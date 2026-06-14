@@ -25,8 +25,9 @@ const std = @import("std");
 const atom_module = @import("../core/atom.zig");
 const core_bigint = @import("../core/bigint.zig");
 const core = @import("../core/root.zig");
-const regexp_builtin = @import("../builtins/regexp.zig");
+const regexp_validate = @import("../libs/regexp_validate.zig");
 const libs_bignum = @import("../libs/bignum.zig");
+const unicode = @import("../libs/unicode.zig");
 const memory = @import("../core/memory.zig");
 const JSValue = @import("../core/value.zig").JSValue;
 
@@ -112,6 +113,7 @@ const ControlFrames = struct {
     label_frames: std.ArrayList(LabelFrame),
     pending_label_atom: ?Atom,
     active_catch_marker_depth: u32,
+    droppable_rethrow_marker_count: u32,
     using_block_frames: std.ArrayList(UsingBlockFrame),
 };
 
@@ -360,6 +362,9 @@ pub const ParseState = struct {
     /// for golden-byte tests that assert the lowered shape and want
     /// to bypass the pipeline.
     emit_phase1_temp: bool = true,
+    /// One-shot: the next `parseBlock` is a function/arrow body and must
+    /// not emit `enter_scope` (see `emitEnterScope`).
+    suppress_block_enter_scope: bool = false,
 
     /// Parity/tooling mode for top-level program dumps. QuickJS-ng dumps
     /// top-level lexical bindings in the eval/module wrapper as var-ref
@@ -443,6 +448,12 @@ pub const ParseState = struct {
     active_with_func_depth: usize = 0,
     with_scope_id: u32 = 0,
     active_catch_marker_depth: u32 = 0,
+    /// How many of the active catch markers are pure rethrow markers of
+    /// finally-less `catch` bodies. When ALL active markers are such
+    /// markers, a `return <expr>` may drop them before evaluating the
+    /// expression (catch-and-rethrow equals plain propagation), putting a
+    /// trailing call into tail position per HasCallInTailPosition.
+    droppable_rethrow_marker_count: u32 = 0,
     emit_lexical_tdz_at_decl: bool = false,
     break_fixups: std.ArrayList(usize) = .empty,
     break_frame_lens: std.ArrayList(usize) = .empty,
@@ -1054,6 +1065,7 @@ pub const ParseState = struct {
             .label_frames = s.label_frames,
             .pending_label_atom = s.pending_label_atom,
             .active_catch_marker_depth = s.active_catch_marker_depth,
+            .droppable_rethrow_marker_count = s.droppable_rethrow_marker_count,
             .using_block_frames = s.using_block_frames,
         };
         s.break_fixups = .empty;
@@ -1067,6 +1079,7 @@ pub const ParseState = struct {
         s.label_frames = .empty;
         s.pending_label_atom = null;
         s.active_catch_marker_depth = 0;
+        s.droppable_rethrow_marker_count = 0;
         s.using_block_frames = .empty;
         return saved;
     }
@@ -1084,6 +1097,7 @@ pub const ParseState = struct {
         s.label_frames = saved.label_frames;
         s.pending_label_atom = saved.pending_label_atom;
         s.active_catch_marker_depth = saved.active_catch_marker_depth;
+        s.droppable_rethrow_marker_count = saved.droppable_rethrow_marker_count;
         s.using_block_frames = saved.using_block_frames;
     }
 
@@ -1471,6 +1485,13 @@ pub const ParseState = struct {
     }
 
     fn emitFClosure8(self: *ParseState, idx: u8) Error!void {
+        // Phase-1 temporary opcodes overlap the short-opcode range that
+        // contains fclosure8. Keep parser output in the wide form until
+        // resolve_labels shortens it after temp opcodes have been erased.
+        if (self.emit_phase1_temp) {
+            try self.emitOpU32(opcode.op.fclosure, idx);
+            return;
+        }
         try self.emitOpU8(opcode.op.fclosure8, idx);
     }
 
@@ -1500,6 +1521,24 @@ pub const ParseState = struct {
 
     fn emitCloseLoc(self: *ParseState, idx: u16) Error!void {
         try self.emitOpU16NoSource(opcode.op.close_loc, idx);
+    }
+
+    /// Mirror the `OP_enter_scope` emission of QuickJS `push_scope`
+    /// (`quickjs.c:23486`). `resolve_variables` lowers this temp opcode
+    /// to a per-scope binding refresh (TDZ re-arm + captured-slot
+    /// detach, see `enterScopeRefreshSize`) so block-scoped bindings
+    /// are fresh on every scope entry — the per-iteration semantics of
+    /// lexicals declared inside loop bodies.
+    ///
+    /// Function/arrow body blocks set `suppress_block_enter_scope`:
+    /// they are entered exactly once per frame (slots start fresh) and
+    /// the hoisted statement-function inits injected ahead of the body
+    /// may already have captured body-scope slots, which an entry-time
+    /// detach would disconnect.
+    fn emitEnterScope(self: *ParseState) Error!void {
+        if (!self.emit_phase1_temp) return;
+        if (self.scope_level < 0) return;
+        try self.emitOpU16NoSource(opcode.op.enter_scope, @intCast(self.scope_level));
     }
 
     fn emitOpAtom(self: *ParseState, op_id: u8, atom_id: Atom) Error!void {
@@ -1717,6 +1756,12 @@ pub const ParseState = struct {
     }
 
     fn ensureClosureChain(self: *ParseState, source_index: usize, source: function_def_mod.ClosureVar) Error!void {
+        if (source.closure_type == .local) {
+            const source_fd = self.funcAtVirtualIndex(source_index);
+            if (source.var_idx < source_fd.vars.len) {
+                source_fd.vars[source.var_idx].is_captured = true;
+            }
+        }
         var parent_ref_idx: ?u16 = null;
         var child_index = source_index + 1;
         while (child_index <= self.cur_func_stack.len) : (child_index += 1) {
@@ -1759,6 +1804,57 @@ pub const ParseState = struct {
         return false;
     }
 
+    /// Like `functionDefUsesAtom`, but also returns true when any (transitive)
+    /// nested child function references `atom_id` without shadowing it. Used by
+    /// the forward-capture retrofit so an intermediate function that merely
+    /// *propagates* a binding to a deeper closure (and never names it directly)
+    /// still receives a closure-var link. Mirrors QuickJS resolving the whole
+    /// function tree after parsing, where such chains are built unconditionally.
+    fn functionDefUsesAtomTransitive(fd: *const function_def_mod.FunctionDef, atom_id: Atom) bool {
+        if (functionDefUsesAtom(fd, atom_id)) return true;
+        for (fd.child_list) |*child| {
+            if (child.findVar(atom_id) >= 0 or child.findArg(atom_id) >= 0) continue;
+            if (functionDefUsesAtomTransitive(child, atom_id)) return true;
+        }
+        return false;
+    }
+
+    /// Recursively extend a forward-capture chain into the descendants of `fd`.
+    /// `fd_ref_idx` is the index, within `fd.closure_var`, of the entry that
+    /// already holds `atom_id`. Every descendant that transitively uses the atom
+    /// (and does not shadow it) gets a `.ref` closure var pointing at its
+    /// parent's entry, so the runtime can thread the cell down the whole chain.
+    fn propagateForwardCaptureToDescendants(
+        self: *ParseState,
+        fd: *function_def_mod.FunctionDef,
+        atom_id: Atom,
+        fd_ref_idx: u16,
+        is_lexical: bool,
+        is_const: bool,
+        var_kind: function_def_mod.VarKind,
+    ) Error!void {
+        for (fd.child_list) |*child| {
+            if (child.findVar(atom_id) >= 0 or child.findArg(atom_id) >= 0) continue;
+            if (!functionDefUsesAtomTransitive(child, atom_id)) continue;
+            const child_ref_idx: u16 = if (findClosureVarIndex(child, atom_id)) |existing| blk: {
+                child.closure_var[existing].closure_type = .ref;
+                child.closure_var[existing].is_lexical = is_lexical;
+                child.closure_var[existing].is_const = is_const;
+                child.closure_var[existing].var_kind = var_kind;
+                child.closure_var[existing].var_idx = fd_ref_idx;
+                break :blk existing;
+            } else @intCast(try child.addClosureVar(.{
+                .closure_type = .ref,
+                .is_lexical = is_lexical,
+                .is_const = is_const,
+                .var_kind = var_kind,
+                .var_idx = fd_ref_idx,
+                .var_name = atom_id,
+            }));
+            try self.propagateForwardCaptureToDescendants(child, atom_id, child_ref_idx, is_lexical, is_const, var_kind);
+        }
+    }
+
     fn scopeChainContains(fd: *const function_def_mod.FunctionDef, start_scope: i32, target_scope: i32) bool {
         var scope_idx = start_scope;
         while (scope_idx >= 0 and @as(usize, @intCast(scope_idx)) < fd.scopes.len) {
@@ -1786,18 +1882,21 @@ pub const ParseState = struct {
         is_const: bool,
         var_kind: function_def_mod.VarKind,
     ) Error!void {
-        _ = self;
         for (parent_fd.child_list) |*child| {
-            if (!functionDefUsesAtom(child, atom_id)) continue;
-            if (findClosureVarIndex(child, atom_id) != null) continue;
-            _ = try child.addClosureVar(.{
-                .closure_type = .ref,
-                .is_lexical = is_lexical,
-                .is_const = is_const,
-                .var_kind = var_kind,
-                .var_idx = parent_ref_idx,
-                .var_name = atom_id,
-            });
+            if (!functionDefUsesAtomTransitive(child, atom_id)) continue;
+            if (child.findVar(atom_id) >= 0 or child.findArg(atom_id) >= 0) continue;
+            const child_ref_idx: u16 = if (findClosureVarIndex(child, atom_id)) |existing|
+                existing
+            else
+                @intCast(try child.addClosureVar(.{
+                    .closure_type = .ref,
+                    .is_lexical = is_lexical,
+                    .is_const = is_const,
+                    .var_kind = var_kind,
+                    .var_idx = parent_ref_idx,
+                    .var_name = atom_id,
+                }));
+            try self.propagateForwardCaptureToDescendants(child, atom_id, child_ref_idx, is_lexical, is_const, var_kind);
         }
     }
 
@@ -1807,13 +1906,12 @@ pub const ParseState = struct {
         atom_id: Atom,
         local_idx: u16,
     ) Error!void {
-        _ = self;
         const local = parent_fd.vars[local_idx];
         for (parent_fd.child_list) |*child| {
-            if (!functionDefUsesAtom(child, atom_id)) continue;
+            if (!functionDefUsesAtomTransitive(child, atom_id)) continue;
             if (child.findVar(atom_id) >= 0 or child.findArg(atom_id) >= 0) continue;
             if (!scopeChainContains(parent_fd, child.parent_scope_level, local.scope_level)) continue;
-            if (findClosureVarIndex(child, atom_id)) |existing| {
+            const child_ref_idx: u16 = if (findClosureVarIndex(child, atom_id)) |existing| blk: {
                 if (child.closure_var[existing].closure_type == .local and
                     child.closure_var[existing].var_idx < parent_fd.vars.len)
                 {
@@ -1827,16 +1925,16 @@ pub const ParseState = struct {
                 child.closure_var[existing].is_const = local.is_const;
                 child.closure_var[existing].var_kind = local.var_kind;
                 child.closure_var[existing].var_idx = local_idx;
-                continue;
-            }
-            _ = try child.addClosureVar(.{
+                break :blk existing;
+            } else @intCast(try child.addClosureVar(.{
                 .closure_type = .local,
                 .is_lexical = local.is_lexical,
                 .is_const = local.is_const,
                 .var_kind = local.var_kind,
                 .var_idx = local_idx,
                 .var_name = atom_id,
-            });
+            }));
+            try self.propagateForwardCaptureToDescendants(child, atom_id, child_ref_idx, local.is_lexical, local.is_const, local.var_kind);
         }
     }
 
@@ -1978,6 +2076,26 @@ pub const ParseState = struct {
             self.cur_func().atom_operands.len
         else
             self.function.atom_operands.len;
+    }
+
+    fn appendDirectCallSite(self: *ParseState, prepare_pc: usize, call_pc: usize, atom_id: Atom, argc: u16) Error!void {
+        if (self.emit_to_function_def) {
+            try self.cur_func().appendDirectCallSite(.{
+                .kind = .prop_atom,
+                .prepare_pc = @intCast(prepare_pc),
+                .call_pc = @intCast(call_pc),
+                .atom_id = atom_id,
+                .argc = argc,
+            });
+            return;
+        }
+        try self.function.appendDirectCallSite(.{
+            .kind = .prop_atom,
+            .prepare_pc = @intCast(prepare_pc),
+            .call_pc = @intCast(call_pc),
+            .atom_id = atom_id,
+            .argc = argc,
+        });
     }
 };
 
@@ -2669,29 +2787,6 @@ fn classifyLhs(
     return .none;
 }
 
-fn codeRangeContainsOpcode(code: []const u8, start: usize, needle: u8) bool {
-    var pc = start;
-    while (pc < code.len) {
-        const op_id = code[pc];
-        if (op_id == needle) return true;
-        const size = parserEmittedOpcodeSize(op_id);
-        if (size == 0) return false;
-        pc += size;
-    }
-    return false;
-}
-
-fn parserEmittedOpcodeSize(op_id: u8) u8 {
-    return switch (op_id) {
-        opcode.op.scope_get_var,
-        opcode.op.scope_put_var,
-        opcode.op.scope_get_var_undef,
-        opcode.op.scope_put_var_init,
-        => 7,
-        else => opcode.opcode_size[op_id],
-    };
-}
-
 fn emitPutRefValue(s: *ParseState, result_needed: bool) Error!void {
     if (result_needed) {
         try s.emitOp(opcode.op.insert3);
@@ -3381,6 +3476,19 @@ fn emitWithDeleteVarFallback(s: *ParseState, with_atom: Atom, ident: Atom) Error
     try patchAbsoluteTarget(s, label_offset);
 }
 
+/// Emit the return for one pushed-down `return`-expression branch (see
+/// `parseCondExpr`), folding a trailing call into a tail call when the
+/// branch ends in one. Mirrors the `TOK_RETURN` rewrite conditions.
+fn emitReturnExprBranch(s: *ParseState) Error!void {
+    const tail_rewrite = if (!s.in_constructor and !s.in_async and !hasActiveIteratorCloses(s))
+        rewriteTrailingCallAsTailCall(s)
+    else
+        TrailingCallRewrite.none;
+    if (tail_rewrite != .rewrote) {
+        try s.emitOp(if (s.in_async) opcode.op.return_async else opcode.op.@"return");
+    }
+}
+
 /// `js_parse_cond_expr` (`quickjs.c:27282`). `a ? b : c`.
 pub fn parseCondExpr(s: *ParseState, flags: ParseFlags) Error!void {
     const return_cond_depth = s.return_expr_cond_depth;
@@ -3400,13 +3508,13 @@ pub fn parseCondExpr(s: *ParseState, flags: ParseFlags) Error!void {
         const else_jump_offset = try emitForwardJump(s, opcode.op.if_false);
         if (s.return_expr_mode and return_cond_depth == 0 and !hasActiveIteratorCloses(s)) {
             try parseAssignExprWithoutPendingFunctionName(s, then_flags);
-            try s.emitOp(if (s.in_async) opcode.op.return_async else opcode.op.@"return");
+            try emitReturnExprBranch(s);
             try patchForwardJump(s, else_jump_offset);
             try expectPunct(s, ':');
             // The `parse_flags` propagated to the else-branch must keep
             // `PF_IN_ACCEPTED` per QuickJS (`quickjs.c:27305`).
             try parseAssignExprWithoutPendingFunctionName(s, flags);
-            try s.emitOp(if (s.in_async) opcode.op.return_async else opcode.op.@"return");
+            try emitReturnExprBranch(s);
             s.return_expr_emitted_return = true;
             s.last_anonymous_function_expr = false;
             s.last_was_direct_eval_callee = false;
@@ -4130,15 +4238,16 @@ fn optionalCallFollows(s: *ParseState) bool {
 }
 
 fn rewriteTrailingMemberReferenceForCall(s: *ParseState) Error!bool {
+    const should_promote_optional_exit = s.last_lhs_had_optional_chain;
     const code = s.currentCode();
     if (code.len >= 5 and code[code.len - 5] == opcode.op.get_field) {
         code[code.len - 5] = opcode.op.get_field2;
-        try promoteTrailingOptionalChainExitForMethodCall(s);
+        if (should_promote_optional_exit) try promoteTrailingOptionalChainExitForMethodCall(s);
         return true;
     }
     if (code.len >= 1 and code[code.len - 1] == opcode.op.get_array_el) {
         code[code.len - 1] = opcode.op.get_array_el2;
-        try promoteTrailingOptionalChainExitForMethodCall(s);
+        if (should_promote_optional_exit) try promoteTrailingOptionalChainExitForMethodCall(s);
         return true;
     }
     return false;
@@ -4149,11 +4258,8 @@ fn promoteTrailingOptionalChainExitForMethodCall(s: *ParseState) Error!void {
     const chain_end: u32 = @intCast(code.len);
     var pc: usize = 0;
     var candidate_drop: ?usize = null;
-    while (pc < code.len) {
-        const op_id = code[pc];
-        const size = opcode.sizeOf(op_id);
-        if (size == 0 or pc + size > code.len) return Error.UnexpectedToken;
-        if (op_id == opcode.op.dup and pc + 14 <= code.len and
+    while (pc + 14 <= code.len) : (pc += 1) {
+        if (code[pc] == opcode.op.dup and
             code[pc + 1] == opcode.op.is_undefined_or_null and
             code[pc + 2] == opcode.op.if_false and
             code[pc + 7] == opcode.op.drop and
@@ -4163,7 +4269,6 @@ fn promoteTrailingOptionalChainExitForMethodCall(s: *ParseState) Error!void {
             const target = std.mem.readInt(u32, code[pc + 10 ..][0..4], .little);
             if (target == chain_end) candidate_drop = pc + 7;
         }
-        pc += size;
     }
     if (candidate_drop) |drop_pc| {
         try insertByteInCurrentCode(s, drop_pc + 2, opcode.op.undefined);
@@ -4544,6 +4649,7 @@ fn parseMemberChain(s: *ParseState, flags: ParseFlags, chain_buf: []usize, chain
             if (s.peekKind() == @as(tok.TokenKind, @intCast('('))) {
                 const callee_line = s.last_token_line_num;
                 const callee_col = s.last_token_col_num;
+                const prepare_pc = s.currentCodeLen();
                 if (was_super) {
                     const code = s.currentCode();
                     if (code.len == 0 or code[code.len - 1] != opcode.op.get_super) return Error.UnexpectedToken;
@@ -4559,7 +4665,11 @@ fn parseMemberChain(s: *ParseState, flags: ParseFlags, chain_buf: []usize, chain
                 const shape = try parseCallArgs(s, flags);
                 s.last_anonymous_function_expr = false;
                 switch (shape) {
-                    .direct => |argc| try s.emitOpU16At(opcode.op.call_method, argc, callee_line, callee_col),
+                    .direct => |argc| {
+                        const call_pc = s.currentCodeLen();
+                        try s.emitOpU16At(opcode.op.call_method, argc, callee_line, callee_col);
+                        if (!was_super and !private_name) try s.appendDirectCallSite(prepare_pc, call_pc, retained_name, argc);
+                    },
                     .applied => {
                         // Method call with spread. Stack: [obj, func, array].
                         // QuickJS emits `perm3 ; apply 0` (`quickjs.c:26672-26676`).
@@ -5017,7 +5127,7 @@ fn parseRegExpLiteral(s: *ParseState) Error!void {
     s.token = try s.lex.rescanRegexp(slash_offset);
     const pattern = s.token.payload.regexp.pattern;
     const flags = s.token.payload.regexp.flags;
-    if (!regexp_builtin.validatePatternAndFlags(pattern, flags)) return Error.InvalidRegExp;
+    if (!regexp_validate.validatePatternAndFlags(pattern, flags)) return Error.InvalidRegExp;
     try emitStringLiteralBytes(s, pattern);
     try emitStringLiteralBytes(s, flags);
     try s.emitOp(opcode.op.regexp);
@@ -6442,9 +6552,15 @@ fn hasJumpToCurrentEnd(code: []const u8, include_conditional: bool) bool {
     var pc: usize = 0;
     while (pc < code.len) {
         const op_id = code[pc];
-        const size = opcode.sizeOf(op_id);
-        // This scan runs before all temporary opcodes are resolved. If it
-        // cannot prove the path is linear, keep tail-call rewriting disabled.
+        // `scope_make_ref` embeds a label operand this scan does not
+        // track, and id 192 is ambiguous in phase-1 streams
+        // (`push_empty_string` vs `scope_in_private_field`). Answer
+        // conservatively in both cases.
+        if (op_id == opcode.op.scope_make_ref or op_id == opcode.op.scope_in_private_field) return true;
+        // This scan runs on Phase 1 code, before temporary opcodes are
+        // resolved: size through the phase-1 view. If the walk cannot
+        // prove the path is linear, answer conservatively.
+        const size = opcode.sizeOfPhase1(op_id);
         if (size == 0 or pc + size > code.len) return true;
         if (op_id == opcode.op.goto or
             (include_conditional and (op_id == opcode.op.if_false or op_id == opcode.op.if_true)))
@@ -7075,9 +7191,12 @@ pub fn parseProgramStatements(s: *ParseState, decl_mask: DeclMask) Error!void {
 /// `resolve_variables` walks this chain.
 pub fn parseBlock(s: *ParseState) Error!void {
     const direct_using_kind = blockDirectUsingDeclarationKind(s);
+    const is_function_body = s.suppress_block_enter_scope;
+    s.suppress_block_enter_scope = false;
     try s.expectToken('{');
     try s.pushScope();
     errdefer s.popScope();
+    if (!is_function_body) try s.emitEnterScope();
     // Check for directive prologue (simplified)
     try parseDirectives(s);
 
@@ -7226,11 +7345,7 @@ fn startsKeywordAt(source: []const u8, index: usize, keyword: []const u8) bool {
 }
 
 fn isAsciiIdentifierContinue(c: u8) bool {
-    return (c >= 'a' and c <= 'z') or
-        (c >= 'A' and c <= 'Z') or
-        (c >= '0' and c <= '9') or
-        c == '_' or
-        c == '$';
+    return unicode.isAsciiIdentifierPartByte(c);
 }
 
 fn emitStringLiteralValue(s: *ParseState, bytes: []const u8) Error!void {
@@ -7530,6 +7645,17 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
             if (try emitCapturedReturnThroughFinally(s, has_expr)) {
                 // return is emitted after the active finally block completes normally.
             } else if (has_expr) {
+                // When every active catch marker is a finally-less rethrow
+                // marker, drop them before evaluating the return expression:
+                // catch-and-rethrow equals plain propagation, and the
+                // trailing call lands in tail position (HasCallInTailPosition
+                // includes finally-less Catch blocks).
+                const dropped_markers_early = !s.in_constructor and !s.in_async and
+                    s.active_catch_marker_depth > 0 and
+                    s.active_catch_marker_depth == s.droppable_rethrow_marker_count and
+                    s.return_finally_frames.items.len == 0 and
+                    !hasActiveIteratorCloses(s);
+                if (dropped_markers_early) try emitCatchMarkerDropsToDepth(s, 0);
                 const saved_return_expr_mode = s.return_expr_mode;
                 const saved_return_expr_emitted = s.return_expr_emitted_return;
                 s.return_expr_mode = true;
@@ -7539,16 +7665,21 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
                 s.return_expr_mode = saved_return_expr_mode;
                 s.return_expr_emitted_return = saved_return_expr_emitted;
                 if (!emitted_return) {
-                    if (hasActiveIteratorCloses(s) or (s.active_catch_marker_depth > 0 and s.return_finally_frames.items.len == 0)) {
+                    if (hasActiveIteratorCloses(s) or (!dropped_markers_early and s.active_catch_marker_depth > 0 and s.return_finally_frames.items.len == 0)) {
                         const return_tmp = try appendTempLocal(s);
                         try s.emitOpU16(opcode.op.put_loc, return_tmp);
                         try emitCatchMarkerDropsToDepth(s, 0);
                         try emitActiveIteratorCloses(s);
                         try s.emitOpU16(opcode.op.get_loc, return_tmp);
                     }
-                    if (!s.in_constructor and !s.in_async and !hasActiveIteratorCloses(s) and rewriteTrailingCallAsTailCall(s)) {
-                        // QuickJS folds `return f(...)` into tail-call opcodes.
-                    } else {
+                    const tail_rewrite = if (!s.in_constructor and !s.in_async and !hasActiveIteratorCloses(s))
+                        rewriteTrailingCallAsTailCall(s)
+                    else
+                        TrailingCallRewrite.none;
+                    if (tail_rewrite != .rewrote) {
+                        // QuickJS folds `return f(...)` into tail-call
+                        // opcodes; short-circuit paths jumping past a
+                        // rewritten call still need the return to land on.
                         try s.emitOp(if (s.in_async) opcode.op.return_async else opcode.op.@"return");
                     }
                 }
@@ -7999,6 +8130,7 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
             try validateSwitchCaseBlockDeclarations(s);
             try s.pushScope();
             errdefer s.popScope();
+            try s.emitEnterScope();
             const saved_switch_case_block_scope = s.in_switch_case_block_scope;
             s.in_switch_case_block_scope = true;
             defer s.in_switch_case_block_scope = saved_switch_case_block_scope;
@@ -8140,6 +8272,7 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
                 try s.advance();
                 try patchForwardJump(s, catch_off);
                 try s.pushScope();
+                try s.emitEnterScope();
                 var catch_bound_atom: ?Atom = null;
                 if (s.peekKind() == '{') {
                     try s.emitOp(opcode.op.drop);
@@ -8185,7 +8318,13 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
                 }
                 const rethrow_off = try emitForwardJump(s, opcode.op.@"catch");
                 s.active_catch_marker_depth += 1;
+                // Without a finally, this marker only re-throws: a `return`
+                // in the catch body may drop it up front, putting a trailing
+                // call into tail position (sec-static-semantics-
+                // hascallintailposition lists finally-less Catch blocks).
+                if (!has_finally) s.droppable_rethrow_marker_count += 1;
                 try parseBlock(s);
+                if (!has_finally) s.droppable_rethrow_marker_count -= 1;
                 s.active_catch_marker_depth -= 1;
                 try s.emitOp(opcode.op.drop);
                 const catch_end_off = try emitForwardJump(s, opcode.op.goto);
@@ -11142,6 +11281,7 @@ fn parseFunctionParamsAndBody(s: *ParseState, func_kind: ParseFunctionKind, sour
     defer {
         if (!capture_child) s.return_depth -= 1;
     }
+    s.suppress_block_enter_scope = true;
     try parseBlock(s);
     if (s.is_strict) s.cur_func().is_strict_mode = true;
     if (s.cur_func().is_strict_mode) {
@@ -11555,6 +11695,7 @@ fn parseArrowFunction(s: *ParseState, func_kind: ParseFunctionKind, source_start
         defer {
             if (!capture_child) s.return_depth -= 1;
         }
+        s.suppress_block_enter_scope = true;
         try parseBlock(s);
         if (capture_child) {
             const code = s.currentCode();
@@ -11574,7 +11715,7 @@ fn parseArrowFunction(s: *ParseState, func_kind: ParseFunctionKind, source_start
     } else {
         // Expression body
         try parseAssignExpr2(s, .{ .in_accepted = body_flags.in_accepted });
-        if (!rewriteTrailingCallAsTailCall(s)) {
+        if (rewriteTrailingCallAsTailCall(s) != .rewrote) {
             try s.emitOp(opcode.op.@"return");
         }
     }
@@ -11612,22 +11753,67 @@ fn parseArrowFunction(s: *ParseState, func_kind: ParseFunctionKind, source_start
     }
 }
 
-fn rewriteTrailingCallAsTailCall(s: *ParseState) bool {
-    var code = s.currentCode();
-    if (code.len < 3) return false;
-    if (hasJumpToCurrentEnd(code, true)) return false;
-    const op_index = code.len - 3;
-    switch (code[op_index]) {
-        opcode.op.call => {
-            code[op_index] = opcode.op.tail_call;
-            return true;
-        },
-        opcode.op.call_method => {
-            code[op_index] = opcode.op.tail_call_method;
-            return true;
-        },
-        else => return false,
+const TrailingCallRewrite = enum {
+    /// No rewrite happened; the caller must emit its return opcode.
+    none,
+    /// Trailing call rewritten to a tail call and nothing jumps to the
+    /// current end: the tail call subsumes the return entirely.
+    rewrote,
+    /// Trailing call rewritten to a tail call, but short-circuit paths
+    /// (`&&` / `||` / `??` / optional chains) jump to the current end
+    /// carrying their own result value: the caller must still emit the
+    /// return opcode for those paths to land on.
+    rewrote_jump_target,
+};
+
+const TrailingScan = struct { last_op_index: usize, jump_to_end: bool };
+
+/// Decode the current (Phase 1) code linearly to find the last
+/// instruction boundary and whether any jump targets the current end.
+/// Sizes come from the phase-1 metadata view (`opcode.sizeOfPhase1`),
+/// which resolves the temp/short id overlap to the temp forms the
+/// parser actually emits. Returns null when the stream cannot be
+/// decoded, keeping tail-call rewriting disabled.
+fn scanTrailingCode(code: []const u8, include_conditional: bool) ?TrailingScan {
+    var pc: usize = 0;
+    var last_op_index: usize = 0;
+    var jump_to_end = false;
+    while (pc < code.len) {
+        const op_id = code[pc];
+        // `scope_make_ref` embeds a label operand this scan does not
+        // track; bail out rather than miss a jump to the current end.
+        if (op_id == opcode.op.scope_make_ref) return null;
+        // Id 192 is ambiguous in phase-1 streams (`push_empty_string`
+        // short form vs `scope_in_private_field` temp); it cannot be
+        // sized from the id alone.
+        if (op_id == opcode.op.scope_in_private_field) return null;
+        const size: usize = opcode.sizeOfPhase1(op_id);
+        if (size == 0 or pc + size > code.len) return null;
+        if (op_id == opcode.op.goto or
+            (include_conditional and (op_id == opcode.op.if_false or op_id == opcode.op.if_true)))
+        {
+            const target = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+            if (target == code.len) jump_to_end = true;
+        }
+        last_op_index = pc;
+        pc += size;
     }
+    return .{ .last_op_index = last_op_index, .jump_to_end = jump_to_end };
+}
+
+fn rewriteTrailingCallAsTailCall(s: *ParseState) TrailingCallRewrite {
+    var code = s.currentCode();
+    if (code.len < 3) return .none;
+    const scan = scanTrailingCode(code, true) orelse return .none;
+    // The trailing call opcode must be a real instruction boundary; a raw
+    // `code[len - 3]` probe can hit operand payload bytes (e.g. push_i32).
+    if (scan.last_op_index != code.len - 3) return .none;
+    switch (code[scan.last_op_index]) {
+        opcode.op.call => code[scan.last_op_index] = opcode.op.tail_call,
+        opcode.op.call_method => code[scan.last_op_index] = opcode.op.tail_call_method,
+        else => return .none,
+    }
+    return if (scan.jump_to_end) .rewrote_jump_target else .rewrote;
 }
 
 const DestructuringKind = enum { array, object };

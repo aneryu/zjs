@@ -1,8 +1,8 @@
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
+const error_stack_ops = @import("error_stack_ops.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
 
@@ -10,15 +10,51 @@ const SourceLocation = core.BacktraceLocation;
 
 pub const ErrorInfo = struct { name: []const u8, message: []const u8 };
 
-pub fn createNamedError(rt: *core.JSRuntime, global: *core.Object, name: []const u8, message: []const u8) !core.JSValue {
+/// Construct a named error from `global`'s constructor for `name` and
+/// capture its `.stack` call sites from the current VM backtrace. This is
+/// the single construction primitive for engine-thrown named errors; the
+/// stack capture lives here so every construction site gets it (QuickJS
+/// runs `build_backtrace` inside the `JS_ThrowError2` choke point). Paths
+/// that must not capture a stack go through `createNamedErrorWithoutStack`
+/// and are documented there.
+pub fn createNamedError(ctx: *core.JSContext, global: *core.Object, name: []const u8, message: []const u8) !core.JSValue {
+    const error_value = try createNamedErrorWithoutStack(ctx.runtime, global, name, message);
+    errdefer error_value.free(ctx.runtime);
+    try error_stack_ops.attachStackToErrorValue(ctx, global, error_value);
+    return error_value;
+}
+
+/// `createNamedError` for a directly supplied constructor value (used for
+/// realm-specific intrinsic constructors); also captures `.stack` at
+/// construction. `global` only drives the stack capture policy
+/// (`Error.stackTraceLimit` and the CallSite array prototype).
+pub fn createNamedErrorWithConstructor(ctx: *core.JSContext, global: *core.Object, ctor_value: core.JSValue, name: []const u8, message: []const u8) !core.JSValue {
+    const error_value = try buildNamedErrorObject(ctx.runtime, ctor_value, name, message);
+    errdefer error_value.free(ctx.runtime);
+    try error_stack_ops.attachStackToErrorValue(ctx, global, error_value);
+    return error_value;
+}
+
+/// Raw, stack-less variant of `createNamedError`. Every user-observable
+/// throw path must construct through the stack-attaching primitives above.
+/// The only allowed uses of this entry are:
+/// - the preallocated out-of-memory error (`JSRuntime.preallocated_oom_error`):
+///   it is built once at startup while memory is plentiful and delivered via
+///   an allocation-free `dup()` once the heap is exhausted, so it can neither
+///   capture a meaningful backtrace at construction time nor allocate one at
+///   delivery time (QuickJS likewise skips the backtrace for its preallocated
+///   OOM exception);
+/// - the embedding API `JSContext.createError` when the embedder explicitly
+///   opts out via `ErrorOptions.capture_stack = false`.
+pub fn createNamedErrorWithoutStack(rt: *core.JSRuntime, global: *core.Object, name: []const u8, message: []const u8) !core.JSValue {
     const ctor_key = try rt.internAtom(name);
     defer rt.atoms.free(ctor_key);
     const ctor_value = global.getProperty(ctor_key);
     defer ctor_value.free(rt);
-    return createNamedErrorWithConstructor(rt, ctor_value, name, message);
+    return buildNamedErrorObject(rt, ctor_value, name, message);
 }
 
-pub fn createNamedErrorWithConstructor(rt: *core.JSRuntime, ctor_value: core.JSValue, name: []const u8, message: []const u8) !core.JSValue {
+fn buildNamedErrorObject(rt: *core.JSRuntime, ctor_value: core.JSValue, name: []const u8, message: []const u8) !core.JSValue {
     var rooted_ctor_value = ctor_value;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_ctor_value },
@@ -55,7 +91,7 @@ pub fn createNamedErrorWithConstructor(rt: *core.JSRuntime, ctor_value: core.JSV
     return object.value();
 }
 
-test "createNamedErrorWithConstructor roots direct symbol constructor while creating error object" {
+test "buildNamedErrorObject roots direct symbol constructor while creating error object" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -66,7 +102,7 @@ test "createNamedErrorWithConstructor roots direct symbol constructor while crea
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const error_value = try createNamedErrorWithConstructor(rt, ctor_value, "TypeError", "boom");
+    const error_value = try buildNamedErrorObject(rt, ctor_value, "TypeError", "boom");
     var error_alive = true;
     defer if (error_alive) error_value.free(rt);
     const object = try property_ops.expectObject(error_value);
@@ -131,6 +167,13 @@ pub fn throwTdzReference(ctx: *core.JSContext) error{ReferenceError} {
         return error.ReferenceError;
     };
 
+    // Best-effort stack capture: this throw path is hardened to survive
+    // allocation failure (sentinel fallback above), so a failed capture
+    // degrades to a stack-less TDZ error instead of losing the throw.
+    if (ctx.global) |global| {
+        error_stack_ops.attachStackToErrorValue(ctx, global, error_obj.value()) catch {};
+    }
+
     _ = ctx.throwValue(error_obj.value().dup());
     return error.ReferenceError;
 }
@@ -144,25 +187,23 @@ pub fn normalizeEvalRuntimeError(err: anytype) (@TypeOf(err) || error{TypeError}
 
 pub fn runtimeErrorValueForGeneratorCatch(ctx: *core.JSContext, global: *core.Object, err: anytype) !core.JSValue {
     if (pendingExceptionMatchesError(ctx, err)) return ctx.takeException();
-    const name = @errorName(err);
-    const value = if (std.mem.eql(u8, name, "TypeError"))
-        try createNamedError(ctx.runtime, global, "TypeError", "not a function")
-    else if (std.mem.eql(u8, name, "RangeError"))
-        try createNamedError(ctx.runtime, global, "RangeError", "")
-    else if (std.mem.eql(u8, name, "ReferenceError"))
-        try createNamedError(ctx.runtime, global, "ReferenceError", "not defined")
-    else if (std.mem.eql(u8, name, "SyntaxError"))
-        try createNamedError(ctx.runtime, global, "SyntaxError", "invalid syntax")
-    else {
-        if (ctx.hasException()) ctx.clearException();
-        return err;
+    const value = switch (@as(anyerror, err)) {
+        error.TypeError => try createNamedError(ctx, global, "TypeError", ""),
+        error.RangeError => try createNamedError(ctx, global, "RangeError", ""),
+        error.ReferenceError => try createNamedError(ctx, global, "ReferenceError", "not defined"),
+        error.SyntaxError => try createNamedError(ctx, global, "SyntaxError", "invalid syntax"),
+        else => {
+            if (ctx.hasException()) ctx.clearException();
+            return err;
+        },
     };
     if (ctx.hasException()) ctx.clearException();
     return value;
 }
 
-pub fn qjsPromiseAggregateError(rt: *core.JSRuntime, global: *core.Object, errors: *core.Object) !core.JSValue {
-    const aggregate_error = try createNamedError(rt, global, "AggregateError", "");
+pub fn qjsPromiseAggregateError(ctx: *core.JSContext, global: *core.Object, errors: *core.Object) !core.JSValue {
+    const rt = ctx.runtime;
+    const aggregate_error = try createNamedError(ctx, global, "AggregateError", "");
     errdefer aggregate_error.free(rt);
     const object = objectFromValue(aggregate_error) orelse return error.TypeError;
     try defineValueProperty(rt, object, "errors", errors.value());
@@ -172,7 +213,7 @@ pub fn qjsPromiseAggregateError(rt: *core.JSRuntime, global: *core.Object, error
 pub fn qjsPromiseErrorValue(ctx: *core.JSContext, global: *core.Object, err: anytype) !core.JSValue {
     if (pendingExceptionMatchesError(ctx, err)) return ctx.takeException();
     const error_info = promiseErrorInfo(err);
-    return createNamedError(ctx.runtime, global, error_info.name, error_info.message);
+    return createNamedError(ctx, global, error_info.name, error_info.message);
 }
 
 pub fn rejectedPromiseForRuntimeError(
@@ -183,16 +224,42 @@ pub fn rejectedPromiseForRuntimeError(
 ) !core.JSValue {
     if (pendingExceptionMatchesError(ctx, err)) {
         const thrown_value = ctx.exception_slot.value;
-        const promise = try builtins.promise.rejectedWithPrototype(ctx.runtime, thrown_value, prototype);
+        const promise = try core.promise.rejectedWithPrototype(ctx.runtime, thrown_value, prototype);
         ctx.clearException();
         return promise;
     }
     const error_info = runtimeErrorInfo(err) orelse return err;
-    const error_value = try createNamedError(ctx.runtime, global, error_info.name, error_info.message);
+    const error_value = try createNamedError(ctx, global, error_info.name, error_info.message);
     defer error_value.free(ctx.runtime);
-    const promise = try builtins.promise.rejectedWithPrototype(ctx.runtime, error_value, prototype);
+    const promise = try core.promise.rejectedWithPrototype(ctx.runtime, error_value, prototype);
     if (ctx.hasException()) ctx.clearException();
     return promise;
+}
+
+/// Throw a `TypeError` with `message`: construct (stack attached by the
+/// primitive), set the context exception, and return the VM sentinel.
+pub fn throwTypeErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
+    const error_value = try createNamedError(ctx, global, "TypeError", message);
+    _ = ctx.throwValue(error_value);
+    return error.TypeError;
+}
+
+pub fn throwRangeErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
+    const error_value = try createNamedError(ctx, global, "RangeError", message);
+    _ = ctx.throwValue(error_value);
+    return error.RangeError;
+}
+
+pub fn throwReferenceErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
+    const error_value = try createNamedError(ctx, global, "ReferenceError", message);
+    _ = ctx.throwValue(error_value);
+    return error.ReferenceError;
+}
+
+pub fn throwSyntaxErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
+    const error_value = try createNamedError(ctx, global, "SyntaxError", message);
+    _ = ctx.throwValue(error_value);
+    return error.SyntaxError;
 }
 
 pub fn isCallSiteObject(rt: *core.JSRuntime, object: *core.Object) bool {
@@ -200,15 +267,19 @@ pub fn isCallSiteObject(rt: *core.JSRuntime, object: *core.Object) bool {
     return object.isCallSite();
 }
 
-pub fn qjsCallSiteMethod(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !?core.JSValue {
+/// CallSite prototype methods dispatched by `.host` native-record id; the
+/// receiver must be a CallSite object (the metadata lives in internal slots).
+pub fn qjsCallSiteMethodById(rt: *core.JSRuntime, object: *core.Object, id: core.function.HostGlobalMethod) ?core.JSValue {
     if (!isCallSiteObject(rt, object)) return null;
-    if (std.mem.eql(u8, name, "getFunction")) return core.JSValue.nullValue();
-    if (std.mem.eql(u8, name, "getFunctionName")) return if (object.callSiteFunctionName()) |value| value.dup() else core.JSValue.nullValue();
-    if (std.mem.eql(u8, name, "getFileName")) return if (object.callSiteFile()) |value| value.dup() else core.JSValue.nullValue();
-    if (std.mem.eql(u8, name, "getLineNumber")) return core.JSValue.int32(object.callSiteLine());
-    if (std.mem.eql(u8, name, "getColumnNumber")) return core.JSValue.int32(object.callSiteColumn());
-    if (std.mem.eql(u8, name, "isNative")) return core.JSValue.boolean(false);
-    return null;
+    return switch (id) {
+        .callsite_get_function => core.JSValue.nullValue(),
+        .callsite_get_function_name => if (object.callSiteFunctionName()) |value| value.dup() else core.JSValue.nullValue(),
+        .callsite_get_file_name => if (object.callSiteFile()) |value| value.dup() else core.JSValue.nullValue(),
+        .callsite_get_line_number => core.JSValue.int32(object.callSiteLine()),
+        .callsite_get_column_number => core.JSValue.int32(object.callSiteColumn()),
+        .callsite_is_native => core.JSValue.boolean(false),
+        else => null,
+    };
 }
 
 pub fn backtraceFunctionNameAtom(ctx: *core.JSContext, fallback: core.Atom, current_function_value: core.JSValue) !core.Atom {
@@ -221,6 +292,23 @@ pub fn backtraceFunctionNameAtom(ctx: *core.JSContext, fallback: core.Atom, curr
     defer bytes.deinit(ctx.runtime.memory.allocator);
     try value_ops.appendRawString(ctx.runtime, &bytes, name_desc.value);
     return ctx.runtime.atoms.internString(bytes.items);
+}
+
+/// Resolve the display name of a backtrace frame, caching the result in
+/// place. Frames pushed with a lazy function value defer the `name` property
+/// read and atom interning to the first materialization, keeping the per-call
+/// hot path free of property lookups and interning.
+/// Returns a borrowed atom valid while the frame entry is alive.
+pub fn resolvedBacktraceFunctionNameAt(ctx: *core.JSContext, index: usize) core.Atom {
+    const frame = &ctx.backtrace_frames[index];
+    const function_value = frame.function_value;
+    if (function_value.isUndefined()) return frame.function_name;
+    frame.function_value = core.JSValue.undefinedValue();
+    defer function_value.free(ctx.runtime);
+    const resolved = backtraceFunctionNameAtom(ctx, frame.function_name, function_value) catch ctx.runtime.atoms.dup(core.atom.ids.empty_string);
+    ctx.runtime.atoms.free(frame.function_name);
+    frame.function_name = resolved;
+    return frame.function_name;
 }
 
 pub fn resolveBacktraceLocation(data: ?*const anyopaque, target_pc: usize) core.BacktraceLocation {
@@ -236,15 +324,7 @@ pub fn resolveBacktraceLocation(data: ?*const anyopaque, target_pc: usize) core.
 }
 
 pub fn isErrorConstructorName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "Error") or
-        std.mem.eql(u8, name, "AggregateError") or
-        std.mem.eql(u8, name, "SuppressedError") or
-        std.mem.eql(u8, name, "EvalError") or
-        std.mem.eql(u8, name, "RangeError") or
-        std.mem.eql(u8, name, "ReferenceError") or
-        std.mem.eql(u8, name, "SyntaxError") or
-        std.mem.eql(u8, name, "TypeError") or
-        std.mem.eql(u8, name, "URIError");
+    return core.error_names.isErrorConstructorName(name);
 }
 
 pub fn functionNameBytes(rt: *core.JSRuntime, value: core.JSValue) ![]u8 {
@@ -260,7 +340,7 @@ pub fn functionNameBytes(rt: *core.JSRuntime, value: core.JSValue) ![]u8 {
 
 pub fn pendingExceptionMatchesError(ctx: *core.JSContext, err: anytype) bool {
     if (!ctx.hasException()) return false;
-    if (std.mem.eql(u8, @errorName(err), "JSException")) return true;
+    if (@as(anyerror, err) == error.JSException) return true;
     const expected = errorNameForRuntimeError(err) orelse return false;
     const object = objectFromValue(ctx.exception_slot.value) orelse return false;
     const name_value = object.getProperty(core.atom.ids.name);
@@ -280,36 +360,49 @@ pub fn pendingExceptionMatchesError(ctx: *core.JSContext, err: anytype) bool {
     }
 }
 
+// Fallback messages for sentinel errors that reach the catch machinery with
+// no pending exception object. Throw sites that know the real reason should
+// use the message-carrying throw*Message helpers; these defaults must stay
+// neutral because they cover every remaining source of the sentinel. The
+// URIError text is kept: every URIError sentinel comes from the URI builtins
+// and the hex-digit failure is the dominant source (matching the qjs text).
 pub fn runtimeErrorInfo(err: anytype) ?ErrorInfo {
-    const name = @errorName(err);
-    if (std.mem.eql(u8, name, "URIError") or std.mem.eql(u8, name, "InvalidUtf8")) return .{ .name = "URIError", .message = "expecting hex digit" };
-    if (std.mem.eql(u8, name, "TypeError") or std.mem.eql(u8, name, "NotExtensible")) return .{ .name = "TypeError", .message = "not a Date object" };
-    if (std.mem.eql(u8, name, "InvalidCharacterError")) return .{ .name = "InvalidCharacterError", .message = "" };
-    if (std.mem.eql(u8, name, "SyntaxError")) return .{ .name = "SyntaxError", .message = "invalid syntax" };
-    if (std.mem.eql(u8, name, "RangeError")) return .{ .name = "RangeError", .message = "Date value is NaN" };
-    if (std.mem.eql(u8, name, "ReferenceError")) return .{ .name = "ReferenceError", .message = "not defined" };
-    return null;
+    return switch (@as(anyerror, err)) {
+        error.URIError, error.InvalidUtf8 => .{ .name = "URIError", .message = "expecting hex digit" },
+        // Allocation failure under a memory limit is catchable, mirroring
+        // QuickJS's InternalError "out of memory" exception; paths without a
+        // JS catch handler still surface error.OutOfMemory to the embedder.
+        error.OutOfMemory => .{ .name = "InternalError", .message = "out of memory" },
+        error.TypeError, error.NotExtensible => .{ .name = "TypeError", .message = "" },
+        error.InvalidCharacterError => .{ .name = "InvalidCharacterError", .message = "" },
+        error.SyntaxError => .{ .name = "SyntaxError", .message = "invalid syntax" },
+        error.RangeError => .{ .name = "RangeError", .message = "" },
+        error.ReferenceError => .{ .name = "ReferenceError", .message = "not defined" },
+        else => null,
+    };
 }
 
 pub fn promiseErrorInfo(err: anytype) ErrorInfo {
-    const name = @errorName(err);
-    if (std.mem.eql(u8, name, "URIError") or std.mem.eql(u8, name, "InvalidUtf8")) return .{ .name = "URIError", .message = "expecting hex digit" };
-    if (std.mem.eql(u8, name, "TypeError")) return .{ .name = "TypeError", .message = "not a Date object" };
-    if (std.mem.eql(u8, name, "SyntaxError")) return .{ .name = "SyntaxError", .message = "invalid syntax" };
-    if (std.mem.eql(u8, name, "RangeError")) return .{ .name = "RangeError", .message = "Date value is NaN" };
-    if (std.mem.eql(u8, name, "ReferenceError")) return .{ .name = "ReferenceError", .message = "not defined" };
-    return .{ .name = "Error", .message = "" };
+    return switch (@as(anyerror, err)) {
+        error.URIError, error.InvalidUtf8 => .{ .name = "URIError", .message = "expecting hex digit" },
+        error.TypeError => .{ .name = "TypeError", .message = "" },
+        error.SyntaxError => .{ .name = "SyntaxError", .message = "invalid syntax" },
+        error.RangeError => .{ .name = "RangeError", .message = "" },
+        error.ReferenceError => .{ .name = "ReferenceError", .message = "not defined" },
+        else => .{ .name = "Error", .message = "" },
+    };
 }
 
 fn errorNameForRuntimeError(err: anytype) ?[]const u8 {
-    const name = @errorName(err);
-    if (std.mem.eql(u8, name, "URIError") or std.mem.eql(u8, name, "InvalidUtf8")) return "URIError";
-    if (std.mem.eql(u8, name, "TypeError")) return "TypeError";
-    if (std.mem.eql(u8, name, "InvalidCharacterError")) return "InvalidCharacterError";
-    if (std.mem.eql(u8, name, "SyntaxError")) return "SyntaxError";
-    if (std.mem.eql(u8, name, "RangeError")) return "RangeError";
-    if (std.mem.eql(u8, name, "ReferenceError")) return "ReferenceError";
-    return null;
+    return switch (@as(anyerror, err)) {
+        error.URIError, error.InvalidUtf8 => "URIError",
+        error.TypeError => "TypeError",
+        error.InvalidCharacterError => "InvalidCharacterError",
+        error.SyntaxError => "SyntaxError",
+        error.RangeError => "RangeError",
+        error.ReferenceError => "ReferenceError",
+        else => null,
+    };
 }
 
 fn sourceSlotUpperBound(slots: []const bytecode.pipeline.pc2line.SourceLocSlot, target_pc: usize) usize {

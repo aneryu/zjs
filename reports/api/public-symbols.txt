@@ -51,7 +51,6 @@ zjs.host.defineArgvGlobals
 zjs.host.defineScriptArgs
 zjs.host.evalGlobalScriptSource
 zjs.host.evalGlobalScriptValue
-zjs.host.exposeStdOsGlobals
 zjs.job
 zjs.job.DrainOptions
 zjs.job.DrainResult
@@ -65,10 +64,20 @@ zjs.module.Source
 zjs.module.evalFileGraphWithHost
 zjs.object
 zjs.object.Buffer
+zjs.object.Buffer.Borrow
+zjs.object.Buffer.BorrowGuard
+zjs.object.Buffer.BorrowKind
+zjs.object.Buffer.ReadonlyBorrow
+zjs.object.Buffer.backingArrayBufferValue
+zjs.object.Buffer.borrowBytes
+zjs.object.Buffer.borrowBytesReadonly
+zjs.object.Buffer.checkStillValid
 zjs.object.Buffer.createUint8ArrayFromBytes
 zjs.object.Buffer.createUint8ArrayFromOwnedBytes
+zjs.object.Buffer.detachBackingBuffer
 zjs.object.Buffer.isTypedArrayObject
 zjs.object.Buffer.ownedBytesFromObject
+zjs.object.Buffer.pinForBorrow
 zjs.object.Buffer.typedArrayByteLength
 zjs.object.Builder
 zjs.object.MemoryAccount
@@ -98,6 +107,7 @@ zjs.object.forEachOwnDataProperty
 zjs.object.fromValue
 zjs.object.getOwnIndexPropertyValue
 zjs.object.getProperty
+zjs.object.isArray
 zjs.object.isArrayBufferObject
 zjs.object.isCallableValue
 zjs.object.isPromiseObject
@@ -115,7 +125,6 @@ zjs.runtime.EventLoopRunResult
 zjs.runtime.Plugin
 zjs.runtime.PluginInstallOptions
 zjs.runtime.cleanupAtomicsWaitersForContext
-zjs.runtime.cleanupWorkersForRuntime
 zjs.runtime.detachArrayBuffer
 zjs.runtime.evalFileModuleGraphWithOutput
 zjs.runtime.resolveModuleSpecifier
@@ -133,6 +142,8 @@ zjs.value.Weak
 zjs.value.WeakRef
 zjs.value.appendRawString
 zjs.value.appendString
+zjs.value.bigIntFromI64
+zjs.value.bigIntFromU64
 zjs.value.boolean
 zjs.value.createString
 zjs.value.float64

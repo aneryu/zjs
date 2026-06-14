@@ -1,7 +1,5 @@
 const core = @import("../core/root.zig");
 const bytecode = @import("../bytecode/root.zig");
-const collection_builtin = @import("../builtins/collection.zig");
-const object_builtin = @import("../builtins/object.zig");
 const globals_mod = @import("globals.zig");
 const value_ops = @import("value_ops.zig");
 const std = @import("std");
@@ -604,7 +602,7 @@ test "appendPairToGlobalArray roots direct function bytecode entries while creat
     {
         const stored_pair_value = results.getProperty(core.atom.atomFromUInt32(0));
         defer stored_pair_value.free(rt);
-        const stored_pair = try expectArray(stored_pair_value);
+        const stored_pair = try core.array.expectArray(stored_pair_value);
         try expectArrayIndexSame(rt, stored_pair, 0, pair_key.value);
         try expectArrayIndexSame(rt, stored_pair, 1, pair_value.value);
     }
@@ -760,7 +758,7 @@ fn appendArrayValue(rt: *core.JSRuntime, array: *core.Object, value: core.JSValu
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    if (!array.is_array) return error.TypeError;
+    if (!array.flags.is_array) return error.TypeError;
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.length), core.Descriptor.data(rooted_value, true, true, true));
 }
 
@@ -776,7 +774,6 @@ fn setGlobalMapString(rt: *core.JSRuntime, globals: []globals_mod.Slot, key_int:
     for (map_object.collectionEntriesSlot().*) |*entry| {
         if (!entry.active) continue;
         if (entry.key.asInt32() == key_int) {
-            try rt.writeBarrierValueAt(&map_object.header, value, &entry.value);
             const next_value = value.dup();
             const old_value = entry.value;
             entry.value = next_value;
@@ -798,7 +795,7 @@ fn setGlobalWeakMapString(rt: *core.JSRuntime, globals: []globals_mod.Slot, map_
     defer key_value.free(rt);
     const value = try value_ops.createStringValue(rt, bytes);
     defer value.free(rt);
-    try collection_builtin.setWeakMapEntry(rt, map_object, key_value, value);
+    try core.collection.setWeakMapEntry(rt, map_object, key_value, value);
 }
 
 fn appendRecordToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8, value: core.JSValue, key: core.JSValue, this_arg: core.JSValue) !void {
@@ -854,11 +851,11 @@ fn appendWeakMapAdderRecord(rt: *core.JSRuntime, globals: []globals_mod.Slot, ke
 fn assertAndShiftExpected(rt: *core.JSRuntime, globals: []globals_mod.Slot, actual: core.JSValue) !void {
     const expects_value = try globals_mod.getByName(rt, globals, "expects");
     defer expects_value.free(rt);
-    const expects = try expectArray(expects_value);
+    const expects = try core.array.expectArray(expects_value);
     if (expects.length == 0) return error.JSException;
     const expected = expects.getProperty(core.atom.atomFromUInt32(0));
     defer expected.free(rt);
-    if (!object_builtin.sameValue(actual, expected)) return error.JSException;
+    if (!actual.sameValue(expected)) return error.JSException;
     var index: u32 = 1;
     while (index < expects.length) : (index += 1) {
         const next = expects.getProperty(core.atom.atomFromUInt32(index));
@@ -1008,7 +1005,7 @@ fn appendToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: [
         array_value = try getGlobalObjectProperty(rt, globals, name);
     }
     defer array_value.free(rt);
-    const array = try expectArray(array_value);
+    const array = try core.array.expectArray(array_value);
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.length), core.Descriptor.data(rooted_value, true, true, true));
 }
 
@@ -1046,14 +1043,6 @@ fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const 
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(rooted_value, true, true, true));
-}
-
-fn expectArray(value: core.JSValue) !*core.Object {
-    const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isObject()) return error.TypeError;
-    const object: *core.Object = @fieldParentPtr("header", header);
-    if (!object.is_array) return error.TypeError;
-    return object;
 }
 
 fn expectObject(value: core.JSValue) !*core.Object {

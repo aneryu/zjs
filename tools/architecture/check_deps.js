@@ -85,7 +85,7 @@ function violationReason(source, target) {
 
   if (source === 'src/root.zig') {
     if (
-      target === 'src/kernel/root.zig' ||
+      target === 'src/binding/root.zig' ||
       target === 'src/runtime/public.zig' ||
       target === 'src/core/root.zig' ||
       target === 'src/exec/root.zig' ||
@@ -107,28 +107,69 @@ function violationReason(source, target) {
     return targetStarts(target, disallowed) ? 'core must not depend on bytecode, builtins, exec, frontend, runtime, or CLI' : null;
   }
 
-  if (source.startsWith('src/kernel/')) {
-    const disallowed = [
-      'src/bytecode/',
-      'src/builtins/',
-      'src/cli/',
-      'src/exec/',
-      'src/frontend/',
-      'src/libs/',
-      'src/runtime/',
-    ];
-    return targetStarts(target, disallowed) ? 'kernel may import core/kernel only; it must not depend on exec, runtime, frontend, bytecode, builtins, libs, or CLI' : null;
-  }
-
   if (source.startsWith('src/builtins/')) {
     const disallowed = [
       'src/bytecode/',
       'src/cli/',
+      'src/frontend/',
+      'src/runtime/',
+    ];
+    return targetStarts(target, disallowed) ? 'builtins may import core/libs/exec/builtins only (Phase 6 client model: builtins implement methods on top of exec VM ops); runtime/frontend/bytecode/CLI dependencies must be explicit debt' : null;
+  }
+
+  if (source.startsWith('src/libs/')) {
+    const disallowed = [
+      'src/binding/',
+      'src/builtins/',
+      'src/bytecode/',
+      'src/cli/',
       'src/exec/',
       'src/frontend/',
       'src/runtime/',
     ];
-    return targetStarts(target, disallowed) ? 'builtins may import core/libs/builtins only; exec/runtime/frontend/bytecode/CLI dependencies must be explicit debt' : null;
+    return targetStarts(target, disallowed) ? 'libs may import core/libs only' : null;
+  }
+
+  if (source.startsWith('src/frontend/')) {
+    const disallowed = [
+      'src/binding/',
+      'src/builtins/',
+      'src/cli/',
+      'src/exec/',
+      'src/runtime/',
+    ];
+    return targetStarts(target, disallowed) ? 'frontend may import core/libs/frontend/bytecode only (the parser emits bytecode directly); builtins/exec/runtime/binding/CLI dependencies must be explicit debt' : null;
+  }
+
+  if (source.startsWith('src/bytecode/')) {
+    const disallowed = [
+      'src/binding/',
+      'src/builtins/',
+      'src/cli/',
+      'src/exec/',
+      'src/runtime/',
+    ];
+    return targetStarts(target, disallowed) ? 'bytecode may import core/libs/frontend/bytecode only' : null;
+  }
+
+  if (source.startsWith('src/exec/')) {
+    const disallowed = [
+      'src/binding/',
+      'src/builtins/',
+      'src/cli/',
+      'src/runtime/',
+    ];
+    return targetStarts(target, disallowed) ? 'exec must not depend on builtins, runtime, binding, or CLI (Phase 6 terminal: builtins are clients of exec — they import exec VM ops; exec dispatches to them only through the core-owned internal record table, never by importing builtins). Host policy reaches exec through core interfaces (e.g. HostEventLoop) or the external host-function registry' : null;
+  }
+
+  if (source.startsWith('src/runtime/')) {
+    const disallowed = ['src/cli/'];
+    return targetStarts(target, disallowed) ? 'runtime must not depend on CLI' : null;
+  }
+
+  if (source.startsWith('src/binding/')) {
+    const disallowed = ['src/cli/'];
+    return targetStarts(target, disallowed) ? 'binding must not depend on CLI' : null;
   }
 
   return null;

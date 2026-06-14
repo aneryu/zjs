@@ -1,11 +1,111 @@
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const value_ops = @import("value_ops.zig");
-const shared_vm = @import("shared.zig");
+const call_runtime = @import("call_runtime.zig");
+const coercion_ops = @import("coercion_ops.zig");
+const object_ops = @import("object_ops.zig");
+const string_ops = @import("string_ops.zig");
+
+// The Date constructor body runs through the record table keyed on this ref
+// (matching the RegExp/String construct unification in Phase 6b-3d/e): the
+// VM-context argument coercion stays here in `qjsDateConstructWithPrototype`
+// and the coerced primitives + resolved instance prototype are threaded to the
+// record, whose construct branch (`builtins/date.zig` `dateCall`) runs
+// `constructWithPrototype`. The Date construct record reads only
+// `args`/`new_target`, so no constructor function object or caller frame is
+// threaded.
+const date_construct_ref = core.function.NativeBuiltinRef{
+    .domain = .date,
+    .id = @intFromEnum(core.host_function.builtin_method_ids.date.ConstructorMethod.construct),
+};
+
+/// Run the builtin Date constructor body for already-coerced `args` and a
+/// resolved instance `prototype` through the record table.
+fn constructDateRecord(
+    ctx: *core.JSContext,
+    prototype: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    return (try builtin_dispatch.callConstructRecord(ctx, null, null, &.{}, null, date_construct_ref, prototype, args, null, null)) orelse error.TypeError;
+}
+
+const date_method_ids = core.host_function.builtin_method_id_lookup.date;
+const DatePrototypeMethod = core.host_function.builtin_method_ids.date.PrototypeMethod;
+
+/// Route a Date prototype-method *body* through the record table's
+/// func-object-free arm. `decoded_method_id` is the legacy 1..34 selector the
+/// builtin date bodies switch on; it is re-encoded to its `PrototypeMethod`
+/// record id so the dispatch lands on `builtins/date.zig` `dateCall` (which runs
+/// the pure `methodCallArgs` body for it). `args` must already be coerced. This
+/// replaces the former direct `builtins.date.methodCall*` calls so exec carries
+/// no compile-time Date knowledge.
+pub fn callDateBody(
+    ctx: *core.JSContext,
+    this_value: core.JSValue,
+    decoded_method_id: u32,
+    args: []const core.JSValue,
+) !core.JSValue {
+    const native_ref = core.function.NativeBuiltinRef{ .domain = .date, .id = date_method_ids.encodePrototypeMethodId(decoded_method_id).? };
+    return (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, this_value, native_ref, args, null, null)) orelse error.TypeError;
+}
+
+/// Route a Date static-method body (`Date.UTC`/`Date.parse`/`Date.now`) through
+/// the table. `static_method_id` is the `StaticMethod` enum value (1/2/3), which
+/// doubles as the `staticCall` selector; `args` must already be coerced.
+pub fn callDateStaticBody(
+    ctx: *core.JSContext,
+    static_method_id: u32,
+    args: []const core.JSValue,
+) !core.JSValue {
+    const native_ref = core.function.NativeBuiltinRef{ .domain = .date, .id = static_method_id };
+    return (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, core.JSValue.undefinedValue(), native_ref, args, null, null)) orelse error.TypeError;
+}
+
+/// Capture a Date instance's `[[DateValue]]` as an f64 by routing the `getTime`
+/// body through the table (the spec captures `t` before coercing setter args).
+fn captureDateValueMs(ctx: *core.JSContext, this_value: core.JSValue) !f64 {
+    const captured_value = try callDateBody(ctx, this_value, 1, &.{});
+    defer captured_value.free(ctx.runtime);
+    return value_ops.numberValue(captured_value) orelse std.math.nan(f64);
+}
+
+/// Route `setYear` with a pre-captured `[[DateValue]]` and coerced year through
+/// the table's captured-setter arm (`setYearNumber` body). The captured ms and
+/// year are packed as the leading args the record handler unpacks.
+fn callDateSetYearWithCapturedMs(
+    ctx: *core.JSContext,
+    this_value: core.JSValue,
+    captured_ms: f64,
+    year_number: f64,
+) !core.JSValue {
+    const native_ref = core.function.NativeBuiltinRef{ .domain = .date, .id = @intFromEnum(DatePrototypeMethod.set_year_with_captured_ms) };
+    const packed_args = [_]core.JSValue{ core.JSValue.float64(captured_ms), core.JSValue.float64(year_number) };
+    return (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, this_value, native_ref, &packed_args, null, null)) orelse error.TypeError;
+}
+
+/// Route a date-parts setter (decoded ids 25..31) with a pre-captured
+/// `[[DateValue]]` and coerced field args through the table's captured-setter arm
+/// (`methodCallArgsWithCapturedMs` body). Layout: args[0]=captured ms,
+/// args[1]=int32 decoded setter id, args[2..]=coerced field args.
+fn callDateSetPartsWithCapturedMs(
+    ctx: *core.JSContext,
+    this_value: core.JSValue,
+    decoded_method_id: u32,
+    captured_ms: f64,
+    args: []const core.JSValue,
+) !core.JSValue {
+    const native_ref = core.function.NativeBuiltinRef{ .domain = .date, .id = @intFromEnum(DatePrototypeMethod.set_parts_with_captured_ms) };
+    var packed_args: [6]core.JSValue = undefined;
+    packed_args[0] = core.JSValue.float64(captured_ms);
+    packed_args[1] = core.JSValue.int32(@intCast(decoded_method_id));
+    const count = @min(args.len, packed_args.len - 2);
+    @memcpy(packed_args[2 .. 2 + count], args[0..count]);
+    return (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, this_value, native_ref, packed_args[0 .. 2 + count], null, null)) orelse error.TypeError;
+}
 
 const DateToPrimitiveHint = enum {
     string,
@@ -21,16 +121,14 @@ pub fn qjsDateSetYear(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const object = shared_vm.objectFromValue(this_value) orelse return null;
+    const object = object_ops.objectFromValue(this_value) orelse return null;
     if (object.class_id != core.class.ids.date) return null;
-    const captured_ms_value = try builtins.date.methodCall(ctx.runtime, this_value, 1);
-    defer captured_ms_value.free(ctx.runtime);
-    const captured_ms = value_ops.numberValue(captured_ms_value) orelse std.math.nan(f64);
+    const captured_ms = try captureDateValueMs(ctx, this_value);
     const year_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const year_value = try shared_vm.toNumberForDateMethod(ctx, output, global, year_input, caller_function, caller_frame);
+    const year_value = try coercion_ops.toNumberForDateMethod(ctx, output, global, year_input, caller_function, caller_frame);
     defer year_value.free(ctx.runtime);
     const year_number = value_ops.numberValue(year_value) orelse std.math.nan(f64);
-    return try builtins.date.setYearNumber(ctx.runtime, this_value, captured_ms, year_number);
+    return try callDateSetYearWithCapturedMs(ctx, this_value, captured_ms, year_number);
 }
 
 pub fn qjsDateSetTime(
@@ -42,12 +140,12 @@ pub fn qjsDateSetTime(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const object = shared_vm.objectFromValue(this_value) orelse return null;
+    const object = object_ops.objectFromValue(this_value) orelse return null;
     if (object.class_id != core.class.ids.date) return null;
     const time_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const time_value = try shared_vm.toNumberForDateMethod(ctx, output, global, time_input, caller_function, caller_frame);
+    const time_value = try coercion_ops.toNumberForDateMethod(ctx, output, global, time_input, caller_function, caller_frame);
     defer time_value.free(ctx.runtime);
-    return try builtins.date.methodCallArgs(ctx.runtime, this_value, 24, &.{time_value});
+    return try callDateBody(ctx, this_value, 24, &.{time_value});
 }
 
 pub fn qjsDateStaticCall(
@@ -68,9 +166,9 @@ pub fn qjsDateStaticCall(
         for (coerced_args[0..coerced_len]) |value| value.free(ctx.runtime);
     }
     while (coerced_len < args.len and coerced_len < coerced_args.len) : (coerced_len += 1) {
-        coerced_args[coerced_len] = try shared_vm.toNumberForDateMethod(ctx, output, global, args[coerced_len], caller_function, caller_frame);
+        coerced_args[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, global, args[coerced_len], caller_function, caller_frame);
     }
-    return try builtins.date.staticCall(ctx.runtime, method_id, coerced_args[0..coerced_len]);
+    return try callDateStaticBody(ctx, method_id, coerced_args[0..coerced_len]);
 }
 
 pub fn qjsDateCapturedSetterCall(
@@ -84,12 +182,10 @@ pub fn qjsDateCapturedSetterCall(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (method_id < 25 or method_id > 31) return null;
-    const object = shared_vm.objectFromValue(this_value) orelse return null;
+    const object = object_ops.objectFromValue(this_value) orelse return null;
     if (object.class_id != core.class.ids.date) return null;
 
-    const captured_ms_value = try builtins.date.methodCall(ctx.runtime, this_value, 1);
-    defer captured_ms_value.free(ctx.runtime);
-    const captured_ms = value_ops.numberValue(captured_ms_value) orelse std.math.nan(f64);
+    const captured_ms = try captureDateValueMs(ctx, this_value);
 
     var coerced_args: [4]core.JSValue = undefined;
     var coerced_len: usize = 0;
@@ -97,10 +193,10 @@ pub fn qjsDateCapturedSetterCall(
         for (coerced_args[0..coerced_len]) |value| value.free(ctx.runtime);
     }
     while (coerced_len < args.len and coerced_len < coerced_args.len) : (coerced_len += 1) {
-        coerced_args[coerced_len] = try shared_vm.toNumberForDateMethod(ctx, output, global, args[coerced_len], caller_function, caller_frame);
+        coerced_args[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, global, args[coerced_len], caller_function, caller_frame);
     }
 
-    return try builtins.date.methodCallArgsWithCapturedMs(ctx.runtime, this_value, method_id, captured_ms, coerced_args[0..coerced_len]);
+    return try callDateSetPartsWithCapturedMs(ctx, this_value, method_id, captured_ms, coerced_args[0..coerced_len]);
 }
 
 pub fn qjsDateToJsonCall(
@@ -115,7 +211,7 @@ pub fn qjsDateToJsonCall(
     _ = args;
     if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
 
-    const primitive = try shared_vm.toPrimitiveForNumber(ctx, output, global, this_value);
+    const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, this_value);
     defer primitive.free(ctx.runtime);
     if (primitive.isNumber()) {
         const number = value_ops.numberValue(primitive) orelse std.math.nan(f64);
@@ -124,10 +220,10 @@ pub fn qjsDateToJsonCall(
 
     const key = try ctx.runtime.internAtom("toISOString");
     defer ctx.runtime.atoms.free(key);
-    const method = try shared_vm.getValueProperty(ctx, output, global, this_value, key, caller_function, caller_frame);
+    const method = try object_ops.getValueProperty(ctx, output, global, this_value, key, caller_function, caller_frame);
     defer method.free(ctx.runtime);
-    if (!shared_vm.isCallableValue(method)) return error.TypeError;
-    return try shared_vm.callValueOrBytecode(ctx, output, global, this_value, method, &.{}, caller_function, caller_frame);
+    if (!call_runtime.isCallableValue(method)) return error.TypeError;
+    return try call_runtime.callValueOrBytecode(ctx, output, global, this_value, method, &.{}, caller_function, caller_frame);
 }
 
 pub fn qjsDateConstructWithPrototype(
@@ -137,28 +233,28 @@ pub fn qjsDateConstructWithPrototype(
     prototype: ?*core.Object,
     args: []const core.JSValue,
 ) !core.JSValue {
-    if (args.len == 0) return builtins.date.constructWithPrototype(ctx.runtime, args, prototype);
+    if (args.len == 0) return constructDateRecord(ctx, prototype, args);
 
     if (args.len == 1) {
-        if (shared_vm.objectFromValue(args[0])) |object| {
+        if (object_ops.objectFromValue(args[0])) |object| {
             if (object.class_id == core.class.ids.date) {
-                const time_value = try builtins.date.methodCall(ctx.runtime, args[0], 1);
+                const time_value = try callDateBody(ctx, args[0], 1, &.{});
                 defer time_value.free(ctx.runtime);
-                return builtins.date.constructWithPrototype(ctx.runtime, &.{time_value}, prototype);
+                return constructDateRecord(ctx, prototype, &.{time_value});
             }
 
-            const primitive = try shared_vm.toPrimitiveForAddition(ctx, output, global, args[0]);
+            const primitive = try coercion_ops.toPrimitiveForAddition(ctx, output, global, args[0]);
             defer primitive.free(ctx.runtime);
-            if (primitive.isString()) return builtins.date.constructWithPrototype(ctx.runtime, &.{primitive}, prototype);
+            if (primitive.isString()) return constructDateRecord(ctx, prototype, &.{primitive});
             const number = try value_ops.toNumberValue(ctx.runtime, primitive);
             defer number.free(ctx.runtime);
-            return builtins.date.constructWithPrototype(ctx.runtime, &.{number}, prototype);
+            return constructDateRecord(ctx, prototype, &.{number});
         }
 
-        if (args[0].isString()) return builtins.date.constructWithPrototype(ctx.runtime, args, prototype);
+        if (args[0].isString()) return constructDateRecord(ctx, prototype, args);
         const number = try value_ops.toNumberValue(ctx.runtime, args[0]);
         defer number.free(ctx.runtime);
-        return builtins.date.constructWithPrototype(ctx.runtime, &.{number}, prototype);
+        return constructDateRecord(ctx, prototype, &.{number});
     }
 
     var coerced_args: [7]core.JSValue = undefined;
@@ -167,16 +263,9 @@ pub fn qjsDateConstructWithPrototype(
         for (coerced_args[0..coerced_len]) |value| value.free(ctx.runtime);
     }
     while (coerced_len < args.len and coerced_len < coerced_args.len) : (coerced_len += 1) {
-        coerced_args[coerced_len] = try shared_vm.toNumberForDateMethod(ctx, output, global, args[coerced_len], null, null);
+        coerced_args[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, global, args[coerced_len], null, null);
     }
-    return builtins.date.constructWithPrototype(ctx.runtime, coerced_args[0..coerced_len], prototype);
-}
-
-pub fn qjsDateStaticId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "UTC")) return 1;
-    if (std.mem.eql(u8, name, "parse")) return 2;
-    if (std.mem.eql(u8, name, "now")) return 3;
-    return null;
+    return constructDateRecord(ctx, prototype, coerced_args[0..coerced_len]);
 }
 
 pub fn qjsDateToPrimitiveCall(
@@ -198,48 +287,10 @@ pub fn qjsDateToPrimitiveCall(
     };
 }
 
-pub fn qjsDateMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "getTime")) return 1;
-    if (std.mem.eql(u8, name, "valueOf")) return 2;
-    if (std.mem.eql(u8, name, "getFullYear")) return 3;
-    if (std.mem.eql(u8, name, "getTimezoneOffset")) return 32;
-    if (std.mem.eql(u8, name, "getMonth")) return 4;
-    if (std.mem.eql(u8, name, "getDate")) return 5;
-    if (std.mem.eql(u8, name, "getHours")) return 6;
-    if (std.mem.eql(u8, name, "getMinutes")) return 7;
-    if (std.mem.eql(u8, name, "getSeconds")) return 8;
-    if (std.mem.eql(u8, name, "getMilliseconds")) return 9;
-    if (std.mem.eql(u8, name, "toISOString")) return 10;
-    if (std.mem.eql(u8, name, "toJSON")) return 11;
-    if (std.mem.eql(u8, name, "getUTCFullYear")) return 12;
-    if (std.mem.eql(u8, name, "getUTCMonth")) return 13;
-    if (std.mem.eql(u8, name, "getUTCDate")) return 14;
-    if (std.mem.eql(u8, name, "getUTCHours")) return 15;
-    if (std.mem.eql(u8, name, "getUTCMinutes")) return 16;
-    if (std.mem.eql(u8, name, "getUTCSeconds")) return 17;
-    if (std.mem.eql(u8, name, "getUTCMilliseconds")) return 18;
-    if (std.mem.eql(u8, name, "getUTCDay") or std.mem.eql(u8, name, "getDay")) return 19;
-    if (std.mem.eql(u8, name, "toString") or std.mem.eql(u8, name, "toLocaleString")) return 20;
-    if (std.mem.eql(u8, name, "toUTCString") or std.mem.eql(u8, name, "toGMTString")) return 21;
-    if (std.mem.eql(u8, name, "toDateString") or std.mem.eql(u8, name, "toLocaleDateString")) return 33;
-    if (std.mem.eql(u8, name, "toTimeString") or std.mem.eql(u8, name, "toLocaleTimeString")) return 34;
-    if (std.mem.eql(u8, name, "getYear")) return 22;
-    if (std.mem.eql(u8, name, "setYear")) return 23;
-    if (std.mem.eql(u8, name, "setTime")) return 24;
-    if (std.mem.eql(u8, name, "setMilliseconds") or std.mem.eql(u8, name, "setUTCMilliseconds")) return 25;
-    if (std.mem.eql(u8, name, "setSeconds") or std.mem.eql(u8, name, "setUTCSeconds")) return 26;
-    if (std.mem.eql(u8, name, "setMinutes") or std.mem.eql(u8, name, "setUTCMinutes")) return 27;
-    if (std.mem.eql(u8, name, "setHours") or std.mem.eql(u8, name, "setUTCHours")) return 28;
-    if (std.mem.eql(u8, name, "setDate") or std.mem.eql(u8, name, "setUTCDate")) return 29;
-    if (std.mem.eql(u8, name, "setMonth") or std.mem.eql(u8, name, "setUTCMonth")) return 30;
-    if (std.mem.eql(u8, name, "setFullYear") or std.mem.eql(u8, name, "setUTCFullYear")) return 31;
-    return null;
-}
-
 fn qjsDateToPrimitiveHint(value: core.JSValue) ?DateToPrimitiveHint {
     if (!value.isString()) return null;
-    if (shared_vm.stringValueUnitsEqualBytes(value, "string") or shared_vm.stringValueUnitsEqualBytes(value, "default")) return .string;
-    if (shared_vm.stringValueUnitsEqualBytes(value, "number")) return .number;
+    if (string_ops.stringValueUnitsEqualBytes(value, "string") or string_ops.stringValueUnitsEqualBytes(value, "default")) return .string;
+    if (string_ops.stringValueUnitsEqualBytes(value, "number")) return .number;
     return null;
 }
 
@@ -253,11 +304,11 @@ fn qjsDateOrdinaryToPrimitive(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (string_first) {
-        if (try shared_vm.callObjectToPrimitiveMethod(ctx, output, global, receiver, "toString", caller_function, caller_frame)) |primitive| return primitive;
-        if (try shared_vm.callObjectToPrimitiveMethod(ctx, output, global, receiver, "valueOf", caller_function, caller_frame)) |primitive| return primitive;
+        if (try object_ops.callObjectToPrimitiveMethod(ctx, output, global, receiver, "toString", caller_function, caller_frame)) |primitive| return primitive;
+        if (try object_ops.callObjectToPrimitiveMethod(ctx, output, global, receiver, "valueOf", caller_function, caller_frame)) |primitive| return primitive;
     } else {
-        if (try shared_vm.callObjectToPrimitiveMethod(ctx, output, global, receiver, "valueOf", caller_function, caller_frame)) |primitive| return primitive;
-        if (try shared_vm.callObjectToPrimitiveMethod(ctx, output, global, receiver, "toString", caller_function, caller_frame)) |primitive| return primitive;
+        if (try object_ops.callObjectToPrimitiveMethod(ctx, output, global, receiver, "valueOf", caller_function, caller_frame)) |primitive| return primitive;
+        if (try object_ops.callObjectToPrimitiveMethod(ctx, output, global, receiver, "toString", caller_function, caller_frame)) |primitive| return primitive;
     }
     return error.TypeError;
 }

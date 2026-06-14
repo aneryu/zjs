@@ -1,5 +1,6 @@
 const std = @import("std");
 const zjs = @import("zjs");
+const public_zjs = @import("../root.zig");
 
 const InterruptState = struct {
     hits: usize = 0,
@@ -21,6 +22,21 @@ const HostFunctionState = struct {
     }
 };
 
+const HostFinalizerState = struct {
+    calls: usize = 0,
+
+    fn call(ptr: *anyopaque, call_info: zjs.ExternalHostCall) anyerror!zjs.JSValue {
+        _ = ptr;
+        _ = call_info;
+        return zjs.JSValue.undefinedValue();
+    }
+
+    fn finalize(ptr: *anyopaque) void {
+        const self: *HostFinalizerState = @ptrCast(@alignCast(ptr));
+        self.calls += 1;
+    }
+};
+
 const BytesStoreState = struct {
     allocator: std.mem.Allocator,
     calls: usize = 0,
@@ -31,6 +47,28 @@ const BytesStoreState = struct {
         self.allocator.free(bytes);
     }
 };
+
+test "production public API contract exposes Zig-native embedding spellings" {
+    try std.testing.expect(public_zjs.JSValue.Scope == public_zjs.value.Scope);
+    try std.testing.expect(public_zjs.JSValue.Local == public_zjs.value.Local);
+    try std.testing.expect(public_zjs.JSValue.Persistent == public_zjs.value.Persistent);
+    try std.testing.expect(public_zjs.JSValue.Weak == public_zjs.value.Weak);
+    try std.testing.expect(public_zjs.value.String == public_zjs.JSValue.String);
+    try std.testing.expect(public_zjs.value.Bytes == public_zjs.JSValue.Bytes);
+    try std.testing.expect(@hasDecl(public_zjs.host, "PropName"));
+    try std.testing.expect(@hasDecl(public_zjs.host, "NativeBinding"));
+    try std.testing.expect(@hasDecl(public_zjs.host.NativeBinding, "JSObject"));
+    try std.testing.expect(@hasDecl(public_zjs.host.NativeBinding, "Storage"));
+    try std.testing.expect(@hasDecl(public_zjs.host.NativeBinding, "Properties"));
+    try std.testing.expect(@hasDecl(public_zjs.host.NativeBinding, "method"));
+    try std.testing.expect(@typeInfo(public_zjs.object.Object) == .@"opaque");
+    try std.testing.expect(!@hasDecl(public_zjs, "internal"));
+    try std.testing.expect(!@hasDecl(public_zjs, "kernel"));
+    try std.testing.expect(!@hasDecl(public_zjs, "PropNameID"));
+    try std.testing.expect(!@hasDecl(public_zjs, "JSString"));
+    try std.testing.expect(!@hasDecl(public_zjs, "JSBytes"));
+    try std.testing.expect(!@hasDecl(public_zjs, "binding"));
+}
 
 test "production embedding can own JSRuntime and JSContext directly" {
     var rt: zjs.JSRuntime = undefined;
@@ -50,7 +88,7 @@ test "production embedding can own JSRuntime and JSContext directly" {
     try std.testing.expect(object.isObject());
 
     const global = try ctx.globalObject();
-    try std.testing.expect(global.is_global);
+    try std.testing.expect(global.flags.is_global);
 }
 
 test "production embedding API applies limits and releases eval handles" {
@@ -419,6 +457,38 @@ test "production embedding can inspect runtime memory usage without internal mod
     try std.testing.expect(usage.atom_count > 0);
 }
 
+test "production embedding roots host-held values with public handles" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const ctx = try zjs.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const object = try ctx.eval("({ answer: 42 })", .{});
+
+    var scope: zjs.JSValue.Scope = rt.enterHandleScope();
+    const local: zjs.JSValue.Local = try scope.localDup(object);
+    object.free(rt);
+
+    try std.testing.expectEqual(@as(usize, 1), rt.localRootCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
+    try std.testing.expect(local.get().isObject());
+
+    var persistent: zjs.JSValue.Persistent = try rt.createPersistentValue(local.get());
+    defer persistent.deinit();
+
+    scope.exit();
+    try std.testing.expectEqual(@as(usize, 0), rt.localRootCountForTest());
+    try std.testing.expectEqual(@as(usize, 1), rt.persistentRootCountForTest());
+
+    const answer = try ctx.getProperty(persistent.get(), "answer");
+    defer answer.free(rt);
+    try std.testing.expectEqual(@as(?i32, 42), answer.asInt32());
+
+    persistent.deinit();
+    try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
+}
+
 test "production embedding can expose owned and shared byte stores" {
     const rt = try zjs.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -598,6 +668,76 @@ test "production embedding memory limit reports allocation failure without leaki
     try std.testing.expectError(error.OutOfMemory, ctx.eval("({ payload: new Array(32).fill('x') });", .{}));
 }
 
+test "production embedding public API allocation failures keep host ownership intact" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const ctx = try zjs.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const object = try ctx.eval("({ answer: 42 })", .{});
+    defer object.free(rt);
+
+    const persistent_before = rt.persistentRootCountForTest();
+    const local_before = rt.localRootCountForTest();
+
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    defer rt.setMemoryLimit(null);
+
+    if (rt.createPersistentValue(object)) |handle| {
+        var owned = handle;
+        owned.deinit();
+        return error.TestExpectedError;
+    } else |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+    }
+    try std.testing.expectEqual(persistent_before, rt.persistentRootCountForTest());
+    try std.testing.expectEqual(local_before, rt.localRootCountForTest());
+
+    if (ctx.createString("must allocate")) |value| {
+        value.free(rt);
+        return error.TestExpectedError;
+    } else |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+    }
+    try std.testing.expectEqual(persistent_before, rt.persistentRootCountForTest());
+    try std.testing.expectEqual(local_before, rt.localRootCountForTest());
+
+    var finalizer_state = HostFinalizerState{};
+    if (ctx.createExternalFunction(
+        "AllocationBlockedHostFn",
+        0,
+        &finalizer_state,
+        HostFinalizerState.call,
+        HostFinalizerState.finalize,
+        .{},
+    )) |value| {
+        value.free(rt);
+        return error.TestExpectedError;
+    } else |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+    }
+    try std.testing.expectEqual(@as(usize, 0), finalizer_state.calls);
+
+    var bytes_state = BytesStoreState{ .allocator = std.testing.allocator };
+    const backing = try std.testing.allocator.alloc(u8, 2);
+    @memcpy(backing, &[_]u8{ 1, 2 });
+    var store = zjs.JSValue.Bytes.Store.owned(backing, .{
+        .deinit = BytesStoreState.deinit,
+        .context = &bytes_state,
+    });
+    defer store.release();
+
+    if (ctx.arrayBuffer(&store)) |value| {
+        value.free(rt);
+        return error.TestExpectedError;
+    } else |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+    }
+    try std.testing.expectEqual(@as(usize, 0), bytes_state.calls);
+    try std.testing.expectEqual(@as(usize, 2), store.bytes.len);
+}
+
 test "production embedding interrupt handler aborts unbounded execution" {
     const rt = try zjs.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -694,7 +834,7 @@ test "production embedding can create independent realms" {
     try std.testing.expect(realm_global.isObject());
 
     const realm_global_object = try ctx.realmGlobalObject(realm);
-    try std.testing.expect(realm_global_object.is_global);
+    try std.testing.expect(realm_global_object.flags.is_global);
 
     const realm_global_this = try ctx.getProperty(realm_global, "globalThis");
     defer realm_global_this.free(rt);

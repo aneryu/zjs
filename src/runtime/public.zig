@@ -6,7 +6,6 @@ pub const EventLoopRunResult = runtime.EventLoopRunResult;
 pub const runUntilIdle = runtime.runUntilIdle;
 pub const cleanupAtomicsWaitersForContext = runtime.cleanupAtomicsWaitersForContext;
 pub const wakeAtomicsWaitersForRuntimes = runtime.wakeAtomicsWaitersForRuntimes;
-pub const cleanupWorkersForRuntime = runtime.cleanupWorkersForRuntime;
 pub const detachArrayBuffer = runtime.detachArrayBuffer;
 pub const evalFileModuleGraphWithOutput = runtime.evalFileModuleGraphWithOutput;
 pub const resolveModuleSpecifier = runtime.resolveModuleSpecifier;
@@ -20,7 +19,6 @@ test {
     _ = runUntilIdle;
     _ = cleanupAtomicsWaitersForContext;
     _ = wakeAtomicsWaitersForRuntimes;
-    _ = cleanupWorkersForRuntime;
     _ = detachArrayBuffer;
     _ = evalFileModuleGraphWithOutput;
     _ = resolveModuleSpecifier;

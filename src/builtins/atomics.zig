@@ -1,21 +1,14 @@
-const std = @import("std");
+//! Install-time name dispatch for the `Atomics` namespace. The `StaticMethod`
+//! selector and the lock-free predicate are VM-core primitives that live in
+//! `exec/atomics_wait.zig` (QuickJS keeps the Atomics wait mechanism in the
+//! engine); this module only re-exports the selector and maps method names to
+//! ids for the registry's namespace binding (builtins -> exec is legal under
+//! the Phase 6 client model).
 
-pub const StaticMethod = enum(u32) {
-    add = 1,
-    @"and" = 2,
-    compare_exchange = 3,
-    exchange = 4,
-    is_lock_free = 5,
-    load = 6,
-    notify = 7,
-    @"or" = 8,
-    pause = 9,
-    store = 10,
-    sub = 11,
-    wait = 12,
-    wait_async = 13,
-    xor = 14,
-};
+const std = @import("std");
+const atomics_wait = @import("../exec/atomics_wait.zig");
+
+pub const StaticMethod = atomics_wait.StaticMethod;
 
 pub fn methodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "add")) return @intFromEnum(StaticMethod.add);
@@ -33,8 +26,4 @@ pub fn methodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "waitAsync")) return @intFromEnum(StaticMethod.wait_async);
     if (std.mem.eql(u8, name, "xor")) return @intFromEnum(StaticMethod.xor);
     return null;
-}
-
-pub fn isLockFree(size: usize) bool {
-    return size == 1 or size == 2 or size == 4 or size == 8;
 }

@@ -20,7 +20,7 @@ pub fn deleteProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.A
 
 pub fn getPropertyValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) !core.JSValue {
     const object_value = try expectObject(value);
-    if (object_value.is_global and value_ops.atomNameEql(rt, atom_id, "globalThis")) return object_value.value().dup();
+    if (object_value.flags.is_global and value_ops.atomNameEql(rt, atom_id, "globalThis")) return object_value.value().dup();
     return object_value.getProperty(atom_id);
 }
 
@@ -59,7 +59,7 @@ pub fn instanceOfArray(value: core.JSValue) core.JSValue {
     const header = value.refHeader() orelse return core.JSValue.boolean(false);
     if (!value.isObject()) return core.JSValue.boolean(false);
     const object: *core.Object = @fieldParentPtr("header", header);
-    return core.JSValue.boolean(object.is_array);
+    return core.JSValue.boolean(object.flags.is_array);
 }
 
 pub fn instanceOf(rt: *core.JSRuntime, value: core.JSValue, constructor_value: core.JSValue) !core.JSValue {
@@ -89,10 +89,9 @@ pub fn instanceOf(rt: *core.JSRuntime, value: core.JSValue, constructor_value: c
 pub fn propertyKeyAtom(rt: *core.JSRuntime, value: core.JSValue) !core.Atom {
     if (value.asSymbolAtom()) |atom_id| return rt.atoms.dup(atom_id);
     if (value.isString()) {
-        var bytes = std.ArrayList(u8).empty;
-        defer bytes.deinit(rt.memory.allocator);
-        try value_ops.appendRawString(rt, &bytes, value);
-        return rt.internAtom(bytes.items);
+        const header = value.refHeader().?;
+        const string_value: *core.string.String = @fieldParentPtr("header", header);
+        return string_value.internAtom(rt);
     }
     if (value.asInt32()) |index| {
         if (index >= 0) return core.atom.atomFromUInt32(@intCast(index));

@@ -1,14 +1,28 @@
+const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
+const dtoa = @import("../libs/dtoa.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
+const vm_property_globals = @import("vm_property_globals.zig");
+const regexp_vm = @import("vm_regexp.zig");
+const call_runtime = @import("call_runtime.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
 const op = bytecode.opcode.op;
+
+// `ToObject(string)` (the `with`-statement / Object coercion) builds its String
+// wrapper through the String construct record (Phase 6b-3 STEP 4) rather than
+// naming `builtins.string.constructWithPrototype`; the construct branch is pure
+// (reads only `args`/`new_target`).
+const string_construct_ref = core.function.NativeBuiltinRef{
+    .domain = .string,
+    .id = @intFromEnum(core.host_function.builtin_method_ids.string.ConstructorMethod.call),
+};
 
 pub const DropResult = union(enum) {
     value,
@@ -53,10 +67,8 @@ pub fn pushI16OperandVm(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     fast_paths: GlobalFastPathEnv,
-    comptime tryFuseGlobalInt32PrefixTermsStore: anytype,
-    comptime globalLexicalValue: anytype,
 ) !void {
-    if (tryFuseGlobalInt32PrefixTermsStore(ctx, fast_paths.global, function, frame, frame.pc - 1, fast_paths.eval_local_names, fast_paths.eval_var_ref_names, fast_paths.eval_with_object, globalLexicalValue)) return;
+    if (fusion_stats.counted(.tryFuseGlobalInt32PrefixTermsStore, vm_property_globals.tryFuseGlobalInt32PrefixTermsStore(ctx, fast_paths.global, function, frame, frame.pc - 1, fast_paths.eval_local_names, fast_paths.eval_var_ref_names, fast_paths.eval_with_object))) return;
     try pushI16Operand(stack, function, frame);
 }
 
@@ -262,13 +274,10 @@ pub fn pushAtomValueVm(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     fast_paths: PushAtomValueFastPaths,
-    comptime tryFuseAtomPercentHexGlobalStringStore: anytype,
-    comptime tryPushRegexpLiteralFromAtomPair: anytype,
-    comptime globalLexicalValue: anytype,
 ) !void {
     const global_env = fast_paths.global_env;
-    if (try tryFuseAtomPercentHexGlobalStringStore(ctx, global_env.global, function, frame, global_env.eval_local_names, global_env.eval_var_ref_names, global_env.eval_with_object, globalLexicalValue)) return;
-    if (ctx.runtime.opcode_profile == null and try tryPushRegexpLiteralFromAtomPair(ctx, global_env.global, stack, function, frame, fast_paths.regexp_prototype)) return;
+    if (fusion_stats.counted(.tryFuseAtomPercentHexGlobalStringStore, try vm_property_globals.tryFuseAtomPercentHexGlobalStringStore(ctx, global_env.global, function, frame, global_env.eval_local_names, global_env.eval_var_ref_names, global_env.eval_with_object))) return;
+    if (ctx.runtime.opcode_profile == null and try regexp_vm.tryPushLiteralFromAtomPair(ctx, stack, function, frame, fast_paths.regexp_prototype)) return;
     try pushAtomValue(ctx, stack, function, frame);
 }
 
@@ -281,21 +290,32 @@ fn pushFusedAsciiAtomStringConcat(
 ) !bool {
     const code = function.code;
     const second_op_pc = frame.pc + 4;
-    if (second_op_pc + 6 > code.len) return false;
-    if (code[second_op_pc] != op.push_atom_value) return false;
-    const second_atom = readInt(u32, code[second_op_pc + 1 ..][0..4]);
-    if (code[second_op_pc + 5] != op.add) return false;
-
     var first_buf: [10]u8 = undefined;
-    var second_buf: [10]u8 = undefined;
     const first = atomAsciiText(ctx.runtime, first_atom, &first_buf) orelse return false;
-    const second = atomAsciiText(ctx.runtime, second_atom, &second_buf) orelse return false;
+    if (second_op_pc < code.len and code[second_op_pc] == op.push_atom_value) {
+        if (second_op_pc + 6 > code.len) return false;
+        const second_atom = readInt(u32, code[second_op_pc + 1 ..][0..4]);
+        if (code[second_op_pc + 5] != op.add) return false;
 
-    const out = try core.string.String.createLatin1Concat(ctx.runtime, first, second);
+        var second_buf: [10]u8 = undefined;
+        const second = atomAsciiText(ctx.runtime, second_atom, &second_buf) orelse return false;
+        const out = try core.string.String.createLatin1Concat(ctx.runtime, first, second);
+        const value = out.value();
+        errdefer value.free(ctx.runtime);
+        try stack.pushOwned(value);
+        frame.pc = second_op_pc + 6;
+        return true;
+    }
+    const second_int = immediateInt32Operand(code, second_op_pc) orelse return false;
+    if (second_int.next_pc >= code.len or code[second_int.next_pc] != op.add) return false;
+
+    var int_buf: [16]u8 = undefined;
+    const digits = dtoa.formatInt32(&int_buf, second_int.value);
+    const out = try core.string.String.createLatin1Concat(ctx.runtime, first, digits);
     const value = out.value();
     errdefer value.free(ctx.runtime);
     try stack.pushOwned(value);
-    frame.pc = second_op_pc + 6;
+    frame.pc = second_int.next_pc + 1;
     return true;
 }
 
@@ -305,15 +325,8 @@ fn atomAsciiText(rt: *core.JSRuntime, atom_id: core.Atom, buffer: *[10]u8) ?[]co
         return std.fmt.bufPrint(buffer, "{d}", .{core.atom.atomToUInt32(atom_id)}) catch return null;
     }
     const text = rt.atoms.name(atom_id) orelse return null;
-    if (!asciiBytes(text)) return null;
+    if (!core.string.isAsciiBytes(text)) return null;
     return text;
-}
-
-fn asciiBytes(bytes: []const u8) bool {
-    for (bytes) |byte| {
-        if (byte > 0x7f) return false;
-    }
-    return true;
 }
 
 pub fn pushPrivateSymbol(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
@@ -340,11 +353,10 @@ pub fn pushThisVm(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     global: *core.Object,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
     pushThis(stack, frame.this_value) catch |err| switch (err) {
         error.ReferenceError => {
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
             return error.ReferenceError;
         },
         else => return err,
@@ -355,10 +367,10 @@ pub fn pushThisVm(
 pub fn toObject(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(ctx.runtime);
-    var object_value = try toObjectForWith(ctx.runtime, value);
+    var object_value = try toObjectForWith(ctx, value);
     errdefer object_value.free(ctx.runtime);
     const object = try property_ops.expectObject(object_value);
-    object.is_with_environment = true;
+    object.flags.is_with_environment = true;
     try stack.pushOwned(object_value);
 }
 
@@ -368,11 +380,10 @@ pub fn toObjectVm(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     global: *core.Object,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
     toObject(ctx, stack) catch |err| switch (err) {
         error.TypeError => {
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
             return error.TypeError;
         },
         else => return err,
@@ -690,10 +701,11 @@ pub fn isNull(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     try stack.pushOwned(core.JSValue.boolean(value.isNull()));
 }
 
-pub fn toObjectForWith(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
+pub fn toObjectForWith(ctx: *core.JSContext, value: core.JSValue) !core.JSValue {
+    const rt = ctx.runtime;
     if (value.isObject()) return value.dup();
     if (value.isNull() or value.isUndefined()) return error.TypeError;
-    if (value.isString()) return builtins.string.constructWithPrototype(rt, &.{value}, null);
+    if (value.isString()) return (try builtin_dispatch.callConstructRecord(ctx, null, null, &.{}, null, string_construct_ref, null, &.{value}, null, null)) orelse error.TypeError;
     if (value.isNumber()) return primitiveObject(rt, core.class.ids.number, value);
     if (value.asBool() != null) return primitiveObject(rt, core.class.ids.boolean, value);
     if (value.isBigInt()) return primitiveObject(rt, core.class.ids.big_int, value);
@@ -769,7 +781,7 @@ fn expectStackInt32s(stack: *const stack_mod.Stack, expected: []const i32) !void
 }
 
 fn varRefSlotIsUninitialized(slot: core.JSValue) bool {
-    return slotValueBorrow(slot).tag == core.Tag.uninitialized;
+    return slotValueBorrow(slot).isUninitialized();
 }
 
 fn varRefCellFromValue(value: core.JSValue) ?*core.Object {

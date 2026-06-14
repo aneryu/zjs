@@ -13,6 +13,7 @@ const module = @import("module.zig");
 const object_mod = @import("object.zig");
 const shape = @import("shape.zig");
 const string = @import("string.zig");
+const unicode = @import("../libs/unicode.zig");
 const JSValue = @import("value.zig").JSValue;
 const Object = object_mod.Object;
 const profile = @import("profile.zig");
@@ -23,6 +24,106 @@ pub const default_stack_size = 1024 * 1024;
 pub const default_gc_threshold = 256 * 1024;
 
 pub const InterruptHandler = *const fn (*JSRuntime, ?*anyopaque) bool;
+
+/// Installs the standard ECMAScript global object (every builtin constructor,
+/// prototype, namespace, and the `rt.internal_builtins` record table) onto a
+/// freshly-created global `Object`. The implementation lives in the builtins
+/// subsystem (`builtins/registry.zig`); core only holds the function pointer so
+/// the bootstrap install can be invoked without core or exec naming builtins.
+/// This is the engine bootstrap seam: exec's context/realm initialization calls
+/// the runtime's installer rather than importing the builtins registry.
+pub const StandardGlobalsInstaller = *const fn (rt: *JSRuntime, global: *Object) anyerror!void;
+
+/// Process-global default standard-globals installer, registered once by the
+/// builtins subsystem (`builtins.registry.registerStandardGlobalsDefault`). New
+/// runtimes copy this into their per-runtime `install_standard_globals_cb` at
+/// `init`, so a bare `core.JSRuntime.create` (e.g. in engine unit tests) still
+/// gets the installer wired without the creator naming builtins. Mirrors the
+/// `profile.setOpcodeNameProvider` process-global registration pattern.
+var default_standard_globals_installer: ?StandardGlobalsInstaller = null;
+var default_standard_global_own_property_capacity: usize = 0;
+
+/// Register (or clear, with `null`) the process-global standard-globals
+/// installer and the own-property capacity its global object reserves. Called by
+/// the builtins subsystem during engine setup; idempotent and safe to call more
+/// than once with the same values.
+pub fn setDefaultStandardGlobalsInstaller(
+    installer: ?StandardGlobalsInstaller,
+    own_property_capacity: usize,
+) void {
+    default_standard_globals_installer = installer;
+    default_standard_global_own_property_capacity = own_property_capacity;
+}
+
+/// Contiguous VM value-stack arena mirroring QuickJS's `alloca`-based
+/// `JS_CallInternal` frame layout. Call frames carve LIFO windows for
+/// `[args | locals | operand stack]` instead of per-call heap allocations.
+/// Windows are stable for their lifetime (chunks never move); release is a
+/// watermark restore. Values inside windows are owned by the frames using
+/// them and must be released before the watermark is restored.
+pub const VmStackArena = struct {
+    pub const chunk_slots: usize = 32 * 1024;
+    pub const max_chunks: usize = 64;
+
+    pub const Mark = struct {
+        chunk: usize,
+        used: usize,
+    };
+
+    chunks: [max_chunks][]JSValue = @splat(&.{}),
+    used: [max_chunks]usize = @splat(0),
+    chunk_count: usize = 0,
+    active: usize = 0,
+
+    pub fn mark(self: *const VmStackArena) Mark {
+        return .{ .chunk = self.active, .used = if (self.chunk_count == 0) 0 else self.used[self.active] };
+    }
+
+    /// Carve `n` slots from the arena. Returns null when the request cannot
+    /// be served (oversized window or arena exhausted); callers fall back to
+    /// heap storage.
+    pub fn carve(self: *VmStackArena, account: *memory.MemoryAccount, n: usize) ?[]JSValue {
+        if (n == 0) return self.chunks[0][0..0];
+        if (n > chunk_slots) return null;
+        if (self.chunk_count != 0) {
+            const used = self.used[self.active];
+            if (chunk_slots - used >= n) {
+                self.used[self.active] = used + n;
+                return self.chunks[self.active][used .. used + n];
+            }
+        }
+        const next_index = if (self.chunk_count == 0) 0 else self.active + 1;
+        if (next_index >= max_chunks) return null;
+        if (next_index >= self.chunk_count) {
+            const chunk = account.alloc(JSValue, chunk_slots) catch return null;
+            self.chunks[next_index] = chunk;
+            self.chunk_count = next_index + 1;
+        }
+        self.active = next_index;
+        self.used[next_index] = n;
+        return self.chunks[next_index][0..n];
+    }
+
+    /// Restore the watermark taken by `mark`. All values stored in the
+    /// released region must already have been freed by frame/stack teardown.
+    pub fn restore(self: *VmStackArena, m: Mark) void {
+        if (self.chunk_count == 0) return;
+        var index = m.chunk + 1;
+        while (index <= self.active) : (index += 1) self.used[index] = 0;
+        self.active = m.chunk;
+        self.used[m.chunk] = m.used;
+    }
+
+    pub fn deinit(self: *VmStackArena, account: *memory.MemoryAccount) void {
+        for (self.chunks[0..self.chunk_count]) |chunk| {
+            if (chunk.len != 0) account.free(JSValue, chunk);
+        }
+        self.chunks = @splat(&.{});
+        self.used = @splat(0);
+        self.chunk_count = 0;
+        self.active = 0;
+    }
+};
 
 pub const RuntimeOptions = struct {
     trace_writer: ?*std.Io.Writer = null,
@@ -331,7 +432,7 @@ pub const WeakPersistentValue = struct {
         callback: ?WeakPersistentCallback,
         callback_context: ?*anyopaque,
     ) !WeakPersistentValue {
-        const identity = object_mod.Object.weakIdentityFromValue(value) orelse return error.InvalidWeakTarget;
+        const identity = (try object_mod.Object.weakIdentityFromValue(runtime, value)) orelse return error.InvalidWeakTarget;
         const slot = try runtime.createWeakRootSlot(identity, callback, callback_context);
         return .{
             .runtime = runtime,
@@ -481,8 +582,9 @@ const RegExpSimpleClassAlternationCacheEntry = struct {
     pattern: object_mod.RegExpSimpleClassAlternationPattern = .{},
 };
 
-pub const shared_lazy_native_function_slots = 8;
+pub const shared_lazy_native_function_slots = 12;
 pub const internal_destructuring_helper_slots = 14;
+const root_provider_inline_capacity = 1;
 
 pub const JSRuntime = struct {
     pub const Options = RuntimeOptions;
@@ -496,11 +598,20 @@ pub const JSRuntime = struct {
     modules: module.Registry,
     materialize_builtin_namespace_cb: ?*const fn (rt: *JSRuntime, global: *Object, kind: property.AutoInitKind) anyerror!?JSValue = null,
     materialize_context_global_cb: ?*const fn (ctx: *context_mod.JSContext) anyerror!*Object = null,
+    /// Bootstrap install seam: builds the standard global object. Seeded from the
+    /// process-global default at `init`; the builtins subsystem registers that
+    /// default (`builtins.registry.registerStandardGlobalsDefault`). Exec invokes
+    /// this through `installStandardGlobals` instead of importing builtins.
+    install_standard_globals_cb: ?StandardGlobalsInstaller = null,
+    /// Own-property count to reserve on a global object before running
+    /// `install_standard_globals_cb`. Seeded alongside the installer at `init`.
+    standard_global_own_property_capacity: usize = 0,
 
     borrowed_reference_holders: []*Object = &.{},
     borrowed_reference_holders_capacity: usize = 0,
     root_providers: []RootProvider = &.{},
     root_providers_capacity: usize = 0,
+    root_providers_inline: [root_provider_inline_capacity]RootProvider = undefined,
     local_root_slots: []*RootSlot = &.{},
     local_root_slots_capacity: usize = 0,
     persistent_root_slots: []*RootSlot = &.{},
@@ -529,6 +640,18 @@ pub const JSRuntime = struct {
     draining_deferred_weak_value_frees: bool = false,
     borrowed_weak_cleanup_identities: []usize = &.{},
     borrowed_weak_cleanup_identities_capacity: usize = 0,
+    /// O(1) membership companion for `borrowed_weak_cleanup_identities`.
+    /// Only even (object) identities are inserted; symbol identities keep
+    /// the slice-scan semantics of the identity list.
+    borrowed_weak_cleanup_identity_set: std.AutoHashMapUnmanaged(usize, void) = .empty,
+    /// Weak identity registry: maps object header addresses to monotonically
+    /// increasing weak ids and back. Weak slots (WeakRef/WeakMap/WeakSet/
+    /// FinalizationRegistry/WeakRootSlot) store `weak_id << 1` instead of the
+    /// header address, so a recycled allocation can never alias a stale weak
+    /// identity and weak lookups are O(1) instead of a full heap scan.
+    weak_object_ids: std.AutoHashMapUnmanaged(usize, usize) = .empty,
+    weak_id_objects: std.AutoHashMapUnmanaged(usize, *Object) = .empty,
+    next_weak_id: usize = 1,
     borrowed_weak_cleanup_realm_identities: []usize = &.{},
     borrowed_weak_cleanup_realm_identities_capacity: usize = 0,
     borrowed_weak_cleanup_active: bool = false,
@@ -541,6 +664,8 @@ pub const JSRuntime = struct {
     gc_running: bool = false,
     current_exception: JSValue = JSValue.uninitialized(),
     stack_size: usize = default_stack_size,
+    /// Per-runtime VM value-stack arena for bytecode call frames.
+    vm_stack: VmStackArena = .{},
     interrupt_handler: ?InterruptHandler = null,
     interrupt_context: ?*anyopaque = null,
     can_block: bool = false,
@@ -583,10 +708,24 @@ pub const JSRuntime = struct {
     /// destructuring bytecode uses these as stack-only callees instead of
     /// resolving pseudo-private `__zjs_dstr_*` globals.
     internal_destructuring_helpers: [internal_destructuring_helper_slots]?JSValue = @splat(null),
+    /// Error object preallocated while memory is plentiful so the VM catch
+    /// machinery can still materialize a catch value when the heap is fully
+    /// exhausted (QuickJS's preallocated out-of-memory exception analogue).
+    /// Populated by the exec layer at context-global bootstrap.
+    preallocated_oom_error: ?JSValue = null,
     performance_time_origin_ms: f64 = 0,
     opcode_profile: ?*profile.OpcodeProfile = null,
     external_host_functions: []host_function.ExternalRecord = &.{},
     external_host_functions_capacity: usize = 0,
+    /// Static internal-builtin record table, indexed
+    /// `[domain][domain-local id]` with the `NativeBuiltinDomain` enum value
+    /// as the outer index (slot 0 unused). Built at comptime by
+    /// `builtins/internal_table.zig` and assigned by the builtins install
+    /// path (`registry.installStandardGlobals`); exec dispatches through
+    /// `internalBuiltinRecord` with no compile-time knowledge of individual
+    /// builtins. Empty until standard globals are installed, which is also
+    /// the only path that creates native function objects carrying these ids.
+    internal_builtins: []const []const host_function.InternalRecord = &.{},
     any_prototype_may_have_indexed_properties: bool = false,
     pub fn init(self: *JSRuntime, allocator: std.mem.Allocator, options: RuntimeOptions) !void {
         const account = if (options.trace_writer) |writer|
@@ -627,7 +766,8 @@ pub const JSRuntime = struct {
         rt.memory.setLimit(options.memory_limit);
         rt.gc = gc.Registry.init(&rt.memory, options.gc_policy);
         rt.atoms = atom.AtomTable.init(&rt.memory);
-        rt.classes = try class.Table.init(&rt.memory, &rt.atoms);
+        rt.atoms.runtime = rt;
+        try rt.classes.initInPlace(&rt.memory, &rt.atoms);
         errdefer {
             rt.classes.deinit();
         }
@@ -635,10 +775,13 @@ pub const JSRuntime = struct {
         rt.modules = module.Registry.init(&rt.memory, &rt.atoms);
         rt.materialize_builtin_namespace_cb = null;
         rt.materialize_context_global_cb = null;
+        rt.install_standard_globals_cb = default_standard_globals_installer;
+        rt.standard_global_own_property_capacity = default_standard_global_own_property_capacity;
         rt.borrowed_reference_holders = &.{};
         rt.borrowed_reference_holders_capacity = 0;
-        rt.root_providers = &.{};
-        rt.root_providers_capacity = 0;
+        rt.root_providers_inline = undefined;
+        rt.root_providers = rt.root_providers_inline[0..0];
+        rt.root_providers_capacity = rt.root_providers_inline.len;
         rt.local_root_slots = &.{};
         rt.local_root_slots_capacity = 0;
         rt.persistent_root_slots = &.{};
@@ -667,6 +810,10 @@ pub const JSRuntime = struct {
         rt.draining_deferred_weak_value_frees = false;
         rt.borrowed_weak_cleanup_identities = &.{};
         rt.borrowed_weak_cleanup_identities_capacity = 0;
+        rt.borrowed_weak_cleanup_identity_set = .empty;
+        rt.weak_object_ids = .empty;
+        rt.weak_id_objects = .empty;
+        rt.next_weak_id = 1;
         rt.borrowed_weak_cleanup_realm_identities = &.{};
         rt.borrowed_weak_cleanup_realm_identities_capacity = 0;
         rt.borrowed_weak_cleanup_active = false;
@@ -679,6 +826,7 @@ pub const JSRuntime = struct {
         rt.gc_running = false;
         rt.current_exception = JSValue.uninitialized();
         rt.stack_size = options.stack_size;
+        rt.vm_stack = .{};
         rt.interrupt_handler = options.interrupt_handler;
         rt.interrupt_context = options.interrupt_context;
         rt.can_block = options.can_block;
@@ -693,10 +841,12 @@ pub const JSRuntime = struct {
         rt.percent_hex_strings = @splat(null);
         rt.small_int_strings = @splat(null);
         rt.internal_destructuring_helpers = @splat(null);
+        rt.preallocated_oom_error = null;
         rt.performance_time_origin_ms = 0;
         rt.opcode_profile = null;
         rt.external_host_functions = &.{};
         rt.external_host_functions_capacity = 0;
+        rt.internal_builtins = &.{};
         rt.any_prototype_may_have_indexed_properties = false;
         rt.memory.profile_alloc_count = null;
         rt.memory.trigger_gc_fn = JSRuntime.triggerGCOnAllocation;
@@ -709,6 +859,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn deinit(self: *JSRuntime) void {
+        self.vm_stack.deinit(&self.memory);
         const current_exception = self.current_exception;
         self.current_exception = JSValue.uninitialized();
         current_exception.free(self);
@@ -755,6 +906,10 @@ pub const JSRuntime = struct {
             slot.* = null;
             if (cached) |stored| stored.free(self);
         }
+        if (self.preallocated_oom_error) |stored| {
+            self.preallocated_oom_error = null;
+            stored.free(self);
+        }
         self.clearExternalHostFunctions();
         self.drainDeferredNativeCleanups();
         self.clearLocalRootSlots();
@@ -777,14 +932,21 @@ pub const JSRuntime = struct {
         self.drainDeferredClassPayloadFinalizers();
         self.clearBorrowedWeakCleanupIdentities();
         self.clearPendingFinalizationJobs();
+        // Release the atom table's materialized strings while string
+        // destruction is still operational; `atoms.deinit` (after the GC
+        // teardown below) asserts no cached strings remain.
+        self.atoms.releaseCachedStrings(self);
         self.gc.deinit(self);
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
+        self.borrowed_weak_cleanup_identity_set.deinit(self.memory.allocator);
+        self.weak_object_ids.deinit(self.memory.allocator);
+        self.weak_id_objects.deinit(self.memory.allocator);
         self.shapes.deinit();
         self.classes.deinit();
         self.atoms.deinit();
         const borrowed_reference_holders: []*Object = if (self.borrowed_reference_holders_capacity != 0) self.borrowed_reference_holders.ptr[0..self.borrowed_reference_holders_capacity] else self.borrowed_reference_holders[0..0];
-        const root_providers: []RootProvider = if (self.root_providers_capacity != 0) self.root_providers.ptr[0..self.root_providers_capacity] else self.root_providers[0..0];
+        const root_providers: []RootProvider = if (self.root_providers_capacity != 0 and !self.rootProvidersUsingInline()) self.root_providers.ptr[0..self.root_providers_capacity] else self.root_providers[0..0];
         const local_root_slots: []*RootSlot = if (self.local_root_slots_capacity != 0) self.local_root_slots.ptr[0..self.local_root_slots_capacity] else self.local_root_slots[0..0];
         const persistent_root_slots: []*RootSlot = if (self.persistent_root_slots_capacity != 0) self.persistent_root_slots.ptr[0..self.persistent_root_slots_capacity] else self.persistent_root_slots[0..0];
         const weak_root_slots: []*WeakRootSlot = if (self.weak_root_slots_capacity != 0) self.weak_root_slots.ptr[0..self.weak_root_slots_capacity] else self.weak_root_slots[0..0];
@@ -840,51 +1002,17 @@ pub const JSRuntime = struct {
     }
 
     pub fn registerObject(self: *JSRuntime, object: *Object) !void {
-        try self.gc.addWithGeneration(&object.header, self.initialObjectGeneration(object), object.allocationSize(self));
+        try self.gc.addWithSize(&object.header, object.allocationSize(self));
         if (self.gc.hasPendingMajorRequest() or self.memory.allocated_bytes > self.malloc_gc_threshold) {
             _ = self.pollGC(self.active_value_roots, .normal) catch {};
         }
     }
 
-    fn initialObjectGeneration(self: JSRuntime, object: *const Object) gc.Generation {
-        if (!self.gc.policy.enable_nursery) return .old;
-        return switch (object.class_id) {
-            class.ids.object,
-            class.ids.array,
-            class.ids.error_,
-            class.ids.number,
-            class.ids.string,
-            class.ids.boolean,
-            class.ids.symbol,
-            class.ids.arguments,
-            class.ids.mapped_arguments,
-            class.ids.date,
-            class.ids.big_int,
-            class.ids.for_in_iterator,
-            class.ids.iterator,
-            class.ids.iterator_concat,
-            class.ids.iterator_helper,
-            class.ids.iterator_wrap,
-            class.ids.map_iterator,
-            class.ids.set_iterator,
-            class.ids.array_iterator,
-            class.ids.string_iterator,
-            class.ids.regexp_string_iterator,
-            class.ids.async_from_sync_iterator,
-            class.ids.promise,
-            class.ids.promise_resolve_function,
-            class.ids.promise_reject_function,
-            class.ids.dom_exception,
-            class.ids.call_site,
-            class.ids.raw_json,
-            => .young,
-            else => .old,
-        };
-    }
-
     pub fn unregisterObject(self: *JSRuntime, object: *Object) void {
         const notify = self.gc.phase != .deinit;
-        self.clearWeakPersistentIdentity(@intFromPtr(&object.header) & ~@as(usize, 1), notify);
+        if (self.peekWeakObjectIdentity(object)) |weak_identity| {
+            self.clearWeakPersistentIdentity(weak_identity, notify);
+        }
         self.unregisterBorrowedReferenceHolder(object);
         self.gc.unlinkObject(&object.header);
     }
@@ -926,7 +1054,29 @@ pub const JSRuntime = struct {
         for (self.root_providers) |registered| {
             if (registered.context == provider.context and registered.trace == provider.trace) return;
         }
-        try appendRuntimeRootProvider(&self.memory, &self.root_providers, &self.root_providers_capacity, provider);
+        try self.appendRootProvider(provider);
+    }
+
+    fn rootProvidersUsingInline(self: *const JSRuntime) bool {
+        return self.root_providers.ptr == self.root_providers_inline[0..].ptr;
+    }
+
+    fn appendRootProvider(self: *JSRuntime, provider: RootProvider) !void {
+        if (self.root_providers.len == self.root_providers_capacity) {
+            const next_capacity = if (self.root_providers_capacity == 0) root_provider_inline_capacity else self.root_providers_capacity * 2;
+            const next = try self.memory.alloc(RootProvider, next_capacity);
+            errdefer self.memory.free(RootProvider, next);
+            @memcpy(next[0..self.root_providers.len], self.root_providers);
+            const old_capacity = self.root_providers_capacity;
+            const old_using_inline = self.rootProvidersUsingInline();
+            const old = if (!old_using_inline and old_capacity != 0) self.root_providers.ptr[0..old_capacity] else self.root_providers[0..0];
+            self.root_providers = next[0..self.root_providers.len];
+            self.root_providers_capacity = next_capacity;
+            if (old.len != 0) self.memory.free(RootProvider, old);
+        }
+        const len = self.root_providers.len;
+        self.root_providers = self.root_providers.ptr[0 .. len + 1];
+        self.root_providers[len] = provider;
     }
 
     pub fn unregisterRootProvider(self: *JSRuntime, provider: RootProvider) void {
@@ -943,9 +1093,14 @@ pub const JSRuntime = struct {
         }
         self.root_providers = self.root_providers[0 .. self.root_providers.len - 1];
         if (self.root_providers.len == 0 and self.root_providers_capacity != 0) {
+            if (self.rootProvidersUsingInline()) {
+                self.root_providers = self.root_providers_inline[0..0];
+                self.root_providers_capacity = self.root_providers_inline.len;
+                return;
+            }
             const old_providers = self.root_providers.ptr[0..self.root_providers_capacity];
-            self.root_providers = &.{};
-            self.root_providers_capacity = 0;
+            self.root_providers = self.root_providers_inline[0..0];
+            self.root_providers_capacity = self.root_providers_inline.len;
             self.memory.free(RootProvider, old_providers);
         }
     }
@@ -956,6 +1111,7 @@ pub const JSRuntime = struct {
         for (&self.internal_destructuring_helpers) |*maybe_helper| {
             try visitor.optionalValue(maybe_helper);
         }
+        try visitor.optionalValue(&self.preallocated_oom_error);
         for (self.local_root_slots) |slot| {
             try visitor.value(&slot.value);
         }
@@ -1183,18 +1339,53 @@ pub const JSRuntime = struct {
         return object.value().dup();
     }
 
-    fn liveObjectFromWeakIdentity(self: *JSRuntime, identity: usize) ?*Object {
+    /// Resolves an even weak identity (`weak_id << 1`) to its registered
+    /// object in O(1). Returns null for symbol identities, unregistered ids,
+    /// and objects that are currently being destroyed.
+    pub fn liveObjectFromWeakIdentity(self: *const JSRuntime, identity: usize) ?*Object {
         if ((identity & 1) != 0) return null;
-        var current = self.gc.gc_obj_list_head;
-        while (current) |node| {
-            const next = node.next;
-            const header = gc.headerFromGcNode(node);
-            if (header.rc > 0 and header.kind == .object and (@intFromPtr(header) & ~@as(usize, 1)) == identity) {
-                return @alignCast(@fieldParentPtr("header", header));
-            }
-            current = next;
+        const object = self.weak_id_objects.get(identity >> 1) orelse return null;
+        if (object.header.rc == 0) return null;
+        return object;
+    }
+
+    /// Returns the encoded weak identity for `object`, allocating a fresh
+    /// monotonically increasing weak id on first registration.
+    pub fn registerWeakObjectIdentity(self: *JSRuntime, object: *Object) !usize {
+        const address = @intFromPtr(&object.header) & ~@as(usize, 1);
+        if (object.flags.has_weak_id) {
+            const weak_id = self.weak_object_ids.get(address) orelse unreachable;
+            return weak_id << 1;
         }
-        return null;
+        const weak_id = self.next_weak_id;
+        try self.weak_object_ids.put(self.memory.allocator, address, weak_id);
+        self.weak_id_objects.put(self.memory.allocator, weak_id, object) catch |err| {
+            _ = self.weak_object_ids.remove(address);
+            return err;
+        };
+        self.next_weak_id += 1;
+        object.flags.has_weak_id = true;
+        return weak_id << 1;
+    }
+
+    /// Returns the encoded weak identity for `object` without registering one.
+    pub fn peekWeakObjectIdentity(self: *const JSRuntime, object: *const Object) ?usize {
+        if (!object.flags.has_weak_id) return null;
+        const address = @intFromPtr(&object.header) & ~@as(usize, 1);
+        const weak_id = self.weak_object_ids.get(address) orelse return null;
+        return weak_id << 1;
+    }
+
+    /// Removes `object` from the weak identity registry, returning its encoded
+    /// weak identity (if any) so destruction can propagate it to weak slots.
+    pub fn takeWeakObjectIdentity(self: *JSRuntime, object: *Object) ?usize {
+        if (!object.flags.has_weak_id) return null;
+        object.flags.has_weak_id = false;
+        const address = @intFromPtr(&object.header) & ~@as(usize, 1);
+        const weak_id = self.weak_object_ids.get(address) orelse return null;
+        _ = self.weak_object_ids.remove(address);
+        _ = self.weak_id_objects.remove(weak_id);
+        return weak_id << 1;
     }
 
     fn clearLocalRootSlots(self: *JSRuntime) void {
@@ -1377,6 +1568,20 @@ pub const JSRuntime = struct {
         return self.external_host_functions[index];
     }
 
+    /// Internal-builtin record lookup: `domain_index` is the
+    /// `NativeBuiltinDomain` enum value, `id` the domain-local method id.
+    /// Returns null for unmigrated domains/ids (caller falls back to the
+    /// transitional enum dispatch) and for runtimes whose builtins were never
+    /// installed. Two bounds-checked loads; no hashing or string compares.
+    pub fn internalBuiltinRecord(self: *const JSRuntime, domain_index: usize, id: u32) ?*const host_function.InternalRecord {
+        if (domain_index >= self.internal_builtins.len) return null;
+        const records = self.internal_builtins[domain_index];
+        if (id >= records.len) return null;
+        const record = &records[id];
+        if (record.call == null) return null;
+        return record;
+    }
+
     pub fn replaceExternalHostFunction(self: *JSRuntime, id: u32, record: host_function.ExternalRecord) ?host_function.ExternalRecord {
         if (id == 0) return null;
         const index: usize = @intCast(id - 1);
@@ -1421,7 +1626,6 @@ pub const JSRuntime = struct {
     ) gc.CollectionError!gc.CollectionResult {
         if (self.gc_running) return .{};
         if (builtin.mode == .Debug) self.gc.verifyIntrusiveList() catch unreachable;
-        if (builtin.mode == .Debug) self.gc.verifyNurseryCoverage() catch unreachable;
         if (builtin.mode == .Debug) self.gc.verifyHeapAccounting() catch unreachable;
         defer if (builtin.mode == .Debug) {
             self.gc.verifyIntrusiveList() catch unreachable;
@@ -1440,7 +1644,7 @@ pub const JSRuntime = struct {
             };
             self.gc.recordFailure(mapped);
             self.gc.abortMajorCycle();
-            self.gc.requestGC(.major, .collection_failed, .soon);
+            self.gc.requestGC(.collection_failed, .soon);
             return mapped;
         };
         self.gc.setMajorPhase(.sweep);
@@ -1455,215 +1659,6 @@ pub const JSRuntime = struct {
         self.gc.recordSuccess(result);
         self.gc.finishMajorCycle(result);
         self.resetGCThreshold();
-        return result;
-    }
-
-    fn tryCollectMinorNonMoving(
-        self: *JSRuntime,
-        roots: ?*const ValueRootFrame,
-    ) gc.CollectionError!gc.CollectionResult {
-        if (self.gc_running) return .{};
-        if (builtin.mode == .Debug) self.gc.verifyIntrusiveList() catch unreachable;
-        if (builtin.mode == .Debug) self.gc.verifyNurseryCoverage() catch unreachable;
-        if (builtin.mode == .Debug) self.verifyRememberedSetCoverage() catch unreachable;
-        if (builtin.mode == .Debug) self.gc.verifyHeapAccounting() catch unreachable;
-        defer if (builtin.mode == .Debug) {
-            self.gc.verifyIntrusiveList() catch unreachable;
-            self.gc.verifyHeapAccounting() catch unreachable;
-        };
-        self.gc_running = true;
-        defer self.gc_running = false;
-
-        const MinorPromotionVisitor = struct {
-            rt: *JSRuntime,
-            object_worklist: std.ArrayList(*Object) = .empty,
-            bytecode_worklist: std.ArrayList(*FunctionBytecode) = .empty,
-            promoted_young_objects: usize = 0,
-            promoted_young_bytes: usize = 0,
-            err: ?gc.CollectionError = null,
-
-            fn deinit(self_visitor: *@This()) void {
-                self_visitor.object_worklist.deinit(self_visitor.rt.memory.persistent_allocator);
-                self_visitor.bytecode_worklist.deinit(self_visitor.rt.memory.persistent_allocator);
-            }
-
-            fn rootVisitValue(context: *anyopaque, slot: *JSValue) RootTraceError!void {
-                const self_visitor: *@This() = @ptrCast(@alignCast(context));
-                try self_visitor.visitValue(slot);
-            }
-
-            fn rootVisitObject(context: *anyopaque, slot: *?*Object) RootTraceError!void {
-                const self_visitor: *@This() = @ptrCast(@alignCast(context));
-                try self_visitor.visitObject(slot);
-            }
-
-            fn visitObject(self_visitor: *@This(), slot: *?*Object) !void {
-                self_visitor.rt.rewriteForwardedObjectSlot(slot);
-                const obj = slot.* orelse return;
-                try self_visitor.evacuateHeader(&obj.header);
-            }
-
-            fn visitValue(self_visitor: *@This(), slot: *JSValue) !void {
-                self_visitor.rt.rewriteForwardedValueSlot(slot);
-                if (slot.refHeader()) |header| {
-                    try self_visitor.evacuateHeader(header);
-                }
-                if (slot.objectHeader()) |header| {
-                    try self_visitor.evacuateHeader(header);
-                }
-            }
-
-            fn evacuateHeader(self_visitor: *@This(), header: *gc.Header) !void {
-                if (header.generation() != .young) return;
-
-                if (self_visitor.rt.gc.forwardedHeader(header)) |forwarded| {
-                    if (forwarded != header) {
-                        self_visitor.rt.gc.promoteHeapAllocationToOld(header);
-                        header.setGeneration(.old);
-                        return;
-                    }
-                } else {
-                    try self_visitor.rt.gc.recordForwarding(header, header);
-                }
-
-                try self_visitor.promoteInPlace(header);
-            }
-
-            fn promoteInPlace(self_visitor: *@This(), header: *gc.Header) !void {
-                std.debug.assert(header.generation() == .young);
-                self_visitor.rt.gc.markNurserySurvivor(header);
-                switch (header.kind) {
-                    .object => {
-                        const obj: *Object = @alignCast(@fieldParentPtr("header", header));
-                        try self_visitor.object_worklist.append(self_visitor.rt.memory.persistent_allocator, obj);
-                        self_visitor.rt.gc.recordMarkStackDepth(self_visitor.object_worklist.items.len + self_visitor.bytecode_worklist.items.len);
-                    },
-                    .function_bytecode => {
-                        const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
-                        try self_visitor.bytecode_worklist.append(self_visitor.rt.memory.persistent_allocator, fb);
-                        self_visitor.rt.gc.recordMarkStackDepth(self_visitor.object_worklist.items.len + self_visitor.bytecode_worklist.items.len);
-                    },
-                    .string, .big_int => {},
-                }
-
-                self_visitor.rt.gc.promoteHeapAllocationToOld(header);
-                header.setGeneration(.old);
-                self_visitor.promoted_young_objects +|= 1;
-                self_visitor.promoted_young_bytes +|= promotedSize(header);
-            }
-
-            fn promotedSize(header: *const gc.Header) usize {
-                return switch (header.kind) {
-                    .object => @sizeOf(Object),
-                    .function_bytecode => @sizeOf(FunctionBytecode),
-                    .string, .big_int => 0,
-                };
-            }
-
-            fn drain(self_visitor: *@This()) !void {
-                var object_index: usize = 0;
-                var bytecode_index: usize = 0;
-                while (object_index < self_visitor.object_worklist.items.len or bytecode_index < self_visitor.bytecode_worklist.items.len) {
-                    while (object_index < self_visitor.object_worklist.items.len) : (object_index += 1) {
-                        const obj = self_visitor.object_worklist.items[object_index];
-                        try obj.traceChildEdgesFallible(self_visitor.rt, self_visitor);
-                    }
-                    while (bytecode_index < self_visitor.bytecode_worklist.items.len) : (bytecode_index += 1) {
-                        const fb = self_visitor.bytecode_worklist.items[bytecode_index];
-                        try self_visitor.traceFunctionBytecode(fb);
-                    }
-                }
-            }
-
-            fn traceFunctionBytecode(self_visitor: *@This(), fb: *FunctionBytecode) !void {
-                if (fb.class_fields_init) |*stored| try self_visitor.visitValue(stored);
-                for (fb.cpool) |*stored| try self_visitor.visitValue(stored);
-            }
-        };
-
-        const Helper = struct {
-            fn mapRootTraceError(err: RootTraceError) gc.CollectionError {
-                return switch (err) {
-                    error.OutOfMemory => error.OutOfMemory,
-                    error.PayloadMarkFailed => error.PayloadMarkFailed,
-                };
-            }
-        };
-
-        const start_ns = profile.nowNanos();
-        _ = self.gc.clearMinorRequest();
-        errdefer self.gc.clearForwarding();
-
-        var visitor = MinorPromotionVisitor{ .rt = self };
-        defer visitor.deinit();
-
-        var root_visitor = RootVisitor{
-            .context = &visitor,
-            .visit_value = MinorPromotionVisitor.rootVisitValue,
-            .visit_object = MinorPromotionVisitor.rootVisitObject,
-        };
-        self.traceRoots(roots orelse self.active_value_roots, &root_visitor) catch |err| {
-            const mapped = Helper.mapRootTraceError(err);
-            self.gc.recordFailure(mapped);
-            self.gc.requestGC(.minor, .collection_failed, .soon);
-            return mapped;
-        };
-
-        for (self.gc.remembered_set) |owner| {
-            switch (owner.kind) {
-                .object => {
-                    const obj: *Object = @alignCast(@fieldParentPtr("header", owner));
-                    obj.traceChildEdgesFallible(self, &visitor) catch |err| {
-                        self.gc.recordFailure(err);
-                        self.gc.requestGC(.minor, .collection_failed, .soon);
-                        return err;
-                    };
-                },
-                .function_bytecode => {
-                    const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", owner));
-                    visitor.traceFunctionBytecode(fb) catch |err| {
-                        self.gc.recordFailure(err);
-                        self.gc.requestGC(.minor, .collection_failed, .soon);
-                        return err;
-                    };
-                },
-                .string, .big_int => {},
-            }
-        }
-
-        visitor.drain() catch |err| {
-            self.gc.recordFailure(err);
-            self.gc.requestGC(.minor, .collection_failed, .soon);
-            return err;
-        };
-
-        var nursery_index: usize = 0;
-        while (self.gc.nurseryEntryHeader(nursery_index)) |header| : (nursery_index += 1) {
-            visitor.evacuateHeader(header) catch |err| {
-                self.gc.recordFailure(err);
-                self.gc.requestGC(.minor, .collection_failed, .soon);
-                return err;
-            };
-        }
-        visitor.drain() catch |err| {
-            self.gc.recordFailure(err);
-            self.gc.requestGC(.minor, .collection_failed, .soon);
-            return err;
-        };
-
-        const result = gc.CollectionResult{
-            .promoted_young_objects = visitor.promoted_young_objects,
-            .promoted_young_bytes = visitor.promoted_young_bytes,
-            .duration_ns = blk: {
-                const end_ns = profile.nowNanos();
-                break :blk if (end_ns > start_ns) end_ns - start_ns else 0;
-            },
-        };
-        self.gc.finishMinorCollection(result);
-        if (builtin.mode == .Debug) {
-            self.gc.verifyMinorPostcondition() catch unreachable;
-            self.gc.verifyHeapAccounting() catch unreachable;
-        }
         return result;
     }
 
@@ -1685,33 +1680,19 @@ pub const JSRuntime = struct {
             .callback_boundary, .safepoint => {},
         }
         const over_threshold = self.memory.allocated_bytes > self.malloc_gc_threshold;
-        const run_minor = self.gc.shouldRunMinorAt(scheduler_point);
         const run_major = self.gc.shouldRunMajorAt(scheduler_point, over_threshold);
-        if (!run_minor and !run_major) return .{};
-
-        var result: gc.CollectionResult = .{};
-        if (run_minor) {
-            result = try self.tryCollectMinorNonMoving(roots orelse self.active_value_roots);
-        }
+        if (!run_major) return .{};
 
         const major_request = self.gc.pendingMajorRequest();
-        if (run_major) {
-            if (major_request != null) _ = self.gc.clearMajorRequest();
-            const reason = if (major_request) |request|
-                request.reason orelse gc.RequestReason.manual
-            else if (over_threshold)
-                gc.RequestReason.allocation_threshold
-            else
-                gc.RequestReason.manual;
-            self.gc.beginMajorCycle(reason, profile.nowNanos());
-            const major_result = try self.tryRunObjectCycleRemovalWithValueRoots(roots orelse self.active_value_roots);
-            result.freed_objects +|= major_result.freed_objects;
-            result.freed_bytecodes +|= major_result.freed_bytecodes;
-            result.promoted_young_objects +|= major_result.promoted_young_objects;
-            result.promoted_young_bytes +|= major_result.promoted_young_bytes;
-            result.duration_ns +|= major_result.duration_ns;
-        }
-        return result;
+        if (major_request != null) _ = self.gc.clearMajorRequest();
+        const reason = if (major_request) |request|
+            request.reason orelse gc.RequestReason.manual
+        else if (over_threshold)
+            gc.RequestReason.allocation_threshold
+        else
+            gc.RequestReason.manual;
+        self.gc.beginMajorCycle(reason, profile.nowNanos());
+        return try self.tryRunObjectCycleRemovalWithValueRoots(roots orelse self.active_value_roots);
     }
 
     pub fn gcSafepoint(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!gc.CollectionResult {
@@ -1733,7 +1714,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn forceGC(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!gc.CollectionResult {
-        self.gc.requestGC(.major, .manual, .urgent);
+        self.gc.requestGC(.manual, .urgent);
         return self.pollGC(roots, .urgent);
     }
 
@@ -1741,14 +1722,9 @@ pub const JSRuntime = struct {
         return self.forceGC(roots);
     }
 
-    pub fn forceMinorGC(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!gc.CollectionResult {
-        self.gc.requestGC(.minor, .manual, .urgent);
-        return self.pollGC(roots, .normal);
-    }
-
     pub fn requestGCForTest(self: *JSRuntime) void {
         if (!builtin.is_test) @compileError("test-only helper");
-        self.gc.requestGC(.major, .manual, .soon);
+        self.gc.requestGC(.manual, .soon);
     }
 
     pub fn gcPendingForTest(self: JSRuntime) bool {
@@ -1759,11 +1735,6 @@ pub const JSRuntime = struct {
     pub fn gcLastRequestReasonForTest(self: JSRuntime) ?gc.RequestReason {
         if (!builtin.is_test) @compileError("test-only helper");
         return self.gc.stats.last_request_reason;
-    }
-
-    pub fn gcPendingKindForTest(self: JSRuntime) ?gc.RequestKind {
-        if (!builtin.is_test) @compileError("test-only helper");
-        return self.gc.pendingRequestKind();
     }
 
     pub fn setGCThreshold(self: *JSRuntime, threshold: usize) void {
@@ -1827,14 +1798,22 @@ pub const JSRuntime = struct {
     pub fn reportExternalAlloc(self: *JSRuntime, bytes: usize) !gc.ExternalMemoryToken {
         const token = try self.gc.reportExternalAlloc(bytes);
         if (self.gc.externalMemoryRequestReason()) |reason| {
-            self.gc.requestGC(.major, reason, self.gc.externalMemoryRequestUrgency());
+            self.gc.requestGC(reason, self.gc.externalMemoryRequestUrgency());
         }
         self.requestGCForProcessMemoryPressure();
         return token;
     }
 
+    pub fn reportExternalAllocUntracked(self: *JSRuntime, bytes: usize) void {
+        self.gc.reportExternalAllocUntracked(bytes);
+    }
+
     pub fn reportExternalFree(self: *JSRuntime, bytes: usize) void {
         self.gc.reportExternalFree(bytes);
+    }
+
+    pub fn reportExternalFreeUntracked(self: *JSRuntime, bytes: usize) void {
+        self.gc.reportExternalFreeUntracked(bytes);
     }
 
     pub fn externalMemoryBytes(self: JSRuntime) usize {
@@ -1868,7 +1847,7 @@ pub const JSRuntime = struct {
         const cgroup_limit_bytes = cgroupLimitBytes();
         if (self.gc.processMemoryRequest(rss_bytes, cgroup_limit_bytes)) |request| {
             if (request.urgency == .urgent) self.gc.decommitEmptyPagesNow();
-            self.gc.requestGC(.major, request.reason, request.urgency);
+            self.gc.requestGC(request.reason, request.urgency);
         }
     }
 
@@ -1926,125 +1905,6 @@ pub const JSRuntime = struct {
         return std.fmt.parseInt(usize, token, 10) catch null;
     }
 
-    pub fn rewriteForwardedValueSlot(self: *JSRuntime, slot: *JSValue) void {
-        const header = slot.refHeader() orelse slot.objectHeader() orelse return;
-        const forwarded = self.gc.forwardedHeader(header) orelse return;
-        slot.payload = @intFromPtr(forwarded);
-    }
-
-    pub fn rewriteForwardedObjectSlot(self: *JSRuntime, slot: *?*Object) void {
-        const obj = slot.* orelse return;
-        const forwarded = self.gc.forwardedHeader(&obj.header) orelse return;
-        std.debug.assert(forwarded.kind == .object);
-        slot.* = @alignCast(@fieldParentPtr("header", forwarded));
-    }
-
-    pub fn writeBarrierValue(self: *JSRuntime, owner: *gc.GCObjectHeader, value: JSValue) !void {
-        const child = value.refHeader() orelse value.objectHeader() orelse return;
-        try self.gc.writeBarrier(owner, child, null);
-    }
-
-    pub fn writeBarrierValueAt(self: *JSRuntime, owner: *gc.GCObjectHeader, value: JSValue, slot_addr: *const anyopaque) !void {
-        const child = value.refHeader() orelse value.objectHeader() orelse return;
-        try self.gc.writeBarrier(owner, child, slot_addr);
-    }
-
-    pub fn writeBarrierObjectAt(self: *JSRuntime, owner: *gc.GCObjectHeader, object: ?*Object, slot_addr: *const anyopaque) !void {
-        const child = object orelse return;
-        try self.gc.writeBarrier(owner, &child.header, slot_addr);
-    }
-
-    pub fn writeBarrierObjectSlot(self: *JSRuntime, owner: *gc.GCObjectHeader, slot: *const ?*Object) !void {
-        try self.writeBarrierObjectAt(owner, slot.*, @ptrCast(slot));
-    }
-
-    pub fn writeBarrierValueSlot(self: *JSRuntime, owner: *gc.GCObjectHeader, slot: *const JSValue) !void {
-        try self.writeBarrierValueAt(owner, slot.*, slot);
-    }
-
-    pub fn writeBarrierValueSlice(self: *JSRuntime, owner: *gc.GCObjectHeader, values: []const JSValue) !void {
-        for (values, 0..) |value, index| {
-            try self.writeBarrierValueAt(owner, value, &values[index]);
-        }
-    }
-
-    pub fn writeBarrierOptionalValueSlot(self: *JSRuntime, owner: *gc.GCObjectHeader, slot: *const ?JSValue) !void {
-        if (slot.*) |stored| try self.writeBarrierValueAt(owner, stored, slot);
-    }
-
-    pub fn verifyRememberedSetCoverage(self: *JSRuntime) gc.InvariantError!void {
-        const RememberedVerifier = struct {
-            rt: *JSRuntime,
-            owner: *gc.GCObjectHeader,
-            err: ?gc.InvariantError = null,
-
-            pub fn visitValue(verifier: *@This(), slot: *JSValue) gc.InvariantError!void {
-                if (slot.refHeader()) |header| try verifier.verifyValueChild(header, slot);
-                if (slot.objectHeader()) |header| try verifier.verifyValueChild(header, slot);
-            }
-
-            pub fn visitObject(verifier: *@This(), slot: *?*Object) gc.InvariantError!void {
-                const object = slot.* orelse return;
-                try verifier.verifyObjectChild(&object.header, slot);
-            }
-
-            pub fn visitWeakCollectionEntry(verifier: *@This(), entry: *object_mod.WeakCollectionEntry) gc.InvariantError!void {
-                try verifier.visitValue(&entry.value);
-            }
-
-            pub fn visitFinalizationCell(verifier: *@This(), entry: *object_mod.FinalizationRegistryCell) gc.InvariantError!void {
-                if (!entry.keepsHeldValuesAlive()) return;
-                try verifier.visitValue(&entry.held_value);
-                try verifier.visitValue(&entry.unregister_token);
-            }
-
-            fn verifyChild(verifier: *@This(), child: *gc.GCObjectHeader) gc.InvariantError!void {
-                _ = verifier.rt;
-                if (child.generation() != .young) return;
-                if (!verifier.owner.remembered()) return error.MissingRememberedEdge;
-            }
-
-            fn verifyValueChild(verifier: *@This(), child: *gc.GCObjectHeader, slot: *const JSValue) gc.InvariantError!void {
-                try verifier.verifyChild(child);
-                if (child.generation() != .young) return;
-                if (!verifier.rt.gc.hasDirtyCard(verifier.owner, slot)) return error.MissingDirtyCard;
-            }
-
-            fn verifyObjectChild(verifier: *@This(), child: *gc.GCObjectHeader, slot: *const ?*Object) gc.InvariantError!void {
-                try verifier.verifyChild(child);
-                if (child.generation() != .young) return;
-                if (!verifier.rt.gc.hasDirtyCard(verifier.owner, @ptrCast(slot))) return error.MissingDirtyCard;
-            }
-        };
-
-        var current = self.gc.gc_obj_list_head;
-        while (current) |node| {
-            const owner = gc.headerFromGcNode(node);
-            if (owner.generation() != .old) {
-                current = node.next;
-                continue;
-            }
-
-            var verifier = RememberedVerifier{
-                .rt = self,
-                .owner = owner,
-            };
-            switch (owner.kind) {
-                .object => {
-                    const obj: *Object = @alignCast(@fieldParentPtr("header", owner));
-                    try obj.traceChildEdgesFallible(self, &verifier);
-                },
-                .function_bytecode => {
-                    const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", owner));
-                    if (fb.class_fields_init) |*stored| try verifier.visitValue(stored);
-                    for (fb.cpool) |*stored| try verifier.visitValue(stored);
-                },
-                .string, .big_int => {},
-            }
-            current = node.next;
-        }
-    }
-
     fn maybeRunObjectCycleRemoval(self: *JSRuntime) void {
         if (self.gc_running) return;
         if (self.memory.allocated_bytes <= self.malloc_gc_threshold) return;
@@ -2056,7 +1916,7 @@ pub const JSRuntime = struct {
         if (self.gc_running) return;
         const total = std.math.add(usize, self.memory.allocated_bytes, size) catch std.math.maxInt(usize);
         if (total > self.malloc_gc_threshold) {
-            self.gc.requestGC(.major, .allocation_threshold, .soon);
+            self.gc.requestGC(.allocation_threshold, .soon);
         }
     }
 
@@ -2118,9 +1978,9 @@ pub const JSRuntime = struct {
         }
 
         const created = try string.String.createUtf8(self, bytes);
-        if (self.atoms.kind(atom_id) == .string) {
-            created.atom_id = self.atoms.dup(atom_id);
-        }
+        // Seeds the weak back-pointer (and, for non-tagged string atoms,
+        // the table-side cache); no-op for symbol atoms.
+        self.atoms.cacheString(atom_id, created);
         const slot_index = self.recent_atom_string_next % self.recent_atom_strings.len;
         const old = self.recent_atom_strings[slot_index];
         self.recent_atom_strings[slot_index] = .{
@@ -2180,11 +2040,10 @@ pub const JSRuntime = struct {
 
     pub fn percentHexString(self: *JSRuntime, value: u8) !*string.String {
         if (self.percent_hex_strings[value]) |cached| return cached;
-        const digits = "0123456789ABCDEF";
         const bytes: [3]u8 = .{
             '%',
-            digits[value >> 4],
-            digits[value & 0x0f],
+            unicode.asciiUpperHexDigitChar(value >> 4),
+            unicode.asciiUpperHexDigitChar(value & 0x0f),
         };
         const created = try string.String.createAscii(self, &bytes);
         self.percent_hex_strings[value] = created;
@@ -2210,6 +2069,29 @@ pub const JSRuntime = struct {
     pub fn setInterruptHandler(self: *JSRuntime, handler: ?*const fn (*JSRuntime, ?*anyopaque) bool, context: ?*anyopaque) void {
         self.interrupt_handler = handler;
         self.interrupt_context = context;
+    }
+
+    /// Reserve count for a global object's own-property table prior to running
+    /// the standard-globals installer. Returns the count registered with the
+    /// installer (0 if none is wired, in which case `installStandardGlobals`
+    /// will fail).
+    pub fn standardGlobalOwnPropertyCapacity(self: *const JSRuntime) usize {
+        return self.standard_global_own_property_capacity;
+    }
+
+    /// Bootstrap the standard ECMAScript global object onto `global` via the
+    /// registered installer. Fails with `error.InvalidBuiltinRegistry` if the
+    /// builtins subsystem never registered one (the installer also wires
+    /// `internal_builtins` and `materialize_builtin_namespace_cb`).
+    ///
+    /// The installer callback is typed `anyerror` so core need not name the
+    /// builtins error set, but the install only ever produces engine errors;
+    /// narrow the result back to the engine-wide `DynamicImportError` set so the
+    /// bounded-error callers of `installHostGlobals`/`contextGlobal` (notably the
+    /// `DynamicImportCallback` host hook) keep a concrete error set.
+    pub fn installStandardGlobals(self: *JSRuntime, global: *Object) context_mod.DynamicImportError!void {
+        const installer = self.install_standard_globals_cb orelse return error.InvalidBuiltinRegistry;
+        installer(self, global) catch |err| return @errorCast(err);
     }
 
     pub fn hasInterruptHandler(self: JSRuntime) bool {
@@ -2513,14 +2395,16 @@ pub const JSRuntime = struct {
                 if (objectFromLastRefValue(item.value)) |object| {
                     const identity = @intFromPtr(&object.header) & ~@as(usize, 1);
                     if (self.borrowed_weak_cleanup_active) {
-                        if (object.is_global) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
+                        if (object.flags.is_global) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
                         if (self.borrowed_weak_cleanup_seen_holder) self.markBorrowedWeakCleanupNeedsRescan();
-                        var enqueued_current_identity = false;
+                        var enqueued_current_identity = true;
                         self.enqueueBorrowedWeakCleanupIdentity(identity) catch {
                             enqueued_current_identity = false;
                         };
-                        if (self.borrowed_weak_cleanup_identities.len != 0 and self.borrowed_weak_cleanup_identities[self.borrowed_weak_cleanup_identities.len - 1] == identity) {
-                            enqueued_current_identity = true;
+                        if (self.peekWeakObjectIdentity(object)) |weak_identity| {
+                            self.enqueueBorrowedWeakCleanupIdentity(weak_identity) catch {
+                                enqueued_current_identity = false;
+                            };
                         }
                         if (enqueued_current_identity) skip_identity = identity;
                     }
@@ -2562,6 +2446,7 @@ pub const JSRuntime = struct {
         self.borrowed_weak_cleanup_seen_holder = false;
         self.borrowed_weak_cleanup_needs_rescan = false;
         self.current_deferred_weak_value_free_identity = null;
+        self.borrowed_weak_cleanup_identity_set.clearRetainingCapacity();
         self.borrowed_weak_cleanup_identities = if (self.borrowed_weak_cleanup_identities_capacity == 0)
             &.{}
         else
@@ -2578,6 +2463,7 @@ pub const JSRuntime = struct {
         self.borrowed_weak_cleanup_seen_holder = false;
         self.borrowed_weak_cleanup_needs_rescan = false;
         self.current_deferred_weak_value_free_identity = null;
+        self.borrowed_weak_cleanup_identity_set.clearRetainingCapacity();
         self.borrowed_weak_cleanup_identities = if (self.borrowed_weak_cleanup_identities_capacity == 0)
             &.{}
         else
@@ -2641,37 +2527,41 @@ pub const JSRuntime = struct {
     pub fn enqueueBorrowedWeakCleanupIdentity(self: *JSRuntime, identity: usize) !void {
         const index = self.borrowed_weak_cleanup_identities.len;
         try self.ensureBorrowedWeakCleanupIdentityCapacity(index + 1);
+        if ((identity & 1) == 0) {
+            try self.borrowed_weak_cleanup_identity_set.put(self.memory.allocator, identity, {});
+        }
         self.borrowed_weak_cleanup_identities = self.borrowed_weak_cleanup_identities.ptr[0 .. index + 1];
         self.borrowed_weak_cleanup_identities[index] = identity;
-        if ((identity & 1) == 0) {
-            const object: *Object = @ptrFromInt(identity);
-            object.in_weak_cleanup = true;
-        }
     }
 
     pub fn enqueueBorrowedWeakCleanupIdentityForLastRefValue(self: *JSRuntime, value: JSValue) !void {
         const object = objectFromLastRefValue(value) orelse return;
         const identity = @intFromPtr(&object.header) & ~@as(usize, 1);
-        if (object.is_global) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
+        if (object.flags.is_global) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
         if (self.borrowed_weak_cleanup_seen_holder) self.markBorrowedWeakCleanupNeedsRescan();
         try self.enqueueBorrowedWeakCleanupIdentity(identity);
+        if (self.peekWeakObjectIdentity(object)) |weak_identity| {
+            try self.enqueueBorrowedWeakCleanupIdentity(weak_identity);
+        }
     }
 
     pub fn prequeueBorrowedWeakCleanupIdentityForLastRefValue(self: *JSRuntime, value: JSValue) ?usize {
         if (!self.borrowed_weak_cleanup_active) return null;
         const object = objectFromLastRefValue(value) orelse return null;
         const identity = @intFromPtr(&object.header) & ~@as(usize, 1);
-        if (object.is_global) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
+        if (object.flags.is_global) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
         if (self.borrowed_weak_cleanup_seen_holder) self.markBorrowedWeakCleanupNeedsRescan();
         self.enqueueBorrowedWeakCleanupIdentity(identity) catch return null;
+        if (self.peekWeakObjectIdentity(object)) |weak_identity| {
+            self.enqueueBorrowedWeakCleanupIdentity(weak_identity) catch return null;
+        }
         return identity;
     }
 
     pub fn borrowedWeakCleanupIdentityMatches(self: *const JSRuntime, identity: usize) bool {
         if (identity == 0) return false;
         if ((identity & 1) == 0) {
-            const object: *const Object = @ptrFromInt(identity);
-            return object.in_weak_cleanup;
+            return self.borrowed_weak_cleanup_identity_set.contains(identity);
         }
         var index = self.borrowed_weak_cleanup_identities.len;
         while (index != 0) {
@@ -2684,8 +2574,7 @@ pub const JSRuntime = struct {
     pub inline fn borrowedWeakCleanupIdentityMatchesSlice(self: *const JSRuntime, start_index: usize, identity: usize) bool {
         if (identity == 0) return false;
         if ((identity & 1) == 0) {
-            const object: *const Object = @ptrFromInt(identity);
-            return object.in_weak_cleanup;
+            return self.borrowed_weak_cleanup_identity_set.contains(identity);
         }
         var index = self.borrowed_weak_cleanup_identities.len;
         while (index > start_index) {
@@ -2702,12 +2591,7 @@ pub const JSRuntime = struct {
     pub fn clearBorrowedWeakCleanupIdentities(self: *JSRuntime) void {
         const identities: []usize = if (self.borrowed_weak_cleanup_identities_capacity != 0) self.borrowed_weak_cleanup_identities.ptr[0..self.borrowed_weak_cleanup_identities_capacity] else self.borrowed_weak_cleanup_identities[0..0];
         const realm_identities: []usize = if (self.borrowed_weak_cleanup_realm_identities_capacity != 0) self.borrowed_weak_cleanup_realm_identities.ptr[0..self.borrowed_weak_cleanup_realm_identities_capacity] else self.borrowed_weak_cleanup_realm_identities[0..0];
-        for (self.borrowed_weak_cleanup_identities) |identity| {
-            if ((identity & 1) == 0) {
-                const object: *Object = @ptrFromInt(identity);
-                object.in_weak_cleanup = false;
-            }
-        }
+        self.borrowed_weak_cleanup_identity_set.clearRetainingCapacity();
         self.borrowed_weak_cleanup_identities = &.{};
         self.borrowed_weak_cleanup_identities_capacity = 0;
         self.borrowed_weak_cleanup_realm_identities = &.{};
@@ -2762,7 +2646,7 @@ fn objectFromLastRefValue(value: JSValue) ?*Object {
 }
 
 fn valueMayContainNestedSymbolRoots(value: JSValue) bool {
-    if (value.tag == @import("value.zig").Tag.object) return true;
+    if (value.isObject()) return true;
     const header = value.objectHeader() orelse return false;
     return header.kind == .function_bytecode;
 }
@@ -2817,23 +2701,6 @@ fn appendRuntimeExternalHostFunction(
         slice.* = next[0..slice.*.len];
         capacity.* = next_capacity;
         if (old_capacity != 0) account.free(host_function.ExternalRecord, old);
-    }
-    const len = slice.*.len;
-    slice.* = slice.*.ptr[0 .. len + 1];
-    slice.*[len] = item;
-}
-
-fn appendRuntimeRootProvider(account: *memory.MemoryAccount, slice: *[]RootProvider, capacity: *usize, item: RootProvider) !void {
-    if (slice.*.len == capacity.*) {
-        const next_capacity = if (capacity.* == 0) 4 else capacity.* * 2;
-        const next = try account.alloc(RootProvider, next_capacity);
-        errdefer account.free(RootProvider, next);
-        @memcpy(next[0..slice.*.len], slice.*);
-        const old_capacity = capacity.*;
-        const old = if (old_capacity != 0) slice.*.ptr[0..old_capacity] else slice.*[0..0];
-        slice.* = next[0..slice.*.len];
-        capacity.* = next_capacity;
-        if (old_capacity != 0) account.free(RootProvider, old);
     }
     const len = slice.*.len;
     slice.* = slice.*.ptr[0 .. len + 1];

@@ -16,7 +16,7 @@ pub const property_ops = @import("property_ops.zig");
 pub const exceptions = @import("exceptions.zig");
 pub const exception_ops = @import("vm_exception_ops.zig");
 pub const iterator = @import("iterator.zig");
-pub const eval = @import("eval.zig");
+pub const eval = @import("eval_entry.zig");
 pub const eval_entry = @import("eval_entry.zig");
 pub const module = @import("module.zig");
 pub const module_graph = @import("module_graph.zig");
@@ -25,7 +25,17 @@ pub const jobs = @import("jobs.zig");
 pub const value_ops = @import("value_ops.zig");
 pub const globals = @import("globals.zig");
 pub const closure = @import("closure.zig");
-pub const shared = @import("shared.zig");
+pub const collection_adapter = @import("collection_adapter.zig");
+pub const call_runtime = @import("call_runtime.zig");
+pub const fusion_stats = @import("vm_fusion_stats.zig");
+pub const host_dispatch_stats = @import("host_dispatch_stats.zig");
+pub const string_ops = @import("string_ops.zig");
+pub const object_ops = @import("object_ops.zig");
+pub const reflect_ops = @import("reflect_ops.zig");
+pub const array_ops = @import("array_ops.zig");
+pub const coercion_ops = @import("coercion_ops.zig");
+pub const promise_ops = @import("promise_ops.zig");
+pub const typed_array_construct = @import("typed_array_construct.zig");
 
 pub fn opcodeName(opcode: u8) []const u8 {
     return bytecode.opcode.nameOf(opcode);

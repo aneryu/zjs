@@ -85,8 +85,15 @@ available only through git history.
   iterating, and save the full Debug suite for meaningful checkpoints or before
   handing off substantial code changes)
 - `zig build test -Doptimize=ReleaseSafe --summary all` (ReleaseSafe verification; run ONLY once as a final gate before final commits or CI gates to ensure optimized loop safety)
-- `zig build test-oom --summary all` (不再执行 / No longer executed)
-- `zig build test-oom-exhaustive --summary all` (不再执行 / No longer executed)
+- `zig build test-altrepr --summary all` (alternate JSValue representation
+  guard: runs the suite with the non-default 16-byte layout. REQUIRED
+  whenever a change touches `src/core/value.zig` or value-representation
+  semantics; for such changes also run the test262 gate once with
+  `-Dzjs_nan_boxing=false` at stage close. The default is the 8-byte
+  NaN-boxed layout — compute parity, ~10% lower RSS on value-dense heaps —
+  and the 16-byte layout stays as the reference representation; neither
+  mode may rot.)
+- `zig build test-oom --summary all` (OOM 注入门禁：corpus×checkAllAllocationFailures 注入 + 同 runtime 恢复金丝雀；阶段收口档位执行，不进日常迭代 / OOM injection gate: corpus x allocation-failure injection plus same-runtime recovery canaries; run at phase-close tier, not per-edit)
 
 - `git diff --check`
 
@@ -126,6 +133,9 @@ Missing or invalid arguments should print usage and exit non-zero.
   change touches shared runtime/core semantics and targeted evidence is not
   strong enough.
 - Runner or test262 changes require the relevant runner fixture or target slice.
+- New throw sites should use the message-carrying throw*Message helpers; bare
+  `return error.XxxError` is reserved for paths whose message is attached
+  elsewhere or genuinely unreachable by user code.
 - Keep non-trivial validation evidence close to the relevant code change,
   commit message, issue, or PR. Do not add broad status ledgers back to the
   active tree without an explicit request.

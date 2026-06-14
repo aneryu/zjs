@@ -1,10 +1,15 @@
+const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
+const call_runtime = @import("call_runtime.zig");
+const forof_ops = @import("forof_ops.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
+
+const array_ops = @import("array_ops.zig");
 
 const op = bytecode.opcode.op;
 
@@ -74,8 +79,7 @@ pub fn jump8(function: *const bytecode.Bytecode, frame: *frame_mod.Frame) void {
 }
 
 pub fn tryFuseGoto8LocalLessThanFalseBranch(function: *const bytecode.Bytecode, frame: *frame_mod.Frame) bool {
-    return tryFuseGoto8LocalInt32LessThanFalseBranch(function, frame) or
-        tryFuseGoto8LocalShortBigIntLessThanFalseBranch(function, frame);
+    return fusion_stats.counted(.tryFuseGoto8LocalInt32LessThanFalseBranch, tryFuseGoto8LocalInt32LessThanFalseBranch(function, frame));
 }
 
 pub fn branch32(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, branch_if_true: bool) !void {
@@ -109,20 +113,19 @@ pub fn throwTop(
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
-    comptime closeStackTopForOfIteratorForPendingError: anytype,
 ) !ThrowResult {
     const value = try stack.pop();
     var value_owned = true;
     errdefer if (value_owned) value.free(ctx.runtime);
-    try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
+    try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
     try stack.reserveAdditional(1);
     if (catch_target.* == null) {
-        if (try popCatchMarker(ctx.runtime, stack)) |restored| {
+        if (try array_ops.popCatchMarker(ctx.runtime, stack)) |restored| {
             catch_target.* = restored;
         }
     }
     if (catch_target.*) |target| {
-        const restored = (try popCatchMarker(ctx.runtime, stack)) orelse null;
+        const restored = (try array_ops.popCatchMarker(ctx.runtime, stack)) orelse null;
         stack.pushOwnedAssumeCapacity(value);
         value_owned = false;
         frame.pc = target;
@@ -151,10 +154,9 @@ pub fn throwErrorVm(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     global: *core.Object,
-    comptime handleCatchableRuntimeError: anytype,
 ) !ThrowResult {
     const err = throwError(function, frame);
-    if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .handled;
+    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .handled;
     return err;
 }
 
@@ -216,45 +218,8 @@ fn tryFuseGoto8LocalInt32LessThanFalseBranch(function: *const bytecode.Bytecode,
     return true;
 }
 
-fn tryFuseGoto8LocalShortBigIntLessThanFalseBranch(function: *const bytecode.Bytecode, frame: *frame_mod.Frame) bool {
-    const operand_pc = frame.pc;
-    if (operand_pc >= function.code.len) return false;
-    const diff: i8 = @bitCast(function.code[operand_pc]);
-    if (diff >= 0) return false;
-    const target_pc = relativePc(operand_pc, diff);
-    if (target_pc + 11 > function.code.len) return false;
-
-    const code = function.code;
-    if (code[target_pc] != op.get_loc_check) return false;
-    if (code[target_pc + 3] != op.push_bigint_i32) return false;
-    if (code[target_pc + 8] != op.lt) return false;
-    if (code[target_pc + 9] != op.if_false8) return false;
-
-    const idx = readInt(u16, code[target_pc + 1 ..][0..2]);
-    if (idx >= frame.locals.len or idx >= frame.locals_uninit.len) return false;
-    if (frame.localIsUninitialized(idx)) return false;
-    const lhs = frame.locals[idx].asShortBigInt() orelse return false;
-    const rhs: i64 = readInt(i32, code[target_pc + 4 ..][0..4]);
-    const branch_operand_pc = target_pc + 10;
-    const branch_diff: i8 = @bitCast(code[branch_operand_pc]);
-    frame.pc = if (lhs < rhs)
-        target_pc + 11
-    else
-        relativePc(branch_operand_pc, branch_diff);
-    return true;
-}
-
 fn relativePc(operand_pc: usize, diff: anytype) usize {
     return @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff));
-}
-
-fn popCatchMarker(rt: *core.JSRuntime, stack: *stack_mod.Stack) !??usize {
-    while (stack.peekBorrowed()) |marker| {
-        const popped = try stack.pop();
-        if (marker.isCatchOffset()) return catchTargetFromMarker(popped);
-        popped.free(rt);
-    }
-    return null;
 }
 
 fn catchTargetFromMarker(marker: core.JSValue) ?usize {
@@ -278,7 +243,7 @@ fn slotValueBorrow(slot: core.JSValue) core.JSValue {
 }
 
 fn varRefSlotIsUninitialized(slot: core.JSValue) bool {
-    return slotValueBorrow(slot).tag == core.Tag.uninitialized;
+    return slotValueBorrow(slot).isUninitialized();
 }
 
 fn varRefCellFromValue(value: core.JSValue) ?*core.Object {

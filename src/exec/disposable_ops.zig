@@ -4,15 +4,15 @@ const bytecode = @import("../bytecode/root.zig");
 const frame_mod = @import("frame.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 
-const shared_vm = @import("shared.zig");
-const constructorPrototypeFromGlobal = shared_vm.constructorPrototypeFromGlobal;
-const callValueOrBytecode = shared_vm.callValueOrBytecode;
-const objectFromValue = shared_vm.objectFromValue;
-const isCallableValue = shared_vm.isCallableValue;
-const getValueProperty = shared_vm.getValueProperty;
-const createNamedError = shared_vm.createNamedError;
-const qjsDisposableStackConstructWithPrototype = shared_vm.qjsDisposableStackConstructWithPrototype;
-const qjsSuppressedErrorConstructWithPrototype = shared_vm.qjsSuppressedErrorConstructWithPrototype;
+const call_runtime = @import("call_runtime.zig");
+const object_ops = @import("object_ops.zig");
+const constructorPrototypeFromGlobal = object_ops.constructorPrototypeFromGlobal;
+const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const objectFromValue = object_ops.objectFromValue;
+const isCallableValue = call_runtime.isCallableValue;
+const getValueProperty = object_ops.getValueProperty;
+const qjsDisposableStackConstructWithPrototype = object_ops.qjsDisposableStackConstructWithPrototype;
+const qjsSuppressedErrorConstructWithPrototype = object_ops.qjsSuppressedErrorConstructWithPrototype;
 
 pub const DisposableStackMethod = enum(u8) {
     use = 1,
@@ -263,7 +263,7 @@ pub fn runtimeErrorValueForDisposableDispose(
     if (exception_ops.pendingExceptionMatchesError(ctx, err)) return ctx.takeException();
     if (ctx.hasException()) ctx.clearException();
     const error_info = exception_ops.runtimeErrorInfo(err) orelse return err;
-    return createNamedError(ctx.runtime, global, error_info.name, error_info.message);
+    return exception_ops.createNamedError(ctx, global, error_info.name, error_info.message);
 }
 
 pub fn qjsSuppressedErrorForDispose(

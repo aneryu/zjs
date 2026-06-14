@@ -1,1 +1,0 @@
-test262/test/staging/sm/TypedArray/constructor-ArrayBuffer-species-wrap.js

@@ -1,31 +1,28 @@
 const core = @import("../core/root.zig");
 const dtoa = @import("../libs/dtoa.zig");
-const bignum = @import("../libs/bignum.zig");
 const std = @import("std");
+const builtin_dispatch = @import("../exec/builtin_dispatch.zig");
+const builtin_glue = @import("../exec/builtin_glue.zig");
+const coercion_ops = @import("../exec/coercion_ops.zig");
+const exceptions = @import("../exec/exceptions.zig");
+const exception_ops = @import("../exec/vm_exception_ops.zig");
+const object_ops = @import("../exec/object_ops.zig");
+const value_ops = @import("../exec/value_ops.zig");
 
-const AppendStringError = error{
-    OutOfMemory,
-    TypeError,
-    InvalidRadix,
-    NoSpaceLeft,
-};
+const HostError = exceptions.HostError;
+const InternalCall = core.host_function.InternalCall;
 
-pub const StaticMethod = enum(u32) {
-    parse_int = 1,
-    parse_float = 2,
-    is_nan = 3,
-    is_finite = 4,
-    is_integer = 5,
-    is_safe_integer = 6,
-};
+/// Pure ASCII -> f64 parse primitives now live in `core/number.zig`; re-export
+/// them here so the existing install/dispatch path keeps a single import
+/// surface. The realm-coercing record handler (`numberCall`) and the
+/// `Number.prototype.*` formatters below still own the VM-touching logic.
+pub const parseIntValue = core.number.parseIntValue;
+pub const parseFloatValue = core.number.parseFloatValue;
+pub const parseIntLatin1Bytes = core.number.parseIntLatin1Bytes;
+pub const parseFloatLatin1Bytes = core.number.parseFloatLatin1Bytes;
 
-pub const PrototypeMethod = enum(u32) {
-    to_string = 101,
-    to_locale_string = 102,
-    to_fixed = 103,
-    to_exponential = 104,
-    to_precision = 105,
-};
+pub const StaticMethod = core.host_function.builtin_method_ids.number.StaticMethod;
+pub const PrototypeMethod = core.host_function.builtin_method_ids.number.PrototypeMethod;
 
 pub fn staticMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "parseInt")) return @intFromEnum(StaticMethod.parse_int);
@@ -46,6 +43,129 @@ pub fn prototypeMethodId(name: []const u8) ?u32 {
     return null;
 }
 
+/// Declaration table: one entry per `Number.*` static, the four global
+/// number functions, and the `Number.prototype.*` methods. `id` is the
+/// `StaticMethod`/`PrototypeMethod` enum value, reused as the dispatch
+/// `magic`. All share `numberCall`, which mirrors the legacy
+/// `callNumberNativeFunctionRecord` dispatch. Static parse helpers and the
+/// realm-coercing prototype/parse paths reach exec VM ops through
+/// `builtin_glue`/`object_ops` (shared with the fast-call entry points);
+/// bare-runtime parse callers use the primitive-only `parse*Value` fallback.
+pub const internal_entries = [_]core.host_function.InternalEntry{
+    .{ .name = "parseInt", .length = 2, .id = @intFromEnum(StaticMethod.parse_int), .magic = @intFromEnum(StaticMethod.parse_int), .prepared_call_ok = true, .call = &numberCall },
+    .{ .name = "parseFloat", .length = 1, .id = @intFromEnum(StaticMethod.parse_float), .magic = @intFromEnum(StaticMethod.parse_float), .prepared_call_ok = true, .call = &numberCall },
+    .{ .name = "isNaN", .length = 1, .id = @intFromEnum(StaticMethod.is_nan), .magic = @intFromEnum(StaticMethod.is_nan), .call = &numberCall },
+    .{ .name = "isFinite", .length = 1, .id = @intFromEnum(StaticMethod.is_finite), .magic = @intFromEnum(StaticMethod.is_finite), .call = &numberCall },
+    .{ .name = "isInteger", .length = 1, .id = @intFromEnum(StaticMethod.is_integer), .magic = @intFromEnum(StaticMethod.is_integer), .call = &numberCall },
+    .{ .name = "isSafeInteger", .length = 1, .id = @intFromEnum(StaticMethod.is_safe_integer), .magic = @intFromEnum(StaticMethod.is_safe_integer), .call = &numberCall },
+    .{ .name = "toString", .length = 1, .id = @intFromEnum(PrototypeMethod.to_string), .magic = @intFromEnum(PrototypeMethod.to_string), .call = &numberCall },
+    .{ .name = "toLocaleString", .length = 0, .id = @intFromEnum(PrototypeMethod.to_locale_string), .magic = @intFromEnum(PrototypeMethod.to_locale_string), .call = &numberCall },
+    .{ .name = "toFixed", .length = 1, .id = @intFromEnum(PrototypeMethod.to_fixed), .magic = @intFromEnum(PrototypeMethod.to_fixed), .call = &numberCall },
+    .{ .name = "toExponential", .length = 1, .id = @intFromEnum(PrototypeMethod.to_exponential), .magic = @intFromEnum(PrototypeMethod.to_exponential), .call = &numberCall },
+    .{ .name = "toPrecision", .length = 1, .id = @intFromEnum(PrototypeMethod.to_precision), .magic = @intFromEnum(PrototypeMethod.to_precision), .call = &numberCall },
+};
+
+/// Shared record handler for the `.number` domain. Replicates the legacy
+/// `callNumberNativeFunctionRecord` dispatch verbatim: realm parse/predicate
+/// and prototype methods take the VM-coercing exec ops, the bare-runtime
+/// `parse*` fall back to the primitive-only path, and the integer predicates
+/// stay self-contained.
+fn numberCall(host_call: InternalCall) HostError!core.JSValue {
+    const ctx = host_call.ctx;
+    const id: u32 = host_call.magic;
+    const args = host_call.args;
+    const caller_function = builtin_dispatch.callerBytecode(host_call);
+    const caller_frame = builtin_dispatch.callerFrame(host_call);
+    return switch (id) {
+        @intFromEnum(StaticMethod.parse_int) => {
+            if (host_call.global) |global| return builtin_glue.qjsGlobalParseInt(ctx, host_call.output, global, args, caller_function, caller_frame);
+            const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            const radix = if (args.len >= 2) args[1] else null;
+            return value_ops.numberToValue(try parseIntValue(ctx.runtime, input, radix));
+        },
+        @intFromEnum(StaticMethod.parse_float) => {
+            if (host_call.global) |global| return builtin_glue.qjsGlobalParseFloat(ctx, host_call.output, global, args, caller_function, caller_frame);
+            const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            return value_ops.numberToValue(try parseFloatValue(ctx.runtime, input));
+        },
+        @intFromEnum(StaticMethod.is_nan) => {
+            const global = host_call.global orelse return error.TypeError;
+            return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, host_call.output, global, host_call.this_value, args, true);
+        },
+        @intFromEnum(StaticMethod.is_finite) => {
+            const global = host_call.global orelse return error.TypeError;
+            return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, host_call.output, global, host_call.this_value, args, false);
+        },
+        @intFromEnum(StaticMethod.is_integer) => {
+            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            return core.JSValue.boolean(numberIsInteger(value));
+        },
+        @intFromEnum(StaticMethod.is_safe_integer) => {
+            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            if (!numberIsInteger(value)) return core.JSValue.boolean(false);
+            const number = value_ops.numberValue(value) orelse return core.JSValue.boolean(false);
+            return core.JSValue.boolean(@abs(number) <= 9007199254740991.0);
+        },
+        @intFromEnum(PrototypeMethod.to_string),
+        @intFromEnum(PrototypeMethod.to_locale_string),
+        @intFromEnum(PrototypeMethod.to_fixed),
+        @intFromEnum(PrototypeMethod.to_exponential),
+        @intFromEnum(PrototypeMethod.to_precision),
+        => {
+            const global = host_call.global orelse return error.TypeError;
+            return numberPrototypeMethod(ctx, host_call.output, global, host_call.this_value, id, args);
+        },
+        else => error.TypeError,
+    };
+}
+
+/// `Number.prototype.{toString,toLocaleString,toFixed,toExponential,toPrecision}`
+/// method body. Coerces the receiver to a number primitive and the optional
+/// digits argument through the VM ToNumber path, then dispatches to the pure
+/// formatters below; receiver/range failures map to the spec error messages.
+/// `id` is a `PrototypeMethod` enum value. This is a builtin method body (it
+/// reaches the VM coercion/exception ops), so exec routes here through the
+/// record table (`object_ops.qjsNumberPrototypeMethod` ->
+/// `builtin_dispatch.callInternalRecord`) instead of naming it directly.
+fn numberPrototypeMethod(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    id: u32,
+    args: []const core.JSValue,
+) HostError!core.JSValue {
+    const rt = ctx.runtime;
+    const primitive = object_ops.primitivePrototypeThisValue(rt, this_value, 1) catch |err| switch (err) {
+        error.TypeError => return exception_ops.throwTypeErrorMessage(ctx, global, "not a number"),
+    };
+    defer primitive.free(rt);
+    const coerced_arg: ?core.JSValue = try coercion_ops.coerceOptionalNumberMethodArgument(ctx, output, global, args, true);
+    defer if (coerced_arg) |value| value.free(rt);
+    var coerced_storage: [1]core.JSValue = undefined;
+    const method_args = if (coerced_arg) |value| blk: {
+        coerced_storage[0] = value;
+        break :blk coerced_storage[0..];
+    } else args;
+    return (switch (id) {
+        @intFromEnum(PrototypeMethod.to_string) => toStringMethod(rt, primitive, method_args),
+        @intFromEnum(PrototypeMethod.to_locale_string) => toStringMethod(rt, primitive, &.{}),
+        @intFromEnum(PrototypeMethod.to_fixed) => toFixed(rt, primitive, method_args),
+        @intFromEnum(PrototypeMethod.to_exponential) => toExponential(rt, primitive, method_args),
+        @intFromEnum(PrototypeMethod.to_precision) => toPrecision(rt, primitive, method_args),
+        else => error.TypeError,
+    }) catch |err| switch (err) {
+        error.TypeError => return exception_ops.throwTypeErrorMessage(ctx, global, "not a number"),
+        error.RangeError => return exception_ops.throwRangeErrorMessage(ctx, global, "invalid number of digits"),
+        else => err,
+    };
+}
+
+fn numberIsInteger(value: core.JSValue) bool {
+    const number = value_ops.numberValue(value) orelse return false;
+    return std.math.isFinite(number) and @floor(number) == number;
+}
+
 pub fn parseFloat(bytes: []const u8) !f64 {
     return dtoa.parseNumber(bytes);
 }
@@ -55,7 +175,7 @@ pub fn toString(buf: []u8, value: f64) ![]const u8 {
 }
 
 pub fn toFixed(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
-    const number = numberValue(receiver) orelse return error.TypeError;
+    const number = core.number.numberValue(receiver) orelse return error.TypeError;
     const fraction_digits = try integerDigitsArgument(rt, args, 0);
     if (fraction_digits < 0 or fraction_digits > 100) return error.RangeError;
 
@@ -64,7 +184,7 @@ pub fn toFixed(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.J
 }
 
 pub fn toExponential(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
-    const number = numberValue(receiver) orelse return error.TypeError;
+    const number = core.number.numberValue(receiver) orelse return error.TypeError;
     const fraction_arg_undefined = args.len == 0 or args[0].isUndefined();
     var fraction_digits = try integerDigitsArgument(rt, args, 0);
     if (std.math.isNan(number) or !std.math.isFinite(number)) return numberStringValue(rt, number);
@@ -80,7 +200,7 @@ pub fn toExponential(rt: *core.JSRuntime, receiver: core.JSValue, args: []const 
 }
 
 pub fn toPrecision(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
-    const number = numberValue(receiver) orelse return error.TypeError;
+    const number = core.number.numberValue(receiver) orelse return error.TypeError;
     if (args.len == 0 or args[0].isUndefined()) return numberStringValue(rt, number);
     const precision = try integerDigitsArgument(rt, args, 0);
     if (std.math.isNan(number) or !std.math.isFinite(number)) return numberStringValue(rt, number);
@@ -89,9 +209,9 @@ pub fn toPrecision(rt: *core.JSRuntime, receiver: core.JSValue, args: []const co
 }
 
 pub fn toStringMethod(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
-    const number = numberValue(receiver) orelse return error.TypeError;
+    const number = core.number.numberValue(receiver) orelse return error.TypeError;
     const radix = if (args.len >= 1 and !args[0].isUndefined())
-        @as(i32, @intFromFloat(try toNumber(rt, args[0])))
+        @as(i32, @intFromFloat(try core.number.toNumber(rt, args[0])))
     else
         10;
     if (radix < 2 or radix > 36) return error.RangeError;
@@ -127,7 +247,7 @@ fn dtoaStringValue(rt: *core.JSRuntime, number: f64, n_digits: i32, flags: i32) 
 fn integerDigitsArgument(rt: *core.JSRuntime, args: []const core.JSValue, default: i32) !i32 {
     if (args.len == 0 or args[0].isUndefined()) return default;
     if (args[0].isSymbol() or args[0].isBigInt()) return error.TypeError;
-    const number = try toNumber(rt, args[0]);
+    const number = try core.number.toNumber(rt, args[0]);
     if (std.math.isNan(number) or number == 0) return 0;
     if (!std.math.isFinite(number)) return if (number < 0) std.math.minInt(i32) else std.math.maxInt(i32);
     const truncated = @trunc(number);
@@ -156,384 +276,4 @@ fn appendRadixInteger(rt: *core.JSRuntime, out: *std.ArrayList(u8), number: f64,
         remaining /= radix;
     }
     try out.appendSlice(rt.memory.allocator, buffer[index..]);
-}
-
-/// QuickJS source map: global parseInt / Number.parseInt. This is still the
-/// narrow subset used by transitional `parse_int` bytecode.
-fn stringFromValue(value: core.JSValue) ?*core.string.String {
-    if (!value.isString()) return null;
-    const header = value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
-}
-
-pub fn parseIntValue(rt: *core.JSRuntime, input: core.JSValue, radix_value: ?core.JSValue) !f64 {
-    if (input.isString()) {
-        const radix = if (radix_value) |value| toInt32(try toNumber(rt, value)) else 0;
-        const str = stringFromValue(input).?;
-        switch (str.resolveData()) {
-            .latin1 => |bytes| return parseIntLatin1Bytes(bytes, radix),
-            .utf16 => {},
-        }
-    }
-
-    var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
-    try appendValueString(rt, &bytes, input);
-
-    const radix = if (radix_value) |value| toInt32(try toNumber(rt, value)) else 0;
-    return parseIntLatin1Bytes(bytes.items, radix);
-}
-
-/// QuickJS source map: global parseFloat / Number.parseFloat. This is still the
-/// narrow subset used by transitional `parse_float` bytecode.
-pub fn parseFloatValue(rt: *core.JSRuntime, input: core.JSValue) !f64 {
-    if (input.isString()) {
-        const str = stringFromValue(input).?;
-        switch (str.resolveData()) {
-            .latin1 => |bytes| return parseFloatLatin1Bytes(bytes),
-            .utf16 => {},
-        }
-    }
-
-    var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
-    try appendValueString(rt, &bytes, input);
-    return parseFloatLatin1Bytes(bytes.items);
-}
-
-pub fn parseIntLatin1Bytes(source: []const u8, initial_radix: i32) f64 {
-    var text = trimLeadingJsWhitespace(source);
-    var sign: f64 = 1;
-    if (text.len != 0 and (text[0] == '+' or text[0] == '-')) {
-        if (text[0] == '-') sign = -1;
-        text = text[1..];
-    }
-
-    var radix = initial_radix;
-    if (radix != 0 and (radix < 2 or radix > 36)) return std.math.nan(f64);
-    if (radix == 0) {
-        radix = 10;
-        if (text.len >= 2 and text[0] == '0' and (text[1] == 'x' or text[1] == 'X')) {
-            radix = 16;
-            text = text[2..];
-        }
-    } else if (radix == 16 and text.len >= 2 and text[0] == '0' and (text[1] == 'x' or text[1] == 'X')) {
-        text = text[2..];
-    }
-
-    var value: f64 = 0;
-    var consumed = false;
-    for (text) |ch| {
-        const digit: i32 =
-            if (ch >= '0' and ch <= '9') ch - '0' else if (ch >= 'a' and ch <= 'z') ch - 'a' + 10 else if (ch >= 'A' and ch <= 'Z') ch - 'A' + 10 else break;
-        if (digit >= radix) break;
-        consumed = true;
-        value = value * @as(f64, @floatFromInt(radix)) + @as(f64, @floatFromInt(digit));
-    }
-    if (!consumed) return std.math.nan(f64);
-    const signed = value * sign;
-    if (signed == 0 and sign < 0) return -0.0;
-    return signed;
-}
-
-pub fn parseFloatLatin1Bytes(source: []const u8) f64 {
-    if (source.len != 0 and jsWhitespacePrefixLen(source) == null) {
-        if (parseSimpleDecimalFloat(source)) |number| return number;
-    }
-    const text = trimLeadingJsWhitespace(source);
-    if (text.len == 0) return std.math.nan(f64);
-
-    var index: usize = 0;
-    if (text[index] == '+' or text[index] == '-') index += 1;
-
-    if (std.mem.startsWith(u8, text[index..], "Infinity")) {
-        return if (text[0] == '-') -std.math.inf(f64) else std.math.inf(f64);
-    }
-
-    var digits: usize = 0;
-    while (index < text.len and isAsciiDigit(text[index])) : (index += 1) digits += 1;
-    if (index < text.len and text[index] == '.') {
-        index += 1;
-        while (index < text.len and isAsciiDigit(text[index])) : (index += 1) digits += 1;
-    }
-    if (digits == 0) return std.math.nan(f64);
-
-    const exponent_start = index;
-    if (index < text.len and (text[index] == 'e' or text[index] == 'E')) {
-        index += 1;
-        if (index < text.len and (text[index] == '+' or text[index] == '-')) index += 1;
-        const exponent_digits_start = index;
-        while (index < text.len and isAsciiDigit(text[index])) : (index += 1) {}
-        if (index == exponent_digits_start) index = exponent_start;
-    }
-
-    if (parseSimpleDecimalFloat(text[0..index])) |number| return number;
-    return std.fmt.parseFloat(f64, text[0..index]) catch std.math.nan(f64);
-}
-
-fn parseSimpleDecimalFloat(text: []const u8) ?f64 {
-    var index: usize = 0;
-    var sign: f64 = 1;
-    if (index < text.len and (text[index] == '+' or text[index] == '-')) {
-        if (text[index] == '-') sign = -1;
-        index += 1;
-    }
-
-    var value: f64 = 0;
-    var digits: usize = 0;
-    while (index < text.len and isAsciiDigit(text[index])) : (index += 1) {
-        if (digits == 15) return null;
-        value = value * 10 + @as(f64, @floatFromInt(text[index] - '0'));
-        digits += 1;
-    }
-
-    if (index < text.len and text[index] == '.') {
-        index += 1;
-        var scale: f64 = 1;
-        while (index < text.len and isAsciiDigit(text[index])) : (index += 1) {
-            if (digits == 15) return null;
-            value = value * 10 + @as(f64, @floatFromInt(text[index] - '0'));
-            scale *= 10;
-            digits += 1;
-        }
-        value /= scale;
-    }
-
-    if (digits == 0 or index != text.len) return null;
-    const signed = value * sign;
-    if (signed == 0 and sign < 0) return -0.0;
-    return signed;
-}
-
-fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
-    if (value.asInt32()) |int_value| {
-        var int_buf: [32]u8 = undefined;
-        const printed = try std.fmt.bufPrint(&int_buf, "{d}", .{int_value});
-        try buffer.appendSlice(rt.memory.allocator, printed);
-    } else if (value.asFloat64()) |float_value| {
-        if (std.math.isNan(float_value)) {
-            try buffer.appendSlice(rt.memory.allocator, "NaN");
-        } else if (std.math.isPositiveInf(float_value)) {
-            try buffer.appendSlice(rt.memory.allocator, "Infinity");
-        } else if (std.math.isNegativeInf(float_value)) {
-            try buffer.appendSlice(rt.memory.allocator, "-Infinity");
-        } else if (isNegativeZero(float_value)) {
-            try buffer.append(rt.memory.allocator, '0');
-        } else {
-            var float_buf: [64]u8 = undefined;
-            const printed = try std.fmt.bufPrint(&float_buf, "{d}", .{float_value});
-            try buffer.appendSlice(rt.memory.allocator, printed);
-        }
-    } else if (value.isBigInt()) {
-        var big = try cloneBigIntValue(rt, value);
-        defer big.deinit();
-        const printed = try big.formatBase10Alloc(rt.memory.allocator);
-        defer rt.memory.allocator.free(printed);
-        try buffer.appendSlice(rt.memory.allocator, printed);
-    } else if (value.asBool()) |bool_value| {
-        try buffer.appendSlice(rt.memory.allocator, if (bool_value) "true" else "false");
-    } else if (value.isUndefined()) {
-        try buffer.appendSlice(rt.memory.allocator, "undefined");
-    } else if (value.isNull()) {
-        try buffer.appendSlice(rt.memory.allocator, "null");
-    } else if (value.isString()) {
-        try appendRawString(rt, buffer, value);
-    } else if (value.isObject()) {
-        const header = value.refHeader() orelse return;
-        const object_value: *core.Object = @fieldParentPtr("header", header);
-        if (object_value.class_id == core.class.ids.string) {
-            const data = object_value.objectData() orelse return error.TypeError;
-            try appendValueString(rt, buffer, data);
-        } else if (object_value.class_id == core.class.ids.number or object_value.class_id == core.class.ids.boolean or
-            object_value.class_id == core.class.ids.big_int or object_value.class_id == core.class.ids.symbol)
-        {
-            const primitive = (object_value.objectData() orelse return error.TypeError).dup();
-            defer primitive.free(rt);
-            try appendValueString(rt, buffer, primitive);
-        } else if (object_value.class_id == core.class.ids.array_buffer) {
-            try buffer.appendSlice(rt.memory.allocator, "[object ArrayBuffer]");
-        } else if (object_value.class_id == core.class.ids.promise) {
-            try buffer.appendSlice(rt.memory.allocator, "[object Promise]");
-        } else if (object_value.is_array) {
-            try appendArrayString(rt, buffer, object_value);
-        } else {
-            try buffer.appendSlice(rt.memory.allocator, "[object Object]");
-        }
-    } else {
-        try buffer.appendSlice(rt.memory.allocator, "[object Object]");
-    }
-}
-
-fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
-    const header = value.refHeader() orelse return;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
-    switch (string_value.resolveData()) {
-        .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
-        .utf16 => |units| {
-            for (units) |unit| {
-                try appendUtf8CodePoint(rt, buffer, unit);
-            }
-        },
-    }
-}
-
-fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
-    var index: u32 = 0;
-    while (index < object.length) : (index += 1) {
-        if (index != 0) try buffer.append(rt.memory.allocator, ',');
-        const value = object.getProperty(core.atom.atomFromUInt32(index));
-        defer value.free(rt);
-        if (!value.isUndefined() and !value.isNull()) try appendValueString(rt, buffer, value);
-    }
-}
-
-fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
-    if (value.asShortBigInt()) |big_int| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, big_int);
-    if (value.isBigInt() and value.refHeader() != null) {
-        const header = value.refHeader().?;
-        const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-        return big.value.cloneWithAllocator(rt.memory.allocator);
-    }
-    return error.TypeError;
-}
-
-fn numberValue(value: core.JSValue) ?f64 {
-    if (value.asInt32()) |v| return @floatFromInt(v);
-    if (value.asFloat64()) |v| return v;
-    return null;
-}
-
-fn toNumber(rt: *core.JSRuntime, value: core.JSValue) !f64 {
-    if (numberValue(value)) |number| return number;
-    if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
-    if (value.isNull()) return 0;
-    if (value.isUndefined()) return std.math.nan(f64);
-
-    var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
-    try appendValueString(rt, &bytes, value);
-    return parseJsNumber(bytes.items);
-}
-
-fn parseJsNumber(bytes: []const u8) f64 {
-    const trimmed = trimJsWhitespace(bytes);
-    if (trimmed.len == 0) return 0;
-    if (std.mem.indexOfScalar(u8, trimmed, '_') != null) return std.math.nan(f64);
-    if (hasSignedRadixPrefix(trimmed)) return std.math.nan(f64);
-    if (std.mem.eql(u8, trimmed, "Infinity") or std.mem.eql(u8, trimmed, "+Infinity")) return std.math.inf(f64);
-    if (std.mem.eql(u8, trimmed, "-Infinity")) return -std.math.inf(f64);
-    const parsed = std.fmt.parseFloat(f64, trimmed) catch return std.math.nan(f64);
-    if (std.math.isInf(parsed) and beginsWithAsciiAlphaAfterSign(trimmed)) return std.math.nan(f64);
-    return parsed;
-}
-
-fn trimJsWhitespace(bytes: []const u8) []const u8 {
-    var start: usize = 0;
-    var end: usize = bytes.len;
-    while (start < end) {
-        const width = jsWhitespacePrefixLen(bytes[start..end]) orelse break;
-        start += width;
-    }
-    while (end > start) {
-        const width = jsWhitespaceSuffixLen(bytes[start..end]) orelse break;
-        end -= width;
-    }
-    return bytes[start..end];
-}
-
-fn jsWhitespacePrefixLen(bytes: []const u8) ?usize {
-    if (bytes.len == 0) return null;
-    switch (bytes[0]) {
-        0x09...0x0d, 0x20 => return 1,
-        0xa0 => return 1,
-        0xc2 => if (startsWith(bytes, &.{ 0xc2, 0xa0 })) return 2,
-        0xe1 => if (startsWith(bytes, &.{ 0xe1, 0x9a, 0x80 })) return 3,
-        0xe2 => {
-            if (bytes.len >= 3 and bytes[1] == 0x80 and ((bytes[2] >= 0x80 and bytes[2] <= 0x8a) or bytes[2] == 0xa8 or bytes[2] == 0xa9 or bytes[2] == 0xaf)) return 3;
-            if (startsWith(bytes, &.{ 0xe2, 0x81, 0x9f })) return 3;
-        },
-        0xe3 => if (startsWith(bytes, &.{ 0xe3, 0x80, 0x80 })) return 3,
-        0xef => if (startsWith(bytes, &.{ 0xef, 0xbb, 0xbf })) return 3,
-        else => {},
-    }
-    return null;
-}
-
-fn jsWhitespaceSuffixLen(bytes: []const u8) ?usize {
-    if (bytes.len == 0) return null;
-    const last = bytes[bytes.len - 1];
-    if ((last >= 0x09 and last <= 0x0d) or last == 0x20) return 1;
-    if (endsWith(bytes, &.{ 0xc2, 0xa0 })) return 2;
-    if (last == 0xa0) return 1;
-    if (endsWith(bytes, &.{ 0xe1, 0x9a, 0x80 })) return 3;
-    if (endsWith(bytes, &.{ 0xe2, 0x81, 0x9f })) return 3;
-    if (endsWith(bytes, &.{ 0xe3, 0x80, 0x80 })) return 3;
-    if (endsWith(bytes, &.{ 0xef, 0xbb, 0xbf })) return 3;
-    if (bytes.len >= 3 and bytes[bytes.len - 3] == 0xe2 and bytes[bytes.len - 2] == 0x80) {
-        const tail = bytes[bytes.len - 1];
-        if ((tail >= 0x80 and tail <= 0x8a) or tail == 0xa8 or tail == 0xa9 or tail == 0xaf) return 3;
-    }
-    return null;
-}
-
-fn startsWith(bytes: []const u8, prefix: []const u8) bool {
-    return bytes.len >= prefix.len and std.mem.eql(u8, bytes[0..prefix.len], prefix);
-}
-
-fn endsWith(bytes: []const u8, suffix: []const u8) bool {
-    return bytes.len >= suffix.len and std.mem.eql(u8, bytes[bytes.len - suffix.len ..], suffix);
-}
-
-fn hasSignedRadixPrefix(bytes: []const u8) bool {
-    return bytes.len >= 3 and (bytes[0] == '+' or bytes[0] == '-') and bytes[1] == '0' and
-        (bytes[2] == 'x' or bytes[2] == 'X' or bytes[2] == 'o' or bytes[2] == 'O' or bytes[2] == 'b' or bytes[2] == 'B');
-}
-
-fn beginsWithAsciiAlphaAfterSign(bytes: []const u8) bool {
-    const index: usize = if (bytes.len > 0 and (bytes[0] == '+' or bytes[0] == '-')) 1 else 0;
-    return index < bytes.len and ((bytes[index] >= 'a' and bytes[index] <= 'z') or (bytes[index] >= 'A' and bytes[index] <= 'Z'));
-}
-
-fn toInt32(number: f64) i32 {
-    if (number == 0 or std.math.isNan(number) or !std.math.isFinite(number)) return 0;
-    const two32 = 4294967296.0;
-    var int = @mod(@floor(@abs(number)), two32);
-    if (number < 0 and int != 0) int = two32 - int;
-    if (int >= 2147483648.0) return @intFromFloat(int - two32);
-    return @intFromFloat(int);
-}
-
-fn trimLeadingJsWhitespace(source: []const u8) []const u8 {
-    var index: usize = 0;
-    while (index < source.len) {
-        const width = jsWhitespacePrefixLen(source[index..]) orelse break;
-        index += width;
-    }
-    return source[index..];
-}
-
-fn isAsciiDigit(byte: u8) bool {
-    return byte >= '0' and byte <= '9';
-}
-
-fn isNegativeZero(value: f64) bool {
-    return value == 0 and std.math.isNegativeInf(1.0 / value);
-}
-
-fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32) !void {
-    if (cp <= 0x7f) {
-        try buffer.append(rt.memory.allocator, @intCast(cp));
-    } else if (cp <= 0x7ff) {
-        try buffer.append(rt.memory.allocator, @intCast(0xc0 | (cp >> 6)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
-    } else if (cp <= 0xffff) {
-        try buffer.append(rt.memory.allocator, @intCast(0xe0 | (cp >> 12)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
-    } else {
-        try buffer.append(rt.memory.allocator, @intCast(0xf0 | (cp >> 18)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 12) & 0x3f)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
-    }
 }

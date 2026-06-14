@@ -17,6 +17,21 @@ const countJob = helpers.countJob;
 const countJobArgs = helpers.countJobArgs;
 
 pub const helpers = struct {
+    /// Install the standard + host globals on a bare `core.JSRuntime` global for
+    /// tests that build a runtime directly (bypassing the binding-layer context
+    /// create that wires the installer). Phase 6b-3 STEP 7B routed the install
+    /// through `rt.installStandardGlobals`, which needs the builtins installer
+    /// registered first; exec source cannot name the builtins registry, so the
+    /// test tree (which imports builtins) registers it here. Idempotent.
+    pub fn installHostGlobalsBare(rt: *core.JSRuntime, global: *core.Object) !void {
+        const registry = engine.builtins.registry;
+        const exec_call = engine.exec.call;
+        registry.registerStandardGlobalsDefault();
+        rt.install_standard_globals_cb = registry.installStandardGlobals;
+        rt.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+        try exec_call.installHostGlobals(rt, global);
+    }
+
     pub fn makeFunction(rt: *core.JSRuntime, code: []const u8) !engine.bytecode.Bytecode {
         const name = try rt.internAtom("exec");
         defer rt.atoms.free(name);
@@ -235,7 +250,6 @@ pub const helpers = struct {
             wrapper.runJobs(null) catch {};
             self.event_loop.deinit();
             self.allocator.destroy(self.event_loop);
-            engine.exec.zjs_vm.cleanupWorkersForRuntime(self.runtime);
             const run_test262 = @import("../cli/run_test262.zig");
             _ = run_test262.cleanupTest262Agents(self.runtime);
             engine.exec.zjs_vm.cleanupAtomicsWaitersForContext(self.context);
@@ -411,6 +425,7 @@ pub const helpers = struct {
     var shared_engine_baseline_shape_hash: u32 = 0;
     var shared_engine_baseline_shape_deleted_count: usize = 0;
     var shared_engine_baseline_properties: ?[]core.property.Entry = null;
+    var shared_engine_baseline_shape_props: ?[]core.shape.Property = null;
 
     pub fn sharedTestEngine() *TestEngine {
         if (shared_engine_storage == null) {
@@ -438,13 +453,20 @@ pub const helpers = struct {
                 shared_engine_baseline_shape_hash = g.shape_ref.hash;
                 shared_engine_baseline_shape_deleted_count = g.shape_ref.deleted_prop_count;
 
-                // Snapshot the baseline property entries
+                // Snapshot the baseline property entries (value slots only;
+                // key atoms and flags are snapshotted with the shape props
+                // below).
                 shared_engine_baseline_properties = std.heap.page_allocator.alloc(core.property.Entry, g.properties.len) catch unreachable;
                 for (g.properties, 0..) |entry, idx| {
-                    shared_engine_baseline_properties.?[idx] = entry;
-                    shared_engine_baseline_properties.?[idx].slot = entry.slot.dup();
-                    if (entry.atom_id != core.atom.null_atom) {
-                        _ = eng.runtime.atoms.dup(entry.atom_id);
+                    shared_engine_baseline_properties.?[idx] = .{ .slot = entry.slot.dup() };
+                }
+
+                shared_engine_baseline_shape_props = std.heap.page_allocator.alloc(core.shape.Property, g.shape_ref.prop_count) catch unreachable;
+                for (g.shape_ref.props[0..g.shape_ref.prop_count], 0..) |prop, idx| {
+                    shared_engine_baseline_shape_props.?[idx] = prop;
+                    shared_engine_baseline_shape_props.?[idx].hash_next = core.shape.no_property_index;
+                    if (prop.atom_id != core.atom.null_atom) {
+                        _ = eng.runtime.atoms.dup(prop.atom_id);
                     }
                 }
             }
@@ -495,12 +517,8 @@ pub const helpers = struct {
             const baseline = shared_engine_baseline_property_count;
             if (global.properties.len > baseline) {
                 for (global.properties[baseline..]) |*entry| {
-                    if (entry.flags.deleted) continue;
                     entry.slot.destroy(eng.runtime);
-                    if (entry.atom_id != core.atom.null_atom) eng.runtime.atoms.free(entry.atom_id);
-                    entry.atom_id = core.atom.null_atom;
                     entry.slot = .deleted;
-                    entry.flags.deleted = true;
                 }
                 global.properties = global.properties.ptr[0..baseline];
             }
@@ -510,27 +528,20 @@ pub const helpers = struct {
                 // First, destroy current values below baseline
                 for (global.properties[0..baseline]) |entry| {
                     entry.slot.destroy(eng.runtime);
-                    if (entry.atom_id != core.atom.null_atom) eng.runtime.atoms.free(entry.atom_id);
                 }
                 // Second, restore baseline values (and dup them so they can be modified/freed again)
                 for (baselines, 0..) |base, idx| {
-                    global.properties[idx] = base;
-                    global.properties[idx].slot = base.slot.dup();
-                    if (base.atom_id != core.atom.null_atom) {
-                        _ = eng.runtime.atoms.dup(base.atom_id);
-                    }
+                    global.properties[idx] = .{ .slot = base.slot.dup() };
                 }
             }
 
-            const shape_baseline = shared_engine_baseline_shape_prop_count;
-            if (global.shape_ref.prop_count > shape_baseline) {
-                for (global.shape_ref.props[shape_baseline..global.shape_ref.prop_count]) |*prop| {
-                    if (prop.atom_id != core.atom.null_atom) eng.runtime.atoms.free(prop.atom_id);
-                    prop.* = .{};
-                }
-                global.shape_ref.prop_count = shape_baseline;
-                global.shape_ref.hash = shared_engine_baseline_shape_hash;
-                global.shape_ref.deleted_prop_count = shared_engine_baseline_shape_deleted_count;
+            if (shared_engine_baseline_shape_props) |baseline_shape_props| {
+                eng.runtime.shapes.restorePropertyLayout(
+                    global.shape_ref,
+                    baseline_shape_props[0..shared_engine_baseline_shape_prop_count],
+                    shared_engine_baseline_shape_hash,
+                    shared_engine_baseline_shape_deleted_count,
+                ) catch unreachable;
             }
         }
     }
@@ -932,6 +943,98 @@ test "closure helper stores closure state outside the VM" {
     try std.testing.expectEqual(@as(?i32, 2), second.asInt32());
 }
 
+test "M1.3: returned closure can update and return captured counter" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const result = try vm_helpers.parseAndRunWithTopLevelChildren(rt, ctx,
+        \\(function(){
+        \\  function counter() {
+        \\    let n = 0;
+        \\    return function next() { n++; return n; };
+        \\  }
+        \\  var next = counter();
+        \\  return next() * 100 + next() * 10 + next();
+        \\})()
+    );
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 123), result.asInt32().?);
+}
+
+test "TDZ: closure update and return of captured const throws TypeError" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    try std.testing.expectError(error.TypeError, vm_helpers.parseStmtAndRunWithTopLevelChildren(rt, ctx,
+        \\const k = 11;
+        \\function f() { k++; return k; }
+        \\f();
+    ));
+}
+
+test "forward-ref top-level lexical captured through a nested closure resolves after init" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // `mk` is declared textually before `const G`, and only the inner closure
+    // names G. The forward-capture retrofit must thread a closure-var chain
+    // through `mk` (which never names G itself) down to the inner function;
+    // otherwise the reference falls back to a global lookup and reads
+    // undefined. Mirrors QuickJS, which resolves the whole tree post-parse.
+    const result = try vm_helpers.parseStmtAndRunWithTopLevelChildren(rt, ctx,
+        \\function mk() { return function inner() { return G; }; }
+        \\const G = 42;
+        \\mk()();
+    );
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
+}
+
+test "forward-ref lexical captured through nested closure still honors TDZ before init" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // The retrofitted chain must capture the binding's cell (not a snapshot):
+    // calling the closure before `const G` is initialized throws ReferenceError
+    // (TDZ), and the same closure reads 42 once initialized. Result encodes
+    // 2 = ReferenceError thrown pre-init.
+    const result = try vm_helpers.parseStmtAndRunWithTopLevelChildren(rt, ctx,
+        \\function mk() { return function inner() { return G; }; }
+        \\const early = mk();
+        \\let code = 0;
+        \\try { early(); code = 1; } catch (e) { code = (e instanceof ReferenceError) ? 2 : 3; }
+        \\const G = 42;
+        \\code;
+    );
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 2), result.asInt32().?);
+}
+
+test "forward-ref top-level lexical threads through three closure levels" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // Two intermediate functions, neither naming G, must each receive a
+    // propagated closure-var link so the innermost arrow resolves G.
+    const result = try vm_helpers.parseStmtAndRunWithTopLevelChildren(rt, ctx,
+        \\function a() { return function b() { return () => G; }; }
+        \\const G = 7;
+        \\a()()();
+    );
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 7), result.asInt32().?);
+}
+
 test "test262 helpers own SameValue assertions" {
     const run_test262 = @import("../cli/run_test262.zig");
     const same_nan = try run_test262.assertSameValue(core.JSValue.float64(std.math.nan(f64)), core.JSValue.float64(std.math.nan(f64)));
@@ -947,7 +1050,7 @@ test "call subsystem installs and invokes host globals" {
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
     const run_test262 = @import("../cli/run_test262.zig");
     try run_test262.installTest262Globals(rt, @ptrCast(ctx), global);
 
@@ -1054,7 +1157,7 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const math_key = try rt.internAtom("Math");
     defer rt.atoms.free(math_key);
@@ -1625,7 +1728,7 @@ test "number native builtin records cover static and prototype dispatch" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const number_key = try rt.internAtom("Number");
     defer rt.atoms.free(number_key);
@@ -1703,7 +1806,7 @@ test "string static native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const string_key = try rt.internAtom("String");
     defer rt.atoms.free(string_key);
@@ -1754,7 +1857,7 @@ test "string prototype native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const string_key = try rt.internAtom("String");
     defer rt.atoms.free(string_key);
@@ -1811,7 +1914,7 @@ test "date static native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const date_key = try rt.internAtom("Date");
     defer rt.atoms.free(date_key);
@@ -1861,7 +1964,7 @@ test "date constructor native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const date_key = try rt.internAtom("Date");
     defer rt.atoms.free(date_key);
@@ -1889,7 +1992,7 @@ test "date constructor native builtin records ignore dispatch names" {
     try engine.exec.value_ops.appendRawString(rt, &call_buffer, call_result);
     try std.testing.expect(std.mem.indexOf(u8, call_buffer.items, "GMT+0000") != null);
 
-    const construct_result = try engine.exec.construct.constructValue(rt, fake, &.{core.JSValue.int32(1)}, &.{});
+    const construct_result = try engine.exec.construct.constructValue(ctx, fake, &.{core.JSValue.int32(1)}, &.{});
     defer construct_result.free(rt);
     const construct_ms = try engine.builtins.date.methodCall(rt, construct_result, 1);
     defer construct_ms.free(rt);
@@ -1920,6 +2023,8 @@ test "date constructor native builtin records ignore dispatch names" {
 test "constructValue AggregateError releases copied errors array owner" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
     const name = try rt.internAtom("AggregateError");
     defer rt.atoms.free(name);
@@ -1934,7 +2039,7 @@ test "constructValue AggregateError releases copied errors array owner" {
     try source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), true, false, false));
 
     const baseline_objects = rt.gc.liveCount();
-    const result = try engine.exec.construct.constructValue(rt, constructor, &.{source.value()}, &.{});
+    const result = try engine.exec.construct.constructValue(ctx, constructor, &.{source.value()}, &.{});
     result.free(rt);
     _ = rt.runObjectCycleRemoval();
 
@@ -1948,7 +2053,7 @@ test "date prototype native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const date_key = try rt.internAtom("Date");
     defer rt.atoms.free(date_key);
@@ -2003,7 +2108,7 @@ test "array static native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const array_key = try rt.internAtom("Array");
     defer rt.atoms.free(array_key);
@@ -2049,7 +2154,7 @@ test "array static native builtin records ignore dispatch names" {
     const direct_from_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, array_value, fake_from, &direct_is_array_args);
     defer direct_from_result.free(rt);
     const direct_from_array: *core.Object = @fieldParentPtr("header", direct_from_result.refHeader().?);
-    try std.testing.expect(direct_from_array.is_array);
+    try std.testing.expect(direct_from_array.flags.is_array);
     try std.testing.expectEqual(@as(u32, 1), direct_from_array.length);
 
     const fake_is_array_key = try rt.internAtom("fakeArrayIsArray");
@@ -2078,7 +2183,7 @@ test "array prototype native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const array_key = try rt.internAtom("Array");
     defer rt.atoms.free(array_key);
@@ -2181,7 +2286,7 @@ test "collection native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const map_key = try rt.internAtom("Map");
     defer rt.atoms.free(map_key);
@@ -2306,7 +2411,7 @@ test "buffer native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const array_buffer_key = try rt.internAtom("ArrayBuffer");
     defer rt.atoms.free(array_buffer_key);
@@ -2471,7 +2576,7 @@ test "typed array accessor native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const typed_array_key = try rt.internAtom("TypedArray");
     defer rt.atoms.free(typed_array_key);
@@ -2565,7 +2670,7 @@ test "regexp static native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const regexp_key = try rt.internAtom("RegExp");
     defer rt.atoms.free(regexp_key);
@@ -2619,7 +2724,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const regexp_key = try rt.internAtom("RegExp");
     defer rt.atoms.free(regexp_key);
@@ -2684,7 +2789,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     const exec_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_exec, &direct_args);
     defer exec_result.free(rt);
     const exec_array: *core.Object = @fieldParentPtr("header", exec_result.refHeader().?);
-    try std.testing.expect(exec_array.is_array);
+    try std.testing.expect(exec_array.flags.is_array);
     const first_match = exec_array.getProperty(core.atom.atomFromUInt32(0));
     defer first_match.free(rt);
     try std.testing.expect(first_match.isString());
@@ -2735,7 +2840,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const regexp_key = try rt.internAtom("RegExp");
     defer rt.atoms.free(regexp_key);
@@ -2832,7 +2937,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     const split_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_split, &one_arg);
     defer split_result.free(rt);
     const split_array: *core.Object = @fieldParentPtr("header", split_result.refHeader().?);
-    try std.testing.expect(split_array.is_array);
+    try std.testing.expect(split_array.flags.is_array);
     try std.testing.expectEqual(@as(u32, 2), split_array.length);
 
     const fake_search_key = try rt.internAtom("fakeRegExpSearch");
@@ -2877,7 +2982,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const regexp_key = try rt.internAtom("RegExp");
     defer rt.atoms.free(regexp_key);
@@ -3008,6 +3113,29 @@ test "Engine eval executes test262 helpers through generic call paths" {
     try std.testing.expect(result.isUndefined());
     try std.testing.expectError(error.JSException, js.eval("assert.sameValue(1, 2);"));
     try std.testing.expectError(error.JSException, js.eval("throw new Test262Error('boom');"));
+}
+
+test "shared test engine reset rebuilds global shape hash buckets" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval("assert.sameValue(1 + 1, 2, 'sum');");
+    result.free(js.runtime);
+    try std.testing.expectError(error.JSException, js.eval("assert.sameValue(1, 2);"));
+    try std.testing.expectError(error.JSException, js.eval("throw new Test262Error('boom');"));
+    helpers.endSharedTest();
+
+    const clean = helpers.sharedTestEngine();
+    var output_buffer: [16]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const clean_result = try clean.evalWithOutput(
+        \\"use strict";
+        \\print(this === globalThis);
+    , &stream);
+    defer clean_result.free(clean.runtime);
+
+    try std.testing.expect(clean_result.isUndefined());
+    try std.testing.expectEqualStrings("true\n", stream.buffered());
 }
 
 test "Engine eval strips TypeScript source kind before execution" {
@@ -3153,6 +3281,55 @@ test "Error stack preserves construction frames across delayed access" {
         \\assert.sameValue(typeof stack, "string");
         \\assert.sameValue(stack.indexOf("at makeError") >= 0, true);
         \\assert.sameValue(stack.indexOf("at readStack") < 0, true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "eval SyntaxError carries construction stack" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Pins the createNamedError stack capture: the SyntaxError materialized
+    // for a failed `eval` parse used to carry no call sites, so a delayed
+    // `.stack` read fell back to the reader's frames and lost the
+    // construction frame ("at evalThrower" was absent before the fix).
+    const result = try js.eval(
+        \\function evalThrower() {
+        \\    try { eval("]"); } catch (e) { return e; }
+        \\    return null;
+        \\}
+        \\var evalErr = evalThrower();
+        \\assert.sameValue(evalErr instanceof SyntaxError, true);
+        \\var evalStack = evalErr.stack;
+        \\assert.sameValue(typeof evalStack, "string");
+        \\assert.sameValue(evalStack.length > 0, true);
+        \\assert.sameValue(evalStack.indexOf("at evalThrower") >= 0, true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "TypeError thrown via message helper carries stack exactly once" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Pins the throw*Message relocation: the TypeError thrown for calling a
+    // non-callable keeps its construction stack ("at typeThrower"), and the
+    // frame appears exactly once (no double attach from the former
+    // shell-level capture plus the primitive-level capture).
+    const result = try js.eval(
+        \\function typeThrower() {
+        \\    try { (0)(); } catch (e) { return e; }
+        \\    return null;
+        \\}
+        \\var typeErr = typeThrower();
+        \\assert.sameValue(typeErr instanceof TypeError, true);
+        \\var typeStack = typeErr.stack;
+        \\assert.sameValue(typeof typeStack, "string");
+        \\assert.sameValue(typeStack.length > 0, true);
+        \\assert.sameValue(typeStack.indexOf("at typeThrower") >= 0, true);
+        \\assert.sameValue(typeStack.indexOf("at typeThrower"), typeStack.lastIndexOf("at typeThrower"));
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
@@ -3656,6 +3833,33 @@ test "Engine eval executes simple variable assignment and print" {
     try std.testing.expectEqualStrings("12\n", stream.buffered());
 }
 
+test "Engine eval preserves global lexical write fast path semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let g = 0;
+        \\g = 1;
+        \\function setGlobal() { g = g + 2; }
+        \\setGlobal();
+        \\print(g);
+        \\const c = 1;
+        \\try { c = 2; } catch (e) { print(e.name, c); }
+        \\let shadow = "global";
+        \\function localShadow() { let shadow = "local"; shadow = "changed"; return shadow; }
+        \\print(localShadow(), shadow);
+        \\let withTarget = { g: 10 };
+        \\with (withTarget) { g = 11; }
+        \\print(g, withTarget.g);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("3\nTypeError 1\nchanged global\n3 11\n", stream.buffered());
+}
+
 test "Engine eval assigns contextual await bindings in sloppy scripts" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -3769,6 +3973,240 @@ test "Engine eval routes host output through global function calls" {
     try std.testing.expectEqualStrings("1\nx\n5 function\nok\nalias\n", stream.buffered());
 }
 
+test "Engine eval preserves local numeric add host output semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let a = 1;
+        \\let b = 2;
+        \\print(a + b);
+        \\let max = 2147483647;
+        \\print(max + 1);
+        \\let oldPrint = print;
+        \\print = function(x) { globalThis.seen = "custom:" + x; };
+        \\print(a + b);
+        \\oldPrint(globalThis.seen);
+        \\print = oldPrint;
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("3\n2147483648\ncustom:3\n", stream.buffered());
+}
+
+test "Engine eval preserves collection read host output semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let map = new Map();
+        \\map.set("a", 1);
+        \\print(map.get("a"));
+        \\print(map.has("a"));
+        \\let key = {};
+        \\let weak = new WeakMap();
+        \\weak.set(key, 2);
+        \\print(weak.get(key));
+        \\print(weak.has(key));
+        \\let set = new Set();
+        \\set.add("s");
+        \\print(set.has("s"));
+        \\let weakSetKey = {};
+        \\let weakSet = new WeakSet();
+        \\weakSet.add(weakSetKey);
+        \\print(weakSet.has(weakSetKey));
+        \\let oldGet = Map.prototype.get;
+        \\Map.prototype.get = function(k) { return "custom:" + k; };
+        \\print(map.get("a"));
+        \\Map.prototype.get = oldGet;
+        \\map.get = function(k) { return "own:" + k; };
+        \\print(map.get("a"));
+        \\delete map.get;
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1\ntrue\n2\ntrue\ntrue\ntrue\ncustom:a\nown:a\n", stream.buffered());
+}
+
+test "Engine eval preserves regexp UTF-16 test host output semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let re = new RegExp("\u00e9+", "");
+        \\print(re.test("\u00e9\u00e9"));
+        \\print(re.test("\u0100\u00e9"));
+        \\print(re.test("\u0100"));
+        \\let oldTest = RegExp.prototype.test;
+        \\RegExp.prototype.test = function(input) { return input.length + ":" + (this === re); };
+        \\print(re.test("\u00e9\u00e9"));
+        \\RegExp.prototype.test = oldTest;
+        \\re.test = function(input) { return input.charCodeAt(0); };
+        \\print(re.test("\u00e9\u00e9"));
+        \\delete re.test;
+        \\print(re.test("aa"));
+        \\let execOverride = /a+b/;
+        \\let seenExec = "";
+        \\execOverride.exec = function(input) { seenExec = input + ":" + (this === execOverride); return null; };
+        \\print(execOverride.test("aaab"));
+        \\print(seenExec);
+        \\let globalRe = /a+b/g;
+        \\print(globalRe.test("aaab"), globalRe.lastIndex);
+        \\print(globalRe.test("x"), globalRe.lastIndex);
+        \\let stickyRe = /a/y;
+        \\stickyRe.lastIndex = 1;
+        \\print(stickyRe.test("ba"), stickyRe.lastIndex);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("true\ntrue\nfalse\n2:true\n233\nfalse\nfalse\naaab:true\ntrue 4\nfalse 0\ntrue 2\n", stream.buffered());
+}
+
+test "Engine eval prepared RegExp call observes same-site property changes" {
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let re = /a+b/;
+        \\function hit(input) { return re.test(input); }
+        \\print(hit("aaab"));
+        \\RegExp.prototype.test = function(input) { return "patched:" + input + ":" + (this === re); };
+        \\print(hit("aaab"));
+        \\re.test = function(input) { return "own:" + input; };
+        \\print(hit("aaab"));
+        \\delete re.test;
+        \\print(hit("aaab"));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("true\npatched:aaab:true\nown:aaab\npatched:aaab:true\n", stream.buffered());
+}
+
+test "Engine eval preserves dense array join host output semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let tab = [3, 1, 2];
+        \\tab.sort();
+        \\print(tab.join(","));
+        \\let oldJoin = Array.prototype.join;
+        \\Array.prototype.join = function(separator) { return "custom:" + separator + ":" + this.length; };
+        \\print(tab.join("|"));
+        \\Array.prototype.join = oldJoin;
+        \\tab.join = function(separator) { return "own:" + separator; };
+        \\print(tab.join(","));
+        \\delete tab.join;
+        \\tab[0] = { toString: function() { globalThis.seenJoinObject = "object"; return "obj"; } };
+        \\print(tab.join(","));
+        \\print(globalThis.seenJoinObject);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1,2,3\ncustom:|:3\nown:,\nobj,2,3\nobject\n", stream.buffered());
+}
+
+test "Engine eval preserves dense array pop host output semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let tab = [1, 2];
+        \\print(tab.pop());
+        \\print(tab.length);
+        \\let oldPop = Array.prototype.pop;
+        \\Array.prototype.pop = function() { return "custom:" + this.length; };
+        \\print(tab.pop());
+        \\Array.prototype.pop = oldPop;
+        \\tab.pop = function() { return "own:" + this.length; };
+        \\print(tab.pop());
+        \\delete tab.pop;
+        \\let accessorTab = [1];
+        \\Object.defineProperty(accessorTab, "0", { get: function() { globalThis.seenPopGetter = "getter"; return 9; }, configurable: true });
+        \\print(accessorTab.pop());
+        \\print(accessorTab.length);
+        \\print(globalThis.seenPopGetter);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("2\n1\ncustom:1\nown:1\n9\n0\ngetter\n", stream.buffered());
+}
+
+test "Engine eval preserves ordinary array pop fast path semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let a = [1, 2, 3];
+        \\let x = a.pop();
+        \\print(x, a.length, a.join(","));
+        \\let extra = [1, 2];
+        \\print(extra.pop(0), extra.length, extra.join(","));
+        \\let b = [1];
+        \\b.length = 2;
+        \\print(b.pop(), b.length);
+        \\Object.prototype[1] = 7;
+        \\let c = [1];
+        \\c.length = 2;
+        \\print(c.pop(), c.length);
+        \\delete Object.prototype[1];
+        \\let d = [1, 2];
+        \\Object.defineProperty(d, "1", { value: 2, configurable: false });
+        \\try {
+        \\    print(d.pop());
+        \\} catch (e) {
+        \\    print(e.name, d.length, d[1]);
+        \\}
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("3 2 1,2\n2 1 1\nundefined 1\n7 1\nTypeError 2 2\n", stream.buffered());
+}
+
+test "Engine eval preserves simple closure call host output semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function counter() { let n = 0; return function () { n++; return n; }; }
+        \\let next = counter();
+        \\print(next());
+        \\print(next());
+        \\let oldPrint = print;
+        \\print = function(x) { globalThis.seenClosureCall = "[" + x + "]"; };
+        \\print(next());
+        \\oldPrint(globalThis.seenClosureCall);
+        \\print = oldPrint;
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1\n2\n[3]\n", stream.buffered());
+}
+
 test "Engine eval preserves one-shot array literal host output semantics" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -3864,6 +4302,31 @@ test "Engine eval preserves typed array constructor length host output semantics
     try std.testing.expectEqualStrings("4\ntrue\nprint:4\n99\n", stream.buffered());
 }
 
+test "Engine eval preserves Int32Array indexed read fast path semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let a = new Int32Array(2);
+        \\a[0] = 7;
+        \\a[1] = -3;
+        \\print(a[0], a[1], a[2]);
+        \\Object.prototype[0] = 9;
+        \\let b = new Int32Array(0);
+        \\print(b[0]);
+        \\delete Object.prototype[0];
+        \\let c = new Int32Array(1);
+        \\c.buffer.transfer();
+        \\print(c[0]);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("7 -3 undefined\nundefined\nundefined\n", stream.buffered());
+}
+
 test "Engine eval executes simple template interpolation" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -3928,6 +4391,64 @@ test "Engine eval executes simple functions and arrows" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("5\n42\n720\n12\nobject\n", stream.buffered());
+}
+
+test "Phase 7: arrow and method tail calls reuse inline frames for deep recursion" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    // Each recursion goes 40000 deep — past both the native-recursion limit
+    // (`max(16, stack_limit/16384)`) and the inline-frame storage cap
+    // (`max_chunks * entries_per_chunk` = 8192), so it only completes if the
+    // tail call REUSES the inline frame rather than pushing a new one (Phase 7).
+    // test262 has no coverage for deep tail recursion at the arrow or method
+    // position, so this is the self-built fixture. Arrows gained inline
+    // eligibility (lexical this/new.target routed through the shared frame-setup
+    // boxing primitive); `tail_call_method` reuses the frame with the receiver
+    // as `this` (mutual `even`/`odd` and self `loop`).
+    const result = try js.evalWithOutput(
+        \\const arrowTail = (n, acc) => n === 0 ? acc : arrowTail(n - 1, acc + 1);
+        \\print(arrowTail(40000, 0));
+        \\const machine = {
+        \\  even(n) { return n === 0 ? "even" : this.odd(n - 1); },
+        \\  odd(n) { return n === 0 ? "odd" : this.even(n - 1); },
+        \\};
+        \\print(machine.even(40000));
+        \\const counter = { loop(n, acc) { return n === 0 ? acc : this.loop(n - 1, acc + n); } };
+        \\print(counter.loop(40000, 0));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("40000\neven\n800020000\n", stream.buffered());
+}
+
+test "Phase 7: inlined arrow keeps lexical this and ignores any receiver" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    // An arrow captures `this` lexically; once it is inline-eligible, the shared
+    // frame setup must still bind the lexical `this` (not the plain-call default
+    // or the method receiver). `bound.call(other)`/`carrier.m()` must not change
+    // the arrow's `this`.
+    const result = try js.evalWithOutput(
+        \\const lex = { tag: "LEX" };
+        \\function make() { return () => this.tag; }
+        \\const bound = make.call(lex);
+        \\print(bound());
+        \\const carrier = { tag: "CARRIER", m: bound };
+        \\print(carrier.m());
+        \\const obj = { name: "outer", run() { const a = () => this.name; return a(); } };
+        \\print(obj.run());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("LEX\nLEX\nouter\n", stream.buffered());
 }
 
 test "Engine eval Function.prototype.toString returns source or native text" {
@@ -4061,6 +4582,78 @@ test "Engine eval preserves one-shot object missing field host output semantics"
     try std.testing.expectEqualStrings("true\nfalse\ncustom:true\nfalse\n", stream.buffered());
 }
 
+test "Engine eval preserves local string substring host output semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let s = "abcdef";
+        \\print(s.substring(4, 1));
+        \\print(s.substring(2));
+        \\print(s.substring());
+        \\let oldSubstring = String.prototype.substring;
+        \\String.prototype.substring = function(start, end) {
+        \\  return "custom:" + this + ":" + start + ":" + end;
+        \\};
+        \\print(s.substring(4, 1));
+        \\String.prototype.substring = oldSubstring;
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("bcd\ncdef\nabcdef\ncustom:abcdef:4:1\n", stream.buffered());
+}
+
+test "Engine eval preserves ASCII string integer literal concat semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\print("a" + 1);
+        \\print("a" + -1);
+        \\print("" + 12345);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("a1\na-1\n12345\n", stream.buffered());
+}
+
+test "Engine eval preserves simple for-in mutation semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let obj = { a: 1, b: 2, c: 3 };
+        \\let keys = "";
+        \\for (var k in obj) {
+        \\  keys += k;
+        \\  if (k === "a") delete obj.b;
+        \\}
+        \\print(keys);
+        \\let obj2 = { a: 1, b: 2 };
+        \\keys = "";
+        \\for (var k in obj2) {
+        \\  keys += k;
+        \\  if (k === "a") {
+        \\    delete obj2.b;
+        \\    obj2.b = 3;
+        \\  }
+        \\}
+        \\print(keys);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("ac\nab\n", stream.buffered());
+}
+
 test "Engine runJobs preserves pending JS exceptions for callers" {
     var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
@@ -4150,6 +4743,39 @@ test "host commonjs wrapper passes directory dirname" {
     try std.testing.expectEqualStrings("", stream.buffered());
 }
 
+test "import bytes module creates immutable ArrayBuffer backing store" {
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const dir = ".zig-cache/module-import-bytes-immutable-test";
+    const bytes_path = dir ++ "/payload.bin";
+    const main_path = dir ++ "/main.mjs";
+    std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, dir);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = bytes_path, .data = "ABC" });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = main_path, .data =
+        \\import value from "./payload.bin" with { type: "bytes" };
+        \\print(value instanceof Uint8Array);
+        \\print(value.buffer instanceof ArrayBuffer);
+        \\print(value.length);
+        \\print(value[0]);
+        \\print(value.buffer.immutable);
+        \\print(Object.hasOwn(value.buffer, "immutable"));
+        \\try { value.buffer.resize(0); print("resize-ok"); } catch (e) { print(e.name); }
+        \\try { value.buffer.transfer(); print("transfer-ok"); } catch (e) { print(e.name); }
+    });
+
+    var output_buffer: [128]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, main_path, std.testing.allocator, .limited(2048));
+    defer std.testing.allocator.free(source);
+    const result = try js.evalFileModuleGraphWithOutput(source, &output, main_path, std.testing.io, std.testing.allocator, 2048);
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings("true\ntrue\n3\n65\ntrue\nfalse\nTypeError\nTypeError\n", output.buffered());
+}
+
 const HostFixtureModule = struct {
     specifier: []const u8,
     path: []const u8,
@@ -4212,4 +4838,149 @@ fn loadFixtureModule(
         .kind = module.kind,
         .owned = false,
     };
+}
+
+// Bootstrap-integration tests relocated from src/exec/{call,zjs_vm}.zig during
+// Phase 6b-3 STEP 7B. They build a bare `core.JSRuntime` and install the
+// standard globals through `rt.installStandardGlobals`, which needs the builtins
+// installer wired; exec source must not name the builtins registry, so they live
+// here where the test tree may import builtins (via `helpers.installHostGlobalsBare`).
+
+test "host global bootstrap installs and tears down builtin plus host domains" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+    global.flags.is_global = true;
+    defer global.value().free(rt);
+
+    try helpers.installHostGlobalsBare(rt, global);
+}
+
+test "engine eval host globals and throw intrinsic tear down cleanly" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+    global.flags.is_global = true;
+    defer global.value().free(rt);
+
+    try helpers.installHostGlobalsBare(rt, global);
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+
+    const value = try engine.exec.eval_entry.eval(ctx, "print(1);", .{ .output = &output });
+    defer value.free(rt);
+
+    try std.testing.expect(value.isUndefined());
+    try std.testing.expectEqualStrings("1\n", output.buffered());
+}
+
+const ReflectActiveRootSymbolProbe = struct {
+    rt: *core.JSRuntime,
+    atom_id: u32,
+    saw_symbol: bool = false,
+    trace_failed: bool = false,
+
+    fn trigger(context: ?*anyopaque, size: usize) void {
+        _ = size;
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const saved_trigger_fn = self.rt.memory.trigger_gc_fn;
+        const saved_trigger_ctx = self.rt.memory.trigger_gc_ctx;
+        self.rt.memory.trigger_gc_fn = null;
+        self.rt.memory.trigger_gc_ctx = null;
+        defer {
+            self.rt.memory.trigger_gc_fn = saved_trigger_fn;
+            self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+        }
+        var visitor = core.runtime.RootVisitor{
+            .context = self,
+            .visit_value = @This().visitValue,
+            .visit_object = @This().visitObject,
+        };
+        self.rt.traceActiveRoots(&visitor) catch {
+            self.trace_failed = true;
+        };
+    }
+
+    fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (slot.asSymbolAtom()) |atom_id| {
+            if (atom_id == self.atom_id) self.saw_symbol = true;
+        }
+    }
+
+    fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
+        _ = context;
+        _ = slot;
+    }
+};
+
+fn reflectTestSetArrayIndex(rt: *core.JSRuntime, array: *core.Object, index: u32, value: core.JSValue) !void {
+    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, true, true, true));
+    if (array.length <= index) array.length = index + 1;
+}
+
+test "reflect construct roots argument list while resolving prototype" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // `reflectConstruct` routes builtin construction (Array, like Date/RegExp/
+    // String) through the internal record table, so the realm globals must be
+    // installed to wire `rt.internal_builtins` before the construct record is
+    // reachable.
+    const realm_global = try core.Object.create(rt, core.class.ids.object, null);
+    realm_global.flags.is_global = true;
+    defer realm_global.value().free(rt);
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    rt.install_standard_globals_cb = engine.builtins.registry.installStandardGlobals;
+    rt.standard_global_own_property_capacity = engine.builtins.registry.standardGlobalOwnPropertyCapacity();
+    try rt.installStandardGlobals(realm_global);
+
+    const target = try core.function.nativeFunction(rt, "Array", 1);
+    defer target.free(rt);
+    const new_target = try core.function.nativeFunction(rt, "Array", 1);
+    defer new_target.free(rt);
+    const new_target_object = engine.exec.call.thisObject(new_target) orelse return error.TypeError;
+    try new_target_object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(core.JSValue.int32(1), true, false, true));
+
+    const args_object = try core.Object.createArray(rt, null);
+    var args_alive = true;
+    defer if (args_alive) args_object.value().free(rt);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-reflect-construct-argument-root");
+    try reflectTestSetArrayIndex(rt, args_object, 0, core.JSValue.symbol(symbol_atom));
+
+    const saved_trigger_fn = rt.memory.trigger_gc_fn;
+    const saved_trigger_ctx = rt.memory.trigger_gc_ctx;
+    var probe = ReflectActiveRootSymbolProbe{
+        .rt = rt,
+        .atom_id = symbol_atom,
+    };
+    rt.memory.trigger_gc_fn = ReflectActiveRootSymbolProbe.trigger;
+    rt.memory.trigger_gc_ctx = &probe;
+    defer {
+        rt.memory.trigger_gc_fn = saved_trigger_fn;
+        rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+    }
+
+    var globals = [_]engine.exec.globals.Slot{};
+    const reflect_args = [_]core.JSValue{ target, args_object.value(), new_target };
+    const result = try engine.exec.reflect_ops.reflectConstruct(ctx, &reflect_args, globals[0..]);
+    var result_alive = true;
+    defer if (result_alive) result.free(rt);
+
+    try std.testing.expect(!probe.trace_failed);
+    try std.testing.expect(probe.saw_symbol);
+
+    args_object.value().free(rt);
+    args_alive = false;
+    result.free(rt);
+    result_alive = false;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }

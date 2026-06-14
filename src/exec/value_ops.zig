@@ -2,7 +2,7 @@ const bytecode = @import("../bytecode/root.zig");
 const core = @import("../core/root.zig");
 const dtoa = @import("../libs/dtoa.zig");
 const bignum = @import("../libs/bignum.zig");
-const symbol_builtin = @import("../builtins/symbol.zig");
+const unicode_lib = @import("../libs/unicode.zig");
 const std = @import("std");
 
 pub const AppendStringError = error{
@@ -219,7 +219,7 @@ pub fn length(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isObject()) {
         const header = value.refHeader() orelse return error.TypeError;
         const object_value: *core.Object = @fieldParentPtr("header", header);
-        if (object_value.is_array) {
+        if (object_value.flags.is_array) {
             if (object_value.length <= @as(u32, @intCast(std.math.maxInt(i32)))) {
                 return core.JSValue.int32(@intCast(object_value.length));
             }
@@ -375,7 +375,7 @@ fn primitiveToStringValueFast(rt: *core.JSRuntime, value: core.JSValue) !?core.J
         if (std.math.isNan(float_value)) return try createAsciiStringValue(rt, "NaN");
         if (std.math.isPositiveInf(float_value)) return try createAsciiStringValue(rt, "Infinity");
         if (std.math.isNegativeInf(float_value)) return try createAsciiStringValue(rt, "-Infinity");
-        if (isNegativeZero(float_value)) return try createAsciiStringValue(rt, "0");
+        if (std.math.isNegativeZero(float_value)) return try createAsciiStringValue(rt, "0");
         var float_buf: [64]u8 = undefined;
         return try createAsciiStringValue(rt, try formatFiniteNumber(&float_buf, float_value));
     }
@@ -409,6 +409,7 @@ pub fn toNumberValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isNull()) return core.JSValue.int32(0);
     if (value.isString()) {
         const str = stringObject(value).?;
+        try str.ensureFlat(rt);
         switch (str.resolveData()) {
             .latin1 => |bytes| {
                 if (fastStringToInt32(bytes)) |val| return core.JSValue.int32(val);
@@ -462,7 +463,7 @@ pub fn asN(rt: *core.JSRuntime, bits_value: core.JSValue, bigint_value: core.JSV
 pub fn numberToValue(value: f64) core.JSValue {
     if (value >= -2147483648 and value <= 2147483647) {
         const int_val: i32 = @intFromFloat(value);
-        if (@as(f64, @floatFromInt(int_val)) == value and !isNegativeZero(value)) {
+        if (@as(f64, @floatFromInt(int_val)) == value and !std.math.isNegativeZero(value)) {
             return core.JSValue.int32(int_val);
         }
     }
@@ -474,7 +475,7 @@ pub fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
         const cached = try rt.emptyString();
         return cached.value().dup();
     }
-    const str = if (isAsciiBytes(bytes))
+    const str = if (core.string.isAsciiBytes(bytes))
         try core.string.String.createAscii(rt, bytes)
     else
         try core.string.String.createUtf8(rt, bytes);
@@ -489,15 +490,8 @@ fn createAsciiStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue 
     return (try core.string.String.createAscii(rt, bytes)).value();
 }
 
-fn isAsciiBytes(bytes: []const u8) bool {
-    for (bytes) |byte| {
-        if (byte >= 0x80) return false;
-    }
-    return true;
-}
-
 pub fn createBigIntI128(rt: *core.JSRuntime, value: i128) !core.JSValue {
-    if (value >= std.math.minInt(i64) and value <= std.math.maxInt(i64)) {
+    if (core.JSValue.shortBigIntFits(value)) {
         return core.JSValue.shortBigInt(@intCast(value));
     }
     const big = try core.bigint.BigInt.create(rt, value);
@@ -508,8 +502,10 @@ pub fn createBigIntOwned(rt: *core.JSRuntime, value: bignum.BigInt) !core.JSValu
     var owned = value;
     errdefer owned.deinit();
     if (owned.toI64()) |val| {
-        owned.deinit();
-        return core.JSValue.shortBigInt(val);
+        if (core.JSValue.shortBigIntFits(val)) {
+            owned.deinit();
+            return core.JSValue.shortBigInt(val);
+        }
     }
     const big = try core.bigint.BigInt.createFromOwned(rt, owned);
     return big.valueRef();
@@ -517,15 +513,17 @@ pub fn createBigIntOwned(rt: *core.JSRuntime, value: bignum.BigInt) !core.JSValu
 
 pub fn createBigIntValue(rt: *core.JSRuntime, value: bignum.BigInt) !core.JSValue {
     if (value.toI64()) |val| {
-        return core.JSValue.shortBigInt(val);
+        if (core.JSValue.shortBigIntFits(val)) {
+            return core.JSValue.shortBigInt(val);
+        }
     }
     const big = try core.bigint.BigInt.createFromBigInt(rt, value);
     return big.valueRef();
 }
 
 pub fn numberValue(value: core.JSValue) ?f64 {
-    if (value.tag == core.Tag.int) return @floatFromInt(value.asInt32().?);
-    if (value.tag == core.Tag.float64) return value.asFloat64().?;
+    if (value.isInt()) return @floatFromInt(value.asInt32().?);
+    if (value.isFloat64()) return value.asFloat64().?;
     return null;
 }
 
@@ -598,23 +596,7 @@ pub fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt
 }
 
 pub fn isTruthy(value: core.JSValue) bool {
-    if (isHTMLDDA(value)) return false;
-    if (value.isUndefined() or value.isNull()) return false;
-    if (value.asBool()) |bool_value| return bool_value;
-    if (value.asInt32()) |int_value| return int_value != 0;
-    if (value.asFloat64()) |float_value| return float_value != 0 and !std.math.isNan(float_value);
-    if (value.asShortBigInt()) |bigint_value| return bigint_value != 0;
-    if (value.isBigInt()) {
-        var zero_scratch: [2]bignum.Limb = undefined;
-        const parts = bigIntParts(value, &zero_scratch) orelse return true;
-        return !(parts.limbs.len == 0 or (parts.limbs.len == 1 and parts.limbs[0] == 0));
-    }
-    if (value.isString()) {
-        const header = value.refHeader() orelse return false;
-        const string_value: *core.string.String = @fieldParentPtr("header", header);
-        return string_value.len() != 0;
-    }
-    return true;
+    return core.value_semantics.toBoolean(value);
 }
 
 pub fn isFunctionObject(value: core.JSValue) bool {
@@ -644,6 +626,7 @@ pub fn atomNameEql(rt: *core.JSRuntime, atom_id: core.Atom, name: []const u8) bo
 pub fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
         .utf16 => |units| try appendUtf16AsUtf8(rt, buffer, units),
@@ -652,7 +635,7 @@ pub fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: c
 
 pub fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
     if (value.asSymbolAtom()) |atom_id| {
-        const description = symbol_builtin.description(&rt.atoms, atom_id) orelse "";
+        const description = core.symbol.description(&rt.atoms, atom_id) orelse "";
         try buffer.appendSlice(rt.memory.allocator, "Symbol(");
         try buffer.appendSlice(rt.memory.allocator, description);
         try buffer.append(rt.memory.allocator, ')');
@@ -667,23 +650,15 @@ pub fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value:
             try buffer.appendSlice(rt.memory.allocator, "Infinity");
         } else if (std.math.isNegativeInf(float_value)) {
             try buffer.appendSlice(rt.memory.allocator, "-Infinity");
-        } else if (isNegativeZero(float_value)) {
+        } else if (std.math.isNegativeZero(float_value)) {
             try buffer.append(rt.memory.allocator, '0');
         } else {
             var float_buf: [64]u8 = undefined;
             const printed = try formatFiniteNumber(&float_buf, float_value);
             try buffer.appendSlice(rt.memory.allocator, printed);
         }
-    } else if (value.asShortBigInt()) |bigint_value| {
-        var bigint_buf: [32]u8 = undefined;
-        const printed = dtoa.formatInt64(&bigint_buf, bigint_value);
-        try buffer.appendSlice(rt.memory.allocator, printed);
     } else if (value.isBigInt()) {
-        var big = try cloneBigIntValue(rt, value);
-        defer big.deinit();
-        const printed = try big.formatBase10Alloc(rt.memory.allocator);
-        defer rt.memory.allocator.free(printed);
-        try buffer.appendSlice(rt.memory.allocator, printed);
+        try core.value_format.appendBigIntBase10(rt.memory.allocator, buffer, value);
     } else if (value.asBool()) |bool_value| {
         try buffer.appendSlice(rt.memory.allocator, if (bool_value) "true" else "false");
     } else if (value.isUndefined()) {
@@ -693,6 +668,7 @@ pub fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value:
     } else if (value.isString()) {
         const header = value.refHeader() orelse return;
         const string_value: *core.string.String = @fieldParentPtr("header", header);
+        try string_value.ensureFlat(rt);
         switch (string_value.resolveData()) {
             .latin1 => |bytes| {
                 for (bytes) |byte| try appendUtf8CodePoint(rt, buffer, byte);
@@ -709,7 +685,7 @@ pub fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value:
             try buffer.appendSlice(rt.memory.allocator, "[object ArrayBuffer]");
         } else if (object_value.class_id == core.class.ids.promise) {
             try buffer.appendSlice(rt.memory.allocator, "[object Promise]");
-        } else if (object_value.is_array) {
+        } else if (object_value.flags.is_array) {
             try appendArrayString(rt, buffer, object_value);
         } else {
             try buffer.appendSlice(rt.memory.allocator, "[object Object]");
@@ -720,56 +696,7 @@ pub fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value:
 }
 
 pub fn formatFiniteNumber(buffer: []u8, value: f64) ![]const u8 {
-    if (formatSimpleFiniteDecimal(buffer, value)) |text| return text;
-    return dtoa.formatNumber(buffer, value);
-}
-
-fn formatSimpleFiniteDecimal(buffer: []u8, value: f64) ?[]const u8 {
-    if (!std.math.isFinite(value)) return null;
-    if (value == 0) return null;
-    const abs_value = @abs(value);
-    if (abs_value < 1e-6 or abs_value >= 1e21) return null;
-
-    const scaled = value * 10.0;
-    if (!std.math.isFinite(scaled)) return null;
-    if (@abs(scaled) > 9007199254740991.0) return null;
-    if (@trunc(scaled) != scaled) return null;
-
-    const scaled_int: i64 = @intFromFloat(scaled);
-    const sign_len: usize = if (scaled_int < 0) 1 else 0;
-    const magnitude: u64 = @intCast(if (scaled_int < 0) -scaled_int else scaled_int);
-    const integer = magnitude / 10;
-    const fraction: u8 = @intCast(magnitude % 10);
-
-    if (fraction == 0) {
-        const needed = sign_len + 20;
-        if (buffer.len < needed) return null;
-        var temp: [32]u8 = undefined;
-        const digits = dtoa.formatInt64(&temp, @intCast(integer));
-        if (sign_len + digits.len > buffer.len) return null;
-        var index: usize = 0;
-        if (scaled_int < 0) {
-            buffer[index] = '-';
-            index += 1;
-        }
-        @memcpy(buffer[index .. index + digits.len], digits);
-        return buffer[0 .. index + digits.len];
-    }
-
-    var temp: [32]u8 = undefined;
-    const digits = dtoa.formatInt64(&temp, @intCast(integer));
-    const total_len = sign_len + digits.len + 2;
-    if (total_len > buffer.len) return null;
-    var index: usize = 0;
-    if (scaled_int < 0) {
-        buffer[index] = '-';
-        index += 1;
-    }
-    @memcpy(buffer[index .. index + digits.len], digits);
-    index += digits.len;
-    buffer[index] = '.';
-    buffer[index + 1] = '0' + fraction;
-    return buffer[0..total_len];
+    return core.value_format.formatFiniteNumber(buffer, value);
 }
 
 fn normalizeExponentSign(buffer: []u8, len: usize) []const u8 {
@@ -785,39 +712,11 @@ fn normalizeExponentSign(buffer: []u8, len: usize) []const u8 {
 }
 
 fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32) !void {
-    if (cp <= 0x7f) {
-        try buffer.append(rt.memory.allocator, @intCast(cp));
-    } else if (cp <= 0x7ff) {
-        try buffer.append(rt.memory.allocator, @intCast(0xc0 | (cp >> 6)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
-    } else if (cp <= 0xffff) {
-        try buffer.append(rt.memory.allocator, @intCast(0xe0 | (cp >> 12)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
-    } else {
-        try buffer.append(rt.memory.allocator, @intCast(0xf0 | (cp >> 18)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 12) & 0x3f)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
-    }
+    return unicode_lib.appendUtf8CodePoint(rt.memory.allocator, buffer, cp);
 }
 
 fn appendUtf16AsUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), units: []const u16) !void {
-    var index: usize = 0;
-    while (index < units.len) : (index += 1) {
-        const unit = units[index];
-        if (unit >= 0xd800 and unit <= 0xdbff and index + 1 < units.len) {
-            const next = units[index + 1];
-            if (next >= 0xdc00 and next <= 0xdfff) {
-                const high: u32 = @intCast(unit - 0xd800);
-                const low: u32 = @intCast(next - 0xdc00);
-                try appendUtf8CodePoint(rt, buffer, 0x10000 + (high << 10) + low);
-                index += 1;
-                continue;
-            }
-        }
-        try appendUtf8CodePoint(rt, buffer, unit);
-    }
+    return unicode_lib.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units);
 }
 
 fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue {
@@ -921,7 +820,7 @@ pub fn shortBigIntBinary(op: u8, lhs: i64, rhs: i64) ?core.JSValue {
 
 pub fn shortBigIntUnary(op: u8, value: i64) ?core.JSValue {
     return switch (op) {
-        bytecode.opcode.op.neg => if (value == std.math.minInt(i64)) null else core.JSValue.shortBigInt(-value),
+        bytecode.opcode.op.neg => shortBigIntSub(0, value),
         bytecode.opcode.op.dec, bytecode.opcode.op.post_dec => shortBigIntSub(value, 1),
         bytecode.opcode.op.inc, bytecode.opcode.op.post_inc => shortBigIntAdd(value, 1),
         bytecode.opcode.op.not => core.JSValue.shortBigInt(~value),
@@ -932,18 +831,21 @@ pub fn shortBigIntUnary(op: u8, value: i64) ?core.JSValue {
 fn shortBigIntAdd(lhs: i64, rhs: i64) ?core.JSValue {
     const result = @addWithOverflow(lhs, rhs);
     if (result[1] != 0) return null;
+    if (!core.JSValue.shortBigIntFits(result[0])) return null;
     return core.JSValue.shortBigInt(result[0]);
 }
 
 fn shortBigIntSub(lhs: i64, rhs: i64) ?core.JSValue {
     const result = @subWithOverflow(lhs, rhs);
     if (result[1] != 0) return null;
+    if (!core.JSValue.shortBigIntFits(result[0])) return null;
     return core.JSValue.shortBigInt(result[0]);
 }
 
 fn shortBigIntMul(lhs: i64, rhs: i64) ?core.JSValue {
     const result = @mulWithOverflow(lhs, rhs);
     if (result[1] != 0) return null;
+    if (!core.JSValue.shortBigIntFits(result[0])) return null;
     return core.JSValue.shortBigInt(result[0]);
 }
 
@@ -972,10 +874,10 @@ fn toInt32(rt: *core.JSRuntime, value: core.JSValue) !i32 {
 
 fn stringAdd(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValue {
     if (a.isSymbol() or b.isSymbol()) return error.TypeError;
-    if (a.isString() and b.tag == core.Tag.int) {
+    if (a.isString() and b.isInt()) {
         if (try stringAddStringInt(rt, a, b.asInt32().?, .suffix)) |out| return out;
     }
-    if (a.tag == core.Tag.int and b.isString()) {
+    if (a.isInt() and b.isString()) {
         if (try stringAddStringInt(rt, b, a.asInt32().?, .prefix)) |out| return out;
     }
     if (a.isString() and b.isString()) return stringAddStrings(rt, a, b);
@@ -995,6 +897,36 @@ fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value
     const string = stringObject(string_value) orelse return null;
     if (string.len() == 0) {
         return try toStringValue(rt, core.JSValue.int32(int_value));
+    }
+
+    // Rope-backed strings must not be flattened by borrowLatin1; append the
+    // formatted digits into the rope's tail when the wrapper is exclusively
+    // held, otherwise chain them through another rope node.
+    if (string.isRope()) {
+        if (position == .suffix) {
+            if (string_value.refHeader()) |header| {
+                if (header.rc == 1) {
+                    var digits_buf: [16]u8 = undefined;
+                    const digits = dtoa.formatInt32(&digits_buf, int_value);
+                    if (try string.appendRopeTail(rt, .{ .latin1 = digits })) {
+                        return string_value.dup();
+                    }
+                }
+            }
+        }
+        const digits_value = try toStringValue(rt, core.JSValue.int32(int_value));
+        const digits_string = stringObject(digits_value) orelse {
+            digits_value.free(rt);
+            return null;
+        };
+        const left = if (position == .prefix) digits_string else string;
+        const right = if (position == .prefix) string else digits_string;
+        const out = core.string.String.createRope(rt, left, right) catch |err| {
+            digits_value.free(rt);
+            return err;
+        };
+        digits_value.free(rt);
+        return out.value();
     }
 
     const string_bytes = string.borrowLatin1() orelse return null;
@@ -1020,36 +952,13 @@ fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value
     }
 
     var int_buf: [16]u8 = undefined;
-    const digits = formatI32Decimal(&int_buf, int_value);
+    const digits = dtoa.formatInt32(&int_buf, int_value);
 
     const out = switch (position) {
         .prefix => try core.string.String.createLatin1Concat(rt, digits, string_bytes),
         .suffix => try core.string.String.createLatin1Concat(rt, string_bytes, digits),
     };
     return out.value();
-}
-
-fn formatI32Decimal(buffer: *[16]u8, value: i32) []const u8 {
-    if (value == 0) {
-        buffer[buffer.len - 1] = '0';
-        return buffer[buffer.len - 1 ..];
-    }
-
-    var index = buffer.len;
-    var magnitude: u32 = if (value < 0)
-        @as(u32, @intCast(-(value + 1))) + 1
-    else
-        @intCast(value);
-    while (magnitude != 0) {
-        index -= 1;
-        buffer[index] = '0' + @as(u8, @intCast(magnitude % 10));
-        magnitude /= 10;
-    }
-    if (value < 0) {
-        index -= 1;
-        buffer[index] = '-';
-    }
-    return buffer[index..];
 }
 
 fn stringAddStrings(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValue {
@@ -1059,10 +968,28 @@ fn stringAddStrings(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core
     const b_len = b_string.len();
     if (a_len == 0) return b.dup();
     if (b_len == 0) return a.dup();
-    if (a.refHeader()) |header| {
-        if (header.rc == 1 and try appendStringInPlace(rt, a_string, b_string)) {
-            return a.dup();
+    // rc==1: the caller holds the only reference, so the lhs is consumed by
+    // this add and may be extended in place (flat capacity append, or rope
+    // tail append when the lhs is an unmaterialized rope). A rope rhs keeps
+    // the deferred rope-of-rope linking below instead of being copied.
+    if (!b_string.isRope()) {
+        if (a.refHeader()) |header| {
+            if (header.rc == 1 and try appendStringInPlace(rt, a_string, b_string)) {
+                return a.dup();
+            }
         }
+    }
+    // If either operand already is a rope, concatenating eagerly would flatten
+    // it; chain another rope node instead (ropes are always >= rope_min_len).
+    if (a_string.isRope() or b_string.isRope()) {
+        const out = try core.string.String.createRope(rt, a_string, b_string);
+        return out.value();
+    }
+    // Long concatenations defer the copy through a rope node (QuickJS
+    // JSStringRope analogue); content materializes lazily on first read.
+    if (a_len + b_len >= core.string.String.rope_min_len) {
+        const out = try core.string.String.createRope(rt, a_string, b_string);
+        return out.value();
     }
     // Fast path: both operands are latin1. We allocate the result string
     // directly and memcpy in place, skipping the ArrayList intermediate
@@ -1096,6 +1023,15 @@ fn stringAddStrings(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core
 }
 
 fn appendStringInPlace(rt: *core.JSRuntime, lhs_string: *core.string.String, rhs_string: *core.string.String) !bool {
+    // Rope lhs: never resolve it here (resolveData() would flatten it
+    // eagerly). An unmaterialized rope grows through its private tail
+    // buffer instead of chaining one node per append; a rope rhs keeps the
+    // rope-of-rope linking so its own deferred content stays lazy.
+    if (lhs_string.isRope()) {
+        if (rhs_string.isRope()) return false;
+        return lhs_string.appendRopeTail(rt, rhs_string.resolveData());
+    }
+    try rhs_string.ensureFlat(rt);
     return switch (rhs_string.resolveData()) {
         .latin1 => |rhs_bytes| switch (lhs_string.resolveData()) {
             .latin1 => try lhs_string.appendLatin1InPlace(rt, rhs_bytes),
@@ -1134,6 +1070,7 @@ pub fn tryAppendLatin1AtomRepeatedInPlace(rt: *core.JSRuntime, lhs: core.JSValue
 
 pub fn latin1AtomRepeatedConcatValue(rt: *core.JSRuntime, lhs: core.JSValue, atom_id: core.Atom, repeat_count: usize) !?core.JSValue {
     const lhs_string = stringObject(lhs) orelse return null;
+    try lhs_string.ensureFlat(rt);
     const lhs_bytes = switch (lhs_string.resolveData()) {
         .latin1 => |bytes| bytes,
         .utf16 => return null,
@@ -1144,7 +1081,7 @@ pub fn latin1AtomRepeatedConcatValue(rt: *core.JSRuntime, lhs: core.JSValue, ato
         if (byte > 0x7f) return null;
     }
     if (suffix.len == 0 or repeat_count == 0) return lhs.dup();
-    const out = try core.string.String.createLatin1RepeatedConcatWithSeed(rt, lhs_bytes, suffix, repeat_count, lhs_string.hash);
+    const out = try core.string.String.createLatin1RepeatedConcatWithSeed(rt, lhs_bytes, suffix, repeat_count, lhs_string.contentHash());
     return out.value();
 }
 
@@ -1163,9 +1100,7 @@ fn percentHexConcat(rt: *core.JSRuntime, a: []const u8, b: []const u8) !?core.JS
 }
 
 fn upperHexValue(byte: u8) ?u8 {
-    if (byte >= '0' and byte <= '9') return byte - '0';
-    if (byte >= 'A' and byte <= 'F') return byte - 'A' + 10;
-    return null;
+    return unicode_lib.asciiUpperHexDigitValueByte(byte);
 }
 
 fn stringObject(value: core.JSValue) ?*core.string.String {
@@ -1214,99 +1149,8 @@ fn shiftBigInt(allocator: std.mem.Allocator, lhs: bignum.BigInt, rhs: bignum.Big
     };
 }
 
-fn isNegativeZero(value: f64) bool {
-    return value == 0 and std.math.isNegativeInf(1.0 / value);
-}
-
 fn parseJsNumber(bytes: []const u8) f64 {
-    const trimmed = trimJsWhitespace(bytes);
-    if (trimmed.len == 0) return 0;
-    if (std.mem.indexOfScalar(u8, trimmed, '_') != null) return std.math.nan(f64);
-    if (hasSignedRadixPrefix(trimmed)) return std.math.nan(f64);
-    if (std.mem.eql(u8, trimmed, "Infinity") or std.mem.eql(u8, trimmed, "+Infinity")) return std.math.inf(f64);
-    if (std.mem.eql(u8, trimmed, "-Infinity")) return -std.math.inf(f64);
-    if (trimmed.len >= 2 and trimmed[0] == '0' and (trimmed[1] == 'x' or trimmed[1] == 'X')) {
-        const parsed = std.fmt.parseUnsigned(u64, trimmed[2..], 16) catch return std.math.nan(f64);
-        return @floatFromInt(parsed);
-    }
-    if (trimmed.len >= 2 and trimmed[0] == '0' and (trimmed[1] == 'o' or trimmed[1] == 'O')) {
-        const parsed = std.fmt.parseUnsigned(u64, trimmed[2..], 8) catch return std.math.nan(f64);
-        return @floatFromInt(parsed);
-    }
-    if (trimmed.len >= 2 and trimmed[0] == '0' and (trimmed[1] == 'b' or trimmed[1] == 'B')) {
-        const parsed = std.fmt.parseUnsigned(u64, trimmed[2..], 2) catch return std.math.nan(f64);
-        return @floatFromInt(parsed);
-    }
-    const parsed = std.fmt.parseFloat(f64, trimmed) catch return std.math.nan(f64);
-    if (std.math.isInf(parsed) and beginsWithAsciiAlphaAfterSign(trimmed)) return std.math.nan(f64);
-    return parsed;
-}
-
-fn trimJsWhitespace(bytes: []const u8) []const u8 {
-    var start: usize = 0;
-    var end: usize = bytes.len;
-    while (start < end) {
-        const width = jsWhitespacePrefixLen(bytes[start..end]) orelse break;
-        start += width;
-    }
-    while (end > start) {
-        const width = jsWhitespaceSuffixLen(bytes[start..end]) orelse break;
-        end -= width;
-    }
-    return bytes[start..end];
-}
-
-fn jsWhitespacePrefixLen(bytes: []const u8) ?usize {
-    if (bytes.len == 0) return null;
-    switch (bytes[0]) {
-        0x09...0x0d, 0x20 => return 1,
-        0xa0 => return 1,
-        0xc2 => if (startsWith(bytes, &.{ 0xc2, 0xa0 })) return 2,
-        0xe1 => if (startsWith(bytes, &.{ 0xe1, 0x9a, 0x80 })) return 3,
-        0xe2 => {
-            if (bytes.len >= 3 and bytes[1] == 0x80 and ((bytes[2] >= 0x80 and bytes[2] <= 0x8a) or bytes[2] == 0xa8 or bytes[2] == 0xa9 or bytes[2] == 0xaf)) return 3;
-            if (startsWith(bytes, &.{ 0xe2, 0x81, 0x9f })) return 3;
-        },
-        0xe3 => if (startsWith(bytes, &.{ 0xe3, 0x80, 0x80 })) return 3,
-        0xef => if (startsWith(bytes, &.{ 0xef, 0xbb, 0xbf })) return 3,
-        else => {},
-    }
-    return null;
-}
-
-fn jsWhitespaceSuffixLen(bytes: []const u8) ?usize {
-    if (bytes.len == 0) return null;
-    const last = bytes[bytes.len - 1];
-    if ((last >= 0x09 and last <= 0x0d) or last == 0x20) return 1;
-    if (endsWith(bytes, &.{ 0xc2, 0xa0 })) return 2;
-    if (last == 0xa0) return 1;
-    if (endsWith(bytes, &.{ 0xe1, 0x9a, 0x80 })) return 3;
-    if (endsWith(bytes, &.{ 0xe2, 0x81, 0x9f })) return 3;
-    if (endsWith(bytes, &.{ 0xe3, 0x80, 0x80 })) return 3;
-    if (endsWith(bytes, &.{ 0xef, 0xbb, 0xbf })) return 3;
-    if (bytes.len >= 3 and bytes[bytes.len - 3] == 0xe2 and bytes[bytes.len - 2] == 0x80) {
-        const tail = bytes[bytes.len - 1];
-        if ((tail >= 0x80 and tail <= 0x8a) or tail == 0xa8 or tail == 0xa9 or tail == 0xaf) return 3;
-    }
-    return null;
-}
-
-fn startsWith(bytes: []const u8, prefix: []const u8) bool {
-    return bytes.len >= prefix.len and std.mem.eql(u8, bytes[0..prefix.len], prefix);
-}
-
-fn endsWith(bytes: []const u8, suffix: []const u8) bool {
-    return bytes.len >= suffix.len and std.mem.eql(u8, bytes[bytes.len - suffix.len ..], suffix);
-}
-
-fn hasSignedRadixPrefix(bytes: []const u8) bool {
-    return bytes.len >= 3 and (bytes[0] == '+' or bytes[0] == '-') and bytes[1] == '0' and
-        (bytes[2] == 'x' or bytes[2] == 'X' or bytes[2] == 'o' or bytes[2] == 'O' or bytes[2] == 'b' or bytes[2] == 'B');
-}
-
-fn beginsWithAsciiAlphaAfterSign(bytes: []const u8) bool {
-    const index: usize = if (bytes.len > 0 and (bytes[0] == '+' or bytes[0] == '-')) 1 else 0;
-    return index < bytes.len and ((bytes[index] >= 'a' and bytes[index] <= 'z') or (bytes[index] >= 'A' and bytes[index] <= 'Z'));
+    return core.value_format.parseJsNumber(bytes);
 }
 
 fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
@@ -1380,10 +1224,7 @@ fn bigIntParts(value: core.JSValue, scratch: *[2]bignum.Limb) ?BigIntParts {
 }
 
 pub fn isHTMLDDA(value: core.JSValue) bool {
-    if (!value.isObject()) return false;
-    const header = value.refHeader() orelse return false;
-    const object: *core.Object = @fieldParentPtr("header", header);
-    return object.is_html_dda;
+    return core.value_semantics.isHTMLDDA(value);
 }
 
 fn sameAbstractEqualityType(a: core.JSValue, b: core.JSValue) bool {
@@ -1394,7 +1235,7 @@ fn sameAbstractEqualityType(a: core.JSValue, b: core.JSValue) bool {
     if (a.isSymbol() and b.isSymbol()) return true;
     if (a.isObject() and b.isObject()) return true;
     if (a.isFunctionBytecode() and b.isFunctionBytecode()) return true;
-    return a.tag == b.tag;
+    return a.tagOf() == b.tagOf();
 }
 
 fn numberLikeInt(value: core.JSValue) ?i32 {
@@ -1437,4 +1278,31 @@ fn powI32(lhs: i32, rhs: i32) i32 {
     var i: i32 = 0;
     while (i < rhs) : (i += 1) out *= lhs;
     return out;
+}
+
+// Strict equality over runtime values (moved from the VM call runtime).
+
+pub fn valuesStrictEqual(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !bool {
+    if (a.isNumber() and b.isNumber()) {
+        const av = numberValue(a) orelse return false;
+        const bv = numberValue(b) orelse return false;
+        if (std.math.isNan(av) or std.math.isNan(bv)) return false;
+        return av == bv;
+    }
+    if (a.asBool()) |ab| {
+        if (b.asBool()) |bb| return ab == bb;
+    }
+    if (a.isNull() or a.isUndefined()) return a.same(b);
+    if (a.isBigInt() and b.isBigInt()) return a.sameValue(b);
+    if (a.isString() and b.isString()) {
+        if (a.same(b)) return true;
+        var a_bytes = std.ArrayList(u8).empty;
+        defer a_bytes.deinit(rt.memory.allocator);
+        var b_bytes = std.ArrayList(u8).empty;
+        defer b_bytes.deinit(rt.memory.allocator);
+        try appendRawString(rt, &a_bytes, a);
+        try appendRawString(rt, &b_bytes, b);
+        return std.mem.eql(u8, a_bytes.items, b_bytes.items);
+    }
+    return a.same(b);
 }

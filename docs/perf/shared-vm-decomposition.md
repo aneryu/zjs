@@ -1,6 +1,11 @@
-# `exec/shared.zig` Decomposition Map
+# `exec/call_runtime.zig` Decomposition Map
 
-`src/exec/shared.zig` remains large and should continue to shrink in small
+`src/exec/call_runtime.zig` (originally `shared.zig`) is the VM call runtime:
+`execCall`, the `callValueOrBytecode*` dispatch chain, construct paths, direct
+and indirect eval support, generator resumption, and Atomics waiter
+machinery. The compatibility alias layer that `shared.zig` once
+carried has been removed; callers now import the owning domain module
+directly. Remaining non-call-runtime code should continue to shrink in small
 behavior-preserving moves. This map is a refactor aid, not a status ledger.
 
 ## Existing VM Shards
@@ -27,31 +32,31 @@ helpers use the `vm_*.zig` prefix; broader domain helpers generally use the
 Domain helper shards such as `array_ops.zig`, `date_ops.zig`,
 `iterator_ops.zig`, `json_ops.zig`, `object_ops.zig`, `string_ops.zig`, and
 `value_ops.zig` are not pure opcode dispatch modules, but they are still useful
-targets when shrinking `shared.zig` around a coherent ECMAScript domain.
+targets when shrinking `call_runtime.zig` around a coherent ECMAScript domain.
 
 ## Move Criteria
 
-Move code out of `shared.zig` only when the ownership boundary is clear:
+Move code out of `call_runtime.zig` only when the ownership boundary is clear:
 
 - The target file has one coherent domain.
-- Imports do not introduce cycles back through `shared.zig`.
+- Imports do not introduce cycles back through `call_runtime.zig`.
 - Moved helpers retain the same ownership, rooting, and exception behavior.
-- Compatibility aliases are temporary and should be removed once callers have
-  migrated.
+- Callers reference the owning module directly; do not reintroduce forwarding
+  aliases in `call_runtime.zig`.
 
 Prefer leaf helper groups first. Avoid moving an orchestration function if its
-callees would still force broad imports from `shared.zig`.
+callees would still force broad imports from `call_runtime.zig`.
 
 ## Candidate Domains
 
 These domains are still reasonable candidates for future splits when touched:
 
-- coercion helpers (`toPrimitive`, `toString`, `toNumber`, truthiness, wrapper
-  extraction).
 - global object and global lexical environment operations.
 - closure and var-ref operations.
-- builtin wrapper glue that does not belong in an existing `builtins/` module.
-- worker and `qjs:os`/`qjs:std` helper paths.
+- builtin wrapper glue that does not belong in an existing `builtins/` module
+  (Reflect/Iterator-helper native records and similar `qjs*` call glue).
+- worker helper paths (the legacy `qjs:os`/`qjs:std` cluster and the dead
+  QjsWorker machinery have both been deleted).
 
 Do not create a new shard for a single unrelated helper. Leave nearby code in
 place until there is a stable domain boundary.

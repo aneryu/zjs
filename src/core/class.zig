@@ -182,23 +182,41 @@ pub const Table = struct {
     memory: *memory.MemoryAccount,
     atoms: *atom.AtomTable,
     records: []Record = &.{},
+    records_inline: [ids.init_count]Record = @splat(.{}),
     next_dynamic_id: ClassId = ids.init_count,
 
     pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable) !Table {
         var table = Table{ .memory = account, .atoms = atoms };
         errdefer table.deinit();
         try table.ensureCapacity(ids.init_count);
+        try table.registerStandardClasses();
+        return table;
+    }
+
+    pub fn initInPlace(self: *Table, account: *memory.MemoryAccount, atoms: *atom.AtomTable) !void {
+        self.* = .{ .memory = account, .atoms = atoms };
+        self.records = self.records_inline[0..ids.init_count];
+        @memset(self.records, .{});
+        errdefer self.deinit();
+        try self.registerStandardClasses();
+    }
+
+    fn registerStandardClasses(self: *Table) !void {
         for (standard_classes) |entry| {
-            try table.registerAtom(entry.id, entry.name_atom, .{
+            try self.registerAtom(entry.id, entry.name_atom, .{
                 .class_name = "",
                 .payload_kind = standardPayloadKind(entry.id),
             });
         }
-        return table;
+    }
+
+    fn usingInlineRecords(self: *const Table) bool {
+        return self.records.ptr == self.records_inline[0..].ptr;
     }
 
     pub fn deinit(self: *Table) void {
         const records = self.records;
+        const using_inline = self.usingInlineRecords();
         self.records = &.{};
         for (records) |rec| {
             if (rec.isRegistered()) {
@@ -206,7 +224,11 @@ pub const Table = struct {
                 self.atoms.free(rec.class_name);
             }
         }
-        if (records.len != 0) self.memory.free(Record, records);
+        if (using_inline) {
+            @memset(records, .{});
+        } else if (records.len != 0) {
+            self.memory.free(Record, records);
+        }
     }
 
     pub fn newClassId(self: *Table, requested: ClassId) ClassId {
@@ -332,8 +354,13 @@ pub const Table = struct {
         @memset(next, .{});
         const old_records = self.records;
         if (old_records.len != 0) @memcpy(next[0..old_records.len], old_records);
+        const old_using_inline = self.usingInlineRecords();
         self.records = next;
-        if (old_records.len != 0) self.memory.free(Record, old_records);
+        if (old_using_inline) {
+            @memset(old_records, .{});
+        } else if (old_records.len != 0) {
+            self.memory.free(Record, old_records);
+        }
     }
 };
 

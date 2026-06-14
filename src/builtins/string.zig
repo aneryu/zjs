@@ -1,9 +1,19 @@
 const core = @import("../core/root.zig");
-const function_builtin = @import("function.zig");
 const bignum = @import("../libs/bignum.zig");
-const value_ops = @import("../exec/value_ops.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
+const builtin_dispatch = @import("../exec/builtin_dispatch.zig");
+// The `.string` builtin record handler `stringCall` dispatches every
+// prototype-method id into the exec `qjsStringPrototypeMethod` (BOTH-reachable:
+// the string opcode/`call_runtime` host path also calls it). The realm-aware
+// method bodies themselves (pad/HTML/normalize/localeCompare/numeric-arg) are
+// exec-only and live in `exec/string_ops.zig`; this module only reaches the
+// shared VM string entry points (`string_ops.*`) for dispatch.
+const string_ops = @import("../exec/string_ops.zig");
+const exceptions = @import("../exec/exceptions.zig");
+
+const HostError = exceptions.HostError;
+const InternalCall = core.host_function.InternalCall;
 
 const AppendStringError = error{
     OutOfMemory,
@@ -14,123 +24,176 @@ const AppendStringError = error{
 
 const TrimMode = enum { start, end, both };
 
-pub const StaticMethod = enum(u32) {
-    from_char_code = 1,
-    from_code_point = 2,
-    raw = 3,
-};
+pub const StaticMethod = core.host_function.builtin_method_ids.string.StaticMethod;
+pub const ConstructorMethod = core.host_function.builtin_method_ids.string.ConstructorMethod;
 
-pub const ConstructorMethod = enum(u32) {
-    call = 4,
-};
+pub const PrototypeMethod = core.host_function.builtin_method_ids.string.PrototypeMethod;
 
-pub const PrototypeMethod = enum(u32) {
-    char_at = 100,
-    substring = 101,
-    to_upper_case = 102,
-    to_lower_case = 103,
-    index_of = 104,
-    includes = 105,
-    starts_with = 106,
-    ends_with = 107,
-    trim = 108,
-    concat = 110,
-    trim_start = 121,
-    trim_end = 122,
-    split = 127,
-    last_index_of = 128,
-    char_code_at = 129,
-    at = 130,
-    code_point_at = 131,
-    slice = 132,
-    repeat = 133,
-    pad_start = 134,
-    pad_end = 135,
-    locale_compare = 136,
-    normalize = 137,
-    is_well_formed = 138,
-    to_well_formed = 139,
-    search = 140,
-    match = 141,
-    replace_all = 142,
-    match_all = 143,
-};
+// Pure name<->id / id->legacy-id mapping helpers relocated to engine core
+// (`core/host_function.zig`, next to the `builtin_method_ids.string` enum) in
+// Phase 6b-3c; re-exported here so the dispatch/install side keeps the original
+// names. The VM consumes the same helpers through `core` (zero exec->builtins).
+const string_id_lookup = core.host_function.builtin_method_id_lookup.string;
+pub const legacy_split_method_id = string_id_lookup.legacy_split_method_id;
+pub const legacy_normalize_method_id = string_id_lookup.legacy_normalize_method_id;
+pub const legacy_search_method_id = string_id_lookup.legacy_search_method_id;
+pub const legacy_match_method_id = string_id_lookup.legacy_match_method_id;
+pub const legacy_replace_all_method_id = string_id_lookup.legacy_replace_all_method_id;
+pub const legacy_match_all_method_id = string_id_lookup.legacy_match_all_method_id;
+pub const staticMethodId = string_id_lookup.staticMethodId;
+pub const prototypeMethodId = string_id_lookup.prototypeMethodId;
+pub const decodePrototypeMethodId = string_id_lookup.decodePrototypeMethodId;
+pub const encodePrototypeMethodId = string_id_lookup.encodePrototypeMethodId;
 
-pub fn staticMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "fromCharCode")) return @intFromEnum(StaticMethod.from_char_code);
-    if (std.mem.eql(u8, name, "fromCodePoint")) return @intFromEnum(StaticMethod.from_code_point);
-    if (std.mem.eql(u8, name, "raw")) return @intFromEnum(StaticMethod.raw);
-    return null;
-}
-
-pub fn prototypeMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "charAt")) return @intFromEnum(PrototypeMethod.char_at);
-    if (std.mem.eql(u8, name, "substring")) return @intFromEnum(PrototypeMethod.substring);
-    if (std.mem.eql(u8, name, "toUpperCase")) return @intFromEnum(PrototypeMethod.to_upper_case);
-    if (std.mem.eql(u8, name, "toLocaleUpperCase")) return @intFromEnum(PrototypeMethod.to_upper_case);
-    if (std.mem.eql(u8, name, "toLowerCase")) return @intFromEnum(PrototypeMethod.to_lower_case);
-    if (std.mem.eql(u8, name, "toLocaleLowerCase")) return @intFromEnum(PrototypeMethod.to_lower_case);
-    if (std.mem.eql(u8, name, "indexOf")) return @intFromEnum(PrototypeMethod.index_of);
-    if (std.mem.eql(u8, name, "includes")) return @intFromEnum(PrototypeMethod.includes);
-    if (std.mem.eql(u8, name, "startsWith")) return @intFromEnum(PrototypeMethod.starts_with);
-    if (std.mem.eql(u8, name, "endsWith")) return @intFromEnum(PrototypeMethod.ends_with);
-    if (std.mem.eql(u8, name, "trim")) return @intFromEnum(PrototypeMethod.trim);
-    if (std.mem.eql(u8, name, "concat")) return @intFromEnum(PrototypeMethod.concat);
-    if (std.mem.eql(u8, name, "lastIndexOf")) return @intFromEnum(PrototypeMethod.last_index_of);
-    if (std.mem.eql(u8, name, "charCodeAt")) return @intFromEnum(PrototypeMethod.char_code_at);
-    if (std.mem.eql(u8, name, "at")) return @intFromEnum(PrototypeMethod.at);
-    if (std.mem.eql(u8, name, "codePointAt")) return @intFromEnum(PrototypeMethod.code_point_at);
-    if (std.mem.eql(u8, name, "slice")) return @intFromEnum(PrototypeMethod.slice);
-    if (std.mem.eql(u8, name, "repeat")) return @intFromEnum(PrototypeMethod.repeat);
-    if (std.mem.eql(u8, name, "padStart")) return @intFromEnum(PrototypeMethod.pad_start);
-    if (std.mem.eql(u8, name, "padEnd")) return @intFromEnum(PrototypeMethod.pad_end);
-    if (std.mem.eql(u8, name, "localeCompare")) return @intFromEnum(PrototypeMethod.locale_compare);
-    if (std.mem.eql(u8, name, "normalize")) return @intFromEnum(PrototypeMethod.normalize);
-    if (std.mem.eql(u8, name, "isWellFormed")) return @intFromEnum(PrototypeMethod.is_well_formed);
-    if (std.mem.eql(u8, name, "toWellFormed")) return @intFromEnum(PrototypeMethod.to_well_formed);
-    if (std.mem.eql(u8, name, "trimStart")) return @intFromEnum(PrototypeMethod.trim_start);
-    if (std.mem.eql(u8, name, "trimEnd")) return @intFromEnum(PrototypeMethod.trim_end);
-    if (std.mem.eql(u8, name, "split")) return @intFromEnum(PrototypeMethod.split);
-    if (std.mem.eql(u8, name, "search")) return @intFromEnum(PrototypeMethod.search);
-    if (std.mem.eql(u8, name, "match")) return @intFromEnum(PrototypeMethod.match);
-    if (std.mem.eql(u8, name, "matchAll")) return @intFromEnum(PrototypeMethod.match_all);
-    if (std.mem.eql(u8, name, "replaceAll")) return @intFromEnum(PrototypeMethod.replace_all);
-    return null;
-}
-
-pub fn decodePrototypeMethodId(id: u32) ?u32 {
-    return switch (id) {
-        @intFromEnum(PrototypeMethod.char_at) => 0,
-        @intFromEnum(PrototypeMethod.substring) => 1,
-        @intFromEnum(PrototypeMethod.to_upper_case) => 2,
-        @intFromEnum(PrototypeMethod.to_lower_case) => 3,
-        @intFromEnum(PrototypeMethod.index_of) => 4,
-        @intFromEnum(PrototypeMethod.includes) => 5,
-        @intFromEnum(PrototypeMethod.starts_with) => 6,
-        @intFromEnum(PrototypeMethod.ends_with) => 7,
-        @intFromEnum(PrototypeMethod.trim) => 8,
-        @intFromEnum(PrototypeMethod.concat) => 10,
-        @intFromEnum(PrototypeMethod.trim_start) => 21,
-        @intFromEnum(PrototypeMethod.trim_end) => 22,
-        @intFromEnum(PrototypeMethod.split) => 27,
-        @intFromEnum(PrototypeMethod.last_index_of) => 28,
-        @intFromEnum(PrototypeMethod.char_code_at) => 29,
-        @intFromEnum(PrototypeMethod.at) => 30,
-        @intFromEnum(PrototypeMethod.code_point_at) => 31,
-        @intFromEnum(PrototypeMethod.slice) => 32,
-        @intFromEnum(PrototypeMethod.repeat) => 33,
-        @intFromEnum(PrototypeMethod.pad_start) => 34,
-        @intFromEnum(PrototypeMethod.pad_end) => 35,
-        @intFromEnum(PrototypeMethod.locale_compare) => 36,
-        @intFromEnum(PrototypeMethod.normalize) => 37,
-        @intFromEnum(PrototypeMethod.is_well_formed) => 38,
-        @intFromEnum(PrototypeMethod.to_well_formed) => 39,
-        @intFromEnum(PrototypeMethod.search) => 40,
-        @intFromEnum(PrototypeMethod.match) => 41,
-        @intFromEnum(PrototypeMethod.replace_all) => 42,
-        @intFromEnum(PrototypeMethod.match_all) => 43,
-        else => null,
+/// Declaration + dispatch table for the `.string` native-builtin domain
+/// (QuickJS js_string_funcs / js_string_proto_funcs analogue). One shared
+/// record handler `stringCall` switches on the per-record `magic` (== the
+/// domain-local id, i.e. the `StaticMethod`/`ConstructorMethod`/`PrototypeMethod`
+/// enum value) and mirrors the retired `call.zig` `callStringNativeFunctionRecord`
+/// exactly: the constructor/statics and the prototype methods delegate to the
+/// exec VM ops in `string_ops.zig`, which stay in exec because the string
+/// opcode handlers (`vm_call.zig`/`call_runtime.zig`) and `regexp_fastpath.zig`
+/// also call them. Property installation still resolves names/lengths through
+/// the registry's `string_static`/`string_prototype` Method tables plus the
+/// `staticMethodId`/`prototypeMethodId` id helpers above (like Date/Number);
+/// this table is consumed only by the slow record-dispatch path
+/// (`rt.internal_builtins`). `prepared_call_ok` mirrors the prepared-call gate
+/// in `vm_call.zig` (`nativeBuiltinSupportedWithoutFunctionObject`): only
+/// `String.fromCharCode` and `String.prototype.substring` are callable without a
+/// materialized function object today.
+pub const internal_entries = stringEntries: {
+    const Entry = core.host_function.InternalEntry;
+    break :stringEntries [_]Entry{
+        // Constructor + statics. The `String` record serves both `String(...)`
+        // (call path) and `new String(...)` (construct path), so it is marked
+        // construct-capable; `stringCall` branches on `flags.constructor`.
+        stringConstructorEntry("String", 1, @intFromEnum(ConstructorMethod.call)),
+        stringEntry("fromCharCode", 1, @intFromEnum(StaticMethod.from_char_code), true),
+        stringEntry("fromCodePoint", 1, @intFromEnum(StaticMethod.from_code_point), false),
+        stringEntry("raw", 1, @intFromEnum(StaticMethod.raw), false),
+        // Prototype methods that carry a `(.string, id)` native record id
+        // (the subset `prototypeMethodId` maps and `decodePrototypeMethodId`
+        // decodes). The remaining String.prototype methods (toString, valueOf,
+        // concat, replace, the AnnexB html helpers, …) are installed as plain
+        // name-dispatched native functions and never reach record dispatch.
+        stringEntry("charAt", 1, @intFromEnum(PrototypeMethod.char_at), false),
+        stringEntry("substring", 2, @intFromEnum(PrototypeMethod.substring), true),
+        stringEntry("toUpperCase", 0, @intFromEnum(PrototypeMethod.to_upper_case), false),
+        stringEntry("toLowerCase", 0, @intFromEnum(PrototypeMethod.to_lower_case), false),
+        stringEntry("indexOf", 1, @intFromEnum(PrototypeMethod.index_of), false),
+        stringEntry("includes", 1, @intFromEnum(PrototypeMethod.includes), false),
+        stringEntry("startsWith", 1, @intFromEnum(PrototypeMethod.starts_with), false),
+        stringEntry("endsWith", 1, @intFromEnum(PrototypeMethod.ends_with), false),
+        stringEntry("trim", 0, @intFromEnum(PrototypeMethod.trim), false),
+        stringEntry("concat", 1, @intFromEnum(PrototypeMethod.concat), false),
+        stringEntry("trimStart", 0, @intFromEnum(PrototypeMethod.trim_start), false),
+        stringEntry("trimEnd", 0, @intFromEnum(PrototypeMethod.trim_end), false),
+        stringEntry("split", 2, @intFromEnum(PrototypeMethod.split), false),
+        stringEntry("lastIndexOf", 1, @intFromEnum(PrototypeMethod.last_index_of), false),
+        stringEntry("charCodeAt", 1, @intFromEnum(PrototypeMethod.char_code_at), false),
+        stringEntry("at", 1, @intFromEnum(PrototypeMethod.at), false),
+        stringEntry("codePointAt", 1, @intFromEnum(PrototypeMethod.code_point_at), false),
+        stringEntry("slice", 2, @intFromEnum(PrototypeMethod.slice), false),
+        stringEntry("repeat", 1, @intFromEnum(PrototypeMethod.repeat), false),
+        stringEntry("padStart", 1, @intFromEnum(PrototypeMethod.pad_start), false),
+        stringEntry("padEnd", 1, @intFromEnum(PrototypeMethod.pad_end), false),
+        stringEntry("localeCompare", 1, @intFromEnum(PrototypeMethod.locale_compare), false),
+        stringEntry("normalize", 0, @intFromEnum(PrototypeMethod.normalize), false),
+        stringEntry("isWellFormed", 0, @intFromEnum(PrototypeMethod.is_well_formed), false),
+        stringEntry("toWellFormed", 0, @intFromEnum(PrototypeMethod.to_well_formed), false),
+        stringEntry("search", 1, @intFromEnum(PrototypeMethod.search), false),
+        stringEntry("match", 1, @intFromEnum(PrototypeMethod.match), false),
+        stringEntry("replaceAll", 2, @intFromEnum(PrototypeMethod.replace_all), false),
+        stringEntry("matchAll", 1, @intFromEnum(PrototypeMethod.match_all), false),
+        // The String Iterator's `next` method.
+        stringEntry("next", 0, @intFromEnum(PrototypeMethod.iterator_next), false),
     };
+};
+
+fn stringEntry(comptime name: []const u8, comptime length: u8, comptime id: u32, comptime prepared: bool) core.host_function.InternalEntry {
+    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = prepared, .call = &stringCall };
+}
+
+/// The String constructor record: construct-capable so `new String(...)`
+/// routes through the construct dispatch path into `stringCall`'s construct
+/// branch (it still serves `String(...)` as a function on the call path).
+fn stringConstructorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .constructor = true, .call = &stringCall };
+}
+
+/// Shared record handler for the `.string` domain. Mirrors the retired
+/// `call.zig` `callStringNativeFunctionRecord`: the String Iterator `next` and
+/// the `from*`/constructor statics run their own helpers, while the prototype
+/// methods (and `String.raw`) delegate to the exec VM ops, which stay in exec
+/// because the string opcode handlers and `regexp_fastpath.zig` also call them.
+fn stringCall(host_call: InternalCall) HostError!core.JSValue {
+    const ctx = host_call.ctx;
+    const output = host_call.output;
+    const id: u32 = host_call.magic;
+    const args = host_call.args;
+    const this_value = host_call.this_value;
+    const caller_function = builtin_dispatch.callerBytecode(host_call);
+    const caller_frame = builtin_dispatch.callerFrame(host_call);
+
+    if (id == @intFromEnum(PrototypeMethod.iterator_next)) {
+        const receiver = thisObject(this_value) orelse return error.TypeError;
+        if (receiver.class_id != core.class.ids.string_iterator) return error.TypeError;
+        return iteratorNext(ctx.runtime, this_value) catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            else => err,
+        };
+    }
+
+    // `new String(...)` arrives through the construct record path
+    // (`exec/construct.zig`) with `flags.constructor` set and the resolved
+    // wrapper prototype in `new_target`; `String(...)` called as a function
+    // falls through to `qjsStringFunctionCall` (the `ConstructorMethod.call`
+    // case below).
+    if (host_call.flags.constructor and id == @intFromEnum(ConstructorMethod.call)) {
+        return constructWithPrototype(ctx.runtime, args, host_call.new_target);
+    }
+
+    // Engine-internal dispatch arm: the exec string dispatcher and fast paths
+    // (`exec/string_ops.zig`, `exec/call_runtime.zig`) have already resolved the
+    // string receiver/args and route the reused *pure body* through the table
+    // here so they never name `builtins.string.{methodCall,charAtValue}`
+    // directly. It is gated on `func_obj == null and global == null`, the
+    // contract those call sites use (the body needs no realm global). The
+    // prepared-call fast path (`vm_call.zig`, e.g. the prepared `substring`)
+    // also passes `func_obj == null` but threads the realm `global` and *raw*
+    // args, so it must fall through to the coercing dispatcher below instead.
+    // This deliberately bypasses the prototype dispatcher
+    // (`string_ops.qjsStringPrototypeMethod`) — routing back through it would
+    // re-enter this record (the dispatcher's own body call is one of the
+    // converted sites) and recurse.
+    if (host_call.func_obj == null and host_call.global == null and !host_call.flags.constructor) {
+        const method_id = decodePrototypeMethodId(id) orelse return error.TypeError;
+        if (method_id == 0) {
+            // `String.prototype.charAt` body (its own helper; `methodCall` does
+            // not handle id 0). The exec caller forwards the index as args[0].
+            const index = if (args.len >= 1) args[0] else core.JSValue.int32(0);
+            return charAtValue(ctx.runtime, this_value, index) catch |err| return @as(HostError, @errorCast(err));
+        }
+        return methodCall(ctx.runtime, this_value, method_id, args) catch |err| return @as(HostError, @errorCast(err));
+    }
+
+    const active_global = host_call.global orelse return error.TypeError;
+    return switch (id) {
+        @intFromEnum(ConstructorMethod.call) => string_ops.qjsStringFunctionCall(ctx, output, active_global, args, caller_function, caller_frame),
+        @intFromEnum(StaticMethod.from_char_code) => string_ops.qjsStringFromCharCode(ctx, output, active_global, args),
+        @intFromEnum(StaticMethod.from_code_point) => string_ops.qjsStringFromCodePoint(ctx, output, active_global, args),
+        @intFromEnum(StaticMethod.raw) => string_ops.qjsStringRaw(ctx, output, active_global, args, caller_function, caller_frame),
+        else => {
+            const method_id = decodePrototypeMethodId(id) orelse return error.TypeError;
+            return string_ops.qjsStringPrototypeMethod(ctx, output, active_global, this_value, method_id, args, caller_function, caller_frame);
+        },
+    };
+}
+
+fn thisObject(value: core.JSValue) ?*core.Object {
+    if (!value.isObject()) return null;
+    const header = value.refHeader() orelse return null;
+    return @fieldParentPtr("header", header);
 }
 
 pub fn charAt(bytes: []const u8, index: usize) []const u8 {
@@ -173,11 +236,12 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, args: []const core.JSValue, p
 
     if (rooted_args.len >= 1 and rooted_args[0].isSymbol()) return error.TypeError;
     data_value = if (rooted_args.len >= 1)
-        try value_ops.toStringValue(rt, rooted_args[0])
+        try stringValueFromSearchArgument(rt, rooted_args[0])
     else
-        try value_ops.createStringValue(rt, "");
+        try createStringValue(rt, "");
     defer data_value.free(rt);
     const data = stringValueFromReceiver(data_value) orelse return error.TypeError;
+    try data.ensureFlat(rt);
 
     const object = try core.Object.create(rt, core.class.ids.string, prototype);
     object_value = object.value();
@@ -196,63 +260,16 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, args: []const core.JSValue, p
     return object_value;
 }
 
-pub fn iterator(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
-    var rooted_receiver = receiver;
-    var target = core.JSValue.undefinedValue();
-    var prototype_value = core.JSValue.undefinedValue();
-    var object_value = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_receiver },
-        .{ .value = &target },
-        .{ .value = &prototype_value },
-        .{ .value = &object_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
-
-    target = try stringPrimitiveValue(rooted_receiver);
-    defer target.free(rt);
-    const prototype = try iteratorPrototype(rt, "String Iterator");
-    prototype_value = prototype.value();
-    defer prototype_value.free(rt);
-    const object = try core.Object.create(rt, core.class.ids.string_iterator, prototype);
-    object_value = object.value();
-    errdefer {
-        const failed_object = object_value;
-        object_value = core.JSValue.undefinedValue();
-        failed_object.free(rt);
-    }
-    try object.setOptionalValueSlot(rt, object.iteratorTargetSlot(), target.dup());
-    object.iteratorIndexSlot().* = 0;
-    return object_value;
-}
-
-fn iteratorPrototype(rt: *core.JSRuntime, tag_name: []const u8) !*core.Object {
-    const base = try core.Object.create(rt, core.class.ids.object, null);
-    var base_raw_owned = true;
-    errdefer if (base_raw_owned) core.Object.destroyFromHeader(rt, &base.header);
-    try defineToStringTag(rt, base, "Iterator");
-    const specific = try core.Object.create(rt, core.class.ids.object, base);
-    errdefer core.Object.destroyFromHeader(rt, &specific.header);
-    base_raw_owned = false;
-    base.value().free(rt);
-    try defineToStringTag(rt, specific, tag_name);
-    const next = try function_builtin.nativeFunction(rt, "next", 0);
-    defer next.free(rt);
-    try specific.defineOwnProperty(rt, core.atom.predefinedId("next", .string).?, core.Descriptor.data(next, true, false, true));
-    return specific;
-}
-
-fn defineToStringTag(rt: *core.JSRuntime, object: *core.Object, tag_name: []const u8) !void {
-    const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
-    const tag_value = try core.string.String.createUtf8(rt, tag_name);
-    defer tag_value.value().free(rt);
-    try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag_value.value(), false, false, true));
-}
+// The String Iterator factory (`iterator`) + its private prototype/toStringTag
+// helpers relocated to engine core (`core/object.zig` `stringIterator`) in Phase
+// 6b-3 STEP 6: they are pure object/native-function constructors over core
+// string/object primitives with no exec/VM deps, and the exec iteration
+// machinery consumes them directly. Re-exported here so this module's own
+// references (and any future builtin caller) keep the original name. The
+// produced iterator's `next` still carries the `(.string, iterator_next)`
+// native id, dispatching back into `iteratorNext` below through the record
+// table.
+pub const iterator = core.object.stringIterator;
 
 pub fn iteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
     const iterator_object = try expectObject(receiver);
@@ -260,6 +277,7 @@ pub fn iteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
     const target = (iterator_object.iteratorTargetSlot().*) orelse return iteratorResult(rt, core.JSValue.undefinedValue(), true);
     const header = target.refHeader() orelse return error.TypeError;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     if ((iterator_object.iteratorIndexSlot().*) >= string_value.len()) {
         const done_result = try iteratorResult(rt, core.JSValue.undefinedValue(), true);
         iterator_object.clearOptionalValueSlot(rt, iterator_object.iteratorTargetSlot());
@@ -268,9 +286,9 @@ pub fn iteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
 
     const index: usize = @intCast((iterator_object.iteratorIndexSlot().*));
     const first = string_value.codeUnitAt(index);
-    if (first >= 0xd800 and first <= 0xdbff and index + 1 < string_value.len()) {
+    if (isHighSurrogateUnit(first) and index + 1 < string_value.len()) {
         const second = string_value.codeUnitAt(index + 1);
-        if (second >= 0xdc00 and second <= 0xdfff) {
+        if (isLowSurrogateUnit(second)) {
             iterator_object.iteratorIndexSlot().* += 2;
             const units: [2]u16 = .{ first, second };
             const out = try core.string.String.createUtf16(rt, &units);
@@ -335,13 +353,7 @@ pub fn fromCodePoint(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSVa
             return error.RangeError;
         }
         const code_point: u32 = @intFromFloat(number);
-        if (code_point <= 0xffff) {
-            try units.append(rt.memory.allocator, @intCast(code_point));
-        } else {
-            const adjusted = code_point - 0x10000;
-            try units.append(rt.memory.allocator, @intCast(0xd800 + (adjusted >> 10)));
-            try units.append(rt.memory.allocator, @intCast(0xdc00 + (adjusted & 0x3ff)));
-        }
+        try unicode.appendUtf16CodePoint(rt.memory.allocator, &units, @intCast(code_point));
     }
     const string = try core.string.String.createUtf16(rt, units.items);
     return string.value();
@@ -353,6 +365,7 @@ pub fn charAtValue(rt: *core.JSRuntime, receiver: core.JSValue, index_value: cor
     const index = try stringInteger(rt, index_value);
     if (stringValueFromReceiver(receiver)) |string_value| {
         if (index < 0 or index >= @as(i64, @intCast(string_value.len()))) return createStringValue(rt, "");
+        try string_value.ensureFlat(rt);
         return codeUnitStringValue(rt, string_value.codeUnitAt(@intCast(index)));
     }
 
@@ -421,7 +434,7 @@ pub fn methodCall(rt: *core.JSRuntime, receiver: core.JSValue, id: u32, args: []
         24 => htmlWrap(rt, bytes.items, "sub"),
         25 => substr(rt, bytes.items, args),
         26 => htmlWrap(rt, bytes.items, "sup"),
-        27 => unreachable,
+        legacy_split_method_id => unreachable,
         28 => unreachable,
         29 => unreachable,
         30 => unreachable,
@@ -431,12 +444,12 @@ pub fn methodCall(rt: *core.JSRuntime, receiver: core.JSValue, id: u32, args: []
         34 => pad(rt, bytes.items, args, .start),
         35 => pad(rt, bytes.items, args, .end),
         36 => localeCompare(rt, bytes.items, args),
-        37 => normalize(rt, bytes.items, args),
+        legacy_normalize_method_id => normalize(rt, bytes.items, args),
         38 => unreachable,
         39 => unreachable,
-        40 => search(rt, bytes.items, args),
-        41 => match(rt, bytes.items, args),
-        42 => replaceAll(rt, bytes.items, args),
+        legacy_search_method_id => search(rt, bytes.items, args),
+        legacy_match_method_id => match(rt, bytes.items, args),
+        legacy_replace_all_method_id => replaceAll(rt, bytes.items, args),
         else => error.TypeError,
     };
 }
@@ -483,6 +496,7 @@ fn trimReceiver(rt: *core.JSRuntime, receiver: core.JSValue, mode: TrimMode) !co
 }
 
 fn trimStringValue(rt: *core.JSRuntime, string_value: *core.string.String, mode: TrimMode) !core.JSValue {
+    try string_value.ensureFlat(rt);
     var start: usize = 0;
     var end = string_value.len();
     if (mode == .start or mode == .both) {
@@ -533,6 +547,7 @@ fn isWellFormedString(string_value: *core.string.String) bool {
 }
 
 fn toWellFormedString(rt: *core.JSRuntime, string_value: *core.string.String) !core.JSValue {
+    try string_value.ensureFlat(rt);
     var units = std.ArrayList(u16).empty;
     defer units.deinit(rt.memory.allocator);
     try units.ensureTotalCapacity(rt.memory.allocator, string_value.len());
@@ -558,11 +573,11 @@ fn toWellFormedString(rt: *core.JSRuntime, string_value: *core.string.String) !c
 }
 
 fn isHighSurrogateUnit(unit: u16) bool {
-    return unit >= 0xd800 and unit <= 0xdbff;
+    return unicode.isHighSurrogateUnit(unit);
 }
 
 fn isLowSurrogateUnit(unit: u16) bool {
-    return unit >= 0xdc00 and unit <= 0xdfff;
+    return unicode.isLowSurrogateUnit(unit);
 }
 
 fn substr(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
@@ -671,6 +686,7 @@ fn splitReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core
     defer rt.active_value_roots = root_frame.previous;
 
     if (stringValueFromReceiver(rooted_receiver)) |string_value| {
+        try string_value.ensureFlat(rt);
         const out = try core.Object.createArray(rt, null);
         out_value = out.value();
         errdefer {
@@ -1019,11 +1035,10 @@ const CodePointSpan = struct {
 fn codePointAtStringIndex(string_value: core.string.String, index: usize) CodePointSpan {
     const first = string_value.codeUnitAt(index);
     const next_index = index + 1;
-    if (first >= 0xd800 and first <= 0xdbff and next_index < string_value.len()) {
+    if (isHighSurrogateUnit(first) and next_index < string_value.len()) {
         const second = string_value.codeUnitAt(next_index);
-        if (second >= 0xdc00 and second <= 0xdfff) {
-            const code_point = 0x10000 + ((@as(u32, first) - 0xd800) << 10) + (@as(u32, second) - 0xdc00);
-            return .{ .value = @intCast(code_point), .start = index, .end = index + 2 };
+        if (isLowSurrogateUnit(second)) {
+            return .{ .value = unicode.codePointFromSurrogatePair(first, second), .start = index, .end = index + 2 };
         }
     }
     return .{ .value = @intCast(first), .start = index, .end = next_index };
@@ -1033,26 +1048,18 @@ fn codePointBeforeStringIndex(string_value: core.string.String, end: usize) ?Cod
     if (end == 0) return null;
     const last_index = end - 1;
     const last = string_value.codeUnitAt(last_index);
-    if (last >= 0xdc00 and last <= 0xdfff and last_index > 0) {
+    if (isLowSurrogateUnit(last) and last_index > 0) {
         const first_index = last_index - 1;
         const first = string_value.codeUnitAt(first_index);
-        if (first >= 0xd800 and first <= 0xdbff) {
-            const code_point = 0x10000 + ((@as(u32, first) - 0xd800) << 10) + (@as(u32, last) - 0xdc00);
-            return .{ .value = @intCast(code_point), .start = first_index, .end = end };
+        if (isHighSurrogateUnit(first)) {
+            return .{ .value = unicode.codePointFromSurrogatePair(first, last), .start = first_index, .end = end };
         }
     }
     return .{ .value = @intCast(last), .start = last_index, .end = end };
 }
 
 fn appendUtf16CodePoint(rt: *core.JSRuntime, units: *std.ArrayList(u16), cp: u21) !void {
-    if (cp <= 0xffff) {
-        try units.append(rt.memory.allocator, @intCast(cp));
-        return;
-    }
-
-    const adjusted = @as(u32, cp) - 0x10000;
-    try units.append(rt.memory.allocator, @intCast(0xd800 + (adjusted >> 10)));
-    try units.append(rt.memory.allocator, @intCast(0xdc00 + (adjusted & 0x3ff)));
+    return unicode.appendUtf16CodePoint(rt.memory.allocator, units, cp);
 }
 
 fn isFinalSigma(string_value: core.string.String, sigma_start: usize, after_sigma: usize) bool {
@@ -1162,6 +1169,7 @@ fn charCodeAtReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     const index = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
     if (index < 0 or index >= @as(i64, @intCast(string_value.len()))) return core.JSValue.float64(std.math.nan(f64));
+    try string_value.ensureFlat(rt);
     return core.JSValue.int32(string_value.codeUnitAt(@intCast(index)));
 }
 
@@ -1172,12 +1180,12 @@ fn codePointAtReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []cons
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     const index = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
     if (index < 0 or index >= @as(i64, @intCast(string_value.len()))) return core.JSValue.undefinedValue();
+    try string_value.ensureFlat(rt);
     const unit = string_value.codeUnitAt(@intCast(index));
-    if (unit >= 0xd800 and unit <= 0xdbff and index + 1 < string_value.len()) {
+    if (isHighSurrogateUnit(unit) and index + 1 < string_value.len()) {
         const next = string_value.codeUnitAt(@intCast(index + 1));
-        if (next >= 0xdc00 and next <= 0xdfff) {
-            const code_point = 0x10000 + ((@as(u32, unit) - 0xd800) << 10) + (@as(u32, next) - 0xdc00);
-            return core.JSValue.int32(@intCast(code_point));
+        if (isLowSurrogateUnit(next)) {
+            return core.JSValue.int32(@intCast(unicode.codePointFromSurrogatePair(unit, next)));
         }
     }
     return core.JSValue.int32(unit);
@@ -1197,6 +1205,7 @@ fn atReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JS
         const len: i64 = @intCast(string_value.len());
         const index = if (relative < 0) len + relative else relative;
         if (index < 0 or index >= len) return core.JSValue.undefinedValue();
+        try string_value.ensureFlat(rt);
         return codeUnitStringValue(rt, string_value.codeUnitAt(@intCast(index)));
     }
 
@@ -1389,7 +1398,7 @@ fn appendStringReceiverBytes(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), ta
 }
 
 fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
-    const str = if (isAsciiBytes(bytes))
+    const str = if (core.string.isAsciiBytes(bytes))
         try core.string.String.createAscii(rt, bytes)
     else
         try core.string.String.createUtf8(rt, bytes);
@@ -1397,6 +1406,7 @@ fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
 }
 
 fn stringValueFromSearchArgument(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
+    if (value.isString()) return value.dup();
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
     try appendValueString(rt, &bytes, value);
@@ -1437,13 +1447,6 @@ fn stringLastIndexOfUnits(haystack: *core.string.String, needle: *core.string.St
 
 fn codeUnitStringValue(rt: *core.JSRuntime, unit: u16) !core.JSValue {
     return (try core.string.String.createUtf16(rt, &.{unit})).value();
-}
-
-fn isAsciiBytes(bytes: []const u8) bool {
-    for (bytes) |byte| {
-        if (byte >= 0x80) return false;
-    }
-    return true;
 }
 
 fn createLatin1SliceValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
@@ -1634,11 +1637,11 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
             try buffer.appendSlice(rt.memory.allocator, "Infinity");
         } else if (std.math.isNegativeInf(float_value)) {
             try buffer.appendSlice(rt.memory.allocator, "-Infinity");
-        } else if (isNegativeZero(float_value)) {
+        } else if (std.math.isNegativeZero(float_value)) {
             try buffer.append(rt.memory.allocator, '0');
         } else {
             var float_buf: [64]u8 = undefined;
-            const printed = try value_ops.formatFiniteNumber(&float_buf, float_value);
+            const printed = try core.value_format.formatFiniteNumber(&float_buf, float_value);
             try buffer.appendSlice(rt.memory.allocator, printed);
         }
     } else if (value.isBigInt()) {
@@ -1671,7 +1674,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
             try buffer.appendSlice(rt.memory.allocator, "[object ArrayBuffer]");
         } else if (object_value.class_id == core.class.ids.promise) {
             try buffer.appendSlice(rt.memory.allocator, "[object Promise]");
-        } else if (object_value.is_array) {
+        } else if (object_value.flags.is_array) {
             try appendArrayString(rt, buffer, object_value);
         } else {
             try buffer.appendSlice(rt.memory.allocator, "[object Object]");
@@ -1684,6 +1687,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
 fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {
             for (bytes) |byte| try appendUtf8CodePoint(rt, buffer, byte);
@@ -1755,11 +1759,7 @@ fn stringInteger(rt: *core.JSRuntime, value: core.JSValue) !i64 {
 }
 
 fn parseJsNumber(bytes: []const u8) f64 {
-    const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
-    if (trimmed.len == 0) return std.math.nan(f64);
-    if (std.mem.eql(u8, trimmed, "Infinity") or std.mem.eql(u8, trimmed, "+Infinity")) return std.math.inf(f64);
-    if (std.mem.eql(u8, trimmed, "-Infinity")) return -std.math.inf(f64);
-    return std.fmt.parseFloat(f64, trimmed) catch std.math.nan(f64);
+    return core.value_format.parseJsNumber(bytes);
 }
 
 fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
@@ -1773,36 +1773,15 @@ fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
 }
 
 fn numberValue(value: core.JSValue) ?f64 {
-    if (value.tag == core.Tag.int) return @floatFromInt(value.asInt32().?);
-    if (value.tag == core.Tag.float64) return value.asFloat64().?;
+    if (value.isInt()) return @floatFromInt(value.asInt32().?);
+    if (value.isFloat64()) return value.asFloat64().?;
     return null;
 }
 
-fn isNegativeZero(value: f64) bool {
-    return value == 0 and std.math.isNegativeInf(1.0 / value);
-}
-
 fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32) !void {
-    if (cp <= 0x7f) {
-        try buffer.append(rt.memory.allocator, @intCast(cp));
-    } else if (cp <= 0x7ff) {
-        try buffer.append(rt.memory.allocator, @intCast(0xc0 | (cp >> 6)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
-    } else if (cp <= 0xffff) {
-        try buffer.append(rt.memory.allocator, @intCast(0xe0 | (cp >> 12)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
-    } else {
-        try buffer.append(rt.memory.allocator, @intCast(0xf0 | (cp >> 18)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 12) & 0x3f)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
-    }
+    return unicode.appendUtf8CodePoint(rt.memory.allocator, buffer, cp);
 }
 
 fn isTrimCodeUnit(unit: u16) bool {
-    return switch (unit) {
-        0x0009, 0x000a, 0x000b, 0x000c, 0x000d, 0x0020, 0x00a0, 0x1680, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff => true,
-        else => (unit >= 0x2000 and unit <= 0x200a),
-    };
+    return unicode.isEcmaWhitespaceOrLineTerminatorUnit(unit);
 }

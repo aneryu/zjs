@@ -2,371 +2,370 @@ const std = @import("std");
 
 const regexp_unicode = @import("../libs/regexp_unicode.zig");
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
+const method_ids = core.host_function.builtin_method_ids;
+const string_id_lookup = core.host_function.builtin_method_id_lookup.string;
 const quickjs_regexp = @import("../libs/quickjs_regexp.zig");
 const unicode_lib = @import("../libs/unicode.zig");
 const emoji = @import("../libs/emoji.zig");
 const call_mod = @import("call.zig");
+const exception_ops = @import("vm_exception_ops.zig");
 const frame_mod = @import("frame.zig");
 const iter_vm = @import("iterator_ops.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
 
-const shared_vm = @import("shared.zig");
-const RegExpCapture = shared_vm.RegExpCapture;
-const SimpleAsciiLiteralClassPlusLiteral = shared_vm.SimpleAsciiLiteralClassPlusLiteral;
-const SimpleCaptureSequenceAtom = shared_vm.SimpleCaptureSequenceAtom;
-const SimpleCaptureSequencePattern = shared_vm.SimpleCaptureSequencePattern;
-const SimpleClassAlternationPattern = shared_vm.SimpleClassAlternationPattern;
-const SimpleClassPredicate = shared_vm.SimpleClassPredicate;
-const SimpleClassSequenceAtom = shared_vm.SimpleClassSequenceAtom;
-const SimpleClassSequencePattern = shared_vm.SimpleClassSequencePattern;
-const UnicodePropertyRunPattern = shared_vm.UnicodePropertyRunPattern;
-const ValueSliceRoot = shared_vm.ValueSliceRoot;
-const anchoredBinaryPropertyName = shared_vm.anchoredBinaryPropertyName;
-const appendAsciiUnits = shared_vm.appendAsciiUnits;
-const appendBacktraceFunctionName = shared_vm.appendBacktraceFunctionName;
-const appendCallSiteFileName = shared_vm.appendCallSiteFileName;
-const appendCallSiteFunctionName = shared_vm.appendCallSiteFunctionName;
-const appendNamedCaptureSubstitution = shared_vm.appendNamedCaptureSubstitution;
-const appendRegExpFlags = shared_vm.appendRegExpFlags;
-const appendRegExpSource = shared_vm.appendRegExpSource;
-const appendRepeatedFillUnits = shared_vm.appendRepeatedFillUnits;
-const arrayFirstIndexStart = shared_vm.arrayFirstIndexStart;
-const arrayLastIndexStart = shared_vm.arrayLastIndexStart;
-const arrayMethodTypedArrayLength = shared_vm.arrayMethodTypedArrayLength;
-const arrayPrototypeFromGlobal = shared_vm.arrayPrototypeFromGlobal;
-const arrayPrototypeRecordId = shared_vm.arrayPrototypeRecordId;
-const arraySpeciesCreate = shared_vm.arraySpeciesCreate;
-const arraySpeciesOriginalIsArray = shared_vm.arraySpeciesOriginalIsArray;
-const atomIdOrNameEql = shared_vm.atomIdOrNameEql;
-const backtraceFunctionNameEql = shared_vm.backtraceFunctionNameEql;
-const bytecodeFunctionObjectTag = shared_vm.bytecodeFunctionObjectTag;
-const callObjectToPrimitiveMethod = shared_vm.callObjectToPrimitiveMethod;
-const callValueOrBytecode = shared_vm.callValueOrBytecode;
-const callableObjectFromValue = shared_vm.callableObjectFromValue;
-const classEscapeIsQuantified = shared_vm.classEscapeIsQuantified;
-const classEscapeKindIndex = shared_vm.classEscapeKindIndex;
-const classEscapeRunLengthLatin1 = shared_vm.classEscapeRunLengthLatin1;
-const classEscapeRunLengthUtf16 = shared_vm.classEscapeRunLengthUtf16;
-const clearRegExpLegacySlot = shared_vm.clearRegExpLegacySlot;
-const constructValueOrBytecode = shared_vm.constructValueOrBytecode;
-const constructorPrototypeFromGlobal = shared_vm.constructorPrototypeFromGlobal;
-const createDataPropertyOrThrow = shared_vm.createDataPropertyOrThrow;
-const createIteratorResult = shared_vm.createIteratorResult;
-const createRegExpIndicesArray = shared_vm.createRegExpIndicesArray;
-const defineFreshNonIndexDataProperty = shared_vm.defineFreshNonIndexDataProperty;
-const defineNativeDataMethod = shared_vm.defineNativeDataMethod;
-const defineRegExpGroupsProperty = shared_vm.defineRegExpGroupsProperty;
-const defineRegExpGroupsPropertyFromValue = shared_vm.defineRegExpGroupsPropertyFromValue;
-const errorStackTraceLimit = shared_vm.errorStackTraceLimit;
-const exactScriptExtensionsAliasTarget = shared_vm.exactScriptExtensionsAliasTarget;
-const getIteratorMethod = shared_vm.getIteratorMethod;
-const getValueProperty = shared_vm.getValueProperty;
-const hasValueProperty = shared_vm.hasValueProperty;
-const isAdlamScriptExtensionsName = shared_vm.isAdlamScriptExtensionsName;
-const isArabicScriptExtensionsName = shared_vm.isArabicScriptExtensionsName;
-const isArmenianScriptExtensionsName = shared_vm.isArmenianScriptExtensionsName;
-const isArrayPrototypeRecord = shared_vm.isArrayPrototypeRecord;
-const isAsciiDigitUnit = shared_vm.isAsciiDigitUnit;
-const isAsciiWordUnit = shared_vm.isAsciiWordUnit;
-const isAvestanScriptExtensionsName = shared_vm.isAvestanScriptExtensionsName;
-const isBengaliScriptExtensionsName = shared_vm.isBengaliScriptExtensionsName;
-const isBopomofoScriptExtensionsName = shared_vm.isBopomofoScriptExtensionsName;
-const isBugineseScriptExtensionsName = shared_vm.isBugineseScriptExtensionsName;
-const isCallableValue = shared_vm.isCallableValue;
-const isCarianScriptExtensionsName = shared_vm.isCarianScriptExtensionsName;
-const isCaucasianAlbanianScriptExtensionsName = shared_vm.isCaucasianAlbanianScriptExtensionsName;
-const isChakmaScriptExtensionsName = shared_vm.isChakmaScriptExtensionsName;
-const isCherokeeScriptExtensionsName = shared_vm.isCherokeeScriptExtensionsName;
-const isCommonScriptExtensionsName = shared_vm.isCommonScriptExtensionsName;
-const isControlGeneralCategoryName = shared_vm.isControlGeneralCategoryName;
-const isCopticScriptExtensionsName = shared_vm.isCopticScriptExtensionsName;
-const isCopticScriptName = shared_vm.isCopticScriptName;
-const isCypriotScriptExtensionsName = shared_vm.isCypriotScriptExtensionsName;
-const isCyrillicScriptExtensionsName = shared_vm.isCyrillicScriptExtensionsName;
-const isDecimalNumberGeneralCategoryName = shared_vm.isDecimalNumberGeneralCategoryName;
-const isDevanagariScriptExtensionsName = shared_vm.isDevanagariScriptExtensionsName;
-const isDograScriptExtensionsName = shared_vm.isDograScriptExtensionsName;
-const isDuployanScriptExtensionsName = shared_vm.isDuployanScriptExtensionsName;
-const isEcmaWhitespaceOrLineTerminator = shared_vm.isEcmaWhitespaceOrLineTerminator;
-const isElbasanScriptExtensionsName = shared_vm.isElbasanScriptExtensionsName;
-const isEthiopicScriptExtensionsName = shared_vm.isEthiopicScriptExtensionsName;
-const isGarayScriptExtensionsName = shared_vm.isGarayScriptExtensionsName;
-const isGeorgianScriptExtensionsName = shared_vm.isGeorgianScriptExtensionsName;
-const isGlagoliticScriptExtensionsName = shared_vm.isGlagoliticScriptExtensionsName;
-const isGothicScriptExtensionsName = shared_vm.isGothicScriptExtensionsName;
-const isGranthaScriptExtensionsName = shared_vm.isGranthaScriptExtensionsName;
-const isGraphemeBaseName = shared_vm.isGraphemeBaseName;
-const isGreekScriptExtensionsName = shared_vm.isGreekScriptExtensionsName;
-const isGujaratiScriptExtensionsName = shared_vm.isGujaratiScriptExtensionsName;
-const isGunjalaGondiScriptExtensionsName = shared_vm.isGunjalaGondiScriptExtensionsName;
-const isGurmukhiScriptExtensionsName = shared_vm.isGurmukhiScriptExtensionsName;
-const isHanScriptExtensionsName = shared_vm.isHanScriptExtensionsName;
-const isHanScriptName = shared_vm.isHanScriptName;
-const isHangulScriptExtensionsName = shared_vm.isHangulScriptExtensionsName;
-const isHanifiRohingyaScriptExtensionsName = shared_vm.isHanifiRohingyaScriptExtensionsName;
-const isHanunooScriptExtensionsName = shared_vm.isHanunooScriptExtensionsName;
-const isHebrewScriptExtensionsName = shared_vm.isHebrewScriptExtensionsName;
-const isHighSurrogateUnit = shared_vm.isHighSurrogateUnit;
-const isHiraganaScriptExtensionsName = shared_vm.isHiraganaScriptExtensionsName;
-const isIdContinueName = shared_vm.isIdContinueName;
-const isImperialAramaicScriptExtensionsName = shared_vm.isImperialAramaicScriptExtensionsName;
-const isInheritedScriptExtensionsName = shared_vm.isInheritedScriptExtensionsName;
-const isInheritedScriptName = shared_vm.isInheritedScriptName;
-const isJavaneseScriptExtensionsName = shared_vm.isJavaneseScriptExtensionsName;
-const isKaithiScriptExtensionsName = shared_vm.isKaithiScriptExtensionsName;
-const isKannadaScriptExtensionsName = shared_vm.isKannadaScriptExtensionsName;
-const isKatakanaScriptExtensionsName = shared_vm.isKatakanaScriptExtensionsName;
-const isKawiScriptExtensionsName = shared_vm.isKawiScriptExtensionsName;
-const isKayahLiScriptExtensionsName = shared_vm.isKayahLiScriptExtensionsName;
-const isKhojkiScriptExtensionsName = shared_vm.isKhojkiScriptExtensionsName;
-const isKhudawadiScriptExtensionsName = shared_vm.isKhudawadiScriptExtensionsName;
-const isKiratRaiScriptName = shared_vm.isKiratRaiScriptName;
-const isLaoScriptExtensionsName = shared_vm.isLaoScriptExtensionsName;
-const isLatinScriptExtensionsName = shared_vm.isLatinScriptExtensionsName;
-const isLetterGeneralCategoryName = shared_vm.isLetterGeneralCategoryName;
-const isLimbuScriptExtensionsName = shared_vm.isLimbuScriptExtensionsName;
-const isLineTerminatorUnit = shared_vm.isLineTerminatorUnit;
-const isLinearAScriptExtensionsName = shared_vm.isLinearAScriptExtensionsName;
-const isLinearBScriptExtensionsName = shared_vm.isLinearBScriptExtensionsName;
-const isLisuScriptExtensionsName = shared_vm.isLisuScriptExtensionsName;
-const isLowSurrogateUnit = shared_vm.isLowSurrogateUnit;
-const isLycianScriptExtensionsName = shared_vm.isLycianScriptExtensionsName;
-const isLydianScriptExtensionsName = shared_vm.isLydianScriptExtensionsName;
-const isMahajaniScriptExtensionsName = shared_vm.isMahajaniScriptExtensionsName;
-const isMalayalamScriptExtensionsName = shared_vm.isMalayalamScriptExtensionsName;
-const isMandaicScriptExtensionsName = shared_vm.isMandaicScriptExtensionsName;
-const isManichaeanScriptExtensionsName = shared_vm.isManichaeanScriptExtensionsName;
-const isMarkGeneralCategoryName = shared_vm.isMarkGeneralCategoryName;
-const isMasaramGondiScriptExtensionsName = shared_vm.isMasaramGondiScriptExtensionsName;
-const isMedefaidrinScriptExtensionsName = shared_vm.isMedefaidrinScriptExtensionsName;
-const isMeeteiMayekScriptExtensionsName = shared_vm.isMeeteiMayekScriptExtensionsName;
-const isMendeKikakuiScriptExtensionsName = shared_vm.isMendeKikakuiScriptExtensionsName;
-const isMeroiticCursiveScriptExtensionsName = shared_vm.isMeroiticCursiveScriptExtensionsName;
-const isMeroiticHieroglyphsScriptExtensionsName = shared_vm.isMeroiticHieroglyphsScriptExtensionsName;
-const isMiaoScriptExtensionsName = shared_vm.isMiaoScriptExtensionsName;
-const isMiaoScriptName = shared_vm.isMiaoScriptName;
-const isModiScriptExtensionsName = shared_vm.isModiScriptExtensionsName;
-const isMongolianScriptExtensionsName = shared_vm.isMongolianScriptExtensionsName;
-const isMroScriptExtensionsName = shared_vm.isMroScriptExtensionsName;
-const isMultaniScriptExtensionsName = shared_vm.isMultaniScriptExtensionsName;
-const isMyanmarScriptExtensionsName = shared_vm.isMyanmarScriptExtensionsName;
-const isNabataeanScriptExtensionsName = shared_vm.isNabataeanScriptExtensionsName;
-const isNagMundariScriptExtensionsName = shared_vm.isNagMundariScriptExtensionsName;
-const isNandinagariScriptExtensionsName = shared_vm.isNandinagariScriptExtensionsName;
-const isNandinagariScriptName = shared_vm.isNandinagariScriptName;
-const isNewTaiLueScriptExtensionsName = shared_vm.isNewTaiLueScriptExtensionsName;
-const isNewTaiLueScriptName = shared_vm.isNewTaiLueScriptName;
-const isNewaScriptExtensionsName = shared_vm.isNewaScriptExtensionsName;
-const isNewaScriptName = shared_vm.isNewaScriptName;
-const isNkoScriptExtensionsName = shared_vm.isNkoScriptExtensionsName;
-const isNkoScriptName = shared_vm.isNkoScriptName;
-const isNumberCategoryName = shared_vm.isNumberCategoryName;
-const isNushuScriptExtensionsName = shared_vm.isNushuScriptExtensionsName;
-const isNushuScriptName = shared_vm.isNushuScriptName;
-const isNyiakengPuachueHmongScriptExtensionsName = shared_vm.isNyiakengPuachueHmongScriptExtensionsName;
-const isNyiakengPuachueHmongScriptName = shared_vm.isNyiakengPuachueHmongScriptName;
-const isOghamScriptExtensionsName = shared_vm.isOghamScriptExtensionsName;
-const isOghamScriptName = shared_vm.isOghamScriptName;
-const isOlChikiScriptExtensionsName = shared_vm.isOlChikiScriptExtensionsName;
-const isOlChikiScriptName = shared_vm.isOlChikiScriptName;
-const isOlOnalScriptExtensionsName = shared_vm.isOlOnalScriptExtensionsName;
-const isOlOnalScriptName = shared_vm.isOlOnalScriptName;
-const isOldHungarianScriptExtensionsName = shared_vm.isOldHungarianScriptExtensionsName;
-const isOldHungarianScriptName = shared_vm.isOldHungarianScriptName;
-const isOldItalicScriptExtensionsName = shared_vm.isOldItalicScriptExtensionsName;
-const isOldItalicScriptName = shared_vm.isOldItalicScriptName;
-const isOldNorthArabianScriptExtensionsName = shared_vm.isOldNorthArabianScriptExtensionsName;
-const isOldNorthArabianScriptName = shared_vm.isOldNorthArabianScriptName;
-const isOldPermicScriptExtensionsName = shared_vm.isOldPermicScriptExtensionsName;
-const isOldPermicScriptName = shared_vm.isOldPermicScriptName;
-const isOldPersianScriptExtensionsName = shared_vm.isOldPersianScriptExtensionsName;
-const isOldPersianScriptName = shared_vm.isOldPersianScriptName;
-const isOldSogdianScriptExtensionsName = shared_vm.isOldSogdianScriptExtensionsName;
-const isOldSogdianScriptName = shared_vm.isOldSogdianScriptName;
-const isOldSouthArabianScriptExtensionsName = shared_vm.isOldSouthArabianScriptExtensionsName;
-const isOldSouthArabianScriptName = shared_vm.isOldSouthArabianScriptName;
-const isOldTurkicScriptExtensionsName = shared_vm.isOldTurkicScriptExtensionsName;
-const isOldTurkicScriptName = shared_vm.isOldTurkicScriptName;
-const isOldUyghurScriptExtensionsName = shared_vm.isOldUyghurScriptExtensionsName;
-const isOldUyghurScriptName = shared_vm.isOldUyghurScriptName;
-const isOriyaScriptExtensionsName = shared_vm.isOriyaScriptExtensionsName;
-const isOriyaScriptName = shared_vm.isOriyaScriptName;
-const isOsageScriptExtensionsName = shared_vm.isOsageScriptExtensionsName;
-const isOsageScriptName = shared_vm.isOsageScriptName;
-const isOsmanyaScriptExtensionsName = shared_vm.isOsmanyaScriptExtensionsName;
-const isOsmanyaScriptName = shared_vm.isOsmanyaScriptName;
-const isOtherGeneralCategoryName = shared_vm.isOtherGeneralCategoryName;
-const isOtherLetterGeneralCategoryName = shared_vm.isOtherLetterGeneralCategoryName;
-const isPahawhHmongScriptExtensionsName = shared_vm.isPahawhHmongScriptExtensionsName;
-const isPahawhHmongScriptName = shared_vm.isPahawhHmongScriptName;
-const isPalmyreneScriptExtensionsName = shared_vm.isPalmyreneScriptExtensionsName;
-const isPalmyreneScriptName = shared_vm.isPalmyreneScriptName;
-const isPauCinHauScriptExtensionsName = shared_vm.isPauCinHauScriptExtensionsName;
-const isPauCinHauScriptName = shared_vm.isPauCinHauScriptName;
-const isPhagsPaScriptExtensionsName = shared_vm.isPhagsPaScriptExtensionsName;
-const isPhagsPaScriptName = shared_vm.isPhagsPaScriptName;
-const isPhoenicianScriptExtensionsName = shared_vm.isPhoenicianScriptExtensionsName;
-const isPhoenicianScriptName = shared_vm.isPhoenicianScriptName;
-const isPlainAsciiRegExpLiteral = shared_vm.isPlainAsciiRegExpLiteral;
-const isPsalterPahlaviScriptExtensionsName = shared_vm.isPsalterPahlaviScriptExtensionsName;
-const isPsalterPahlaviScriptName = shared_vm.isPsalterPahlaviScriptName;
-const isPunctuationGeneralCategoryName = shared_vm.isPunctuationGeneralCategoryName;
-const isRegExpLineTerminator = shared_vm.isRegExpLineTerminator;
-const isRegExpObservable = shared_vm.isRegExpObservable;
-const isRejangScriptExtensionsName = shared_vm.isRejangScriptExtensionsName;
-const isRejangScriptName = shared_vm.isRejangScriptName;
-const isRunicScriptExtensionsName = shared_vm.isRunicScriptExtensionsName;
-const isRunicScriptName = shared_vm.isRunicScriptName;
-const isSamaritanScriptExtensionsName = shared_vm.isSamaritanScriptExtensionsName;
-const isSamaritanScriptName = shared_vm.isSamaritanScriptName;
-const isSaurashtraScriptExtensionsName = shared_vm.isSaurashtraScriptExtensionsName;
-const isSaurashtraScriptName = shared_vm.isSaurashtraScriptName;
-const isSharadaScriptExtensionsName = shared_vm.isSharadaScriptExtensionsName;
-const isSharadaScriptName = shared_vm.isSharadaScriptName;
-const isShavianScriptExtensionsName = shared_vm.isShavianScriptExtensionsName;
-const isShavianScriptName = shared_vm.isShavianScriptName;
-const isSiddhamScriptExtensionsName = shared_vm.isSiddhamScriptExtensionsName;
-const isSiddhamScriptName = shared_vm.isSiddhamScriptName;
-const isSideticScriptExtensionsName = shared_vm.isSideticScriptExtensionsName;
-const isSideticScriptName = shared_vm.isSideticScriptName;
-const isSignWritingScriptExtensionsName = shared_vm.isSignWritingScriptExtensionsName;
-const isSignWritingScriptName = shared_vm.isSignWritingScriptName;
-const isSinhalaScriptExtensionsName = shared_vm.isSinhalaScriptExtensionsName;
-const isSinhalaScriptName = shared_vm.isSinhalaScriptName;
-const isSogdianScriptExtensionsName = shared_vm.isSogdianScriptExtensionsName;
-const isSogdianScriptName = shared_vm.isSogdianScriptName;
-const isSoraSompengScriptExtensionsName = shared_vm.isSoraSompengScriptExtensionsName;
-const isSoraSompengScriptName = shared_vm.isSoraSompengScriptName;
-const isSoyomboScriptExtensionsName = shared_vm.isSoyomboScriptExtensionsName;
-const isSoyomboScriptName = shared_vm.isSoyomboScriptName;
-const isSundaneseScriptExtensionsName = shared_vm.isSundaneseScriptExtensionsName;
-const isSundaneseScriptName = shared_vm.isSundaneseScriptName;
-const isSunuwarScriptExtensionsName = shared_vm.isSunuwarScriptExtensionsName;
-const isSunuwarScriptName = shared_vm.isSunuwarScriptName;
-const isSylotiNagriScriptExtensionsName = shared_vm.isSylotiNagriScriptExtensionsName;
-const isSylotiNagriScriptName = shared_vm.isSylotiNagriScriptName;
-const isSymbolGeneralCategoryName = shared_vm.isSymbolGeneralCategoryName;
-const isSyriacScriptExtensionsName = shared_vm.isSyriacScriptExtensionsName;
-const isSyriacScriptName = shared_vm.isSyriacScriptName;
-const isTagalogScriptExtensionsName = shared_vm.isTagalogScriptExtensionsName;
-const isTagalogScriptName = shared_vm.isTagalogScriptName;
-const isTagbanwaScriptExtensionsName = shared_vm.isTagbanwaScriptExtensionsName;
-const isTagbanwaScriptName = shared_vm.isTagbanwaScriptName;
-const isTaiLeScriptExtensionsName = shared_vm.isTaiLeScriptExtensionsName;
-const isTaiLeScriptName = shared_vm.isTaiLeScriptName;
-const isTaiThamScriptExtensionsName = shared_vm.isTaiThamScriptExtensionsName;
-const isTaiThamScriptName = shared_vm.isTaiThamScriptName;
-const isTaiVietScriptExtensionsName = shared_vm.isTaiVietScriptExtensionsName;
-const isTaiVietScriptName = shared_vm.isTaiVietScriptName;
-const isTaiYoScriptExtensionsName = shared_vm.isTaiYoScriptExtensionsName;
-const isTaiYoScriptName = shared_vm.isTaiYoScriptName;
-const isTakriScriptExtensionsName = shared_vm.isTakriScriptExtensionsName;
-const isTakriScriptName = shared_vm.isTakriScriptName;
-const isTamilScriptExtensionsName = shared_vm.isTamilScriptExtensionsName;
-const isTamilScriptName = shared_vm.isTamilScriptName;
-const isTangsaScriptExtensionsName = shared_vm.isTangsaScriptExtensionsName;
-const isTangsaScriptName = shared_vm.isTangsaScriptName;
-const isTangutScriptExtensionsName = shared_vm.isTangutScriptExtensionsName;
-const isTangutScriptName = shared_vm.isTangutScriptName;
-const isTeluguScriptExtensionsName = shared_vm.isTeluguScriptExtensionsName;
-const isTeluguScriptName = shared_vm.isTeluguScriptName;
-const isThaanaScriptExtensionsName = shared_vm.isThaanaScriptExtensionsName;
-const isThaanaScriptName = shared_vm.isThaanaScriptName;
-const isThaiScriptExtensionsName = shared_vm.isThaiScriptExtensionsName;
-const isThaiScriptName = shared_vm.isThaiScriptName;
-const isTibetanScriptExtensionsName = shared_vm.isTibetanScriptExtensionsName;
-const isTibetanScriptName = shared_vm.isTibetanScriptName;
-const isTifinaghScriptExtensionsName = shared_vm.isTifinaghScriptExtensionsName;
-const isTifinaghScriptName = shared_vm.isTifinaghScriptName;
-const isTirhutaScriptExtensionsName = shared_vm.isTirhutaScriptExtensionsName;
-const isTirhutaScriptName = shared_vm.isTirhutaScriptName;
-const isTodhriScriptExtensionsName = shared_vm.isTodhriScriptExtensionsName;
-const isTodhriScriptName = shared_vm.isTodhriScriptName;
-const isTolongSikiScriptExtensionsName = shared_vm.isTolongSikiScriptExtensionsName;
-const isTolongSikiScriptName = shared_vm.isTolongSikiScriptName;
-const isTotoScriptExtensionsName = shared_vm.isTotoScriptExtensionsName;
-const isTotoScriptName = shared_vm.isTotoScriptName;
-const isTuluTigalariScriptExtensionsName = shared_vm.isTuluTigalariScriptExtensionsName;
-const isTuluTigalariScriptName = shared_vm.isTuluTigalariScriptName;
-const isTypedArrayPrototypeMethod = shared_vm.isTypedArrayPrototypeMethod;
-const isUgariticScriptExtensionsName = shared_vm.isUgariticScriptExtensionsName;
-const isUgariticScriptName = shared_vm.isUgariticScriptName;
-const isUnassignedGeneralCategoryName = shared_vm.isUnassignedGeneralCategoryName;
-const isUnknownScriptName = shared_vm.isUnknownScriptName;
-const isUppercaseLetterGeneralCategoryName = shared_vm.isUppercaseLetterGeneralCategoryName;
-const isVaiScriptExtensionsName = shared_vm.isVaiScriptExtensionsName;
-const isVaiScriptName = shared_vm.isVaiScriptName;
-const isVithkuqiScriptExtensionsName = shared_vm.isVithkuqiScriptExtensionsName;
-const isVithkuqiScriptName = shared_vm.isVithkuqiScriptName;
-const isWanchoScriptExtensionsName = shared_vm.isWanchoScriptExtensionsName;
-const isWanchoScriptName = shared_vm.isWanchoScriptName;
-const isWarangCitiScriptExtensionsName = shared_vm.isWarangCitiScriptExtensionsName;
-const isWarangCitiScriptName = shared_vm.isWarangCitiScriptName;
-const isXidContinueName = shared_vm.isXidContinueName;
-const isYezidiScriptExtensionsName = shared_vm.isYezidiScriptExtensionsName;
-const isYezidiScriptName = shared_vm.isYezidiScriptName;
-const isYiScriptExtensionsName = shared_vm.isYiScriptExtensionsName;
-const isYiScriptName = shared_vm.isYiScriptName;
-const isZanabazarSquareScriptExtensionsName = shared_vm.isZanabazarSquareScriptExtensionsName;
-const isZanabazarSquareScriptName = shared_vm.isZanabazarSquareScriptName;
-const leadingAlternationCharacterClassSource = shared_vm.leadingAlternationCharacterClassSource;
-const lengthIndexValue = shared_vm.lengthIndexValue;
-const lowSurrogateLiteralAt = shared_vm.lowSurrogateLiteralAt;
-const normalizedUtf32 = shared_vm.normalizedUtf32;
-const objectFromValue = shared_vm.objectFromValue;
-const ownDataOrAutoInitPropertyValue = shared_vm.ownDataOrAutoInitPropertyValue;
-const parseSimpleClassSequenceSource = shared_vm.parseSimpleClassSequenceSource;
-const parseSimpleUnicodeLiteralSource = shared_vm.parseSimpleUnicodeLiteralSource;
-const parseSurrogatePairClassSource = shared_vm.parseSurrogatePairClassSource;
-const parseUnicodeAstralSpecialSource = shared_vm.parseUnicodeAstralSpecialSource;
-const primitiveObjectForAccess = shared_vm.primitiveObjectForAccess;
-const propertyAtomFromLengthIndex = shared_vm.propertyAtomFromLengthIndex;
-const propertyEscapePattern = shared_vm.propertyEscapePattern;
-const proxyTargetIsCallableObject = shared_vm.proxyTargetIsCallableObject;
-const qjsArrayLastIndexSparseLarge = shared_vm.qjsArrayLastIndexSparseLarge;
-const qjsIteratorPrototype = shared_vm.qjsIteratorPrototype;
-const qjsRegExpConstructCall = shared_vm.qjsRegExpConstructCall;
-const qjsRegExpExecGeneric = shared_vm.qjsRegExpExecGeneric;
-const qjsRegExpExecSimpleUnicodeLiteral = shared_vm.qjsRegExpExecSimpleUnicodeLiteral;
-const qjsRegExpSpeciesConstructor = shared_vm.qjsRegExpSpeciesConstructor;
-const readUnicodePropertyClassEscape = shared_vm.readUnicodePropertyClassEscape;
-const regExpConstructorFromGlobal = shared_vm.regExpConstructorFromGlobal;
-const regExpExecPropertyIsDefault = shared_vm.regExpExecPropertyIsDefault;
-const regExpFlagsAreFullUnicode = shared_vm.regExpFlagsAreFullUnicode;
-const regexpBorrowedLatin1SourceFlags = shared_vm.regexpBorrowedLatin1SourceFlags;
-const regexpInternalFlagsContain = shared_vm.regexpInternalFlagsContain;
-const regexpInternalSimpleQuantifiedClassSource = shared_vm.regexpInternalSimpleQuantifiedClassSource;
-const regexpSimpleCaptureSequencePattern = shared_vm.regexpSimpleCaptureSequencePattern;
-const setRegExpLastIndexZero = shared_vm.setRegExpLastIndexZero;
-const setValueProperty = shared_vm.setValueProperty;
-const setValuePropertyStrict = shared_vm.setValuePropertyStrict;
-const simpleCaptureSequenceAtLatin1 = shared_vm.simpleCaptureSequenceAtLatin1;
-const simpleCaptureSequenceAtUtf16 = shared_vm.simpleCaptureSequenceAtUtf16;
-const simpleClassSequenceAtLatin1 = shared_vm.simpleClassSequenceAtLatin1;
-const simpleClassSequenceAtUtf16 = shared_vm.simpleClassSequenceAtUtf16;
-const simpleUnicodeLiteralAt = shared_vm.simpleUnicodeLiteralAt;
-const singleLowSurrogateLiteralSource = shared_vm.singleLowSurrogateLiteralSource;
-const standaloneCharacterClassSource = shared_vm.standaloneCharacterClassSource;
-const surrogatePairClassAt = shared_vm.surrogatePairClassAt;
+const call_runtime = @import("call_runtime.zig");
+const array_ops = @import("array_ops.zig");
+const builtin_glue = @import("builtin_glue.zig");
+const coercion_ops = @import("coercion_ops.zig");
+const error_stack_ops = @import("error_stack_ops.zig");
+const object_ops = @import("object_ops.zig");
+const regexp_fastpath = @import("regexp_fastpath.zig");
+const RegExpCapture = call_runtime.RegExpCapture;
+const SimpleAsciiLiteralClassPlusLiteral = regexp_fastpath.SimpleAsciiLiteralClassPlusLiteral;
+const SimpleCaptureSequenceAtom = regexp_fastpath.SimpleCaptureSequenceAtom;
+const SimpleCaptureSequencePattern = regexp_fastpath.SimpleCaptureSequencePattern;
+const SimpleClassAlternationPattern = regexp_fastpath.SimpleClassAlternationPattern;
+const SimpleClassPredicate = regexp_fastpath.SimpleClassPredicate;
+const SimpleClassSequenceAtom = regexp_fastpath.SimpleClassSequenceAtom;
+const SimpleClassSequencePattern = regexp_fastpath.SimpleClassSequencePattern;
+const UnicodePropertyRunPattern = object_ops.UnicodePropertyRunPattern;
+const ValueSliceRoot = array_ops.ValueSliceRoot;
+const anchoredBinaryPropertyName = object_ops.anchoredBinaryPropertyName;
+const appendBacktraceFunctionName = error_stack_ops.appendBacktraceFunctionName;
+const appendCallSiteFileName = error_stack_ops.appendCallSiteFileName;
+const appendCallSiteFunctionName = error_stack_ops.appendCallSiteFunctionName;
+const appendNamedCaptureSubstitution = regexp_fastpath.appendNamedCaptureSubstitution;
+const appendRegExpFlags = regexp_fastpath.appendRegExpFlags;
+const appendRegExpSource = regexp_fastpath.appendRegExpSource;
+const arrayFirstIndexStart = array_ops.arrayFirstIndexStart;
+const arrayLastIndexStart = array_ops.arrayLastIndexStart;
+const arrayMethodTypedArrayLength = array_ops.arrayMethodTypedArrayLength;
+const arrayPrototypeFromGlobal = array_ops.arrayPrototypeFromGlobal;
+const arrayPrototypeRecordId = array_ops.arrayPrototypeRecordId;
+const arraySpeciesCreate = array_ops.arraySpeciesCreate;
+const arraySpeciesOriginalIsArray = array_ops.arraySpeciesOriginalIsArray;
+const atomIdOrNameEql = call_runtime.atomIdOrNameEql;
+const backtraceFunctionNameEql = error_stack_ops.backtraceFunctionNameEql;
+const bytecodeFunctionObjectTag = object_ops.bytecodeFunctionObjectTag;
+const callObjectToPrimitiveMethod = object_ops.callObjectToPrimitiveMethod;
+const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const callableObjectFromValue = object_ops.callableObjectFromValue;
+const classEscapeIsQuantified = regexp_fastpath.classEscapeIsQuantified;
+const classEscapeKindIndex = regexp_fastpath.classEscapeKindIndex;
+const classEscapeRunLengthLatin1 = regexp_fastpath.classEscapeRunLengthLatin1;
+const classEscapeRunLengthUtf16 = regexp_fastpath.classEscapeRunLengthUtf16;
+const clearRegExpLegacySlot = regexp_fastpath.clearRegExpLegacySlot;
+const constructValueOrBytecode = call_runtime.constructValueOrBytecode;
+const constructorPrototypeFromGlobal = object_ops.constructorPrototypeFromGlobal;
+const createDataPropertyOrThrow = object_ops.createDataPropertyOrThrow;
+const createIteratorResult = call_runtime.createIteratorResult;
+const createRegExpIndicesArray = array_ops.createRegExpIndicesArray;
+const defineFreshNonIndexDataProperty = object_ops.defineFreshNonIndexDataProperty;
+const defineNativeDataMethod = builtin_glue.defineNativeDataMethod;
+const defineRegExpGroupsProperty = object_ops.defineRegExpGroupsProperty;
+const defineRegExpGroupsPropertyFromValue = object_ops.defineRegExpGroupsPropertyFromValue;
+const errorStackTraceLimit = error_stack_ops.errorStackTraceLimit;
+const exactScriptExtensionsAliasTarget = regexp_unicode.exactScriptExtensionsAliasTarget;
+const getIteratorMethod = call_runtime.getIteratorMethod;
+const getValueProperty = object_ops.getValueProperty;
+const hasValueProperty = object_ops.hasValueProperty;
+const isAdlamScriptExtensionsName = call_runtime.isAdlamScriptExtensionsName;
+const isArabicScriptExtensionsName = call_runtime.isArabicScriptExtensionsName;
+const isArmenianScriptExtensionsName = call_runtime.isArmenianScriptExtensionsName;
+const isArrayPrototypeRecord = array_ops.isArrayPrototypeRecord;
+const isAvestanScriptExtensionsName = call_runtime.isAvestanScriptExtensionsName;
+const isBengaliScriptExtensionsName = call_runtime.isBengaliScriptExtensionsName;
+const isBopomofoScriptExtensionsName = call_runtime.isBopomofoScriptExtensionsName;
+const isBugineseScriptExtensionsName = call_runtime.isBugineseScriptExtensionsName;
+const isCallableValue = call_runtime.isCallableValue;
+const isCarianScriptExtensionsName = call_runtime.isCarianScriptExtensionsName;
+const isCaucasianAlbanianScriptExtensionsName = call_runtime.isCaucasianAlbanianScriptExtensionsName;
+const isChakmaScriptExtensionsName = call_runtime.isChakmaScriptExtensionsName;
+const isCherokeeScriptExtensionsName = call_runtime.isCherokeeScriptExtensionsName;
+const isCommonScriptExtensionsName = call_runtime.isCommonScriptExtensionsName;
+const isControlGeneralCategoryName = call_runtime.isControlGeneralCategoryName;
+const isCopticScriptExtensionsName = call_runtime.isCopticScriptExtensionsName;
+const isCopticScriptName = call_runtime.isCopticScriptName;
+const isCypriotScriptExtensionsName = call_runtime.isCypriotScriptExtensionsName;
+const isCyrillicScriptExtensionsName = call_runtime.isCyrillicScriptExtensionsName;
+const isDecimalNumberGeneralCategoryName = call_runtime.isDecimalNumberGeneralCategoryName;
+const isDevanagariScriptExtensionsName = call_runtime.isDevanagariScriptExtensionsName;
+const isDograScriptExtensionsName = call_runtime.isDograScriptExtensionsName;
+const isDuployanScriptExtensionsName = call_runtime.isDuployanScriptExtensionsName;
+const isElbasanScriptExtensionsName = call_runtime.isElbasanScriptExtensionsName;
+const isEthiopicScriptExtensionsName = call_runtime.isEthiopicScriptExtensionsName;
+const isGarayScriptExtensionsName = call_runtime.isGarayScriptExtensionsName;
+const isGeorgianScriptExtensionsName = call_runtime.isGeorgianScriptExtensionsName;
+const isGlagoliticScriptExtensionsName = call_runtime.isGlagoliticScriptExtensionsName;
+const isGothicScriptExtensionsName = call_runtime.isGothicScriptExtensionsName;
+const isGranthaScriptExtensionsName = call_runtime.isGranthaScriptExtensionsName;
+const isGraphemeBaseName = call_runtime.isGraphemeBaseName;
+const isGreekScriptExtensionsName = call_runtime.isGreekScriptExtensionsName;
+const isGujaratiScriptExtensionsName = call_runtime.isGujaratiScriptExtensionsName;
+const isGunjalaGondiScriptExtensionsName = call_runtime.isGunjalaGondiScriptExtensionsName;
+const isGurmukhiScriptExtensionsName = call_runtime.isGurmukhiScriptExtensionsName;
+const isHanScriptExtensionsName = call_runtime.isHanScriptExtensionsName;
+const isHanScriptName = call_runtime.isHanScriptName;
+const isHangulScriptExtensionsName = call_runtime.isHangulScriptExtensionsName;
+const isHanifiRohingyaScriptExtensionsName = call_runtime.isHanifiRohingyaScriptExtensionsName;
+const isHanunooScriptExtensionsName = call_runtime.isHanunooScriptExtensionsName;
+const isHebrewScriptExtensionsName = call_runtime.isHebrewScriptExtensionsName;
+const isHiraganaScriptExtensionsName = call_runtime.isHiraganaScriptExtensionsName;
+const isIdContinueName = call_runtime.isIdContinueName;
+const isImperialAramaicScriptExtensionsName = call_runtime.isImperialAramaicScriptExtensionsName;
+const isInheritedScriptExtensionsName = call_runtime.isInheritedScriptExtensionsName;
+const isInheritedScriptName = call_runtime.isInheritedScriptName;
+const isJavaneseScriptExtensionsName = call_runtime.isJavaneseScriptExtensionsName;
+const isKaithiScriptExtensionsName = call_runtime.isKaithiScriptExtensionsName;
+const isKannadaScriptExtensionsName = call_runtime.isKannadaScriptExtensionsName;
+const isKatakanaScriptExtensionsName = call_runtime.isKatakanaScriptExtensionsName;
+const isKawiScriptExtensionsName = call_runtime.isKawiScriptExtensionsName;
+const isKayahLiScriptExtensionsName = call_runtime.isKayahLiScriptExtensionsName;
+const isKhojkiScriptExtensionsName = call_runtime.isKhojkiScriptExtensionsName;
+const isKhudawadiScriptExtensionsName = call_runtime.isKhudawadiScriptExtensionsName;
+const isKiratRaiScriptName = call_runtime.isKiratRaiScriptName;
+const isLaoScriptExtensionsName = call_runtime.isLaoScriptExtensionsName;
+const isLatinScriptExtensionsName = call_runtime.isLatinScriptExtensionsName;
+const isLetterGeneralCategoryName = call_runtime.isLetterGeneralCategoryName;
+const isLimbuScriptExtensionsName = call_runtime.isLimbuScriptExtensionsName;
+const isLinearAScriptExtensionsName = call_runtime.isLinearAScriptExtensionsName;
+const isLinearBScriptExtensionsName = call_runtime.isLinearBScriptExtensionsName;
+const isLisuScriptExtensionsName = call_runtime.isLisuScriptExtensionsName;
+const isLycianScriptExtensionsName = call_runtime.isLycianScriptExtensionsName;
+const isLydianScriptExtensionsName = call_runtime.isLydianScriptExtensionsName;
+const isMahajaniScriptExtensionsName = call_runtime.isMahajaniScriptExtensionsName;
+const isMalayalamScriptExtensionsName = call_runtime.isMalayalamScriptExtensionsName;
+const isMandaicScriptExtensionsName = call_runtime.isMandaicScriptExtensionsName;
+const isManichaeanScriptExtensionsName = call_runtime.isManichaeanScriptExtensionsName;
+const isMarkGeneralCategoryName = call_runtime.isMarkGeneralCategoryName;
+const isMasaramGondiScriptExtensionsName = call_runtime.isMasaramGondiScriptExtensionsName;
+const isMedefaidrinScriptExtensionsName = call_runtime.isMedefaidrinScriptExtensionsName;
+const isMeeteiMayekScriptExtensionsName = call_runtime.isMeeteiMayekScriptExtensionsName;
+const isMendeKikakuiScriptExtensionsName = call_runtime.isMendeKikakuiScriptExtensionsName;
+const isMeroiticCursiveScriptExtensionsName = call_runtime.isMeroiticCursiveScriptExtensionsName;
+const isMeroiticHieroglyphsScriptExtensionsName = call_runtime.isMeroiticHieroglyphsScriptExtensionsName;
+const isMiaoScriptExtensionsName = call_runtime.isMiaoScriptExtensionsName;
+const isMiaoScriptName = call_runtime.isMiaoScriptName;
+const isModiScriptExtensionsName = call_runtime.isModiScriptExtensionsName;
+const isMongolianScriptExtensionsName = call_runtime.isMongolianScriptExtensionsName;
+const isMroScriptExtensionsName = call_runtime.isMroScriptExtensionsName;
+const isMultaniScriptExtensionsName = call_runtime.isMultaniScriptExtensionsName;
+const isMyanmarScriptExtensionsName = call_runtime.isMyanmarScriptExtensionsName;
+const isNabataeanScriptExtensionsName = call_runtime.isNabataeanScriptExtensionsName;
+const isNagMundariScriptExtensionsName = call_runtime.isNagMundariScriptExtensionsName;
+const isNandinagariScriptExtensionsName = call_runtime.isNandinagariScriptExtensionsName;
+const isNandinagariScriptName = call_runtime.isNandinagariScriptName;
+const isNewTaiLueScriptExtensionsName = call_runtime.isNewTaiLueScriptExtensionsName;
+const isNewTaiLueScriptName = call_runtime.isNewTaiLueScriptName;
+const isNewaScriptExtensionsName = call_runtime.isNewaScriptExtensionsName;
+const isNewaScriptName = call_runtime.isNewaScriptName;
+const isNkoScriptExtensionsName = call_runtime.isNkoScriptExtensionsName;
+const isNkoScriptName = call_runtime.isNkoScriptName;
+const isNumberCategoryName = call_runtime.isNumberCategoryName;
+const isNushuScriptExtensionsName = call_runtime.isNushuScriptExtensionsName;
+const isNushuScriptName = call_runtime.isNushuScriptName;
+const isNyiakengPuachueHmongScriptExtensionsName = call_runtime.isNyiakengPuachueHmongScriptExtensionsName;
+const isNyiakengPuachueHmongScriptName = call_runtime.isNyiakengPuachueHmongScriptName;
+const isOghamScriptExtensionsName = call_runtime.isOghamScriptExtensionsName;
+const isOghamScriptName = call_runtime.isOghamScriptName;
+const isOlChikiScriptExtensionsName = call_runtime.isOlChikiScriptExtensionsName;
+const isOlChikiScriptName = call_runtime.isOlChikiScriptName;
+const isOlOnalScriptExtensionsName = call_runtime.isOlOnalScriptExtensionsName;
+const isOlOnalScriptName = call_runtime.isOlOnalScriptName;
+const isOldHungarianScriptExtensionsName = call_runtime.isOldHungarianScriptExtensionsName;
+const isOldHungarianScriptName = call_runtime.isOldHungarianScriptName;
+const isOldItalicScriptExtensionsName = call_runtime.isOldItalicScriptExtensionsName;
+const isOldItalicScriptName = call_runtime.isOldItalicScriptName;
+const isOldNorthArabianScriptExtensionsName = call_runtime.isOldNorthArabianScriptExtensionsName;
+const isOldNorthArabianScriptName = call_runtime.isOldNorthArabianScriptName;
+const isOldPermicScriptExtensionsName = call_runtime.isOldPermicScriptExtensionsName;
+const isOldPermicScriptName = call_runtime.isOldPermicScriptName;
+const isOldPersianScriptExtensionsName = call_runtime.isOldPersianScriptExtensionsName;
+const isOldPersianScriptName = call_runtime.isOldPersianScriptName;
+const isOldSogdianScriptExtensionsName = call_runtime.isOldSogdianScriptExtensionsName;
+const isOldSogdianScriptName = call_runtime.isOldSogdianScriptName;
+const isOldSouthArabianScriptExtensionsName = call_runtime.isOldSouthArabianScriptExtensionsName;
+const isOldSouthArabianScriptName = call_runtime.isOldSouthArabianScriptName;
+const isOldTurkicScriptExtensionsName = call_runtime.isOldTurkicScriptExtensionsName;
+const isOldTurkicScriptName = call_runtime.isOldTurkicScriptName;
+const isOldUyghurScriptExtensionsName = call_runtime.isOldUyghurScriptExtensionsName;
+const isOldUyghurScriptName = call_runtime.isOldUyghurScriptName;
+const isOriyaScriptExtensionsName = call_runtime.isOriyaScriptExtensionsName;
+const isOriyaScriptName = call_runtime.isOriyaScriptName;
+const isOsageScriptExtensionsName = call_runtime.isOsageScriptExtensionsName;
+const isOsageScriptName = call_runtime.isOsageScriptName;
+const isOsmanyaScriptExtensionsName = call_runtime.isOsmanyaScriptExtensionsName;
+const isOsmanyaScriptName = call_runtime.isOsmanyaScriptName;
+const isOtherGeneralCategoryName = call_runtime.isOtherGeneralCategoryName;
+const isOtherLetterGeneralCategoryName = call_runtime.isOtherLetterGeneralCategoryName;
+const isPahawhHmongScriptExtensionsName = call_runtime.isPahawhHmongScriptExtensionsName;
+const isPahawhHmongScriptName = call_runtime.isPahawhHmongScriptName;
+const isPalmyreneScriptExtensionsName = call_runtime.isPalmyreneScriptExtensionsName;
+const isPalmyreneScriptName = call_runtime.isPalmyreneScriptName;
+const isPauCinHauScriptExtensionsName = call_runtime.isPauCinHauScriptExtensionsName;
+const isPauCinHauScriptName = call_runtime.isPauCinHauScriptName;
+const isPhagsPaScriptExtensionsName = call_runtime.isPhagsPaScriptExtensionsName;
+const isPhagsPaScriptName = call_runtime.isPhagsPaScriptName;
+const isPhoenicianScriptExtensionsName = call_runtime.isPhoenicianScriptExtensionsName;
+const isPhoenicianScriptName = call_runtime.isPhoenicianScriptName;
+const isPlainAsciiRegExpLiteral = regexp_fastpath.isPlainAsciiRegExpLiteral;
+const isPsalterPahlaviScriptExtensionsName = call_runtime.isPsalterPahlaviScriptExtensionsName;
+const isPsalterPahlaviScriptName = call_runtime.isPsalterPahlaviScriptName;
+const isPunctuationGeneralCategoryName = call_runtime.isPunctuationGeneralCategoryName;
+const isRegExpLineTerminator = regexp_fastpath.isRegExpLineTerminator;
+const isRegExpObservable = regexp_fastpath.isRegExpObservable;
+const isRejangScriptExtensionsName = call_runtime.isRejangScriptExtensionsName;
+const isRejangScriptName = call_runtime.isRejangScriptName;
+const isRunicScriptExtensionsName = call_runtime.isRunicScriptExtensionsName;
+const isRunicScriptName = call_runtime.isRunicScriptName;
+const isSamaritanScriptExtensionsName = call_runtime.isSamaritanScriptExtensionsName;
+const isSamaritanScriptName = call_runtime.isSamaritanScriptName;
+const isSaurashtraScriptExtensionsName = call_runtime.isSaurashtraScriptExtensionsName;
+const isSaurashtraScriptName = call_runtime.isSaurashtraScriptName;
+const isSharadaScriptExtensionsName = call_runtime.isSharadaScriptExtensionsName;
+const isSharadaScriptName = call_runtime.isSharadaScriptName;
+const isShavianScriptExtensionsName = call_runtime.isShavianScriptExtensionsName;
+const isShavianScriptName = call_runtime.isShavianScriptName;
+const isSiddhamScriptExtensionsName = call_runtime.isSiddhamScriptExtensionsName;
+const isSiddhamScriptName = call_runtime.isSiddhamScriptName;
+const isSideticScriptExtensionsName = call_runtime.isSideticScriptExtensionsName;
+const isSideticScriptName = call_runtime.isSideticScriptName;
+const isSignWritingScriptExtensionsName = call_runtime.isSignWritingScriptExtensionsName;
+const isSignWritingScriptName = call_runtime.isSignWritingScriptName;
+const isSinhalaScriptExtensionsName = call_runtime.isSinhalaScriptExtensionsName;
+const isSinhalaScriptName = call_runtime.isSinhalaScriptName;
+const isSogdianScriptExtensionsName = call_runtime.isSogdianScriptExtensionsName;
+const isSogdianScriptName = call_runtime.isSogdianScriptName;
+const isSoraSompengScriptExtensionsName = call_runtime.isSoraSompengScriptExtensionsName;
+const isSoraSompengScriptName = call_runtime.isSoraSompengScriptName;
+const isSoyomboScriptExtensionsName = call_runtime.isSoyomboScriptExtensionsName;
+const isSoyomboScriptName = call_runtime.isSoyomboScriptName;
+const isSundaneseScriptExtensionsName = call_runtime.isSundaneseScriptExtensionsName;
+const isSundaneseScriptName = call_runtime.isSundaneseScriptName;
+const isSunuwarScriptExtensionsName = call_runtime.isSunuwarScriptExtensionsName;
+const isSunuwarScriptName = call_runtime.isSunuwarScriptName;
+const isSylotiNagriScriptExtensionsName = call_runtime.isSylotiNagriScriptExtensionsName;
+const isSylotiNagriScriptName = call_runtime.isSylotiNagriScriptName;
+const isSymbolGeneralCategoryName = call_runtime.isSymbolGeneralCategoryName;
+const isSyriacScriptExtensionsName = call_runtime.isSyriacScriptExtensionsName;
+const isSyriacScriptName = call_runtime.isSyriacScriptName;
+const isTagalogScriptExtensionsName = call_runtime.isTagalogScriptExtensionsName;
+const isTagalogScriptName = call_runtime.isTagalogScriptName;
+const isTagbanwaScriptExtensionsName = call_runtime.isTagbanwaScriptExtensionsName;
+const isTagbanwaScriptName = call_runtime.isTagbanwaScriptName;
+const isTaiLeScriptExtensionsName = call_runtime.isTaiLeScriptExtensionsName;
+const isTaiLeScriptName = call_runtime.isTaiLeScriptName;
+const isTaiThamScriptExtensionsName = call_runtime.isTaiThamScriptExtensionsName;
+const isTaiThamScriptName = call_runtime.isTaiThamScriptName;
+const isTaiVietScriptExtensionsName = call_runtime.isTaiVietScriptExtensionsName;
+const isTaiVietScriptName = call_runtime.isTaiVietScriptName;
+const isTaiYoScriptExtensionsName = call_runtime.isTaiYoScriptExtensionsName;
+const isTaiYoScriptName = call_runtime.isTaiYoScriptName;
+const isTakriScriptExtensionsName = call_runtime.isTakriScriptExtensionsName;
+const isTakriScriptName = call_runtime.isTakriScriptName;
+const isTamilScriptExtensionsName = call_runtime.isTamilScriptExtensionsName;
+const isTamilScriptName = call_runtime.isTamilScriptName;
+const isTangsaScriptExtensionsName = call_runtime.isTangsaScriptExtensionsName;
+const isTangsaScriptName = call_runtime.isTangsaScriptName;
+const isTangutScriptExtensionsName = call_runtime.isTangutScriptExtensionsName;
+const isTangutScriptName = call_runtime.isTangutScriptName;
+const isTeluguScriptExtensionsName = call_runtime.isTeluguScriptExtensionsName;
+const isTeluguScriptName = call_runtime.isTeluguScriptName;
+const isThaanaScriptExtensionsName = call_runtime.isThaanaScriptExtensionsName;
+const isThaanaScriptName = call_runtime.isThaanaScriptName;
+const isThaiScriptExtensionsName = call_runtime.isThaiScriptExtensionsName;
+const isThaiScriptName = call_runtime.isThaiScriptName;
+const isTibetanScriptExtensionsName = call_runtime.isTibetanScriptExtensionsName;
+const isTibetanScriptName = call_runtime.isTibetanScriptName;
+const isTifinaghScriptExtensionsName = call_runtime.isTifinaghScriptExtensionsName;
+const isTifinaghScriptName = call_runtime.isTifinaghScriptName;
+const isTirhutaScriptExtensionsName = call_runtime.isTirhutaScriptExtensionsName;
+const isTirhutaScriptName = call_runtime.isTirhutaScriptName;
+const isTodhriScriptExtensionsName = call_runtime.isTodhriScriptExtensionsName;
+const isTodhriScriptName = call_runtime.isTodhriScriptName;
+const isTolongSikiScriptExtensionsName = call_runtime.isTolongSikiScriptExtensionsName;
+const isTolongSikiScriptName = call_runtime.isTolongSikiScriptName;
+const isTotoScriptExtensionsName = call_runtime.isTotoScriptExtensionsName;
+const isTotoScriptName = call_runtime.isTotoScriptName;
+const isTuluTigalariScriptExtensionsName = call_runtime.isTuluTigalariScriptExtensionsName;
+const isTuluTigalariScriptName = call_runtime.isTuluTigalariScriptName;
+const isTypedArrayPrototypeMethod = array_ops.isTypedArrayPrototypeMethod;
+const isUgariticScriptExtensionsName = call_runtime.isUgariticScriptExtensionsName;
+const isUgariticScriptName = call_runtime.isUgariticScriptName;
+const isUnassignedGeneralCategoryName = call_runtime.isUnassignedGeneralCategoryName;
+const isUppercaseLetterGeneralCategoryName = call_runtime.isUppercaseLetterGeneralCategoryName;
+const isVaiScriptExtensionsName = call_runtime.isVaiScriptExtensionsName;
+const isVaiScriptName = call_runtime.isVaiScriptName;
+const isVithkuqiScriptExtensionsName = call_runtime.isVithkuqiScriptExtensionsName;
+const isVithkuqiScriptName = call_runtime.isVithkuqiScriptName;
+const isWanchoScriptExtensionsName = call_runtime.isWanchoScriptExtensionsName;
+const isWanchoScriptName = call_runtime.isWanchoScriptName;
+const isWarangCitiScriptExtensionsName = call_runtime.isWarangCitiScriptExtensionsName;
+const isWarangCitiScriptName = call_runtime.isWarangCitiScriptName;
+const isXidContinueName = call_runtime.isXidContinueName;
+const isYezidiScriptExtensionsName = call_runtime.isYezidiScriptExtensionsName;
+const isYezidiScriptName = call_runtime.isYezidiScriptName;
+const isYiScriptExtensionsName = call_runtime.isYiScriptExtensionsName;
+const isYiScriptName = call_runtime.isYiScriptName;
+const isZanabazarSquareScriptExtensionsName = call_runtime.isZanabazarSquareScriptExtensionsName;
+const isZanabazarSquareScriptName = call_runtime.isZanabazarSquareScriptName;
+const leadingAlternationCharacterClassSource = regexp_fastpath.leadingAlternationCharacterClassSource;
+const lengthIndexValue = array_ops.lengthIndexValue;
+const lowSurrogateLiteralAt = regexp_fastpath.lowSurrogateLiteralAt;
+const objectFromValue = object_ops.objectFromValue;
+const ownDataOrAutoInitPropertyValue = object_ops.ownDataOrAutoInitPropertyValue;
+const parseSimpleClassSequenceSource = regexp_fastpath.parseSimpleClassSequenceSource;
+const parseSimpleUnicodeLiteralSource = regexp_fastpath.parseSimpleUnicodeLiteralSource;
+const parseSurrogatePairClassSource = regexp_fastpath.parseSurrogatePairClassSource;
+const parseUnicodeAstralSpecialSource = regexp_fastpath.parseUnicodeAstralSpecialSource;
+const primitiveObjectForAccess = object_ops.primitiveObjectForAccess;
+const propertyAtomFromLengthIndex = object_ops.propertyAtomFromLengthIndex;
+const propertyEscapePattern = object_ops.propertyEscapePattern;
+const proxyTargetIsCallableObject = object_ops.proxyTargetIsCallableObject;
+const qjsArrayLastIndexSparseLarge = array_ops.qjsArrayLastIndexSparseLarge;
+const qjsIteratorPrototype = object_ops.qjsIteratorPrototype;
+const qjsRegExpConstructCall = regexp_fastpath.qjsRegExpConstructCall;
+const qjsRegExpExecGeneric = regexp_fastpath.qjsRegExpExecGeneric;
+const qjsRegExpExecSimpleUnicodeLiteral = regexp_fastpath.qjsRegExpExecSimpleUnicodeLiteral;
+const qjsRegExpSpeciesConstructor = regexp_fastpath.qjsRegExpSpeciesConstructor;
+const readUnicodePropertyClassEscape = object_ops.readUnicodePropertyClassEscape;
+const regExpConstructorFromGlobal = regexp_fastpath.regExpConstructorFromGlobal;
+const regExpExecPropertyIsDefault = object_ops.regExpExecPropertyIsDefault;
+const regExpFlagsAreFullUnicode = regexp_fastpath.regExpFlagsAreFullUnicode;
+const regexpBorrowedLatin1SourceFlags = regexp_fastpath.regexpBorrowedLatin1SourceFlags;
+const regexpInternalFlagsContain = regexp_fastpath.regexpInternalFlagsContain;
+const regexpInternalSimpleQuantifiedClassSource = regexp_fastpath.regexpInternalSimpleQuantifiedClassSource;
+const regexpSimpleCaptureSequencePattern = regexp_fastpath.regexpSimpleCaptureSequencePattern;
+const setRegExpLastIndexZero = regexp_fastpath.setRegExpLastIndexZero;
+const setValueProperty = object_ops.setValueProperty;
+const setValuePropertyStrict = object_ops.setValuePropertyStrict;
+const simpleCaptureSequenceAtLatin1 = regexp_fastpath.simpleCaptureSequenceAtLatin1;
+const simpleCaptureSequenceAtUtf16 = regexp_fastpath.simpleCaptureSequenceAtUtf16;
+const simpleClassSequenceAtLatin1 = regexp_fastpath.simpleClassSequenceAtLatin1;
+const simpleClassSequenceAtUtf16 = regexp_fastpath.simpleClassSequenceAtUtf16;
+const simpleUnicodeLiteralAt = regexp_fastpath.simpleUnicodeLiteralAt;
+const singleLowSurrogateLiteralSource = regexp_fastpath.singleLowSurrogateLiteralSource;
+const standaloneCharacterClassSource = regexp_fastpath.standaloneCharacterClassSource;
+const surrogatePairClassAt = regexp_fastpath.surrogatePairClassAt;
 
-const throwRangeErrorMessage = shared_vm.throwRangeErrorMessage;
-const throwTypeErrorMessage = shared_vm.throwTypeErrorMessage;
-const toLengthIndex = shared_vm.toLengthIndex;
-const toLengthNumber = shared_vm.toLengthNumber;
-const toNumberLikeArgument = shared_vm.toNumberLikeArgument;
-const toPrimitiveForNumber = shared_vm.toPrimitiveForNumber;
-const toUint16CodeUnit = shared_vm.toUint16CodeUnit;
-const toUint32Number = shared_vm.toUint32Number;
-const uint32NumberValue = shared_vm.uint32NumberValue;
-const unicodeAstralSpecialAt = shared_vm.unicodeAstralSpecialAt;
-const unicodePropertyOnlyClassBody = shared_vm.unicodePropertyOnlyClassBody;
-const unicodePropertyOnlyClassSource = shared_vm.unicodePropertyOnlyClassSource;
-const updateRegExpLegacyStaticsNoCaptures = shared_vm.updateRegExpLegacyStaticsNoCaptures;
-const valueTruthy = shared_vm.valueTruthy;
-const valuesStrictEqual = shared_vm.valuesStrictEqual;
+const throwRangeErrorMessage = exception_ops.throwRangeErrorMessage;
+const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
+const toLengthIndex = coercion_ops.toLengthIndex;
+const toLengthNumber = coercion_ops.toLengthNumber;
+const toNumberLikeArgument = builtin_glue.toNumberLikeArgument;
+const toPrimitiveForNumber = coercion_ops.toPrimitiveForNumber;
+const toUint16CodeUnit = coercion_ops.toUint16CodeUnit;
+const toUint32Number = coercion_ops.toUint32Number;
+const uint32NumberValue = coercion_ops.uint32NumberValue;
+const unicodeAstralSpecialAt = regexp_fastpath.unicodeAstralSpecialAt;
+const unicodePropertyOnlyClassBody = object_ops.unicodePropertyOnlyClassBody;
+const unicodePropertyOnlyClassSource = object_ops.unicodePropertyOnlyClassSource;
+const updateRegExpLegacyStaticsNoCaptures = regexp_fastpath.updateRegExpLegacyStaticsNoCaptures;
+const valueTruthy = coercion_ops.valueTruthy;
+const valuesStrictEqual = value_ops.valuesStrictEqual;
 
 pub fn toStringForAnnexB(
     ctx: *core.JSContext,
@@ -442,6 +441,20 @@ pub fn qjsStringFunctionCall(
     return toStringForAnnexB(ctx, output, global, args[0], caller_function, caller_frame);
 }
 
+// Construct records the string ops route through (Phase 6b-3 STEP 4) instead
+// of naming `builtins.{string,regexp}.constructWithPrototype` directly: the
+// observable coercion stays here and the coerced primitives + resolved
+// prototype are threaded to the record. Both construct branches read only
+// `args`/`new_target`, so no constructor function object is threaded.
+const string_construct_ref = core.function.NativeBuiltinRef{
+    .domain = .string,
+    .id = @intFromEnum(method_ids.string.ConstructorMethod.call),
+};
+const regexp_construct_ref = core.function.NativeBuiltinRef{
+    .domain = .regexp,
+    .id = @intFromEnum(method_ids.regexp.ConstructorMethod.construct),
+};
+
 pub fn qjsStringConstructWithPrototype(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -456,7 +469,7 @@ pub fn qjsStringConstructWithPrototype(
     else
         try toStringForAnnexB(ctx, output, global, args[0], caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
-    return builtins.string.constructWithPrototype(ctx.runtime, &.{string_value}, prototype);
+    return (try builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, null, string_construct_ref, prototype, &.{string_value}, caller_function, caller_frame)) orelse error.TypeError;
 }
 
 pub fn qjsStringConcat(
@@ -664,6 +677,7 @@ pub fn buildErrorStackStringValue(ctx: *core.JSContext, global: *core.Object, sk
     var skipping = skip_name != null;
     while (idx > 0) {
         idx -= 1;
+        _ = exception_ops.resolvedBacktraceFunctionNameAt(ctx, idx);
         if (skipping) {
             if (backtraceFunctionNameEql(ctx, ctx.backtrace_frames[idx], skip_name.?)) skipping = false;
             continue;
@@ -692,7 +706,7 @@ pub fn formatCapturedErrorStackStringValue(ctx: *core.JSContext, sites_value: co
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(ctx.runtime.memory.allocator);
 
-    const current_length: usize = if (sites.is_array) @intCast(sites.length) else 0;
+    const current_length: usize = if (sites.flags.is_array) @intCast(sites.length) else 0;
     const length = @min(current_length, site_count);
     var index: usize = 0;
     var emitted: usize = 0;
@@ -740,13 +754,7 @@ pub fn qjsStringFromCodePoint(
             return error.RangeError;
         }
         const code_point: u32 = @intFromFloat(number);
-        if (code_point <= 0xffff) {
-            try units.append(ctx.runtime.memory.allocator, @intCast(code_point));
-        } else {
-            const adjusted = code_point - 0x10000;
-            try units.append(ctx.runtime.memory.allocator, @intCast(0xd800 + (adjusted >> 10)));
-            try units.append(ctx.runtime.memory.allocator, @intCast(0xdc00 + (adjusted & 0x3ff)));
-        }
+        try appendUtf16CodePoint(ctx.runtime, &units, code_point);
     }
     return (try core.string.String.createUtf16(ctx.runtime, units.items)).value();
 }
@@ -809,7 +817,7 @@ pub fn qjsStringFromCodePointArray(
     array_value: core.JSValue,
 ) !core.JSValue {
     const array = try property_ops.expectObject(array_value);
-    if (!array.is_array) return error.TypeError;
+    if (!array.flags.is_array) return error.TypeError;
     if (try qjsStringFromCodePointDenseArray(ctx.runtime, array)) |value| return value;
     var units = std.ArrayList(u16).empty;
     defer units.deinit(ctx.runtime.memory.allocator);
@@ -826,13 +834,7 @@ pub fn qjsStringFromCodePointArray(
             return error.RangeError;
         }
         const code_point: u32 = @intFromFloat(number);
-        if (code_point <= 0xffff) {
-            try units.append(ctx.runtime.memory.allocator, @intCast(code_point));
-        } else {
-            const adjusted = code_point - 0x10000;
-            try units.append(ctx.runtime.memory.allocator, @intCast(0xd800 + (adjusted >> 10)));
-            try units.append(ctx.runtime.memory.allocator, @intCast(0xdc00 + (adjusted & 0x3ff)));
-        }
+        try appendUtf16CodePoint(ctx.runtime, &units, code_point);
     }
     return (try core.string.String.createUtf16(ctx.runtime, units.items)).value();
 }
@@ -857,9 +859,9 @@ pub fn qjsStringFromCodePointDenseArray(rt: *core.JSRuntime, array: *core.Object
                 units[unit_count] = @intCast(code_point);
                 unit_count += 1;
             } else {
-                const adjusted = code_point - 0x10000;
-                units[unit_count] = @intCast(0xd800 + (adjusted >> 10));
-                units[unit_count + 1] = @intCast(0xdc00 + (adjusted & 0x3ff));
+                const pair = unicode_lib.surrogatePairFromCodePoint(@intCast(code_point));
+                units[unit_count] = pair.high;
+                units[unit_count + 1] = pair.low;
                 unit_count += 2;
             }
         }
@@ -873,12 +875,13 @@ pub fn qjsStringFromCodePointDenseArray(rt: *core.JSRuntime, array: *core.Object
     @memset(code_points, null);
 
     var seen: usize = 0;
-    for (array.properties) |entry| {
-        if (entry.flags.deleted) continue;
-        const index = core.array.arrayIndexFromAtom(&rt.atoms, entry.atom_id) orelse continue;
+    for (array.shapeProps(), 0..) |prop, property_index| {
+        const prop_flags = core.property.Flags.fromBits(prop.flags);
+        if (prop_flags.deleted) continue;
+        const index = core.array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;
         if (index >= array.length) continue;
-        if (entry.flags.accessor) return null;
-        const value = switch (entry.slot) {
+        if (prop_flags.accessor) return null;
+        const value = switch (array.properties[property_index].slot) {
             .data => |stored| stored,
             // Array elements never carry `auto_init` placeholders --
             // those only appear for builtin method tables installed via
@@ -913,9 +916,9 @@ pub fn appendCodePointUnits(units: *std.ArrayList(u16), code_point: u32) void {
     if (code_point <= 0xffff) {
         units.appendAssumeCapacity(@intCast(code_point));
     } else {
-        const adjusted = code_point - 0x10000;
-        units.appendAssumeCapacity(@intCast(0xd800 + (adjusted >> 10)));
-        units.appendAssumeCapacity(@intCast(0xdc00 + (adjusted & 0x3ff)));
+        const pair = unicode_lib.surrogatePairFromCodePoint(@intCast(code_point));
+        units.appendAssumeCapacity(pair.high);
+        units.appendAssumeCapacity(pair.low);
     }
 }
 
@@ -1007,24 +1010,50 @@ pub fn qjsRegExpToString(
     return value_ops.createStringValue(ctx.runtime, bytes.items);
 }
 
-pub fn simpleAsciiLiteralPlusLiteralMatch(source: []const u8, flags: []const u8, string_value: core.JSValue) ?bool {
-    const input = latin1StringSlice(string_value) orelse return null;
-    return simpleAsciiLiteralPlusLiteralMatchBytes(source, flags, input);
+const SimpleLatin1LiteralPlusLiteral = struct {
+    repeat: u8,
+    tail: ?u8,
+};
+
+fn isPlainLatin1RegExpLiteral(unit: u8) bool {
+    return unit >= 0x80 or isPlainAsciiRegExpLiteral(unit);
 }
 
-pub fn simpleAsciiLiteralPlusLiteralMatchBytes(source: []const u8, flags: []const u8, input: []const u8) ?bool {
+fn parseSimpleLatin1LiteralPlusLiteral(source: []const u8, flags: []const u8) ?SimpleLatin1LiteralPlusLiteral {
     if (flags.len != 0 or source.len < 2 or source[1] != '+') return null;
     const repeat = source[0];
-    if (!isPlainAsciiRegExpLiteral(repeat)) return null;
+    if (!isPlainLatin1RegExpLiteral(repeat)) return null;
 
     if (source.len == 2) {
-        return std.mem.indexOfScalar(u8, input, repeat) != null;
+        return .{ .repeat = repeat, .tail = null };
     }
 
     if (source.len != 3) return null;
     const tail = source[2];
-    if (!isPlainAsciiRegExpLiteral(tail)) return null;
+    if (!isPlainLatin1RegExpLiteral(tail)) return null;
+    return .{ .repeat = repeat, .tail = tail };
+}
 
+pub fn simpleLatin1LiteralPlusLiteralMatch(source: []const u8, flags: []const u8, string_value: core.JSValue) ?bool {
+    const pattern = parseSimpleLatin1LiteralPlusLiteral(source, flags) orelse return null;
+    const header = string_value.refHeader() orelse return null;
+    if (!string_value.isString()) return null;
+    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    return switch (string_object.resolveData()) {
+        .latin1 => |bytes| simpleLatin1LiteralPlusLiteralMatchBytesPattern(pattern, bytes),
+        .utf16 => |units| simpleLatin1LiteralPlusLiteralMatchUtf16Pattern(pattern, units),
+    };
+}
+
+pub fn simpleLatin1LiteralPlusLiteralMatchBytes(source: []const u8, flags: []const u8, input: []const u8) ?bool {
+    const pattern = parseSimpleLatin1LiteralPlusLiteral(source, flags) orelse return null;
+    return simpleLatin1LiteralPlusLiteralMatchBytesPattern(pattern, input);
+}
+
+fn simpleLatin1LiteralPlusLiteralMatchBytesPattern(pattern: SimpleLatin1LiteralPlusLiteral, input: []const u8) bool {
+    const repeat = pattern.repeat;
+    if (pattern.tail == null) return std.mem.indexOfScalar(u8, input, repeat) != null;
+    const tail = pattern.tail.?;
     var i: usize = 0;
     while (i < input.len) : (i += 1) {
         if (input[i] != repeat) continue;
@@ -1033,6 +1062,28 @@ pub fn simpleAsciiLiteralPlusLiteralMatchBytes(source: []const u8, flags: []cons
         if (j < input.len and input[j] == tail) return true;
     }
     return false;
+}
+
+fn simpleLatin1LiteralPlusLiteralMatchUtf16Pattern(pattern: SimpleLatin1LiteralPlusLiteral, input: []const u16) bool {
+    const repeat: u16 = pattern.repeat;
+    if (pattern.tail == null) return std.mem.indexOfScalar(u16, input, repeat) != null;
+    const tail: u16 = pattern.tail.?;
+    var i: usize = 0;
+    while (i < input.len) : (i += 1) {
+        if (input[i] != repeat) continue;
+        var j = i + 1;
+        while (j < input.len and input[j] == repeat) : (j += 1) {}
+        if (j < input.len and input[j] == tail) return true;
+    }
+    return false;
+}
+
+pub fn simpleAsciiLiteralPlusLiteralMatch(source: []const u8, flags: []const u8, string_value: core.JSValue) ?bool {
+    return simpleLatin1LiteralPlusLiteralMatch(source, flags, string_value);
+}
+
+pub fn simpleAsciiLiteralPlusLiteralMatchBytes(source: []const u8, flags: []const u8, input: []const u8) ?bool {
+    return simpleLatin1LiteralPlusLiteralMatchBytes(source, flags, input);
 }
 
 pub fn simpleAsciiLiteralClassPlusLiteralMatchBytes(pattern: SimpleAsciiLiteralClassPlusLiteral, input: []const u8) bool {
@@ -1045,7 +1096,7 @@ pub fn simpleAsciiLiteralClassPlusLiteralMatchBytes(pattern: SimpleAsciiLiteralC
 
         var class_end = start + pattern.prefix.len;
         const class_min_end = class_end + 1;
-        while (class_end < input.len and builtins.regexp.classMatchesUtf16Unit(pattern.class_source, input[class_end])) : (class_end += 1) {}
+        while (class_end < input.len and core.regexp.classMatchesUtf16Unit(pattern.class_source, input[class_end])) : (class_end += 1) {}
         if (class_end >= class_min_end) {
             if (pattern.suffix.len == 0) return true;
 
@@ -1197,7 +1248,8 @@ pub fn qjsStringMatchAll(
 
     const flags = try value_ops.createStringValue(ctx.runtime, "g");
     defer flags.free(ctx.runtime);
-    const matcher = try builtins.regexp.constructWithPrototype(ctx.runtime, regexp, flags, constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"));
+    const regexp_args = [_]core.JSValue{ regexp, flags };
+    const matcher = (try builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, null, regexp_construct_ref, constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"), &regexp_args, caller_function, caller_frame)) orelse return error.TypeError;
     defer matcher.free(ctx.runtime);
     const match_all = try getValueProperty(ctx, output, global, matcher, match_all_atom, caller_function, caller_frame);
     defer match_all.free(ctx.runtime);
@@ -1208,7 +1260,7 @@ pub fn qjsStringMatchAll(
 pub fn qjsRegExpStringIteratorPrototype(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
     const proto = try qjsIteratorPrototype(rt, global, "RegExp String Iterator");
     errdefer core.Object.destroyFromHeader(rt, &proto.header);
-    const next = try builtins.function.nativeFunction(rt, "next", 0);
+    const next = try core.function.nativeFunction(rt, "next", 0);
     defer next.free(rt);
     try proto.defineOwnProperty(rt, core.atom.predefinedId("next", .string).?, core.Descriptor.data(next, true, false, true));
     return proto;
@@ -1392,9 +1444,9 @@ pub fn qjsRegExpSymbolSplitGeneric(
 pub fn advanceStringIndexUnits(units: []const u16, index: usize, unicode: bool) usize {
     if (!unicode or index + 1 >= units.len) return index + 1;
     const first = units[index];
-    if (first < 0xd800 or first > 0xdbff) return index + 1;
+    if (!isHighSurrogateUnit(first)) return index + 1;
     const second = units[index + 1];
-    return if (second >= 0xdc00 and second <= 0xdfff) index + 2 else index + 1;
+    return if (isLowSurrogateUnit(second)) index + 2 else index + 1;
 }
 
 pub fn qjsRegExpSymbolSearchGeneric(
@@ -1408,7 +1460,7 @@ pub fn qjsRegExpSymbolSearchGeneric(
 ) !core.JSValue {
     const previous = try getValueProperty(ctx, output, global, rx, core.atom.ids.lastIndex, caller_function, caller_frame);
     defer previous.free(ctx.runtime);
-    if (!builtins.object.sameValue(previous, core.JSValue.int32(0))) {
+    if (!previous.sameValue(core.JSValue.int32(0))) {
         try setValuePropertyStrict(ctx, output, global, rx, core.atom.ids.lastIndex, core.JSValue.int32(0), caller_function, caller_frame);
     }
 
@@ -1420,7 +1472,7 @@ pub fn qjsRegExpSymbolSearchGeneric(
 
     const current = try getValueProperty(ctx, output, global, rx, core.atom.ids.lastIndex, caller_function, caller_frame);
     defer current.free(ctx.runtime);
-    if (!builtins.object.sameValue(current, previous)) {
+    if (!current.sameValue(previous)) {
         try setValuePropertyStrict(ctx, output, global, rx, core.atom.ids.lastIndex, previous, caller_function, caller_frame);
     }
 
@@ -1729,7 +1781,7 @@ pub fn parseFastReplacementPattern(replacement: []const u8, capture_count: usize
             '1'...'9' => {
                 var capture_index: usize = next - '0';
                 var consumed: usize = 1;
-                if (index + 2 < replacement.len and std.ascii.isDigit(replacement[index + 2])) {
+                if (index + 2 < replacement.len and unicode_lib.isAsciiDigitByte(replacement[index + 2])) {
                     const two_digit = capture_index * 10 + (replacement[index + 2] - '0');
                     if (two_digit >= 1 and two_digit <= capture_count) {
                         capture_index = two_digit;
@@ -1780,6 +1832,7 @@ pub fn appendStringValueUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), val
         return;
     }
     const string_object: *core.string.String = @fieldParentPtr("header", header);
+    try string_object.ensureFlat(rt);
     switch (string_object.resolveData()) {
         .latin1 => |bytes| for (bytes) |byte| try out.append(rt.memory.allocator, byte),
         .utf16 => |units| try out.appendSlice(rt.memory.allocator, units),
@@ -2103,24 +2156,10 @@ pub fn nativeFunctionMatcherUnicodeClassAsciiResult(source: []const u8, flags: [
     const unit = string_object.codeUnitAt(0);
     if (unit > 0x7f) return null;
     const byte: u8 = @intCast(unit);
-    if (byte >= 'A' and byte <= 'Z') return true;
-    if (byte >= 'a' and byte <= 'z') return true;
-    if (is_id_continue and byte >= '0' and byte <= '9') return true;
+    if (unicode_lib.isAsciiAlphaByte(byte)) return true;
+    if (is_id_continue and unicode_lib.isAsciiDigitByte(byte)) return true;
     if (is_id_continue and byte == '_') return true;
     return false;
-}
-
-pub fn findStringPropertyEscapeMatch(source: []const u8, string_value: core.JSValue, start_index: usize, sticky: bool) ?RegExpMatch {
-    const name = stringPropertyEscapePattern(source) orelse return null;
-    if (!std.mem.eql(u8, name, "RGI_Emoji")) return null;
-    const units = stringValueUnits(string_value) orelse return null;
-    const match = emoji.findRgiEmojiMatch(units, start_index, sticky) orelse return null;
-    return .{ .index = match.index, .len = match.len };
-}
-
-pub fn anchoredRgiEmojiMatches(string_value: core.JSValue) bool {
-    const units = stringValueUnits(string_value) orelse return false;
-    return emoji.rgiEmojiSequencesCover(units);
 }
 
 pub fn stringValueUnits(string_value: core.JSValue) ?emoji.StringUnits {
@@ -2164,23 +2203,6 @@ pub fn findPropertyEscapeMatch(source: []const u8, string_value: core.JSValue, s
         },
     }
     return null;
-}
-
-pub fn anchoredStringPropertyName(source: []const u8) ?[]const u8 {
-    const positive_prefix = "^\\p{";
-    const suffix = "}+$";
-    if (!std.mem.startsWith(u8, source, positive_prefix)) return null;
-    if (!std.mem.endsWith(u8, source, suffix)) return null;
-    if (source.len <= positive_prefix.len + suffix.len) return null;
-    return source[positive_prefix.len .. source.len - suffix.len];
-}
-
-pub fn stringPropertyEscapePattern(source: []const u8) ?[]const u8 {
-    const positive_prefix = "\\p{";
-    if (!std.mem.startsWith(u8, source, positive_prefix)) return null;
-    if (source.len <= positive_prefix.len or source[source.len - 1] != '}') return null;
-    const name = source[positive_prefix.len .. source.len - 1];
-    return if (std.mem.eql(u8, name, "RGI_Emoji")) name else null;
 }
 
 pub fn unicodePropertyRunCodePointMatches(pattern: UnicodePropertyRunPattern, code_point: u21) bool {
@@ -2266,6 +2288,36 @@ pub fn unicodePropertyOnlyClassCodePointMatches(source: []const u8, code_point: 
     return false;
 }
 
+/// Route a reused String method *body* through the record table's
+/// func-object-free arm. `decoded_method_id` is the legacy selector the builtin
+/// string bodies switch on; it is re-encoded to its `PrototypeMethod` record id
+/// so the dispatch lands on `builtins/string.zig` `stringCall`, whose
+/// `func_obj == null` arm runs the pure `methodCall` (or, for `charAt`,
+/// `charAtValue`) body directly. `string_value` is the resolved receiver and
+/// `args` are already coerced. This replaces the former direct
+/// `builtins.string.methodCall`/`charAtValue` calls so exec carries no
+/// compile-time String body knowledge.
+pub fn callStringBody(
+    ctx: *core.JSContext,
+    string_value: core.JSValue,
+    decoded_method_id: u32,
+    args: []const core.JSValue,
+) !core.JSValue {
+    const native_ref = core.function.NativeBuiltinRef{ .domain = .string, .id = string_id_lookup.encodePrototypeMethodId(decoded_method_id) orelse return error.TypeError };
+    return (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, string_value, native_ref, args, null, null)) orelse error.TypeError;
+}
+
+/// Route `String.prototype.charAt` (decoded id 0, the `charAtValue` body)
+/// through the table. The receiver is `string_value` and the single index is
+/// forwarded as `args[0]`.
+pub fn callStringCharAtBody(
+    ctx: *core.JSContext,
+    string_value: core.JSValue,
+    index_value: core.JSValue,
+) !core.JSValue {
+    return callStringBody(ctx, string_value, 0, &.{index_value});
+}
+
 pub fn qjsStringTrim(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2277,7 +2329,7 @@ pub fn qjsStringTrim(
 ) !core.JSValue {
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
-    return builtins.string.methodCall(ctx.runtime, string_value, method_id, &.{});
+    return callStringBody(ctx, string_value, method_id, &.{});
 }
 
 pub fn qjsStringPrototypeMethod(
@@ -2294,21 +2346,27 @@ pub fn qjsStringPrototypeMethod(
     if (method_id == 10) {
         return qjsStringConcat(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
-    if (method_id == 27) {
+    if (method_id == string_id_lookup.legacy_split_method_id) {
         return qjsStringSplit(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
-    if (method_id == 40) {
+    if (method_id == string_id_lookup.legacy_search_method_id) {
         return qjsStringSearch(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
-    if (method_id == 41) {
+    if (method_id == string_id_lookup.legacy_match_method_id) {
         return qjsStringMatch(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
-    if (method_id == 42) {
+    if (method_id == string_id_lookup.legacy_replace_all_method_id) {
         return qjsStringReplaceAll(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
-    if (method_id == 43) {
+    if (method_id == string_id_lookup.legacy_match_all_method_id) {
         return qjsStringMatchAll(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
+    // Pad / Html / Normalize / LocaleCompare / NumericArgs bodies live in this
+    // file (Phase 6b-3 STEP 3B moved them back from `builtins/string.zig`): they
+    // are exec-only, reachable solely through this dispatcher. The RegExp-coupled
+    // bodies (search/match/split/replaceAll/matchAll and
+    // `qjsStringSearchPositionMethod`, which observes RegExp via
+    // `isRegExpForStringSearch`) and the BOTH bodies (concat) also stay in exec.
     if (method_id == 34 or method_id == 35) {
         return qjsStringPad(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
     }
@@ -2318,7 +2376,7 @@ pub fn qjsStringPrototypeMethod(
     {
         return qjsStringHtmlMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
     }
-    if (method_id == 37) {
+    if (method_id == string_id_lookup.legacy_normalize_method_id) {
         return qjsStringNormalize(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
     if (method_id == 36) {
@@ -2332,124 +2390,11 @@ pub fn qjsStringPrototypeMethod(
     }
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
-    return builtins.string.methodCall(ctx.runtime, string_value, method_id, args) catch |err| switch (err) {
+    return callStringBody(ctx, string_value, method_id, args) catch |err| switch (err) {
         error.RangeError => return throwRangeErrorMessage(ctx, global, "invalid repeat count"),
         else => err,
     };
 }
-
-pub fn qjsStringPad(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    method_id: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
-    const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
-
-    var source_units = std.ArrayList(u16).empty;
-    defer source_units.deinit(ctx.runtime.memory.allocator);
-    try appendStringValueUnits(ctx.runtime, &source_units, string_value);
-
-    const max_length_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const target_length = try toLengthIndex(ctx, output, global, max_length_value);
-    if (target_length <= source_units.items.len) return string_value.dup();
-
-    const fill_value = if (args.len >= 2 and !args[1].isUndefined()) blk: {
-        break :blk try toStringForAnnexB(ctx, output, global, args[1], caller_function, caller_frame);
-    } else try value_ops.createStringValue(ctx.runtime, " ");
-    defer fill_value.free(ctx.runtime);
-
-    var fill_units = std.ArrayList(u16).empty;
-    defer fill_units.deinit(ctx.runtime.memory.allocator);
-    try appendStringValueUnits(ctx.runtime, &fill_units, fill_value);
-    if (fill_units.items.len == 0) return string_value.dup();
-
-    const fill_length = target_length - source_units.items.len;
-    var out = std.ArrayList(u16).empty;
-    defer out.deinit(ctx.runtime.memory.allocator);
-    if (method_id == 34) {
-        try appendRepeatedFillUnits(ctx.runtime, &out, fill_units.items, fill_length);
-        try out.appendSlice(ctx.runtime.memory.allocator, source_units.items);
-    } else {
-        try out.appendSlice(ctx.runtime.memory.allocator, source_units.items);
-        try appendRepeatedFillUnits(ctx.runtime, &out, fill_units.items, fill_length);
-    }
-    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
-}
-
-pub fn qjsStringNormalize(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
-    const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
-
-    const form: unicode_lib.NormalizationForm = if (args.len == 0 or args[0].isUndefined()) .nfc else blk: {
-        const form_value = try toStringForAnnexB(ctx, output, global, args[0], caller_function, caller_frame);
-        defer form_value.free(ctx.runtime);
-        var form_bytes = std.ArrayList(u8).empty;
-        defer form_bytes.deinit(ctx.runtime.memory.allocator);
-        try value_ops.appendRawString(ctx.runtime, &form_bytes, form_value);
-        if (std.mem.eql(u8, form_bytes.items, "NFC")) break :blk unicode_lib.NormalizationForm.nfc;
-        if (std.mem.eql(u8, form_bytes.items, "NFD")) break :blk unicode_lib.NormalizationForm.nfd;
-        if (std.mem.eql(u8, form_bytes.items, "NFKC")) break :blk unicode_lib.NormalizationForm.nfkc;
-        if (std.mem.eql(u8, form_bytes.items, "NFKD")) break :blk unicode_lib.NormalizationForm.nfkd;
-        return error.RangeError;
-    };
-
-    var input = std.ArrayList(u32).empty;
-    defer input.deinit(ctx.runtime.memory.allocator);
-    try appendUtf32FromStringValue(ctx.runtime, &input, string_value);
-    const normalized_slice = try unicode_lib.normalizeAlloc(ctx.runtime.memory.allocator, input.items, form);
-    defer ctx.runtime.memory.allocator.free(normalized_slice);
-
-    var out = std.ArrayList(u16).empty;
-    defer out.deinit(ctx.runtime.memory.allocator);
-    for (normalized_slice) |code_point| try appendUtf16CodePoint(ctx.runtime, &out, code_point);
-    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
-}
-
-pub fn qjsStringLocaleCompare(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
-    const lhs = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer lhs.free(ctx.runtime);
-    const rhs_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const rhs = try toStringForAnnexB(ctx, output, global, rhs_input, caller_function, caller_frame);
-    defer rhs.free(ctx.runtime);
-
-    const lhs_nfc = try normalizedUtf32(ctx.runtime, lhs, .nfc);
-    defer lhs_nfc.deinit();
-    const rhs_nfc = try normalizedUtf32(ctx.runtime, rhs, .nfc);
-    defer rhs_nfc.deinit();
-
-    const result: i32 = switch (std.mem.order(u32, lhs_nfc.slice, rhs_nfc.slice)) {
-        .lt => -1,
-        .eq => 0,
-        .gt => 1,
-    };
-    return core.JSValue.int32(result);
-}
-
 pub fn appendUtf32FromStringValue(rt: *core.JSRuntime, out: *std.ArrayList(u32), value: core.JSValue) !void {
     var units = std.ArrayList(u16).empty;
     defer units.deinit(rt.memory.allocator);
@@ -2468,213 +2413,8 @@ pub fn appendUtf32FromStringValue(rt: *core.JSRuntime, out: *std.ArrayList(u32),
 }
 
 pub fn appendUtf16CodePoint(rt: *core.JSRuntime, out: *std.ArrayList(u16), code_point: u32) !void {
-    if (code_point <= 0xffff) {
-        try out.append(rt.memory.allocator, @intCast(code_point));
-        return;
-    }
-    const cp = code_point - 0x10000;
-    try out.append(rt.memory.allocator, @intCast(0xd800 + (cp >> 10)));
-    try out.append(rt.memory.allocator, @intCast(0xdc00 + (cp & 0x3ff)));
+    return unicode_lib.appendUtf16CodePoint(rt.memory.allocator, out, @intCast(code_point));
 }
-
-pub fn qjsStringNumericArgsMethod(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    method_id: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
-    const string_value = if (this_value.isString())
-        this_value
-    else
-        try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer if (!this_value.isString()) string_value.free(ctx.runtime);
-
-    var coerced: [2]core.JSValue = .{ core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
-    const count = @min(args.len, coerced.len);
-    for (args[0..count], 0..) |arg, index| {
-        coerced[index] = if (arg.isUndefined())
-            core.JSValue.undefinedValue()
-        else if (arg.isNumber())
-            arg
-        else
-            try toNumberLikeArgument(ctx, output, global, arg);
-    }
-
-    if (method_id == 1) {
-        if (try fastLatin1Substring(ctx.runtime, string_value, coerced[0..count])) |value| return value;
-    }
-    if (method_id == 0) {
-        const index = if (count >= 1) coerced[0] else core.JSValue.int32(0);
-        return builtins.string.charAtValue(ctx.runtime, string_value, index);
-    }
-    if (method_id == 25) {
-        return qjsStringSubstr(ctx, output, global, string_value, coerced[0..count]);
-    }
-    return builtins.string.methodCall(ctx.runtime, string_value, method_id, coerced[0..count]) catch |err| switch (err) {
-        error.RangeError => return throwRangeErrorMessage(ctx, global, "invalid repeat count"),
-        else => err,
-    };
-}
-
-pub fn fastLatin1Substring(rt: *core.JSRuntime, string_value: core.JSValue, args: []const core.JSValue) !?core.JSValue {
-    if (!string_value.isString() or args.len > 2) return null;
-    const header = string_value.refHeader() orelse return null;
-    const string: *core.string.String = @fieldParentPtr("header", header);
-    const bytes = switch (string.resolveData()) {
-        .latin1 => |latin1| latin1,
-        .utf16 => return null,
-    };
-    const len: i64 = @intCast(string.len());
-    const start_raw = if (args.len >= 1) int32OrUndefinedStringIndex(args[0]) orelse return null else 0;
-    const end_raw = if (args.len >= 2 and !args[1].isUndefined()) int32OrUndefinedStringIndex(args[1]) orelse return null else len;
-    const start: usize = @intCast(@max(@as(i64, 0), @min(start_raw, len)));
-    const end: usize = @intCast(@max(@as(i64, 0), @min(end_raw, len)));
-    const lo = @min(start, end);
-    const hi = @max(start, end);
-    if (lo == hi) {
-        const empty = try rt.emptyString();
-        return empty.value().dup();
-    }
-    return (try core.string.String.createLatin1(rt, bytes[lo..hi])).value();
-}
-
-pub fn int32OrUndefinedStringIndex(value: core.JSValue) ?i64 {
-    if (value.isUndefined()) return null;
-    return if (value.asInt32()) |int_value| @as(i64, int_value) else null;
-}
-
-pub fn qjsStringSubstr(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    string_value: core.JSValue,
-    args: []const core.JSValue,
-) !core.JSValue {
-    var units = std.ArrayList(u16).empty;
-    defer units.deinit(ctx.runtime.memory.allocator);
-    try appendStringValueUnits(ctx.runtime, &units, string_value);
-
-    const size = units.items.len;
-    const start_number = if (args.len >= 1 and !args[0].isUndefined())
-        value_ops.numberValue(args[0]) orelse std.math.nan(f64)
-    else
-        0;
-    var start: usize = 0;
-    if (std.math.isNan(start_number) or start_number == 0) {
-        start = 0;
-    } else if (start_number < 0) {
-        const integer_start = @trunc(start_number);
-        if (integer_start == 0) {
-            start = 0;
-        } else if (std.math.isNegativeInf(integer_start)) {
-            start = 0;
-        } else {
-            const abs_start: usize = @intFromFloat(@min(@abs(integer_start), @as(f64, @floatFromInt(size))));
-            start = size - abs_start;
-        }
-    } else if (std.math.isPositiveInf(start_number)) {
-        start = size;
-    } else {
-        start = @min(@as(usize, @intFromFloat(@trunc(start_number))), size);
-    }
-
-    const max_len = size - start;
-    const requested_len = if (args.len >= 2 and !args[1].isUndefined()) blk: {
-        const length_number = value_ops.numberValue(args[1]) orelse std.math.nan(f64);
-        if (std.math.isNan(length_number) or length_number <= 0) break :blk @as(usize, 0);
-        if (std.math.isPositiveInf(length_number)) break :blk max_len;
-        break :blk @min(@as(usize, @intFromFloat(@trunc(length_number))), max_len);
-    } else max_len;
-
-    _ = output;
-    _ = global;
-    return (try core.string.String.createUtf16(ctx.runtime, units.items[start..][0..requested_len])).value();
-}
-
-pub fn qjsStringHtmlMethod(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    method_id: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
-    var string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
-
-    var string_units = std.ArrayList(u16).empty;
-    defer string_units.deinit(ctx.runtime.memory.allocator);
-    try appendStringValueUnits(ctx.runtime, &string_units, string_value);
-
-    switch (method_id) {
-        11 => return qjsStringCreateHtml(ctx, string_units.items, "a", "name", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
-        12 => return qjsStringCreateHtml(ctx, string_units.items, "big", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        13 => return qjsStringCreateHtml(ctx, string_units.items, "blink", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        14 => return qjsStringCreateHtml(ctx, string_units.items, "b", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        15 => return qjsStringCreateHtml(ctx, string_units.items, "tt", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        16 => return qjsStringCreateHtml(ctx, string_units.items, "font", "color", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
-        17 => return qjsStringCreateHtml(ctx, string_units.items, "font", "size", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
-        18 => return qjsStringCreateHtml(ctx, string_units.items, "i", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        19 => return qjsStringCreateHtml(ctx, string_units.items, "a", "href", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
-        20 => return qjsStringCreateHtml(ctx, string_units.items, "small", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        23 => return qjsStringCreateHtml(ctx, string_units.items, "strike", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        24 => return qjsStringCreateHtml(ctx, string_units.items, "sub", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        26 => return qjsStringCreateHtml(ctx, string_units.items, "sup", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
-        else => return error.TypeError,
-    }
-}
-
-pub fn qjsStringCreateHtml(
-    ctx: *core.JSContext,
-    string_units: []const u16,
-    tag: []const u8,
-    attr: []const u8,
-    attr_value: core.JSValue,
-    has_attr: bool,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    var out = std.ArrayList(u16).empty;
-    defer out.deinit(ctx.runtime.memory.allocator);
-    try appendAsciiUnits(ctx.runtime, &out, "<");
-    try appendAsciiUnits(ctx.runtime, &out, tag);
-    if (has_attr) {
-        const value = try toStringForAnnexB(ctx, output, global, attr_value, caller_function, caller_frame);
-        defer value.free(ctx.runtime);
-        var attr_units = std.ArrayList(u16).empty;
-        defer attr_units.deinit(ctx.runtime.memory.allocator);
-        try appendStringValueUnits(ctx.runtime, &attr_units, value);
-
-        try appendAsciiUnits(ctx.runtime, &out, " ");
-        try appendAsciiUnits(ctx.runtime, &out, attr);
-        try appendAsciiUnits(ctx.runtime, &out, "=\"");
-        for (attr_units.items) |unit| {
-            if (unit == '"') {
-                try appendAsciiUnits(ctx.runtime, &out, "&quot;");
-            } else {
-                try out.append(ctx.runtime.memory.allocator, unit);
-            }
-        }
-        try appendAsciiUnits(ctx.runtime, &out, "\"");
-    }
-    try appendAsciiUnits(ctx.runtime, &out, ">");
-    try out.appendSlice(ctx.runtime.memory.allocator, string_units);
-    try appendAsciiUnits(ctx.runtime, &out, "</");
-    try appendAsciiUnits(ctx.runtime, &out, tag);
-    try appendAsciiUnits(ctx.runtime, &out, ">");
-    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
-}
-
 pub fn qjsStringSearchPositionMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2712,7 +2452,7 @@ pub fn qjsStringSearchPositionMethod(
         count = 2;
     }
 
-    return builtins.string.methodCall(ctx.runtime, string_value, method_id, coerced[0..count]);
+    return callStringBody(ctx, string_value, method_id, coerced[0..count]);
 }
 
 pub fn isRegExpForStringSearch(
@@ -2940,9 +2680,9 @@ pub fn stringIteratorPrototypeFromContext(ctx: *core.JSContext, global: *core.Ob
 
     const object = try qjsIteratorPrototype(ctx.runtime, global, "String Iterator");
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
-    try defineNativeDataMethod(ctx.runtime, object, "next", 0);
+    try builtin_glue.defineNativeDataMethodWithNativeId(ctx.runtime, object, "next", 0, core.function.nativeBuiltinId(.string, @intFromEnum(method_ids.string.PrototypeMethod.iterator_next)));
 
-    const iterator_method = try builtins.function.nativeFunction(ctx.runtime, "[Symbol.iterator]", 0);
+    const iterator_method = try core.function.nativeFunction(ctx.runtime, "[Symbol.iterator]", 0);
     defer iterator_method.free(ctx.runtime);
     const iterator_function = property_ops.expectObject(iterator_method) catch return error.TypeError;
     if (!iterator_function.addIteratorIdentityFunction()) return error.TypeError;
@@ -3087,10 +2827,10 @@ pub fn qjsStringSplitBuiltinArray(
     string_value: core.JSValue,
     args: []const core.JSValue,
 ) !core.JSValue {
-    const result = try builtins.string.methodCall(ctx.runtime, string_value, 27, args);
+    const result = try callStringBody(ctx, string_value, string_id_lookup.legacy_split_method_id, args);
     errdefer result.free(ctx.runtime);
     if (objectFromValue(result)) |object| {
-        if (object.is_array and object.getPrototype() == null) {
+        if (object.flags.is_array and object.getPrototype() == null) {
             if (arrayPrototypeFromGlobal(ctx.runtime, global)) |prototype| {
                 try object.setPrototype(ctx.runtime, prototype);
             }
@@ -3131,7 +2871,7 @@ pub fn qjsRegExpSplit(rt: *core.JSRuntime, separator: core.JSValue, string_value
     const input_len = try stringLengthIndex(rt, string_value);
 
     if (input_len == 0) {
-        const status = quickjs_regexp.execOnStringFromIndex(compiled, string_value, 0) catch |err| switch (err) {
+        const status = quickjs_regexp.execOnStringFromIndex(rt, compiled, string_value, 0) catch |err| switch (err) {
             error.BytecodeCorrupt, error.Timeout => return null,
             else => return err,
         };
@@ -3156,7 +2896,7 @@ pub fn qjsRegExpSplit(rt: *core.JSRuntime, separator: core.JSValue, string_value
     var pos: usize = 0;
     var out_index: u32 = 0;
     while (pos <= input_len) {
-        const status = quickjs_regexp.execOnStringFromIndex(compiled, string_value, pos) catch |err| switch (err) {
+        const status = quickjs_regexp.execOnStringFromIndex(rt, compiled, string_value, pos) catch |err| switch (err) {
             error.BytecodeCorrupt, error.Timeout => return null,
             else => return err,
         };
@@ -3226,7 +2966,7 @@ pub fn qjsRegExpSearch(rt: *core.JSRuntime, regexp: core.JSValue, string_value: 
     defer compiled.deinit(rt.memory.allocator);
 
     const input_len = try stringLengthIndex(rt, string_value);
-    const status = quickjs_regexp.execOnStringFromIndex(compiled, string_value, 0) catch |err| switch (err) {
+    const status = quickjs_regexp.execOnStringFromIndex(rt, compiled, string_value, 0) catch |err| switch (err) {
         error.BytecodeCorrupt, error.Timeout => return null,
         else => return err,
     };
@@ -3261,7 +3001,7 @@ pub fn qjsRegExpMatch(rt: *core.JSRuntime, global: *core.Object, regexp: core.JS
         };
         defer compiled.deinit(rt.memory.allocator);
         const input_len = try stringLengthIndex(rt, string_value);
-        const status = quickjs_regexp.execOnStringFromIndex(compiled, string_value, 0) catch |err| switch (err) {
+        const status = quickjs_regexp.execOnStringFromIndex(rt, compiled, string_value, 0) catch |err| switch (err) {
             error.BytecodeCorrupt, error.Timeout => return null,
             else => return err,
         };
@@ -3301,7 +3041,7 @@ pub fn qjsRegExpMatch(rt: *core.JSRuntime, global: *core.Object, regexp: core.JS
     var out_index: u32 = 0;
     var search_pos: usize = 0;
     while (search_pos <= input_len) {
-        const status = quickjs_regexp.execOnStringFromIndex(compiled, string_value, search_pos) catch |err| switch (err) {
+        const status = quickjs_regexp.execOnStringFromIndex(rt, compiled, string_value, search_pos) catch |err| switch (err) {
             error.BytecodeCorrupt, error.Timeout => return null,
             else => return err,
         };
@@ -3359,23 +3099,23 @@ pub fn findCharacterClassSourceMatch(value: core.JSValue, source: []const u8, st
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {
             if (sticky) {
-                if (start >= bytes.len or !builtins.regexp.classMatchesUtf16Unit(source, bytes[start])) return null;
+                if (start >= bytes.len or !core.regexp.classMatchesUtf16Unit(source, bytes[start])) return null;
                 return RegExpMatch{ .index = start, .len = 1 };
             }
             var index = start;
             while (index < bytes.len) : (index += 1) {
-                if (!builtins.regexp.classMatchesUtf16Unit(source, bytes[index])) continue;
+                if (!core.regexp.classMatchesUtf16Unit(source, bytes[index])) continue;
                 return RegExpMatch{ .index = index, .len = 1 };
             }
         },
         .utf16 => |units| {
             if (sticky) {
-                if (start >= units.len or !builtins.regexp.classMatchesUtf16Unit(source, units[start])) return null;
+                if (start >= units.len or !core.regexp.classMatchesUtf16Unit(source, units[start])) return null;
                 return RegExpMatch{ .index = start, .len = 1 };
             }
             var index = start;
             while (index < units.len) : (index += 1) {
-                if (!builtins.regexp.classMatchesUtf16Unit(source, units[index])) continue;
+                if (!core.regexp.classMatchesUtf16Unit(source, units[index])) continue;
                 return RegExpMatch{ .index = index, .len = 1 };
             }
         },
@@ -3558,19 +3298,13 @@ pub fn simpleCaptureSequenceAtomMatches(atom: SimpleCaptureSequenceAtom, unit: u
 
 pub fn simpleClassPredicateMatches(predicate: SimpleClassPredicate, source: []const u8, unit: u16) bool {
     return switch (predicate) {
-        .generic => builtins.regexp.classMatchesUtf16Unit(source, unit),
-        .ascii_digit, .ascii_decimal => unit >= '0' and unit <= '9',
-        .ascii_not_digit => !(unit >= '0' and unit <= '9'),
-        .ascii_word => (unit >= '0' and unit <= '9') or
-            (unit >= 'A' and unit <= 'Z') or
-            unit == '_' or
-            (unit >= 'a' and unit <= 'z'),
-        .ascii_not_word => !((unit >= '0' and unit <= '9') or
-            (unit >= 'A' and unit <= 'Z') or
-            unit == '_' or
-            (unit >= 'a' and unit <= 'z')),
-        .ascii_lower => unit >= 'a' and unit <= 'z',
-        .ascii_alpha => (unit >= 'A' and unit <= 'Z') or (unit >= 'a' and unit <= 'z'),
+        .generic => core.regexp.classMatchesUtf16Unit(source, unit),
+        .ascii_digit, .ascii_decimal => isAsciiDigitUnit(unit),
+        .ascii_not_digit => !isAsciiDigitUnit(unit),
+        .ascii_word => isAsciiWordUnit(unit),
+        .ascii_not_word => !isAsciiWordUnit(unit),
+        .ascii_lower => unicode_lib.isAsciiLowerUnit(unit),
+        .ascii_alpha => unicode_lib.isAsciiAlphaUnit(unit),
     };
 }
 
@@ -3629,15 +3363,11 @@ pub fn stringCodePointAt(string_value: core.string.String, pos: usize) ?struct {
 }
 
 pub fn codePointFromSurrogatePair(high: u16, low: u16) u21 {
-    return 0x10000 + ((@as(u21, high) - 0xd800) << 10) + (@as(u21, low) - 0xdc00);
+    return unicode_lib.codePointFromSurrogatePair(high, low);
 }
 
-pub fn surrogatePairFromCodePoint(code_point: u21) struct { high: u16, low: u16 } {
-    const value = code_point - 0x10000;
-    return .{
-        .high = @intCast(0xd800 + (value >> 10)),
-        .low = @intCast(0xdc00 + (value & 0x3ff)),
-    };
+pub fn surrogatePairFromCodePoint(code_point: u21) unicode_lib.SurrogatePair {
+    return unicode_lib.surrogatePairFromCodePoint(code_point);
 }
 
 pub fn findUnicodeFoldClassMatch(value: core.JSValue, unit: u16, start: usize) ?usize {
@@ -3684,10 +3414,10 @@ pub fn isStringHighSurrogateAt(value: core.JSValue, index: usize) bool {
 }
 
 pub fn singleDotAnchoredMatches(rt: *core.JSRuntime, string_value: core.JSValue, flags: []const u8) !bool {
-    _ = rt;
     const header = string_value.refHeader() orelse return false;
     if (!string_value.isString()) return false;
     const string_object: *core.string.String = @fieldParentPtr("header", header);
+    try string_object.ensureFlat(rt);
     const dot_all = std.mem.indexOfScalar(u8, flags, 's') != null;
     const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null;
     switch (string_object.resolveData()) {
@@ -3816,7 +3546,7 @@ pub fn anchoredBinaryPropertyMatches(source: []const u8, string_value: core.JSVa
 }
 
 pub fn binaryPropertyCodePointMatches(name: []const u8, code_point: u21) bool {
-    return shared_vm.regexp_unicode.isUnicodePropertyMatches(code_point, name);
+    return regexp_unicode.isUnicodePropertyMatches(code_point, name);
 }
 
 pub fn anchoredCodePointPredicateMatches(
@@ -3828,7 +3558,7 @@ pub fn anchoredCodePointPredicateMatches(
         .latin1 => |bytes| {
             if (bytes.len == 0) return false;
             for (bytes) |byte| {
-                if (shared_vm.regexp_unicode.isUnicodePropertyMatches(byte, name) != positive) return false;
+                if (regexp_unicode.isUnicodePropertyMatches(byte, name) != positive) return false;
             }
             return true;
         },
@@ -3836,7 +3566,7 @@ pub fn anchoredCodePointPredicateMatches(
             if (units.len == 0) return false;
             var index: usize = 0;
             while (index < units.len) {
-                if (shared_vm.regexp_unicode.isUnicodePropertyMatches(readUtf16CodePoint(units, &index), name) != positive) return false;
+                if (regexp_unicode.isUnicodePropertyMatches(readUtf16CodePoint(units, &index), name) != positive) return false;
             }
             return true;
         },
@@ -3845,11 +3575,11 @@ pub fn anchoredCodePointPredicateMatches(
 
 pub fn readUtf16CodePoint(units: []const u16, index: *usize) u21 {
     const high = units[index.*];
-    if (high >= 0xd800 and high <= 0xdbff and index.* + 1 < units.len) {
+    if (isHighSurrogateUnit(high) and index.* + 1 < units.len) {
         const low = units[index.* + 1];
-        if (low >= 0xdc00 and low <= 0xdfff) {
+        if (isLowSurrogateUnit(low)) {
             index.* += 2;
-            return @intCast(0x10000 + ((@as(u32, high) - 0xd800) << 10) + (@as(u32, low) - 0xdc00));
+            return unicode_lib.codePointFromSurrogatePair(high, low);
         }
     }
     index.* += 1;
@@ -3999,7 +3729,7 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
     legacy_capture_values: *[9]?core.JSValue,
     last_capture_value: *?core.JSValue,
 ) !void {
-    std.debug.assert(out.is_array);
+    std.debug.assert(out.flags.is_array);
     std.debug.assert(out.length == 0);
     std.debug.assert(out.arrayElements().len == 0);
     std.debug.assert(out.arrayElementsCapacity() == 0);
@@ -4038,7 +3768,7 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
 
     out.arrayElementsSlot().* = elements[0..element_count];
     out.arrayElementsCapacitySlot().* = element_count;
-    out.may_have_indexed_properties = true;
+    out.flags.may_have_indexed_properties = true;
     out.length = @intCast(element_count);
 }
 
@@ -4166,33 +3896,19 @@ pub fn createStartOfLineUnicodeMatchArray(rt: *core.JSRuntime, global: *core.Obj
 }
 
 pub fn appendUtf8CodePointForRegExpName(rt: *core.JSRuntime, out: *std.ArrayList(u8), cp: u21) !void {
-    if (cp <= 0x7f) {
-        try out.append(rt.memory.allocator, @intCast(cp));
-    } else if (cp <= 0x7ff) {
-        try out.append(rt.memory.allocator, @intCast(0xc0 | (cp >> 6)));
-        try out.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
-    } else if (cp <= 0xffff) {
-        try out.append(rt.memory.allocator, @intCast(0xe0 | (cp >> 12)));
-        try out.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
-        try out.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
-    } else {
-        try out.append(rt.memory.allocator, @intCast(0xf0 | (cp >> 18)));
-        try out.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 12) & 0x3f)));
-        try out.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
-        try out.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
-    }
+    return unicode_lib.appendUtf8CodePoint(rt.memory.allocator, out, cp);
 }
 
 pub fn isHighSurrogateCodePoint(cp: u21) bool {
-    return cp >= 0xd800 and cp <= 0xdbff;
+    return unicode_lib.isHighSurrogateCodePoint(cp);
 }
 
 pub fn isLowSurrogateCodePoint(cp: u21) bool {
-    return cp >= 0xdc00 and cp <= 0xdfff;
+    return unicode_lib.isLowSurrogateCodePoint(cp);
 }
 
 pub fn combinedSurrogateCodePoint(high: u16, low: u16) u21 {
-    return 0x10000 + ((@as(u21, high) - 0xd800) << 10) + (@as(u21, low) - 0xdc00);
+    return unicode_lib.codePointFromSurrogatePair(high, low);
 }
 
 pub fn createRegExpMatchArrayFromStringValue(rt: *core.JSRuntime, input_value: core.JSValue, found: RegExpMatch) !core.JSValue {
@@ -4225,6 +3941,7 @@ pub fn stringSliceValue(rt: *core.JSRuntime, value: core.JSValue, start: usize, 
     const slice_len = slice_end - slice_start;
     if (slice_start == 0 and slice_len == input_len) return value.dup();
     if (slice_len == 0) return (try rt.emptyString()).value().dup();
+    try string_value.ensureFlat(rt);
     if (slice_len == 1) {
         const unit = string_value.codeUnitAt(slice_start);
         if (unit <= 0x7f) {
@@ -4239,7 +3956,7 @@ pub fn getStringPrototypeMethodId(rt: *core.JSRuntime, function_object: *core.Ob
     _ = rt;
     const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return null;
     if (native_ref.domain != .string) return null;
-    return builtins.string.decodePrototypeMethodId(native_ref.id);
+    return string_id_lookup.decodePrototypeMethodId(native_ref.id);
 }
 
 pub fn qjsBigIntPrototypeToString(
@@ -4294,14 +4011,24 @@ pub fn standardStringMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "padStart")) return 34;
     if (std.mem.eql(u8, name, "padEnd")) return 35;
     if (std.mem.eql(u8, name, "localeCompare")) return 36;
-    if (std.mem.eql(u8, name, "normalize")) return 37;
+    if (std.mem.eql(u8, name, "normalize")) return string_id_lookup.legacy_normalize_method_id;
     if (std.mem.eql(u8, name, "isWellFormed")) return 38;
     if (std.mem.eql(u8, name, "toWellFormed")) return 39;
-    if (std.mem.eql(u8, name, "search")) return 40;
-    if (std.mem.eql(u8, name, "match")) return 41;
-    if (std.mem.eql(u8, name, "replaceAll")) return 42;
-    if (std.mem.eql(u8, name, "matchAll")) return 43;
+    if (std.mem.eql(u8, name, "search")) return string_id_lookup.legacy_search_method_id;
+    if (std.mem.eql(u8, name, "match")) return string_id_lookup.legacy_match_method_id;
+    if (std.mem.eql(u8, name, "replaceAll")) return string_id_lookup.legacy_replace_all_method_id;
+    if (std.mem.eql(u8, name, "matchAll")) return string_id_lookup.legacy_match_all_method_id;
     return null;
+}
+
+pub fn primitiveStringMethodId(name: []const u8) ?u32 {
+    if (std.mem.eql(u8, name, "toString")) return 9;
+    if (std.mem.eql(u8, name, "concat")) return 10;
+    if (standardStringMethodId(name)) |method_id| {
+        if (method_id == string_id_lookup.legacy_match_all_method_id) return null;
+        return method_id;
+    }
+    return annexBStringMethodId(name);
 }
 
 pub fn genericTrimStringMethodId(name: []const u8) ?u32 {
@@ -4339,7 +4066,7 @@ pub fn annexBStringMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "sub")) return 24;
     if (std.mem.eql(u8, name, "substr")) return 25;
     if (std.mem.eql(u8, name, "sup")) return 26;
-    if (std.mem.eql(u8, name, "split")) return 27;
+    if (std.mem.eql(u8, name, "split")) return string_id_lookup.legacy_split_method_id;
     return null;
 }
 
@@ -4456,9 +4183,9 @@ pub fn qjsArraySearchCall(
     const function_object = callableObjectFromValue(func) orelse return null;
     const mode: enum { index_of, last_index_of, includes } = if (arrayPrototypeRecordId(function_object)) |record_id|
         switch (record_id) {
-            @intFromEnum(builtins.array.PrototypeMethod.last_index_of) => .last_index_of,
-            @intFromEnum(builtins.array.PrototypeMethod.index_of) => .index_of,
-            @intFromEnum(builtins.array.PrototypeMethod.includes) => .includes,
+            @intFromEnum(method_ids.array.PrototypeMethod.last_index_of) => .last_index_of,
+            @intFromEnum(method_ids.array.PrototypeMethod.index_of) => .index_of,
+            @intFromEnum(method_ids.array.PrototypeMethod.includes) => .includes,
             else => return null,
         }
     else blk: {
@@ -4480,7 +4207,7 @@ pub fn qjsArraySearchCall(
     const receiver_object_value = if (objectFromValue(receiver)) |_| receiver.dup() else try primitiveObjectForAccess(ctx.runtime, global, receiver);
     defer receiver_object_value.free(ctx.runtime);
     const object = objectFromValue(receiver_object_value) orelse return null;
-    const is_typed_array = builtins.buffer.isTypedArrayObject(object);
+    const is_typed_array = core.object.isTypedArrayObject(object);
     const is_typed_method = isTypedArrayPrototypeMethod(ctx.runtime, function_object);
     if (is_typed_method and !is_typed_array) return error.TypeError;
     const array_proto = arrayPrototypeFromGlobal(ctx.runtime, global) orelse return null;
@@ -4498,7 +4225,7 @@ pub fn qjsArraySearchCall(
     }
     const length = if (is_typed_array)
         try arrayMethodTypedArrayLength(ctx.runtime, object, is_typed_method)
-    else if (object.is_array)
+    else if (object.flags.is_array)
         @as(usize, @intCast(object.length))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
@@ -4516,9 +4243,9 @@ pub fn qjsArraySearchCall(
         while (cursor > 0) {
             cursor -= 1;
             const item = if (is_typed_array) blk: {
-                const current_length = @as(usize, @intCast(try builtins.buffer.typedArrayLength(ctx.runtime, object)));
+                const current_length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
                 if (cursor >= current_length) continue;
-                break :blk try builtins.buffer.typedArrayGetIndex(ctx.runtime, object, @intCast(cursor));
+                break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(cursor));
             } else blk: {
                 const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
                 defer key.deinit(ctx.runtime);
@@ -4533,10 +4260,10 @@ pub fn qjsArraySearchCall(
         while (cursor < length) : (cursor += 1) {
             const item = if (is_typed_array) blk: {
                 if (mode != .includes) {
-                    const current_length = @as(usize, @intCast(try builtins.buffer.typedArrayLength(ctx.runtime, object)));
+                    const current_length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
                     if (cursor >= current_length) continue;
                 }
-                break :blk try builtins.buffer.typedArrayGetIndex(ctx.runtime, object, @intCast(cursor));
+                break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(cursor));
             } else blk: {
                 const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
                 defer key.deinit(ctx.runtime);
@@ -4545,7 +4272,7 @@ pub fn qjsArraySearchCall(
             };
             defer item.free(ctx.runtime);
             if (mode == .includes) {
-                if (builtins.collection.sameValueZero(item, search_value)) return core.JSValue.boolean(true);
+                if (item.sameValueZero(search_value)) return core.JSValue.boolean(true);
                 continue;
             }
             if (try valuesStrictEqual(ctx.runtime, item, search_value)) return lengthIndexValue(cursor);
@@ -4565,7 +4292,7 @@ pub fn qjsArrayConcatCall(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
-    if (!isArrayPrototypeRecord(function_object, @intFromEnum(builtins.array.PrototypeMethod.concat))) {
+    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.concat))) {
         const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
         defer ctx.runtime.memory.allocator.free(name);
         if (!std.mem.eql(u8, name, "concat")) return null;
@@ -4641,8 +4368,8 @@ pub fn concatSpreadLengthValue(
 ) !core.JSValue {
     const dynamic = try getValueProperty(ctx, output, global, value, core.atom.ids.length, caller_function, caller_frame);
     errdefer dynamic.free(ctx.runtime);
-    if (!builtins.buffer.isTypedArrayObject(object) or object.typedArrayFixedLength() == null) return dynamic;
-    if (try builtins.buffer.typedArrayOutOfBounds(object)) return dynamic;
+    if (!core.object.isTypedArrayObject(object) or object.typedArrayFixedLength() == null) return dynamic;
+    if (try core.object.typedArrayOutOfBounds(object)) return dynamic;
     const own = object.getOwnProperty(core.atom.ids.length) orelse return dynamic;
     defer own.destroy(ctx.runtime);
     if (own.kind != .data or !own.value.isNumber() or !dynamic.isNumber()) return dynamic;
@@ -4705,6 +4432,7 @@ pub fn replaceFrameVarRefBinding(rt: *core.JSRuntime, frame: *frame_mod.Frame, a
 pub fn appendSourceStringUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const header = value.refHeader() orelse return error.TypeError;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {
             for (bytes) |byte| {
@@ -4722,21 +4450,7 @@ pub fn appendSourceStringUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), v
 }
 
 pub fn appendCodepointUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), codepoint: u21) !void {
-    if (codepoint <= 0x7f) {
-        try buffer.append(rt.memory.allocator, @intCast(codepoint));
-    } else if (codepoint <= 0x7ff) {
-        try buffer.append(rt.memory.allocator, @intCast(0xc0 | (codepoint >> 6)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | (codepoint & 0x3f)));
-    } else if (codepoint <= 0xffff) {
-        try buffer.append(rt.memory.allocator, @intCast(0xe0 | (codepoint >> 12)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | ((codepoint >> 6) & 0x3f)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | (codepoint & 0x3f)));
-    } else {
-        try buffer.append(rt.memory.allocator, @intCast(0xf0 | (codepoint >> 18)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | ((codepoint >> 12) & 0x3f)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | ((codepoint >> 6) & 0x3f)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | (codepoint & 0x3f)));
-    }
+    return unicode_lib.appendUtf8CodePoint(rt.memory.allocator, buffer, codepoint);
 }
 
 pub fn simpleEvalStringLiteral(rt: *core.JSRuntime, source: []const u8) ?core.JSValue {
@@ -4840,7 +4554,7 @@ pub fn getFastStringPrimitiveDataProperty(
 
 pub fn isStandardStringPrototypeMethodAtom(rt: *core.JSRuntime, atom_id: core.Atom) bool {
     const name = rt.atoms.name(atom_id) orelse return false;
-    return builtins.string.prototypeMethodId(name) != null;
+    return string_id_lookup.prototypeMethodId(name) != null;
 }
 
 pub fn defineStringWrapperIndexProperty(rt: *core.JSRuntime, object: *core.Object, index: u32, unit: u16) !void {
@@ -4860,6 +4574,7 @@ pub fn getStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: co
     const header = value.refHeader() orelse return null;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     if (index >= string_value.len()) return core.JSValue.undefinedValue();
+    try string_value.ensureFlat(rt);
     const unit = string_value.codeUnitAt(index);
     if (unit <= 0x7f) {
         // ASCII fast path: reuse the runtime's cached single-byte
@@ -4890,7 +4605,7 @@ pub fn qjsArrayToStringCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (!isArrayPrototypeRecord(function_object, @intFromEnum(builtins.array.PrototypeMethod.to_string))) {
+    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.to_string))) {
         if (function_object.arrayBuiltinMarker() != .to_string) return null;
     }
     if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
@@ -4915,7 +4630,7 @@ pub fn qjsArrayToLocaleStringCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (!isArrayPrototypeRecord(function_object, @intFromEnum(builtins.array.PrototypeMethod.to_locale_string))) {
+    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.to_locale_string))) {
         if (function_object.arrayBuiltinMarker() != .to_locale_string) return null;
     }
     if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
@@ -4923,7 +4638,7 @@ pub fn qjsArrayToLocaleStringCall(
     defer object_value.free(ctx.runtime);
     const object = property_ops.expectObject(object_value) catch return null;
     const is_typed_method = isTypedArrayPrototypeMethod(ctx.runtime, function_object);
-    const is_typed_array = builtins.buffer.isTypedArrayObject(object);
+    const is_typed_array = core.object.isTypedArrayObject(object);
     if (is_typed_method and !is_typed_array) return error.TypeError;
     const length = if (is_typed_array)
         try arrayMethodTypedArrayLength(ctx.runtime, object, is_typed_method)
@@ -4942,7 +4657,7 @@ pub fn qjsArrayToLocaleStringCall(
         if (index != 0) try bytes.append(ctx.runtime.memory.allocator, ',');
         const item = if (is_typed_array) blk: {
             if (!is_typed_method and index >= try arrayMethodTypedArrayLength(ctx.runtime, object, false)) break :blk core.JSValue.undefinedValue();
-            break :blk try builtins.buffer.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
+            break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
         } else blk: {
             const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
             defer key.deinit(ctx.runtime);
@@ -5024,7 +4739,7 @@ pub fn qjsObjectTagString(rt: *core.JSRuntime, tag: []const u8) !core.JSValue {
 }
 
 pub fn defaultObjectToStringTag(object: *core.Object) ![]const u8 {
-    if (object.is_proxy) {
+    if (object.flags.is_proxy) {
         if (object.proxyHandler() == null) return error.TypeError;
         if (object.proxyTarget()) |target_value| {
             if (objectFromValue(target_value)) |target| {
@@ -5034,7 +4749,7 @@ pub fn defaultObjectToStringTag(object: *core.Object) ![]const u8 {
         }
         return "Object";
     }
-    if (object.is_array) return "Array";
+    if (object.flags.is_array) return "Array";
     return switch (object.class_id) {
         core.class.ids.arguments, core.class.ids.mapped_arguments => "Arguments",
         core.class.ids.error_ => "Error",
@@ -5057,8 +4772,8 @@ pub fn defaultObjectToStringTag(object: *core.Object) ![]const u8 {
 }
 
 pub fn objectIsArrayForToString(object: *core.Object) !bool {
-    if (object.is_array) return true;
-    if (!object.is_proxy) return false;
+    if (object.flags.is_array) return true;
+    if (!object.flags.is_proxy) return false;
     if (object.proxyHandler() == null) return error.TypeError;
     const target_value = object.proxyTarget() orelse return false;
     const target = objectFromValue(target_value) orelse return false;
@@ -5072,4 +4787,418 @@ pub fn stringObjectHasIndexProperty(rt: *core.JSRuntime, object: *core.Object, a
     const header = string_data.refHeader() orelse return false;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     return index < string_value.len();
+}
+
+// String unit/byte classification helpers (moved from the VM call runtime).
+
+pub fn bytesAreAscii(bytes: []const u8) bool {
+    for (bytes) |byte| {
+        if (!byteIsAscii(byte)) return false;
+    }
+    return true;
+}
+
+pub fn byteIsAscii(byte: u8) bool {
+    return byte < 0x80;
+}
+
+pub fn appendUtf16UnitsAsUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), units: []const u16) !void {
+    return unicode_lib.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units);
+}
+pub fn appendAsciiUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), bytes: []const u8) !void {
+    for (bytes) |byte| try out.append(rt.memory.allocator, byte);
+}
+
+pub fn isLineTerminatorUnit(unit: u16) bool {
+    return unicode_lib.isEcmaLineTerminatorUnit(unit);
+}
+
+// --- Residual RegExp support helpers moved to regexp_fastpath.zig ---
+
+pub fn isEcmaWhitespaceOrLineTerminator(unit: u16) bool {
+    return unicode_lib.isEcmaWhitespaceOrLineTerminatorUnit(unit);
+}
+
+pub fn isUnknownScriptName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "Script=Unknown") or
+        std.mem.eql(u8, name, "Script=Zzzz") or
+        std.mem.eql(u8, name, "sc=Unknown") or
+        std.mem.eql(u8, name, "sc=Zzzz") or
+        std.mem.eql(u8, name, "Script_Extensions=Unknown") or
+        std.mem.eql(u8, name, "Script_Extensions=Zzzz") or
+        std.mem.eql(u8, name, "scx=Unknown") or
+        std.mem.eql(u8, name, "scx=Zzzz");
+}
+
+pub fn isAsciiDigitUnit(unit: u16) bool {
+    return unicode_lib.isAsciiDigitUnit(unit);
+}
+
+pub fn isAsciiDigitByte(byte: u8) bool {
+    return unicode_lib.isAsciiDigitByte(byte);
+}
+
+pub fn isAsciiWordUnit(unit: u16) bool {
+    return unicode_lib.isAsciiWordUnit(unit);
+}
+
+pub fn isHighSurrogateUnit(unit: u16) bool {
+    return unicode_lib.isHighSurrogateUnit(unit);
+}
+
+pub fn isLowSurrogateUnit(unit: u16) bool {
+    return unicode_lib.isLowSurrogateUnit(unit);
+}
+
+// ---------------------------------------------------------------------------
+// Realm-aware String.prototype method bodies (pad / HTML wrappers / normalize /
+// localeCompare / numeric-arg methods). These are reachable ONLY through the
+// `qjsStringPrototypeMethod` dispatcher above (the `.string` builtin record
+// handler `stringCall` routes every prototype method to it), never from a
+// builtin dispatch table entry, so they are exec-only. They were briefly hosted
+// in `builtins/string.zig` (Phase 6b-2) and were moved back here in Phase 6b-3
+// STEP 3B to keep the dependency edge exec -> builtins out of these bodies. They
+// reuse the file-local rope/UTF helpers (`toStringForAnnexB`,
+// `appendStringValueUnits`, `appendUtf32FromStringValue`, `appendUtf16CodePoint`,
+// `appendAsciiUnits`) plus the shared `value_ops`/`coercion_ops`/`builtin_glue`
+// ops. The two leaf bodies they still defer to (the `charAtValue` and
+// `methodCall` method-impl bodies that stay in builtins) are reached through the
+// record table via `callStringBody`/`callStringCharAtBody` (Phase 6b-3 STEP 5),
+// so exec no longer names them directly.
+
+pub fn qjsStringPad(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    method_id: u32,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
+    defer string_value.free(ctx.runtime);
+
+    var source_units = std.ArrayList(u16).empty;
+    defer source_units.deinit(ctx.runtime.memory.allocator);
+    try appendStringValueUnits(ctx.runtime, &source_units, string_value);
+
+    const max_length_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const target_length = try coercion_ops.toLengthIndex(ctx, output, global, max_length_value);
+    if (target_length <= source_units.items.len) return string_value.dup();
+
+    const fill_value = if (args.len >= 2 and !args[1].isUndefined()) blk: {
+        break :blk try toStringForAnnexB(ctx, output, global, args[1], caller_function, caller_frame);
+    } else try value_ops.createStringValue(ctx.runtime, " ");
+    defer fill_value.free(ctx.runtime);
+
+    var fill_units = std.ArrayList(u16).empty;
+    defer fill_units.deinit(ctx.runtime.memory.allocator);
+    try appendStringValueUnits(ctx.runtime, &fill_units, fill_value);
+    if (fill_units.items.len == 0) return string_value.dup();
+
+    const fill_length = target_length - source_units.items.len;
+    var out = std.ArrayList(u16).empty;
+    defer out.deinit(ctx.runtime.memory.allocator);
+    if (method_id == 34) {
+        try appendRepeatedFillUnits(ctx.runtime, &out, fill_units.items, fill_length);
+        try out.appendSlice(ctx.runtime.memory.allocator, source_units.items);
+    } else {
+        try out.appendSlice(ctx.runtime.memory.allocator, source_units.items);
+        try appendRepeatedFillUnits(ctx.runtime, &out, fill_units.items, fill_length);
+    }
+    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
+}
+
+fn appendRepeatedFillUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), fill: []const u16, length: usize) !void {
+    var index: usize = 0;
+    while (index < length) : (index += 1) {
+        try out.append(rt.memory.allocator, fill[index % fill.len]);
+    }
+}
+
+pub fn qjsStringNormalize(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
+    defer string_value.free(ctx.runtime);
+
+    const form: unicode_lib.NormalizationForm = if (args.len == 0 or args[0].isUndefined()) .nfc else blk: {
+        const form_value = try toStringForAnnexB(ctx, output, global, args[0], caller_function, caller_frame);
+        defer form_value.free(ctx.runtime);
+        var form_bytes = std.ArrayList(u8).empty;
+        defer form_bytes.deinit(ctx.runtime.memory.allocator);
+        try value_ops.appendRawString(ctx.runtime, &form_bytes, form_value);
+        if (std.mem.eql(u8, form_bytes.items, "NFC")) break :blk unicode_lib.NormalizationForm.nfc;
+        if (std.mem.eql(u8, form_bytes.items, "NFD")) break :blk unicode_lib.NormalizationForm.nfd;
+        if (std.mem.eql(u8, form_bytes.items, "NFKC")) break :blk unicode_lib.NormalizationForm.nfkc;
+        if (std.mem.eql(u8, form_bytes.items, "NFKD")) break :blk unicode_lib.NormalizationForm.nfkd;
+        return error.RangeError;
+    };
+
+    var input = std.ArrayList(u32).empty;
+    defer input.deinit(ctx.runtime.memory.allocator);
+    try appendUtf32FromStringValue(ctx.runtime, &input, string_value);
+    const normalized_slice = try unicode_lib.normalizeAlloc(ctx.runtime.memory.allocator, input.items, form);
+    defer ctx.runtime.memory.allocator.free(normalized_slice);
+
+    var out = std.ArrayList(u16).empty;
+    defer out.deinit(ctx.runtime.memory.allocator);
+    for (normalized_slice) |code_point| try appendUtf16CodePoint(ctx.runtime, &out, code_point);
+    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
+}
+
+pub fn qjsStringLocaleCompare(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    const lhs = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
+    defer lhs.free(ctx.runtime);
+    const rhs_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const rhs = try toStringForAnnexB(ctx, output, global, rhs_input, caller_function, caller_frame);
+    defer rhs.free(ctx.runtime);
+
+    const lhs_nfc = try normalizedUtf32(ctx.runtime, lhs, .nfc);
+    defer lhs_nfc.deinit();
+    const rhs_nfc = try normalizedUtf32(ctx.runtime, rhs, .nfc);
+    defer rhs_nfc.deinit();
+
+    const result: i32 = switch (std.mem.order(u32, lhs_nfc.slice, rhs_nfc.slice)) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    };
+    return core.JSValue.int32(result);
+}
+
+const NormalizedUtf32 = struct {
+    allocator: std.mem.Allocator,
+    slice: []u32,
+
+    fn deinit(self: NormalizedUtf32) void {
+        self.allocator.free(self.slice);
+    }
+};
+
+fn normalizedUtf32(rt: *core.JSRuntime, value: core.JSValue, form: unicode_lib.NormalizationForm) !NormalizedUtf32 {
+    var input = std.ArrayList(u32).empty;
+    defer input.deinit(rt.memory.allocator);
+    try appendUtf32FromStringValue(rt, &input, value);
+    return .{
+        .allocator = rt.memory.allocator,
+        .slice = try unicode_lib.normalizeAlloc(rt.memory.allocator, input.items, form),
+    };
+}
+
+pub fn qjsStringNumericArgsMethod(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    method_id: u32,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    const string_value = if (this_value.isString())
+        this_value
+    else
+        try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
+    defer if (!this_value.isString()) string_value.free(ctx.runtime);
+
+    var coerced: [2]core.JSValue = .{ core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    const count = @min(args.len, coerced.len);
+    for (args[0..count], 0..) |arg, index| {
+        coerced[index] = if (arg.isUndefined())
+            core.JSValue.undefinedValue()
+        else if (arg.isNumber())
+            arg
+        else
+            try builtin_glue.toNumberLikeArgument(ctx, output, global, arg);
+    }
+
+    if (method_id == 1) {
+        if (try fastLatin1Substring(ctx.runtime, string_value, coerced[0..count])) |value| return value;
+    }
+    if (method_id == 0) {
+        const index = if (count >= 1) coerced[0] else core.JSValue.int32(0);
+        return callStringCharAtBody(ctx, string_value, index);
+    }
+    if (method_id == 25) {
+        return qjsStringSubstr(ctx, output, global, string_value, coerced[0..count]);
+    }
+    return callStringBody(ctx, string_value, method_id, coerced[0..count]) catch |err| switch (err) {
+        error.RangeError => return throwRangeErrorMessage(ctx, global, "invalid repeat count"),
+        else => err,
+    };
+}
+
+fn fastLatin1Substring(rt: *core.JSRuntime, string_value: core.JSValue, args: []const core.JSValue) !?core.JSValue {
+    if (!string_value.isString() or args.len > 2) return null;
+    const header = string_value.refHeader() orelse return null;
+    const string: *core.string.String = @fieldParentPtr("header", header);
+    try string.ensureFlat(rt);
+    const bytes = switch (string.resolveData()) {
+        .latin1 => |latin1| latin1,
+        .utf16 => return null,
+    };
+    const len: i64 = @intCast(string.len());
+    const start_raw = if (args.len >= 1) int32OrUndefinedStringIndex(args[0]) orelse return null else 0;
+    const end_raw = if (args.len >= 2 and !args[1].isUndefined()) int32OrUndefinedStringIndex(args[1]) orelse return null else len;
+    const start: usize = @intCast(@max(@as(i64, 0), @min(start_raw, len)));
+    const end: usize = @intCast(@max(@as(i64, 0), @min(end_raw, len)));
+    const lo = @min(start, end);
+    const hi = @max(start, end);
+    if (lo == hi) {
+        const empty = try rt.emptyString();
+        return empty.value().dup();
+    }
+    return (try core.string.String.createLatin1(rt, bytes[lo..hi])).value();
+}
+
+fn int32OrUndefinedStringIndex(value: core.JSValue) ?i64 {
+    if (value.isUndefined()) return null;
+    return if (value.asInt32()) |int_value| @as(i64, int_value) else null;
+}
+
+pub fn qjsStringSubstr(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    string_value: core.JSValue,
+    args: []const core.JSValue,
+) !core.JSValue {
+    var units = std.ArrayList(u16).empty;
+    defer units.deinit(ctx.runtime.memory.allocator);
+    try appendStringValueUnits(ctx.runtime, &units, string_value);
+
+    const size = units.items.len;
+    const start_number = if (args.len >= 1 and !args[0].isUndefined())
+        value_ops.numberValue(args[0]) orelse std.math.nan(f64)
+    else
+        0;
+    var start: usize = 0;
+    if (std.math.isNan(start_number) or start_number == 0) {
+        start = 0;
+    } else if (start_number < 0) {
+        const integer_start = @trunc(start_number);
+        if (integer_start == 0) {
+            start = 0;
+        } else if (std.math.isNegativeInf(integer_start)) {
+            start = 0;
+        } else {
+            const abs_start: usize = @intFromFloat(@min(@abs(integer_start), @as(f64, @floatFromInt(size))));
+            start = size - abs_start;
+        }
+    } else if (std.math.isPositiveInf(start_number)) {
+        start = size;
+    } else {
+        start = @min(@as(usize, @intFromFloat(@trunc(start_number))), size);
+    }
+
+    const max_len = size - start;
+    const requested_len = if (args.len >= 2 and !args[1].isUndefined()) blk: {
+        const length_number = value_ops.numberValue(args[1]) orelse std.math.nan(f64);
+        if (std.math.isNan(length_number) or length_number <= 0) break :blk @as(usize, 0);
+        if (std.math.isPositiveInf(length_number)) break :blk max_len;
+        break :blk @min(@as(usize, @intFromFloat(@trunc(length_number))), max_len);
+    } else max_len;
+
+    _ = output;
+    _ = global;
+    return (try core.string.String.createUtf16(ctx.runtime, units.items[start..][0..requested_len])).value();
+}
+
+pub fn qjsStringHtmlMethod(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    method_id: u32,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
+    var string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
+    defer string_value.free(ctx.runtime);
+
+    var string_units = std.ArrayList(u16).empty;
+    defer string_units.deinit(ctx.runtime.memory.allocator);
+    try appendStringValueUnits(ctx.runtime, &string_units, string_value);
+
+    switch (method_id) {
+        11 => return qjsStringCreateHtml(ctx, string_units.items, "a", "name", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
+        12 => return qjsStringCreateHtml(ctx, string_units.items, "big", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        13 => return qjsStringCreateHtml(ctx, string_units.items, "blink", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        14 => return qjsStringCreateHtml(ctx, string_units.items, "b", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        15 => return qjsStringCreateHtml(ctx, string_units.items, "tt", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        16 => return qjsStringCreateHtml(ctx, string_units.items, "font", "color", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
+        17 => return qjsStringCreateHtml(ctx, string_units.items, "font", "size", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
+        18 => return qjsStringCreateHtml(ctx, string_units.items, "i", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        19 => return qjsStringCreateHtml(ctx, string_units.items, "a", "href", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
+        20 => return qjsStringCreateHtml(ctx, string_units.items, "small", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        23 => return qjsStringCreateHtml(ctx, string_units.items, "strike", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        24 => return qjsStringCreateHtml(ctx, string_units.items, "sub", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        26 => return qjsStringCreateHtml(ctx, string_units.items, "sup", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        else => return error.TypeError,
+    }
+}
+
+fn qjsStringCreateHtml(
+    ctx: *core.JSContext,
+    string_units: []const u16,
+    tag: []const u8,
+    attr: []const u8,
+    attr_value: core.JSValue,
+    has_attr: bool,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    var out = std.ArrayList(u16).empty;
+    defer out.deinit(ctx.runtime.memory.allocator);
+    try appendAsciiUnits(ctx.runtime, &out, "<");
+    try appendAsciiUnits(ctx.runtime, &out, tag);
+    if (has_attr) {
+        const value = try toStringForAnnexB(ctx, output, global, attr_value, caller_function, caller_frame);
+        defer value.free(ctx.runtime);
+        var attr_units = std.ArrayList(u16).empty;
+        defer attr_units.deinit(ctx.runtime.memory.allocator);
+        try appendStringValueUnits(ctx.runtime, &attr_units, value);
+
+        try appendAsciiUnits(ctx.runtime, &out, " ");
+        try appendAsciiUnits(ctx.runtime, &out, attr);
+        try appendAsciiUnits(ctx.runtime, &out, "=\"");
+        for (attr_units.items) |unit| {
+            if (unit == '"') {
+                try appendAsciiUnits(ctx.runtime, &out, "&quot;");
+            } else {
+                try out.append(ctx.runtime.memory.allocator, unit);
+            }
+        }
+        try appendAsciiUnits(ctx.runtime, &out, "\"");
+    }
+    try appendAsciiUnits(ctx.runtime, &out, ">");
+    try out.appendSlice(ctx.runtime.memory.allocator, string_units);
+    try appendAsciiUnits(ctx.runtime, &out, "</");
+    try appendAsciiUnits(ctx.runtime, &out, tag);
+    try appendAsciiUnits(ctx.runtime, &out, ">");
+    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
 }

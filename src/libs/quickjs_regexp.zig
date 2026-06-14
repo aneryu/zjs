@@ -2,6 +2,7 @@ const core = @import("../core/root.zig");
 const regexp = @import("regexp.zig");
 const regexp_bytecode = regexp;
 const regexp_compile = regexp;
+const unicode = @import("unicode.zig");
 const std = @import("std");
 
 pub const max_captures = regexp_bytecode.max_captures;
@@ -265,7 +266,7 @@ fn appendPatternByte(
         try out.append(allocator, byte);
         return;
     }
-    if (isAsciiAlpha(byte)) {
+    if (unicode.isAsciiAlphaByte(byte)) {
         try appendCaseInsensitiveAsciiAtom(allocator, out, byte);
     } else if (byte < 0x80) {
         try out.append(allocator, byte);
@@ -343,7 +344,7 @@ fn appendEscapedPatternAtom(
             index.* = parsed.end;
         },
         else => {
-            if (isAsciiAlpha(escaped)) return error.InvalidPattern;
+            if (unicode.isAsciiAlphaByte(escaped)) return error.InvalidPattern;
             try appendRawEscapedPatternAtom(allocator, pattern, index, out);
         },
     }
@@ -480,7 +481,7 @@ fn appendCaseInsensitiveCharacterClass(
         if (byte == '-' and index.* != content_start and index.* + 1 < pattern.len and pattern[index.* + 1] != ']') {
             return error.InvalidPattern;
         }
-        if (isAsciiAlpha(byte)) {
+        if (unicode.isAsciiAlphaByte(byte)) {
             try appendCaseInsensitiveAsciiClassAtom(allocator, out, byte);
         } else if (byte < 0x80) {
             try out.append(allocator, byte);
@@ -526,7 +527,7 @@ fn appendEscapedClassAtom(
         'p', 'P', 'k' => return error.InvalidPattern,
         '1'...'9' => return error.InvalidPattern,
         else => {
-            if (isAsciiAlpha(escaped)) return error.InvalidPattern;
+            if (unicode.isAsciiAlphaByte(escaped)) return error.InvalidPattern;
             try appendRawEscapedPatternAtom(allocator, pattern, index, out);
         },
     }
@@ -552,9 +553,9 @@ fn parseHexEscape(pattern: []const u8, start: usize, digit_count: usize) ?Parsed
 fn parseDecimalEscape(pattern: []const u8, start: usize) ?ParsedEscape {
     if (start + 1 >= pattern.len or pattern[start] != '\\') return null;
     var pos = start + 1;
-    if (pattern[pos] < '1' or pattern[pos] > '9') return null;
+    if (!unicode.isAsciiDigitByte(pattern[pos]) or pattern[pos] == '0') return null;
     var value: u21 = 0;
-    while (pos < pattern.len and pattern[pos] >= '0' and pattern[pos] <= '9') : (pos += 1) {
+    while (pos < pattern.len and unicode.isAsciiDigitByte(pattern[pos])) : (pos += 1) {
         value = value * 10 + (pattern[pos] - '0');
         if (value >= max_captures) return null;
     }
@@ -621,7 +622,7 @@ fn appendCaseInsensitiveEscapedCodePoint(
     raw_escape: []const u8,
     code_point: u21,
 ) NormalizeError!void {
-    if (code_point <= 0x7f and isAsciiAlpha(@intCast(code_point))) {
+    if (code_point <= 0x7f and unicode.isAsciiAlphaCodePoint(code_point)) {
         try appendCaseInsensitiveAsciiAtom(allocator, out, @intCast(code_point));
     } else if (code_point < 0x80) {
         try out.appendSlice(allocator, raw_escape);
@@ -636,7 +637,7 @@ fn appendCaseInsensitiveClassEscapedCodePoint(
     raw_escape: []const u8,
     code_point: u21,
 ) NormalizeError!void {
-    if (code_point <= 0x7f and isAsciiAlpha(@intCast(code_point))) {
+    if (code_point <= 0x7f and unicode.isAsciiAlphaCodePoint(code_point)) {
         try appendCaseInsensitiveAsciiClassAtom(allocator, out, @intCast(code_point));
     } else if (code_point < 0x80) {
         try out.appendSlice(allocator, raw_escape);
@@ -681,7 +682,7 @@ fn appendCaseInsensitiveCaptureLiteral(allocator: std.mem.Allocator, out: *std.A
             }
             continue;
         }
-        if (isAsciiAlpha(byte)) {
+        if (unicode.isAsciiAlphaByte(byte)) {
             try appendCaseInsensitiveAsciiAtom(allocator, out, byte);
         } else if (byte < 0x80 and !isRegExpSyntaxByte(byte)) {
             try out.append(allocator, byte);
@@ -693,8 +694,8 @@ fn appendCaseInsensitiveCaptureLiteral(allocator: std.mem.Allocator, out: *std.A
 }
 
 fn appendCaseInsensitiveAsciiClassAtom(allocator: std.mem.Allocator, out: *std.ArrayList(u8), byte: u8) NormalizeError!void {
-    const lower = asciiLower(byte);
-    const upper = asciiUpper(byte);
+    const lower = unicode.toLowerAscii(byte);
+    const upper = unicode.toUpperAscii(byte);
     try out.append(allocator, lower);
     try out.append(allocator, upper);
 }
@@ -766,7 +767,7 @@ fn isSimpleLiteralCapture(body: []const u8) bool {
                 },
                 'd', 'D', 's', 'S', 'w', 'W', 'b', 'B', 'p', 'P', 'k', '0'...'9' => return false,
                 else => {
-                    if (isAsciiAlpha(escaped)) return false;
+                    if (unicode.isAsciiAlphaByte(escaped)) return false;
                     index += 2;
                 },
             }
@@ -842,27 +843,9 @@ fn isRegExpSyntaxByte(byte: u8) bool {
     };
 }
 
-fn isAsciiAlpha(byte: u8) bool {
-    return (byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z');
-}
-
-fn asciiLower(byte: u8) u8 {
-    if (byte >= 'A' and byte <= 'Z') return byte + ('a' - 'A');
-    return byte;
-}
-
-fn asciiUpper(byte: u8) u8 {
-    if (byte >= 'a' and byte <= 'z') return byte - ('a' - 'A');
-    return byte;
-}
-
 fn hexValue(byte: u8) ?u21 {
-    return switch (byte) {
-        '0'...'9' => byte - '0',
-        'a'...'f' => 10 + byte - 'a',
-        'A'...'F' => 10 + byte - 'A',
-        else => null,
-    };
+    const value = unicode.asciiHexDigitValueByte(byte) orelse return null;
+    return @intCast(value);
 }
 
 pub fn execOnString(compiled: Compiled, string_value: core.JSValue) ExecError!?Match {
@@ -880,10 +863,11 @@ pub fn execOnString(compiled: Compiled, string_value: core.JSValue) ExecError!?M
     };
 }
 
-pub fn execOnStringFromIndex(compiled: Compiled, string_value: core.JSValue, start_index: usize) ExecError!ExecStatus {
+pub fn execOnStringFromIndex(rt: *core.JSRuntime, compiled: Compiled, string_value: core.JSValue, start_index: usize) ExecError!ExecStatus {
     const header = string_value.refHeader() orelse return .{ .result = .not_available };
     if (!string_value.isString()) return .{ .result = .not_available };
     const string_object: *core.string.String = @fieldParentPtr("header", header);
+    try string_object.ensureFlat(rt);
 
     return switch (string_object.resolveData()) {
         .latin1 => |bytes| try regexp_bytecode.exec(std.heap.page_allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index),
@@ -891,10 +875,11 @@ pub fn execOnStringFromIndex(compiled: Compiled, string_value: core.JSValue, sta
     };
 }
 
-pub fn testOnStringFromIndex(compiled: Compiled, string_value: core.JSValue, start_index: usize) ExecError!?bool {
+pub fn testOnStringFromIndex(rt: *core.JSRuntime, compiled: Compiled, string_value: core.JSValue, start_index: usize) ExecError!?bool {
     const header = string_value.refHeader() orelse return null;
     if (!string_value.isString()) return null;
     const string_object: *core.string.String = @fieldParentPtr("header", header);
+    try string_object.ensureFlat(rt);
 
     return switch (string_object.resolveData()) {
         .latin1 => |bytes| try regexp_bytecode.testMatch(std.heap.page_allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index),

@@ -21,6 +21,10 @@ pub const BacktraceFrame = struct {
     pc_source: ?*const usize = null,
     location_data: ?*const anyopaque = null,
     location_resolver: ?BacktraceLocationResolver = null,
+    /// Owned function value used to resolve the display name lazily when a
+    /// backtrace is materialized. Undefined when `function_name` is already
+    /// authoritative. Resolution caches into `function_name` and clears this.
+    function_value: JSValue = JSValue.undefinedValue(),
 
     pub fn location(self: BacktraceFrame) BacktraceLocation {
         const current_pc = if (self.pc_source) |pc_source| pc_source.* -| 1 else self.pc;
@@ -373,6 +377,8 @@ pub const PendingPromiseJob = struct {
     }
 };
 
+const class_prototype_inline_capacity: usize = class.ids.init_count;
+
 pub const JSContext = struct {
     pub const Options = ContextOptions;
     pub const EvalOptions = ContextEvalOptions;
@@ -383,7 +389,11 @@ pub const JSContext = struct {
     unhandled_rejection_slot: exception.ExceptionSlot = .{},
     unhandled_rejection_promise_slot: exception.ExceptionSlot = .{},
     stack_limit: usize = 0,
+    /// Logical JS call depth (recursive interpreter entries + inline frames).
     call_depth: usize = 0,
+    /// Native interpreter recursion depth only (excludes inline frames, which
+    /// consume no native stack). Guards against native stack exhaustion.
+    native_call_depth: usize = 0,
     preserve_uncaught_exception: bool = false,
     /// Host-controlled QuickJS-style unhandled rejection tracking. Normal CLI
     /// contexts enable it; validation and embedding-style contexts keep it off.
@@ -392,6 +402,7 @@ pub const JSContext = struct {
     backtrace_frames: []BacktraceFrame = &.{},
     backtrace_capacity: usize = 0,
     class_prototypes: []JSValue = &.{},
+    class_prototypes_inline: [class_prototype_inline_capacity]JSValue = @splat(JSValue.nullValue()),
     /// Global object, populated lazily by the eval entry path.
     /// Sharing the global across `eval` calls matches QuickJS semantics
     /// (`JS_Eval` reuses the per-context globals) and skips rebuilding every
@@ -425,22 +436,26 @@ pub const JSContext = struct {
     }
 
     pub fn init(self: *JSContext, rt: *JSRuntime, options: ContextOptions) !void {
-        const prototypes = try rt.memory.alloc(JSValue, rt.classes.records.len);
-        errdefer rt.memory.free(JSValue, prototypes);
         self.* = .{
             .runtime = rt,
             .stack_limit = options.stack_size orelse rt.stackSize(),
             .track_unhandled_rejections = options.track_unhandled_rejections,
-            .class_prototypes = prototypes,
             .dynamic_import_callback = options.dynamic_import_callback,
             .dynamic_import_userdata = options.dynamic_import_userdata,
         };
-        @memset(self.class_prototypes, JSValue.nullValue());
+        const initial_len = rt.classes.records.len;
+        if (initial_len <= self.class_prototypes_inline.len) {
+            self.class_prototypes = self.class_prototypes_inline[0..initial_len];
+        } else {
+            const prototypes = try rt.memory.alloc(JSValue, initial_len);
+            errdefer rt.memory.free(JSValue, prototypes);
+            @memset(prototypes, JSValue.nullValue());
+            self.class_prototypes = prototypes;
+        }
         var provider_registered = false;
         errdefer {
             if (provider_registered) rt.unregisterRootProvider(self.rootProvider());
-            rt.memory.free(JSValue, self.class_prototypes);
-            self.class_prototypes = &.{};
+            self.deinitClassPrototypeSlots();
         }
         try rt.registerRootProvider(self.rootProvider());
         provider_registered = true;
@@ -488,6 +503,25 @@ pub const JSContext = struct {
         return self.host_event_loop;
     }
 
+    fn usingInlineClassPrototypes(self: *const JSContext) bool {
+        return self.class_prototypes.ptr == self.class_prototypes_inline[0..].ptr;
+    }
+
+    fn deinitClassPrototypeSlots(self: *JSContext) void {
+        const rt = self.runtime;
+        const class_prototypes = self.class_prototypes;
+        const using_inline = self.usingInlineClassPrototypes();
+        self.class_prototypes = &.{};
+        for (class_prototypes) |*slot| {
+            const value = slot.*;
+            slot.* = JSValue.nullValue();
+            value.free(rt);
+        }
+        if (!using_inline and class_prototypes.len != 0) {
+            rt.memory.free(JSValue, class_prototypes);
+        }
+    }
+
     pub fn ensureClassPrototypeSlot(self: *JSContext, class_id: class.ClassId) !*JSValue {
         const index: usize = @intCast(class_id);
         if (index >= self.class_prototypes.len) {
@@ -500,8 +534,13 @@ pub const JSContext = struct {
             @memset(next[self.class_prototypes.len..], JSValue.nullValue());
 
             const old = self.class_prototypes;
+            const old_using_inline = self.usingInlineClassPrototypes();
             self.class_prototypes = next;
-            if (old.len != 0) self.runtime.memory.free(JSValue, old);
+            if (old_using_inline) {
+                @memset(old, JSValue.nullValue());
+            } else if (old.len != 0) {
+                self.runtime.memory.free(JSValue, old);
+            }
         }
         return &self.class_prototypes[index];
     }
@@ -560,16 +599,10 @@ pub const JSContext = struct {
         for (backtrace_frames) |frame| {
             rt.atoms.free(frame.function_name);
             rt.atoms.free(frame.filename);
+            frame.function_value.free(rt);
         }
         if (backtrace_capacity != 0) rt.memory.free(BacktraceFrame, backtrace_frames.ptr[0..backtrace_capacity]);
-        const class_prototypes = self.class_prototypes;
-        self.class_prototypes = &.{};
-        for (class_prototypes) |*slot| {
-            const value = slot.*;
-            slot.* = JSValue.nullValue();
-            value.free(rt);
-        }
-        if (class_prototypes.len != 0) rt.memory.free(JSValue, class_prototypes);
+        self.deinitClassPrototypeSlots();
     }
 
     pub fn destroy(self: *JSContext) void {
@@ -610,13 +643,9 @@ pub const JSContext = struct {
         }
     }
 
-
-
     pub fn arrayBuffer(self: *JSContext, store: *JSValue.Bytes.Store) !JSValue {
         return store.toArrayBuffer(self);
     }
-
-
 
     fn rootProvider(self: *JSContext) runtime_mod.RootProvider {
         return .{
@@ -737,6 +766,22 @@ pub const JSContext = struct {
         location_data: ?*const anyopaque,
         location_resolver: ?BacktraceLocationResolver,
     ) !void {
+        try self.pushBacktraceFrameLazyName(function_name, filename, line_num, col_num, location_data, location_resolver, JSValue.undefinedValue());
+    }
+
+    /// Push a backtrace frame whose display name is resolved lazily from
+    /// `function_value` (an object) only when a backtrace is materialized.
+    /// `function_name` stays the fallback for non-object function values.
+    pub fn pushBacktraceFrameLazyName(
+        self: *JSContext,
+        function_name: atom.Atom,
+        filename: atom.Atom,
+        line_num: i32,
+        col_num: i32,
+        location_data: ?*const anyopaque,
+        location_resolver: ?BacktraceLocationResolver,
+        function_value: JSValue,
+    ) !void {
         if (self.backtrace_frames.len == self.backtrace_capacity) {
             var next_capacity: usize = if (self.backtrace_capacity == 0) 16 else self.backtrace_capacity * 2;
             if (next_capacity < self.backtrace_frames.len + 1) next_capacity = self.backtrace_frames.len + 1;
@@ -748,6 +793,7 @@ pub const JSContext = struct {
             self.backtrace_capacity = next_capacity;
             if (old_capacity != 0) self.runtime.memory.free(BacktraceFrame, old_frames.ptr[0..old_capacity]);
         }
+        const stored_function_value = if (function_value.isObject()) function_value.dup() else JSValue.undefinedValue();
         self.backtrace_frames.ptr[self.backtrace_frames.len] = .{
             .function_name = self.runtime.atoms.dup(function_name),
             .filename = self.runtime.atoms.dup(filename),
@@ -755,6 +801,7 @@ pub const JSContext = struct {
             .col_num = col_num,
             .location_data = location_data,
             .location_resolver = location_resolver,
+            .function_value = stored_function_value,
         };
         self.backtrace_frames = self.backtrace_frames.ptr[0 .. self.backtrace_frames.len + 1];
     }
@@ -766,6 +813,7 @@ pub const JSContext = struct {
         self.backtrace_frames = self.backtrace_frames.ptr[0..idx];
         self.runtime.atoms.free(entry.function_name);
         self.runtime.atoms.free(entry.filename);
+        entry.function_value.free(self.runtime);
     }
 
     pub fn updateBacktracePc(self: *JSContext, pc: usize) void {
@@ -788,8 +836,6 @@ pub const JSContext = struct {
         self.backtrace_frames[idx].line_num = line_num;
         self.backtrace_frames[idx].col_num = col_num;
     }
-
-
 
     pub fn takePendingException(self: *JSContext) JSValue {
         if (self.hasUnhandledRejection()) {

@@ -1,6 +1,23 @@
 const core = @import("../core/root.zig");
 const bignum = @import("../libs/bignum.zig");
+const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
+const builtin_dispatch = @import("../exec/builtin_dispatch.zig");
+const exceptions = @import("../exec/exceptions.zig");
+const string_ops = @import("../exec/string_ops.zig");
+
+const HostError = exceptions.HostError;
+const InternalCall = core.host_function.InternalCall;
+
+/// Domain-local ids for the legacy `escape`/`unescape` globals (relocated to
+/// `core/uri.zig` so exec's string-name fallback can route their bodies
+/// through `callInternalRecord` without naming this builtin). The four
+/// `encodeURI`/`decodeURI` records use the `methodId` mode selector (1..4);
+/// these continue the same `.uri` id space. Reachable only through the record
+/// table (`bindUriNativeRecords` skips them, so the installed `escape`/
+/// `unescape` functions keep their existing dispatch).
+const escape_id = core.uri.escape_id;
+const unescape_id = core.uri.unescape_id;
 
 const AppendStringError = error{
     OutOfMemory,
@@ -9,18 +26,81 @@ const AppendStringError = error{
     NoSpaceLeft,
 };
 
-pub const FourByteEscapeUnits = struct {
-    high: u16,
-    low: u16,
+/// Declaration table: one entry per global URI builtin plus the legacy
+/// `escape`/`unescape` globals. `id` is the `methodId` mode selector (1..4)
+/// for the URI functions and `escape_id`/`unescape_id` for the legacy pair,
+/// reused as the dispatch `magic`. The record `call` fn (`uriCall`) coerces
+/// the input through the VM Annex B ToString path when a realm global is
+/// present and falls back to the primitive-only bodies (`call`/`escape`/
+/// `unescape`) on bare runtimes.
+pub const internal_entries = [_]core.host_function.InternalEntry{
+    uriEntry("encodeURI", 1),
+    uriEntry("encodeURIComponent", 2),
+    uriEntry("decodeURI", 3),
+    uriEntry("decodeURIComponent", 4),
+    .{ .name = "escape", .length = 1, .id = escape_id, .magic = escape_id, .prepared_call_ok = true, .call = &uriCall },
+    .{ .name = "unescape", .length = 1, .id = unescape_id, .magic = unescape_id, .prepared_call_ok = true, .call = &uriCall },
 };
 
-pub fn methodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "encodeURI")) return 1;
-    if (std.mem.eql(u8, name, "encodeURIComponent")) return 2;
-    if (std.mem.eql(u8, name, "decodeURI")) return 3;
-    if (std.mem.eql(u8, name, "decodeURIComponent")) return 4;
-    return null;
+fn uriEntry(comptime name: []const u8, comptime mode: u32) core.host_function.InternalEntry {
+    return .{ .name = name, .length = 1, .id = mode, .magic = mode, .prepared_call_ok = true, .call = &uriCall };
 }
+
+/// Shared record handler for the global URI functions and the legacy
+/// `escape`/`unescape` pair. With a realm global the input is string-coerced
+/// through the VM (Annex B ToString); without one the primitive-only bodies
+/// preserve the legacy host behavior on bare runtimes. Both modes invoke the
+/// same method bodies (`call`/`escape`/`unescape`) below, so exec routes its
+/// direct call sites here through `callInternalRecord` instead of naming them.
+fn uriCall(host_call: InternalCall) HostError!core.JSValue {
+    const ctx = host_call.ctx;
+    const mode: u32 = host_call.magic;
+    const input = if (host_call.args.len >= 1) host_call.args[0] else core.JSValue.undefinedValue();
+    if (host_call.global) |global| {
+        // Realm path: coerce the argument through the user-visible ToString
+        // (Annex B) before the body, except an already-string input which the
+        // body consumes directly (matching the retired exec coercion glue).
+        if (input.isString()) return uriBody(ctx.runtime, mode, input);
+        const string_value = try string_ops.toStringForAnnexB(
+            ctx,
+            host_call.output,
+            global,
+            input,
+            builtin_dispatch.callerBytecode(host_call),
+            builtin_dispatch.callerFrame(host_call),
+        );
+        defer string_value.free(ctx.runtime);
+        return uriBody(ctx.runtime, mode, string_value);
+    }
+    // Bare-runtime primitive path.
+    return uriBody(ctx.runtime, mode, input);
+}
+
+/// Dispatch a `.uri` record id to its primitive method body.
+fn uriBody(rt: *core.JSRuntime, mode: u32, input: core.JSValue) HostError!core.JSValue {
+    return switch (mode) {
+        escape_id => escape(rt, input),
+        unescape_id => unescape(rt, input),
+        else => call(rt, mode, input),
+    } catch |err| switch (err) {
+        error.TypeError, error.URIError => err,
+        else => err,
+    };
+}
+
+// `FourByteEscapeUnits` + the single-four-byte-escape probe relocated to
+// engine core (`core/uri.zig`) in Phase 6b-3 STEP 5B so exec's
+// `decodeURI(...) === String.fromCharCode(...)` fusion can reach it without
+// naming this builtin; re-exported here for the decode bodies below.
+pub const FourByteEscapeUnits = core.uri.FourByteEscapeUnits;
+pub const decodeSingleFourByteEscapeUnits = core.uri.decodeSingleFourByteEscapeUnits;
+const decodeSingleFourByteEscapeUnitsFromAscii = core.uri.decodeSingleFourByteEscapeUnitsFromAscii;
+const fastHexPair = core.uri.fastHexPair;
+
+// `methodId` relocated to engine core
+// (`core/host_function.zig`, `builtin_method_id_lookup.uri`) in Phase 6b-3
+// STEP 2; re-exported here unchanged.
+pub const methodId = core.host_function.builtin_method_id_lookup.uri.methodId;
 
 /// QuickJS source map: global URI encode/decode functions in quickjs.c. This
 /// is the current narrow URI subset used by transitional `uri_call` bytecode.
@@ -82,6 +162,7 @@ pub fn call(rt: *core.JSRuntime, mode: u32, input: core.JSValue) !core.JSValue {
 /// (`decodeURI("%F0%9F%98%80")` and similar) never spills to the heap.
 /// Larger strings spill to an `ArrayList`.
 fn decodeStringDataFast(rt: *core.JSRuntime, string_value: *core.string.String, component: bool) !?core.JSValue {
+    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| return try decodeAsciiBytes(rt, bytes, component),
         .utf16 => |units| {
@@ -129,72 +210,6 @@ fn decodeSingleFourByteEscape(rt: *core.JSRuntime, bytes: []const u8) !?core.JSV
     return cached.value().dup();
 }
 
-pub fn decodeSingleFourByteEscapeUnits(value: core.JSValue) !?FourByteEscapeUnits {
-    if (!value.isString()) return null;
-    const header = value.refHeader() orelse return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
-    const bytes = switch (string_value.resolveData()) {
-        .latin1 => |latin1| latin1,
-        .utf16 => return null,
-    };
-    return decodeSingleFourByteEscapeUnitsFromAscii(bytes);
-}
-
-fn decodeSingleFourByteEscapeUnitsFromAscii(bytes: []const u8) !?FourByteEscapeUnits {
-    if (bytes.len != 12) return null;
-
-    if (bytes[0] != '%' or bytes[3] != '%' or bytes[6] != '%' or bytes[9] != '%') return null;
-    const h01 = fastHexPair(bytes[1], bytes[2]) orelse return null;
-    const h23 = fastHexPair(bytes[4], bytes[5]) orelse return null;
-    const h45 = fastHexPair(bytes[7], bytes[8]) orelse return null;
-    const h67 = fastHexPair(bytes[10], bytes[11]) orelse return null;
-
-    const b0 = h01;
-    if (b0 < 0xf0) return null;
-    if (b0 > 0xf4) return error.URIError;
-    if ((h23 & 0xc0) != 0x80 or (h45 & 0xc0) != 0x80 or (h67 & 0xc0) != 0x80) {
-        return error.URIError;
-    }
-
-    const codepoint: u21 =
-        (@as(u21, b0 & 0x07) << 18) |
-        (@as(u21, h23 & 0x3f) << 12) |
-        (@as(u21, h45 & 0x3f) << 6) |
-        @as(u21, h67 & 0x3f);
-    if (codepoint < 0x10000 or codepoint > 0x10ffff) return error.URIError;
-
-    const adjusted = codepoint - 0x10000;
-    const high: u16 = @intCast(0xd800 + (adjusted >> 10));
-    const low: u16 = @intCast(0xdc00 + (adjusted & 0x3ff));
-    return .{ .high = high, .low = low };
-}
-
-fn fastHexPair(high: u8, low: u8) ?u8 {
-    return (fastHexValue(high) orelse return null) << 4 | (fastHexValue(low) orelse return null);
-}
-
-const fast_hex_table: [256]i8 = initFastHexTable();
-
-fn initFastHexTable() [256]i8 {
-    var table: [256]i8 = @splat(-1);
-    var digit: usize = 0;
-    while (digit < 10) : (digit += 1) {
-        table['0' + digit] = @intCast(digit);
-    }
-    var upper: usize = 0;
-    while (upper < 6) : (upper += 1) {
-        const value: i8 = @intCast(upper + 10);
-        table['A' + upper] = value;
-        table['a' + upper] = value;
-    }
-    return table;
-}
-
-fn fastHexValue(byte: u8) ?u8 {
-    const value = fast_hex_table[byte];
-    if (value < 0) return null;
-    return @intCast(value);
-}
 
 pub fn escape(rt: *core.JSRuntime, input: core.JSValue) !core.JSValue {
     var units = std.ArrayList(u16).empty;
@@ -292,6 +307,7 @@ fn stringHasUnpairedSurrogate(value: core.JSValue) bool {
 fn encodeStringValue(rt: *core.JSRuntime, out: *std.ArrayList(u8), value: core.JSValue, component: bool) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {
             for (bytes) |byte| try encodeCodepoint(rt, out, byte, component);
@@ -300,11 +316,9 @@ fn encodeStringValue(rt: *core.JSRuntime, out: *std.ArrayList(u8), value: core.J
             var index: usize = 0;
             while (index < units.len) : (index += 1) {
                 const unit = units[index];
-                if (unit >= 0xd800 and unit <= 0xdbff) {
+                if (unicode.isHighSurrogateUnit(unit)) {
                     const next = units[index + 1];
-                    const high: u21 = unit - 0xd800;
-                    const low: u21 = next - 0xdc00;
-                    try encodeCodepoint(rt, out, 0x10000 + (high << 10) + low, component);
+                    try encodeCodepoint(rt, out, unicode.codePointFromSurrogatePair(unit, next), component);
                     index += 1;
                 } else {
                     try encodeCodepoint(rt, out, unit, component);
@@ -336,12 +350,12 @@ fn hasUnpairedSurrogate(units: []const u16) bool {
     var index: usize = 0;
     while (index < units.len) : (index += 1) {
         const unit = units[index];
-        if (unit >= 0xd800 and unit <= 0xdbff) {
+        if (unicode.isHighSurrogateUnit(unit)) {
             if (index + 1 >= units.len) return true;
             const next = units[index + 1];
-            if (next < 0xdc00 or next > 0xdfff) return true;
+            if (!unicode.isLowSurrogateUnit(next)) return true;
             index += 1;
-        } else if (unit >= 0xdc00 and unit <= 0xdfff) {
+        } else if (unicode.isLowSurrogateUnit(unit)) {
             return true;
         }
     }
@@ -367,19 +381,17 @@ fn encodeBytes(rt: *core.JSRuntime, out: *std.ArrayList(u8), bytes: []const u8, 
 }
 
 fn percentEncodedByte(byte: u8) [3]u8 {
-    const hex = "0123456789ABCDEF";
-    return .{ '%', hex[byte >> 4], hex[byte & 0x0f] };
+    return .{ '%', unicode.asciiUpperHexDigitChar(byte >> 4), unicode.asciiUpperHexDigitChar(byte & 0x0f) };
 }
 
 fn percentEncodedUnit(unit: u16) [6]u8 {
-    const hex = "0123456789ABCDEF";
     return .{
         '%',
         'u',
-        hex[(unit >> 12) & 0x0f],
-        hex[(unit >> 8) & 0x0f],
-        hex[(unit >> 4) & 0x0f],
-        hex[unit & 0x0f],
+        unicode.asciiUpperHexDigitChar((unit >> 12) & 0x0f),
+        unicode.asciiUpperHexDigitChar((unit >> 8) & 0x0f),
+        unicode.asciiUpperHexDigitChar((unit >> 4) & 0x0f),
+        unicode.asciiUpperHexDigitChar(unit & 0x0f),
     };
 }
 
@@ -500,7 +512,7 @@ fn decodeBytesInto(dest: []u8, bytes: []const u8, component: bool, out_len: *usi
 }
 
 fn isSurrogate(codepoint: u21) bool {
-    return codepoint >= 0xd800 and codepoint <= 0xdfff;
+    return unicode.isSurrogateCodePoint(codepoint);
 }
 
 fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
@@ -515,7 +527,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
             try buffer.appendSlice(rt.memory.allocator, "Infinity");
         } else if (std.math.isNegativeInf(float_value)) {
             try buffer.appendSlice(rt.memory.allocator, "-Infinity");
-        } else if (isNegativeZero(float_value)) {
+        } else if (std.math.isNegativeZero(float_value)) {
             try buffer.append(rt.memory.allocator, '0');
         } else {
             var float_buf: [64]u8 = undefined;
@@ -546,7 +558,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
             try buffer.appendSlice(rt.memory.allocator, "[object ArrayBuffer]");
         } else if (object_value.class_id == core.class.ids.promise) {
             try buffer.appendSlice(rt.memory.allocator, "[object Promise]");
-        } else if (object_value.is_array) {
+        } else if (object_value.flags.is_array) {
             try appendArrayString(rt, buffer, object_value);
         } else {
             try buffer.appendSlice(rt.memory.allocator, "[object Object]");
@@ -559,6 +571,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
 fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
         .utf16 => |units| {
@@ -606,6 +619,7 @@ fn appendValueCodeUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: co
 fn appendStringCodeUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| for (bytes) |byte| try out.append(rt.memory.allocator, byte),
         .utf16 => |units| try out.appendSlice(rt.memory.allocator, units),
@@ -613,17 +627,15 @@ fn appendStringCodeUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: c
 }
 
 fn isAnnexBEscapeUnmodified(ch: u8) bool {
-    return std.ascii.isAlphanumeric(ch) or ch == '@' or ch == '*' or ch == '_' or ch == '+' or ch == '-' or ch == '.' or ch == '/';
+    return unicode.isAsciiAlphanumericByte(ch) or ch == '@' or ch == '*' or ch == '_' or ch == '+' or ch == '-' or ch == '.' or ch == '/';
 }
 
 fn isHexCodeUnit(unit: u16) bool {
-    return (unit >= '0' and unit <= '9') or (unit >= 'a' and unit <= 'f') or (unit >= 'A' and unit <= 'F');
+    return unicode.isAsciiHexDigitUnit(unit);
 }
 
 fn hexCodeUnitValue(unit: u16) u8 {
-    if (unit >= '0' and unit <= '9') return @intCast(unit - '0');
-    if (unit >= 'a' and unit <= 'f') return @intCast(unit - 'a' + 10);
-    return @intCast(unit - 'A' + 10);
+    return unicode.asciiHexDigitValueUnit(unit) orelse unreachable;
 }
 
 fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
@@ -636,12 +648,8 @@ fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     return error.TypeError;
 }
 
-fn isNegativeZero(value: f64) bool {
-    return value == 0 and std.math.isNegativeInf(1.0 / value);
-}
-
 fn isUnescaped(ch: u8) bool {
-    return std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_' or ch == '.' or ch == '!' or ch == '~' or ch == '*' or ch == '\'' or ch == '(' or ch == ')';
+    return unicode.isAsciiAlphanumericByte(ch) or ch == '-' or ch == '_' or ch == '.' or ch == '!' or ch == '~' or ch == '*' or ch == '\'' or ch == '(' or ch == ')';
 }
 
 fn isReserved(ch: u8) bool {

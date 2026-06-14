@@ -1,7 +1,9 @@
 # Limitations
 
 `zjs` has reached its Production v1 Candidate status. It is designed for
-semantic convergence, validation work, and production-grade embedded use cases, rather than a broad, general-purpose production JavaScript runtime (such as a full Node.js/Deno competitor).
+semantic convergence, validation work, and production-grade Zig-native embedded
+use cases, rather than a broad, general-purpose production JavaScript runtime
+such as a full Node.js or Deno competitor.
 
 ## Runtime Boundary
 
@@ -9,7 +11,8 @@ semantic convergence, validation work, and production-grade embedded use cases, 
   local `quickjs/` source tree.
 - Compatibility is scoped to the active `test262.conf` profile and the
   focused regression tests in this repository.
-- `zjs` is not a Node.js, Deno, browser, or general-purpose production QuickJS replacement.
+- `zjs` is not a Node.js, Deno, browser, or drop-in `libquickjs` C API
+  replacement.
 - The engine-only Production v1 target is trusted-code embedding, not
   hostile-code sandboxing. See [docs/security-boundary.md](docs/security-boundary.md).
 
@@ -31,8 +34,8 @@ and should not rely on process exit for cleanup.
 
 - Reference counts are non-atomic. A runtime and its values are thread-affine.
 - The collector is non-moving. Embedders must still treat raw object pointers as
-  runtime-owned and must not keep them without a `PersistentValue` or documented
-  native payload ownership.
+  runtime-owned and must not keep them without a `JSValue.Persistent` handle or
+  documented native payload ownership.
 - GC safe points are explicit. New VM or host APIs that allocate must root
   temporaries before polling GC.
 - Changes that touch weak edges, finalizers, descriptors, or object graphs need
@@ -41,8 +44,9 @@ and should not rely on process exit for cleanup.
 ## Standard Library and Host APIs
 
 - No Node.js or Deno standard modules are provided.
-- QuickJS-style `qjs:std` and `qjs:os` support exists only where the current
-  engine and tests require it.
+- There is no QuickJS-style `qjs:std`/`qjs:os` layer; the legacy implementation
+  was removed (git history has it). Host capabilities are added through the
+  external host-function registry instead.
 - There is no stable JavaScript FFI for loading arbitrary C, C++, or Zig
   libraries.
 - Host APIs such as Fetch, Streams, WebCrypto, DOM, and browser event-loop
@@ -54,6 +58,28 @@ ECMAScript modules and binary module imports (using `import ... with { type: "by
 are supported within the local validation boundary. CommonJS `require`,
 `node_modules` resolution, package exports/import maps, and hybrid Node-style
 module loading are not supported.
+
+## Proper Tail Calls
+
+- Plain `tail_call` sites (including tail-position direct `eval` calls that do
+  not resolve to %eval%) run as real tail-call optimization through frame
+  reuse: logical call depth stays constant. `test262.conf` enables the
+  `tail-call-optimization` feature.
+- Tail targets that still take the recursive slow path, where deep tail
+  recursion grows the native stack: L0 frames (generator/eval shells),
+  arrow / class-constructor / cross-realm callees, and `tail_call_method`.
+  Arrow inlining and `tail_call_method` frame reuse are scheduled as R5
+  roadmap Phase 7. The class-constructor exclusion is spec-correct: calling a
+  class constructor without `new` throws TypeError, so no deep recursion
+  exists there.
+- Failure shape: the recursive path is protected by the dual depth guard
+  (native depth `max(16, stack_limit / 16384)` plus the logical depth limit)
+  and throws RangeError when exceeded — it is not a crash. The consequence is
+  that spec-legal deep tail recursion in method/arrow position hits RangeError
+  early, deviating from PTC's constant-stack semantics.
+- Note: test262 has no coverage for deep tail recursion in method/arrow
+  position (`tco-member-args.js` actually contains a plain call), so a green
+  gate is not evidence for those shapes.
 
 ## Performance
 

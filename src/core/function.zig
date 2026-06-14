@@ -3,8 +3,10 @@ const memory = @import("memory.zig");
 const JSValue = @import("value.zig").JSValue;
 const Object = @import("object.zig").Object;
 const Descriptor = @import("descriptor.zig").Descriptor;
+const property = @import("property.zig");
 const string = @import("string.zig");
-const JSRuntime = @import("runtime.zig").JSRuntime;
+const runtime = @import("runtime.zig");
+const JSRuntime = runtime.JSRuntime;
 const class = @import("class.zig");
 const std = @import("std");
 
@@ -40,7 +42,37 @@ pub const NativeBuiltinDomain = enum(i32) {
     function = 16,
     error_object = 17,
     iterator = 18,
+    host = 19,
+    promise = 20,
 };
+
+/// Method ids for the `.host` native-builtin domain: host/web globals and
+/// engine-internal helpers that have no spec namespace of their own (HTML
+/// btoa/atob/queueMicrotask, the zjs `gc` helper, navigator accessors, host
+/// constructor stubs, the shared `[Symbol.species]` getter, and the V8-style
+/// CallSite methods).
+pub const HostGlobalMethod = enum(u32) {
+    btoa = 1,
+    atob = 2,
+    queue_microtask = 3,
+    gc = 4,
+    navigator_user_agent_get = 5,
+    dom_exception_ctor_call = 6,
+    species_getter = 7,
+    callsite_get_function = 8,
+    callsite_get_function_name = 9,
+    callsite_get_file_name = 10,
+    callsite_get_line_number = 11,
+    callsite_get_column_number = 12,
+    callsite_is_native = 13,
+};
+
+// QuickJS CLI exposes navigator.userAgent as "quickjs-ng/<JS_GetVersion()>".
+// Pure version constant returned by the `navigator_user_agent_get` host getter
+// above; relocated to engine core in Phase 6b-3 STEP 2 (`builtins/registry.zig`
+// re-exports it). Kept tied to the QuickJS reference version used by the local
+// fixtures.
+pub const navigator_user_agent = "quickjs-ng/0.14.0";
 
 pub const NativeBuiltinRef = struct {
     domain: NativeBuiltinDomain,
@@ -77,6 +109,8 @@ pub fn decodeNativeBuiltinId(encoded: i32) ?NativeBuiltinRef {
         16 => .function,
         17 => .error_object,
         18 => .iterator,
+        19 => .host,
+        20 => .promise,
         else => return null,
     };
     return .{ .domain = domain, .id = @intCast(local_id) };
@@ -275,7 +309,7 @@ fn isAsciiBuiltinName(bytes: []const u8) bool {
 }
 
 pub fn nativeFunction(rt: *JSRuntime, name: []const u8, length: i32) !JSValue {
-    const function_object = try Object.create(rt, class.ids.c_function, null);
+    const function_object = try Object.createWithOwnPropertyCapacity(rt, class.ids.c_function, null, 2);
     errdefer function_object.value().free(rt);
 
     const length_key = atom.predefinedId("length", .string).?;
@@ -296,4 +330,69 @@ pub fn nativeFunction(rt: *JSRuntime, name: []const u8, length: i32) !JSValue {
     function_object.nativeDispatchNameSlot().* = try rt.internAtom(name);
 
     return function_object.value();
+}
+
+/// `name` must outlive the function object. This is intended for standard
+/// builtin tables whose names have static storage.
+pub fn nativeFunctionWithLazyName(rt: *JSRuntime, name: []const u8, length: i32) !JSValue {
+    return nativeFunctionWithLazyNameAndCapacity(rt, name, length, 2);
+}
+
+/// `name` must outlive the function object. This is intended for standard
+/// builtin tables whose names have static storage.
+pub fn nativeFunctionWithLazyNameAndCapacity(rt: *JSRuntime, name: []const u8, length: i32, capacity: usize) !JSValue {
+    std.debug.assert(capacity >= 2);
+    const function_object = try Object.createWithOwnPropertyCapacity(rt, class.ids.c_function, null, capacity);
+    errdefer function_object.value().free(rt);
+
+    const length_key = atom.predefinedId("length", .string).?;
+    try function_object.defineOwnPropertyAssumingNew(rt, length_key, Descriptor.data(JSValue.int32(length), false, false, true));
+
+    const name_key = atom.predefinedId("name", .string).?;
+    const name_flags = property.Flags.data(false, false, true);
+    try function_object.defineStringConstantAutoInitProperty(rt, name_key, name, name_flags);
+
+    function_object.nativeDispatchNameSlot().* = try rt.internAtom(name);
+
+    return function_object.value();
+}
+
+/// Creates a fresh native function named `name`/arity `length` and installs it
+/// as a `writable: true, enumerable: false, configurable: true` own data
+/// property on `target` under the same key. This is the lazy method-install
+/// primitive used when a Promise object is constructed without a shared
+/// prototype (so `then`/`catch` must be materialized directly on the
+/// instance). It depends only on core ops (`nativeFunction` + descriptor
+/// install), so engine-core callers may use it without reaching into builtins.
+pub fn defineNativeMethod(rt: *JSRuntime, target: *Object, name: []const u8, length: i32) !void {
+    const method = try nativeFunction(rt, name, length);
+    defer method.free(rt);
+    try defineMethodData(rt, target, name, method, true, false, true);
+}
+
+fn defineMethodData(
+    rt: *JSRuntime,
+    target: *Object,
+    name: []const u8,
+    value: JSValue,
+    writable: bool,
+    enumerable: bool,
+    configurable: bool,
+) !void {
+    var target_value = target.value();
+    var rooted_value = value;
+    var root_values = [_]runtime.ValueRootValue{
+        .{ .value = &target_value },
+        .{ .value = &rooted_value },
+    };
+    const root_frame = runtime.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = &root_values,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
+
+    const key = try rt.internAtom(name);
+    defer rt.atoms.free(key);
+    try target.defineOwnProperty(rt, key, Descriptor.data(rooted_value, writable, enumerable, configurable));
 }

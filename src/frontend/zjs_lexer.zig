@@ -153,7 +153,7 @@ pub const Lexer = struct {
         if (isAsciiIdentStart(c) or c >= 0x80 or self.startsUnicodeEscape()) {
             return self.lexIdentifier();
         }
-        if (std.ascii.isDigit(c)) return self.lexNumber(false);
+        if (isDecimalDigit(c)) return self.lexNumber(false);
         if (c == '#') return self.lexPrivateName();
         if (c == '"' or c == '\'') return self.lexString(c);
         if (c == '`') return self.lexTemplate(.head_or_no_subst);
@@ -583,7 +583,7 @@ pub const Lexer = struct {
             self.bump();
             return self.emit(t.TOK_ELLIPSIS, .{ .none = {} });
         }
-        if (std.ascii.isDigit(self.peekAt(1))) {
+        if (isDecimalDigit(self.peekAt(1))) {
             return self.lexNumber(true);
         }
         self.bump();
@@ -657,7 +657,7 @@ pub const Lexer = struct {
         // (e.g. `123abc` is a single error per spec, not two tokens).
         if (self.pos < self.source.len) {
             const nc = self.peek();
-            if (isAsciiIdentStart(nc) or std.ascii.isDigit(nc) or (nc >= 0x80 and !self.startsUtf8Trivia())) {
+            if (isAsciiIdentContinue(nc) or (nc >= 0x80 and !self.startsUtf8Trivia())) {
                 return error.InvalidNumber;
             }
         }
@@ -742,7 +742,7 @@ pub const Lexer = struct {
                 try out.append(self.allocator, 0x0B);
             },
             '0' => {
-                if (self.pos + 1 < self.source.len and std.ascii.isDigit(self.peekAt(1))) {
+                if (self.pos + 1 < self.source.len and isDecimalDigit(self.peekAt(1))) {
                     if (self.is_strict_mode or in_template) return error.LegacyOctalInStrictMode;
                     try appendUtf8(out, self.allocator, try self.consumeLegacyOctalEscape());
                     return true;
@@ -755,7 +755,7 @@ pub const Lexer = struct {
                 if (self.remaining() < 2) return error.InvalidEscape;
                 const h1 = self.peek();
                 const h2 = self.peekAt(1);
-                if (!std.ascii.isHex(h1) or !std.ascii.isHex(h2)) return error.InvalidEscape;
+                if (!unicode.isAsciiHexDigitByte(h1) or !unicode.isAsciiHexDigitByte(h2)) return error.InvalidEscape;
                 self.bump();
                 self.bump();
                 try appendUtf8(out, self.allocator, @intCast(hexNibble(h1) * 16 + hexNibble(h2)));
@@ -832,7 +832,7 @@ pub const Lexer = struct {
             var saw_digit = false;
             while (self.pos < self.source.len and self.peek() != '}') {
                 const d = self.peek();
-                if (!std.ascii.isHex(d)) return error.InvalidUnicodeEscape;
+                if (!unicode.isAsciiHexDigitByte(d)) return error.InvalidUnicodeEscape;
                 value = value * 16 + hexNibble(d);
                 if (value > 0x10FFFF) return error.InvalidUnicodeEscape;
                 saw_digit = true;
@@ -879,7 +879,7 @@ pub const Lexer = struct {
         var i: u8 = 0;
         while (i < 4) : (i += 1) {
             const d = self.peek();
-            if (!std.ascii.isHex(d)) return error.InvalidUnicodeEscape;
+            if (!unicode.isAsciiHexDigitByte(d)) return error.InvalidUnicodeEscape;
             v = v * 16 + hexNibble(d);
             self.bump();
         }
@@ -1278,7 +1278,7 @@ pub const Lexer = struct {
                 }
                 return self.emit(t.TOK_DOUBLE_QUESTION_MARK, .{ .none = {} });
             }
-            if (self.peek() == '.' and !std.ascii.isDigit(self.peekAt(1))) {
+            if (self.peek() == '.' and !isDecimalDigit(self.peekAt(1))) {
                 self.bump();
                 return self.emit(t.TOK_QUESTION_MARK_DOT, .{ .none = {} });
             }
@@ -1327,18 +1327,15 @@ pub const Lexer = struct {
 };
 
 fn isAsciiIdentStart(c: u8) bool {
-    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_' or c == '$';
+    return unicode.isAsciiIdentifierStartByte(c);
 }
 
 fn isAsciiIdentContinue(c: u8) bool {
-    return isAsciiIdentStart(c) or (c >= '0' and c <= '9');
+    return unicode.isAsciiIdentifierPartByte(c);
 }
 
 fn hexNibble(c: u8) u16 {
-    if (c >= '0' and c <= '9') return c - '0';
-    if (c >= 'a' and c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' and c <= 'F') return c - 'A' + 10;
-    unreachable;
+    return unicode.asciiHexDigitValueByte(c) orelse unreachable;
 }
 
 fn appendUtf8(out: *std.ArrayList(u8), allocator: std.mem.Allocator, cp: u21) !void {
@@ -1357,12 +1354,28 @@ fn appendUtf8(out: *std.ArrayList(u8), allocator: std.mem.Allocator, cp: u21) !v
     try out.appendSlice(allocator, buf[0..len]);
 }
 
-fn consumeHexDigits(self: *Lexer) bool {
+fn isHexDigit(c: u8) bool {
+    return unicode.isAsciiHexDigitByte(c);
+}
+
+fn isOctalDigit(c: u8) bool {
+    return unicode.isAsciiOctalDigitByte(c);
+}
+
+fn isBinaryDigit(c: u8) bool {
+    return unicode.isAsciiBinaryDigitByte(c);
+}
+
+fn isDecimalDigit(c: u8) bool {
+    return unicode.isAsciiDigitByte(c);
+}
+
+fn consumeDigitRun(self: *Lexer, comptime isDigit: fn (u8) bool) bool {
     var any = false;
     var prev_sep = false;
     while (self.pos < self.source.len) {
         const c = self.peek();
-        if (std.ascii.isHex(c)) {
+        if (isDigit(c)) {
             any = true;
             prev_sep = false;
             self.bump();
@@ -1373,60 +1386,22 @@ fn consumeHexDigits(self: *Lexer) bool {
         } else break;
     }
     return any and !prev_sep;
+}
+
+fn consumeHexDigits(self: *Lexer) bool {
+    return consumeDigitRun(self, isHexDigit);
 }
 
 fn consumeOctalDigits(self: *Lexer) bool {
-    var any = false;
-    var prev_sep = false;
-    while (self.pos < self.source.len) {
-        const c = self.peek();
-        if (c >= '0' and c <= '7') {
-            any = true;
-            prev_sep = false;
-            self.bump();
-        } else if (c == '_') {
-            if (!any or prev_sep) return false;
-            prev_sep = true;
-            self.bump();
-        } else break;
-    }
-    return any and !prev_sep;
+    return consumeDigitRun(self, isOctalDigit);
 }
 
 fn consumeBinaryDigits(self: *Lexer) bool {
-    var any = false;
-    var prev_sep = false;
-    while (self.pos < self.source.len) {
-        const c = self.peek();
-        if (c == '0' or c == '1') {
-            any = true;
-            prev_sep = false;
-            self.bump();
-        } else if (c == '_') {
-            if (!any or prev_sep) return false;
-            prev_sep = true;
-            self.bump();
-        } else break;
-    }
-    return any and !prev_sep;
+    return consumeDigitRun(self, isBinaryDigit);
 }
 
 fn consumeDecDigits(self: *Lexer) bool {
-    var any = false;
-    var prev_sep = false;
-    while (self.pos < self.source.len) {
-        const c = self.peek();
-        if (std.ascii.isDigit(c)) {
-            any = true;
-            prev_sep = false;
-            self.bump();
-        } else if (c == '_') {
-            if (!any or prev_sep) return false;
-            prev_sep = true;
-            self.bump();
-        } else break;
-    }
-    return any and !prev_sep;
+    return consumeDigitRun(self, isDecimalDigit);
 }
 
 fn consumeDecDigitsRequired(self: *Lexer) Error!void {
@@ -1436,7 +1411,7 @@ fn consumeDecDigitsRequired(self: *Lexer) Error!void {
 fn consumeOptionalFractionDigits(self: *Lexer) Error!void {
     if (self.pos >= self.source.len) return;
     const c = self.peek();
-    if (std.ascii.isDigit(c) or c == '_') {
+    if (isDecimalDigit(c) or c == '_') {
         if (!consumeDecDigits(self)) return error.InvalidNumber;
     }
 }
@@ -1628,7 +1603,7 @@ fn tsTokenize(allocator: std.mem.Allocator, src: []const u8, tokens: *std.ArrayL
     var prev_sig: ?TSToken = null;
     while (i < src.len) {
         const c = src[i];
-        if (std.ascii.isWhitespace(c)) {
+        if (unicode.isAsciiWhitespaceByte(c)) {
             i += 1;
             continue;
         }
@@ -1646,7 +1621,7 @@ fn tsTokenize(allocator: std.mem.Allocator, src: []const u8, tokens: *std.ArrayL
             i += 1;
             while (i < src.len and tsIsIdentContinue(src[i])) i += 1;
             break :blk TSToken{ .kind = .identifier, .start = start, .end = i };
-        } else if (std.ascii.isDigit(c)) blk: {
+        } else if (isDecimalDigit(c)) blk: {
             i = tsSkipNumber(src, i);
             break :blk TSToken{ .kind = .number, .start = start, .end = i };
         } else if (c == '\'' or c == '"') blk: {
@@ -1753,7 +1728,7 @@ fn tsSkipNumber(src: []const u8, start: usize) usize {
     var i = start;
     while (i < src.len) {
         const c = src[i];
-        if (std.ascii.isAlphanumeric(c) or c == '_' or c == '.') {
+        if (unicode.isAsciiWordByte(c) or c == '.') {
             i += 1;
             continue;
         }
@@ -2581,11 +2556,11 @@ fn textEql(a: []const u8, b: []const u8) bool {
 }
 
 fn tsIsIdentStart(c: u8) bool {
-    return std.ascii.isAlphabetic(c) or c == '_' or c == '$' or c >= 0x80;
+    return unicode.isAsciiIdentifierStartByte(c) or c >= 0x80;
 }
 
 fn tsIsIdentContinue(c: u8) bool {
-    return tsIsIdentStart(c) or std.ascii.isDigit(c);
+    return tsIsIdentStart(c) or unicode.isAsciiDigitByte(c);
 }
 
 pub const RegExpLiteral = struct {
@@ -2626,7 +2601,7 @@ pub fn scanRegExpLiteral(source: []const u8, slash_offset: usize) !RegExpLiteral
     const pattern = source[slash_offset + 1 .. i];
     i += 1;
     const flags_start = i;
-    while (i < source.len and (std.ascii.isAlphabetic(source[i]) or std.ascii.isDigit(source[i]) or source[i] == '_' or source[i] == '$')) : (i += 1) {}
+    while (i < source.len and unicode.isAsciiIdentifierPartByte(source[i])) : (i += 1) {}
     return .{
         .pattern = pattern,
         .flags = source[flags_start..i],

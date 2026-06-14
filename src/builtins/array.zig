@@ -4,6 +4,11 @@ const buffer_builtin = @import("buffer.zig");
 const function_builtin = @import("function.zig");
 const bignum = @import("../libs/bignum.zig");
 const std = @import("std");
+const builtin_glue = @import("../exec/builtin_glue.zig");
+const builtin_dispatch = @import("../exec/builtin_dispatch.zig");
+
+const HostError = @import("../exec/exceptions.zig").HostError;
+const InternalCall = core.host_function.InternalCall;
 
 const AppendStringError = error{
     OutOfMemory,
@@ -36,52 +41,10 @@ const RootedValueCopies = struct {
     }
 };
 
-pub const StaticMethod = enum(u32) {
-    from = 1,
-    is_array = 2,
-    of = 3,
-};
 
-pub const PrototypeMethod = enum(u32) {
-    to_string = 100,
-    to_locale_string = 101,
-    map = 102,
-    filter = 103,
-    reduce = 104,
-    reduce_right = 105,
-    for_each = 106,
-    push = 107,
-    pop = 108,
-    shift = 109,
-    unshift = 110,
-    some = 111,
-    every = 112,
-    find = 113,
-    find_index = 114,
-    find_last = 115,
-    find_last_index = 116,
-    includes = 117,
-    index_of = 118,
-    last_index_of = 119,
-    at = 120,
-    copy_within = 121,
-    fill = 122,
-    slice = 123,
-    splice = 124,
-    join = 125,
-    concat = 126,
-    reverse = 127,
-    sort = 128,
-    flat = 129,
-    flat_map = 130,
-    to_reversed = 131,
-    to_sorted = 132,
-    to_spliced = 133,
-    with_ = 134,
-    keys = 135,
-    values = 136,
-    entries = 137,
-};
+pub const StaticMethod = core.host_function.builtin_method_ids.array.StaticMethod;
+pub const PrototypeMethod = core.host_function.builtin_method_ids.array.PrototypeMethod;
+pub const ConstructorMethod = core.host_function.builtin_method_ids.array.ConstructorMethod;
 
 pub fn staticMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "from")) return @intFromEnum(StaticMethod.from);
@@ -132,43 +95,197 @@ pub fn prototypeMethodId(name: []const u8) ?u32 {
     return null;
 }
 
-pub fn decodePrototypeMethodId(id: u32) ?u32 {
-    return switch (id) {
-        @intFromEnum(PrototypeMethod.filter) => 1,
-        @intFromEnum(PrototypeMethod.reduce) => 2,
-        @intFromEnum(PrototypeMethod.some) => 4,
-        @intFromEnum(PrototypeMethod.every) => 5,
-        @intFromEnum(PrototypeMethod.index_of) => 6,
-        @intFromEnum(PrototypeMethod.includes) => 7,
-        @intFromEnum(PrototypeMethod.last_index_of) => 8,
-        @intFromEnum(PrototypeMethod.at) => 9,
-        @intFromEnum(PrototypeMethod.slice) => 10,
-        @intFromEnum(PrototypeMethod.splice) => 11,
-        @intFromEnum(PrototypeMethod.reverse) => 12,
-        @intFromEnum(PrototypeMethod.push) => 13,
-        @intFromEnum(PrototypeMethod.pop) => 14,
-        @intFromEnum(PrototypeMethod.concat) => 15,
-        @intFromEnum(PrototypeMethod.sort) => 16,
-        @intFromEnum(PrototypeMethod.values) => 17,
-        @intFromEnum(PrototypeMethod.keys) => 18,
-        @intFromEnum(PrototypeMethod.entries) => 19,
-        else => null,
+// Pure native-id -> legacy-id mapping relocated to engine core
+// (`core/host_function.zig`, next to `builtin_method_ids.array`) in Phase
+// 6b-3c; re-exported here so the dispatch/install side keeps the original name.
+pub const decodePrototypeMethodId = core.host_function.builtin_method_id_lookup.array.decodePrototypeMethodId;
+
+pub fn legacyPrototypeMethodId(name: []const u8) ?u32 {
+    const native_id = prototypeMethodId(name) orelse return null;
+    return decodePrototypeMethodId(native_id);
+}
+
+/// `arrayCall` switches on the per-record `magic` (== domain-local id) by
+/// forwarding to `builtin_glue.qjsArrayNativeRecord`, the exec VM-op dispatch
+/// glue that resolves `Array.from`/`Array.of`/`Array.isArray` and the
+/// Array.prototype method record hub against the realm-aware exec ops. Those
+/// exec ops stay in exec (`exec/array_ops.zig`): the prototype hub
+/// (`qjsArrayPrototypeNativeRecord`) and its leaf method bodies are BOTH —
+/// reached through this record table AND directly by the VM's residual
+/// fast-array fast-call (`qjsArrayMethodFastCall`), the realm-fallback name
+/// cascade (`call_runtime.callValueOrBytecodeClassModeDispatch`), and the
+/// `array.map` opcode fusion (`tryFastMapCallDense`) — so per the client model
+/// the implementation core stays in exec and builtins hosts only this thin
+/// record entry. (Phase 6b-relocate inventory: unlike String — whose six
+/// movable bodies were reachable only through `stringCall` — almost every
+/// Array.prototype / Array static body here is reached by the opcode-bound
+/// fast-array fast-call, so it is BOTH and stays. The only bodies reachable
+/// solely through native-dispatch surfaces are `qjsArrayJoinCall` and the
+/// `Array.from`/`Array.of` statics; those still stay in exec because their
+/// other live caller is the realm name cascade in `call_runtime.zig` (outside
+/// this relocation's file scope) and because `from`/`of` are construction
+/// orchestrators wired into the array-iterator-protocol and TypedArray-from
+/// machinery that the client model deliberately keeps in exec. The lone
+/// record-only function `qjsArrayIteratorMethodRecord` is the
+/// array-iterator-protocol core and likewise stays.) The
+/// fast-array `[[Get]]/[[Set]]` element semantics, the array iterator protocol
+/// core, the `new_array` / `array_join` construction opcodes, and the VM
+/// stack/frame primitives (`popCatchMarker`, `pushSlotValue`,
+/// `pushFunctionClosure`) are NOT here — they are driven by opcode handlers,
+/// never by function-object record dispatch. Property installation still
+/// resolves names/lengths through the registry's own `array_static` /
+/// `array_prototype` method tables and the `staticMethodId` /
+/// `prototypeMethodId` helpers above; this table is consumed by both the slow
+/// record-dispatch path and the VM hot paths (`rt.internal_builtins`).
+///
+/// `prepared_call_ok` is uniformly false, but unlike the other domains that is
+/// not what gates `.array` prepared eligibility: the VM admits exactly `push`
+/// and `pop` to the prepared (no-function-object) path through
+/// `vm_call.arrayNativeSupportedWithoutFunctionObject`, and those calls now
+/// route through this same record handler with `func_obj = null` (uniform
+/// dispatch). `arrayCall` and the exec hub tolerate the null function object
+/// for `push`/`pop` and reject every other id, so the residual flag stays
+/// `false` without affecting the prepared path.
+pub const internal_entries = arrayEntries: {
+    const Entry = core.host_function.InternalEntry;
+    break :arrayEntries [_]Entry{
+        // Array constructor (`new Array(...)` / `Array(...)`). Construct-capable
+        // so the construct dispatch path routes through `arrayCall`'s construct
+        // branch; the Array constructor object is not installed with this native
+        // id (its call-as-function/species recognition stays on the existing
+        // name + `arrayBuiltinMarker` paths), so this record is reached only
+        // through `builtin_dispatch.callConstructRecord` with an explicit ref.
+        arrayConstructorEntry("Array", 1, @intFromEnum(ConstructorMethod.construct)),
+        // Array static methods.
+        arrayEntry("from", 1, @intFromEnum(StaticMethod.from)),
+        arrayEntry("isArray", 1, @intFromEnum(StaticMethod.is_array)),
+        arrayEntry("of", 0, @intFromEnum(StaticMethod.of)),
+        // Array.prototype methods.
+        arrayEntry("toString", 0, @intFromEnum(PrototypeMethod.to_string)),
+        arrayEntry("toLocaleString", 0, @intFromEnum(PrototypeMethod.to_locale_string)),
+        arrayEntry("map", 1, @intFromEnum(PrototypeMethod.map)),
+        arrayEntry("filter", 1, @intFromEnum(PrototypeMethod.filter)),
+        arrayEntry("reduce", 1, @intFromEnum(PrototypeMethod.reduce)),
+        arrayEntry("reduceRight", 1, @intFromEnum(PrototypeMethod.reduce_right)),
+        arrayEntry("forEach", 1, @intFromEnum(PrototypeMethod.for_each)),
+        arrayEntry("push", 1, @intFromEnum(PrototypeMethod.push)),
+        arrayEntry("pop", 0, @intFromEnum(PrototypeMethod.pop)),
+        arrayEntry("shift", 0, @intFromEnum(PrototypeMethod.shift)),
+        arrayEntry("unshift", 1, @intFromEnum(PrototypeMethod.unshift)),
+        arrayEntry("some", 1, @intFromEnum(PrototypeMethod.some)),
+        arrayEntry("every", 1, @intFromEnum(PrototypeMethod.every)),
+        arrayEntry("find", 1, @intFromEnum(PrototypeMethod.find)),
+        arrayEntry("findIndex", 1, @intFromEnum(PrototypeMethod.find_index)),
+        arrayEntry("findLast", 1, @intFromEnum(PrototypeMethod.find_last)),
+        arrayEntry("findLastIndex", 1, @intFromEnum(PrototypeMethod.find_last_index)),
+        arrayEntry("includes", 1, @intFromEnum(PrototypeMethod.includes)),
+        arrayEntry("indexOf", 1, @intFromEnum(PrototypeMethod.index_of)),
+        arrayEntry("lastIndexOf", 1, @intFromEnum(PrototypeMethod.last_index_of)),
+        arrayEntry("at", 1, @intFromEnum(PrototypeMethod.at)),
+        arrayEntry("copyWithin", 2, @intFromEnum(PrototypeMethod.copy_within)),
+        arrayEntry("fill", 1, @intFromEnum(PrototypeMethod.fill)),
+        arrayEntry("slice", 2, @intFromEnum(PrototypeMethod.slice)),
+        arrayEntry("splice", 2, @intFromEnum(PrototypeMethod.splice)),
+        arrayEntry("join", 1, @intFromEnum(PrototypeMethod.join)),
+        arrayEntry("concat", 1, @intFromEnum(PrototypeMethod.concat)),
+        arrayEntry("reverse", 0, @intFromEnum(PrototypeMethod.reverse)),
+        arrayEntry("sort", 1, @intFromEnum(PrototypeMethod.sort)),
+        arrayEntry("flat", 0, @intFromEnum(PrototypeMethod.flat)),
+        arrayEntry("flatMap", 1, @intFromEnum(PrototypeMethod.flat_map)),
+        arrayEntry("toReversed", 0, @intFromEnum(PrototypeMethod.to_reversed)),
+        arrayEntry("toSorted", 1, @intFromEnum(PrototypeMethod.to_sorted)),
+        arrayEntry("toSpliced", 2, @intFromEnum(PrototypeMethod.to_spliced)),
+        arrayEntry("with", 2, @intFromEnum(PrototypeMethod.with_)),
+        arrayEntry("keys", 0, @intFromEnum(PrototypeMethod.keys)),
+        arrayEntry("values", 0, @intFromEnum(PrototypeMethod.values)),
+        arrayEntry("entries", 0, @intFromEnum(PrototypeMethod.entries)),
     };
+};
+
+fn arrayEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .call = &arrayCall };
+}
+
+/// The Array constructor record: construct-capable so `new Array(...)` (and
+/// `Array(...)` called as a function, routed with `flags.constructor == false`)
+/// reach `arrayCall`'s construct branch. Never prepared-eligible.
+fn arrayConstructorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .constructor = true, .call = &arrayCall };
+}
+
+/// The realm's default `Array.prototype` for the call-as-function construct
+/// fallback (the construct path passes `new_target` instead). Returns null when
+/// the realm cache is not yet populated, in which case the array is created
+/// with the engine default prototype.
+fn arrayPrototypeFromGlobal(global: *core.Object) ?*core.Object {
+    const stored = global.cachedRealmValue(.array_prototype) orelse return null;
+    if (!stored.isObject()) return null;
+    const header = stored.refHeader() orelse return null;
+    return @fieldParentPtr("header", header);
+}
+
+/// Shared record handler for the `.array` domain. Mirrors the retired
+/// `call.zig` `callArrayNativeFunctionRecord`: forward the record id to the
+/// exec dispatch glue, and surface the corrupt-id / null-result case (e.g. an
+/// Array.prototype method invoked against a non-array receiver the hub
+/// declines) as a TypeError, exactly as before.
+///
+/// `func_obj` is nullable so the prepared (no-function-object) call path can
+/// reach this same record handler under the uniform dispatch model: the
+/// prepared-call gate (`vm_call.arrayNativeSupportedWithoutFunctionObject`)
+/// only admits `push`/`pop`, whose implementations need only the receiver
+/// array, so the exec glue routes those two ids to their func-object-free
+/// bodies when `func_obj == null`. Every other Array method record requires the
+/// materialized function object (to disambiguate Array vs `%TypedArray%`
+/// prototype methods sharing a record id, and to read species/callbacks) and
+/// surfaces the corrupt-id `error.TypeError` under null func_obj — which never
+/// fires here because the gate blocks those ids from the prepared path. The VM
+/// caller bytecode/frame are recovered and threaded so the relocated table path
+/// keeps the inline-cache hint the dedicated prepared bypass used to carry.
+fn arrayCall(host_call: InternalCall) HostError!core.JSValue {
+    const id: u32 = host_call.magic;
+    if (id == @intFromEnum(ConstructorMethod.construct)) {
+        // `new Array(...)` arrives through the construct record path with
+        // `flags.constructor` set and the resolved instance prototype in
+        // `new_target`. `Array(...)` called as a function behaves identically
+        // (per spec) but is currently name-dispatched and so does not reach this
+        // id; the `flags.constructor == false` branch falls back to the realm's
+        // default Array.prototype (null when no realm global is threaded — e.g.
+        // a bare `Reflect.construct` against an unwired native function — which
+        // yields the engine default prototype). The construct branch runs before
+        // the `global` requirement below because it needs no realm global, just
+        // like the Date/RegExp/String construct records. RangeError surfaces
+        // unchanged for an invalid `new Array(length)`.
+        const prototype = if (host_call.flags.constructor)
+            host_call.new_target
+        else if (host_call.global) |global|
+            arrayPrototypeFromGlobal(global)
+        else
+            null;
+        return constructConstructorWithPrototype(host_call.ctx.runtime, host_call.args, prototype);
+    }
+    const global = host_call.global orelse return error.TypeError;
+    if (try builtin_glue.qjsArrayNativeRecord(
+        host_call.ctx,
+        host_call.output,
+        global,
+        host_call.this_value,
+        host_call.func_obj,
+        host_call.magic,
+        host_call.args,
+        builtin_dispatch.callerBytecode(host_call),
+        builtin_dispatch.callerFrame(host_call),
+    )) |value| return value;
+    return error.TypeError;
 }
 
 pub fn isArrayIndex(bytes: []const u8) bool {
     return core_array.isArrayIndexName(bytes);
 }
 
-pub fn isArrayValue(value: core.JSValue) !bool {
-    const object = objectFromValue(value) orelse return false;
-    if (object.is_proxy) {
-        if (object.proxyHandler() == null) return error.TypeError;
-        const target = object.proxyTarget() orelse return error.TypeError;
-        return isArrayValue(target);
-    }
-    return object.is_array;
-}
+// Proxy-aware `Array.isArray` predicate relocated to engine core
+// (`core/array.zig`) in Phase 6b-3 STEP 2; re-exported here unchanged.
+pub const isArrayValue = core_array.isArrayValue;
 
 pub fn lengthAfterSet(index: u32, current: u32) u32 {
     if (index >= current) return index + 1;
@@ -214,29 +331,10 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, values: []const core.JSValue,
     return object.value();
 }
 
-pub fn constructLiteralWithPrototype(rt: *core.JSRuntime, values: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
-    const rooted = try RootedValueCopies.init(rt, values);
-    defer rooted.deinit(rt);
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = rooted.roots,
-    };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
-
-    const object = try core.Object.createArray(rt, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &object.header);
-
-    if (try object.initDenseArrayLiteralValuesAssumingEmpty(rt, rooted.values)) return object.value();
-
-    try object.reserveDenseArrayElements(rt, @intCast(rooted.values.len));
-    for (rooted.values, 0..) |value, index| {
-        const atom_id = core.atom.atomFromUInt32(@intCast(index));
-        if (try object.appendDenseArrayLiteralIndex(rt, @intCast(index), value)) continue;
-        try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true));
-    }
-    return object.value();
-}
+// `constructLiteralWithPrototype` (the array-literal opcode helper) is pure and
+// was relocated to engine core (`core/array.zig`) in Phase 6b-3 STEP 4 so
+// `src/exec/vm_literal.zig` can call it without importing builtins; it is not
+// re-exported here because the only caller was that exec opcode handler.
 
 fn arrayLengthFromNumber(value: core.JSValue) ?u32 {
     const number: f64 = if (value.asInt32()) |int_value|
@@ -970,7 +1068,7 @@ fn concatAppend(rt: *core.JSRuntime, out: *core.Object, next_index: *u32, value:
     if (value.isObject()) {
         const header = value.refHeader() orelse unreachable;
         const object: *core.Object = @fieldParentPtr("header", header);
-        if (object.is_array) {
+        if (object.flags.is_array) {
             var index: u32 = 0;
             while (index < object.length) : (index += 1) {
                 const item = object.getProperty(core.atom.atomFromUInt32(index));
@@ -1000,20 +1098,18 @@ fn objectFromValue(value: core.JSValue) ?*core.Object {
     return @fieldParentPtr("header", header);
 }
 
-pub fn expectArray(value: core.JSValue) !*core.Object {
-    const object = try expectObject(value);
-    if (!object.is_array) return error.TypeError;
-    return object;
-}
+// `expectArray` relocated to engine core (`core/array.zig`) in Phase 6b-3
+// STEP 2; re-exported here unchanged.
+pub const expectArray = core_array.expectArray;
 
 fn expectArrayIteratorTarget(value: core.JSValue) !*core.Object {
     const object = try expectObject(value);
-    if (object.is_array or object.class_id == core.class.ids.arguments or object.class_id == core.class.ids.mapped_arguments or buffer_builtin.isTypedArrayObject(object)) return object;
+    if (object.flags.is_array or object.class_id == core.class.ids.arguments or object.class_id == core.class.ids.mapped_arguments or buffer_builtin.isTypedArrayObject(object)) return object;
     return error.TypeError;
 }
 
 fn arrayIteratorTargetLength(rt: *core.JSRuntime, object: *core.Object) u32 {
-    if (object.is_array) return object.length;
+    if (object.flags.is_array) return object.length;
     if (buffer_builtin.isTypedArrayObject(object)) return buffer_builtin.typedArrayLength(rt, object) catch 0;
     const length = object.getProperty(core.atom.ids.length);
     defer length.free(rt);
@@ -1028,6 +1124,7 @@ fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
 fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
         .utf16 => |units| {
@@ -1050,7 +1147,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
             try buffer.appendSlice(rt.memory.allocator, "Infinity");
         } else if (std.math.isNegativeInf(float_value)) {
             try buffer.appendSlice(rt.memory.allocator, "-Infinity");
-        } else if (isNegativeZero(float_value)) {
+        } else if (std.math.isNegativeZero(float_value)) {
             try buffer.append(rt.memory.allocator, '0');
         } else {
             var float_buf: [64]u8 = undefined;
@@ -1072,6 +1169,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
     } else if (value.isString()) {
         const header = value.refHeader() orelse return;
         const string_value: *core.string.String = @fieldParentPtr("header", header);
+        try string_value.ensureFlat(rt);
         switch (string_value.resolveData()) {
             .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
             .utf16 => |units| {
@@ -1096,7 +1194,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
             try buffer.appendSlice(rt.memory.allocator, "[object ArrayBuffer]");
         } else if (object_value.class_id == core.class.ids.promise) {
             try buffer.appendSlice(rt.memory.allocator, "[object Promise]");
-        } else if (object_value.is_array) {
+        } else if (object_value.flags.is_array) {
             try appendArrayString(rt, buffer, object_value);
         } else {
             try buffer.appendSlice(rt.memory.allocator, "[object Object]");
@@ -1187,8 +1285,4 @@ fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
         return big.value.cloneWithAllocator(rt.memory.allocator);
     }
     return error.TypeError;
-}
-
-fn isNegativeZero(value: f64) bool {
-    return value == 0 and std.math.isNegativeInf(1.0 / value);
 }

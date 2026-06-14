@@ -3,6 +3,7 @@ const std = @import("std");
 const atom = @import("../core/atom.zig");
 const JSRuntime = @import("../core/runtime.zig").JSRuntime;
 const bytecode = @import("../bytecode/root.zig");
+const unicode = @import("../libs/unicode.zig");
 const zjs_lexer = @import("zjs_lexer.zig");
 const zjs_parser = @import("zjs_parser.zig");
 const zjs_token = @import("zjs_token.zig");
@@ -93,7 +94,14 @@ pub fn parse(rt: *JSRuntime, source: []const u8, options: Options) !Result {
                 .arena = undefined,
             };
             function_owned = false;
-            try setFallbackSyntaxError(&result, rt, filename_atom, source, @errorName(err));
+            // From here `result.function` owns the partial bytecode; if the
+            // guard itself fails (e.g. OOM while rescanning), release it
+            // explicitly - the `function_owned` errdefer no longer covers it
+            // (found by test-oom injection).
+            setFallbackSyntaxError(&result, rt, filename_atom, source, @errorName(err)) catch |fallback_err| {
+                result.function.deinit(rt);
+                return fallback_err;
+            };
             result.arena = arena;
             return result;
         },
@@ -230,7 +238,7 @@ fn skipJsTrivia(source: []const u8, start: usize) usize {
     var index = start;
     while (index < source.len) {
         const ch = source[index];
-        if (std.ascii.isWhitespace(ch)) {
+        if (unicode.isAsciiWhitespaceByte(ch)) {
             index += 1;
             continue;
         }

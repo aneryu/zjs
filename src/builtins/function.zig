@@ -1,6 +1,12 @@
 const core = @import("../core/root.zig");
 const JSValue = @import("../core/value.zig").JSValue;
 const std = @import("std");
+const call = @import("../exec/call.zig");
+const exceptions = @import("../exec/exceptions.zig");
+const string_ops = @import("../exec/string_ops.zig");
+
+const HostError = exceptions.HostError;
+const InternalCall = core.host_function.InternalCall;
 
 pub const BuiltinFunction = struct {
     name: []const u8,
@@ -9,7 +15,44 @@ pub const BuiltinFunction = struct {
 
 pub const PrototypeMethod = enum(u32) {
     to_string = 1,
+    bind = 2,
 };
+
+/// Declaration + dispatch table for the `.function` native-builtin domain
+/// (QuickJS js_function_proto_funcs analogue). One shared record handler
+/// `functionCall` switches on the per-record `magic` (== domain-local id) for
+/// `Function.prototype.toString` and `Function.prototype.bind`. The
+/// implementations stay in exec: `toString` reuses `string_ops`, and `bind`
+/// reuses call.zig's `createBoundFunction` (and its proxy-aware property
+/// helpers), both also reached by the VM's bind/toString fast path
+/// (call_runtime.callNativeBuiltinRecordForVm) — so these are thin delegating
+/// entries (BOTH). Property installation still binds the canonical
+/// name/length through the registry (`installFunctionPrototypeExtras`); this
+/// table is consumed by the slow record-dispatch path (`rt.internal_builtins`).
+/// Neither method is callable without a materialized function object, so
+/// `prepared_call_ok` stays false.
+pub const internal_entries = [_]core.host_function.InternalEntry{
+    functionEntry("toString", 0, @intFromEnum(PrototypeMethod.to_string)),
+    functionEntry("bind", 1, @intFromEnum(PrototypeMethod.bind)),
+};
+
+fn functionEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .call = &functionCall };
+}
+
+/// Shared record handler for the `.function` domain. Mirrors the retired
+/// `call.zig` `callFunctionNativeFunctionRecord`: `toString` returns the
+/// function's source text, `bind` builds a bound-function exotic. Both
+/// delegate to exec ops shared with the VM fast path.
+fn functionCall(host_call: InternalCall) HostError!core.JSValue {
+    const ctx = host_call.ctx;
+    const id: u32 = host_call.magic;
+    return switch (id) {
+        @intFromEnum(PrototypeMethod.to_string) => string_ops.qjsFunctionToStringCall(ctx, host_call.this_value),
+        @intFromEnum(PrototypeMethod.bind) => call.qjsFunctionBindCall(ctx, host_call.output, host_call.global, host_call.globals, host_call.this_value, host_call.args),
+        else => error.TypeError,
+    };
+}
 
 pub fn applyReturnThis(this_value: JSValue) JSValue {
     return this_value.dup();
@@ -53,11 +96,10 @@ pub fn sourceFunction(rt: *core.JSRuntime, name: []const u8, source: []const u8)
     return function_value;
 }
 
-pub fn defineNativeMethod(rt: *core.JSRuntime, target: *core.Object, name: []const u8, length: i32) !void {
-    const method = try nativeFunction(rt, name, length);
-    defer method.free(rt);
-    try defineData(rt, target, name, method, true, false, true);
-}
+/// Re-export of the core lazy method-install primitive. The body lives in
+/// `core/function.zig` so engine-core callers (e.g. Promise instance
+/// materialization) can install `then`/`catch` without importing builtins.
+pub const defineNativeMethod = core.function.defineNativeMethod;
 
 fn defineData(
     rt: *core.JSRuntime,

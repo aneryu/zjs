@@ -1,65 +1,219 @@
 const core = @import("../core/root.zig");
 const std = @import("std");
+const builtin_dispatch = @import("../exec/builtin_dispatch.zig");
+const builtin_glue = @import("../exec/builtin_glue.zig");
+const coercion_ops = @import("../exec/coercion_ops.zig");
+const exceptions = @import("../exec/exceptions.zig");
+const object_ops = @import("../exec/object_ops.zig");
+
+const HostError = exceptions.HostError;
+const InternalCall = core.host_function.InternalCall;
 
 const ms_per_second: i64 = 1000;
 const ms_per_minute: i64 = 60 * ms_per_second;
 const ms_per_hour: i64 = 60 * ms_per_minute;
 pub const ms_per_day: i64 = 24 * ms_per_hour;
 
-pub const StaticMethod = enum(u32) {
-    utc = 1,
-    parse = 2,
-    now = 3,
+pub const StaticMethod = core.host_function.builtin_method_ids.date.StaticMethod;
+
+// Relocated to engine core (`core/host_function.zig`, next to
+// `builtin_method_ids.date.StaticMethod`) in Phase 6b-3e so the VM construct
+// dispatchers can gate on the construct id without importing builtins;
+// re-exported here so the install/dispatch side keeps the original name.
+pub const ConstructorMethod = core.host_function.builtin_method_ids.date.ConstructorMethod;
+
+// Relocated to engine core (`core/host_function.zig`,
+// `builtin_method_ids.date.PrototypeMethod`) in Phase 6b-3 STEP 5 so the exec
+// date glue can build the record `NativeBuiltinRef` for table dispatch without
+// importing builtins; re-exported here so the dispatch/install side keeps the
+// original name.
+pub const PrototypeMethod = core.host_function.builtin_method_ids.date.PrototypeMethod;
+
+/// Declaration + dispatch table for the `.date` native-builtin domain
+/// (QuickJS js_date_funcs analogue). One shared record handler `dateCall`
+/// switches on the per-record `magic` (== domain-local id); the constructor,
+/// the statics, the `Symbol.toPrimitive` method, and the prototype methods all
+/// route through it. `id` doubles as `magic`, so the record carries no extra
+/// selector. Property installation still resolves names through the registry's
+/// Date method tables (canonical name/length) and date.zig's id helpers; this
+/// table is consumed by the slow record-dispatch path (`rt.internal_builtins`).
+/// `prepared_call_ok` mirrors the prepared-call gate in `vm_call.zig`
+/// (`nativeBuiltinSupportedWithoutFunctionObject`): only `Date.now` is callable
+/// without a materialized function object today.
+pub const internal_entries = dateEntries: {
+    const Entry = core.host_function.InternalEntry;
+    break :dateEntries [_]Entry{
+        dateEntry("UTC", 7, @intFromEnum(StaticMethod.utc), false),
+        dateEntry("parse", 1, @intFromEnum(StaticMethod.parse), false),
+        dateEntry("now", 0, @intFromEnum(StaticMethod.now), true),
+        dateConstructorEntry("Date", 7, @intFromEnum(ConstructorMethod.construct)),
+        dateEntry("getTime", 0, @intFromEnum(PrototypeMethod.get_time), false),
+        dateEntry("valueOf", 0, @intFromEnum(PrototypeMethod.value_of), false),
+        dateEntry("getFullYear", 0, @intFromEnum(PrototypeMethod.get_full_year), false),
+        dateEntry("getMonth", 0, @intFromEnum(PrototypeMethod.get_month), false),
+        dateEntry("getDate", 0, @intFromEnum(PrototypeMethod.get_date), false),
+        dateEntry("getHours", 0, @intFromEnum(PrototypeMethod.get_hours), false),
+        dateEntry("getMinutes", 0, @intFromEnum(PrototypeMethod.get_minutes), false),
+        dateEntry("getSeconds", 0, @intFromEnum(PrototypeMethod.get_seconds), false),
+        dateEntry("getMilliseconds", 0, @intFromEnum(PrototypeMethod.get_milliseconds), false),
+        dateEntry("toISOString", 0, @intFromEnum(PrototypeMethod.to_iso_string), false),
+        dateEntry("toJSON", 1, @intFromEnum(PrototypeMethod.to_json), false),
+        dateEntry("getUTCFullYear", 0, @intFromEnum(PrototypeMethod.get_utc_full_year), false),
+        dateEntry("getUTCMonth", 0, @intFromEnum(PrototypeMethod.get_utc_month), false),
+        dateEntry("getUTCDate", 0, @intFromEnum(PrototypeMethod.get_utc_date), false),
+        dateEntry("getUTCHours", 0, @intFromEnum(PrototypeMethod.get_utc_hours), false),
+        dateEntry("getUTCMinutes", 0, @intFromEnum(PrototypeMethod.get_utc_minutes), false),
+        dateEntry("getUTCSeconds", 0, @intFromEnum(PrototypeMethod.get_utc_seconds), false),
+        dateEntry("getUTCMilliseconds", 0, @intFromEnum(PrototypeMethod.get_utc_milliseconds), false),
+        dateEntry("getDay", 0, @intFromEnum(PrototypeMethod.get_day), false),
+        dateEntry("toString", 0, @intFromEnum(PrototypeMethod.to_string), false),
+        dateEntry("toUTCString", 0, @intFromEnum(PrototypeMethod.to_utc_string), false),
+        dateEntry("getYear", 0, @intFromEnum(PrototypeMethod.get_year), false),
+        dateEntry("setYear", 1, @intFromEnum(PrototypeMethod.set_year), false),
+        dateEntry("setTime", 1, @intFromEnum(PrototypeMethod.set_time), false),
+        dateEntry("setMilliseconds", 1, @intFromEnum(PrototypeMethod.set_milliseconds), false),
+        dateEntry("setSeconds", 2, @intFromEnum(PrototypeMethod.set_seconds), false),
+        dateEntry("setMinutes", 3, @intFromEnum(PrototypeMethod.set_minutes), false),
+        dateEntry("setHours", 4, @intFromEnum(PrototypeMethod.set_hours), false),
+        dateEntry("setDate", 1, @intFromEnum(PrototypeMethod.set_date), false),
+        dateEntry("setMonth", 2, @intFromEnum(PrototypeMethod.set_month), false),
+        dateEntry("setFullYear", 3, @intFromEnum(PrototypeMethod.set_full_year), false),
+        dateEntry("getTimezoneOffset", 0, @intFromEnum(PrototypeMethod.get_timezone_offset), false),
+        dateEntry("toDateString", 0, @intFromEnum(PrototypeMethod.to_date_string), false),
+        dateEntry("toTimeString", 0, @intFromEnum(PrototypeMethod.to_time_string), false),
+        dateEntry("[Symbol.toPrimitive]", 1, @intFromEnum(PrototypeMethod.to_primitive), false),
+        // Engine-internal captured-setter records (no JS property; the registry
+        // installs only the named methods above). Reached solely from the
+        // `func_obj == null` arm so `exec/date_ops.zig` can route the
+        // capture-then-apply setter bodies through the table.
+        dateEntry("", 0, @intFromEnum(PrototypeMethod.set_year_with_captured_ms), false),
+        dateEntry("", 0, @intFromEnum(PrototypeMethod.set_parts_with_captured_ms), false),
+    };
 };
 
-pub const ConstructorMethod = enum(u32) {
-    construct = 100,
-};
-
-pub const PrototypeMethod = enum(u32) {
-    get_time = 101,
-    value_of = 102,
-    get_full_year = 103,
-    get_month = 104,
-    get_date = 105,
-    get_hours = 106,
-    get_minutes = 107,
-    get_seconds = 108,
-    get_milliseconds = 109,
-    to_iso_string = 110,
-    to_json = 111,
-    get_utc_full_year = 112,
-    get_utc_month = 113,
-    get_utc_date = 114,
-    get_utc_hours = 115,
-    get_utc_minutes = 116,
-    get_utc_seconds = 117,
-    get_utc_milliseconds = 118,
-    get_day = 119,
-    to_string = 120,
-    to_utc_string = 121,
-    get_year = 122,
-    set_year = 123,
-    set_time = 124,
-    set_milliseconds = 125,
-    set_seconds = 126,
-    set_minutes = 127,
-    set_hours = 128,
-    set_date = 129,
-    set_month = 130,
-    set_full_year = 131,
-    get_timezone_offset = 132,
-    to_date_string = 133,
-    to_time_string = 134,
-    to_primitive = 135,
-};
-
-pub fn staticMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "UTC")) return @intFromEnum(StaticMethod.utc);
-    if (std.mem.eql(u8, name, "parse")) return @intFromEnum(StaticMethod.parse);
-    if (std.mem.eql(u8, name, "now")) return @intFromEnum(StaticMethod.now);
-    return null;
+fn dateEntry(comptime name: []const u8, comptime length: u8, comptime id: u32, comptime prepared: bool) core.host_function.InternalEntry {
+    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = prepared, .call = &dateCall };
 }
+
+/// The Date constructor record: construct-capable so `new Date(...)` routes
+/// through the construct dispatch path into `dateCall`'s construct branch.
+fn dateConstructorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .constructor = true, .call = &dateCall };
+}
+
+/// Shared record handler for the `.date` domain. Mirrors the retired
+/// `call.zig` `callDateNativeFunctionRecord`: the constructor and statics run
+/// the pure builtin helpers below, while the `Symbol.toPrimitive` and
+/// prototype methods delegate to the exec VM ops (which stay in exec because
+/// the date opcode handlers and the prepared-call fast path also call them).
+fn dateCall(host_call: InternalCall) HostError!core.JSValue {
+    const ctx = host_call.ctx;
+    const output = host_call.output;
+    const id: u32 = host_call.magic;
+    const args = host_call.args;
+    const caller_function = builtin_dispatch.callerBytecode(host_call);
+    const caller_frame = builtin_dispatch.callerFrame(host_call);
+
+    if (id == @intFromEnum(ConstructorMethod.construct)) {
+        // `new Date(...)` arrives through the construct record path
+        // (`exec/construct.zig`) with `flags.constructor` set and the resolved
+        // instance prototype in `new_target`; `Date(...)` called as a function
+        // returns the current time string (QuickJS js_date_constructor with
+        // `new_target == undefined`).
+        if (host_call.flags.constructor) return constructWithPrototype(ctx.runtime, args, host_call.new_target);
+        return call(ctx.runtime, args);
+    }
+
+    // Engine-internal dispatch arm: the exec date VM-coercion glue
+    // (`exec/date_ops.zig`, plus the `Date.now` fusion and the static
+    // fall-throughs) has already coerced its arguments and routes the *pure body*
+    // through the table here so it never names `builtins.date.*` directly. It is
+    // gated on `func_obj == null and global == null`, the contract those call
+    // sites use; the prepared-call fast path (`vm_call.zig`) also passes
+    // `func_obj == null` but threads the realm `global` and *raw* args, so it
+    // must instead fall through to the coercing dispatcher below. This
+    // deliberately bypasses the prototype dispatcher
+    // (`object_ops.qjsDatePrototypeMethod`) — routing back through it would
+    // re-enter this record (the dispatcher's own body call is one of the
+    // converted sites) and recurse, and the glue already performed the
+    // dispatcher's coercion/capture work.
+    if (host_call.func_obj == null and host_call.global == null and !host_call.flags.constructor) {
+        return dateInternalBodyCall(ctx.runtime, id, host_call.this_value, args);
+    }
+
+    if (id == @intFromEnum(PrototypeMethod.to_primitive)) {
+        const active_global = host_call.global orelse realmGlobalFor(ctx, host_call.func_obj) orelse return error.TypeError;
+        return builtin_glue.qjsDateToPrimitiveNativeRecord(ctx, output, active_global, host_call.this_value, args, caller_function, caller_frame);
+    }
+    if (id == @intFromEnum(StaticMethod.utc)) {
+        const active_global = host_call.global orelse return error.TypeError;
+        var coerced_args: [7]core.JSValue = undefined;
+        var coerced_len: usize = 0;
+        defer {
+            for (coerced_args[0..coerced_len]) |value| value.free(ctx.runtime);
+        }
+        while (coerced_len < args.len and coerced_len < coerced_args.len) : (coerced_len += 1) {
+            coerced_args[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, active_global, args[coerced_len], null, null);
+        }
+        return staticCall(ctx.runtime, id, coerced_args[0..coerced_len]) catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            else => err,
+        };
+    }
+    if (decodePrototypeMethodId(id)) |method_id| {
+        const active_global = host_call.global orelse return error.TypeError;
+        return object_ops.qjsDatePrototypeMethod(ctx, output, active_global, host_call.this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            else => err,
+        };
+    }
+    return staticCall(ctx.runtime, id, args) catch |err| switch (err) {
+        error.TypeError => error.TypeError,
+        else => err,
+    };
+}
+
+/// Run a date method *body* directly for an engine-internal table call that
+/// holds no function object and has already coerced its arguments. Reached only
+/// from `dateCall`'s `func_obj == null` arm. `id` is a `.date` record id:
+/// `StaticMethod.{utc,parse,now}` run the static body on the pre-coerced args;
+/// the captured-setter selectors unpack the captured `[[DateValue]]` (and, for
+/// the parts variant, the decoded setter id) the exec glue threaded through
+/// `args`; every other prototype id runs the plain `methodCallArgs` body on the
+/// decoded id.
+fn dateInternalBodyCall(rt: *core.JSRuntime, id: u32, this_value: core.JSValue, args: []const core.JSValue) HostError!core.JSValue {
+    const result = blk: {
+        if (id == @intFromEnum(PrototypeMethod.set_year_with_captured_ms)) {
+            const captured_ms = args[0].asNumber() orelse std.math.nan(f64);
+            const year_number = args[1].asNumber() orelse std.math.nan(f64);
+            break :blk setYearNumber(rt, this_value, captured_ms, year_number);
+        }
+        if (id == @intFromEnum(PrototypeMethod.set_parts_with_captured_ms)) {
+            const captured_ms = args[0].asNumber() orelse std.math.nan(f64);
+            const setter_id: u32 = @intFromFloat(args[1].asNumber() orelse 0);
+            break :blk methodCallArgsWithCapturedMs(rt, this_value, setter_id, captured_ms, args[2..]);
+        }
+        if (decodePrototypeMethodId(id)) |method_id| {
+            break :blk methodCallArgs(rt, this_value, method_id, args);
+        }
+        // `StaticMethod.{utc,parse,now}`: the enum values (1/2/3) are the
+        // `staticCall` method selectors; the glue pre-coerced any args.
+        break :blk staticCall(rt, id, args);
+    };
+    return result catch |err| return @as(HostError, @errorCast(err));
+}
+
+fn realmGlobalFor(ctx: *core.JSContext, func_obj: ?*core.Object) ?*core.Object {
+    if (func_obj) |obj| {
+        if (object_ops.objectRealmGlobal(obj)) |realm_global| return realm_global;
+    }
+    return ctx.global;
+}
+
+// Pure name->id mapping relocated to engine core (`core/host_function.zig`,
+// next to `builtin_method_ids.date`) in Phase 6b-3c; re-exported here so the
+// dispatch/install side keeps the original name.
+pub const staticMethodId = core.host_function.builtin_method_id_lookup.date.staticMethodId;
 
 pub fn prototypeMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "getTime")) return @intFromEnum(PrototypeMethod.get_time);
@@ -99,45 +253,11 @@ pub fn prototypeMethodId(name: []const u8) ?u32 {
     return null;
 }
 
-pub fn decodePrototypeMethodId(id: u32) ?u32 {
-    return switch (id) {
-        @intFromEnum(PrototypeMethod.get_time) => 1,
-        @intFromEnum(PrototypeMethod.value_of) => 2,
-        @intFromEnum(PrototypeMethod.get_full_year) => 3,
-        @intFromEnum(PrototypeMethod.get_month) => 4,
-        @intFromEnum(PrototypeMethod.get_date) => 5,
-        @intFromEnum(PrototypeMethod.get_hours) => 6,
-        @intFromEnum(PrototypeMethod.get_minutes) => 7,
-        @intFromEnum(PrototypeMethod.get_seconds) => 8,
-        @intFromEnum(PrototypeMethod.get_milliseconds) => 9,
-        @intFromEnum(PrototypeMethod.to_iso_string) => 10,
-        @intFromEnum(PrototypeMethod.to_json) => 11,
-        @intFromEnum(PrototypeMethod.get_utc_full_year) => 12,
-        @intFromEnum(PrototypeMethod.get_utc_month) => 13,
-        @intFromEnum(PrototypeMethod.get_utc_date) => 14,
-        @intFromEnum(PrototypeMethod.get_utc_hours) => 15,
-        @intFromEnum(PrototypeMethod.get_utc_minutes) => 16,
-        @intFromEnum(PrototypeMethod.get_utc_seconds) => 17,
-        @intFromEnum(PrototypeMethod.get_utc_milliseconds) => 18,
-        @intFromEnum(PrototypeMethod.get_day) => 19,
-        @intFromEnum(PrototypeMethod.to_string) => 20,
-        @intFromEnum(PrototypeMethod.to_utc_string) => 21,
-        @intFromEnum(PrototypeMethod.get_year) => 22,
-        @intFromEnum(PrototypeMethod.set_year) => 23,
-        @intFromEnum(PrototypeMethod.set_time) => 24,
-        @intFromEnum(PrototypeMethod.set_milliseconds) => 25,
-        @intFromEnum(PrototypeMethod.set_seconds) => 26,
-        @intFromEnum(PrototypeMethod.set_minutes) => 27,
-        @intFromEnum(PrototypeMethod.set_hours) => 28,
-        @intFromEnum(PrototypeMethod.set_date) => 29,
-        @intFromEnum(PrototypeMethod.set_month) => 30,
-        @intFromEnum(PrototypeMethod.set_full_year) => 31,
-        @intFromEnum(PrototypeMethod.get_timezone_offset) => 32,
-        @intFromEnum(PrototypeMethod.to_date_string) => 33,
-        @intFromEnum(PrototypeMethod.to_time_string) => 34,
-        else => null,
-    };
-}
+// Pure id<->id mappings relocated to engine core (`core/host_function.zig`,
+// `builtin_method_id_lookup.date`) in Phase 6b-3 STEP 5; re-exported here so the
+// dispatch side keeps the original names.
+pub const decodePrototypeMethodId = core.host_function.builtin_method_id_lookup.date.decodePrototypeMethodId;
+pub const encodePrototypeMethodId = core.host_function.builtin_method_id_lookup.date.encodePrototypeMethodId;
 
 pub fn dayFromTime(ms: i64) i64 {
     return @divFloor(ms, ms_per_day);
@@ -572,6 +692,7 @@ fn dateObjectFromValue(value: core.JSValue) ?*core.Object {
 fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
         .utf16 => |units| {
@@ -589,13 +710,13 @@ fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
 }
 
 fn numberValue(value: core.JSValue) ?f64 {
-    if (value.tag == core.Tag.int) return @floatFromInt(value.asInt32().?);
-    if (value.tag == core.Tag.float64) return value.asFloat64().?;
+    if (value.isInt()) return @floatFromInt(value.asInt32().?);
+    if (value.isFloat64()) return value.asFloat64().?;
     return null;
 }
 
 fn numberResult(value: f64) core.JSValue {
-    if (std.math.isFinite(value) and @floor(value) == value and value >= @as(f64, @floatFromInt(std.math.minInt(i32))) and value <= @as(f64, @floatFromInt(std.math.maxInt(i32))) and !isNegativeZero(value)) {
+    if (std.math.isFinite(value) and @floor(value) == value and value >= @as(f64, @floatFromInt(std.math.minInt(i32))) and value <= @as(f64, @floatFromInt(std.math.maxInt(i32))) and !std.math.isNegativeZero(value)) {
         return core.JSValue.int32(@intFromFloat(value));
     }
     return core.JSValue.float64(value);
@@ -1123,8 +1244,4 @@ fn civilFromDays(days_since_epoch: i64) struct { year: i64, month: i64, day: i64
     const month = mp + if (mp < 10) @as(i64, 3) else @as(i64, -9);
     year += if (month <= 2) 1 else 0;
     return .{ .year = year, .month = month, .day = day };
-}
-
-fn isNegativeZero(value: f64) bool {
-    return value == 0 and std.math.isNegativeInf(1.0 / value);
 }

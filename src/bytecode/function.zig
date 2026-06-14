@@ -10,7 +10,6 @@ const ic = @import("../core/ic.zig");
 const module = @import("module.zig");
 const opcode = @import("opcode.zig");
 const pc2line = @import("pipeline/pc2line.zig");
-const scope = @import("scope.zig");
 const runtime = @import("../core/runtime.zig");
 
 /// Generic geometric growth helper, identical in shape to the FunctionDef
@@ -111,6 +110,20 @@ pub const VarDef = function_bytecode.VarDef;
 pub const ClosureVar = function_bytecode.ClosureVar;
 pub const SimpleNumericKind = function_bytecode.SimpleNumericKind;
 pub const SimpleStringKind = function_bytecode.SimpleStringKind;
+pub const CallSiteKind = function_bytecode.CallSiteKind;
+pub const CallSite = function_bytecode.CallSite;
+
+pub const DirectCallKind = enum(u8) {
+    prop_atom,
+};
+
+pub const DirectCallSite = struct {
+    kind: DirectCallKind = .prop_atom,
+    prepare_pc: u32,
+    call_pc: u32,
+    atom_id: atom.Atom,
+    argc: u16,
+};
 
 const IcSite = ic.Site;
 
@@ -152,13 +165,20 @@ pub const Bytecode = struct {
     global_var_names: []atom.Atom = &.{},
     private_bound_names: []atom.Atom = &.{},
     constants: constant.Pool,
-    scopes: []scope.ScopeRecord = &.{},
-    scopes_capacity: usize = 0,
     module_record: ?module.Record = null,
     debug_table: ?debug.Table = null,
     ic_slots: []ic.Slot = &.{},
     ic_site_ids: []usize = &.{},
     ic_sites: []IcSite = &.{},
+    /// Per-pc saturating fail counters for the VM fusion matchers. Once a
+    /// site reaches the threshold the matchers stop being retried there.
+    /// Empty when not allocated (matchers then always run, the pre-cache
+    /// behavior). Mutated through the slice at runtime like `ic_slots`.
+    fusion_cold: []u8 = &.{},
+    direct_call_sites: []DirectCallSite = &.{},
+    direct_call_sites_capacity: usize = 0,
+    call_sites: []CallSite = &.{},
+    call_sites_capacity: usize = 0,
 
     pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable, name: atom.Atom) Bytecode {
         return .{
@@ -194,8 +214,6 @@ pub const Bytecode = struct {
         self.pc2line_buf = &.{};
         self.owns_pc2line_buf = false;
         self.constants.deinit(rt);
-        for (self.scopes) |*scope_record| scope_record.deinit();
-        freeGrowableSlice(scope.ScopeRecord, self.memory, &self.scopes, &self.scopes_capacity);
         var module_record = self.module_record;
         var debug_table = self.debug_table;
         self.module_record = null;
@@ -203,7 +221,24 @@ pub const Bytecode = struct {
         if (module_record) |*record| record.deinit();
         if (debug_table) |*table| table.deinit();
         self.deinitIcSlots(rt);
+        self.deinitDirectCallSites();
+        self.deinitCallSites();
+        self.deinitFusionCold();
         if (owns_pc2line_buf and pc2line_buf.len != 0) self.memory.free(u8, pc2line_buf);
+    }
+
+    pub fn allocateFusionCold(self: *Bytecode) !void {
+        self.deinitFusionCold();
+        if (self.code.len == 0) return;
+        const map = try self.memory.alloc(u8, self.code.len);
+        @memset(map, 0);
+        self.fusion_cold = map;
+    }
+
+    fn deinitFusionCold(self: *Bytecode) void {
+        const map = self.fusion_cold;
+        self.fusion_cold = &.{};
+        if (map.len != 0) self.memory.free(u8, map);
     }
 
     pub fn allocateIcSlots(self: *Bytecode) !void {
@@ -290,6 +325,22 @@ pub const Bytecode = struct {
         }
     }
 
+    pub fn remapDirectCallSites(self: *Bytecode, old_to_new_pc: []const usize) void {
+        if (self.direct_call_sites.len == 0) return;
+        for (self.direct_call_sites) |*site| {
+            if (site.prepare_pc < old_to_new_pc.len) {
+                site.prepare_pc = @intCast(old_to_new_pc[site.prepare_pc]);
+            } else {
+                site.prepare_pc = std.math.maxInt(u32);
+            }
+            if (site.call_pc < old_to_new_pc.len) {
+                site.call_pc = @intCast(old_to_new_pc[site.call_pc]);
+            } else {
+                site.call_pc = std.math.maxInt(u32);
+            }
+        }
+    }
+
     /// Truncate `code` back to `target_len` bytes, preserving capacity so
     /// re-emission after speculative rollback does not reallocate.
     pub fn truncateCode(self: *Bytecode, target_len: usize) void {
@@ -346,10 +397,36 @@ pub const Bytecode = struct {
         self.atom_operands = self.atom_operands.ptr[0..target_len];
     }
 
-    pub fn addScope(self: *Bytecode, parent: ?u32) !*scope.ScopeRecord {
-        const tail = try growSliceBy(scope.ScopeRecord, self.memory, &self.scopes, &self.scopes_capacity, 1);
-        tail[0] = scope.ScopeRecord.init(self.memory, self.atoms, parent);
-        return &self.scopes[self.scopes.len - 1];
+    pub fn appendDirectCallSite(self: *Bytecode, site: DirectCallSite) !void {
+        const tail = try growSliceBy(DirectCallSite, self.memory, &self.direct_call_sites, &self.direct_call_sites_capacity, 1);
+        tail[0] = site;
+        tail[0].atom_id = self.atoms.dup(site.atom_id);
+    }
+
+    pub fn appendCallSite(self: *Bytecode, site: CallSite) !u16 {
+        if (self.call_sites.len >= std.math.maxInt(u16)) return error.BytecodeOverflow;
+        const tail = try growSliceBy(CallSite, self.memory, &self.call_sites, &self.call_sites_capacity, 1);
+        tail[0] = site;
+        tail[0].atom_id = self.atoms.dup(site.atom_id);
+        return @intCast(self.call_sites.len - 1);
+    }
+
+    pub fn deinitDirectCallSites(self: *Bytecode) void {
+        const items = self.direct_call_sites;
+        const capacity = self.direct_call_sites_capacity;
+        self.direct_call_sites = &.{};
+        self.direct_call_sites_capacity = 0;
+        for (items) |site| self.atoms.free(site.atom_id);
+        if (capacity != 0) self.memory.free(DirectCallSite, items.ptr[0..capacity]);
+    }
+
+    pub fn deinitCallSites(self: *Bytecode) void {
+        const items = self.call_sites;
+        const capacity = self.call_sites_capacity;
+        self.call_sites = &.{};
+        self.call_sites_capacity = 0;
+        for (items) |site| self.atoms.free(site.atom_id);
+        if (capacity != 0) self.memory.free(CallSite, items.ptr[0..capacity]);
     }
 
     pub fn ensureModule(self: *Bytecode) *module.Record {
@@ -407,6 +484,8 @@ pub fn asBytecodeView(fb: *const FunctionBytecode, rt: *runtime.JSRuntime) Bytec
         .ic_slots = fb.ic_slots,
         .ic_site_ids = fb.ic_site_ids,
         .ic_sites = fb.ic_sites,
+        .call_sites = fb.call_sites,
+        .fusion_cold = fb.fusion_cold,
         .constants = .{ .memory = &rt.memory, .atoms = &rt.atoms, .values = fb.cpool },
     };
 }
@@ -449,16 +528,19 @@ fn lookupIcSlotForPc(ic_slots: []const ic.Slot, ic_site_ids: []const usize, ic_s
     return @constCast(&ic_slots[site.slot_index]);
 }
 
+// Note: the reserved slot-form opcodes (`get_field_data_slot`,
+// `get_global_data_slot`, `get_global_lexical_slot`, ids 246-248) are never
+// emitted; the generic forms below already reach their IC slots in O(1) via
+// the dense `site_ids[pc]` index, so the slot forms stay reserved ids only
+// and are intentionally not listed here.
 fn opcodeHasOwnDataIc(op_id: u8) bool {
     return op_id == opcode.op.get_var or
         op_id == opcode.op.get_var_undef or
         op_id == opcode.op.put_var or
         op_id == opcode.op.get_field or
         op_id == opcode.op.get_field2 or
-        op_id == opcode.op.put_field or
-        op_id == opcode.op.get_field_data_slot or
-        op_id == opcode.op.get_global_data_slot or
-        op_id == opcode.op.get_global_lexical_slot;
+        op_id == opcode.op.prepare_call_prop_atom or
+        op_id == opcode.op.put_field;
 }
 
 fn bytecodeSkipsPropertyIc(code: []const u8) bool {

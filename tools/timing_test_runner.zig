@@ -5,8 +5,43 @@ const runner_threaded_io: Io = Io.Threaded.global_single_threaded.io();
 
 pub fn main(init: std.process.Init.Minimal) !void {
     const test_fns = builtin.test_functions;
+    var args = std.process.Args.Iterator.init(init.args);
+    defer args.deinit();
+    _ = args.skip();
+    var filter: ?[]const u8 = null;
+    var start_index: usize = 0;
+    var end_index: usize = test_fns.len;
+    var fail_fast = false;
+    var list_only = false;
 
-    std.debug.print("Running {} tests with timing...\n", .{test_fns.len});
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--list")) {
+            list_only = true;
+        } else if (std.mem.eql(u8, arg, "--fail-fast")) {
+            fail_fast = true;
+        } else if (std.mem.eql(u8, arg, "--range")) {
+            const range_arg = args.next() orelse return error.InvalidArgs;
+            const range = try parseRange(range_arg, test_fns.len);
+            start_index = range.start;
+            end_index = range.end;
+        } else if (filter == null) {
+            filter = arg;
+        } else {
+            return error.InvalidArgs;
+        }
+    }
+
+    if (list_only) {
+        for (test_fns, 0..) |test_fn, index| {
+            std.debug.print("{}: {s}\n", .{ index, test_fn.name });
+        }
+        return;
+    }
+
+    std.debug.print("Running {} tests with timing", .{test_fns.len});
+    if (filter) |pattern| std.debug.print(" matching \"{s}\"", .{pattern});
+    if (start_index != 0 or end_index != test_fns.len) std.debug.print(" in range {}..{}", .{ start_index, end_index });
+    std.debug.print("...\n", .{});
 
     const allocator = std.heap.page_allocator;
 
@@ -21,8 +56,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var ok_count: usize = 0;
     var fail_count: usize = 0;
     var skip_count: usize = 0;
+    var filtered_count: usize = 0;
 
-    for (test_fns) |test_fn| {
+    for (test_fns, 0..) |test_fn, test_index| {
+        if (test_index < start_index or test_index >= end_index) {
+            filtered_count += 1;
+            continue;
+        }
+        if (filter) |pattern| {
+            if (std.mem.indexOf(u8, test_fn.name, pattern) == null) {
+                filtered_count += 1;
+                continue;
+            }
+        }
+
         // Setup testing environment
         std.testing.allocator_instance = .{};
         std.testing.io_instance = .init(std.testing.allocator, .{
@@ -50,6 +97,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 if (@errorReturnTrace()) |trace| {
                     std.debug.dumpErrorReturnTrace(trace);
                 }
+                if (fail_fast) break;
             },
         }
 
@@ -76,8 +124,21 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.debug.print("{d:2}. {s}: {d:.3} ms\n", .{ i + 1, entry.name, ms });
     }
 
-    std.debug.print("\nSummary: {} passed; {} skipped; {} failed.\n", .{ ok_count, skip_count, fail_count });
+    std.debug.print("\nSummary: {} passed; {} skipped; {} failed; {} filtered.\n", .{ ok_count, skip_count, fail_count, filtered_count });
     if (fail_count > 0) {
         std.process.exit(1);
     }
+}
+
+const TestRange = struct {
+    start: usize,
+    end: usize,
+};
+
+fn parseRange(arg: []const u8, max_len: usize) !TestRange {
+    const delimiter = std.mem.indexOfScalar(u8, arg, ':') orelse return error.InvalidArgs;
+    const start = try std.fmt.parseUnsigned(usize, arg[0..delimiter], 10);
+    const end = try std.fmt.parseUnsigned(usize, arg[delimiter + 1 ..], 10);
+    if (start > end or end > max_len) return error.InvalidArgs;
+    return .{ .start = start, .end = end };
 }

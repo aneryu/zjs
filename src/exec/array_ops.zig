@@ -1,7 +1,10 @@
+const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
+const unicode_lib = @import("../libs/unicode.zig");
 const core = @import("../core/root.zig");
+const method_ids = core.host_function.builtin_method_ids;
 const call_mod = @import("call.zig");
 // const collection_vm = merged
 const construct_mod = @import("construct.zig");
@@ -11,106 +14,98 @@ const property_ops = @import("property_ops.zig");
 const zjs_vm = @import("zjs_vm.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
-pub const createNamedError = exception_ops.createNamedError;
-pub const createNamedErrorWithConstructor = exception_ops.createNamedErrorWithConstructor;
 const op = bytecode.opcode.op;
 const atom_buffer = core.atom.predefinedId("buffer", .string).?;
 const atom_byte_length = core.atom.predefinedId("byteLength", .string).?;
 const atom_byte_offset = core.atom.predefinedId("byteOffset", .string).?;
 const exception_ops = @import("vm_exception_ops.zig");
 
-const shared_vm = @import("shared.zig");
-const ActiveRootValueProbe = shared_vm.ActiveRootValueProbe;
-const IteratorZipRecord = shared_vm.IteratorZipRecord;
-const RegExpMatch = shared_vm.RegExpMatch;
-const SimpleCaptureSequenceAtom = shared_vm.SimpleCaptureSequenceAtom;
-const SimpleClassPredicate = shared_vm.SimpleClassPredicate;
-const SimpleNumericArg0Bytecode = shared_vm.SimpleNumericArg0Bytecode;
-const SparseIndexKey = shared_vm.SparseIndexKey;
-const WorkerMessage = shared_vm.WorkerMessage;
-const WorkerPostTarget = shared_vm.WorkerPostTarget;
-const appendAtom = shared_vm.appendAtom;
-const atomIdOrNameEql = shared_vm.atomIdOrNameEql;
-const atomListContains = shared_vm.atomListContains;
-const atomicsBufferObject = shared_vm.atomicsBufferObject;
-const backtraceFunctionNameEql = shared_vm.backtraceFunctionNameEql;
-const cacheIteratorNextMethod = shared_vm.cacheIteratorNextMethod;
-const callCollectionAdderFromVm = shared_vm.callCollectionAdderFromVm;
-const callValueOrBytecode = shared_vm.callValueOrBytecode;
-const callableObjectFromValue = shared_vm.callableObjectFromValue;
-const catchTargetFromMarker = shared_vm.catchTargetFromMarker;
-const constructValueOrBytecode = shared_vm.constructValueOrBytecode;
-const constructorPrototypeFromGlobal = shared_vm.constructorPrototypeFromGlobal;
-const constructorPrototypeFromGlobalAtom = shared_vm.constructorPrototypeFromGlobalAtom;
-const constructorPrototypeObject = shared_vm.constructorPrototypeObject;
-const createBytecodeFunctionObject = shared_vm.createBytecodeFunctionObject;
-const createCallSiteObject = shared_vm.createCallSiteObject;
-const createDataPropertyOrThrow = shared_vm.createDataPropertyOrThrow;
-const createIteratorResult = shared_vm.createIteratorResult;
-const createRegExpIndexPair = shared_vm.createRegExpIndexPair;
-const decodeBase64Bytes = shared_vm.decodeBase64Bytes;
-const decodeBase64Into = shared_vm.decodeBase64Into;
-const decodeHexBytes = shared_vm.decodeHexBytes;
-const decodeHexInto = shared_vm.decodeHexInto;
-const defineNativeDataMethod = shared_vm.defineNativeDataMethod;
-const defineRegExpIndicesGroupsProperty = shared_vm.defineRegExpIndicesGroupsProperty;
-const defineSplitValueElement = shared_vm.defineSplitValueElement;
-const defineValueProperty = shared_vm.defineValueProperty;
-const deleteValuePropertyOrThrow = shared_vm.deleteValuePropertyOrThrow;
-const encodeBase64Bytes = shared_vm.encodeBase64Bytes;
-const encodeHexBytes = shared_vm.encodeHexBytes;
-const errorStackTraceLimit = shared_vm.errorStackTraceLimit;
-const findPropertyDescriptor = shared_vm.findPropertyDescriptor;
-const functionBytecodeFromValue = shared_vm.functionBytecodeFromValue;
-const functionObjectFromValue = shared_vm.functionObjectFromValue;
-const getIteratorMethod = shared_vm.getIteratorMethod;
-const getStringPrototypeMethodId = shared_vm.getStringPrototypeMethodId;
-const getValueProperty = shared_vm.getValueProperty;
-const globalHostOutputAutoInit = shared_vm.globalHostOutputAutoInit;
-const hasValueProperty = shared_vm.hasValueProperty;
-const isBuiltinConstructorName = shared_vm.isBuiltinConstructorName;
-const isCallableValue = shared_vm.isCallableValue;
-const isConstructorLike = shared_vm.isConstructorLike;
-const isDirectIteratorClass = shared_vm.isDirectIteratorClass;
-const isIteratorLikeValue = shared_vm.isIteratorLikeValue;
-const lengthIndexValue = shared_vm.lengthIndexValue;
-const objectFromValue = shared_vm.objectFromValue;
-const objectPrototypeFromGlobal = shared_vm.objectPrototypeFromGlobal;
-const objectRealmGlobal = shared_vm.objectRealmGlobal;
-const primitiveObjectForAccess = shared_vm.primitiveObjectForAccess;
-const printHostOutputArgs = shared_vm.printHostOutputArgs;
-const propertyAtomFromLengthIndex = shared_vm.propertyAtomFromLengthIndex;
-const propertyIndexFromLengthKey = shared_vm.propertyIndexFromLengthKey;
-const proxyDefineValueForReflectSet = shared_vm.proxyDefineValueForReflectSet;
-const qjsArrayConcatCall = shared_vm.qjsArrayConcatCall;
-const qjsArraySearchCall = shared_vm.qjsArraySearchCall;
-const qjsArrayToLocaleStringCall = shared_vm.qjsArrayToLocaleStringCall;
-const qjsArrayToStringCall = shared_vm.qjsArrayToStringCall;
-const qjsCollectIteratorValues = shared_vm.qjsCollectIteratorValues;
-const qjsGeneratorNext = shared_vm.qjsGeneratorNext;
-const qjsIteratorCallForNativeRecord = shared_vm.qjsIteratorCallForNativeRecord;
-const qjsIteratorClose = shared_vm.qjsIteratorClose;
-const qjsIteratorPrototype = shared_vm.qjsIteratorPrototype;
-const qjsObjectEnumerableOwnPropertiesCall = shared_vm.qjsObjectEnumerableOwnPropertiesCall;
-const qjsWorkerByIdLocked = shared_vm.qjsWorkerByIdLocked;
-const qjsWorkerIo = shared_vm.qjsWorkerIo;
-const readInt = shared_vm.readInt;
-const sameObjectIdentity = shared_vm.sameObjectIdentity;
-const setValueProperty = shared_vm.setValueProperty;
-const simpleClassPredicateMatches = shared_vm.simpleClassPredicateMatches;
-const simpleNumericArg0Callback = shared_vm.simpleNumericArg0Callback;
-const simpleNumericBinary = shared_vm.simpleNumericBinary;
-const slotValueBorrow = shared_vm.slotValueBorrow;
-const stringSliceValue = shared_vm.stringSliceValue;
-const workerPageAllocator = shared_vm.workerPageAllocator;
-const throwTypeErrorMessage = shared_vm.throwTypeErrorMessage;
-const toLengthIndex = shared_vm.toLengthIndex;
-const toNumberForDateMethod = shared_vm.toNumberForDateMethod;
-const toPrimitiveForNumber = shared_vm.toPrimitiveForNumber;
-const toStringForAnnexB = shared_vm.toStringForAnnexB;
-const uint8ArrayStringBytes = shared_vm.uint8ArrayStringBytes;
-const valueTruthy = shared_vm.valueTruthy;
-const valuesStrictEqual = shared_vm.valuesStrictEqual;
+const call_runtime = @import("call_runtime.zig");
+const builtin_glue = @import("builtin_glue.zig");
+const coercion_ops = @import("coercion_ops.zig");
+const error_stack_ops = @import("error_stack_ops.zig");
+const forof_ops = @import("forof_ops.zig");
+const object_ops = @import("object_ops.zig");
+const regexp_fastpath = @import("regexp_fastpath.zig");
+const slot_ops = @import("slot_ops.zig");
+const string_ops = @import("string_ops.zig");
+const ActiveRootValueProbe = call_runtime.ActiveRootValueProbe;
+const IteratorZipRecord = iter_vm.IteratorZipRecord;
+const RegExpMatch = string_ops.RegExpMatch;
+const SimpleCaptureSequenceAtom = regexp_fastpath.SimpleCaptureSequenceAtom;
+const SimpleClassPredicate = regexp_fastpath.SimpleClassPredicate;
+const SimpleNumericArg0Bytecode = call_runtime.SimpleNumericArg0Bytecode;
+const appendAtom = core.atom.appendAtom;
+const atomIdOrNameEql = call_runtime.atomIdOrNameEql;
+const atomListContains = core.atom.atomListContains;
+const atomicsBufferObject = object_ops.atomicsBufferObject;
+const backtraceFunctionNameEql = error_stack_ops.backtraceFunctionNameEql;
+const cacheIteratorNextMethod = call_runtime.cacheIteratorNextMethod;
+const callCollectionAdderFromVm = builtin_glue.callCollectionAdderFromVm;
+const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const callableObjectFromValue = object_ops.callableObjectFromValue;
+const constructValueOrBytecode = call_runtime.constructValueOrBytecode;
+const constructorPrototypeFromGlobal = object_ops.constructorPrototypeFromGlobal;
+const constructorPrototypeFromGlobalAtom = object_ops.constructorPrototypeFromGlobalAtom;
+const constructorPrototypeObject = object_ops.constructorPrototypeObject;
+const createBytecodeFunctionObject = object_ops.createBytecodeFunctionObject;
+const createCallSiteObject = object_ops.createCallSiteObject;
+const createDataPropertyOrThrow = object_ops.createDataPropertyOrThrow;
+const createIteratorResult = call_runtime.createIteratorResult;
+const createRegExpIndexPair = regexp_fastpath.createRegExpIndexPair;
+const defineNativeDataMethod = builtin_glue.defineNativeDataMethod;
+const defineRegExpIndicesGroupsProperty = object_ops.defineRegExpIndicesGroupsProperty;
+const defineSplitValueElement = string_ops.defineSplitValueElement;
+const defineValueProperty = object_ops.defineValueProperty;
+const deleteValuePropertyOrThrow = object_ops.deleteValuePropertyOrThrow;
+const errorStackTraceLimit = error_stack_ops.errorStackTraceLimit;
+const findPropertyDescriptor = object_ops.findPropertyDescriptor;
+const functionBytecodeFromValue = call_runtime.functionBytecodeFromValue;
+const functionObjectFromValue = object_ops.functionObjectFromValue;
+const getIteratorMethod = call_runtime.getIteratorMethod;
+const getStringPrototypeMethodId = string_ops.getStringPrototypeMethodId;
+const getValueProperty = object_ops.getValueProperty;
+const globalHostOutputAutoInit = builtin_glue.globalHostOutputAutoInit;
+const hasValueProperty = object_ops.hasValueProperty;
+const isBuiltinConstructorName = call_runtime.isBuiltinConstructorName;
+const isCallableValue = call_runtime.isCallableValue;
+const isConstructorLike = call_runtime.isConstructorLike;
+const isDirectIteratorClass = call_runtime.isDirectIteratorClass;
+const isIteratorLikeValue = forof_ops.isIteratorLikeValue;
+const objectFromValue = object_ops.objectFromValue;
+const objectPrototypeFromGlobal = object_ops.objectPrototypeFromGlobal;
+const objectRealmGlobal = object_ops.objectRealmGlobal;
+const primitiveObjectForAccess = object_ops.primitiveObjectForAccess;
+const printHostOutputArgs = builtin_glue.printHostOutputArgs;
+const propertyAtomFromLengthIndex = object_ops.propertyAtomFromLengthIndex;
+const propertyIndexFromLengthKey = object_ops.propertyIndexFromLengthKey;
+const proxyDefineValueForReflectSet = object_ops.proxyDefineValueForReflectSet;
+const qjsArrayConcatCall = string_ops.qjsArrayConcatCall;
+const qjsArraySearchCall = string_ops.qjsArraySearchCall;
+const qjsArrayToLocaleStringCall = string_ops.qjsArrayToLocaleStringCall;
+const qjsArrayToStringCall = string_ops.qjsArrayToStringCall;
+const qjsCollectIteratorValues = call_runtime.qjsCollectIteratorValues;
+const qjsGeneratorNext = call_runtime.qjsGeneratorNext;
+const qjsIteratorCallForNativeRecord = call_runtime.qjsIteratorCallForNativeRecord;
+const qjsIteratorClose = call_runtime.qjsIteratorClose;
+const qjsIteratorPrototype = object_ops.qjsIteratorPrototype;
+const qjsObjectEnumerableOwnPropertiesCall = object_ops.qjsObjectEnumerableOwnPropertiesCall;
+const readInt = call_runtime.readInt;
+const sameObjectIdentity = object_ops.sameObjectIdentity;
+const setValueProperty = object_ops.setValueProperty;
+const simpleClassPredicateMatches = string_ops.simpleClassPredicateMatches;
+const simpleNumericArg0Callback = call_runtime.simpleNumericArg0Callback;
+const simpleNumericBinary = call_runtime.simpleNumericBinary;
+const slotValueBorrow = slot_ops.slotValueBorrow;
+const stringSliceValue = string_ops.stringSliceValue;
+const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
+const toLengthIndex = coercion_ops.toLengthIndex;
+const toNumberForDateMethod = coercion_ops.toNumberForDateMethod;
+const toPrimitiveForNumber = coercion_ops.toPrimitiveForNumber;
+const toStringForAnnexB = string_ops.toStringForAnnexB;
+const uint8ArrayStringBytes = string_ops.uint8ArrayStringBytes;
+const valueTruthy = coercion_ops.valueTruthy;
+const valuesStrictEqual = value_ops.valuesStrictEqual;
 
 pub fn popCatchMarker(rt: *core.JSRuntime, stack: *stack_mod.Stack) !??usize {
     while (stack.peek()) |marker| {
@@ -136,6 +131,9 @@ pub fn popCatchMarker(rt: *core.JSRuntime, stack: *stack_mod.Stack) !??usize {
 }
 
 pub fn arrayPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
+    if (global.cachedRealmValue(.array_prototype)) |stored| {
+        return property_ops.expectObject(stored) catch null;
+    }
     if (global.getOwnDataObjectBorrowed(core.atom.ids.Array)) |constructor| {
         if (constructor.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| return prototype;
     }
@@ -149,12 +147,12 @@ pub fn arrayPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*cor
 }
 
 pub fn arrayIteratorPrototypeFromContext(ctx: *core.JSContext, global: *core.Object) !*core.Object {
-    return iter_vm.arrayIteratorPrototypeFromContext(ctx, global, qjsIteratorPrototype, defineNativeDataMethod);
+    return iter_vm.arrayIteratorPrototypeFromContext(ctx, global);
 }
 
 pub fn isArrayMethodReceiver(value: core.JSValue) bool {
     const object = objectFromValue(value) orelse return false;
-    return object.is_array;
+    return object.flags.is_array;
 }
 
 pub fn pushSlotValue(stack: *stack_mod.Stack, slot: core.JSValue) !void {
@@ -222,21 +220,40 @@ pub fn qjsArrayMethodFastCall(
     return null;
 }
 
+/// `function_object` is nullable so the prepared (no-function-object) call path
+/// reaches this hub under the uniform dispatch model. The prepared-call gate
+/// (`vm_call.arrayNativeSupportedWithoutFunctionObject`) admits only `push` and
+/// `pop`, whose implementations need only the receiver array, so those two ids
+/// route straight to their `*Impl` bodies when `function_object == null`. Every
+/// other id needs the materialized function object (TypedArray-vs-Array record
+/// disambiguation, species, callbacks) and unwraps it, surfacing the corrupt-id
+/// `error.TypeError` under null func_obj — unreachable because the gate blocks
+/// those ids from the prepared path.
 pub fn qjsArrayPrototypeNativeRecord(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: core.JSValue,
-    function_object: *core.Object,
+    function_object: ?*core.Object,
     id: u32,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const array_mod = builtins.array;
+    const array_mod = method_ids.array;
+    // Prepared (no-function-object) path: the gate admits only `push`/`pop`,
+    // which are func-object-free, so route them straight to their `*Impl`
+    // bodies and reject every other id. Kept off the hot non-null path so the
+    // `call_method` / `call` table dispatch stays byte-identical to the path
+    // that always carried a materialized function object.
+    const function_object_nonnull = function_object orelse return switch (id) {
+        @intFromEnum(array_mod.PrototypeMethod.push) => qjsArrayPushCallImpl(ctx, output, global, receiver, args, caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.pop) => qjsArrayPopCallImpl(ctx, output, global, receiver, caller_function, caller_frame),
+        else => error.TypeError,
+    };
     return switch (id) {
-        @intFromEnum(array_mod.PrototypeMethod.to_string) => qjsArrayToStringCall(ctx, output, global, receiver, function_object, caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.to_locale_string) => qjsArrayToLocaleStringCall(ctx, output, global, receiver, function_object, caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.to_string) => qjsArrayToStringCall(ctx, output, global, receiver, function_object_nonnull, caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.to_locale_string) => qjsArrayToLocaleStringCall(ctx, output, global, receiver, function_object_nonnull, caller_function, caller_frame),
         @intFromEnum(array_mod.PrototypeMethod.map),
         @intFromEnum(array_mod.PrototypeMethod.filter),
         @intFromEnum(array_mod.PrototypeMethod.for_each),
@@ -246,38 +263,38 @@ pub fn qjsArrayPrototypeNativeRecord(
         @intFromEnum(array_mod.PrototypeMethod.find_index),
         @intFromEnum(array_mod.PrototypeMethod.find_last),
         @intFromEnum(array_mod.PrototypeMethod.find_last_index),
-        => qjsArrayIterationCall(ctx, output, global, receiver, function_object.value(), args, caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.reduce) => qjsArrayReduceCall(ctx, output, global, receiver, function_object.value(), args, false),
-        @intFromEnum(array_mod.PrototypeMethod.reduce_right) => qjsArrayReduceCall(ctx, output, global, receiver, function_object.value(), args, true),
-        @intFromEnum(array_mod.PrototypeMethod.at) => qjsArrayAtCall(ctx, output, global, receiver, function_object.value(), args),
+        => qjsArrayIterationCall(ctx, output, global, receiver, function_object_nonnull.value(), args, caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.reduce) => qjsArrayReduceCall(ctx, output, global, receiver, function_object_nonnull.value(), args, false),
+        @intFromEnum(array_mod.PrototypeMethod.reduce_right) => qjsArrayReduceCall(ctx, output, global, receiver, function_object_nonnull.value(), args, true),
+        @intFromEnum(array_mod.PrototypeMethod.at) => qjsArrayAtCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
         @intFromEnum(array_mod.PrototypeMethod.includes),
         @intFromEnum(array_mod.PrototypeMethod.index_of),
         @intFromEnum(array_mod.PrototypeMethod.last_index_of),
-        => qjsArraySearchCall(ctx, output, global, receiver, function_object.value(), args),
-        @intFromEnum(array_mod.PrototypeMethod.copy_within) => qjsArrayCopyWithinCall(ctx, output, global, receiver, function_object.value(), args),
-        @intFromEnum(array_mod.PrototypeMethod.fill) => qjsArrayFillCall(ctx, output, global, receiver, function_object.value(), args),
-        @intFromEnum(array_mod.PrototypeMethod.push) => qjsArrayPushCall(ctx, output, global, receiver, function_object.value(), args, caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.pop) => qjsArrayPopCall(ctx, output, global, receiver, function_object.value(), caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.shift) => qjsArrayShiftCall(ctx, output, global, receiver, function_object.value()),
-        @intFromEnum(array_mod.PrototypeMethod.unshift) => qjsArrayUnshiftCall(ctx, output, global, receiver, function_object.value(), args),
-        @intFromEnum(array_mod.PrototypeMethod.reverse) => qjsArrayReverseCall(ctx, output, global, receiver, function_object.value(), caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.splice) => qjsArraySpliceCall(ctx, output, global, receiver, function_object.value(), args),
-        @intFromEnum(array_mod.PrototypeMethod.slice) => qjsArraySliceCall(ctx, output, global, receiver, function_object.value(), args),
-        @intFromEnum(array_mod.PrototypeMethod.join) => qjsArrayJoinCall(ctx, output, global, receiver, function_object, args, caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.concat) => qjsArrayConcatCall(ctx, output, global, receiver, function_object.value(), args, caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.sort) => qjsArraySortCall(ctx, output, global, receiver, function_object.value(), args, caller_function, caller_frame),
+        => qjsArraySearchCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
+        @intFromEnum(array_mod.PrototypeMethod.copy_within) => qjsArrayCopyWithinCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
+        @intFromEnum(array_mod.PrototypeMethod.fill) => qjsArrayFillCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
+        @intFromEnum(array_mod.PrototypeMethod.push) => qjsArrayPushCall(ctx, output, global, receiver, function_object_nonnull.value(), args, caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.pop) => qjsArrayPopCall(ctx, output, global, receiver, function_object_nonnull.value(), caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.shift) => qjsArrayShiftCall(ctx, output, global, receiver, function_object_nonnull.value()),
+        @intFromEnum(array_mod.PrototypeMethod.unshift) => qjsArrayUnshiftCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
+        @intFromEnum(array_mod.PrototypeMethod.reverse) => qjsArrayReverseCall(ctx, output, global, receiver, function_object_nonnull.value(), caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.splice) => qjsArraySpliceCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
+        @intFromEnum(array_mod.PrototypeMethod.slice) => qjsArraySliceCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
+        @intFromEnum(array_mod.PrototypeMethod.join) => qjsArrayJoinCall(ctx, output, global, receiver, function_object_nonnull, args, caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.concat) => qjsArrayConcatCall(ctx, output, global, receiver, function_object_nonnull.value(), args, caller_function, caller_frame),
+        @intFromEnum(array_mod.PrototypeMethod.sort) => qjsArraySortCall(ctx, output, global, receiver, function_object_nonnull.value(), args, caller_function, caller_frame),
         @intFromEnum(array_mod.PrototypeMethod.flat),
         @intFromEnum(array_mod.PrototypeMethod.flat_map),
-        => qjsArrayFlatCall(ctx, output, global, receiver, function_object.value(), args, caller_function, caller_frame),
+        => qjsArrayFlatCall(ctx, output, global, receiver, function_object_nonnull.value(), args, caller_function, caller_frame),
         @intFromEnum(array_mod.PrototypeMethod.to_reversed),
         @intFromEnum(array_mod.PrototypeMethod.to_sorted),
         @intFromEnum(array_mod.PrototypeMethod.to_spliced),
         @intFromEnum(array_mod.PrototypeMethod.with_),
-        => qjsArrayByCopyCall(ctx, output, global, receiver, function_object.value(), args, caller_function, caller_frame),
+        => qjsArrayByCopyCall(ctx, output, global, receiver, function_object_nonnull.value(), args, caller_function, caller_frame),
         @intFromEnum(array_mod.PrototypeMethod.keys),
         @intFromEnum(array_mod.PrototypeMethod.values),
         @intFromEnum(array_mod.PrototypeMethod.entries),
-        => qjsArrayIteratorMethodRecord(ctx, global, receiver, function_object, id),
+        => qjsArrayIteratorMethodRecord(ctx, global, receiver, function_object_nonnull, id),
         else => null,
     };
 }
@@ -291,6 +308,7 @@ pub fn buildCallSiteArray(ctx: *core.JSContext, global: *core.Object, skip_name:
     var skipping = skip_name != null;
     while (idx > 0) {
         idx -= 1;
+        _ = exception_ops.resolvedBacktraceFunctionNameAt(ctx, idx);
         if (skipping) {
             if (backtraceFunctionNameEql(ctx, ctx.backtrace_frames[idx], skip_name.?)) skipping = false;
             continue;
@@ -410,9 +428,9 @@ pub fn regExpLegacyNoCaptureSliceValue(rt: *core.JSRuntime, legacy: anytype, kin
 
 pub fn throwRegExpAccessorTypeError(ctx: *core.JSContext, global: *core.Object, getter_value: core.JSValue) !?core.JSValue {
     const error_value = if (objectFromValue(getter_value)) |getter_object| blk: {
-        const ctor_value = getter_object.functionRealmTypeErrorConstructor() orelse break :blk try createNamedError(ctx.runtime, global, "TypeError", "not a Date object");
-        break :blk try createNamedErrorWithConstructor(ctx.runtime, ctor_value, "TypeError", "not a Date object");
-    } else try createNamedError(ctx.runtime, global, "TypeError", "not a Date object");
+        const ctor_value = getter_object.functionRealmTypeErrorConstructor() orelse break :blk try exception_ops.createNamedError(ctx, global, "TypeError", "RegExp object expected");
+        break :blk try exception_ops.createNamedErrorWithConstructor(ctx, global, ctor_value, "TypeError", "RegExp object expected");
+    } else try exception_ops.createNamedError(ctx, global, "TypeError", "RegExp object expected");
     _ = ctx.throwValue(error_value);
     return error.JSException;
 }
@@ -485,23 +503,23 @@ pub fn constructArrayBufferNativeRecord(
     const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return null;
     if (native_ref.domain != .buffer) return null;
     const shared = switch (native_ref.id) {
-        @intFromEnum(builtins.buffer.ConstructorMethod.array_buffer) => false,
-        @intFromEnum(builtins.buffer.ConstructorMethod.shared_array_buffer) => true,
+        @intFromEnum(method_ids.buffer.ConstructorMethod.array_buffer) => false,
+        @intFromEnum(method_ids.buffer.ConstructorMethod.shared_array_buffer) => true,
         else => return null,
     };
-    if (!builtins.object.sameValue(new_target, func)) return null;
+    if (!new_target.sameValue(func)) return null;
 
     const prototype = try constructorPrototypeObject(ctx.runtime, new_target);
     if (args.len == 0) {
-        if (shared) return try builtins.buffer.sharedArrayBufferConstructLength(ctx.runtime, 0, null, prototype);
-        return try builtins.buffer.arrayBufferConstructLength(ctx.runtime, 0, null, prototype);
+        if (shared) return try core.typed_array.sharedArrayBufferConstructLength(ctx.runtime, 0, null, prototype);
+        return try core.typed_array.arrayBufferConstructLength(ctx.runtime, 0, null, prototype);
     }
     if (args.len == 1) {
         if (args[0].asInt32()) |length_i32| {
             if (length_i32 >= 0) {
                 const byte_length: usize = @intCast(length_i32);
-                if (shared) return try builtins.buffer.sharedArrayBufferConstructLength(ctx.runtime, byte_length, null, prototype);
-                return try builtins.buffer.arrayBufferConstructLength(ctx.runtime, byte_length, null, prototype);
+                if (shared) return try core.typed_array.sharedArrayBufferConstructLength(ctx.runtime, byte_length, null, prototype);
+                return try core.typed_array.arrayBufferConstructLength(ctx.runtime, byte_length, null, prototype);
             }
         }
     }
@@ -510,8 +528,6 @@ pub fn constructArrayBufferNativeRecord(
 
 pub fn tryFuseTypedArrayFromArrayBufferConstructorSequence(
     ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
@@ -520,7 +536,7 @@ pub fn tryFuseTypedArrayFromArrayBufferConstructorSequence(
     args: []const core.JSValue,
 ) !?core.JSValue {
     if (args.len != 1) return null;
-    if (!builtins.object.sameValue(array_buffer_constructor, array_buffer_new_target)) return null;
+    if (!array_buffer_constructor.sameValue(array_buffer_new_target)) return null;
     if (frame.pc + 3 > function.code.len) return null;
     if (function.code[frame.pc] != op.call_constructor) return null;
     if (readInt(u16, function.code[frame.pc + 1 ..][0..2]) != 1) return null;
@@ -528,14 +544,14 @@ pub fn tryFuseTypedArrayFromArrayBufferConstructorSequence(
 
     const outer_constructor = stack.values[stack.values.len - 2];
     const outer_new_target = stack.values[stack.values.len - 1];
-    if (!builtins.object.sameValue(outer_constructor, outer_new_target)) return null;
+    if (!outer_constructor.sameValue(outer_new_target)) return null;
 
     const buffer_constructor_object = callableObjectFromValue(array_buffer_constructor) orelse return null;
     const native_ref = core.function.decodeNativeBuiltinId(buffer_constructor_object.nativeFunctionIdSlot().*) orelse return null;
     if (native_ref.domain != .buffer) return null;
     const shared = switch (native_ref.id) {
-        @intFromEnum(builtins.buffer.ConstructorMethod.array_buffer) => false,
-        @intFromEnum(builtins.buffer.ConstructorMethod.shared_array_buffer) => true,
+        @intFromEnum(method_ids.buffer.ConstructorMethod.array_buffer) => false,
+        @intFromEnum(method_ids.buffer.ConstructorMethod.shared_array_buffer) => true,
         else => return null,
     };
 
@@ -555,25 +571,15 @@ pub fn tryFuseTypedArrayFromArrayBufferConstructorSequence(
     const buffer_prototype = buffer_constructor_object.getOwnDataObjectBorrowed(core.atom.ids.prototype) orelse return null;
     const typed_array_prototype = typed_array_constructor_object.getOwnDataObjectBorrowed(core.atom.ids.prototype) orelse return null;
 
-    if (try tryFuseTypedArrayConstructLengthPrint(
-        ctx,
-        output,
-        global,
-        stack,
-        function,
-        frame,
-        typed_length,
-    )) |value| return value;
-
     const backing_buffer = if (shared)
-        try builtins.buffer.sharedArrayBufferConstructLength(ctx.runtime, byte_length, null, buffer_prototype)
+        try core.typed_array.sharedArrayBufferConstructLength(ctx.runtime, byte_length, null, buffer_prototype)
     else
-        try builtins.buffer.arrayBufferConstructLength(ctx.runtime, byte_length, null, buffer_prototype);
+        try core.typed_array.arrayBufferConstructLength(ctx.runtime, byte_length, null, buffer_prototype);
     var backing_buffer_owned = true;
     errdefer if (backing_buffer_owned) backing_buffer.free(ctx.runtime);
     const backing_buffer_object = objectFromValue(backing_buffer) orelse return error.TypeError;
     backing_buffer_owned = false;
-    const result = try builtins.buffer.typedArrayConstructFullBufferOwned(ctx.runtime, element_size_u32, element_kind, backing_buffer, backing_buffer_object, typed_array_prototype);
+    const result = try core.typed_array.typedArrayConstructFullBufferOwned(ctx.runtime, element_size_u32, element_kind, backing_buffer, backing_buffer_object, typed_array_prototype);
     errdefer result.free(ctx.runtime);
 
     const dropped_new_target = try stack.pop();
@@ -582,39 +588,6 @@ pub fn tryFuseTypedArrayFromArrayBufferConstructorSequence(
     dropped_new_target.free(ctx.runtime);
     dropped_constructor.free(ctx.runtime);
     return result;
-}
-
-pub fn tryFuseTypedArrayConstructLengthPrint(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    typed_length: usize,
-) !?core.JSValue {
-    if (typed_length > @as(usize, @intCast(std.math.maxInt(i32)))) return null;
-    const code = function.code;
-    var pc = frame.pc + 3;
-    const store = decodeTypedArrayLengthPrintStore(code, pc) orelse return null;
-    pc = store.next_pc;
-    if (pc + 5 > code.len or code[pc] != op.get_var) return null;
-    const print_atom = readInt(u32, code[pc + 1 ..][0..4]);
-    if (print_atom != core.atom.predefinedId("print", .string).?) return null;
-    if (!globalHostOutputAutoInit(global, print_atom)) return null;
-    pc += 5;
-    const local_get = decodeTypedArrayLengthPrintLocalGet(code, pc) orelse return null;
-    if (local_get.idx != store.local_index) return null;
-    pc = local_get.next_pc;
-    if (pc + 4 > code.len or code[pc] != op.get_length or code[pc + 1] != op.call1 or code[pc + 2] != op.drop or code[pc + 3] != op.return_undef) return null;
-
-    try printHostOutputArgs(ctx.runtime, output, &.{core.JSValue.int32(@intCast(typed_length))});
-    const dropped_new_target = try stack.pop();
-    const dropped_constructor = try stack.pop();
-    frame.pc = pc + 4;
-    dropped_new_target.free(ctx.runtime);
-    dropped_constructor.free(ctx.runtime);
-    return core.JSValue.undefinedValue();
 }
 
 pub const TypedArrayLengthPrintStore = struct {
@@ -675,9 +648,10 @@ pub fn qjsTypedArrayConstructVm(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
+    const kind = function_object.typedArrayKind();
     const element = construct_mod.TypedArrayElement{
         .size = function_object.typedArrayElementSize(),
-        .kind = function_object.typedArrayKind(),
+        .kind = kind,
     };
     const constructor_global = objectRealmGlobal(function_object) orelse global;
 
@@ -694,11 +668,11 @@ pub fn qjsTypedArrayConstructVm(
     }
 
     const source_object = objectFromValue(first) orelse return error.TypeError;
-    if (builtins.buffer.isTypedArrayObject(source_object)) return null;
+    if (core.object.isTypedArrayObject(source_object)) return null;
     if (source_object.class_id == core.class.ids.array_buffer or source_object.class_id == core.class.ids.shared_array_buffer) {
         const prototype = try qjsTypedArrayConstructorPrototypeVm(ctx, output, global, constructor, function_object, caller_function, caller_frame);
         if (args.len == 1) {
-            return try builtins.buffer.typedArrayConstructWithOptions(ctx.runtime, element.size, element.kind, first, args, prototype);
+            return try core.typed_array.typedArrayConstructWithOptions(ctx.runtime, element.size, element.kind, first, args, prototype);
         }
         return try qjsTypedArrayConstructBufferVm(ctx, output, global, prototype, element, args);
     }
@@ -719,12 +693,12 @@ pub fn qjsTypedArrayConstructLengthVm(
     if (length > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
     const byte_length = try std.math.mul(usize, length, element.size);
     const buffer_proto = qjsTypedArrayArrayBufferPrototypeVm(rt, constructor_global, prototype);
-    const backing_buffer = try builtins.buffer.arrayBufferConstructLength(rt, byte_length, null, buffer_proto);
+    const backing_buffer = try core.typed_array.arrayBufferConstructLength(rt, byte_length, null, buffer_proto);
     var backing_buffer_owned = true;
     errdefer if (backing_buffer_owned) backing_buffer.free(rt);
     const backing_buffer_object = objectFromValue(backing_buffer) orelse return error.TypeError;
     backing_buffer_owned = false;
-    return builtins.buffer.typedArrayConstructFullBufferOwned(rt, element.size, element.kind, backing_buffer, backing_buffer_object, prototype);
+    return core.typed_array.typedArrayConstructFullBufferOwned(rt, element.size, element.kind, backing_buffer, backing_buffer_object, prototype);
 }
 
 pub fn qjsTypedArrayConstructBufferVm(
@@ -754,7 +728,7 @@ pub fn qjsTypedArrayConstructBufferVm(
         construct_args[0..2]
     else
         construct_args[0..1];
-    return builtins.buffer.typedArrayConstructWithOptions(ctx.runtime, element.size, element.kind, args[0], used_args, prototype);
+    return core.typed_array.typedArrayConstructWithOptions(ctx.runtime, element.size, element.kind, args[0], used_args, prototype);
 }
 
 pub fn qjsTypedArrayConstructArrayLikeVm(
@@ -810,7 +784,7 @@ pub fn qjsTypedArrayConstructArrayLikeVm(
         coerced.free(ctx.runtime);
         coerced = try qjsTypedArrayByCopyCoerceValue(ctx, output, global, result_object, item);
 
-        _ = try builtins.buffer.typedArraySetIndex(ctx.runtime, result_object, @intCast(index), coerced);
+        _ = try core.typed_array.typedArraySetIndex(ctx.runtime, result_object, @intCast(index), coerced);
 
         coerced.free(ctx.runtime);
         coerced = core.JSValue.undefinedValue();
@@ -832,9 +806,10 @@ pub fn qjsTypedArrayConstructArrayLikeOwnDataFast(
     if (length > @as(usize, @intCast(std.math.maxInt(u32)))) return false;
 
     var first_index_property: ?usize = null;
-    for (source_object.properties, 0..) |entry, property_index| {
-        if (entry.flags.deleted or entry.flags.accessor) continue;
-        if (entry.atom_id == core.atom.atomFromUInt32(0)) {
+    for (source_object.shapeProps(), 0..) |prop, property_index| {
+        const prop_flags = core.property.Flags.fromBits(prop.flags);
+        if (prop_flags.deleted or prop_flags.accessor) continue;
+        if (prop.atom_id == core.atom.atomFromUInt32(0)) {
             first_index_property = property_index;
             break;
         }
@@ -865,7 +840,7 @@ pub fn qjsTypedArrayConstructArrayLikeOwnDataFast(
 
         coerced.free(ctx.runtime);
         coerced = try qjsTypedArrayByCopyCoerceValue(ctx, output, global, result_object, item);
-        _ = try builtins.buffer.typedArraySetIndex(ctx.runtime, result_object, @intCast(index), coerced);
+        _ = try core.typed_array.typedArraySetIndex(ctx.runtime, result_object, @intCast(index), coerced);
 
         coerced.free(ctx.runtime);
         coerced = core.JSValue.undefinedValue();
@@ -879,10 +854,11 @@ pub fn typedArrayArrayLikeOwnDataFastPathUsable(source_object: *core.Object, fir
     var index: usize = 0;
     while (index < length) : (index += 1) {
         const property_index = first_property + index;
-        if (property_index >= source_object.properties.len) return false;
-        const entry = source_object.properties[property_index];
-        if (entry.atom_id != core.atom.atomFromUInt32(@intCast(index)) or entry.flags.deleted or entry.flags.accessor) return false;
-        switch (entry.slot) {
+        if (property_index >= source_object.shapeProps().len) return false;
+        const prop = source_object.shapeProps()[property_index];
+        const prop_flags = core.property.Flags.fromBits(prop.flags);
+        if (prop.atom_id != core.atom.atomFromUInt32(@intCast(index)) or prop_flags.deleted or prop_flags.accessor) return false;
+        switch (source_object.properties[property_index].slot) {
             .data => |stored| if (stored.isObject()) return false,
             .auto_init, .accessor, .deleted => return false,
         }
@@ -960,8 +936,8 @@ pub fn qjsArrayBufferConstructWithPrototype(
     else
         @as(usize, 0);
     const max_byte_length = try qjsArrayBufferMaxByteLengthOption(ctx, output, global, args, byte_length);
-    if (shared) return builtins.buffer.sharedArrayBufferConstructLength(ctx.runtime, byte_length, max_byte_length, prototype);
-    return builtins.buffer.arrayBufferConstructLength(ctx.runtime, byte_length, max_byte_length, prototype);
+    if (shared) return core.typed_array.sharedArrayBufferConstructLength(ctx.runtime, byte_length, max_byte_length, prototype);
+    return core.typed_array.arrayBufferConstructLength(ctx.runtime, byte_length, max_byte_length, prototype);
 }
 
 pub fn qjsArrayBufferMaxByteLengthOption(
@@ -993,7 +969,7 @@ pub fn qjsTypedArrayConstructFromIterable(
 ) !?core.JSValue {
     if (args.len < 1 or !args[0].isObject()) return null;
     const source_object = objectFromValue(args[0]) orelse return null;
-    if (builtins.buffer.isTypedArrayObject(source_object) or source_object.class_id == core.class.ids.array_buffer or source_object.class_id == core.class.ids.shared_array_buffer) return null;
+    if (core.object.isTypedArrayObject(source_object) or source_object.class_id == core.class.ids.array_buffer or source_object.class_id == core.class.ids.shared_array_buffer) return null;
     const iterator_method = try getIteratorMethod(ctx, output, global, args[0]);
     defer iterator_method.free(ctx.runtime);
     if (iterator_method.isUndefined() or iterator_method.isNull()) return null;
@@ -1072,9 +1048,10 @@ pub fn qjsTypedArrayConstructFromIterable(
     values.length = index;
     if (callableObjectFromValue(constructor)) |function_object| {
         if (function_object.typedArrayElementSize() != 0 and function_object.typedArrayKind() != 0) {
+            const kind = function_object.typedArrayKind();
             const element = construct_mod.TypedArrayElement{
                 .size = function_object.typedArrayElementSize(),
-                .kind = function_object.typedArrayKind(),
+                .kind = kind,
             };
             const prototype = try qjsTypedArrayConstructorPrototypeVm(ctx, output, global, constructor, function_object, caller_function, caller_frame);
             const constructor_global = objectRealmGlobal(function_object) orelse global;
@@ -1091,22 +1068,11 @@ pub fn qjsTypedArrayConstructFromIterable(
             );
         }
     }
-    return try construct_mod.constructValue(ctx.runtime, constructor, &.{values_value}, &.{});
+    return try construct_mod.constructValue(ctx, constructor, &.{values_value}, &.{});
 }
 
 pub fn qjsTypedArrayConstructorName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "Int8Array") or
-        std.mem.eql(u8, name, "Uint8Array") or
-        std.mem.eql(u8, name, "Uint8ClampedArray") or
-        std.mem.eql(u8, name, "Int16Array") or
-        std.mem.eql(u8, name, "Uint16Array") or
-        std.mem.eql(u8, name, "Int32Array") or
-        std.mem.eql(u8, name, "Uint32Array") or
-        std.mem.eql(u8, name, "Float16Array") or
-        std.mem.eql(u8, name, "Float32Array") or
-        std.mem.eql(u8, name, "Float64Array") or
-        std.mem.eql(u8, name, "BigInt64Array") or
-        std.mem.eql(u8, name, "BigUint64Array");
+    return core.typed_array_names.isConcrete(name);
 }
 
 pub fn qjsArrayBufferAccessor(ctx: *core.JSContext, receiver: core.JSValue, accessor: []const u8) !core.JSValue {
@@ -1126,7 +1092,7 @@ pub fn qjsArrayBufferAccessor(ctx: *core.JSContext, receiver: core.JSValue, acce
         return core.JSValue.boolean(object.arrayBufferMaxByteLength() != null);
     }
     if (std.mem.eql(u8, accessor, "immutable")) {
-        return core.JSValue.boolean(builtins.buffer.arrayBufferIsImmutable(ctx.runtime, object));
+        return core.JSValue.boolean(core.object.arrayBufferIsImmutable(ctx.runtime, object));
     }
     return error.TypeError;
 }
@@ -1150,26 +1116,26 @@ pub fn qjsSharedArrayBufferAccessor(ctx: *core.JSContext, receiver: core.JSValue
 pub fn qjsArrayBufferIsView(args: []const core.JSValue) core.JSValue {
     if (args.len < 1) return core.JSValue.boolean(false);
     const object = objectFromValue(args[0]) orelse return core.JSValue.boolean(false);
-    return core.JSValue.boolean(builtins.buffer.isTypedArrayObject(object) or object.class_id == core.class.ids.dataview);
+    return core.JSValue.boolean(core.object.isTypedArrayObject(object) or object.class_id == core.class.ids.dataview);
 }
 
 pub fn qjsArrayBufferPrototypeNativeRecord(ctx: *core.JSContext, receiver: core.JSValue, id: u32, args: []const core.JSValue) !?core.JSValue {
     const object = objectFromValue(receiver) orelse return null;
     if (object.class_id == core.class.ids.shared_array_buffer) {
         return switch (id) {
-            @intFromEnum(builtins.buffer.ArrayBufferPrototypeMethod.slice),
-            @intFromEnum(builtins.buffer.ArrayBufferPrototypeMethod.resize),
-            @intFromEnum(builtins.buffer.ArrayBufferPrototypeMethod.transfer),
-            @intFromEnum(builtins.buffer.ArrayBufferPrototypeMethod.transfer_to_fixed_length),
-            @intFromEnum(builtins.buffer.ArrayBufferPrototypeMethod.slice_to_immutable),
-            @intFromEnum(builtins.buffer.ArrayBufferPrototypeMethod.transfer_to_immutable),
+            @intFromEnum(method_ids.buffer.ArrayBufferPrototypeMethod.slice),
+            @intFromEnum(method_ids.buffer.ArrayBufferPrototypeMethod.resize),
+            @intFromEnum(method_ids.buffer.ArrayBufferPrototypeMethod.transfer),
+            @intFromEnum(method_ids.buffer.ArrayBufferPrototypeMethod.transfer_to_fixed_length),
+            @intFromEnum(method_ids.buffer.ArrayBufferPrototypeMethod.slice_to_immutable),
+            @intFromEnum(method_ids.buffer.ArrayBufferPrototypeMethod.transfer_to_immutable),
             => error.TypeError,
-            @intFromEnum(builtins.buffer.SharedArrayBufferPrototypeMethod.slice) => {
+            @intFromEnum(method_ids.buffer.SharedArrayBufferPrototypeMethod.slice) => {
                 const start = if (args.len >= 1) args[0] else core.JSValue.int32(0);
                 const end = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
                 return try qjsArrayBufferSlice(ctx, receiver, object, start, end, true);
             },
-            @intFromEnum(builtins.buffer.SharedArrayBufferPrototypeMethod.grow) => {
+            @intFromEnum(method_ids.buffer.SharedArrayBufferPrototypeMethod.grow) => {
                 const new_length = if (args.len >= 1) args[0] else core.JSValue.int32(0);
                 return try qjsSharedArrayBufferGrow(ctx, receiver, new_length);
             },
@@ -1178,32 +1144,32 @@ pub fn qjsArrayBufferPrototypeNativeRecord(ctx: *core.JSContext, receiver: core.
     }
     if (object.class_id != core.class.ids.array_buffer) return null;
     return switch (id) {
-        @intFromEnum(builtins.buffer.SharedArrayBufferPrototypeMethod.slice),
-        @intFromEnum(builtins.buffer.SharedArrayBufferPrototypeMethod.grow),
+        @intFromEnum(method_ids.buffer.SharedArrayBufferPrototypeMethod.slice),
+        @intFromEnum(method_ids.buffer.SharedArrayBufferPrototypeMethod.grow),
         => error.TypeError,
-        @intFromEnum(builtins.buffer.ArrayBufferPrototypeMethod.slice) => {
+        @intFromEnum(method_ids.buffer.ArrayBufferPrototypeMethod.slice) => {
             const start = if (args.len >= 1) args[0] else core.JSValue.int32(0);
             const end = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
             return try qjsArrayBufferSlice(ctx, receiver, object, start, end, false);
         },
-        @intFromEnum(builtins.buffer.ArrayBufferPrototypeMethod.slice_to_immutable) => {
+        @intFromEnum(method_ids.buffer.ArrayBufferPrototypeMethod.slice_to_immutable) => {
             const start = if (args.len >= 1) args[0] else core.JSValue.int32(0);
             const end = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
             return try qjsArrayBufferSliceToImmutable(ctx, receiver, object, start, end);
         },
-        @intFromEnum(builtins.buffer.ArrayBufferPrototypeMethod.resize) => {
+        @intFromEnum(method_ids.buffer.ArrayBufferPrototypeMethod.resize) => {
             const new_length = if (args.len >= 1) args[0] else core.JSValue.int32(0);
             return try qjsArrayBufferResize(ctx, receiver, new_length);
         },
-        @intFromEnum(builtins.buffer.ArrayBufferPrototypeMethod.transfer) => {
+        @intFromEnum(method_ids.buffer.ArrayBufferPrototypeMethod.transfer) => {
             const new_length = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             return try qjsArrayBufferTransfer(ctx, receiver, new_length, false);
         },
-        @intFromEnum(builtins.buffer.ArrayBufferPrototypeMethod.transfer_to_fixed_length) => {
+        @intFromEnum(method_ids.buffer.ArrayBufferPrototypeMethod.transfer_to_fixed_length) => {
             const new_length = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             return try qjsArrayBufferTransfer(ctx, receiver, new_length, true);
         },
-        @intFromEnum(builtins.buffer.ArrayBufferPrototypeMethod.transfer_to_immutable) => {
+        @intFromEnum(method_ids.buffer.ArrayBufferPrototypeMethod.transfer_to_immutable) => {
             const new_length = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             return try qjsArrayBufferTransferToImmutable(ctx, receiver, new_length);
         },
@@ -1220,11 +1186,11 @@ pub fn qjsArrayBufferSlice(
     shared: bool,
 ) !core.JSValue {
     const global = ctx.global orelse {
-        if (shared) return builtins.buffer.sharedArrayBufferSlice(ctx.runtime, receiver, start_value, end_value);
-        return builtins.buffer.arrayBufferSlice(ctx.runtime, receiver, start_value, end_value);
+        if (shared) return core.typed_array.sharedArrayBufferSlice(ctx.runtime, receiver, start_value, end_value);
+        return core.typed_array.arrayBufferSlice(ctx.runtime, receiver, start_value, end_value);
     };
     if (object.arrayBufferDetached()) return error.TypeError;
-    if (!shared and builtins.buffer.arrayBufferIsImmutable(ctx.runtime, object)) return error.TypeError;
+    if (!shared and core.object.arrayBufferIsImmutable(ctx.runtime, object)) return error.TypeError;
     const source_length = object.byteStorage().len;
     const start = try qjsRelativeSliceIndex(ctx, null, global, start_value, source_length, false);
     const end = try qjsRelativeSliceIndex(ctx, null, global, end_value, source_length, true);
@@ -1239,8 +1205,8 @@ pub fn qjsArrayBufferSlice(
     } else {
         if (out_object.class_id != core.class.ids.array_buffer) return error.TypeError;
     }
-    if (!shared and builtins.buffer.arrayBufferIsImmutable(ctx.runtime, out_object)) return error.TypeError;
-    if (builtins.object.sameValue(out_value, receiver)) return error.TypeError;
+    if (!shared and core.object.arrayBufferIsImmutable(ctx.runtime, out_object)) return error.TypeError;
+    if (out_value.sameValue(receiver)) return error.TypeError;
     if (out_object.arrayBufferDetached()) return error.TypeError;
     if (out_object.byteStorage().len < length) return error.TypeError;
     if (object.arrayBufferDetached() or object.byteStorage().len < start + length) return error.TypeError;
@@ -1277,7 +1243,7 @@ pub fn qjsArrayBufferSpeciesConstructor(
     }
     default_constructor.free(ctx.runtime);
     default_owned = false;
-    if (!isConstructorLike(ctx, species_value)) {
+    if (!(try isConstructorLike(ctx, species_value))) {
         species_value.free(ctx.runtime);
         return error.TypeError;
     }
@@ -1291,41 +1257,41 @@ pub fn qjsArrayBufferSliceToImmutable(
     start_value: core.JSValue,
     end_value: core.JSValue,
 ) !core.JSValue {
-    const global = ctx.global orelse return builtins.buffer.arrayBufferSliceToImmutable(ctx.runtime, receiver, start_value, end_value);
+    const global = ctx.global orelse return core.typed_array.arrayBufferSliceToImmutable(ctx.runtime, receiver, start_value, end_value);
     if (object.arrayBufferDetached()) return error.TypeError;
-    if (builtins.buffer.arrayBufferIsImmutable(ctx.runtime, object)) return error.TypeError;
+    if (core.object.arrayBufferIsImmutable(ctx.runtime, object)) return error.TypeError;
     const source_length = object.byteStorage().len;
     const start = try qjsRelativeSliceIndex(ctx, null, global, start_value, source_length, false);
     const end = try qjsRelativeSliceIndex(ctx, null, global, end_value, source_length, true);
-    return builtins.buffer.arrayBufferSliceToImmutableRange(ctx.runtime, receiver, start, end);
+    return core.typed_array.arrayBufferSliceToImmutableRange(ctx.runtime, receiver, start, end);
 }
 
 pub fn qjsArrayBufferResize(ctx: *core.JSContext, receiver: core.JSValue, new_length_value: core.JSValue) !core.JSValue {
     const object = objectFromValue(receiver) orelse return error.TypeError;
     if (object.class_id != core.class.ids.array_buffer) return error.TypeError;
-    if (builtins.buffer.arrayBufferIsImmutable(ctx.runtime, object)) return error.TypeError;
+    if (core.object.arrayBufferIsImmutable(ctx.runtime, object)) return error.TypeError;
     const new_length = try qjsArrayBufferLengthArgument(ctx, new_length_value, null);
     if (object.arrayBufferDetached()) return error.TypeError;
-    return builtins.buffer.arrayBufferResizeLength(ctx.runtime, receiver, new_length);
+    return core.typed_array.arrayBufferResizeLength(ctx.runtime, receiver, new_length);
 }
 
 pub fn qjsSharedArrayBufferGrow(ctx: *core.JSContext, receiver: core.JSValue, new_length_value: core.JSValue) !core.JSValue {
     const new_length = try qjsArrayBufferLengthArgument(ctx, new_length_value, null);
-    return builtins.buffer.sharedArrayBufferGrowLength(ctx.runtime, receiver, new_length);
+    return core.typed_array.sharedArrayBufferGrowLength(ctx.runtime, receiver, new_length);
 }
 
 pub fn qjsArrayBufferTransfer(ctx: *core.JSContext, receiver: core.JSValue, new_length_value: core.JSValue, fixed_length: bool) !core.JSValue {
     const object = objectFromValue(receiver) orelse return error.TypeError;
     const fallback = if (object.class_id == core.class.ids.array_buffer) object.byteStorage().len else @as(usize, 0);
     const new_length = try qjsArrayBufferLengthArgument(ctx, new_length_value, fallback);
-    return builtins.buffer.arrayBufferTransferLength(ctx.runtime, receiver, new_length, fixed_length);
+    return core.typed_array.arrayBufferTransferLength(ctx.runtime, receiver, new_length, fixed_length);
 }
 
 pub fn qjsArrayBufferTransferToImmutable(ctx: *core.JSContext, receiver: core.JSValue, new_length_value: core.JSValue) !core.JSValue {
     const object = objectFromValue(receiver) orelse return error.TypeError;
     if (object.class_id != core.class.ids.array_buffer) return error.TypeError;
     const new_length = try qjsArrayBufferLengthArgument(ctx, new_length_value, object.byteStorage().len);
-    return builtins.buffer.arrayBufferTransferToImmutableLength(ctx.runtime, receiver, new_length);
+    return core.typed_array.arrayBufferTransferToImmutableLength(ctx.runtime, receiver, new_length);
 }
 
 pub fn qjsArrayBufferLengthArgument(ctx: *core.JSContext, value: core.JSValue, undefined_length: ?usize) !usize {
@@ -1372,44 +1338,30 @@ pub fn qjsRelativeSliceIndex(
 pub fn qjsTypedArrayAccessor(ctx: *core.JSContext, receiver: core.JSValue, accessor: []const u8) !core.JSValue {
     if (std.mem.eql(u8, accessor, "[Symbol.toStringTag]")) {
         const object = objectFromValue(receiver) orelse return core.JSValue.undefinedValue();
-        if (!builtins.buffer.isTypedArrayObject(object)) return core.JSValue.undefinedValue();
+        if (!core.object.isTypedArrayObject(object)) return core.JSValue.undefinedValue();
         const name = typedArrayNameFromKind(object.typedArrayKind()) orelse return core.JSValue.undefinedValue();
         return value_ops.createStringValue(ctx.runtime, name);
     }
     const object = objectFromValue(receiver) orelse return error.TypeError;
-    if (!builtins.buffer.isTypedArrayObject(object)) return error.TypeError;
+    if (!core.object.isTypedArrayObject(object)) return error.TypeError;
     if (std.mem.eql(u8, accessor, "buffer")) {
         return (object.typedArrayBuffer() orelse return error.TypeError).dup();
     }
     if (std.mem.eql(u8, accessor, "byteLength")) {
-        const byte_length = try builtins.buffer.typedArrayByteLength(ctx.runtime, object);
+        const byte_length = try core.object.typedArrayByteLength(ctx.runtime, object);
         return lengthIndexValue(byte_length);
     }
     if (std.mem.eql(u8, accessor, "byteOffset")) {
-        return lengthIndexValue(try builtins.buffer.typedArrayByteOffset(object));
+        return lengthIndexValue(try core.object.typedArrayEffectiveByteOffset(object));
     }
     if (std.mem.eql(u8, accessor, "length")) {
-        return lengthIndexValue(@intCast(try builtins.buffer.typedArrayLength(ctx.runtime, object)));
+        return lengthIndexValue(@intCast(try core.object.typedArrayLength(ctx.runtime, object)));
     }
     return error.TypeError;
 }
 
 pub fn typedArrayNameFromKind(kind: u8) ?[]const u8 {
-    return switch (kind) {
-        1 => "Int8Array",
-        2 => "Uint8Array",
-        3 => "Uint8ClampedArray",
-        4 => "Int16Array",
-        5 => "Uint16Array",
-        6 => "Int32Array",
-        7 => "Uint32Array",
-        8 => "Float16Array",
-        9 => "Float32Array",
-        10 => "Float64Array",
-        11 => "BigInt64Array",
-        12 => "BigUint64Array",
-        else => null,
-    };
+    return core.typed_array_names.nameFromKind(kind);
 }
 
 pub fn qjsTypedArraySetCall(
@@ -1424,10 +1376,10 @@ pub fn qjsTypedArraySetCall(
 ) !?core.JSValue {
     const is_typed_method = isTypedArrayPrototypeMethod(ctx.runtime, function_object);
     const target = objectFromValue(receiver) orelse return if (is_typed_method) error.TypeError else null;
-    if (!builtins.buffer.isTypedArrayObject(target)) return if (is_typed_method) error.TypeError else null;
-    if (try builtins.buffer.typedArrayDetached(target)) return error.TypeError;
-    if (try builtins.buffer.typedArrayOutOfBounds(target)) return error.TypeError;
-    try builtins.buffer.typedArrayRejectImmutableBuffer(ctx.runtime, target);
+    if (!core.object.isTypedArrayObject(target)) return if (is_typed_method) error.TypeError else null;
+    if (try core.object.typedArrayDetached(target)) return error.TypeError;
+    if (try core.object.typedArrayOutOfBounds(target)) return error.TypeError;
+    try core.object.typedArrayRejectImmutableBuffer(ctx.runtime, target);
     const source = if (args.len >= 1) args[0] else return error.TypeError;
     const offset_value = if (args.len >= 2) args[1] else core.JSValue.int32(0);
     const offset_number = try toIntegerOrInfinityForArrayByCopy(ctx, output, global, offset_value);
@@ -1436,15 +1388,15 @@ pub fn qjsTypedArraySetCall(
     const offset: usize = @intFromFloat(offset_number);
 
     // Offset coercion can detach or resize either view, so revalidate after it runs.
-    if (try builtins.buffer.typedArrayDetached(target)) return error.TypeError;
-    if (try builtins.buffer.typedArrayOutOfBounds(target)) return error.TypeError;
-    const target_length: usize = @intCast(try builtins.buffer.typedArrayLength(ctx.runtime, target));
+    if (try core.object.typedArrayDetached(target)) return error.TypeError;
+    if (try core.object.typedArrayOutOfBounds(target)) return error.TypeError;
+    const target_length: usize = @intCast(try core.object.typedArrayLength(ctx.runtime, target));
 
     if (objectFromValue(source)) |source_object| {
-        if (builtins.buffer.isTypedArrayObject(source_object)) {
-            if (try builtins.buffer.typedArrayDetached(source_object)) return error.TypeError;
-            if (try builtins.buffer.typedArrayOutOfBounds(source_object)) return error.TypeError;
-            const source_length: usize = @intCast(try builtins.buffer.typedArrayLength(ctx.runtime, source_object));
+        if (core.object.isTypedArrayObject(source_object)) {
+            if (try core.object.typedArrayDetached(source_object)) return error.TypeError;
+            if (try core.object.typedArrayOutOfBounds(source_object)) return error.TypeError;
+            const source_length: usize = @intCast(try core.object.typedArrayLength(ctx.runtime, source_object));
             if (offset > target_length or source_length > target_length - offset) return error.RangeError;
 
             const values = try ctx.runtime.memory.alloc(core.JSValue, source_length);
@@ -1465,14 +1417,14 @@ pub fn qjsTypedArraySetCall(
 
             var snapshot_index: usize = 0;
             while (snapshot_index < source_length) : (snapshot_index += 1) {
-                values[snapshot_index] = try builtins.buffer.typedArrayGetIndex(ctx.runtime, source_object, @intCast(snapshot_index));
+                values[snapshot_index] = try core.typed_array.typedArrayGetIndex(ctx.runtime, source_object, @intCast(snapshot_index));
                 filled += 1;
                 rooted_values = values[0..filled];
             }
 
             var write_index: usize = 0;
             while (write_index < source_length) : (write_index += 1) {
-                _ = try builtins.buffer.typedArraySetIndex(ctx.runtime, target, @intCast(offset + write_index), values[write_index]);
+                _ = try core.typed_array.typedArraySetIndex(ctx.runtime, target, @intCast(offset + write_index), values[write_index]);
             }
             return core.JSValue.undefinedValue();
         }
@@ -1521,8 +1473,8 @@ test "qjsTypedArraySetCall roots typed array snapshot while reading source" {
     const second_big_object = try core.bigint.BigInt.create(rt, (@as(i128, 1) << 70) + 7);
     const second_big = second_big_object.valueRef();
     defer second_big.free(rt);
-    _ = try builtins.buffer.typedArraySetIndex(rt, source, 0, first_big);
-    _ = try builtins.buffer.typedArraySetIndex(rt, source, 1, second_big);
+    _ = try core.typed_array.typedArraySetIndex(rt, source, 0, first_big);
+    _ = try core.typed_array.typedArraySetIndex(rt, source, 1, second_big);
 
     const function_object = try core.Object.create(rt, core.class.ids.object, null);
     defer function_object.value().free(rt);
@@ -1546,7 +1498,7 @@ test "qjsTypedArraySetCall roots typed array snapshot while reading source" {
 
     try std.testing.expect(!probe.trace_failed);
     try std.testing.expect(probe.match_count >= 1);
-    const copied = try builtins.buffer.typedArrayGetIndex(rt, target, 1);
+    const copied = try core.typed_array.typedArrayGetIndex(rt, target, 1);
     defer copied.free(rt);
     try std.testing.expect(copied.isBigInt());
 }
@@ -1564,7 +1516,7 @@ pub fn qjsTypedArraySetElementValue(
     else
         value.dup();
     defer coerced.free(ctx.runtime);
-    _ = try builtins.buffer.typedArraySetIndex(ctx.runtime, target, @intCast(index), coerced);
+    _ = try core.typed_array.typedArraySetIndex(ctx.runtime, target, @intCast(index), coerced);
 }
 
 pub fn addCollectionEntriesFromArray(
@@ -1627,9 +1579,9 @@ pub fn qjsArrayForEachCall(
 ) !?core.JSValue {
     if (args.len < 1 or !isCallableValue(args[0])) return null;
     const object = property_ops.expectObject(receiver) catch return null;
-    if (!object.is_array) return null;
+    if (!object.flags.is_array) return null;
     const function_object = callableObjectFromValue(func) orelse return null;
-    if (!isArrayPrototypeRecord(function_object, @intFromEnum(builtins.array.PrototypeMethod.for_each))) {
+    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.for_each))) {
         const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
         defer ctx.runtime.memory.allocator.free(name);
         if (!std.mem.eql(u8, name, "forEach")) return null;
@@ -1657,7 +1609,7 @@ pub fn qjsArrayAtCall(
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
     const typed_array_method = isTypedArrayPrototypeMethod(ctx.runtime, function_object);
-    if (!isArrayPrototypeRecord(function_object, @intFromEnum(builtins.array.PrototypeMethod.at))) {
+    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.at))) {
         const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
         defer ctx.runtime.memory.allocator.free(name);
         if (!std.mem.eql(u8, name, "at")) return null;
@@ -1669,15 +1621,15 @@ pub fn qjsArrayAtCall(
     const receiver_object_value = if (objectFromValue(receiver)) |_| receiver.dup() else try primitiveObjectForAccess(ctx.runtime, global, receiver);
     defer receiver_object_value.free(ctx.runtime);
     const object = objectFromValue(receiver_object_value) orelse return null;
-    const is_typed_array = builtins.buffer.isTypedArrayObject(object);
+    const is_typed_array = core.object.isTypedArrayObject(object);
     if (typed_array_method) {
         if (!is_typed_array) return error.TypeError;
-        if (try builtins.buffer.typedArrayDetached(object)) return error.TypeError;
-        if (try builtins.buffer.typedArrayOutOfBounds(object)) return error.TypeError;
+        if (try core.object.typedArrayDetached(object)) return error.TypeError;
+        if (try core.object.typedArrayOutOfBounds(object)) return error.TypeError;
     }
     const length = if (is_typed_array)
-        @as(usize, @intCast(try builtins.buffer.typedArrayLength(ctx.runtime, object)))
-    else if (object.is_array)
+        @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)))
+    else if (object.flags.is_array)
         @as(usize, @intCast(object.length))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
@@ -1735,20 +1687,21 @@ pub fn qjsArrayIterationCall(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
-    if (collectionMethodOwnerClass(function_object)) |owner_class| {
-        if (owner_class == core.class.ids.map or owner_class == core.class.ids.set) return null;
+    const collection_owner_class = function_object.collectionMethodOwnerClass();
+    if (collection_owner_class != core.class.invalid_class_id) {
+        if (collection_owner_class == core.class.ids.map or collection_owner_class == core.class.ids.set) return null;
     }
     const mode: ArrayIterationMode = if (arrayPrototypeRecordId(function_object)) |record_id|
         switch (record_id) {
-            @intFromEnum(builtins.array.PrototypeMethod.for_each) => .for_each,
-            @intFromEnum(builtins.array.PrototypeMethod.map) => .map,
-            @intFromEnum(builtins.array.PrototypeMethod.filter) => .filter,
-            @intFromEnum(builtins.array.PrototypeMethod.some) => .some,
-            @intFromEnum(builtins.array.PrototypeMethod.every) => .every,
-            @intFromEnum(builtins.array.PrototypeMethod.find) => .find,
-            @intFromEnum(builtins.array.PrototypeMethod.find_index) => .find_index,
-            @intFromEnum(builtins.array.PrototypeMethod.find_last) => .find_last,
-            @intFromEnum(builtins.array.PrototypeMethod.find_last_index) => .find_last_index,
+            @intFromEnum(method_ids.array.PrototypeMethod.for_each) => .for_each,
+            @intFromEnum(method_ids.array.PrototypeMethod.map) => .map,
+            @intFromEnum(method_ids.array.PrototypeMethod.filter) => .filter,
+            @intFromEnum(method_ids.array.PrototypeMethod.some) => .some,
+            @intFromEnum(method_ids.array.PrototypeMethod.every) => .every,
+            @intFromEnum(method_ids.array.PrototypeMethod.find) => .find,
+            @intFromEnum(method_ids.array.PrototypeMethod.find_index) => .find_index,
+            @intFromEnum(method_ids.array.PrototypeMethod.find_last) => .find_last,
+            @intFromEnum(method_ids.array.PrototypeMethod.find_last_index) => .find_last_index,
             else => return null,
         }
     else blk: {
@@ -1776,15 +1729,20 @@ pub fn qjsArrayIterationCall(
             return null;
     };
 
-    const receiver_object_value = if (objectFromValue(receiver)) |_| receiver.dup() else try primitiveObjectForAccess(ctx.runtime, global, receiver);
+    const receiver_object_value = if (objectFromValue(receiver)) |_|
+        receiver.dup()
+    else if (receiver.isNull() or receiver.isUndefined())
+        return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "Cannot convert undefined or null to object"))
+    else
+        try primitiveObjectForAccess(ctx.runtime, global, receiver);
     defer receiver_object_value.free(ctx.runtime);
     const object = objectFromValue(receiver_object_value) orelse return null;
     const is_typed_method = isTypedArrayPrototypeMethod(ctx.runtime, function_object);
-    if (is_typed_method and !builtins.buffer.isTypedArrayObject(object)) return error.TypeError;
-    const is_typed_array = builtins.buffer.isTypedArrayObject(object);
+    if (is_typed_method and !core.object.isTypedArrayObject(object)) return error.TypeError;
+    const is_typed_array = core.object.isTypedArrayObject(object);
     const length = if (is_typed_array)
         try arrayMethodTypedArrayLength(ctx.runtime, object, is_typed_method)
-    else if (object.is_array)
+    else if (object.flags.is_array)
         @as(usize, @intCast(object.length))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, caller_function, caller_frame);
@@ -1827,8 +1785,8 @@ pub fn qjsArrayIterationCall(
                 const current_length = try arrayMethodTypedArrayLength(ctx.runtime, object, false);
                 if (index >= current_length) continue;
             }
-            break :blk try builtins.buffer.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
-        } else if (object.is_array and object.arrayElementStorageMode() == .dense and index <= std.math.maxInt(u32)) blk: {
+            break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
+        } else if (object.flags.is_array and object.arrayElementStorageMode() == .dense and index <= std.math.maxInt(u32)) blk: {
             if (object.getDenseArrayElementValue(@intCast(index))) |dense_item| break :blk dense_item;
             const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
             defer key.deinit(ctx.runtime);
@@ -1904,7 +1862,7 @@ pub fn qjsDenseArrayMapSimpleNumericArg0(
     out_value: core.JSValue,
     out: *core.Object,
 ) !?core.JSValue {
-    if (!source.is_array or source.arrayElementStorageMode() != .dense) return null;
+    if (!source.flags.is_array or source.arrayElementStorageMode() != .dense) return null;
     if (length > std.math.maxInt(u32)) return null;
     const elements = source.arrayElements();
     if (length > elements.len) return null;
@@ -1932,7 +1890,7 @@ pub fn qjsArrayMapSimpleNumericArg0DefaultSpeciesFastCall(
     callback: core.JSValue,
 ) !?core.JSValue {
     const source = objectFromValue(receiver) orelse return null;
-    if (!source.is_array or source.proxyTarget() != null or source.exotic != null) return null;
+    if (!source.flags.is_array or source.proxyTarget() != null or source.exotic != null) return null;
     if (source.arrayElementStorageMode() != .dense) return null;
     const length: usize = @intCast(source.length);
     if (length > std.math.maxInt(u32)) return null;
@@ -1979,11 +1937,11 @@ pub fn qjsTypedArrayMapFilter(
         const out = objectFromValue(out_value) orelse return error.TypeError;
         var index: usize = 0;
         while (index < length) : (index += 1) {
-            const item = try builtins.buffer.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
+            const item = try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
             defer item.free(ctx.runtime);
             const mapped = try callValueOrBytecode(ctx, output, global, callback_this, callback, &.{ item, lengthIndexValue(index), receiver_value }, caller_function, caller_frame);
             defer mapped.free(ctx.runtime);
-            _ = try builtins.buffer.typedArraySetIndex(ctx.runtime, out, @intCast(index), mapped);
+            _ = try core.typed_array.typedArraySetIndex(ctx.runtime, out, @intCast(index), mapped);
         }
         return out_value;
     }
@@ -2012,7 +1970,7 @@ pub fn qjsTypedArrayMapFilter(
     }
     var index: usize = 0;
     while (index < length) : (index += 1) {
-        const item = try builtins.buffer.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
+        const item = try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
         const selected = try callValueOrBytecode(ctx, output, global, callback_this, callback, &.{ item, lengthIndexValue(index), receiver_value }, caller_function, caller_frame);
         defer selected.free(ctx.runtime);
         if (valueTruthy(selected)) {
@@ -2031,7 +1989,7 @@ pub fn qjsTypedArrayMapFilter(
     const out = objectFromValue(out_value) orelse return error.TypeError;
     index = 0;
     while (index < kept_count) : (index += 1) {
-        _ = try builtins.buffer.typedArraySetIndex(ctx.runtime, out, @intCast(index), kept[index]);
+        _ = try core.typed_array.typedArraySetIndex(ctx.runtime, out, @intCast(index), kept[index]);
         kept[index].free(ctx.runtime);
         kept[index] = core.JSValue.undefinedValue();
     }
@@ -2052,9 +2010,9 @@ pub fn qjsTypedArrayCreateWithLength(
     const out_value = try constructValueOrBytecode(ctx, output, global, constructor_value, &.{lengthIndexValue(requested_length)}, caller_function, caller_frame);
     errdefer out_value.free(ctx.runtime);
     const out = objectFromValue(out_value) orelse return error.TypeError;
-    if (!builtins.buffer.isTypedArrayObject(out)) return error.TypeError;
-    if (@as(usize, @intCast(try builtins.buffer.typedArrayLength(ctx.runtime, out))) < requested_length) return error.TypeError;
-    try builtins.buffer.typedArrayRejectImmutableBuffer(ctx.runtime, out);
+    if (!core.object.isTypedArrayObject(out)) return error.TypeError;
+    if (@as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, out))) < requested_length) return error.TypeError;
+    try core.object.typedArrayRejectImmutableBuffer(ctx.runtime, out);
     return out_value;
 }
 
@@ -2069,9 +2027,9 @@ pub fn qjsArrayReduceCall(
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
     const expected_id = if (from_right)
-        @intFromEnum(builtins.array.PrototypeMethod.reduce_right)
+        @intFromEnum(method_ids.array.PrototypeMethod.reduce_right)
     else
-        @intFromEnum(builtins.array.PrototypeMethod.reduce);
+        @intFromEnum(method_ids.array.PrototypeMethod.reduce);
     if (!isArrayPrototypeRecord(function_object, expected_id)) {
         const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
         defer ctx.runtime.memory.allocator.free(name);
@@ -2084,12 +2042,12 @@ pub fn qjsArrayReduceCall(
     const receiver_object_value = if (objectFromValue(receiver)) |_| receiver.dup() else try primitiveObjectForAccess(ctx.runtime, global, receiver);
     defer receiver_object_value.free(ctx.runtime);
     const object = objectFromValue(receiver_object_value) orelse return null;
-    const is_typed_array = builtins.buffer.isTypedArrayObject(object);
+    const is_typed_array = core.object.isTypedArrayObject(object);
     const is_typed_method = isTypedArrayPrototypeMethod(ctx.runtime, function_object);
     if (is_typed_method and !is_typed_array) return error.TypeError;
     const length = if (is_typed_array)
         try arrayMethodTypedArrayLength(ctx.runtime, object, is_typed_method)
-    else if (object.is_array)
+    else if (object.flags.is_array)
         @as(usize, @intCast(object.length))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
@@ -2115,8 +2073,8 @@ pub fn qjsArrayReduceCall(
         while (cursor > 0) {
             cursor -= 1;
             const item = if (is_typed_array) blk: {
-                if (!is_typed_method and !try builtins.buffer.typedArrayIndexValid(ctx.runtime, object, @intCast(cursor))) continue;
-                break :blk try builtins.buffer.typedArrayGetIndex(ctx.runtime, object, @intCast(cursor));
+                if (!is_typed_method and !try core.object.typedArrayIndexValid(ctx.runtime, object, @intCast(cursor))) continue;
+                break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(cursor));
             } else blk: {
                 const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
                 defer key.deinit(ctx.runtime);
@@ -2138,8 +2096,8 @@ pub fn qjsArrayReduceCall(
         var cursor: usize = 0;
         while (cursor < length) : (cursor += 1) {
             const item = if (is_typed_array) blk: {
-                if (!is_typed_method and !try builtins.buffer.typedArrayIndexValid(ctx.runtime, object, @intCast(cursor))) continue;
-                break :blk try builtins.buffer.typedArrayGetIndex(ctx.runtime, object, @intCast(cursor));
+                if (!is_typed_method and !try core.object.typedArrayIndexValid(ctx.runtime, object, @intCast(cursor))) continue;
+                break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(cursor));
             } else blk: {
                 const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
                 defer key.deinit(ctx.runtime);
@@ -2212,12 +2170,12 @@ pub fn qjsArrayReduceRightSparseLarge(
 }
 
 pub fn arrayMethodTypedArrayLength(rt: *core.JSRuntime, object: *core.Object, is_typed_method: bool) !usize {
-    if (try builtins.buffer.typedArrayDetached(object)) return error.TypeError;
-    if (try builtins.buffer.typedArrayOutOfBounds(object)) {
+    if (try core.object.typedArrayDetached(object)) return error.TypeError;
+    if (try core.object.typedArrayOutOfBounds(object)) {
         if (is_typed_method) return error.TypeError;
         return 0;
     }
-    return @intCast(try builtins.buffer.typedArrayLength(rt, object));
+    return @intCast(try core.object.typedArrayLength(rt, object));
 }
 
 pub fn qjsArrayLastIndexSparseLarge(
@@ -2302,7 +2260,7 @@ pub fn qjsArraySliceCall(
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
     if (getStringPrototypeMethodId(ctx.runtime, function_object) != null) return null;
-    if (!isArrayPrototypeRecord(function_object, @intFromEnum(builtins.array.PrototypeMethod.slice))) {
+    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.slice))) {
         const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
         defer ctx.runtime.memory.allocator.free(name);
         if (!std.mem.eql(u8, name, "slice")) return null;
@@ -2315,15 +2273,15 @@ pub fn qjsArraySliceCall(
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return null;
     if (!primitive_non_string_receiver and
-        !object.is_array and
-        !object.is_proxy and
+        !object.flags.is_array and
+        !object.flags.is_proxy and
         object.class_id != core.class.ids.object and
         object.class_id != core.class.ids.arguments and
         object.class_id != core.class.ids.mapped_arguments and
-        !builtins.buffer.isTypedArrayObject(object)) return null;
+        !core.object.isTypedArrayObject(object)) return null;
     const length = if (primitive_non_string_receiver)
         0
-    else if (object.is_array and !object.is_proxy)
+    else if (object.flags.is_array and !object.flags.is_proxy)
         @as(usize, @intCast(object.length))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
@@ -2380,9 +2338,9 @@ pub fn qjsTypedArraySliceSubarrayCall(
     if (!is_slice and !is_subarray) return null;
     const is_typed_method = isTypedArrayPrototypeMethod(ctx.runtime, function_object);
     const object = objectFromValue(receiver) orelse return if (is_typed_method) error.TypeError else null;
-    if (!builtins.buffer.isTypedArrayObject(object)) return if (is_typed_method) error.TypeError else null;
-    if (is_slice and (try builtins.buffer.typedArrayDetached(object) or try builtins.buffer.typedArrayOutOfBounds(object))) return error.TypeError;
-    const length = @as(usize, @intCast(try builtins.buffer.typedArrayLength(ctx.runtime, object)));
+    if (!core.object.isTypedArrayObject(object)) return if (is_typed_method) error.TypeError else null;
+    if (is_slice and (try core.object.typedArrayDetached(object) or try core.object.typedArrayOutOfBounds(object))) return error.TypeError;
+    const length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
     const start = try arrayRelativeIndex(ctx, output, global, args, 0, length, 0);
     const end = if (args.len >= 2 and !args[1].isUndefined())
         try arrayRelativeIndex(ctx, output, global, args, 1, length, length)
@@ -2414,20 +2372,20 @@ pub fn qjsTypedArraySliceSubarrayCall(
     } else try qjsTypedArrayCreateWithLength(ctx, output, global, constructor_value, count, null, null);
     errdefer result.free(ctx.runtime);
     const result_object = objectFromValue(result) orelse return error.TypeError;
-    if (!builtins.buffer.isTypedArrayObject(result_object)) return error.TypeError;
+    if (!core.object.isTypedArrayObject(result_object)) return error.TypeError;
 
     if (is_slice and count > 0) {
-        if (try builtins.buffer.typedArrayDetached(object) or try builtins.buffer.typedArrayOutOfBounds(object)) return error.TypeError;
-        const current_length = @as(usize, @intCast(try builtins.buffer.typedArrayLength(ctx.runtime, object)));
+        if (try core.object.typedArrayDetached(object) or try core.object.typedArrayOutOfBounds(object)) return error.TypeError;
+        const current_length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
         const copy_count = if (current_length > start)
             @min(count, current_length - start)
         else
             0;
         var index: usize = 0;
         while (index < copy_count) : (index += 1) {
-            const item = try builtins.buffer.typedArrayGetIndex(ctx.runtime, object, @intCast(start + index));
+            const item = try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(start + index));
             defer item.free(ctx.runtime);
-            _ = try builtins.buffer.typedArraySetIndex(ctx.runtime, result_object, @intCast(index), item);
+            _ = try core.typed_array.typedArraySetIndex(ctx.runtime, result_object, @intCast(index), item);
         }
     }
     return result;
@@ -2479,7 +2437,7 @@ pub fn qjsArraySpliceCall(
     args: []const core.JSValue,
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
-    if (!isArrayPrototypeRecord(function_object, @intFromEnum(builtins.array.PrototypeMethod.splice))) {
+    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.splice))) {
         const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
         defer ctx.runtime.memory.allocator.free(name);
         if (!std.mem.eql(u8, name, "splice")) return null;
@@ -2492,12 +2450,12 @@ pub fn qjsArraySpliceCall(
     var verify_own_length_write = false;
     if (object.getOwnProperty(core.atom.ids.length)) |length_desc| {
         defer length_desc.destroy(ctx.runtime);
-        verify_own_length_write = !object.is_array;
+        verify_own_length_write = !object.flags.is_array;
         if (length_desc.kind == .accessor and length_desc.setter.isUndefined()) return null;
         if (length_desc.kind == .generic) return null;
-        if (length_desc.kind == .data and !object.is_array and isCallableValue(length_desc.value)) return null;
+        if (length_desc.kind == .data and !object.flags.is_array and isCallableValue(length_desc.value)) return null;
     }
-    const length = if (object.is_array)
+    const length = if (object.flags.is_array)
         @as(usize, @intCast(object.length))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
@@ -2617,7 +2575,7 @@ pub fn qjsArrayCopyWithinCall(
     args: []const core.JSValue,
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
-    if (!isArrayPrototypeRecord(function_object, @intFromEnum(builtins.array.PrototypeMethod.copy_within))) {
+    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.copy_within))) {
         const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
         defer ctx.runtime.memory.allocator.free(name);
         if (!std.mem.eql(u8, name, "copyWithin")) return null;
@@ -2626,11 +2584,11 @@ pub fn qjsArrayCopyWithinCall(
 
     if (is_typed_method) {
         const object = objectFromValue(receiver) orelse return error.TypeError;
-        if (!builtins.buffer.isTypedArrayObject(object)) return error.TypeError;
-        if (try builtins.buffer.typedArrayDetached(object)) return error.TypeError;
-        if (try builtins.buffer.typedArrayOutOfBounds(object)) return error.TypeError;
-        try builtins.buffer.typedArrayRejectImmutableBuffer(ctx.runtime, object);
-        const initial_length = @as(usize, @intCast(try builtins.buffer.typedArrayLength(ctx.runtime, object)));
+        if (!core.object.isTypedArrayObject(object)) return error.TypeError;
+        if (try core.object.typedArrayDetached(object)) return error.TypeError;
+        if (try core.object.typedArrayOutOfBounds(object)) return error.TypeError;
+        try core.object.typedArrayRejectImmutableBuffer(ctx.runtime, object);
+        const initial_length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
 
         const target_number = if (args.len >= 1)
             try toIntegerOrInfinityForArrayByCopy(ctx, output, global, args[0])
@@ -2645,10 +2603,10 @@ pub fn qjsArrayCopyWithinCall(
         else
             null;
 
-        if (try builtins.buffer.typedArrayDetached(object)) return error.TypeError;
-        if (try builtins.buffer.typedArrayOutOfBounds(object)) return error.TypeError;
+        if (try core.object.typedArrayDetached(object)) return error.TypeError;
+        if (try core.object.typedArrayOutOfBounds(object)) return error.TypeError;
 
-        const current_length = @as(usize, @intCast(try builtins.buffer.typedArrayLength(ctx.runtime, object)));
+        const current_length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
         const length = @min(initial_length, current_length);
         const to_start = arrayRelativeIndexFromNumber(length, target_number, 0);
         const from_start = arrayRelativeIndexFromNumber(length, start_number, 0);
@@ -2679,9 +2637,9 @@ pub fn qjsArrayCopyWithinCall(
     defer receiver_object_value.free(ctx.runtime);
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return null;
-    const length = if (builtins.buffer.isTypedArrayObject(object))
+    const length = if (core.object.isTypedArrayObject(object))
         try arrayMethodTypedArrayLength(ctx.runtime, object, false)
-    else if (object.is_array)
+    else if (object.flags.is_array)
         @as(usize, @intCast(object.length))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
@@ -2740,7 +2698,7 @@ pub fn qjsArrayFillCall(
     args: []const core.JSValue,
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
-    if (!isArrayPrototypeRecord(function_object, @intFromEnum(builtins.array.PrototypeMethod.fill))) {
+    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.fill))) {
         const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
         defer ctx.runtime.memory.allocator.free(name);
         if (!std.mem.eql(u8, name, "fill")) return null;
@@ -2754,11 +2712,11 @@ pub fn qjsArrayFillCall(
     if (object.class_id == core.class.ids.string) return if (is_typed_method) error.TypeError else null;
 
     if (is_typed_method) {
-        if (!builtins.buffer.isTypedArrayObject(object)) return error.TypeError;
-        if (try builtins.buffer.typedArrayDetached(object) or try builtins.buffer.typedArrayOutOfBounds(object)) return error.TypeError;
-        try builtins.buffer.typedArrayRejectImmutableBuffer(ctx.runtime, object);
+        if (!core.object.isTypedArrayObject(object)) return error.TypeError;
+        if (try core.object.typedArrayDetached(object) or try core.object.typedArrayOutOfBounds(object)) return error.TypeError;
+        try core.object.typedArrayRejectImmutableBuffer(ctx.runtime, object);
 
-        const initial_length = @as(usize, @intCast(try builtins.buffer.typedArrayLength(ctx.runtime, object)));
+        const initial_length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
         const raw_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const value = try qjsTypedArrayByCopyCoerceValue(ctx, output, global, object, raw_value);
         defer value.free(ctx.runtime);
@@ -2769,20 +2727,20 @@ pub fn qjsArrayFillCall(
         else
             initial_length;
 
-        if (try builtins.buffer.typedArrayDetached(object) or try builtins.buffer.typedArrayOutOfBounds(object)) return error.TypeError;
+        if (try core.object.typedArrayDetached(object) or try core.object.typedArrayOutOfBounds(object)) return error.TypeError;
 
-        const current_length = @as(usize, @intCast(try builtins.buffer.typedArrayLength(ctx.runtime, object)));
+        const current_length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
         const capped_final = @min(final, current_length);
         var index = start;
         while (index < capped_final) : (index += 1) {
-            _ = try builtins.buffer.typedArraySetIndex(ctx.runtime, object, @intCast(index), value);
+            _ = try core.typed_array.typedArraySetIndex(ctx.runtime, object, @intCast(index), value);
         }
         return receiver_object_value.dup();
     }
 
-    const length = if (builtins.buffer.isTypedArrayObject(object))
+    const length = if (core.object.isTypedArrayObject(object))
         try arrayMethodTypedArrayLength(ctx.runtime, object, false)
-    else if (object.is_array)
+    else if (object.flags.is_array)
         @as(usize, @intCast(object.length))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
@@ -2796,14 +2754,14 @@ pub fn qjsArrayFillCall(
     else
         length;
     const raw_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const value = if (builtins.buffer.isTypedArrayObject(object) and object.typedArrayKind() != 11 and object.typedArrayKind() != 12) blk: {
+    const value = if (core.object.isTypedArrayObject(object) and object.typedArrayKind() != 11 and object.typedArrayKind() != 12) blk: {
         const primitive = try toPrimitiveForNumber(ctx, output, global, raw_value);
         defer primitive.free(ctx.runtime);
         break :blk try value_ops.toNumberValue(ctx.runtime, primitive);
     } else raw_value.dup();
     defer value.free(ctx.runtime);
 
-    if (object.is_array and object.exotic == null and object.proxyTarget() == null and object.arrayElementStorageMode() == .dense and object.extensible and arrayPrototypeChainHasNoIndexedProperties(object)) {
+    if (object.flags.is_array and object.exotic == null and object.proxyTarget() == null and object.arrayElementStorageMode() == .dense and object.flags.extensible and arrayPrototypeChainHasNoIndexedProperties(object)) {
         if (final <= @as(usize, @intCast(std.math.maxInt(u32))) + 1) {
             var dense_index = start;
             if (object.canDefineDenseArrayDataPropertiesUnchecked()) {
@@ -2843,7 +2801,7 @@ pub fn arrayPrototypeChainHasNoIndexedProperties(object: *core.Object) bool {
     var cursor = object.getPrototype();
     while (cursor) |candidate| {
         if (candidate.proxyTarget() != null or candidate.exotic != null) return false;
-        if (candidate.may_have_indexed_properties) return false;
+        if (candidate.flags.may_have_indexed_properties) return false;
         cursor = candidate.getPrototype();
     }
     return true;
@@ -2860,12 +2818,24 @@ pub fn qjsArrayPushCall(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
-    if (!isArrayPrototypeRecord(function_object, @intFromEnum(builtins.array.PrototypeMethod.push))) {
+    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.push))) {
         const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
         defer ctx.runtime.memory.allocator.free(name);
         if (!std.mem.eql(u8, name, "push")) return null;
     }
 
+    return qjsArrayPushCallImpl(ctx, output, global, receiver, args, caller_function, caller_frame);
+}
+
+fn qjsArrayPushCallImpl(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
     if (receiver.isNull() or receiver.isUndefined()) {
         return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "Cannot convert undefined or null to object"));
     }
@@ -2873,7 +2843,7 @@ pub fn qjsArrayPushCall(
     defer receiver_object_value.free(ctx.runtime);
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return error.TypeError;
-    if (args.len == 1 and objectFromValue(receiver) == object and object.is_array and object.exotic == null and object.length < core.array.max_array_length) {
+    if (args.len == 1 and objectFromValue(receiver) == object and object.flags.is_array and object.exotic == null and object.length < core.array.max_array_length) {
         const index = object.length;
         if (try object.appendDenseArrayIndex(ctx.runtime, index, core.atom.atomFromUInt32(index), args[0])) {
             return lengthIndexValue(index + 1);
@@ -2911,16 +2881,28 @@ pub fn qjsArrayPopCall(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
-    if (!isArrayPrototypeRecord(function_object, @intFromEnum(builtins.array.PrototypeMethod.pop))) {
+    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.pop))) {
         const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
         defer ctx.runtime.memory.allocator.free(name);
         if (!std.mem.eql(u8, name, "pop")) return null;
     }
 
+    return qjsArrayPopCallImpl(ctx, output, global, receiver, caller_function, caller_frame);
+}
+
+fn qjsArrayPopCallImpl(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
     const receiver_object_value = if (objectFromValue(receiver)) |_| receiver.dup() else try primitiveObjectForAccess(ctx.runtime, global, receiver);
     defer receiver_object_value.free(ctx.runtime);
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return error.TypeError;
+    if (qjsFastDenseArrayPop(object)) |value| return value;
     const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, caller_function, caller_frame);
     defer length_value.free(ctx.runtime);
     const length = try toLengthIndex(ctx, output, global, length_value);
@@ -2945,6 +2927,53 @@ pub fn qjsArrayPopCall(
     return value;
 }
 
+fn qjsFastDenseArrayPop(object: *core.Object) ?core.JSValue {
+    if (!object.flags.is_array or !object.flags.length_writable) return null;
+    if (object.proxyTarget() != null or object.exotic != null or object.arrayElementStorageMode() != .dense) return null;
+    if (object.length == 0) return null;
+
+    const index = object.length - 1;
+    const atom_id = core.atom.atomFromUInt32(index);
+    if (object.properties.len != 0 and object.findProperty(atom_id) != null) return null;
+
+    const element_index: usize = @intCast(index);
+    const elements = object.arrayElementsSlot();
+    if (element_index >= elements.*.len) {
+        if (!arrayPrototypeChainHasNoIndexedProperties(object)) return null;
+        object.length = index;
+        return core.JSValue.undefinedValue();
+    }
+
+    const value = elements.*[element_index] orelse {
+        if (!arrayPrototypeChainHasNoIndexedProperties(object)) return null;
+        elements.* = elements.*.ptr[0..element_index];
+        object.length = index;
+        return core.JSValue.undefinedValue();
+    };
+
+    elements.*[element_index] = null;
+    elements.* = elements.*.ptr[0..element_index];
+    object.length = index;
+    return value;
+}
+
+pub fn qjsFastDensePrimitiveArrayPop(object: *core.Object) ?core.JSValue {
+    if (!object.flags.is_array or !object.flags.length_writable) return null;
+    if (object.exotic != null or object.arrayElementStorageMode() != .dense) return null;
+    if (object.properties.len != 0) return null;
+    if (object.length == 0) return null;
+
+    const index = object.length - 1;
+    const elements = object.arrayElementsSlot();
+    if (index >= elements.*.len) return null;
+    const value = elements.*[@intCast(index)] orelse return null;
+    if (!qjsCanFastJoinPrimitive(value)) return null;
+
+    elements.*[@intCast(index)] = null;
+    object.length = index;
+    return value;
+}
+
 pub fn qjsArrayShiftCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2953,7 +2982,7 @@ pub fn qjsArrayShiftCall(
     func: core.JSValue,
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
-    if (!isArrayPrototypeRecord(function_object, @intFromEnum(builtins.array.PrototypeMethod.shift))) {
+    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.shift))) {
         const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
         defer ctx.runtime.memory.allocator.free(name);
         if (!std.mem.eql(u8, name, "shift")) return null;
@@ -2963,7 +2992,7 @@ pub fn qjsArrayShiftCall(
     defer receiver_object_value.free(ctx.runtime);
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return error.TypeError;
-    const length = if (object.is_array)
+    const length = if (object.flags.is_array)
         @as(usize, @intCast(object.length))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
@@ -3017,7 +3046,7 @@ pub fn qjsArrayUnshiftCall(
     args: []const core.JSValue,
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
-    if (!isArrayPrototypeRecord(function_object, @intFromEnum(builtins.array.PrototypeMethod.unshift))) {
+    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.unshift))) {
         const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
         defer ctx.runtime.memory.allocator.free(name);
         if (!std.mem.eql(u8, name, "unshift")) return null;
@@ -3028,7 +3057,7 @@ pub fn qjsArrayUnshiftCall(
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return error.TypeError;
 
-    const length = if (object.is_array)
+    const length = if (object.flags.is_array)
         @as(usize, @intCast(object.length))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
@@ -3077,7 +3106,7 @@ pub fn qjsArrayReverseCall(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
-    if (!isArrayPrototypeRecord(function_object, @intFromEnum(builtins.array.PrototypeMethod.reverse))) {
+    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.reverse))) {
         const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
         defer ctx.runtime.memory.allocator.free(name);
         if (!std.mem.eql(u8, name, "reverse")) return null;
@@ -3088,26 +3117,26 @@ pub fn qjsArrayReverseCall(
     errdefer receiver_object_value.free(ctx.runtime);
     const object = objectFromValue(receiver_object_value) orelse return error.TypeError;
     const is_typed_method = isTypedArrayPrototypeMethod(ctx.runtime, function_object);
-    if (is_typed_method and !builtins.buffer.isTypedArrayObject(object)) return error.TypeError;
+    if (is_typed_method and !core.object.isTypedArrayObject(object)) return error.TypeError;
     if (is_typed_method) {
-        if (try builtins.buffer.typedArrayDetached(object) or try builtins.buffer.typedArrayOutOfBounds(object)) return error.TypeError;
-        try builtins.buffer.typedArrayRejectImmutableBuffer(ctx.runtime, object);
-        const length = @as(usize, @intCast(try builtins.buffer.typedArrayLength(ctx.runtime, object)));
+        if (try core.object.typedArrayDetached(object) or try core.object.typedArrayOutOfBounds(object)) return error.TypeError;
+        try core.object.typedArrayRejectImmutableBuffer(ctx.runtime, object);
+        const length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
         var lower: usize = 0;
         while (lower < length / 2) : (lower += 1) {
             const upper = length - lower - 1;
-            const lower_value = try builtins.buffer.typedArrayGetIndex(ctx.runtime, object, @intCast(lower));
+            const lower_value = try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(lower));
             defer lower_value.free(ctx.runtime);
-            const upper_value = try builtins.buffer.typedArrayGetIndex(ctx.runtime, object, @intCast(upper));
+            const upper_value = try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(upper));
             defer upper_value.free(ctx.runtime);
-            _ = try builtins.buffer.typedArraySetIndex(ctx.runtime, object, @intCast(lower), upper_value);
-            _ = try builtins.buffer.typedArraySetIndex(ctx.runtime, object, @intCast(upper), lower_value);
+            _ = try core.typed_array.typedArraySetIndex(ctx.runtime, object, @intCast(lower), upper_value);
+            _ = try core.typed_array.typedArraySetIndex(ctx.runtime, object, @intCast(upper), lower_value);
         }
         return receiver_object_value;
     }
-    const length = if (builtins.buffer.isTypedArrayObject(object))
+    const length = if (core.object.isTypedArrayObject(object))
         try arrayMethodTypedArrayLength(ctx.runtime, object, false)
-    else if (object.is_array)
+    else if (object.flags.is_array)
         @as(usize, @intCast(object.length))
     else if (!receiver.isObject() and !receiver.isString())
         @as(usize, 0)
@@ -3334,7 +3363,7 @@ pub fn arraySpeciesCreate(
 }
 
 pub fn defaultArraySpeciesCreate(rt: *core.JSRuntime, global: *core.Object, original: *core.Object, length: usize) !?core.JSValue {
-    if (!original.is_array or original.proxyTarget() != null) return null;
+    if (!original.flags.is_array or original.proxyTarget() != null) return null;
     if (original.getOwnProperty(core.atom.ids.constructor)) |desc| {
         desc.destroy(rt);
         return null;
@@ -3378,8 +3407,8 @@ pub fn arrayConstructorFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*c
 }
 
 pub fn arraySpeciesOriginalIsArray(object: *core.Object) !bool {
-    if (object.is_array) return true;
-    if (!object.is_proxy) return false;
+    if (object.flags.is_array) return true;
+    if (!object.flags.is_proxy) return false;
     const target_value = object.proxyTarget() orelse return error.TypeError;
     const handler_value = object.proxyHandler() orelse return error.TypeError;
     _ = handler_value;
@@ -3415,7 +3444,7 @@ pub fn qjsArrayFromCall(
         if (method_id != 1) return null;
         return try qjsTypedArrayFromStaticCall(ctx, output, global, constructor_value, args, caller_function, caller_frame);
     }
-    if (!isArrayStaticRecord(function_object, @intFromEnum(builtins.array.StaticMethod.from))) {
+    if (!isArrayStaticRecord(function_object, @intFromEnum(method_ids.array.StaticMethod.from))) {
         const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
         defer ctx.runtime.memory.allocator.free(name);
         if (!std.mem.eql(u8, name, "from")) return null;
@@ -3430,7 +3459,7 @@ pub fn qjsArrayFromCall(
     const source = args[0];
     if (typedArrayConstructorObject(constructor_value) != null) {
         if (objectFromValue(source)) |source_object| {
-            if (source_object.is_array) {
+            if (source_object.flags.is_array) {
                 return try qjsArrayFromArrayLike(ctx, output, global, constructor_value, source_object.value(), source_object.length, map_fn, this_arg, caller_function, caller_frame);
             }
         }
@@ -3448,11 +3477,18 @@ pub fn qjsArrayFromCall(
         if (source_object.class_id == core.class.ids.generator or source_object.class_id == core.class.ids.async_generator) {
             return try qjsArrayFromIteratorLike(ctx, output, global, constructor_value, source, map_fn, this_arg, caller_function, caller_frame);
         }
-        if (source_object.is_array) {
+        if (source_object.flags.is_array) {
             return try qjsArrayFromArrayLike(ctx, output, global, constructor_value, source_object.value(), null, map_fn, this_arg, caller_function, caller_frame);
         }
         if (source_object.class_id == core.class.ids.set or source_object.class_id == core.class.ids.map) {
-            const iterator = try builtins.collection.methodCall(ctx.runtime, source_object.value(), if (source_object.class_id == core.class.ids.set) 8 else 9, &.{});
+            // Drain the Map/Set through its values/entries iterator. Route the
+            // collection method body through the record table with no function
+            // object and `global == null`, reproducing the bare primitive
+            // iterator the retired `builtins.collection.methodCall` produced
+            // (ctx-less, fresh iterator prototype) so exec carries no
+            // compile-time knowledge of the builtin.
+            const collection_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = if (source_object.class_id == core.class.ids.set) 8 else 9 };
+            const iterator = (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, source_object.value(), collection_ref, &.{}, null, null)) orelse return error.TypeError;
             defer iterator.free(ctx.runtime);
             return try qjsArrayFromIteratorLike(ctx, output, global, constructor_value, iterator, map_fn, this_arg, caller_function, caller_frame);
         }
@@ -3489,7 +3525,7 @@ pub fn qjsArrayFromCall(
         }
         try qjsCreateArrayDataOrTypedArrayElement(ctx.runtime, out, key, item);
     }
-    if (!builtins.buffer.isTypedArrayObject(out)) {
+    if (!core.object.isTypedArrayObject(out)) {
         const set_result = try setValueProperty(ctx, output, global, out.value(), core.atom.ids.length, core.JSValue.int32(@intCast(length)), caller_function, caller_frame);
         set_result.free(ctx.runtime);
     }
@@ -3528,7 +3564,11 @@ pub fn qjsTypedArrayFromStaticCall(
             return try qjsTypedArrayFromIteratorValue(ctx, output, global, constructor_value, source, map_fn, this_arg, caller_function, caller_frame);
         }
         if (source_object.class_id == core.class.ids.set or source_object.class_id == core.class.ids.map) {
-            const iterator = try builtins.collection.methodCall(ctx.runtime, source_object.value(), if (source_object.class_id == core.class.ids.set) 8 else 9, &.{});
+            // Same Map/Set drain as `qjsArrayFrom`, but feeding the typed-array
+            // factory: route through the record table with no function object
+            // and `global == null` to keep the bare primitive iterator.
+            const collection_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = if (source_object.class_id == core.class.ids.set) 8 else 9 };
+            const iterator = (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, source_object.value(), collection_ref, &.{}, null, null)) orelse return error.TypeError;
             defer iterator.free(ctx.runtime);
             return try qjsTypedArrayFromIteratorValue(ctx, output, global, constructor_value, iterator, map_fn, this_arg, caller_function, caller_frame);
         }
@@ -3630,7 +3670,7 @@ pub fn qjsArrayFromArrayLike(
     const out = objectFromValue(out_value) orelse return error.TypeError;
     if (fixed_length) |length| {
         if (length > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
-        if (out.is_array) out.length = @intCast(length);
+        if (out.flags.is_array) out.length = @intCast(length);
     }
 
     var index: usize = 0;
@@ -3654,7 +3694,7 @@ pub fn qjsArrayFromArrayLike(
         try qjsCreateArrayDataOrTypedArrayElement(ctx.runtime, out, key, item);
     }
     if (index > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
-    if (!builtins.buffer.isTypedArrayObject(out)) {
+    if (!core.object.isTypedArrayObject(out)) {
         const set_result = try setValueProperty(ctx, output, global, out.value(), core.atom.ids.length, core.JSValue.int32(@intCast(index)), caller_function, caller_frame);
         set_result.free(ctx.runtime);
     }
@@ -3720,7 +3760,7 @@ pub fn qjsArrayFromIteratorLike(
             return err;
         };
     }
-    if (!builtins.buffer.isTypedArrayObject(out)) {
+    if (!core.object.isTypedArrayObject(out)) {
         const set_result = try setValueProperty(ctx, output, global, out.value(), core.atom.ids.length, core.JSValue.int32(@intCast(index)), caller_function, caller_frame);
         set_result.free(ctx.runtime);
     }
@@ -3742,7 +3782,7 @@ pub fn qjsArrayOfCall(
         if (method_id != 2) return null;
         return try qjsTypedArrayOfStaticCall(ctx, output, global, constructor_value, args, caller_function, caller_frame);
     }
-    if (!isArrayStaticRecord(function_object, @intFromEnum(builtins.array.StaticMethod.of))) {
+    if (!isArrayStaticRecord(function_object, @intFromEnum(method_ids.array.StaticMethod.of))) {
         const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
         defer ctx.runtime.memory.allocator.free(name);
         if (!std.mem.eql(u8, name, "of")) return null;
@@ -3765,7 +3805,7 @@ pub fn qjsArrayOfCall(
         const key = core.atom.atomFromUInt32(@intCast(index));
         try createDataPropertyOrThrow(ctx, output, global, out.value(), out, key, arg, caller_function, caller_frame);
     }
-    if (!builtins.buffer.isTypedArrayObject(out)) {
+    if (!core.object.isTypedArrayObject(out)) {
         const set_result = try setValueProperty(ctx, output, global, out.value(), core.atom.ids.length, length_value, caller_function, caller_frame);
         set_result.free(ctx.runtime);
     }
@@ -3780,27 +3820,27 @@ pub fn isArrayStaticRecord(function_object: *core.Object, method_id: u32) bool {
 pub fn arrayPrototypeRecordId(function_object: *core.Object) ?u32 {
     const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return null;
     if (native_ref.domain != .array) return null;
-    if (builtins.array.decodePrototypeMethodId(native_ref.id) == null and
-        native_ref.id != @intFromEnum(builtins.array.PrototypeMethod.to_string) and
-        native_ref.id != @intFromEnum(builtins.array.PrototypeMethod.to_locale_string) and
-        native_ref.id != @intFromEnum(builtins.array.PrototypeMethod.map) and
-        native_ref.id != @intFromEnum(builtins.array.PrototypeMethod.for_each) and
-        native_ref.id != @intFromEnum(builtins.array.PrototypeMethod.reduce_right) and
-        native_ref.id != @intFromEnum(builtins.array.PrototypeMethod.copy_within) and
-        native_ref.id != @intFromEnum(builtins.array.PrototypeMethod.fill) and
-        native_ref.id != @intFromEnum(builtins.array.PrototypeMethod.shift) and
-        native_ref.id != @intFromEnum(builtins.array.PrototypeMethod.unshift) and
-        native_ref.id != @intFromEnum(builtins.array.PrototypeMethod.join) and
-        native_ref.id != @intFromEnum(builtins.array.PrototypeMethod.flat) and
-        native_ref.id != @intFromEnum(builtins.array.PrototypeMethod.flat_map) and
-        native_ref.id != @intFromEnum(builtins.array.PrototypeMethod.to_reversed) and
-        native_ref.id != @intFromEnum(builtins.array.PrototypeMethod.to_sorted) and
-        native_ref.id != @intFromEnum(builtins.array.PrototypeMethod.to_spliced) and
-        native_ref.id != @intFromEnum(builtins.array.PrototypeMethod.with_) and
-        native_ref.id != @intFromEnum(builtins.array.PrototypeMethod.find) and
-        native_ref.id != @intFromEnum(builtins.array.PrototypeMethod.find_index) and
-        native_ref.id != @intFromEnum(builtins.array.PrototypeMethod.find_last) and
-        native_ref.id != @intFromEnum(builtins.array.PrototypeMethod.find_last_index))
+    if (core.host_function.builtin_method_id_lookup.array.decodePrototypeMethodId(native_ref.id) == null and
+        native_ref.id != @intFromEnum(method_ids.array.PrototypeMethod.to_string) and
+        native_ref.id != @intFromEnum(method_ids.array.PrototypeMethod.to_locale_string) and
+        native_ref.id != @intFromEnum(method_ids.array.PrototypeMethod.map) and
+        native_ref.id != @intFromEnum(method_ids.array.PrototypeMethod.for_each) and
+        native_ref.id != @intFromEnum(method_ids.array.PrototypeMethod.reduce_right) and
+        native_ref.id != @intFromEnum(method_ids.array.PrototypeMethod.copy_within) and
+        native_ref.id != @intFromEnum(method_ids.array.PrototypeMethod.fill) and
+        native_ref.id != @intFromEnum(method_ids.array.PrototypeMethod.shift) and
+        native_ref.id != @intFromEnum(method_ids.array.PrototypeMethod.unshift) and
+        native_ref.id != @intFromEnum(method_ids.array.PrototypeMethod.join) and
+        native_ref.id != @intFromEnum(method_ids.array.PrototypeMethod.flat) and
+        native_ref.id != @intFromEnum(method_ids.array.PrototypeMethod.flat_map) and
+        native_ref.id != @intFromEnum(method_ids.array.PrototypeMethod.to_reversed) and
+        native_ref.id != @intFromEnum(method_ids.array.PrototypeMethod.to_sorted) and
+        native_ref.id != @intFromEnum(method_ids.array.PrototypeMethod.to_spliced) and
+        native_ref.id != @intFromEnum(method_ids.array.PrototypeMethod.with_) and
+        native_ref.id != @intFromEnum(method_ids.array.PrototypeMethod.find) and
+        native_ref.id != @intFromEnum(method_ids.array.PrototypeMethod.find_index) and
+        native_ref.id != @intFromEnum(method_ids.array.PrototypeMethod.find_last) and
+        native_ref.id != @intFromEnum(method_ids.array.PrototypeMethod.find_last_index))
     {
         return null;
     }
@@ -3838,9 +3878,9 @@ pub fn qjsCreateArrayDataOrTypedArrayElement(
     atom_id: core.Atom,
     value: core.JSValue,
 ) !void {
-    if (builtins.buffer.isTypedArrayObject(object)) {
+    if (core.object.isTypedArrayObject(object)) {
         const index = core.array.arrayIndexFromAtom(&rt.atoms, atom_id) orelse return error.TypeError;
-        const ok = try builtins.buffer.typedArraySetIndex(rt, object, index, value);
+        const ok = try core.typed_array.typedArraySetIndex(rt, object, index, value);
         if (!ok) return error.TypeError;
         return;
     }
@@ -3892,9 +3932,9 @@ pub fn qjsArrayMapCall(
 ) !?core.JSValue {
     if (args.len != 1 or !isCallableValue(args[0])) return null;
     const object = property_ops.expectObject(receiver) catch return null;
-    if (!object.is_array) return null;
+    if (!object.flags.is_array) return null;
     const function_object = callableObjectFromValue(func) orelse return null;
-    if (!isArrayPrototypeRecord(function_object, @intFromEnum(builtins.array.PrototypeMethod.map))) {
+    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.map))) {
         const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
         defer ctx.runtime.memory.allocator.free(name);
         if (!std.mem.eql(u8, name, "map")) return null;
@@ -3929,7 +3969,7 @@ pub fn qjsArraySortCall(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
-    if (!isArrayPrototypeRecord(function_object, @intFromEnum(builtins.array.PrototypeMethod.sort))) {
+    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.sort))) {
         const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
         defer ctx.runtime.memory.allocator.free(name);
         if (!std.mem.eql(u8, name, "sort")) return null;
@@ -3942,15 +3982,15 @@ pub fn qjsArraySortCall(
     const object = objectFromValue(receiver_object_value) orelse return error.TypeError;
 
     const is_typed_method = isTypedArrayPrototypeMethod(ctx.runtime, function_object);
-    const is_typed_array = builtins.buffer.isTypedArrayObject(object);
+    const is_typed_array = core.object.isTypedArrayObject(object);
     if (is_typed_method and !is_typed_array) return error.TypeError;
     if (is_typed_method) {
-        if (try builtins.buffer.typedArrayDetached(object) or try builtins.buffer.typedArrayOutOfBounds(object)) return error.TypeError;
-        try builtins.buffer.typedArrayRejectImmutableBuffer(ctx.runtime, object);
+        if (try core.object.typedArrayDetached(object) or try core.object.typedArrayOutOfBounds(object)) return error.TypeError;
+        try core.object.typedArrayRejectImmutableBuffer(ctx.runtime, object);
     }
     const length = if (is_typed_array)
         try arrayMethodTypedArrayLength(ctx.runtime, object, is_typed_method)
-    else if (object.is_array)
+    else if (object.flags.is_array)
         @as(usize, @intCast(object.length))
     else if (!receiver.isObject() and !receiver.isString())
         @as(usize, 0)
@@ -4093,10 +4133,10 @@ pub fn qjsArrayByCopyCall(
     const function_object = callableObjectFromValue(func) orelse return null;
     const mode: enum { to_reversed, to_sorted, to_spliced, with_ } = if (arrayPrototypeRecordId(function_object)) |record_id|
         switch (record_id) {
-            @intFromEnum(builtins.array.PrototypeMethod.to_reversed) => .to_reversed,
-            @intFromEnum(builtins.array.PrototypeMethod.to_sorted) => .to_sorted,
-            @intFromEnum(builtins.array.PrototypeMethod.to_spliced) => .to_spliced,
-            @intFromEnum(builtins.array.PrototypeMethod.with_) => .with_,
+            @intFromEnum(method_ids.array.PrototypeMethod.to_reversed) => .to_reversed,
+            @intFromEnum(method_ids.array.PrototypeMethod.to_sorted) => .to_sorted,
+            @intFromEnum(method_ids.array.PrototypeMethod.to_spliced) => .to_spliced,
+            @intFromEnum(method_ids.array.PrototypeMethod.with_) => .with_,
             else => return null,
         }
     else blk: {
@@ -4123,7 +4163,7 @@ pub fn qjsArrayByCopyCall(
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return null;
     const is_typed_method = isTypedArrayPrototypeMethod(ctx.runtime, function_object);
-    if (is_typed_method and !builtins.buffer.isTypedArrayObject(object)) return error.TypeError;
+    if (is_typed_method and !core.object.isTypedArrayObject(object)) return error.TypeError;
     if (is_typed_method) {
         const name = switch (mode) {
             .to_reversed => "toReversed",
@@ -4134,7 +4174,7 @@ pub fn qjsArrayByCopyCall(
         if (try qjsTypedArrayByCopyCall(ctx, output, global, object, name, args, caller_function, caller_frame)) |value| return value;
     }
 
-    const length = if (object.is_array)
+    const length = if (object.flags.is_array)
         @as(usize, @intCast(object.length))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, caller_function, caller_frame);
@@ -4275,11 +4315,11 @@ pub fn qjsTypedArrayByCopyCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (!builtins.buffer.isTypedArrayObject(object)) return null;
-    if (try builtins.buffer.typedArrayDetached(object)) return error.TypeError;
-    if (try builtins.buffer.typedArrayOutOfBounds(object)) return error.TypeError;
+    if (!core.object.isTypedArrayObject(object)) return null;
+    if (try core.object.typedArrayDetached(object)) return error.TypeError;
+    if (try core.object.typedArrayOutOfBounds(object)) return error.TypeError;
 
-    const length = @as(usize, @intCast(try builtins.buffer.typedArrayLength(ctx.runtime, object)));
+    const length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
 
     if (std.mem.eql(u8, name, "toReversed")) {
         const out_value = try qjsTypedArrayCreateSameType(ctx, output, global, object, length, caller_function, caller_frame);
@@ -4287,9 +4327,9 @@ pub fn qjsTypedArrayByCopyCall(
         const out = objectFromValue(out_value) orelse return error.TypeError;
         var index: usize = 0;
         while (index < length) : (index += 1) {
-            const item = try builtins.buffer.typedArrayGetIndex(ctx.runtime, object, @intCast(length - index - 1));
+            const item = try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(length - index - 1));
             defer item.free(ctx.runtime);
-            _ = try builtins.buffer.typedArraySetIndex(ctx.runtime, out, @intCast(index), item);
+            _ = try core.typed_array.typedArraySetIndex(ctx.runtime, out, @intCast(index), item);
         }
         return out_value;
     }
@@ -4304,7 +4344,7 @@ pub fn qjsTypedArrayByCopyCall(
 
         var index: usize = 0;
         while (index < length) : (index += 1) {
-            const item = try builtins.buffer.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
+            const item = try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
             var item_owned = true;
             errdefer if (item_owned) item.free(ctx.runtime);
             try entries.append(ctx.runtime.memory.allocator, .{ .value = item, .order = @intCast(index) });
@@ -4316,7 +4356,7 @@ pub fn qjsTypedArrayByCopyCall(
         errdefer out_value.free(ctx.runtime);
         const out = objectFromValue(out_value) orelse return error.TypeError;
         for (entries.items, 0..) |entry, sorted_index| {
-            _ = try builtins.buffer.typedArraySetIndex(ctx.runtime, out, @intCast(sorted_index), entry.value);
+            _ = try core.typed_array.typedArraySetIndex(ctx.runtime, out, @intCast(sorted_index), entry.value);
         }
         return out_value;
     }
@@ -4327,7 +4367,7 @@ pub fn qjsTypedArrayByCopyCall(
         const replacement = try qjsTypedArrayByCopyCoerceValue(ctx, output, global, object, if (args.len >= 2) args[1] else core.JSValue.undefinedValue());
         defer replacement.free(ctx.runtime);
 
-        const current_length = @as(usize, @intCast(try builtins.buffer.typedArrayLength(ctx.runtime, object)));
+        const current_length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
         if (actual_index < 0 or actual_index >= @as(f64, @floatFromInt(current_length)) or !std.math.isFinite(actual_index)) return error.RangeError;
         const replace_index: usize = @intFromFloat(actual_index);
 
@@ -4339,9 +4379,9 @@ pub fn qjsTypedArrayByCopyCall(
             const item = if (index == replace_index)
                 replacement
             else
-                try builtins.buffer.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
+                try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
             defer if (index != replace_index) item.free(ctx.runtime);
-            _ = try builtins.buffer.typedArraySetIndex(ctx.runtime, out, @intCast(index), item);
+            _ = try core.typed_array.typedArraySetIndex(ctx.runtime, out, @intCast(index), item);
         }
         return out_value;
     }
@@ -4362,8 +4402,8 @@ pub fn qjsArrayFlatCall(
     const function_object = callableObjectFromValue(func) orelse return null;
     const is_flat_map = if (arrayPrototypeRecordId(function_object)) |record_id|
         switch (record_id) {
-            @intFromEnum(builtins.array.PrototypeMethod.flat_map) => true,
-            @intFromEnum(builtins.array.PrototypeMethod.flat) => false,
+            @intFromEnum(method_ids.array.PrototypeMethod.flat_map) => true,
+            @intFromEnum(method_ids.array.PrototypeMethod.flat) => false,
             else => return null,
         }
     else blk: {
@@ -4380,7 +4420,7 @@ pub fn qjsArrayFlatCall(
     const receiver_object_value = if (objectFromValue(receiver)) |_| receiver.dup() else try primitiveObjectForAccess(ctx.runtime, global, receiver);
     defer receiver_object_value.free(ctx.runtime);
     const source = objectFromValue(receiver_object_value) orelse return null;
-    const source_length = if (source.is_array)
+    const source_length = if (source.flags.is_array)
         @as(usize, @intCast(source.length))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, caller_function, caller_frame);
@@ -4407,7 +4447,7 @@ pub fn qjsArrayFlatCall(
     errdefer out_value.free(ctx.runtime);
     const out = objectFromValue(out_value) orelse return error.TypeError;
     const written = try flattenIntoArray(ctx, output, global, out_value, out, receiver_object_value, source, source_length, 0, depth, mapper, this_arg, caller_function, caller_frame);
-    if (out.is_array) {
+    if (out.flags.is_array) {
         const set_length = try setValueProperty(ctx, output, global, out_value, core.atom.ids.length, lengthIndexValue(written), caller_function, caller_frame);
         set_length.free(ctx.runtime);
     }
@@ -4448,7 +4488,7 @@ pub fn flattenIntoArray(
 
         const element_object = objectFromValue(element);
         if (depth > 0 and element_object != null and try arraySpeciesOriginalIsArray(element_object.?)) {
-            const element_length = if (element_object.?.is_array)
+            const element_length = if (element_object.?.flags.is_array)
                 @as(usize, @intCast(element_object.?.length))
             else blk: {
                 const length_value = try getValueProperty(ctx, output, global, element, core.atom.ids.length, caller_function, caller_frame);
@@ -4603,7 +4643,7 @@ pub fn stableSortTieBreak(lhs: ArraySortEntry, rhs: ArraySortEntry) i32 {
 pub fn typedArrayOwnKeys(rt: *core.JSRuntime, source: *core.Object) ![]core.Atom {
     var keys: []core.Atom = &[_]core.Atom{};
     errdefer core.Object.freeKeys(rt, keys);
-    const length = try builtins.buffer.typedArrayLength(rt, source);
+    const length = try core.object.typedArrayLength(rt, source);
     var index: u32 = 0;
     while (index < length) : (index += 1) {
         try appendAtom(rt, &keys, core.atom.atomFromUInt32(index));
@@ -4613,7 +4653,7 @@ pub fn typedArrayOwnKeys(rt: *core.JSRuntime, source: *core.Object) ![]core.Atom
     defer core.Object.freeKeys(rt, ordinary);
     for (ordinary) |key| {
         if (rt.atoms.kind(key) == .symbol) continue;
-        if (try typedArrayCanonicalNumericIndex(rt, key) != .none) continue;
+        if (try core.object.typedArrayCanonicalNumericIndex(rt, key) != .none) continue;
         if (isTypedArrayInternalOwnKey(rt, key)) continue;
         if (atomListContains(keys, key)) continue;
         try appendAtom(rt, &keys, key);
@@ -4641,7 +4681,7 @@ pub fn arrayUsesDefaultIterator(
     source_value: core.JSValue,
     source: *core.Object,
 ) !bool {
-    if (!source.is_array) return false;
+    if (!source.flags.is_array) return false;
     const iterator_method = try getIteratorMethod(ctx, output, global, source_value);
     defer iterator_method.free(ctx.runtime);
     if (!isCallableValue(iterator_method)) return error.TypeError;
@@ -4653,7 +4693,7 @@ pub fn arrayUsesDefaultIterator(
 
 pub fn atomicsTypedArray(value: core.JSValue, waitable: bool) !*core.Object {
     const object = property_ops.expectObject(value) catch return error.TypeError;
-    if (!builtins.buffer.isTypedArrayObject(object)) return error.TypeError;
+    if (!core.object.isTypedArrayObject(object)) return error.TypeError;
     const kind = object.typedArrayKind();
     const ok = if (waitable)
         kind == 6 or kind == 11
@@ -4713,7 +4753,7 @@ pub fn qjsUint8ArrayCodecCall(
     }
     if (std.mem.eql(u8, name, "setFromHex")) {
         const object = try expectUint8ArrayObject(this_value);
-        try builtins.buffer.typedArrayRejectImmutableBuffer(ctx.runtime, object);
+        try core.object.typedArrayRejectImmutableBuffer(ctx.runtime, object);
         var source = try uint8ArrayStringBytes(ctx.runtime, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
         defer source.deinit(ctx.runtime.memory.allocator);
         const target = try uint8ArrayViewBytes(ctx.runtime, object);
@@ -4722,7 +4762,7 @@ pub fn qjsUint8ArrayCodecCall(
     }
     if (std.mem.eql(u8, name, "setFromBase64")) {
         const object = try expectUint8ArrayObject(this_value);
-        try builtins.buffer.typedArrayRejectImmutableBuffer(ctx.runtime, object);
+        try core.object.typedArrayRejectImmutableBuffer(ctx.runtime, object);
         var source = try uint8ArrayStringBytes(ctx.runtime, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
         defer source.deinit(ctx.runtime.memory.allocator);
         const options = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
@@ -4741,7 +4781,7 @@ pub const Uint8ArrayCodecProgress = struct { read: usize, written: usize };
 
 pub fn expectUint8ArrayObject(value: core.JSValue) !*core.Object {
     const object = property_ops.expectObject(value) catch return error.TypeError;
-    if (!builtins.buffer.isTypedArrayObject(object) or object.typedArrayKind() != 2) return error.TypeError;
+    if (!core.object.isTypedArrayObject(object) or object.typedArrayKind() != 2) return error.TypeError;
     return object;
 }
 
@@ -4809,14 +4849,14 @@ pub fn uint8ArrayOmitPadding(
 
 pub fn createUint8ArrayFromBytes(rt: *core.JSRuntime, global: *core.Object, bytes: []const u8) !core.JSValue {
     const buffer_proto = constructorPrototypeFromGlobalAtom(rt, global, core.atom.predefinedId("ArrayBuffer", .string).?);
-    const buffer_value = try builtins.buffer.arrayBufferConstructLength(rt, bytes.len, null, buffer_proto);
+    const buffer_value = try core.typed_array.arrayBufferConstructLength(rt, bytes.len, null, buffer_proto);
     var buffer_owned = true;
     errdefer if (buffer_owned) buffer_value.free(rt);
     const buffer = try property_ops.expectObject(buffer_value);
     if (bytes.len != 0) @memcpy(buffer.byteStorage()[0..bytes.len], bytes);
     const proto = try uint8ArrayConstructorPrototypeObject(rt, global, "Uint8Array");
     buffer_owned = false;
-    return try builtins.buffer.typedArrayConstructFullBufferOwned(rt, 1, 2, buffer_value, buffer, proto);
+    return try core.typed_array.typedArrayConstructFullBufferOwned(rt, 1, 2, buffer_value, buffer, proto);
 }
 
 pub fn uint8ArrayConstructorPrototypeObject(rt: *core.JSRuntime, global: *core.Object, name: []const u8) !?*core.Object {
@@ -4831,7 +4871,7 @@ pub fn uint8ArrayConstructorPrototypeObject(rt: *core.JSRuntime, global: *core.O
 }
 
 pub fn uint8ArrayViewBytes(rt: *core.JSRuntime, object: *core.Object) ![]u8 {
-    const length = try builtins.buffer.typedArrayLength(rt, object);
+    const length = try core.object.typedArrayLength(rt, object);
     const buffer = try atomicsBufferObject(object);
     if (buffer.arrayBufferDetached()) return error.TypeError;
     const start = object.typedArrayByteOffset();
@@ -4892,38 +4932,9 @@ pub fn freeValueSlice(rt: *core.JSRuntime, values: []core.JSValue) void {
     if (values.len != 0) rt.memory.free(core.JSValue, values);
 }
 
-pub fn qjsWorkerPopMessage(id: i32, endpoint: WorkerPostTarget) ?WorkerMessage {
-    const allocator = workerPageAllocator();
-    const io = qjsWorkerIo();
-    shared_vm.qjs_workers.mutex.lockUncancelable(io);
-    defer shared_vm.qjs_workers.mutex.unlock(io);
-    const worker = qjsWorkerByIdLocked(id) orelse return null;
-    const queue = switch (endpoint) {
-        .worker => &worker.to_worker,
-        .parent => &worker.to_parent,
-    };
-    const capacity = switch (endpoint) {
-        .worker => &worker.to_worker_capacity,
-        .parent => &worker.to_parent_capacity,
-    };
-    if (queue.*.len == 0) return null;
-    const message = queue.*[0];
-    const old_len = queue.*.len;
-    if (old_len == 1) {
-        const old = queue.*.ptr[0..capacity.*];
-        queue.* = &.{};
-        capacity.* = 0;
-        allocator.free(old);
-    } else {
-        @memmove(queue.*[0 .. old_len - 1], queue.*[1..old_len]);
-        queue.* = queue.*.ptr[0 .. old_len - 1];
-    }
-    return message;
-}
-
 pub fn putDenseArrayElementFast(rt: *core.JSRuntime, object_value: core.JSValue, key: core.JSValue, value: core.JSValue) !bool {
     const object = property_ops.expectObject(object_value) catch return false;
-    if (!object.is_array) return false;
+    if (!object.flags.is_array) return false;
     if (key.asInt32()) |index_i32| {
         if (index_i32 >= 0 and index_i32 <= core.array.max_array_index and index_i32 <= core.atom.max_int_atom) {
             const index: u32 = @intCast(index_i32);
@@ -4948,7 +4959,7 @@ pub fn putDenseArrayElementFast(rt: *core.JSRuntime, object_value: core.JSValue,
 
 pub fn argsFromArray(rt: *core.JSRuntime, array_value: core.JSValue) ![]core.JSValue {
     const array = try property_ops.expectObject(array_value);
-    if (!array.is_array) return error.TypeError;
+    if (!array.flags.is_array) return error.TypeError;
     if (array.length == 0) return &.{};
     const args = try rt.memory.alloc(core.JSValue, array.length);
     errdefer rt.memory.free(core.JSValue, args);
@@ -5004,7 +5015,7 @@ pub fn argsFromArrayLike(
     caller_frame: ?*frame_mod.Frame,
 ) ![]core.JSValue {
     const object = objectFromValue(array_value) orelse return error.TypeError;
-    if (object.is_array) return argsFromArray(ctx.runtime, array_value);
+    if (object.flags.is_array) return argsFromArray(ctx.runtime, array_value);
 
     const length_value = try getValueProperty(ctx, output, global, array_value, core.atom.ids.length, caller_function, caller_frame);
     defer length_value.free(ctx.runtime);
@@ -5069,14 +5080,14 @@ pub fn qjsGeneratorSlice(
 }
 
 pub fn qjsArrayIteratorMethod(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, function_object: *core.Object) !?core.JSValue {
-    return iter_vm.arrayIteratorMethod(ctx, global, receiver, function_object, primitiveObjectForAccess, isTypedArrayPrototypeMethod, arrayIteratorPrototypeFromContext);
+    return iter_vm.arrayIteratorMethod(ctx, global, receiver, function_object);
 }
 
 pub fn qjsArrayIteratorMethodRecord(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, function_object: *core.Object, method_id: u32) !?core.JSValue {
     const kind: u8 = switch (method_id) {
-        @intFromEnum(builtins.array.PrototypeMethod.keys) => 1,
-        @intFromEnum(builtins.array.PrototypeMethod.values) => 2,
-        @intFromEnum(builtins.array.PrototypeMethod.entries) => 3,
+        @intFromEnum(method_ids.array.PrototypeMethod.keys) => 1,
+        @intFromEnum(method_ids.array.PrototypeMethod.values) => 2,
+        @intFromEnum(method_ids.array.PrototypeMethod.entries) => 3,
         else => return null,
     };
     if (receiver.isNull() or receiver.isUndefined()) return error.TypeError;
@@ -5088,9 +5099,9 @@ pub fn qjsArrayIteratorMethodRecord(ctx: *core.JSContext, global: *core.Object, 
         return null;
     };
     if (isTypedArrayPrototypeMethod(ctx.runtime, function_object)) {
-        if (!builtins.buffer.isTypedArrayObject(object)) return error.TypeError;
-        if (try builtins.buffer.typedArrayDetached(object)) return error.TypeError;
-        if (try builtins.buffer.typedArrayOutOfBounds(object)) return error.TypeError;
+        if (!core.object.isTypedArrayObject(object)) return error.TypeError;
+        if (try core.object.typedArrayDetached(object)) return error.TypeError;
+        if (try core.object.typedArrayOutOfBounds(object)) return error.TypeError;
     }
     const prototype = try arrayIteratorPrototypeFromContext(ctx, global);
     const iterator = try core.Object.create(ctx.runtime, core.class.ids.array_iterator, prototype);
@@ -5117,9 +5128,6 @@ pub fn qjsIteratorZipFlattenableRecord(
         value,
         caller_function,
         caller_frame,
-        getValueProperty,
-        callValueOrBytecode,
-        isCallableValue,
     );
 }
 
@@ -5163,7 +5171,7 @@ pub fn iteratorFlattenableForIteratorFrom(
 
 pub fn qjsArrayIteratorNext(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, receiver: core.JSValue, function_object: *core.Object) !?core.JSValue {
     if (!function_object.isArrayIteratorNextFunction()) return null;
-    return iter_vm.arrayIteratorNext(ctx, output, global, receiver, createIteratorResult, getValueProperty, toLengthIndex);
+    return iter_vm.arrayIteratorNext(ctx, output, global, receiver);
 }
 
 pub fn qjsArrayIteratorValue(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, target: *core.Object, index: u32, kind: u8) !core.JSValue {
@@ -5256,7 +5264,7 @@ pub fn arrayLengthAssignmentValue(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (!object.is_array or atom_id != core.atom.ids.length or value.isNumber()) return value;
+    if (!object.flags.is_array or atom_id != core.atom.ids.length or value.isNumber()) return value;
     const first_primitive = try toPrimitiveForNumber(ctx, output, global, value);
     defer first_primitive.free(ctx.runtime);
     const first_number = try value_ops.toNumberValue(ctx.runtime, first_primitive);
@@ -5284,7 +5292,7 @@ pub fn typedArrayReflectSetReceiverOwn(
         return true;
     }
 
-    if (builtins.buffer.isTypedArrayObject(receiver_object)) {
+    if (core.object.isTypedArrayObject(receiver_object)) {
         const typed_array_desc = core.Descriptor{
             .kind = .data,
             .value = value,
@@ -5333,14 +5341,14 @@ pub fn typedArrayPrototypeSet(
 ) !?bool {
     var current = prototype;
     while (current) |object| : (current = object.getPrototype()) {
-        if (!builtins.buffer.isTypedArrayObject(object)) continue;
-        switch (try typedArrayCanonicalNumericIndex(ctx.runtime, atom_id)) {
+        if (!core.object.isTypedArrayObject(object)) continue;
+        switch (try core.object.typedArrayCanonicalNumericIndex(ctx.runtime, atom_id)) {
             .none => return null,
             .invalid => {
                 if (sameObjectIdentity(receiver_value, object.value())) {
                     const coerced = try coerceTypedArrayElementInput(ctx, output, global, value);
                     defer coerced.free(ctx.runtime);
-                    try builtins.buffer.typedArrayCoerceElementValue(ctx.runtime, object, coerced);
+                    try core.typed_array.typedArrayCoerceElementValue(ctx.runtime, object, coerced);
                 }
                 return true;
             },
@@ -5348,12 +5356,12 @@ pub fn typedArrayPrototypeSet(
                 if (sameObjectIdentity(receiver_value, object.value())) {
                     const coerced = try coerceTypedArrayElementForSet(ctx, output, global, object, value);
                     defer coerced.free(ctx.runtime);
-                    if (!try builtins.buffer.typedArrayIndexValid(ctx.runtime, object, index)) return true;
-                    if (try builtins.buffer.typedArrayImmutableBuffer(ctx.runtime, object)) return false;
-                    _ = try builtins.buffer.typedArraySetElement(ctx.runtime, object, index, coerced);
+                    if (!try core.object.typedArrayIndexValid(ctx.runtime, object, index)) return true;
+                    if (try core.object.typedArrayImmutableBuffer(ctx.runtime, object)) return false;
+                    _ = try core.typed_array.typedArraySetElement(ctx.runtime, object, index, coerced);
                     return true;
                 }
-                if (!try builtins.buffer.typedArrayIndexValid(ctx.runtime, object, index)) return true;
+                if (!try core.object.typedArrayIndexValid(ctx.runtime, object, index)) return true;
                 return try typedArrayReflectSetReceiverOwn(
                     ctx,
                     output,
@@ -5386,14 +5394,14 @@ pub fn qjsArrayJoinCall(
     defer object_value.free(ctx.runtime);
     const object = property_ops.expectObject(object_value) catch return null;
     const is_typed_method = isTypedArrayPrototypeMethod(ctx.runtime, function_object);
-    const is_typed_array = builtins.buffer.isTypedArrayObject(object);
+    const is_typed_array = core.object.isTypedArrayObject(object);
     if (is_typed_method and !is_typed_array) return error.TypeError;
     if (!is_typed_method and !is_typed_array) {
         if (try qjsFastDensePrimitiveArrayJoin(ctx.runtime, object, args)) |joined| return joined;
     }
     const length = if (is_typed_array)
         try arrayMethodTypedArrayLength(ctx.runtime, object, is_typed_method)
-    else if (object.is_array)
+    else if (object.flags.is_array)
         @as(usize, @intCast(object.length))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, object_value, core.atom.ids.length, caller_function, caller_frame);
@@ -5415,7 +5423,7 @@ pub fn qjsArrayJoinCall(
         if (index != 0) try bytes.appendSlice(ctx.runtime.memory.allocator, separator.items);
         const item = if (is_typed_array) blk: {
             if (!is_typed_method and index >= try arrayMethodTypedArrayLength(ctx.runtime, object, false)) break :blk core.JSValue.undefinedValue();
-            break :blk try builtins.buffer.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
+            break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
         } else blk: {
             const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
             defer key.deinit(ctx.runtime);
@@ -5436,7 +5444,7 @@ pub fn qjsFastDensePrimitiveArrayJoin(
     object: *core.Object,
     args: []const core.JSValue,
 ) !?core.JSValue {
-    if (!object.is_array or object.exotic != null or object.arrayElementStorageMode() != .dense) return null;
+    if (!object.flags.is_array or object.exotic != null or object.arrayElementStorageMode() != .dense) return null;
     if (object.properties.len != 0) return null;
 
     const length: usize = @intCast(object.length);
@@ -5639,29 +5647,23 @@ pub fn popDuplicateConstructorTarget(rt: *core.JSRuntime, stack: *stack_mod.Stac
     duplicate.free(rt);
 }
 
-pub const TypedArrayCanonicalIndex = union(enum) {
-    none,
-    invalid,
-    index: u32,
-};
-
 pub fn typedArrayCanonicalGet(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?core.JSValue {
-    switch (try typedArrayCanonicalNumericIndex(rt, atom_id)) {
+    switch (try core.object.typedArrayCanonicalNumericIndex(rt, atom_id)) {
         .none => return null,
         .invalid => return core.JSValue.undefinedValue(),
-        .index => |index| return try builtins.buffer.typedArrayGetIndex(rt, object, index),
+        .index => |index| return try core.typed_array.typedArrayGetIndex(rt, object, index),
     }
 }
 
 pub fn typedArrayCanonicalOwnDescriptor(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?core.Descriptor {
-    if (!builtins.buffer.isTypedArrayObject(object)) return null;
-    switch (try typedArrayCanonicalNumericIndex(rt, atom_id)) {
+    if (!core.object.isTypedArrayObject(object)) return null;
+    switch (try core.object.typedArrayCanonicalNumericIndex(rt, atom_id)) {
         .none => return null,
         .invalid => return null,
         .index => |index| {
-            const length = try builtins.buffer.typedArrayLength(rt, object);
+            const length = try core.object.typedArrayLength(rt, object);
             if (index >= length) return null;
-            const value = try builtins.buffer.typedArrayGetIndex(rt, object, index);
+            const value = try core.typed_array.typedArrayGetIndex(rt, object, index);
             return core.Descriptor.data(value, true, true, true);
         },
     }
@@ -5688,7 +5690,7 @@ pub fn coerceTypedArrayElementForSet(
 ) !core.JSValue {
     const coerced = try coerceTypedArrayElementInput(ctx, output, global, value);
     errdefer coerced.free(ctx.runtime);
-    try builtins.buffer.typedArrayCoerceElementValue(ctx.runtime, object, coerced);
+    try core.typed_array.typedArrayCoerceElementValue(ctx.runtime, object, coerced);
     return coerced;
 }
 
@@ -5700,8 +5702,8 @@ pub fn typedArrayDefineOwnPropertyVm(
     atom_id: core.Atom,
     desc: core.Descriptor,
 ) !?bool {
-    if (!builtins.buffer.isTypedArrayObject(object)) return null;
-    switch (try typedArrayCanonicalNumericIndex(ctx.runtime, atom_id)) {
+    if (!core.object.isTypedArrayObject(object)) return null;
+    switch (try core.object.typedArrayCanonicalNumericIndex(ctx.runtime, atom_id)) {
         .none => return null,
         .invalid => return false,
         .index => |index| {
@@ -5715,14 +5717,14 @@ pub fn typedArrayDefineOwnPropertyVm(
             if (desc.writable) |writable| {
                 if (!writable) return false;
             }
-            if (!try builtins.buffer.typedArrayIndexValid(ctx.runtime, object, index)) return false;
+            if (!try core.object.typedArrayIndexValid(ctx.runtime, object, index)) return false;
             if (desc.value_present) {
-                if (try builtins.buffer.typedArrayImmutableBuffer(ctx.runtime, object)) return false;
+                if (try core.object.typedArrayImmutableBuffer(ctx.runtime, object)) return false;
                 const coerced = try coerceTypedArrayElementInput(ctx, output, global, desc.value);
                 defer coerced.free(ctx.runtime);
-                if (!try builtins.buffer.typedArrayIndexValid(ctx.runtime, object, index)) return true;
-                if (try builtins.buffer.typedArrayImmutableBuffer(ctx.runtime, object)) return false;
-                _ = try builtins.buffer.typedArraySetElement(ctx.runtime, object, index, coerced);
+                if (!try core.object.typedArrayIndexValid(ctx.runtime, object, index)) return true;
+                if (try core.object.typedArrayImmutableBuffer(ctx.runtime, object)) return false;
+                _ = try core.typed_array.typedArraySetElement(ctx.runtime, object, index, coerced);
             }
             return true;
         },
@@ -5737,1024 +5739,310 @@ pub fn typedArrayCanonicalSet(
     atom_id: core.Atom,
     value: core.JSValue,
 ) !bool {
-    switch (try typedArrayCanonicalNumericIndex(ctx.runtime, atom_id)) {
+    switch (try core.object.typedArrayCanonicalNumericIndex(ctx.runtime, atom_id)) {
         .none => return false,
         .invalid => {
             const coerced = try coerceTypedArrayElementInput(ctx, output, global, value);
             defer coerced.free(ctx.runtime);
-            try builtins.buffer.typedArrayCoerceElementValue(ctx.runtime, object, coerced);
+            try core.typed_array.typedArrayCoerceElementValue(ctx.runtime, object, coerced);
             return true;
         },
         .index => |index| {
             const coerced = try coerceTypedArrayElementForSet(ctx, output, global, object, value);
             defer coerced.free(ctx.runtime);
-            if (!try builtins.buffer.typedArrayIndexValid(ctx.runtime, object, index)) return true;
-            if (try builtins.buffer.typedArrayImmutableBuffer(ctx.runtime, object)) return false;
-            _ = try builtins.buffer.typedArraySetElement(ctx.runtime, object, index, coerced);
+            if (!try core.object.typedArrayIndexValid(ctx.runtime, object, index)) return true;
+            if (try core.object.typedArrayImmutableBuffer(ctx.runtime, object)) return false;
+            _ = try core.typed_array.typedArraySetElement(ctx.runtime, object, index, coerced);
             return true;
         },
     }
 }
 
 pub fn typedArrayCanonicalHas(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) ?bool {
-    if (!builtins.buffer.isTypedArrayObject(object)) return null;
-    switch (typedArrayCanonicalNumericIndex(rt, atom_id) catch return false) {
+    if (!core.object.isTypedArrayObject(object)) return null;
+    switch (core.object.typedArrayCanonicalNumericIndex(rt, atom_id) catch return false) {
         .none => return null,
         .invalid => return false,
         .index => |index| {
-            const length = builtins.buffer.typedArrayLength(rt, object) catch return false;
+            const length = core.object.typedArrayLength(rt, object) catch return false;
             return index < length;
         },
     }
 }
 
 pub fn typedArrayCanonicalDelete(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?bool {
-    if (!builtins.buffer.isTypedArrayObject(object)) return null;
-    switch (try typedArrayCanonicalNumericIndex(rt, atom_id)) {
+    if (!core.object.isTypedArrayObject(object)) return null;
+    switch (try core.object.typedArrayCanonicalNumericIndex(rt, atom_id)) {
         .none => return null,
         .invalid => return true,
         .index => |index| {
-            const length = builtins.buffer.typedArrayLength(rt, object) catch return true;
+            const length = core.object.typedArrayLength(rt, object) catch return true;
             return index >= length;
         },
     }
 }
 
-pub fn typedArrayCanonicalNumericIndex(rt: *core.JSRuntime, atom_id: core.Atom) !TypedArrayCanonicalIndex {
-    if (core.array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| return .{ .index = index };
-    if (rt.atoms.kind(atom_id) != .string) return .none;
-    const name = rt.atoms.name(atom_id) orelse return .none;
-    if (name.len == 0) return .none;
-    if (std.mem.eql(u8, name, "-0")) return .invalid;
+// Uint8Array hex/base64 codecs (moved from the VM call runtime).
 
-    const number: f64 = if (std.mem.eql(u8, name, "NaN"))
-        std.math.nan(f64)
-    else if (std.mem.eql(u8, name, "Infinity"))
-        std.math.inf(f64)
-    else if (std.mem.eql(u8, name, "-Infinity"))
-        -std.math.inf(f64)
-    else
-        std.fmt.parseFloat(f64, name) catch return .none;
-
-    var buffer: [64]u8 = undefined;
-    const printed = if (std.math.isNan(number))
-        "NaN"
-    else if (std.math.isPositiveInf(number))
-        "Infinity"
-    else if (std.math.isNegativeInf(number))
-        "-Infinity"
-    else
-        try value_ops.formatFiniteNumber(&buffer, number);
-    if (!std.mem.eql(u8, name, printed)) return .none;
-    if (!std.math.isFinite(number) or @trunc(number) != number or number < 0 or number > @as(f64, @floatFromInt(std.math.maxInt(u32)))) return .invalid;
-    return .{ .index = @intFromFloat(number) };
-}
-
-// --- Merged from collection.zig ---
-
-const SetMethodMode = enum {
-    difference,
-    intersection,
-    is_disjoint_from,
-    is_subset_of,
-    is_superset_of,
-    symmetric_difference,
-    union_,
-};
-
-const SetLikeRecordVm = struct {
-    object_value: core.JSValue,
-    size: f64,
-    has: core.JSValue,
-    keys: core.JSValue,
-    native_kind: enum { none, set, map },
-
-    fn deinit(self: *const SetLikeRecordVm, rt: *core.JSRuntime) void {
-        self.object_value.free(rt);
-        self.has.free(rt);
-        self.keys.free(rt);
-    }
-};
-
-const ValueListRoot = struct {
-    rt: ?*core.JSRuntime = null,
-    slices: [1]core.runtime.ValueRootSlice = undefined,
-    frame: core.runtime.ValueRootFrame = .{},
-
-    fn init(self: *ValueListRoot, rt: *core.JSRuntime, values: *[]core.JSValue) void {
-        self.rt = rt;
-        self.slices[0] = .{ .mutable = values };
-        self.frame = .{
-            .previous = rt.active_value_roots,
-            .slices = &self.slices,
-        };
-        rt.active_value_roots = &self.frame;
-    }
-
-    fn deinit(self: *ValueListRoot) void {
-        const rt = self.rt orelse return;
-        rt.active_value_roots = self.frame.previous;
-        self.rt = null;
-    }
-};
-
-pub fn qjsCollectionIteratorMethodCall(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    name: []const u8,
-    args: []const core.JSValue,
-) !?core.JSValue {
-    _ = args;
-    const owner_class = collectionMethodOwnerClass(function_object) orelse return null;
-    if (owner_class != core.class.ids.map and owner_class != core.class.ids.set) return null;
-    const method_id: u32 = if (std.mem.eql(u8, name, "keys"))
-        7
-    else if (std.mem.eql(u8, name, "values"))
-        8
-    else if (std.mem.eql(u8, name, "entries"))
-        9
-    else
-        return null;
-    const receiver = shared_vm.objectFromValue(this_value) orelse return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
-    if (receiver.class_id != owner_class) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
-    return try builtins.collection.methodCallWithGlobal(ctx, global, this_value, method_id, &.{}, &.{});
-}
-
-pub fn qjsCollectionForEachCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    name: []const u8,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    if (!std.mem.eql(u8, name, "forEach")) return null;
-    const owner_class = collectionMethodOwnerClass(function_object) orelse return null;
-    if (owner_class != core.class.ids.map and owner_class != core.class.ids.set) return null;
-    const receiver = shared_vm.objectFromValue(this_value) orelse return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
-    if (receiver.class_id != owner_class) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
-    if (args.len < 1 or !shared_vm.isCallableValue(args[0])) return error.TypeError;
-    const callback = args[0];
-    const this_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+pub fn decodeHexBytes(rt: *core.JSRuntime, source: []const u8, reject_odd: bool) !std.ArrayList(u8) {
+    if (reject_odd and source.len % 2 != 0) return error.SyntaxError;
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(rt.memory.allocator);
     var index: usize = 0;
-    while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
-        const entry = receiver.collectionEntriesSlot().*[index];
-        if (!entry.active) continue;
-        const callback_args = if (receiver.class_id == core.class.ids.set)
-            [_]core.JSValue{ entry.key, entry.key, receiver.value() }
-        else
-            [_]core.JSValue{ entry.value, entry.key, receiver.value() };
-        const result = try shared_vm.callValueOrBytecode(ctx, output, global, this_arg, callback, &callback_args, caller_function, caller_frame);
-        result.free(ctx.runtime);
+    while (index + 1 < source.len) : (index += 2) {
+        const hi = hexNibble(source[index]) orelse return error.SyntaxError;
+        const lo = hexNibble(source[index + 1]) orelse return error.SyntaxError;
+        try out.append(rt.memory.allocator, (hi << 4) | lo);
     }
-    return core.JSValue.undefinedValue();
+    return out;
 }
 
-pub fn qjsSetMethodCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    name: []const u8,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    const owner_class = collectionMethodOwnerClass(function_object) orelse return null;
-    if (owner_class != core.class.ids.set) return null;
-    const mode = qjsSetMethodMode(name) orelse return null;
-    const receiver = shared_vm.objectFromValue(this_value) orelse return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, core.class.ids.set));
-    if (receiver.class_id != core.class.ids.set) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, core.class.ids.set));
-    const other_value = if (args.len >= 1) args[0] else return error.TypeError;
-    var other_record = try qjsGetSetRecord(ctx, output, global, other_value, caller_function, caller_frame);
-    defer other_record.deinit(ctx.runtime);
-    return switch (mode) {
-        .difference => try qjsSetDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .intersection => try qjsSetIntersection(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .is_disjoint_from => try qjsSetIsDisjointFrom(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .is_subset_of => try qjsSetIsSubsetOf(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .is_superset_of => try qjsSetIsSupersetOf(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .symmetric_difference => try qjsSetSymmetricDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .union_ => try qjsSetUnion(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-    };
+pub fn decodeHexInto(source: []const u8, target: []u8) !Uint8ArrayCodecProgress {
+    if (source.len % 2 != 0) return error.SyntaxError;
+    var read: usize = 0;
+    var written: usize = 0;
+    while (read < source.len and written < target.len) {
+        const hi = hexNibble(source[read]) orelse return error.SyntaxError;
+        const lo = hexNibble(source[read + 1]) orelse return error.SyntaxError;
+        target[written] = (hi << 4) | lo;
+        read += 2;
+        written += 1;
+    }
+    return .{ .read = read, .written = written };
 }
 
-pub fn qjsCollectionNativeRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    id: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    const receiver = shared_vm.objectFromValue(this_value) orelse {
-        if (collectionMethodOwnerClass(function_object)) |owner_class| {
-            return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
+pub fn encodeHexBytes(rt: *core.JSRuntime, bytes: []const u8) !std.ArrayList(u8) {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(rt.memory.allocator);
+    for (bytes) |byte| {
+        try out.append(rt.memory.allocator, unicode_lib.asciiLowerHexDigitChar(byte >> 4));
+        try out.append(rt.memory.allocator, unicode_lib.asciiLowerHexDigitChar(byte & 0x0f));
+    }
+    return out;
+}
+
+pub fn hexNibble(byte: u8) ?u8 {
+    return unicode_lib.asciiHexDigitValueByte(byte);
+}
+
+pub const Base64Chunk = struct {
+    bytes: [3]u8 = .{ 0, 0, 0 },
+    len: usize = 0,
+};
+
+pub fn decodeBase64Bytes(
+    rt: *core.JSRuntime,
+    source: []const u8,
+    alphabet: Uint8ArrayBase64Alphabet,
+    last_chunk_handling: Uint8ArrayBase64LastChunkHandling,
+) !std.ArrayList(u8) {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(rt.memory.allocator);
+    _ = try decodeBase64Internal(rt, source, alphabet, last_chunk_handling, &out, null);
+    return out;
+}
+
+pub fn decodeBase64Into(
+    rt: *core.JSRuntime,
+    source: []const u8,
+    alphabet: Uint8ArrayBase64Alphabet,
+    last_chunk_handling: Uint8ArrayBase64LastChunkHandling,
+    target: []u8,
+) !Uint8ArrayCodecProgress {
+    if (target.len == 0) return .{ .read = 0, .written = 0 };
+    return decodeBase64Internal(rt, source, alphabet, last_chunk_handling, null, target);
+}
+
+pub fn decodeBase64Internal(
+    rt: *core.JSRuntime,
+    source: []const u8,
+    alphabet: Uint8ArrayBase64Alphabet,
+    last_chunk_handling: Uint8ArrayBase64LastChunkHandling,
+    out: ?*std.ArrayList(u8),
+    target: ?[]u8,
+) !Uint8ArrayCodecProgress {
+    var chunk: [4]u8 = .{ 0, 0, 0, 0 };
+    var chunk_len: usize = 0;
+    var read_pos: usize = 0;
+    var last_read: usize = 0;
+    var written: usize = 0;
+    var saw_padded_chunk = false;
+    var pending_padded_chunk: ?Base64Chunk = null;
+    var pending_padded_read: usize = 0;
+
+    for (source, 0..) |byte, index| {
+        if (unicode_lib.isAsciiWhitespaceByte(byte)) continue;
+        read_pos = index + 1;
+        if (saw_padded_chunk) return error.SyntaxError;
+        if (byte != '=' and base64Value(byte, alphabet) == null) return error.SyntaxError;
+        chunk[chunk_len] = byte;
+        chunk_len += 1;
+        if (chunk_len == 4) {
+            const decoded = try decodeBase64Chunk(chunk, 4, alphabet, last_chunk_handling, false);
+            if (chunk[2] == '=' or chunk[3] == '=') {
+                pending_padded_chunk = decoded;
+                pending_padded_read = read_pos;
+                saw_padded_chunk = true;
+                chunk_len = 0;
+                continue;
+            }
+            if (target) |bytes| {
+                if (decoded.len > bytes.len - written) return .{ .read = last_read, .written = written };
+                if (decoded.len != 0) @memcpy(bytes[written..][0..decoded.len], decoded.bytes[0..decoded.len]);
+            } else if (out) |list| {
+                try list.appendSlice(rt.memory.allocator, decoded.bytes[0..decoded.len]);
+            }
+            written += decoded.len;
+            last_read = read_pos;
+            chunk_len = 0;
+            if (target) |bytes| {
+                if (written == bytes.len) return .{ .read = last_read, .written = written };
+            }
         }
-        return error.TypeError;
-    };
-    if (collectionMethodOwnerClass(function_object)) |owner_class| {
-        if (receiver.class_id != owner_class) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
     }
 
-    const method: builtins.collection.PrototypeMethod = switch (id) {
-        @intFromEnum(builtins.collection.PrototypeMethod.set) => .set,
-        @intFromEnum(builtins.collection.PrototypeMethod.get) => .get,
-        @intFromEnum(builtins.collection.PrototypeMethod.has) => .has,
-        @intFromEnum(builtins.collection.PrototypeMethod.delete) => .delete,
-        @intFromEnum(builtins.collection.PrototypeMethod.clear) => .clear,
-        @intFromEnum(builtins.collection.PrototypeMethod.add) => .add,
-        @intFromEnum(builtins.collection.PrototypeMethod.keys) => .keys,
-        @intFromEnum(builtins.collection.PrototypeMethod.values) => .values,
-        @intFromEnum(builtins.collection.PrototypeMethod.entries) => .entries,
-        @intFromEnum(builtins.collection.PrototypeMethod.for_each) => .for_each,
-        @intFromEnum(builtins.collection.PrototypeMethod.get_or_insert) => .get_or_insert,
-        @intFromEnum(builtins.collection.PrototypeMethod.get_or_insert_computed) => .get_or_insert_computed,
-        @intFromEnum(builtins.collection.PrototypeMethod.size_getter) => .size_getter,
-        @intFromEnum(builtins.collection.PrototypeMethod.difference) => .difference,
-        @intFromEnum(builtins.collection.PrototypeMethod.intersection) => .intersection,
-        @intFromEnum(builtins.collection.PrototypeMethod.is_disjoint_from) => .is_disjoint_from,
-        @intFromEnum(builtins.collection.PrototypeMethod.is_subset_of) => .is_subset_of,
-        @intFromEnum(builtins.collection.PrototypeMethod.is_superset_of) => .is_superset_of,
-        @intFromEnum(builtins.collection.PrototypeMethod.symmetric_difference) => .symmetric_difference,
-        @intFromEnum(builtins.collection.PrototypeMethod.union_) => .union_,
-        else => return null,
-    };
+    if (pending_padded_chunk) |decoded| {
+        if (target) |bytes| {
+            if (decoded.len > bytes.len - written) return .{ .read = last_read, .written = written };
+            if (decoded.len != 0) @memcpy(bytes[written..][0..decoded.len], decoded.bytes[0..decoded.len]);
+        } else if (out) |list| {
+            try list.appendSlice(rt.memory.allocator, decoded.bytes[0..decoded.len]);
+        }
+        written += decoded.len;
+        return .{ .read = pending_padded_read, .written = written };
+    }
+    if (chunk_len == 0) return .{ .read = last_read, .written = written };
+    const decoded = try decodeBase64Chunk(chunk, chunk_len, alphabet, last_chunk_handling, true);
+    if (decoded.len == 0 and last_chunk_handling == .stop_before_partial) return .{ .read = last_read, .written = written };
+    if (target) |bytes| {
+        if (decoded.len > bytes.len - written) return .{ .read = last_read, .written = written };
+        if (decoded.len != 0) @memcpy(bytes[written..][0..decoded.len], decoded.bytes[0..decoded.len]);
+    } else if (out) |list| {
+        try list.appendSlice(rt.memory.allocator, decoded.bytes[0..decoded.len]);
+    }
+    written += decoded.len;
+    return .{ .read = read_pos, .written = written };
+}
 
-    if (collectionCallResultIsDropped(caller_function, caller_frame)) {
-        const handled = builtins.collection.methodCallDroppedResult(ctx.runtime, receiver, id, args) catch |err| switch (err) {
-            error.TypeError => return @as(?core.JSValue, try throwCollectionMethodTypeError(ctx, global, receiver, method, args)),
-            else => return err,
-        };
-        if (handled) return core.JSValue.undefinedValue();
+pub fn decodeBase64Chunk(
+    chunk: [4]u8,
+    chunk_len: usize,
+    alphabet: Uint8ArrayBase64Alphabet,
+    last_chunk_handling: Uint8ArrayBase64LastChunkHandling,
+    is_final: bool,
+) !Base64Chunk {
+    if (chunk_len == 0) return .{};
+    if (chunk_len < 4) {
+        var first_padding: ?usize = null;
+        var i: usize = 0;
+        while (i < chunk_len) : (i += 1) {
+            if (chunk[i] == '=') {
+                if (first_padding == null) first_padding = i;
+            } else if (first_padding != null) {
+                return error.SyntaxError;
+            }
+        }
+        if (first_padding) |padding_index| {
+            if (padding_index < 2) return error.SyntaxError;
+            if (last_chunk_handling == .stop_before_partial and is_final) return .{};
+            return error.SyntaxError;
+        }
+        if (chunk_len == 1) {
+            if (last_chunk_handling == .stop_before_partial and is_final) return .{};
+            return error.SyntaxError;
+        }
+        if (last_chunk_handling == .stop_before_partial and is_final) return .{};
+        if (last_chunk_handling == .strict) return error.SyntaxError;
+        const a = base64Value(chunk[0], alphabet) orelse return error.SyntaxError;
+        const b = base64Value(chunk[1], alphabet) orelse return error.SyntaxError;
+        var result = Base64Chunk{ .bytes = .{ (a << 2) | (b >> 4), 0, 0 }, .len = 1 };
+        if (chunk_len == 3) {
+            const c = base64Value(chunk[2], alphabet) orelse return error.SyntaxError;
+            result.bytes[1] = ((b & 0x0f) << 4) | (c >> 2);
+            result.len = 2;
+        }
+        return result;
     }
 
-    return switch (method) {
-        .set,
-        .get,
-        .has,
-        .delete,
-        .clear,
-        .add,
-        .keys,
-        .values,
-        .entries,
-        .get_or_insert,
-        .size_getter,
-        => builtins.collection.methodCallWithGlobal(ctx, global, this_value, id, args, &.{}) catch |err| switch (err) {
-            error.TypeError => return @as(?core.JSValue, try throwCollectionMethodTypeError(ctx, global, receiver, method, args)),
-            else => err,
-        },
-        .for_each => try qjsCollectionForEachRecord(ctx, output, global, this_value, receiver, args, caller_function, caller_frame),
-        .get_or_insert_computed => try qjsMapGetOrInsertComputed(ctx, output, global, this_value, function_object, args, caller_function, caller_frame),
-        .difference,
-        .intersection,
-        .is_disjoint_from,
-        .is_subset_of,
-        .is_superset_of,
-        .symmetric_difference,
-        .union_,
-        => try qjsSetMethodRecord(ctx, output, global, receiver, method, args, caller_function, caller_frame),
-        .iterator_next => return null,
-    };
+    if (chunk[0] == '=' or chunk[1] == '=') return error.SyntaxError;
+    const a = base64Value(chunk[0], alphabet) orelse return error.SyntaxError;
+    const b = base64Value(chunk[1], alphabet) orelse return error.SyntaxError;
+    if (chunk[2] == '=') {
+        if (chunk[3] != '=') return error.SyntaxError;
+        if (last_chunk_handling == .strict and (b & 0x0f) != 0) return error.SyntaxError;
+        return .{ .bytes = .{ (a << 2) | (b >> 4), 0, 0 }, .len = 1 };
+    }
+    const c = base64Value(chunk[2], alphabet) orelse return error.SyntaxError;
+    if (chunk[3] == '=') {
+        if (last_chunk_handling == .strict and (c & 0x03) != 0) return error.SyntaxError;
+        return .{ .bytes = .{ (a << 2) | (b >> 4), ((b & 0x0f) << 4) | (c >> 2), 0 }, .len = 2 };
+    }
+    const d = base64Value(chunk[3], alphabet) orelse return error.SyntaxError;
+    return .{ .bytes = .{ (a << 2) | (b >> 4), ((b & 0x0f) << 4) | (c >> 2), ((c & 0x03) << 6) | d }, .len = 3 };
 }
 
-fn collectionCallResultIsDropped(caller_function: ?*const bytecode.Bytecode, caller_frame: ?*frame_mod.Frame) bool {
-    const function = caller_function orelse return false;
-    const frame = caller_frame orelse return false;
-    return frame.pc < function.code.len and function.code[frame.pc] == bytecode.opcode.op.drop;
-}
-
-fn qjsCollectionForEachRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    receiver: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    if (receiver.class_id != core.class.ids.map and receiver.class_id != core.class.ids.set) return throwCollectionReceiverTypeError(ctx, global, receiver.class_id);
-    if (args.len < 1 or !shared_vm.isCallableValue(args[0])) return error.TypeError;
-    const callback = args[0];
-    const this_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+pub fn encodeBase64Bytes(rt: *core.JSRuntime, bytes: []const u8, alphabet: Uint8ArrayBase64Alphabet, omit_padding: bool) !std.ArrayList(u8) {
+    const table = if (alphabet == .base64) "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/" else "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(rt.memory.allocator);
     var index: usize = 0;
-    while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
-        const entry = receiver.collectionEntriesSlot().*[index];
-        if (!entry.active) continue;
-        const callback_args = if (receiver.class_id == core.class.ids.set)
-            [_]core.JSValue{ entry.key, entry.key, this_value }
-        else
-            [_]core.JSValue{ entry.value, entry.key, this_value };
-        const result = try shared_vm.callValueOrBytecode(ctx, output, global, this_arg, callback, &callback_args, caller_function, caller_frame);
-        result.free(ctx.runtime);
+    while (index < bytes.len) : (index += 3) {
+        const rem = bytes.len - index;
+        const b0 = bytes[index];
+        const b1 = if (rem > 1) bytes[index + 1] else 0;
+        const b2 = if (rem > 2) bytes[index + 2] else 0;
+        try out.append(rt.memory.allocator, table[b0 >> 2]);
+        try out.append(rt.memory.allocator, table[((b0 & 0x03) << 4) | (b1 >> 4)]);
+        if (rem > 1) {
+            try out.append(rt.memory.allocator, table[((b1 & 0x0f) << 2) | (b2 >> 6)]);
+        } else if (!omit_padding) {
+            try out.append(rt.memory.allocator, '=');
+        }
+        if (rem > 2) {
+            try out.append(rt.memory.allocator, table[b2 & 0x3f]);
+        } else if (!omit_padding) {
+            try out.append(rt.memory.allocator, '=');
+        }
     }
-    return core.JSValue.undefinedValue();
+    return out;
 }
 
-fn qjsSetMethodRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: *core.Object,
-    method: builtins.collection.PrototypeMethod,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    if (receiver.class_id != core.class.ids.set) return throwCollectionReceiverTypeError(ctx, global, core.class.ids.set);
-    const other_value = if (args.len >= 1) args[0] else return error.TypeError;
-    var other_record = try qjsGetSetRecord(ctx, output, global, other_value, caller_function, caller_frame);
-    defer other_record.deinit(ctx.runtime);
-    const mode = qjsSetMethodModeFromRecord(method) orelse return error.TypeError;
-    return switch (mode) {
-        .difference => try qjsSetDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .intersection => try qjsSetIntersection(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .is_disjoint_from => try qjsSetIsDisjointFrom(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .is_subset_of => try qjsSetIsSubsetOf(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .is_superset_of => try qjsSetIsSupersetOf(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .symmetric_difference => try qjsSetSymmetricDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .union_ => try qjsSetUnion(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-    };
-}
-
-fn qjsSetMethodMode(name: []const u8) ?SetMethodMode {
-    if (std.mem.eql(u8, name, "difference")) return .difference;
-    if (std.mem.eql(u8, name, "intersection")) return .intersection;
-    if (std.mem.eql(u8, name, "isDisjointFrom")) return .is_disjoint_from;
-    if (std.mem.eql(u8, name, "isSubsetOf")) return .is_subset_of;
-    if (std.mem.eql(u8, name, "isSupersetOf")) return .is_superset_of;
-    if (std.mem.eql(u8, name, "symmetricDifference")) return .symmetric_difference;
-    if (std.mem.eql(u8, name, "union")) return .union_;
+pub fn base64Value(byte: u8, alphabet: Uint8ArrayBase64Alphabet) ?u8 {
+    if (byte >= 'A' and byte <= 'Z') return byte - 'A';
+    if (byte >= 'a' and byte <= 'z') return byte - 'a' + 26;
+    if (byte >= '0' and byte <= '9') return byte - '0' + 52;
+    if (alphabet == .base64 and byte == '+') return 62;
+    if (alphabet == .base64 and byte == '/') return 63;
+    if (alphabet == .base64url and byte == '-') return 62;
+    if (alphabet == .base64url and byte == '_') return 63;
     return null;
 }
 
-fn qjsSetMethodModeFromRecord(method: builtins.collection.PrototypeMethod) ?SetMethodMode {
-    return switch (method) {
-        .difference => .difference,
-        .intersection => .intersection,
-        .is_disjoint_from => .is_disjoint_from,
-        .is_subset_of => .is_subset_of,
-        .is_superset_of => .is_superset_of,
-        .symmetric_difference => .symmetric_difference,
-        .union_ => .union_,
-        else => null,
-    };
+// Array length/index helpers (moved from the VM call runtime).
+
+pub const SparseIndexKey = struct {
+    atom_id: core.Atom,
+    index: usize,
+};
+
+pub fn lengthIndexValue(index: usize) core.JSValue {
+    if (index <= @as(usize, @intCast(std.math.maxInt(i32)))) return core.JSValue.int32(@intCast(index));
+    return core.JSValue.float64(@floatFromInt(index));
 }
 
-fn qjsGetSetRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    other_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !SetLikeRecordVm {
-    const object = shared_vm.objectFromValue(other_value) orelse return error.TypeError;
-    if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) {
-        return .{
-            .object_value = other_value.dup(),
-            .size = @floatFromInt(qjsSetStrongSize(object)),
-            .has = core.JSValue.undefinedValue(),
-            .keys = core.JSValue.undefinedValue(),
-            .native_kind = if (object.class_id == core.class.ids.set) .set else .map,
-        };
+pub const LengthIndexAtom = struct {
+    atom: core.Atom,
+    owned: bool,
+
+    pub fn deinit(self: LengthIndexAtom, rt: *core.JSRuntime) void {
+        if (self.owned) rt.atoms.free(self.atom);
     }
+};
 
-    const raw_size = try shared_vm.getValueProperty(ctx, output, global, other_value, core.atom.predefinedId("size", .string).?, caller_function, caller_frame);
-    defer raw_size.free(ctx.runtime);
-    const size_value = if (raw_size.isObject())
-        try shared_vm.toPrimitiveForNumber(ctx, output, global, raw_size)
-    else
-        raw_size.dup();
-    defer size_value.free(ctx.runtime);
-    const number_value = try value_ops.toNumberValue(ctx.runtime, size_value);
-    defer number_value.free(ctx.runtime);
-    const size_number = value_ops.numberValue(number_value) orelse return error.TypeError;
-    if (std.math.isNan(size_number)) return error.TypeError;
-
-    const has_key = try ctx.runtime.internAtom("has");
-    defer ctx.runtime.atoms.free(has_key);
-    const has_value = try shared_vm.getValueProperty(ctx, output, global, other_value, has_key, caller_function, caller_frame);
-    errdefer has_value.free(ctx.runtime);
-    if (!shared_vm.isCallableValue(has_value)) return error.TypeError;
-
-    const keys_key = try ctx.runtime.internAtom("keys");
-    defer ctx.runtime.atoms.free(keys_key);
-    const keys_value = try shared_vm.getValueProperty(ctx, output, global, other_value, keys_key, caller_function, caller_frame);
-    errdefer keys_value.free(ctx.runtime);
-    if (!shared_vm.isCallableValue(keys_value)) return error.TypeError;
-
-    return .{
-        .object_value = other_value.dup(),
-        .size = size_number,
-        .has = has_value,
-        .keys = keys_value,
-        .native_kind = .none,
-    };
-}
-
-fn qjsSetStrongSize(object: *core.Object) usize {
-    var count: usize = 0;
-    for (object.collectionEntriesSlot().*) |entry| {
-        if (entry.active) count += 1;
-    }
-    return count;
-}
-
-fn qjsConstructPlainSet(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
-    const set_proto = shared_vm.constructorPrototypeFromGlobal(ctx.runtime, global, "Set") orelse return error.TypeError;
-    return builtins.collection.constructWithPrototype(ctx.runtime, 2, set_proto);
-}
-
-fn qjsSetAddValue(rt: *core.JSRuntime, set_value: core.JSValue, key: core.JSValue) !void {
-    const out = try builtins.collection.methodCall(rt, set_value, 6, &.{key});
-    out.free(rt);
-}
-
-fn qjsSetDeleteValue(rt: *core.JSRuntime, set_value: core.JSValue, key: core.JSValue) !void {
-    const out = try builtins.collection.methodCall(rt, set_value, 4, &.{key});
-    out.free(rt);
-}
-
-fn qjsSetHasValue(rt: *core.JSRuntime, set_value: core.JSValue, key: core.JSValue) !bool {
-    const out = try builtins.collection.methodCall(rt, set_value, 3, &.{key});
-    defer out.free(rt);
-    return shared_vm.valueTruthy(out);
-}
-
-fn qjsSetLikeHas(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    record: SetLikeRecordVm,
-    key: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !bool {
-    if (record.native_kind != .none) {
-        const out = try builtins.collection.methodCall(ctx.runtime, record.object_value, 3, &.{key});
-        defer out.free(ctx.runtime);
-        return shared_vm.valueTruthy(out);
-    }
-    const out = try shared_vm.callValueOrBytecode(ctx, output, global, record.object_value, record.has, &.{key}, caller_function, caller_frame);
-    defer out.free(ctx.runtime);
-    return shared_vm.valueTruthy(out);
-}
-
-fn qjsSetLikeKeysIterator(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    record: SetLikeRecordVm,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    const source = if (record.native_kind != .none)
-        try builtins.collection.methodCall(ctx.runtime, record.object_value, 7, &.{})
-    else
-        try shared_vm.callValueOrBytecode(ctx, output, global, record.object_value, record.keys, &.{}, caller_function, caller_frame);
-    errdefer source.free(ctx.runtime);
-    const iterator_object = shared_vm.objectFromValue(source) orelse return error.TypeError;
-    const next_key = try ctx.runtime.internAtom("next");
-    defer ctx.runtime.atoms.free(next_key);
-    const next_method = try shared_vm.getValueProperty(ctx, output, global, source, next_key, caller_function, caller_frame);
-    defer next_method.free(ctx.runtime);
-    if (!shared_vm.isCallableValue(next_method)) return error.TypeError;
-    const cached = iterator_object.cachedIteratorNextSlot();
-    try iterator_object.setOptionalValueSlot(ctx.runtime, cached, next_method.dup());
-    return source;
-}
-
-fn qjsSetCloneReceiver(ctx: *core.JSContext, global: *core.Object, receiver: *core.Object) !core.JSValue {
-    const result_value = try qjsConstructPlainSet(ctx, global);
-    errdefer result_value.free(ctx.runtime);
-    var index: usize = 0;
-    while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
-        const entry = receiver.collectionEntriesSlot().*[index];
-        if (!entry.active) continue;
-        try qjsSetAddValue(ctx.runtime, result_value, entry.key);
-    }
-    return result_value;
-}
-
-fn qjsSetSnapshotKeys(rt: *core.JSRuntime, receiver: *core.Object) ![]core.JSValue {
-    const count = qjsSetStrongSize(receiver);
-    if (count == 0) return &.{};
-    const keys = try rt.memory.alloc(core.JSValue, count);
-    errdefer rt.memory.free(core.JSValue, keys);
-    var out: usize = 0;
-    errdefer {
-        for (keys[0..out]) |key| key.free(rt);
-    }
-    for (receiver.collectionEntriesSlot().*) |entry| {
-        if (!entry.active) continue;
-        keys[out] = entry.key.dup();
-        out += 1;
-    }
-    return keys;
-}
-
-fn qjsFreeValueList(rt: *core.JSRuntime, values: []core.JSValue) void {
-    for (values) |value| value.free(rt);
-    if (values.len != 0) rt.memory.free(core.JSValue, values);
-}
-
-test "set difference snapshot key root exposes dynamic key slice" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const first_atom = try rt.atoms.newValueSymbol("gc-set-difference-snapshot-key");
-    var keys = try rt.memory.alloc(core.JSValue, 1);
-    keys[0] = core.JSValue.symbol(first_atom);
-    defer qjsFreeValueList(rt, keys);
-
-    var keys_root = ValueListRoot{};
-    keys_root.init(rt, &keys);
-    defer keys_root.deinit();
-
-    const Visitor = struct {
-        atom_id: u32,
-        saw_key: bool = false,
-
-        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (slot.asSymbolAtom()) |atom_id| {
-                if (atom_id == self.atom_id) self.saw_key = true;
-            }
-        }
-
-        fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
-            _ = context;
-            _ = slot;
-        }
-    };
-    var state = Visitor{ .atom_id = first_atom };
-    var visitor = core.runtime.RootVisitor{
-        .context = &state,
-        .visit_value = Visitor.visitValue,
-        .visit_object = Visitor.visitObject,
-    };
-    try rt.traceActiveRoots(&visitor);
-
-    try std.testing.expect(state.saw_key);
-}
-
-fn qjsSetDifference(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: *core.Object,
-    other_record: SetLikeRecordVm,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    const result_value = try qjsConstructPlainSet(ctx, global);
-    errdefer result_value.free(ctx.runtime);
-    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) > other_record.size) {
-        var copy_index: usize = 0;
-        while (copy_index < receiver.collectionEntriesSlot().*.len) : (copy_index += 1) {
-            const entry = receiver.collectionEntriesSlot().*[copy_index];
-            if (!entry.active) continue;
-            try qjsSetAddValue(ctx.runtime, result_value, entry.key);
-        }
-        var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
-        defer iterator_value.free(ctx.runtime);
-        var iterator_done = false;
-        while (true) {
-            const step = shared_vm.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
-                if (!iterator_done) shared_vm.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
-                return err;
-            };
-            defer step.value.free(ctx.runtime);
-            if (step.done) {
-                iterator_done = true;
-                break;
-            }
-            try qjsSetDeleteValue(ctx.runtime, result_value, step.value);
-        }
-    } else {
-        var keys = try qjsSetSnapshotKeys(ctx.runtime, receiver);
-        defer qjsFreeValueList(ctx.runtime, keys);
-        var keys_root = ValueListRoot{};
-        keys_root.init(ctx.runtime, &keys);
-        defer keys_root.deinit();
-        for (keys) |key| {
-            if (!try qjsSetLikeHas(ctx, output, global, other_record, key, caller_function, caller_frame)) {
-                try qjsSetAddValue(ctx.runtime, result_value, key);
-            }
-        }
-    }
-    return result_value;
-}
-
-fn qjsSetIntersection(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: *core.Object,
-    other_record: SetLikeRecordVm,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    const result_value = try qjsConstructPlainSet(ctx, global);
-    errdefer result_value.free(ctx.runtime);
-    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) <= other_record.size) {
-        var index: usize = 0;
-        while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
-            const entry = receiver.collectionEntriesSlot().*[index];
-            if (!entry.active) continue;
-            if (try qjsSetLikeHas(ctx, output, global, other_record, entry.key, caller_function, caller_frame)) {
-                try qjsSetAddValue(ctx.runtime, result_value, entry.key);
-            }
-        }
-    } else {
-        var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
-        defer iterator_value.free(ctx.runtime);
-        var iterator_done = false;
-        while (true) {
-            const step = shared_vm.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
-                if (!iterator_done) shared_vm.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
-                return err;
-            };
-            defer step.value.free(ctx.runtime);
-            if (step.done) {
-                iterator_done = true;
-                break;
-            }
-            if (try qjsSetHasValue(ctx.runtime, receiver.value(), step.value)) {
-                try qjsSetAddValue(ctx.runtime, result_value, step.value);
-            }
-        }
-    }
-    return result_value;
-}
-
-fn qjsSetUnion(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: *core.Object,
-    other_record: SetLikeRecordVm,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
-    defer iterator_value.free(ctx.runtime);
-    const result_value = try qjsSetCloneReceiver(ctx, global, receiver);
-    errdefer result_value.free(ctx.runtime);
-    var iterator_done = false;
-    while (true) {
-        const step = shared_vm.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
-            if (!iterator_done) shared_vm.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
-            return err;
-        };
-        defer step.value.free(ctx.runtime);
-        if (step.done) {
-            iterator_done = true;
-            break;
-        }
-        try qjsSetAddValue(ctx.runtime, result_value, step.value);
-    }
-    return result_value;
-}
-
-fn qjsSetSymmetricDifference(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: *core.Object,
-    other_record: SetLikeRecordVm,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
-    defer iterator_value.free(ctx.runtime);
-    const result_value = try qjsSetCloneReceiver(ctx, global, receiver);
-    errdefer result_value.free(ctx.runtime);
-    var iterator_done = false;
-    while (true) {
-        const step = shared_vm.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
-            if (!iterator_done) shared_vm.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
-            return err;
-        };
-        defer step.value.free(ctx.runtime);
-        if (step.done) {
-            iterator_done = true;
-            break;
-        }
-        if (try qjsSetHasValue(ctx.runtime, receiver.value(), step.value)) {
-            try qjsSetDeleteValue(ctx.runtime, result_value, step.value);
-        } else if (!try qjsSetHasValue(ctx.runtime, result_value, step.value)) {
-            try qjsSetAddValue(ctx.runtime, result_value, step.value);
-        }
-    }
-    return result_value;
-}
-
-fn qjsSetIsDisjointFrom(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: *core.Object,
-    other_record: SetLikeRecordVm,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) <= other_record.size) {
-        var index: usize = 0;
-        while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
-            const entry = receiver.collectionEntriesSlot().*[index];
-            if (!entry.active) continue;
-            if (try qjsSetLikeHas(ctx, output, global, other_record, entry.key, caller_function, caller_frame)) {
-                return core.JSValue.boolean(false);
-            }
-        }
-        return core.JSValue.boolean(true);
-    }
-
-    var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
-    defer iterator_value.free(ctx.runtime);
-    var iterator_done = false;
-    while (true) {
-        const step = shared_vm.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
-            if (!iterator_done) shared_vm.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
-            return err;
-        };
-        defer step.value.free(ctx.runtime);
-        if (step.done) {
-            iterator_done = true;
-            return core.JSValue.boolean(true);
-        }
-        if (try qjsSetHasValue(ctx.runtime, receiver.value(), step.value)) {
-            shared_vm.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
-            iterator_done = true;
-            return core.JSValue.boolean(false);
-        }
-    }
-}
-
-fn qjsSetIsSubsetOf(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: *core.Object,
-    other_record: SetLikeRecordVm,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) > other_record.size) return core.JSValue.boolean(false);
-    var index: usize = 0;
-    while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
-        const entry = receiver.collectionEntriesSlot().*[index];
-        if (!entry.active) continue;
-        if (!try qjsSetLikeHas(ctx, output, global, other_record, entry.key, caller_function, caller_frame)) {
-            return core.JSValue.boolean(false);
-        }
-    }
-    return core.JSValue.boolean(true);
-}
-
-fn qjsSetIsSupersetOf(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: *core.Object,
-    other_record: SetLikeRecordVm,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) < other_record.size) return core.JSValue.boolean(false);
-    var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
-    defer iterator_value.free(ctx.runtime);
-    var iterator_done = false;
-    while (true) {
-        const step = shared_vm.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
-            if (!iterator_done) shared_vm.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
-            return err;
-        };
-        defer step.value.free(ctx.runtime);
-        if (step.done) {
-            iterator_done = true;
-            return core.JSValue.boolean(true);
-        }
-        if (!try qjsSetHasValue(ctx.runtime, receiver.value(), step.value)) {
-            shared_vm.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
-            iterator_done = true;
-            return core.JSValue.boolean(false);
-        }
-    }
-}
-
-pub fn qjsMapGroupByCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    const map_proto = shared_vm.constructorPrototypeFromGlobal(ctx.runtime, global, "Map") orelse return error.TypeError;
-    return qjsMapGroupByRecord(ctx, output, global, args, map_proto, caller_function, caller_frame);
-}
-
-pub fn qjsMapGroupByRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    prototype: ?*core.Object,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    if (args.len < 2) return error.TypeError;
-    if (!shared_vm.isCallableValue(args[1])) return error.TypeError;
-
-    const map_value = try builtins.collection.constructWithPrototype(ctx.runtime, 1, prototype);
-    errdefer map_value.free(ctx.runtime);
-
-    const iterator_value = try shared_vm.iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
-    defer iterator_value.free(ctx.runtime);
-
-    var index: usize = 0;
-    while (true) {
-        const max_safe_integer: usize = 9007199254740991;
-        if (index >= max_safe_integer) {
-            try shared_vm.closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
-            return error.TypeError;
-        }
-
-        const step = try shared_vm.iteratorStepValue(ctx, output, global, iterator_value);
-        defer step.value.free(ctx.runtime);
-        if (step.done) return map_value;
-
-        const index_value = value_ops.numberToValue(@floatFromInt(index));
-        const key = shared_vm.callValueOrBytecode(
-            ctx,
-            output,
-            global,
-            core.JSValue.undefinedValue(),
-            args[1],
-            &.{ step.value, index_value },
-            caller_function,
-            caller_frame,
-        ) catch |err| {
-            try shared_vm.closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
-            return err;
-        };
-        defer key.free(ctx.runtime);
-
-        qjsMapAppendGroupByValue(ctx, global, map_value, key, step.value) catch |err| {
-            try shared_vm.closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
-            return err;
-        };
-        index += 1;
-    }
-}
-
-pub fn qjsMapGetOrInsertComputed(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver_value: core.JSValue,
-    function_object: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    const receiver = property_ops.expectObject(receiver_value) catch return null;
-    if (receiver.class_id != core.class.ids.weakmap and receiver.class_id != core.class.ids.map) return null;
-    if (collectionMethodOwnerClass(function_object)) |owner_class| {
-        if (receiver.class_id != owner_class) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
-    }
-    if (args.len < 2) return error.TypeError;
-    if (!shared_vm.isCallableValue(args[1])) return error.TypeError;
-
-    const key = if (receiver.class_id == core.class.ids.map)
-        canonicalizeMapKey(args[0])
-    else
-        args[0].dup();
-    defer key.free(ctx.runtime);
-    if (receiver.class_id == core.class.ids.weakmap and !canBeHeldWeakly(ctx.runtime, key)) {
-        return @as(?core.JSValue, try shared_vm.throwTypeErrorMessage(ctx, global, "invalid value used as WeakMap key"));
-    }
-
-    const has_value = try builtins.collection.methodCall(ctx.runtime, receiver_value, 3, &.{key});
-    defer has_value.free(ctx.runtime);
-    if (has_value.asBool() == true) {
-        return try builtins.collection.methodCall(ctx.runtime, receiver_value, 2, &.{key});
-    }
-
-    const computed = try shared_vm.callValueOrBytecode(
-        ctx,
-        output,
-        global,
-        core.JSValue.undefinedValue(),
-        args[1],
-        &.{key},
-        caller_function,
-        caller_frame,
-    );
-    errdefer computed.free(ctx.runtime);
-    const set_result = try builtins.collection.methodCall(ctx.runtime, receiver_value, 1, &.{ key, computed });
-    set_result.free(ctx.runtime);
-    return computed;
-}
-
-pub fn canBeHeldWeakly(rt: *core.JSRuntime, value: core.JSValue) bool {
-    if (value.isObject()) return true;
-    if (value.asSymbolAtom()) |atom_id| {
-        return rt.atoms.kind(atom_id) == .symbol and builtins.symbol.registryKey(&rt.atoms, atom_id) == null;
-    }
-    return false;
-}
-
-pub fn collectionMethodOwnerClass(function_object: *core.Object) ?core.ClassId {
-    const cached = function_object.collectionMethodOwnerClass();
-    if (cached != core.class.invalid_class_id) return cached;
-    return null;
-}
-
-fn canonicalizeMapKey(key: core.JSValue) core.JSValue {
-    if (key.asFloat64()) |number| {
-        if (number == 0) return core.JSValue.int32(0);
-    }
-    return key.dup();
-}
-
-fn throwCollectionReceiverTypeError(ctx: *core.JSContext, global: *core.Object, owner_class: core.ClassId) !core.JSValue {
-    return shared_vm.throwTypeErrorMessage(ctx, global, collectionReceiverMessage(owner_class));
-}
-
-fn throwCollectionMethodTypeError(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    receiver: *core.Object,
-    method: builtins.collection.PrototypeMethod,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (receiver.class_id == core.class.ids.weakmap and
-        (method == .set or method == .get_or_insert or method == .get_or_insert_computed) and
-        args.len >= 1 and !canBeHeldWeakly(ctx.runtime, args[0]))
-    {
-        return shared_vm.throwTypeErrorMessage(ctx, global, "invalid value used as WeakMap key");
-    }
-    if (receiver.class_id == core.class.ids.weakset and
-        method == .add and
-        args.len >= 1 and !canBeHeldWeakly(ctx.runtime, args[0]))
-    {
-        return shared_vm.throwTypeErrorMessage(ctx, global, "invalid value used in weak set");
-    }
-    return shared_vm.throwTypeErrorMessage(ctx, global, collectionReceiverMessage(receiver.class_id));
-}
-
-fn collectionReceiverMessage(owner_class: core.ClassId) []const u8 {
-    if (owner_class == core.class.ids.map) return "Map object expected";
-    if (owner_class == core.class.ids.set) return "Set object expected";
-    if (owner_class == core.class.ids.weakmap) return "WeakMap object expected";
-    if (owner_class == core.class.ids.weakset) return "WeakSet object expected";
-    return "not an object";
-}
-
-fn qjsMapAppendGroupByValue(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    map_value: core.JSValue,
-    key: core.JSValue,
-    value: core.JSValue,
-) !void {
-    const existing = try builtins.collection.methodCall(ctx.runtime, map_value, 2, &.{key});
-    defer existing.free(ctx.runtime);
-
-    if (!existing.isUndefined()) {
-        const group = try property_ops.expectObject(existing);
-        if (!group.is_array) return error.TypeError;
-        try group.defineOwnProperty(
-            ctx.runtime,
-            core.atom.atomFromUInt32(group.length),
-            core.Descriptor.data(value, true, true, true),
-        );
-        return;
-    }
-
-    const group = try core.Object.createArray(ctx.runtime, shared_vm.arrayPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &group.header);
-    try group.defineOwnProperty(
-        ctx.runtime,
-        core.atom.atomFromUInt32(group.length),
-        core.Descriptor.data(value, true, true, true),
-    );
-    const set_result = try builtins.collection.methodCall(ctx.runtime, map_value, 1, &.{ key, group.value() });
-    defer set_result.free(ctx.runtime);
-    group.value().free(ctx.runtime);
+// Catch-marker decoding for the iterator unwind path (moved from the
+// dissolved exec/vm_utils.zig).
+fn catchTargetFromMarker(marker: core.JSValue) ?usize {
+    const previous = marker.asCatchOffset() orelse -1;
+    if (previous < 0) return null;
+    return @intCast(previous);
 }

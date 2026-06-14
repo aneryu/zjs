@@ -4,25 +4,29 @@
 reference, while this repository keeps the active validation profile in the
 root `test262` checkout and fixture snapshots under `tests/fixtures/`.
 
-This is a Production v1 Candidate. It has reached production-grade maturity for its targeted validation profile and embedded runtime use cases, but it is not a general-purpose drop-in replacement for Node.js or Deno outside its specified API surface.
+This is a Production v1 Candidate. It has reached production-grade maturity for
+its targeted validation profile and Zig-native embedded runtime use cases, but
+it is not a general-purpose drop-in replacement for Node.js, Deno, or the
+QuickJS C API outside its specified API surface.
 
 ## Status
 
-The active local test262 gate is expected to pass with no unexpected errors.
-The current known-error boundary contains three selected SpiderMonkey staging
-cases:
-
-- `test262/test/staging/sm/Function/function-name-binding.js`
-- `test262/test/staging/sm/TypedArray/constructor-ArrayBuffer-species-wrap.js`
-- `test262/test/staging/sm/class/newTargetDefaults.js`
+The active local test262 gate is expected to pass with no unexpected errors and
+no checked-in known failures. The current `test262_errors.txt` boundary is
+empty.
 
 ```sh
 zig build test262-gate --summary all
 ```
 
-The gate uses `test262.conf` and writes the latest bucket/failure
-reports under `reports/test262-latest/`. Skips and excludes in that config are
-part of the current compatibility boundary.
+The gate uses `test262.conf` and writes the latest bucket/failure reports under
+`reports/test262-latest/`. Skips and excludes in that config are part of the
+current compatibility boundary.
+
+`zig build engine-production-gate --summary all` is the engine semantic and
+architecture gate. A Production v1 release requires this gate to pass from a
+clean checkout; the full release checklist also requires ReleaseSafe testing,
+diff hygiene, and performance evidence when runtime-sensitive code changed.
 
 ## Requirements
 
@@ -46,8 +50,7 @@ Useful build steps:
 zig build test --summary all
 zig build test -Doptimize=ReleaseSafe --summary all
 zig build smoke --summary all
-# zig build test-oom --summary all (不再执行 / No longer executed)
-# zig build test-oom-exhaustive --summary all (不再执行 / No longer executed)
+zig build test-oom --summary all # OOM 注入门禁（corpus×注入+恢复金丝雀），阶段收口档位执行 / OOM injection gate (corpus x injection + recovery canaries), phase-close tier
 zig build gc-stress --summary all
 zig build perf-self-check --summary all
 zig build engine-production-gate --summary all
@@ -71,9 +74,16 @@ Missing or invalid arguments print usage and exit non-zero.
 Read [COMPATIBILITY.md](COMPATIBILITY.md) for the current validation boundary
 and [LIMITATIONS.md](LIMITATIONS.md) for runtime limitations.
 
-The current kernel/runtime boundary is tracked in
-[docs/adr/0001-zig-kernel-api-and-runtime-boundary.md](docs/adr/0001-zig-kernel-api-and-runtime-boundary.md).
-ADR 0001 is the active public API authority.
+Read [docs/embedding-cookbook.md](docs/embedding-cookbook.md) for public
+Zig-native embedding examples: runtime/context lifecycle, host functions,
+handle scopes, persistent values, byte stores, limits, interrupts, and module
+evaluation.
+
+Read [docs/public-api-contract.md](docs/public-api-contract.md) for the current
+public Zig API contract, [docs/api-boundary.md](docs/api-boundary.md) for the
+core/runtime boundary, and
+[docs/runtime-plugin-abi.md](docs/runtime-plugin-abi.md) for the dynamic runtime
+plugin ABI.
 
 The full direct test262 invocation is:
 
@@ -90,10 +100,11 @@ zjs uses non-atomic reference counting for immediate lifetime management and a
 cycle-removal pass for `Object` and `FunctionBytecode` graphs. The runtime is
 single-threaded; JS values must not be shared across threads.
 
-Every host-owned `Value` must either remain inside an active `ValueRootFrame`
-for the duration of a call or be stored in a `PersistentValue` handle. A
-`PersistentValue` duplicates the value, registers nested symbol roots, and must
-be destroyed before `Runtime.destroy`.
+Every host-owned `JSValue` must either remain inside an active
+`JSValue.Scope` / local handle for the duration of a call, or be stored in a
+`JSValue.Persistent` handle when it crosses callbacks, ticks, or host object
+state. Persistent handles duplicate the value, register nested symbol roots,
+and must be destroyed before `JSRuntime.destroy`.
 
 GC may run only at audited safe points where VM temporaries are rooted.
 Low-level allocation marks GC as pending but does not directly collect.

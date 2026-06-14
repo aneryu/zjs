@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { performance } from 'node:perf_hooks';
-import { cases, categories } from './microbench_cases.js';
+import { cases as microbenchCases, categories as microbenchCategories } from './microbench_cases.js';
+import { cases as hotpathCases, categories as hotpathCategories } from './hotpath_cases.js';
 
 const toolDir = import.meta.dir;
 const root = path.resolve(toolDir, '../..');
@@ -24,8 +25,23 @@ let zjsOnly = false;
 let emitJson = false;
 let outputPath = null;
 let emitScriptsDir = null;
+let suiteName = 'microbench';
+let shouldList = false;
 const selectedCases = [];
 const selectedCategories = [];
+
+const suites = {
+    microbench: {
+        cases: microbenchCases,
+        categories: microbenchCategories,
+        description: 'default compatibility and performance microbench suite',
+    },
+    hotpath: {
+        cases: hotpathCases,
+        categories: hotpathCategories,
+        description: 'focused hotpath calibration suite',
+    },
+};
 
 function parseInteger(value, fallback) {
     if (value == null || value === '') return fallback;
@@ -45,6 +61,7 @@ Options:
   --warmup N                Warmup runs per case and binary (default: ${warmup})
   --case NAME               Run one case; repeatable
   --category NAME           Run one category; repeatable
+  --suite NAME              Case suite: microbench or hotpath (default: ${suiteName})
   --include-unsupported     Show unsupported cases in the terminal table
   --zjs-only                Use zjs for the reference column; does not require C qjs
   --json                    Print the JSON report to stdout instead of the table
@@ -161,27 +178,37 @@ function formatRatio(value) {
 }
 
 function listCases() {
+    const suite = activeSuite();
+    console.log(`Suite: ${suiteName} (${suite.description})`);
+    console.log();
     console.log('Categories:');
-    for (const category of categories()) console.log(`  - ${category}`);
+    for (const category of suite.categories()) console.log(`  - ${category}`);
     console.log();
     console.log('Cases:');
-    for (const item of cases) {
+    for (const item of suite.cases) {
         console.log(`${item.name.padEnd(24)} ${item.category.padEnd(14)} QuickJS: ${item.quickjsName}`);
     }
 }
 
+function activeSuite() {
+    const suite = suites[suiteName];
+    if (!suite) fail(`error: unknown suite: ${suiteName}`);
+    return suite;
+}
+
 function selectedCaseList() {
-    let selected = cases;
+    const suite = activeSuite();
+    let selected = suite.cases;
     if (selectedCases.length !== 0) {
         selected = selectedCases.map((name) => {
-            const found = cases.find((item) => item.name === name || item.quickjsName === name);
+            const found = suite.cases.find((item) => item.name === name || item.quickjsName === name);
             if (!found) fail(`error: unknown case: ${name}`);
             return found;
         });
     }
 
     if (selectedCategories.length !== 0) {
-        const validCategories = new Set(categories());
+        const validCategories = new Set(suite.categories());
         for (const category of selectedCategories) {
             if (!validCategories.has(category)) fail(`error: unknown category: ${category}`);
         }
@@ -214,6 +241,7 @@ function makeReport(rows, selected) {
         .filter((ratio) => Number.isFinite(ratio) && ratio > 0);
     return {
         tool: 'zjs-microbench',
+        suite: suiteName,
         timestamp: new Date().toISOString(),
         qjs: qjsBin,
         zjs: zjsBin,
@@ -365,6 +393,12 @@ for (let i = 0; i < args.length; i += 1) {
             selectedCategories.push(value);
             break;
         }
+        case '--suite': {
+            const value = args[++i];
+            if (value == null) fail('error: --suite requires a value');
+            suiteName = value;
+            break;
+        }
         case '--include-unsupported':
             includeUnsupported = true;
             break;
@@ -400,8 +434,8 @@ for (let i = 0; i < args.length; i += 1) {
             break;
         }
         case '--list':
-            listCases();
-            process.exit(0);
+            shouldList = true;
+            break;
         case '-h':
         case '--help':
             usage();
@@ -409,6 +443,12 @@ for (let i = 0; i < args.length; i += 1) {
         default:
             fail(`error: unknown option: ${arg}`);
     }
+}
+
+activeSuite();
+if (shouldList) {
+    listCases();
+    process.exit(0);
 }
 
 ensureExecutable(zjsBin, 'zjs', "run 'zig build qjs -Doptimize=ReleaseFast' first, or set QJS_ZIG");

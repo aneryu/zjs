@@ -1,5 +1,6 @@
 const std = @import("std");
 const unicode = @import("unicode.zig");
+const emoji_sequences = @import("emoji_sequences.zig");
 
 pub const max_captures = 256;
 const max_stack = 256;
@@ -59,8 +60,6 @@ const Header = struct {
 };
 
 const header_len = 8;
-const cp_ls = 0x2028;
-const cp_ps = 0x2029;
 const int32_max: u32 = 0x7fffffff;
 
 const Op = enum(u8) {
@@ -1003,26 +1002,23 @@ fn canonicalize(code_point: u21, is_unicode: bool) u21 {
 }
 
 fn isLineTerminator(code_point: u21) bool {
-    return code_point == '\n' or code_point == '\r' or code_point == cp_ls or code_point == cp_ps;
+    return unicode.isEcmaLineTerminatorCodePoint(code_point);
 }
 
 fn isWordChar(code_point: u21) bool {
-    return (code_point >= '0' and code_point <= '9') or
-        (code_point >= 'a' and code_point <= 'z') or
-        (code_point >= 'A' and code_point <= 'Z') or
-        code_point == '_';
+    return unicode.isAsciiWordCodePoint(code_point);
 }
 
 fn isHiSurrogate(code_unit: u21) bool {
-    return code_unit >= 0xd800 and code_unit <= 0xdbff;
+    return unicode.isHighSurrogateCodePoint(code_unit);
 }
 
 fn isLoSurrogate(code_unit: u21) bool {
-    return code_unit >= 0xdc00 and code_unit <= 0xdfff;
+    return unicode.isLowSurrogateCodePoint(code_unit);
 }
 
 fn fromSurrogate(high: u16, low: u16) u21 {
-    return 0x10000 + ((@as(u21, high) - 0xd800) << 10) + (@as(u21, low) - 0xdc00);
+    return unicode.codePointFromSurrogatePair(high, low);
 }
 
 fn headerCaptureCount() usize {
@@ -1118,6 +1114,7 @@ pub fn compile(allocator: std.mem.Allocator, pattern: []const u8, flags_str: []c
     };
     errdefer compiler.code.deinit(allocator);
     defer compiler.capture_names.deinit(allocator);
+    defer compiler.deinitNamedGroupPaths();
 
     try compiler.emitHeader();
     if (!parsed_flags.sticky) {
@@ -1248,6 +1245,49 @@ const Compiler = struct {
     code: std.ArrayList(u8),
     capture_names: std.ArrayList(?[]const u8) = .empty,
     has_named_captures: bool = false,
+    /// Current alternation path: one alternative counter per enclosing
+    /// Disjunction. Two named groups may share a name only when their
+    /// paths diverge (they sit in different alternatives of some common
+    /// Disjunction), per the duplicate-named-groups proposal.
+    alt_path: std.ArrayList(u32) = .empty,
+    named_group_paths: std.ArrayList(NamedGroupPath) = .empty,
+
+    const NamedGroupPath = struct {
+        name: []const u8,
+        path: []u32,
+    };
+
+    fn deinitNamedGroupPaths(self: *Compiler) void {
+        for (self.named_group_paths.items) |record| self.allocator.free(record.path);
+        self.named_group_paths.deinit(self.allocator);
+        self.alt_path.deinit(self.allocator);
+    }
+
+    /// A duplicate of `name` is allowed only when every already-recorded
+    /// group with the same name diverges from the current alternation
+    /// path: the first differing position marks the shared Disjunction
+    /// whose distinct alternatives keep the two groups mutually
+    /// exclusive. A prefix relation (one group nested inside the other's
+    /// alternative chain) means both could participate in one match.
+    fn duplicateNameAllowed(self: *const Compiler, name: []const u8) bool {
+        const current = self.alt_path.items;
+        for (self.named_group_paths.items) |record| {
+            if (!groupNamesEqual(record.name, name)) continue;
+            const limit = @min(record.path.len, current.len);
+            var i: usize = 0;
+            const diverges = while (i < limit) : (i += 1) {
+                if (record.path[i] != current[i]) break true;
+            } else false;
+            if (!diverges) return false;
+        }
+        return true;
+    }
+
+    fn recordNamedGroupPath(self: *Compiler, name: []const u8) CompileError!void {
+        const path = try self.allocator.dupe(u32, self.alt_path.items);
+        errdefer self.allocator.free(path);
+        try self.named_group_paths.append(self.allocator, .{ .name = name, .path = path });
+    }
 
     fn emitHeader(self: *Compiler) !void {
         try self.code.appendNTimes(self.allocator, 0, header_len);
@@ -1273,9 +1313,12 @@ const Compiler = struct {
 
     fn parseDisjunction(self: *Compiler, terminator: ?u8, is_backward_dir: bool) CompileError!void {
         const start = self.code.items.len;
+        try self.alt_path.append(self.allocator, 0);
+        defer _ = self.alt_path.pop();
         try self.parseAlternative(terminator, is_backward_dir);
         while (self.index < self.pattern.len and self.pattern[self.index] == '|') {
             self.index += 1;
+            self.alt_path.items[self.alt_path.items.len - 1] += 1;
             const previous_len = self.code.items.len - start;
             try self.insertBytes(start, 5);
             self.code.items[start] = opByte(.split_next_first);
@@ -1403,7 +1446,8 @@ const Compiler = struct {
         const capture_index = self.capture_count;
         self.capture_count += 1;
         if (maybe_name) |name| {
-            if (self.findCaptureName(name, capture_index) != null) return error.InvalidPattern;
+            if (!self.duplicateNameAllowed(name)) return error.InvalidPattern;
+            try self.recordNamedGroupPath(name);
             self.has_named_captures = true;
         }
         try self.capture_names.append(self.allocator, maybe_name);
@@ -1449,7 +1493,7 @@ const Compiler = struct {
             },
             '0' => {
                 self.index += 2;
-                if (self.index < self.pattern.len and std.ascii.isDigit(self.pattern[self.index]) and self.flags.unicode) return error.InvalidPattern;
+                if (self.index < self.pattern.len and isDecimalDigit(self.pattern[self.index]) and self.flags.unicode) return error.InvalidPattern;
                 const cp = try self.parseLegacyOctalAfterZero();
                 try self.emitCharacterAtom(canonicalizeLiteral(cp, self.flags), is_backward_dir);
                 return .{ .start = start, .simple_char_count = if (is_backward_dir) null else 1, .quantifiable = true, .capture_count_before = self.capture_count };
@@ -1481,7 +1525,7 @@ const Compiler = struct {
                 return .{ .start = start, .simple_char_count = if (is_backward_dir) null else 1, .quantifiable = true, .capture_count_before = self.capture_count };
             },
             'c' => {
-                if (self.index + 2 >= self.pattern.len or !std.ascii.isAlphabetic(self.pattern[self.index + 2])) {
+                if (self.index + 2 >= self.pattern.len or !unicode.isAsciiAlphaByte(self.pattern[self.index + 2])) {
                     if (self.flags.unicode) return error.InvalidPattern;
                     self.index += 2;
                     try self.emitCharacterAtom('\\', is_backward_dir);
@@ -1523,6 +1567,14 @@ const Compiler = struct {
                     try self.emitCharacterAtom(canonicalizeLiteral(escaped, self.flags), is_backward_dir);
                     return .{ .start = start, .simple_char_count = if (is_backward_dir) null else 1, .quantifiable = true, .capture_count_before = self.capture_count };
                 }
+                if ((self.flags.bits & regex_bytecode.flags.unicode_sets) != 0) {
+                    if (try self.parseStringPropertyEscape()) |string_set| {
+                        var set = string_set;
+                        defer set.deinit();
+                        try self.emitClassSet(&set, is_backward_dir);
+                        return .{ .start = start, .simple_char_count = null, .quantifiable = true, .capture_count_before = self.capture_count };
+                    }
+                }
                 const inverted = escaped == 'P';
                 var ranges = try self.parseUnicodePropertyEscape(inverted);
                 defer ranges.deinit();
@@ -1547,13 +1599,26 @@ const Compiler = struct {
                     try self.emitCharacterAtom(canonicalizeLiteral('k', self.flags), is_backward_dir);
                     return .{ .start = start, .simple_char_count = if (is_backward_dir) null else 1, .quantifiable = true, .capture_count_before = self.capture_count };
                 };
-                const capture_index = self.findCaptureName(name, self.capture_count) orelse self.findScannedCaptureName(name) orelse {
+                // With duplicate named groups, `\k<name>` references every
+                // group carrying the name. At most one of them participates
+                // in a match (duplicates must sit in different alternatives),
+                // and an unset capture matches the empty string, so emitting
+                // one back_reference per same-named group composes to "match
+                // the participating one".
+                var emitted_back_reference = false;
+                var name_capture_index: usize = 1;
+                while (name_capture_index < self.total_capture_count and name_capture_index - 1 < self.all_capture_names.len) : (name_capture_index += 1) {
+                    const existing = self.all_capture_names[name_capture_index - 1] orelse continue;
+                    if (!groupNamesEqual(existing, name)) continue;
+                    try self.emitOpU8(if (is_backward_dir) .backward_back_reference else .back_reference, @intCast(name_capture_index));
+                    emitted_back_reference = true;
+                }
+                if (!emitted_back_reference) {
                     if (self.flags.unicode or self.patternHasNamedCaptures()) return error.InvalidPattern;
                     self.index = escape_start + 2;
                     try self.emitCharacterAtom(canonicalizeLiteral('k', self.flags), is_backward_dir);
                     return .{ .start = start, .simple_char_count = if (is_backward_dir) null else 1, .quantifiable = true, .capture_count_before = self.capture_count };
-                };
-                try self.emitOpU8(if (is_backward_dir) .backward_back_reference else .back_reference, @intCast(capture_index));
+                }
                 return .{ .start = start, .simple_char_count = null, .quantifiable = true, .capture_count_before = self.capture_count };
             },
             else => {
@@ -1583,6 +1648,14 @@ const Compiler = struct {
 
     fn parseClass(self: *Compiler, start: usize, is_backward_dir: bool) CompileError!Atom {
         self.index += 1;
+        if ((self.flags.bits & regex_bytecode.flags.unicode_sets) != 0) {
+            var set = try self.parseClassSetBody();
+            defer set.deinit();
+            try self.emitClassSet(&set, is_backward_dir);
+            // String alternatives make the match length variable.
+            const single_char = !is_backward_dir and set.strings.items.len == 0;
+            return .{ .start = start, .simple_char_count = if (single_char) 1 else null, .quantifiable = true, .capture_count_before = self.capture_count };
+        }
         var ranges = RangeSet.init(self.allocator);
         defer ranges.deinit();
         const invert = if (self.index < self.pattern.len and self.pattern[self.index] == '^') blk: {
@@ -1590,7 +1663,6 @@ const Compiler = struct {
             break :blk true;
         } else false;
         const body_start = self.index;
-        var has_class_set_lhs = false;
 
         while (self.index < self.pattern.len) {
             if (self.pattern[self.index] == ']') {
@@ -1604,25 +1676,331 @@ const Compiler = struct {
                 return .{ .start = start, .simple_char_count = if (is_backward_dir) null else 1, .quantifiable = true, .capture_count_before = self.capture_count };
             }
 
-            if ((self.flags.bits & regex_bytecode.flags.unicode_sets) != 0 and
-                self.index + 1 < self.pattern.len and
-                self.pattern[self.index] == '&' and
-                self.pattern[self.index + 1] == '&')
-            {
-                if (!has_class_set_lhs) return error.InvalidPattern;
-                self.index += 2;
-                var rhs = try self.parseClassAtomOrRange(body_start);
-                defer rhs.deinit();
-                try ranges.intersectWith(&rhs);
-                continue;
-            }
-
             var atom_ranges = try self.parseClassAtomOrRange(body_start);
             defer atom_ranges.deinit();
             try ranges.addSet(&atom_ranges);
-            has_class_set_lhs = true;
         }
         return error.InvalidPattern;
+    }
+
+    fn atMatch(self: *const Compiler, needle: []const u8) bool {
+        return self.index + needle.len <= self.pattern.len and
+            std.mem.eql(u8, self.pattern[self.index..][0..needle.len], needle);
+    }
+
+    /// A v-mode class set: code points plus multi-code-point strings
+    /// (from `\q{...}`). Single-code-point string alternatives fold into
+    /// `ranges`; `strings` stays deduplicated and allocator-owned.
+    const ClassSet = struct {
+        ranges: RangeSet,
+        strings: std.ArrayList([]u21) = .empty,
+
+        fn init(allocator: std.mem.Allocator) ClassSet {
+            return .{ .ranges = RangeSet.init(allocator) };
+        }
+
+        fn deinit(self: *ClassSet) void {
+            for (self.strings.items) |s| self.ranges.allocator.free(s);
+            self.strings.deinit(self.ranges.allocator);
+            self.ranges.deinit();
+        }
+
+        fn containsString(self: *const ClassSet, needle: []const u21) bool {
+            for (self.strings.items) |s| {
+                if (std.mem.eql(u21, s, needle)) return true;
+            }
+            return false;
+        }
+
+        /// Takes ownership of `s` (frees it when already present).
+        fn addOwnedString(self: *ClassSet, s: []u21) !void {
+            if (self.containsString(s)) {
+                self.ranges.allocator.free(s);
+                return;
+            }
+            try self.strings.append(self.ranges.allocator, s);
+        }
+
+        fn unionWith(self: *ClassSet, other: *const ClassSet) !void {
+            try self.ranges.addSet(&other.ranges);
+            for (other.strings.items) |s| {
+                if (self.containsString(s)) continue;
+                const copy = try self.ranges.allocator.dupe(u21, s);
+                errdefer self.ranges.allocator.free(copy);
+                try self.strings.append(self.ranges.allocator, copy);
+            }
+        }
+
+        fn intersectWith(self: *ClassSet, other: *ClassSet) !void {
+            try self.ranges.intersectWith(&other.ranges);
+            var write: usize = 0;
+            for (self.strings.items) |s| {
+                if (other.containsString(s)) {
+                    self.strings.items[write] = s;
+                    write += 1;
+                } else {
+                    self.ranges.allocator.free(s);
+                }
+            }
+            self.strings.shrinkRetainingCapacity(write);
+        }
+
+        fn subtract(self: *ClassSet, other: *ClassSet) !void {
+            try other.ranges.invert();
+            try self.ranges.intersectWith(&other.ranges);
+            var write: usize = 0;
+            for (self.strings.items) |s| {
+                if (!other.containsString(s)) {
+                    self.strings.items[write] = s;
+                    write += 1;
+                } else {
+                    self.ranges.allocator.free(s);
+                }
+            }
+            self.strings.shrinkRetainingCapacity(write);
+        }
+    };
+
+    /// v-mode ClassSetExpression body. Entered just past the opening `[`
+    /// (top-level or nested); consumes through the matching `]`. The
+    /// expression is one of ClassUnion, ClassIntersection (`&&`-chain) or
+    /// ClassDifference (`--`-chain) — operators must not be mixed at one
+    /// level. Returns the resolved class set, case-folded per operand when
+    /// ignoring case and complemented when the class is negated (negation
+    /// of a set that may contain strings is a SyntaxError).
+    fn parseClassSetBody(self: *Compiler) CompileError!ClassSet {
+        const invert = if (self.index < self.pattern.len and self.pattern[self.index] == '^') blk: {
+            self.index += 1;
+            break :blk true;
+        } else false;
+
+        var result = ClassSet.init(self.allocator);
+        errdefer result.deinit();
+
+        if (self.index < self.pattern.len and self.pattern[self.index] == ']') {
+            self.index += 1;
+            if (invert) try result.ranges.invert();
+            return result;
+        }
+
+        const first = try self.parseClassSetOperand(true);
+        result.deinit();
+        result = first.set;
+
+        if (self.atMatch("--")) {
+            // ClassSetRange is only valid inside ClassUnion.
+            if (first.was_range) return error.InvalidPattern;
+            while (true) {
+                if (self.index < self.pattern.len and self.pattern[self.index] == ']') {
+                    self.index += 1;
+                    break;
+                }
+                if (!self.atMatch("--")) return error.InvalidPattern;
+                self.index += 2;
+                var rhs = try self.parseClassSetOperand(false);
+                defer rhs.set.deinit();
+                try result.subtract(&rhs.set);
+            }
+        } else if (self.atMatch("&&")) {
+            if (first.was_range) return error.InvalidPattern;
+            while (true) {
+                if (self.index < self.pattern.len and self.pattern[self.index] == ']') {
+                    self.index += 1;
+                    break;
+                }
+                if (!self.atMatch("&&")) return error.InvalidPattern;
+                self.index += 2;
+                var rhs = try self.parseClassSetOperand(false);
+                defer rhs.set.deinit();
+                try result.intersectWith(&rhs.set);
+            }
+        } else {
+            while (true) {
+                if (self.index >= self.pattern.len) return error.InvalidPattern;
+                if (self.pattern[self.index] == ']') {
+                    self.index += 1;
+                    break;
+                }
+                // Operators must not appear in a union chain.
+                if (self.atMatch("--") or self.atMatch("&&")) return error.InvalidPattern;
+                var rhs = try self.parseClassSetOperand(true);
+                defer rhs.set.deinit();
+                try result.unionWith(&rhs.set);
+            }
+        }
+        try result.ranges.normalize();
+        if (invert) {
+            // ClassComplement of a set that may contain strings.
+            if (result.strings.items.len != 0) return error.InvalidPattern;
+            try result.ranges.invert();
+        }
+        return result;
+    }
+
+    const ClassSetOperandResult = struct { set: ClassSet, was_range: bool };
+
+    /// One ClassSetOperand (or, when `allow_range`, a ClassSetRange) of a
+    /// v-mode class set expression. The caller owns the returned set.
+    fn parseClassSetOperand(self: *Compiler, allow_range: bool) CompileError!ClassSetOperandResult {
+        if (self.index >= self.pattern.len) return error.InvalidPattern;
+        const raw = self.pattern[self.index];
+        if (raw == ']') return error.InvalidPattern;
+        if (raw == '[') {
+            // Nested class.
+            self.index += 1;
+            const set = try self.parseClassSetBody();
+            return .{ .set = set, .was_range = false };
+        }
+        if (raw != '\\') {
+            // A lone `-` is a ClassSetSyntaxCharacter: never a valid
+            // operand start in v-mode (ranges consume their hyphen below).
+            if (isUnicodeSetsReservedClassByte(raw, true)) return error.InvalidPattern;
+            if (self.index + 1 < self.pattern.len and isUnicodeSetsReservedDoublePunctuator(raw, self.pattern[self.index + 1])) {
+                return error.InvalidPattern;
+            }
+        } else if (self.index + 1 < self.pattern.len and self.pattern[self.index + 1] == 'q') {
+            return .{ .set = try self.parseClassStringDisjunction(), .was_range = false };
+        } else if (self.index + 1 < self.pattern.len and (self.pattern[self.index + 1] == 'p' or self.pattern[self.index + 1] == 'P')) {
+            if (try self.parseStringPropertyEscape()) |set| {
+                return .{ .set = set, .was_range = false };
+            }
+        }
+
+        var set = ClassSet.init(self.allocator);
+        errdefer set.deinit();
+        var was_range = false;
+
+        const first = try self.parseClassAtom();
+        const can_be_range = allow_range and first == .code_point and
+            self.index + 1 < self.pattern.len and
+            self.pattern[self.index] == '-' and
+            self.pattern[self.index + 1] != ']' and
+            self.pattern[self.index + 1] != '-';
+        if (can_be_range) {
+            self.index += 1;
+            var second = try self.parseClassAtom();
+            if (second != .code_point) {
+                second.ranges.deinit();
+                return error.InvalidPattern;
+            }
+            if (second.code_point < first.code_point) return error.InvalidPattern;
+            try set.ranges.addInclusive(first.code_point, second.code_point);
+            was_range = true;
+        } else {
+            try set.ranges.addAtom(first);
+        }
+        try set.ranges.normalize();
+        if (self.flags.ignore_case) try set.ranges.regexpCanonicalize(true);
+        return .{ .set = set, .was_range = was_range };
+    }
+
+    /// `\q{alt|alt|...}`: each alternative is a (possibly empty) sequence
+    /// of ClassSetCharacters. Single-code-point alternatives fold into the
+    /// range set; longer ones (and the empty string) become set strings.
+    fn parseClassStringDisjunction(self: *Compiler) CompileError!ClassSet {
+        std.debug.assert(self.atMatch("\\q"));
+        self.index += 2;
+        if (self.index >= self.pattern.len or self.pattern[self.index] != '{') return error.InvalidPattern;
+        self.index += 1;
+
+        var set = ClassSet.init(self.allocator);
+        errdefer set.deinit();
+        var current = std.ArrayList(u21).empty;
+        defer current.deinit(self.allocator);
+
+        while (true) {
+            if (self.index >= self.pattern.len) return error.InvalidPattern;
+            const byte = self.pattern[self.index];
+            if (byte == '}' or byte == '|') {
+                self.index += 1;
+                if (current.items.len == 1) {
+                    try set.ranges.addInclusive(current.items[0], current.items[0]);
+                } else {
+                    const copy = try self.allocator.dupe(u21, current.items);
+                    errdefer self.allocator.free(copy);
+                    try set.addOwnedString(copy);
+                }
+                current.clearRetainingCapacity();
+                if (byte == '}') break;
+                continue;
+            }
+            var atom = try self.parseClassAtom();
+            if (atom != .code_point) {
+                if (atom == .ranges) atom.ranges.deinit();
+                return error.InvalidPattern;
+            }
+            const cp = if (self.flags.ignore_case) canonicalize(atom.code_point, true) else atom.code_point;
+            try current.append(self.allocator, cp);
+        }
+        try set.ranges.normalize();
+        if (self.flags.ignore_case) try set.ranges.regexpCanonicalize(true);
+        return set;
+    }
+
+    /// Emit the matcher for a v-mode class set. Multi-code-point strings
+    /// are tried first (longest first, per spec ordering), then the
+    /// code-point set, then the empty string when present.
+    fn emitClassSet(self: *Compiler, set: *ClassSet, is_backward_dir: bool) CompileError!void {
+        if (set.strings.items.len == 0) {
+            if (is_backward_dir) try self.emitOp(.prev);
+            try self.emitRangeSet(&set.ranges);
+            if (is_backward_dir) try self.emitOp(.prev);
+            return;
+        }
+
+        // Sort strings by descending length (stable, preserving insertion
+        // order between equal lengths per spec ordering). The empty string,
+        // if present, lands last.
+        const items = set.strings.items;
+        std.sort.block([]u21, items, {}, struct {
+            fn longerFirst(_: void, lhs: []u21, rhs: []u21) bool {
+                return lhs.len > rhs.len;
+            }
+        }.longerFirst);
+
+        const has_empty = items.len > 0 and items[items.len - 1].len == 0;
+        const string_count = items.len - @intFromBool(has_empty);
+        const has_ranges = set.ranges.ranges.items.len != 0;
+
+        var end_jumps = std.ArrayList(usize).empty;
+        defer end_jumps.deinit(self.allocator);
+
+        for (items[0..string_count], 0..) |s, string_index| {
+            const is_last_branch = string_index + 1 == string_count and !has_ranges and !has_empty;
+            const split_pos = if (!is_last_branch) try self.emitOpU32At(.split_next_first, 0) else null;
+            if (is_backward_dir) {
+                var k = s.len;
+                while (k > 0) {
+                    k -= 1;
+                    try self.emitCharacterAtom(s[k], true);
+                }
+            } else {
+                for (s) |cp| try self.emitCharacterAtom(cp, false);
+            }
+            if (!is_last_branch) {
+                const goto_pos = try self.emitOpU32At(.goto_, 0);
+                try end_jumps.append(self.allocator, goto_pos);
+            }
+            if (split_pos) |pos| {
+                std.mem.writeInt(u32, self.code.items[pos..][0..4], @intCast(self.code.items.len - (pos + 4)), .little);
+            }
+        }
+
+        if (has_ranges) {
+            const split_pos = if (has_empty) try self.emitOpU32At(.split_next_first, 0) else null;
+            if (is_backward_dir) try self.emitOp(.prev);
+            try self.emitRangeSet(&set.ranges);
+            if (is_backward_dir) try self.emitOp(.prev);
+            if (split_pos) |pos| {
+                // The empty-string branch matches nothing: fall through.
+                std.mem.writeInt(u32, self.code.items[pos..][0..4], @intCast(self.code.items.len - (pos + 4)), .little);
+            }
+        }
+        // has_empty: the empty alternative emits no instructions.
+
+        for (end_jumps.items) |goto_pos| {
+            std.mem.writeInt(u32, self.code.items[goto_pos..][0..4], @intCast(self.code.items.len - (goto_pos + 4)), .little);
+        }
     }
 
     fn parseClassAtomOrRange(self: *Compiler, body_start: usize) CompileError!RangeSet {
@@ -1679,7 +2057,7 @@ const Compiler = struct {
                 },
                 '0' => {
                     if (self.flags.unicode) {
-                        if (self.index + 2 < self.pattern.len and std.ascii.isDigit(self.pattern[self.index + 2])) return error.InvalidPattern;
+                        if (self.index + 2 < self.pattern.len and isDecimalDigit(self.pattern[self.index + 2])) return error.InvalidPattern;
                         self.index += 2;
                         return .{ .code_point = 0 };
                     }
@@ -1695,7 +2073,7 @@ const Compiler = struct {
                 },
                 'c' => {
                     if (self.flags.unicode) {
-                        if (self.index + 2 >= self.pattern.len or !std.ascii.isAlphabetic(self.pattern[self.index + 2])) return error.InvalidPattern;
+                        if (self.index + 2 >= self.pattern.len or !unicode.isAsciiAlphaByte(self.pattern[self.index + 2])) return error.InvalidPattern;
                         const cp: u21 = self.pattern[self.index + 2] & 0x1f;
                         self.index += 3;
                         return .{ .code_point = cp };
@@ -1798,13 +2176,13 @@ const Compiler = struct {
                 max = 1;
             },
             '{' => {
-                if (self.index + 1 >= self.pattern.len or !std.ascii.isDigit(self.pattern[self.index + 1])) return;
+                if (self.index + 1 >= self.pattern.len or !isDecimalDigit(self.pattern[self.index + 1])) return;
                 self.index += 1;
                 min = try self.parseDigits(true);
                 max = min;
                 if (self.index < self.pattern.len and self.pattern[self.index] == ',') {
                     self.index += 1;
-                    if (self.index < self.pattern.len and std.ascii.isDigit(self.pattern[self.index])) {
+                    if (self.index < self.pattern.len and isDecimalDigit(self.pattern[self.index])) {
                         max = try self.parseDigits(true);
                         if (max < min) return error.InvalidPattern;
                     } else {
@@ -1832,15 +2210,19 @@ const Compiler = struct {
                 return;
             }
         }
-        var atom_start = atom.start;
-        if (min == 0 and self.capture_count != atom.capture_count_before) {
+        // Per RepeatMatcher, every iteration entry clears the captures
+        // inside the repeated Atom, so the reset stays INSIDE the loop
+        // body (it gets wrapped together with the atom below). QuickJS
+        // hoists the reset out of the loop (resetting once, before the
+        // first iteration), which deviates from the spec for patterns
+        // like /^(?:(x)|z){2}\1$/ and the duplicate-named-groups tests.
+        if (self.capture_count != atom.capture_count_before) {
             try self.insertBytes(atom.start, 3);
             self.code.items[atom.start] = opByte(.save_reset);
             self.code.items[atom.start + 1] = atom.capture_count_before;
             self.code.items[atom.start + 2] = self.capture_count - 1;
-            atom_start += 3;
         }
-        try self.wrapGenericQuantifier(atom_start, min, max, greedy);
+        try self.wrapGenericQuantifier(atom.start, min, max, greedy);
     }
 
     fn wrapSimpleGreedyQuantifier(self: *Compiler, atom_start: usize, char_count: u32, min: u32, max: u32) !void {
@@ -1940,7 +2322,7 @@ const Compiler = struct {
     }
 
     fn parseLegacyDecimalEscape(self: *Compiler) CompileError!u21 {
-        if (self.index >= self.pattern.len or !std.ascii.isDigit(self.pattern[self.index])) return error.InvalidPattern;
+        if (self.index >= self.pattern.len or !isDecimalDigit(self.pattern[self.index])) return error.InvalidPattern;
         if (self.pattern[self.index] > '7') {
             const cp = self.pattern[self.index];
             self.index += 1;
@@ -1973,7 +2355,7 @@ const Compiler = struct {
     fn parseLegacyClassDecimalEscape(self: *Compiler) CompileError!u21 {
         std.debug.assert(self.pattern[self.index] == '\\');
         self.index += 1;
-        if (self.index >= self.pattern.len or !std.ascii.isDigit(self.pattern[self.index])) return error.InvalidPattern;
+        if (self.index >= self.pattern.len or !isDecimalDigit(self.pattern[self.index])) return error.InvalidPattern;
         if (!isOctalDigit(self.pattern[self.index])) {
             const cp = self.pattern[self.index];
             self.index += 1;
@@ -1995,6 +2377,99 @@ const Compiler = struct {
         return parseGroupNameAt(self.pattern, &self.index);
     }
 
+    /// The seven v-mode Unicode properties of strings (UTS #51 sequence
+    /// properties; sec-static-semantics-unicodematchpropertyofstrings).
+    const StringProperty = enum {
+        basic_emoji,
+        emoji_keycap_sequence,
+        rgi_emoji,
+        rgi_emoji_flag_sequence,
+        rgi_emoji_modifier_sequence,
+        rgi_emoji_tag_sequence,
+        rgi_emoji_zwj_sequence,
+    };
+
+    fn stringPropertyByName(name: []const u8) ?StringProperty {
+        const names = [_]struct { []const u8, StringProperty }{
+            .{ "Basic_Emoji", .basic_emoji },
+            .{ "Emoji_Keycap_Sequence", .emoji_keycap_sequence },
+            .{ "RGI_Emoji", .rgi_emoji },
+            .{ "RGI_Emoji_Flag_Sequence", .rgi_emoji_flag_sequence },
+            .{ "RGI_Emoji_Modifier_Sequence", .rgi_emoji_modifier_sequence },
+            .{ "RGI_Emoji_Tag_Sequence", .rgi_emoji_tag_sequence },
+            .{ "RGI_Emoji_ZWJ_Sequence", .rgi_emoji_zwj_sequence },
+        };
+        for (names) |entry| {
+            if (std.mem.eql(u8, entry[0], name)) return entry[1];
+        }
+        return null;
+    }
+
+    /// When the `\p{...}`/`\P{...}` escape at `self.index` names a v-mode
+    /// property of strings, consumes it and returns its class set. `\P` of
+    /// a property of strings is a SyntaxError (MayContainStrings under
+    /// complement). Any other escape leaves the position untouched and
+    /// returns null so the regular code-point property path applies.
+    fn parseStringPropertyEscape(self: *Compiler) CompileError!?ClassSet {
+        std.debug.assert(self.pattern[self.index] == '\\');
+        std.debug.assert(self.pattern[self.index + 1] == 'p' or self.pattern[self.index + 1] == 'P');
+        if (self.index + 2 >= self.pattern.len or self.pattern[self.index + 2] != '{') return null;
+        var end = self.index + 3;
+        while (end < self.pattern.len and self.pattern[end] != '}') : (end += 1) {}
+        if (end >= self.pattern.len) return null;
+        const property = stringPropertyByName(self.pattern[self.index + 3 .. end]) orelse return null;
+        if (self.pattern[self.index + 1] == 'P') return error.InvalidPattern;
+        self.index = end + 1;
+        return try self.buildStringPropertyClassSet(property);
+    }
+
+    fn buildStringPropertyClassSet(self: *Compiler, property: StringProperty) CompileError!ClassSet {
+        var set = ClassSet.init(self.allocator);
+        errdefer set.deinit();
+        switch (property) {
+            .basic_emoji => try self.addBasicEmoji(&set),
+            .emoji_keycap_sequence => try self.addPropertyStrings(&set, &emoji_sequences.emoji_keycap_sequences),
+            .rgi_emoji_flag_sequence => try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_flag_sequences),
+            .rgi_emoji_modifier_sequence => try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_modifier_sequences),
+            .rgi_emoji_tag_sequence => try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_tag_sequences),
+            .rgi_emoji_zwj_sequence => try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_zwj_sequences),
+            .rgi_emoji => {
+                // RGI_Emoji is the union of the six other properties of
+                // strings (UTS #51); their sequence sets are pairwise
+                // disjoint, so plain concatenation needs no dedup.
+                try self.addBasicEmoji(&set);
+                try self.addPropertyStrings(&set, &emoji_sequences.emoji_keycap_sequences);
+                try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_flag_sequences);
+                try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_modifier_sequences);
+                try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_tag_sequences);
+                try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_zwj_sequences);
+            },
+        }
+        try set.ranges.normalize();
+        if (self.flags.ignore_case) try set.ranges.regexpCanonicalize(true);
+        return set;
+    }
+
+    fn addBasicEmoji(self: *Compiler, set: *ClassSet) CompileError!void {
+        for (emoji_sequences.basic_emoji_ranges) |range| {
+            try set.ranges.addInclusive(range.lo, range.hi);
+        }
+        try self.addPropertyStrings(set, &emoji_sequences.basic_emoji_sequences);
+    }
+
+    fn addPropertyStrings(self: *Compiler, set: *ClassSet, property_sequences: []const []const u21) CompileError!void {
+        try set.strings.ensureUnusedCapacity(self.allocator, property_sequences.len);
+        for (property_sequences) |sequence| {
+            const copy = try self.allocator.dupe(u21, sequence);
+            if (self.flags.ignore_case) {
+                for (copy) |*cp| cp.* = canonicalize(cp.*, true);
+            }
+            // The generated tables are already deduplicated, so skip
+            // ClassSet.addOwnedString's linear duplicate scan.
+            set.strings.appendAssumeCapacity(copy);
+        }
+    }
+
     fn parseUnicodePropertyEscape(self: *Compiler, inverted: bool) CompileError!RangeSet {
         std.debug.assert(self.pattern[self.index] == '\\');
         if (self.index + 3 >= self.pattern.len or self.pattern[self.index + 2] != '{') return error.InvalidPattern;
@@ -2002,7 +2477,7 @@ const Compiler = struct {
         const name_start = self.index;
         while (self.index < self.pattern.len and self.pattern[self.index] != '}') : (self.index += 1) {
             const byte = self.pattern[self.index];
-            if (!(std.ascii.isAlphanumeric(byte) or byte == '_' or byte == '=')) return error.Unsupported;
+            if (!(unicode.isAsciiWordByte(byte) or byte == '=')) return error.Unsupported;
         }
         if (self.index == name_start or self.index >= self.pattern.len or self.pattern[self.index] != '}') return error.InvalidPattern;
         const name = self.pattern[name_start..self.index];
@@ -2042,7 +2517,7 @@ const Compiler = struct {
     fn parseDigits(self: *Compiler, allow_overflow: bool) CompileError!u32 {
         var value: u64 = 0;
         var saw_digit = false;
-        while (self.index < self.pattern.len and std.ascii.isDigit(self.pattern[self.index])) : (self.index += 1) {
+        while (self.index < self.pattern.len and isDecimalDigit(self.pattern[self.index])) : (self.index += 1) {
             saw_digit = true;
             value = value * 10 + (self.pattern[self.index] - '0');
             if (value >= int32_max) {
@@ -2134,12 +2609,12 @@ const Compiler = struct {
     }
 
     fn looksLikeQuantifier(self: *const Compiler, start: usize) bool {
-        if (start + 1 >= self.pattern.len or !std.ascii.isDigit(self.pattern[start + 1])) return false;
+        if (start + 1 >= self.pattern.len or !isDecimalDigit(self.pattern[start + 1])) return false;
         var pos = start + 1;
-        while (pos < self.pattern.len and std.ascii.isDigit(self.pattern[pos])) : (pos += 1) {}
+        while (pos < self.pattern.len and isDecimalDigit(self.pattern[pos])) : (pos += 1) {}
         if (pos < self.pattern.len and self.pattern[pos] == ',') {
             pos += 1;
-            while (pos < self.pattern.len and std.ascii.isDigit(self.pattern[pos])) : (pos += 1) {}
+            while (pos < self.pattern.len and isDecimalDigit(self.pattern[pos])) : (pos += 1) {}
         }
         return pos < self.pattern.len and self.pattern[pos] == '}';
     }
@@ -2161,9 +2636,9 @@ const Compiler = struct {
     }
 
     fn emitNonUnicodeSurrogatePairAtom(self: *Compiler, cp: u21, is_backward_dir: bool) !void {
-        const value = cp - 0x10000;
-        const high: u21 = 0xd800 + (value >> 10);
-        const low: u21 = 0xdc00 + (value & 0x3ff);
+        const pair = unicode.surrogatePairFromCodePoint(cp);
+        const high: u21 = pair.high;
+        const low: u21 = pair.low;
         if (is_backward_dir) {
             try self.emitCharacterAtom(low, true);
             try self.emitCharacterAtom(high, true);
@@ -2174,9 +2649,9 @@ const Compiler = struct {
     }
 
     fn emitNonUnicodeSurrogatePairTerms(self: *Compiler, cp: u21, is_backward_dir: bool) !usize {
-        const value = cp - 0x10000;
-        const high: u21 = 0xd800 + (value >> 10);
-        const low: u21 = 0xdc00 + (value & 0x3ff);
+        const pair = unicode.surrogatePairFromCodePoint(cp);
+        const high: u21 = pair.high;
+        const low: u21 = pair.low;
         if (is_backward_dir) {
             const low_start = self.code.items.len;
             try self.emitCharacterAtom(low, true);
@@ -2343,11 +2818,9 @@ const RangeSet = struct {
     }
 
     fn addNonUnicodeSurrogatePair(self: *RangeSet, cp: u21) !void {
-        const value = cp - 0x10000;
-        const high: u21 = 0xd800 + (value >> 10);
-        const low: u21 = 0xdc00 + (value & 0x3ff);
-        try self.addInclusive(high, high);
-        try self.addInclusive(low, low);
+        const pair = unicode.surrogatePairFromCodePoint(cp);
+        try self.addInclusive(pair.high, pair.high);
+        try self.addInclusive(pair.low, pair.low);
     }
 
     fn addHalfOpen(self: *RangeSet, lo: u21, hi: u21) !void {
@@ -2362,16 +2835,9 @@ const RangeSet = struct {
                 if (escaped == 'D') try self.invert();
             },
             's', 'S' => {
-                try self.addHalfOpen(0x0009, 0x000d + 1);
-                try self.addHalfOpen(0x0020, 0x0020 + 1);
-                try self.addHalfOpen(0x00a0, 0x00a0 + 1);
-                try self.addHalfOpen(0x1680, 0x1680 + 1);
-                try self.addHalfOpen(0x2000, 0x200a + 1);
-                try self.addHalfOpen(0x2028, 0x2029 + 1);
-                try self.addHalfOpen(0x202f, 0x202f + 1);
-                try self.addHalfOpen(0x205f, 0x205f + 1);
-                try self.addHalfOpen(0x3000, 0x3000 + 1);
-                try self.addHalfOpen(0xfeff, 0xfeff + 1);
+                for (unicode.ecmaWhitespaceOrLineTerminatorRanges) |range| {
+                    try self.addHalfOpen(range.lo, range.hi);
+                }
                 if (escaped == 'S') try self.invert();
             },
             'w', 'W' => {
@@ -2665,7 +3131,7 @@ fn readUnicodeEscapeCodePoint(pattern: []const u8, index: *usize) CompileError!u
 
 fn isRegExpGroupNameStart(cp: u21) bool {
     if (cp == '$' or cp == '_') return true;
-    if ((cp >= 'A' and cp <= 'Z') or (cp >= 'a' and cp <= 'z')) return true;
+    if (unicode.isAsciiAlphaCodePoint(cp)) return true;
     if (isInvalidRegExpGroupNameStart(cp)) return false;
     return cp > 0x7f;
 }
@@ -2674,13 +3140,13 @@ fn isRegExpGroupNameContinue(cp: u21) bool {
     if (isInvalidRegExpGroupNameContinue(cp)) return false;
     if (cp == 0x104a4) return true;
     if (isRegExpGroupNameStart(cp)) return true;
-    if (cp >= '0' and cp <= '9') return true;
+    if (unicode.isAsciiDigitCodePoint(cp)) return true;
     if (cp == 0x1d7da) return true;
     return false;
 }
 
 fn isInvalidRegExpGroupNameStart(cp: u21) bool {
-    if (cp >= 0xd800 and cp <= 0xdfff) return true;
+    if (unicode.isSurrogateCodePoint(cp)) return true;
     return switch (cp) {
         0x275e, 0x2764, 0x104a4, 0x1d7da, 0x1f08b, 0x1f415, 0x1f712, 0x1f98a, 0x10ffff => true,
         else => false,
@@ -2688,7 +3154,7 @@ fn isInvalidRegExpGroupNameStart(cp: u21) bool {
 }
 
 fn isInvalidRegExpGroupNameContinue(cp: u21) bool {
-    if (cp >= 0xd800 and cp <= 0xdfff) return true;
+    if (unicode.isSurrogateCodePoint(cp)) return true;
     return switch (cp) {
         0x275e, 0x2764, 0x1f08b, 0x1f415, 0x1f712, 0x1f98a, 0x10ffff => true,
         else => false,
@@ -2696,12 +3162,8 @@ fn isInvalidRegExpGroupNameContinue(cp: u21) bool {
 }
 
 fn hexValue(byte: u8) ?u21 {
-    return switch (byte) {
-        '0'...'9' => byte - '0',
-        'a'...'f' => 10 + byte - 'a',
-        'A'...'F' => 10 + byte - 'A',
-        else => null,
-    };
+    const value = unicode.asciiHexDigitValueByte(byte) orelse return null;
+    return @intCast(value);
 }
 
 const DecodedWtf8 = struct {
@@ -2722,12 +3184,16 @@ fn decodeWtf8Surrogate(bytes: []const u8, index: usize) ?DecodedWtf8 {
     return .{ .code_point = code_point, .len = 3 };
 }
 
+fn isDecimalDigit(byte: u8) bool {
+    return unicode.isAsciiDigitByte(byte);
+}
+
 fn isOctalDigit(byte: u8) bool {
-    return byte >= '0' and byte <= '7';
+    return unicode.isAsciiOctalDigitByte(byte);
 }
 
 fn isClassControlLetter(byte: u8) bool {
-    return std.ascii.isAlphanumeric(byte) or byte == '_';
+    return unicode.isAsciiWordByte(byte);
 }
 
 test "Zig regexp compiler emits bytecode for common ASCII patterns" {

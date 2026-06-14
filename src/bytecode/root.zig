@@ -7,7 +7,6 @@ pub const format = @import("format.zig");
 pub const function = @import("function.zig");
 pub const ic = @import("../core/ic.zig");
 pub const constant = @import("constant.zig");
-pub const scope = @import("scope.zig");
 pub const module = @import("module.zig");
 pub const debug = @import("debug.zig");
 pub const dump = @import("dump.zig");

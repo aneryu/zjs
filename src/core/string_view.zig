@@ -1,4 +1,5 @@
 const std = @import("std");
+const unicode = @import("../libs/unicode.zig");
 const string_mod = @import("string.zig");
 
 pub fn JSString(comptime Value: type) type {
@@ -21,7 +22,7 @@ pub fn JSString(comptime Value: type) type {
             pub fn init(allocator: std.mem.Allocator, string: Self) !Utf8 {
                 switch (string.ptr.resolveData()) {
                     .latin1 => |latin1| {
-                        if (isAscii(latin1)) {
+                        if (string_mod.isAsciiBytes(latin1)) {
                             return .{ .bytes = latin1 };
                         }
                         const owned = try string.toOwnedUtf8(allocator);
@@ -126,13 +127,6 @@ pub fn JSString(comptime Value: type) type {
     };
 }
 
-fn isAscii(bytes: []const u8) bool {
-    for (bytes) |byte| {
-        if (byte > 0x7f) return false;
-    }
-    return true;
-}
-
 fn utf8LenLatin1(bytes: []const u8) usize {
     var len: usize = 0;
     for (bytes) |byte| len += if (byte <= 0x7f) @as(usize, 1) else 2;
@@ -189,15 +183,15 @@ fn writeUtf8CodePoint(out: []u8, code_point: u32) usize {
 }
 
 fn isHighSurrogate(unit: u16) bool {
-    return unit >= 0xd800 and unit <= 0xdbff;
+    return unicode.isHighSurrogateUnit(unit);
 }
 
 fn isLowSurrogate(unit: u16) bool {
-    return unit >= 0xdc00 and unit <= 0xdfff;
+    return unicode.isLowSurrogateUnit(unit);
 }
 
 fn surrogatePairCodePoint(high: u16, low: u16) u32 {
-    return 0x10000 + ((@as(u32, high) - 0xd800) << 10) + (@as(u32, low) - 0xdc00);
+    return @intCast(unicode.codePointFromSurrogatePair(high, low));
 }
 
 test "JSValue.asString views latin1 units without allocation" {

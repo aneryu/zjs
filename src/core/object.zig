@@ -1,6 +1,7 @@
 const array = @import("array.zig");
 const atom = @import("atom.zig");
 const class = @import("class.zig");
+const value_format = @import("value_format.zig");
 const descriptor = @import("descriptor.zig");
 const function = @import("function.zig");
 const gc = @import("gc.zig");
@@ -190,7 +191,6 @@ pub const OrdinaryPayload = struct {
     is_callsite: bool = false,
     promise_already_resolved: bool = false,
     promise_combinator_remaining: i32 = 0,
-    worker_id: ?i32 = null,
     realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *OrdinaryPayload, rt: *JSRuntime) void {
@@ -224,6 +224,7 @@ pub const IteratorPayload = struct {
     zip_nexts: ?JSValue = null,
     zip_pads: ?JSValue = null,
     zip_keys: ?JSValue = null,
+    atom_keys: []atom.Atom = &.{},
     index: usize = 0,
     zip_alive: usize = 0,
     kind: u8 = 0,
@@ -241,6 +242,7 @@ pub const IteratorPayload = struct {
         destroyOptionalValue(rt, &self.zip_nexts);
         destroyOptionalValue(rt, &self.zip_pads);
         destroyOptionalValue(rt, &self.zip_keys);
+        destroyAtomSlice(rt, &self.atom_keys);
     }
 };
 
@@ -362,7 +364,11 @@ pub const SharedBufferStore = struct {
 pub const ExternalByteStorageDeinit = *const fn (context: ?*anyopaque, bytes: []u8) void;
 
 pub const BufferPayload = struct {
+    pub const inline_storage_capacity: usize = 32;
+
     bytes: []u8 = &.{},
+    inline_bytes: [inline_storage_capacity]u8 = undefined,
+    inline_length: u8 = 0,
     shared_store: ?*SharedBufferStore = null,
     external_memory: gc.ExternalMemoryToken = .{},
     external_deinit: ?ExternalByteStorageDeinit = null,
@@ -382,6 +388,9 @@ pub const BufferPayload = struct {
         } else if (self.external_deinit) |deinit| {
             self.external_memory.release();
             deinit(self.external_context, self.bytes);
+        } else if (self.inline_length != 0) {
+            rt.reportExternalFreeUntracked(self.inline_length);
+            self.inline_length = 0;
         } else {
             self.external_memory.release();
             if (self.bytes.len != 0) rt.memory.free(u8, self.bytes);
@@ -655,6 +664,8 @@ pub const DisposableStackPayload = struct {
 
 pub const RealmValueSlot = enum(u8) {
     throw_type_error_intrinsic,
+    object_prototype,
+    array_prototype,
     async_function_constructor,
     async_function_prototype,
     generator_prototype,
@@ -825,7 +836,6 @@ pub const FunctionPayload = struct {
     collection_method_owner_class: class.ClassId = class.invalid_class_id,
     typed_array_element_size: u32 = 0,
     typed_array_kind: u8 = 0,
-    worker_post_target: u8 = 0,
     iterator_wrap_method: u8 = 0,
     async_from_sync_unwrap_done: u8 = 0,
     primitive_prototypes: [primitive_prototype_slot_count]?JSValue = @splat(null),
@@ -1041,6 +1051,26 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, payload_kind: class.PayloadKi
     }
 }
 
+pub const ObjectFlags = packed struct(u16) {
+    null_prototype: bool = false,
+    extensible: bool = true,
+    immutable_prototype: bool = false,
+    is_array: bool = false,
+    is_proxy: bool = false,
+    is_global: bool = false,
+    is_html_dda: bool = false,
+    may_have_indexed_properties: bool = false,
+    length_writable: bool = true,
+    is_with_environment: bool = false,
+    is_prototype: bool = false,
+    reserved_class_payload_finalizer_slot: bool = false,
+    /// Set once the object has been assigned a weak id in the runtime's weak
+    /// identity registry, so destruction can skip the registry lookup for the
+    /// common case of objects that were never weakly referenced.
+    has_weak_id: bool = false,
+    _padding: u3 = 0,
+};
+
 pub const Object = struct {
     header: gc.GCObjectHeader,
     gc: gc.GcNode = .{},
@@ -1049,22 +1079,11 @@ pub const Object = struct {
     class_payload_kind: class.PayloadKind = .none,
     shape_ref: *shape.Shape,
     prototype: ?*Object = null,
-    null_prototype: bool = false,
-    extensible: bool = true,
-    immutable_prototype: bool = false,
-    is_array: bool = false,
-    is_proxy: bool = false,
-    is_global: bool = false,
+    flags: ObjectFlags = .{},
+    global_lexicals: ?*Object = null,
     shared_lazy_native_functions: ?*[runtime_mod.shared_lazy_native_function_slots]?JSValue = null,
     cached_iterator_next: ?JSValue = null,
-    is_html_dda: bool = false,
-    may_have_indexed_properties: bool = false,
     length: u32 = 0,
-    length_writable: bool = true,
-    is_with_environment: bool = false,
-    is_prototype: bool = false,
-    reserved_class_payload_finalizer_slot: bool = false,
-    in_weak_cleanup: bool = false,
     properties: []property.Entry = &.{},
 
     property_capacity: usize = 0,
@@ -1077,6 +1096,14 @@ pub const Object = struct {
     }
 
     pub fn create(rt: *JSRuntime, class_id: class.ClassId, prototype: ?*Object) !*Object {
+        return createInternal(rt, class_id, prototype, 0);
+    }
+
+    pub fn createWithOwnPropertyCapacity(rt: *JSRuntime, class_id: class.ClassId, prototype: ?*Object, capacity: usize) !*Object {
+        return createInternal(rt, class_id, prototype, capacity);
+    }
+
+    fn createInternal(rt: *JSRuntime, class_id: class.ClassId, prototype: ?*Object, own_property_capacity: usize) !*Object {
         const class_record = rt.classes.record(class_id);
         const inline_layout = inlineClassPayloadLayout(class_record);
         const self = if (inline_layout) |layout| blk: {
@@ -1092,9 +1119,16 @@ pub const Object = struct {
             }
         }
         const proto_id = if (prototype) |proto| @intFromPtr(proto) else null;
-        const shape_ref = try rt.shapes.createObjectRoot(proto_id);
+        const shape_ref = try rt.shapes.createObjectRootWithPropertyCapacity(proto_id, own_property_capacity);
         var shape_owned = true;
         errdefer if (shape_owned) rt.shapes.release(shape_ref);
+        var property_storage: []property.Entry = &.{};
+        var property_storage_owned = false;
+        errdefer if (property_storage_owned) rt.memory.free(property.Entry, property_storage);
+        if (own_property_capacity != 0) {
+            property_storage = try rt.memory.alloc(property.Entry, own_property_capacity);
+            property_storage_owned = true;
+        }
         var class_payload: class.Payload = .none;
         var class_payload_kind: class.PayloadKind = .none;
         const payload_kind = if (class_record) |record|
@@ -1244,8 +1278,8 @@ pub const Object = struct {
         }
         if (prototype) |proto| {
             gc.retain(&proto.header);
-            proto.is_prototype = true;
-            if (proto.may_have_indexed_properties) {
+            proto.flags.is_prototype = true;
+            if (proto.flags.may_have_indexed_properties) {
                 rt.any_prototype_may_have_indexed_properties = true;
             }
         }
@@ -1254,15 +1288,17 @@ pub const Object = struct {
             .class_id = class_id,
             .class_payload = class_payload,
             .class_payload_kind = class_payload_kind,
-            .reserved_class_payload_finalizer_slot = reserved_class_payload_finalizer_slot,
+            .flags = .{ .reserved_class_payload_finalizer_slot = reserved_class_payload_finalizer_slot },
             .shape_ref = shape_ref,
             .prototype = prototype,
+            .properties = property_storage[0..0],
+            .property_capacity = own_property_capacity,
         };
+        property_storage_owned = false;
         reserved_class_payload_finalizer_slot = false;
         shape_owned = false;
         initialized = true;
         try rt.registerObject(self);
-        try rt.writeBarrierObjectSlot(&self.header, &self.prototype);
         initialized = false;
         return self;
     }
@@ -1309,7 +1345,13 @@ pub const Object = struct {
 
     pub fn createArray(rt: *JSRuntime, prototype: ?*Object) !*Object {
         const self = try create(rt, class.ids.array, prototype);
-        self.is_array = true;
+        self.flags.is_array = true;
+        return self;
+    }
+
+    pub fn createArrayWithOwnPropertyCapacity(rt: *JSRuntime, prototype: ?*Object, capacity: usize) !*Object {
+        const self = try createWithOwnPropertyCapacity(rt, class.ids.array, prototype, capacity);
+        self.flags.is_array = true;
         return self;
     }
 
@@ -1388,7 +1430,6 @@ pub const Object = struct {
         const payload = try self.ensureRealmPayload(rt);
         if (prototype) |stored| gc.retain(&stored.header);
         errdefer if (prototype) |stored| stored.value().free(rt);
-        try rt.writeBarrierObjectAt(&self.header, prototype, @ptrCast(&payload.cached_function_proto));
         const old_prototype = payload.cached_function_proto;
         payload.cached_function_proto = prototype;
         if (old_prototype) |old| old.value().free(rt);
@@ -1408,7 +1449,6 @@ pub const Object = struct {
         const payload = try self.ensureRealmPayload(rt);
         if (prototype) |stored| gc.retain(&stored.header);
         errdefer if (prototype) |stored| stored.value().free(rt);
-        try rt.writeBarrierObjectAt(&self.header, prototype, @ptrCast(&payload.cached_promise_proto));
         const old_prototype = payload.cached_promise_proto;
         payload.cached_promise_proto = prototype;
         if (old_prototype) |old| old.value().free(rt);
@@ -1484,9 +1524,13 @@ pub const Object = struct {
         if (!self.finalizeInlineClassPayload(rt)) self.enqueueClassPayloadFinalizer(rt);
         const old_properties = self.properties;
         const old_property_capacity = self.property_capacity;
+        const old_shape_props = self.shape_ref.props[0..@min(self.shape_ref.prop_count, old_properties.len)];
         self.properties = &.{};
         self.property_capacity = 0;
-        for (old_properties) |entry| destroyPropertyEntry(rt, entry);
+        for (old_properties, 0..) |entry, index| {
+            const entry_atom = if (index < old_shape_props.len) old_shape_props[index].atom_id else atom.null_atom;
+            destroyPropertySlot(rt, entry_atom, entry.slot);
+        }
         if (old_property_capacity != 0) rt.memory.free(property.Entry, old_properties.ptr[0..old_property_capacity]);
         self.destroyOrdinaryPayload(rt);
         self.destroyArrayPayload(rt);
@@ -1498,6 +1542,11 @@ pub const Object = struct {
         self.destroyBoundFunctionPayload(rt);
         self.destroyCollectionPayload(rt);
         self.destroyIteratorPayload(rt);
+        const global_lexicals = self.global_lexicals;
+        self.global_lexicals = null;
+        if (global_lexicals) |env| {
+            if (rt.gc.phase != .deinit) env.value().free(rt);
+        }
         const shared_lazy_native_functions = self.shared_lazy_native_functions;
         self.shared_lazy_native_functions = null;
         if (shared_lazy_native_functions) |cache| {
@@ -1547,11 +1596,11 @@ pub const Object = struct {
     }
 
     fn enqueueClassPayloadFinalizer(self: *Object, rt: *JSRuntime) void {
-        if (!self.reserved_class_payload_finalizer_slot) return;
+        if (!self.flags.reserved_class_payload_finalizer_slot) return;
         const payload = self.class_payload;
         const payload_kind = self.class_payload_kind;
         const object_identity = @intFromPtr(&self.header) & ~@as(usize, 1);
-        self.reserved_class_payload_finalizer_slot = false;
+        self.flags.reserved_class_payload_finalizer_slot = false;
         const enqueued = rt.enqueueReservedDeferredClassPayloadFinalizer(self.class_id, payload, payload_kind, object_identity);
         if (!enqueued) return;
         self.class_payload = .none;
@@ -1560,22 +1609,37 @@ pub const Object = struct {
 
     fn clearBorrowedReferencesForDestroyedObject(rt: *JSRuntime, destroyed: *Object) void {
         if (rt.gc.phase == .deinit) return;
+        // The address identity drives realm-global clearing (and the OOM
+        // fallback for realm identities); the registered weak identity, if
+        // any, drives weak slot invalidation. Taking the weak identity here
+        // removes the registry entry so stale ids can never resolve again.
         const destroyed_identity = @intFromPtr(&destroyed.header) & ~@as(usize, 1);
+        const weak_identity = rt.takeWeakObjectIdentity(destroyed);
         if (rt.borrowedWeakCleanupActive()) {
-            if (destroyed.is_global) rt.enqueueBorrowedWeakCleanupRealmIdentity(destroyed_identity);
+            if (destroyed.flags.is_global) rt.enqueueBorrowedWeakCleanupRealmIdentity(destroyed_identity);
             if (rt.isCurrentDeferredWeakValueFreeIdentity(destroyed_identity)) return;
             rt.enqueueBorrowedWeakCleanupIdentity(destroyed_identity) catch {
                 clearBorrowedReferencesForDestroyedIdentity(rt, destroyed_identity);
             };
+            if (weak_identity) |identity| {
+                rt.enqueueBorrowedWeakCleanupIdentity(identity) catch {
+                    clearBorrowedReferencesForDestroyedIdentity(rt, identity);
+                };
+            }
             return;
         }
 
         rt.beginBorrowedWeakCleanup();
         defer rt.endBorrowedWeakCleanup();
-        if (destroyed.is_global) rt.enqueueBorrowedWeakCleanupRealmIdentity(destroyed_identity);
+        if (destroyed.flags.is_global) rt.enqueueBorrowedWeakCleanupRealmIdentity(destroyed_identity);
         rt.enqueueBorrowedWeakCleanupIdentity(destroyed_identity) catch {
             clearBorrowedReferencesForDestroyedIdentity(rt, destroyed_identity);
         };
+        if (weak_identity) |identity| {
+            rt.enqueueBorrowedWeakCleanupIdentity(identity) catch {
+                clearBorrowedReferencesForDestroyedIdentity(rt, identity);
+            };
+        }
 
         drainBorrowedWeakCleanup(rt);
     }
@@ -1934,6 +1998,17 @@ pub const Object = struct {
         return null;
     }
 
+    pub fn iteratorAtomKeysSlot(self: *Object) *[]atom.Atom {
+        if (self.iteratorPayload()) |payload| return &payload.atom_keys;
+        std.debug.assert(self.class_payload_kind == .iterator);
+        unreachable;
+    }
+
+    pub fn iteratorAtomKeys(self: *const Object) []const atom.Atom {
+        if (self.iteratorPayloadConst()) |payload| return payload.atom_keys;
+        return &.{};
+    }
+
     pub fn iteratorIndexSlot(self: *Object) *usize {
         if (self.iteratorPayload()) |payload| return &payload.index;
         std.debug.assert(self.class_payload_kind == .iterator);
@@ -2045,8 +2120,6 @@ pub const Object = struct {
         const refreshed_entries = self.collectionEntriesSlot();
         refreshed_entries.* = refreshed_entries.*.ptr[0 .. index + 1];
         errdefer refreshed_entries.* = refreshed_entries.*[0..index];
-        try self.writeValueBarrierAt(rt, entry.key, &refreshed_entries.*[index].key);
-        try self.writeValueBarrierAt(rt, entry.value, &refreshed_entries.*[index].value);
         refreshed_entries.*[index] = entry;
         return index;
     }
@@ -2207,6 +2280,7 @@ pub const Object = struct {
         rt.active_value_roots = &root_frame;
         defer rt.active_value_roots = root_frame.previous;
 
+        const target_identity = try weakIdentityFromValue(rt, rooted_target);
         const entries = self.finalizationRegistryCellsSlot();
         const index = entries.*.len;
         const inserted_holder = !rt.borrowedReferenceHolderRegistered(self);
@@ -2216,10 +2290,8 @@ pub const Object = struct {
         const refreshed_entries = self.finalizationRegistryCellsSlot();
         refreshed_entries.* = refreshed_entries.*.ptr[0 .. index + 1];
         errdefer refreshed_entries.* = refreshed_entries.*[0..index];
-        try self.writeValueBarrierAt(rt, rooted_held_value, &refreshed_entries.*[index].held_value);
-        try self.writeValueBarrierAt(rt, rooted_unregister_token, &refreshed_entries.*[index].unregister_token);
         refreshed_entries.*[index] = .{
-            .target_identity = weakIdentityFromValue(rooted_target),
+            .target_identity = target_identity,
             .held_value = rooted_held_value.dup(),
             .unregister_token = rooted_unregister_token.dup(),
         };
@@ -2295,8 +2367,6 @@ pub const Object = struct {
         const index = payload.resources.len;
         payload.resources = payload.resources.ptr[0 .. index + 1];
         errdefer payload.resources = payload.resources[0..index];
-        try self.writeValueBarrierAt(rt, resource_value, &payload.resources[index].value);
-        try self.writeValueBarrierAt(rt, method, &payload.resources[index].method);
         payload.resources[index] = .{
             .value = resource_value.dup(),
             .method = method.dup(),
@@ -2355,11 +2425,8 @@ pub const Object = struct {
             std.debug.assert(target.class_payload_kind == .disposable_stack);
             unreachable;
         };
+        _ = rt;
         std.debug.assert(target_payload.resources.len == 0 and target_payload.resource_capacity == 0);
-        for (source_payload.resources) |*resource| {
-            try target.writeValueBarrierAt(rt, resource.value, &resource.value);
-            try target.writeValueBarrierAt(rt, resource.method, &resource.method);
-        }
         target_payload.resources = source_payload.resources;
         target_payload.resource_capacity = source_payload.resource_capacity;
         source_payload.resources = &.{};
@@ -2385,15 +2452,14 @@ pub const Object = struct {
     pub fn setVarRefValue(self: *Object, rt: *JSRuntime, next_value: JSValue) !void {
         errdefer next_value.free(rt);
         const value_slot = self.varRefValueSlot();
-        try self.writeValueBarrierAt(rt, next_value, value_slot);
         const old_value = value_slot.*;
         value_slot.* = next_value;
         if (old_value) |stored| stored.free(rt);
     }
 
     pub fn setOptionalValueSlot(self: *Object, rt: *JSRuntime, slot: *?JSValue, next_value: ?JSValue) !void {
+        _ = self;
         errdefer if (next_value) |stored_value| stored_value.free(rt);
-        if (next_value) |stored_value| try self.writeValueBarrierAt(rt, stored_value, slot);
         const old_value = slot.*;
         slot.* = next_value;
         if (old_value) |stored| stored.free(rt);
@@ -2413,16 +2479,12 @@ pub const Object = struct {
         return old_value;
     }
 
-    pub fn writeValueSliceBarrier(self: *Object, rt: *JSRuntime, values: []const JSValue) !void {
-        try rt.writeBarrierValueSlice(&self.header, values);
-    }
-
     pub fn setValueSlice(self: *Object, rt: *JSRuntime, slot: *[]JSValue, next_values: []JSValue) !void {
+        _ = self;
         errdefer {
             var owned_next = next_values;
             destroyValueSlice(rt, &owned_next);
         }
-        try self.writeValueSliceBarrier(rt, next_values);
         destroyValueSlice(rt, slot);
         slot.* = next_values;
     }
@@ -2435,12 +2497,12 @@ pub const Object = struct {
         next_values: []JSValue,
         next_capacity: usize,
     ) !void {
+        _ = self;
         errdefer {
             var owned_next = next_values;
             var owned_capacity = next_capacity;
             destroyValueSliceWithCapacity(rt, &owned_next, &owned_capacity);
         }
-        try self.writeValueSliceBarrier(rt, next_values);
         destroyValueSliceWithCapacity(rt, slot, capacity);
         slot.* = next_values;
         capacity.* = next_capacity;
@@ -2566,9 +2628,28 @@ pub const Object = struct {
             payload.releaseStorage(rt);
             payload.shared_store = null;
             payload.bytes = bytes;
+            payload.inline_length = 0;
             payload.external_memory = external_memory;
             payload.detached = false;
             return;
+        }
+        std.debug.assert(self.class_payload_kind == .buffer);
+        unreachable;
+    }
+
+    pub fn installInlineByteStorage(self: *Object, rt: *JSRuntime, byte_length: usize) !bool {
+        if (byte_length > BufferPayload.inline_storage_capacity) return false;
+        if (self.bufferPayload()) |payload| {
+            payload.releaseStorage(rt);
+            rt.reportExternalAllocUntracked(byte_length);
+            payload.shared_store = null;
+            payload.external_memory = .{};
+            payload.external_deinit = null;
+            payload.external_context = null;
+            payload.inline_length = @intCast(byte_length);
+            payload.bytes = payload.inline_bytes[0..byte_length];
+            payload.detached = false;
+            return true;
         }
         std.debug.assert(self.class_payload_kind == .buffer);
         unreachable;
@@ -2585,6 +2666,7 @@ pub const Object = struct {
             const external_memory = try rt.reportExternalAlloc(bytes.len);
             payload.releaseStorage(rt);
             payload.bytes = bytes;
+            payload.inline_length = 0;
             payload.external_memory = external_memory;
             payload.external_deinit = deinit_fn;
             payload.external_context = context;
@@ -2616,6 +2698,7 @@ pub const Object = struct {
             payload.releaseStorage(rt);
             payload.shared_store = store;
             payload.bytes = store.bytes;
+            payload.inline_length = 0;
             payload.external_memory = .{};
             payload.detached = false;
             return;
@@ -2877,7 +2960,7 @@ pub const Object = struct {
 
     pub fn proxyTargetSlot(self: *Object) *?JSValue {
         if (self.proxyPayload()) |payload| return &payload.target;
-        std.debug.assert(self.is_proxy);
+        std.debug.assert(self.flags.is_proxy);
         unreachable;
     }
 
@@ -2888,7 +2971,7 @@ pub const Object = struct {
 
     pub fn proxyHandlerSlot(self: *Object) *?JSValue {
         if (self.proxyPayload()) |payload| return &payload.handler;
-        std.debug.assert(self.is_proxy);
+        std.debug.assert(self.flags.is_proxy);
         unreachable;
     }
 
@@ -2932,6 +3015,7 @@ pub const Object = struct {
         rt.active_value_roots = &root_frame;
         defer rt.active_value_roots = root_frame.previous;
 
+        const weak_target_identity = try weakIdentityFromValue(rt, rooted_target);
         try rt.registerBorrowedReferenceHolder(self);
         const payload = self.objectDataPayload() orelse {
             std.debug.assert(self.class_payload_kind == .object_data);
@@ -2939,7 +3023,7 @@ pub const Object = struct {
         };
         const old_target = payload.data;
         payload.data = null;
-        payload.weak_target_identity = weakIdentityFromValue(rooted_target);
+        payload.weak_target_identity = weak_target_identity;
         if (old_target) |stored| stored.free(rt);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
@@ -2954,13 +3038,13 @@ pub const Object = struct {
             const symbol_atom: atom.Atom = @intCast(atom_id);
             return if (rt.atoms.kind(symbol_atom) == .symbol) JSValue.symbol(symbol_atom) else JSValue.undefinedValue();
         }
-        const target = liveObjectFromWeakIdentity(rt, identity) orelse return JSValue.undefinedValue();
+        const target = rt.liveObjectFromWeakIdentity(identity) orelse return JSValue.undefinedValue();
         return target.value().dup();
     }
 
     pub fn arrayStorageModeSlot(self: *Object) *ArrayStorageMode {
         if (self.arrayPayload()) |payload| return &payload.storage_mode;
-        std.debug.assert(self.is_array);
+        std.debug.assert(self.flags.is_array);
         unreachable;
     }
 
@@ -2971,7 +3055,7 @@ pub const Object = struct {
 
     pub fn arrayElementsSlot(self: *Object) *[]?JSValue {
         if (self.arrayPayload()) |payload| return &payload.elements;
-        std.debug.assert(self.is_array);
+        std.debug.assert(self.flags.is_array);
         unreachable;
     }
 
@@ -2982,7 +3066,7 @@ pub const Object = struct {
 
     pub fn arrayElementsCapacitySlot(self: *Object) *usize {
         if (self.arrayPayload()) |payload| return &payload.elements_capacity;
-        std.debug.assert(self.is_array);
+        std.debug.assert(self.flags.is_array);
         unreachable;
     }
 
@@ -3298,17 +3382,6 @@ pub const Object = struct {
 
     pub fn externalHostFunctionId(self: *const Object) u32 {
         if (self.functionPayloadConst()) |payload| return payload.external_host_function_id;
-        return 0;
-    }
-
-    pub fn functionWorkerPostTargetSlot(self: *Object) *u8 {
-        if (self.functionPayload()) |payload| return &payload.worker_post_target;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
-    }
-
-    pub fn functionWorkerPostTarget(self: *const Object) u8 {
-        if (self.functionPayloadConst()) |payload| return payload.worker_post_target;
         return 0;
     }
 
@@ -3998,7 +4071,6 @@ pub const Object = struct {
         if (slot.* == home_object) return;
         if (home_object) |next| gc.retain(&next.header);
         errdefer if (home_object) |next| next.value().free(rt);
-        try rt.writeBarrierObjectAt(&self.header, home_object, @ptrCast(slot));
         const old_home_object = slot.*;
         slot.* = home_object;
         if (old_home_object) |old| old.value().free(rt);
@@ -4057,8 +4129,6 @@ pub const Object = struct {
         errdefer next_file.free(rt);
         const next_function = function_name.dup();
         errdefer next_function.free(rt);
-        try self.writeValueBarrierAt(rt, next_file, &payload.callsite_file);
-        try self.writeValueBarrierAt(rt, next_function, &payload.callsite_function);
         const old_file = payload.callsite_file;
         const old_function = payload.callsite_function;
         payload.callsite_file = next_file;
@@ -4099,7 +4169,6 @@ pub const Object = struct {
         const payload = try self.ensureOrdinaryPayload(rt);
         const next_value = stack_value.dup();
         errdefer next_value.free(rt);
-        try self.writeValueBarrierAt(rt, next_value, &payload.error_stack);
         const old_value = payload.error_stack;
         const old_sites = payload.error_stack_sites;
         payload.error_stack = next_value;
@@ -4118,7 +4187,6 @@ pub const Object = struct {
         const payload = try self.ensureOrdinaryPayload(rt);
         const next_value = sites_value.dup();
         errdefer next_value.free(rt);
-        try self.writeValueBarrierAt(rt, next_value, &payload.error_stack_sites);
         const old_stack = payload.error_stack;
         const old_sites = payload.error_stack_sites;
         payload.error_stack = null;
@@ -4140,7 +4208,7 @@ pub const Object = struct {
 
     fn capturedStackSiteCount(sites_value: JSValue) usize {
         const sites = objectFromValue(sites_value) orelse return 0;
-        return if (sites.is_array) @intCast(sites.length) else 0;
+        return if (sites.flags.is_array) @intCast(sites.length) else 0;
     }
 
     pub fn promiseReactionOnFulfilledSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
@@ -4244,8 +4312,6 @@ pub const Object = struct {
         }
         const resolve_slot = try self.promiseCapabilityResolveSlot(rt);
         const reject_slot = try self.promiseCapabilityRejectSlot(rt);
-        if (next_resolve) |stored| try self.writeValueBarrierAt(rt, stored, resolve_slot);
-        if (next_reject) |stored| try self.writeValueBarrierAt(rt, stored, reject_slot);
         const old_resolve = resolve_slot.*;
         const old_reject = reject_slot.*;
         resolve_slot.* = next_resolve;
@@ -4332,16 +4398,6 @@ pub const Object = struct {
     pub fn promiseCombinatorRemaining(self: *const Object) i32 {
         if (self.ordinaryPayloadConst()) |payload| return payload.promise_combinator_remaining;
         return 0;
-    }
-
-    pub fn workerIdSlot(self: *Object, rt: *JSRuntime) !*?i32 {
-        const payload = try self.ensureOrdinaryPayload(rt);
-        return &payload.worker_id;
-    }
-
-    pub fn workerId(self: *const Object) ?i32 {
-        if (self.ordinaryPayloadConst()) |payload| return payload.worker_id;
-        return null;
     }
 
     pub fn functionRealmGlobalSlot(self: *Object) *?JSValue {
@@ -5133,34 +5189,31 @@ pub const Object = struct {
             }
         }
 
-        var visited = &rt.gc.visited;
-        visited.clearRetainingCapacity();
-        var preserved = &rt.gc.preserved;
-        preserved.clearRetainingCapacity();
-        var free_set = &rt.gc.free_set;
-        free_set.clearRetainingCapacity();
-
-        // Populate visited and preserved from live list
+        // Initialize the per-header cycle-scan bits. These traversals touch every
+        // candidate node, so bits possibly left set by a previous (early-exited)
+        // round are unconditionally reset here before any query.
+        // visited bit: object participates in this scan.
+        // preserved bit: object is currently known live.
+        // Free/garbage membership is derived as (cycle_visited and !cycle_preserved).
+        var preserved_count: usize = 0;
         {
             var current = rt.gc.gc_obj_list_head;
             while (current) |node| : (current = node.next) {
                 const h = gc.headerFromGcNode(node);
                 if (h.kind == .object) {
-                    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                    try visited.put(@intFromPtr(obj), {});
-                    try preserved.put(@intFromPtr(obj), {});
+                    h.flags.cycle_visited = true;
+                    h.flags.cycle_preserved = true;
+                    preserved_count += 1;
                 }
             }
         }
-        // Populate visited and free_set from garbage list
         {
             var current = tmp_head;
             while (current) |node| : (current = node.next) {
                 const h = gc.headerFromGcNode(node);
                 if (h.kind == .object) {
-                    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                    try visited.put(@intFromPtr(obj), {});
-                    try free_set.put(@intFromPtr(obj), {});
+                    h.flags.cycle_visited = true;
+                    h.flags.cycle_preserved = false;
                 }
             }
         }
@@ -5169,13 +5222,11 @@ pub const Object = struct {
         defer symbol_roots.deinit();
         try seedSymbolRootsFromRuntimeHeldValues(rt, roots, &symbol_roots);
 
-        try scanPreservedWeakAndFinalizationEdges(rt, visited, preserved, &symbol_roots);
+        try scanPreservedWeakAndFinalizationEdges(rt, tmp_head, &symbol_roots, &preserved_count);
 
         const ResurrectHelper = struct {
             pub fn scanAndPreserveValue(
                 runtime: *JSRuntime,
-                visited_set: *const ObjectVisitSet,
-                preserved_set: *ObjectVisitSet,
                 preserved_bytecodes: *ObjectVisitSet,
                 symbol_roots_set: *SymbolRootSet,
                 object_worklist: *std.ArrayList(*Object),
@@ -5184,13 +5235,10 @@ pub const Object = struct {
             ) ObjectGraphError!void {
                 try preserveSymbolValue(runtime, symbol_roots_set, val);
                 if (objectFromValue(val)) |obj| {
-                    const addr = @intFromPtr(obj);
-                    if (visited_set.contains(addr)) {
-                        const entry = try preserved_set.getOrPut(addr);
-                        if (!entry.found_existing) {
-                            try object_worklist.append(runtime.memory.persistent_allocator, obj);
-                            runtime.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
-                        }
+                    if (obj.header.flags.cycle_visited and !obj.header.flags.cycle_preserved) {
+                        obj.header.flags.cycle_preserved = true;
+                        try object_worklist.append(runtime.memory.persistent_allocator, obj);
+                        runtime.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
                     }
                 } else if (functionBytecodeFromValue(val)) |const_fb| {
                     const fb = @constCast(const_fb);
@@ -5205,8 +5253,6 @@ pub const Object = struct {
 
             pub fn scanBytecodeChildObjectsAndBytecodes(
                 runtime: *JSRuntime,
-                visited_set: *const ObjectVisitSet,
-                preserved_set: *ObjectVisitSet,
                 preserved_bytecodes: *ObjectVisitSet,
                 symbol_roots_set: *SymbolRootSet,
                 object_worklist: *std.ArrayList(*Object),
@@ -5214,18 +5260,16 @@ pub const Object = struct {
                 fb: *FunctionBytecode,
             ) ObjectGraphError!void {
                 if (fb.class_fields_init) |val| {
-                    try scanAndPreserveValue(runtime, visited_set, preserved_set, preserved_bytecodes, symbol_roots_set, object_worklist, bytecode_worklist, val);
+                    try scanAndPreserveValue(runtime, preserved_bytecodes, symbol_roots_set, object_worklist, bytecode_worklist, val);
                 }
                 for (fb.cpool) |val| {
-                    try scanAndPreserveValue(runtime, visited_set, preserved_set, preserved_bytecodes, symbol_roots_set, object_worklist, bytecode_worklist, val);
+                    try scanAndPreserveValue(runtime, preserved_bytecodes, symbol_roots_set, object_worklist, bytecode_worklist, val);
                 }
             }
         };
 
         const ObjectResurrectVisitor = struct {
             rt: *JSRuntime,
-            visited_set: *const ObjectVisitSet,
-            preserved_set: *ObjectVisitSet,
             preserved_bytecodes: *ObjectVisitSet,
             symbol_roots_set: *SymbolRootSet,
             object_worklist: *std.ArrayList(*Object),
@@ -5235,13 +5279,10 @@ pub const Object = struct {
             pub fn visitObject(self: *@This(), obj_ptr: *?*Object) ObjectGraphError!void {
                 if (obj_ptr.*) |obj| {
                     if (@intFromPtr(obj) == 0) return;
-                    const addr = @intFromPtr(obj);
-                    if (self.visited_set.contains(addr)) {
-                        const entry = try self.preserved_set.getOrPut(addr);
-                        if (!entry.found_existing) {
-                            try self.object_worklist.append(self.rt.memory.persistent_allocator, obj);
-                            self.rt.gc.recordMarkStackDepth(self.object_worklist.items.len + self.bytecode_worklist.items.len);
-                        }
+                    if (obj.header.flags.cycle_visited and !obj.header.flags.cycle_preserved) {
+                        obj.header.flags.cycle_preserved = true;
+                        try self.object_worklist.append(self.rt.memory.persistent_allocator, obj);
+                        self.rt.gc.recordMarkStackDepth(self.object_worklist.items.len + self.bytecode_worklist.items.len);
                     }
                 }
             }
@@ -5249,8 +5290,6 @@ pub const Object = struct {
             pub fn visitValue(self: *@This(), val_ptr: *JSValue) ObjectGraphError!void {
                 try ResurrectHelper.scanAndPreserveValue(
                     self.rt,
-                    self.visited_set,
-                    self.preserved_set,
                     self.preserved_bytecodes,
                     self.symbol_roots_set,
                     self.object_worklist,
@@ -5283,13 +5322,21 @@ pub const Object = struct {
         var bytecode_worklist = &rt.gc.bytecode_worklist;
         bytecode_worklist.clearRetainingCapacity();
 
-        // Initialize object worklist with all objects currently in preserved
+        // Initialize object worklist with all objects currently preserved. At this
+        // point preserved objects live either on the live list (all of them) or on
+        // the garbage list (resurrected via weak/finalization edges, not yet moved).
         {
-            var iterator = preserved.keyIterator();
-            while (iterator.next()) |address| {
-                const obj: *Object = @ptrFromInt(address.*);
-                try object_worklist.append(rt.memory.persistent_allocator, obj);
-                rt.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
+            const list_heads = [2]?*gc.GcNode{ rt.gc.gc_obj_list_head, tmp_head };
+            for (list_heads) |list_head| {
+                var current = list_head;
+                while (current) |node| : (current = node.next) {
+                    const h = gc.headerFromGcNode(node);
+                    if (h.kind == .object and h.flags.cycle_preserved) {
+                        const obj: *Object = @alignCast(@fieldParentPtr("header", h));
+                        try object_worklist.append(rt.memory.persistent_allocator, obj);
+                        rt.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
+                    }
+                }
             }
         }
 
@@ -5300,8 +5347,6 @@ pub const Object = struct {
                 rt.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
                 var visitor = ObjectResurrectVisitor{
                     .rt = rt,
-                    .visited_set = visited,
-                    .preserved_set = preserved,
                     .preserved_bytecodes = preserved_bytecodes,
                     .symbol_roots_set = &symbol_roots,
                     .object_worklist = object_worklist,
@@ -5315,8 +5360,6 @@ pub const Object = struct {
                 rt.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
                 try ResurrectHelper.scanBytecodeChildObjectsAndBytecodes(
                     rt,
-                    visited,
-                    preserved,
                     preserved_bytecodes,
                     &symbol_roots,
                     object_worklist,
@@ -5333,8 +5376,7 @@ pub const Object = struct {
                 const next = node.next;
                 const h = gc.headerFromGcNode(node);
                 if (h.kind == .object) {
-                    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                    if (preserved.contains(@intFromPtr(obj))) {
+                    if (h.flags.cycle_preserved) {
                         unlinkNodeFromList(&tmp_head, &tmp_tail, node);
                         linkNodeToList(&rt.gc.gc_obj_list_head, &rt.gc.gc_obj_list_tail, node);
                         h.flags.mark = false;
@@ -5351,18 +5393,9 @@ pub const Object = struct {
             }
         }
 
-        // Re-sync free_set
-        free_set.clearRetainingCapacity();
-        {
-            var current = tmp_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
-                if (h.kind == .object) {
-                    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                    try free_set.put(@intFromPtr(obj), {});
-                }
-            }
-        }
+        // Free/garbage membership needs no re-sync: it is derived from the header
+        // bits as (cycle_visited and !cycle_preserved), which now exactly matches
+        // the objects remaining on the garbage list.
 
         var free_internal_bytecodes = ObjectVisitSet.init(rt.memory.allocator);
         defer free_internal_bytecodes.deinit();
@@ -5377,14 +5410,28 @@ pub const Object = struct {
             }
         }
 
+        // Snapshot all preserved objects (after the move-back they are exactly the
+        // live-list objects with the preserved bit set). The snapshot keeps the
+        // guard/unguard loops below safe against list mutation while weak sweeping
+        // and guard release may destroy nodes. The object worklist is empty here,
+        // so reuse its buffer.
+        std.debug.assert(object_worklist.items.len == 0);
+        {
+            var current = rt.gc.gc_obj_list_head;
+            while (current) |node| : (current = node.next) {
+                const h = gc.headerFromGcNode(node);
+                if (h.kind == .object and h.flags.cycle_preserved) {
+                    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
+                    try object_worklist.append(rt.memory.persistent_allocator, obj);
+                }
+            }
+        }
+        const preserved_objects: []const *Object = object_worklist.items;
+
         // Temporarily increment ref counts of all preserved objects and bytecodes
         // to prevent them from being destroyed/freed during weak entries sweeping.
-        {
-            var iterator = preserved.keyIterator();
-            while (iterator.next()) |address| {
-                const current: *Object = @ptrFromInt(address.*);
-                current.header.rc += 1;
-            }
+        for (preserved_objects) |current| {
+            current.header.rc += 1;
         }
         {
             var iterator = preserved_bytecodes.keyIterator();
@@ -5394,33 +5441,27 @@ pub const Object = struct {
             }
         }
 
-        sweepDeadWeakEntries(rt, visited, preserved, &symbol_roots, free_set, &free_internal_bytecodes);
+        sweepDeadWeakEntries(rt, preserved_objects, &symbol_roots, &free_internal_bytecodes);
         const WeakPersistentSweepContext = struct {
-            visited: *const ObjectVisitSet,
-            preserved: *const ObjectVisitSet,
+            rt: *const JSRuntime,
             symbol_roots: *const SymbolRootSet,
 
             pub fn isWeakIdentityAlive(self: @This(), identity: usize) bool {
-                return weakEntryKeyIsPreserved(self.visited, self.preserved, self.symbol_roots, identity);
+                return weakEntryKeyIsPreserved(self.rt, self.symbol_roots, identity);
             }
         };
         rt.sweepDeadWeakPersistentSlots(WeakPersistentSweepContext{
-            .visited = visited,
-            .preserved = preserved,
+            .rt = rt,
             .symbol_roots = &symbol_roots,
         });
         _ = rt.atoms.sweepUnrootedUniqueSymbols(&symbol_roots);
 
         // Decrement protected ref counts back to normal and release any that reached 0.
-        {
-            var iterator = preserved.keyIterator();
-            while (iterator.next()) |address| {
-                const current: *Object = @ptrFromInt(address.*);
-                current.header.rc -= 1;
-                if (current.header.rc == 0) {
-                    current.header.rc = 1;
-                    gc.release(rt, &current.header);
-                }
+        for (preserved_objects) |current| {
+            current.header.rc -= 1;
+            if (current.header.rc == 0) {
+                current.header.rc = 1;
+                gc.release(rt, &current.header);
             }
         }
         {
@@ -5454,7 +5495,7 @@ pub const Object = struct {
                 const h = gc.headerFromGcNode(node);
                 if (h.kind == .function_bytecode) {
                     const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
-                    clearFunctionBytecodeReferencesToVisited(rt, fb, free_set, &free_internal_bytecodes);
+                    clearFunctionBytecodeReferencesToVisited(rt, fb, &free_internal_bytecodes);
                 }
             }
 
@@ -5476,10 +5517,10 @@ pub const Object = struct {
             const h = gc.headerFromGcNode(node);
             if (h.kind == .object) {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                try obj.clearReferencesToVisited(rt, free_set, &free_internal_bytecodes);
+                try obj.clearReferencesToVisited(rt, &free_internal_bytecodes);
             } else if (h.kind == .function_bytecode) {
                 const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
-                clearFunctionBytecodeReferencesToVisited(rt, fb, free_set, &free_internal_bytecodes);
+                clearFunctionBytecodeReferencesToVisited(rt, fb, &free_internal_bytecodes);
             }
         }
 
@@ -5765,14 +5806,21 @@ pub const Object = struct {
         };
 
         try Helper.callVisitObject(visitor, &self.prototype);
+        try Helper.callVisitObject(visitor, &self.global_lexicals);
         try Helper.traceOptValue(visitor, &self.cached_iterator_next);
         if (self.shared_lazy_native_functions) |cache| {
             for (cache) |*maybe_cached| {
                 try Helper.traceOptValue(visitor, maybe_cached);
             }
         }
+        // Property key atoms (including symbol keys) live in the shape;
+        // visit them from there. Visitors only read symbol atoms (set
+        // insertion / no-op), so revisiting a shared shape from several
+        // objects is safe.
+        for (self.shape_ref.props[0..self.shape_ref.prop_count]) |*prop| {
+            try Helper.callVisitSymbol(visitor, &prop.atom_id);
+        }
         for (self.properties) |*entry| {
-            try Helper.callVisitSymbol(visitor, &entry.atom_id);
             switch (entry.slot) {
                 .data => |*stored| try Helper.callVisitValue(visitor, stored),
                 .accessor => |*stored_accessor| {
@@ -6146,41 +6194,38 @@ pub const Object = struct {
 
     fn scanPreservedObjects(
         rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        preserved: *ObjectVisitSet,
         symbol_roots: *SymbolRootSet,
+        preserved_count: *usize,
         current: *Object,
     ) ObjectGraphError!void {
-        const address = @intFromPtr(current);
-        if (!visited.contains(address)) return;
-        const entry = try preserved.getOrPut(address);
-        if (entry.found_existing) return;
-        try current.scanPreservedChildObjects(rt, visited, preserved, symbol_roots);
+        if (!current.header.flags.cycle_visited) return;
+        if (current.header.flags.cycle_preserved) return;
+        current.header.flags.cycle_preserved = true;
+        preserved_count.* += 1;
+        try current.scanPreservedChildObjects(rt, symbol_roots, preserved_count);
     }
 
     fn scanPreservedChildObjects(
         self: *Object,
         rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        preserved: *ObjectVisitSet,
         symbol_roots: *SymbolRootSet,
+        preserved_count: *usize,
     ) ObjectGraphError!void {
         const ScanPreservedVisitor = struct {
             rt: *JSRuntime,
-            visited: *const ObjectVisitSet,
-            preserved: *ObjectVisitSet,
             symbol_roots: *SymbolRootSet,
+            preserved_count: *usize,
             err: ?ObjectGraphError = null,
 
             pub fn visitObject(sv: *@This(), obj_ptr: *?*Object) !void {
                 if (obj_ptr.*) |obj| {
                     if (@intFromPtr(obj) == 0) return;
-                    try scanPreservedObjects(sv.rt, sv.visited, sv.preserved, sv.symbol_roots, obj);
+                    try scanPreservedObjects(sv.rt, sv.symbol_roots, sv.preserved_count, obj);
                 }
             }
 
             pub fn visitValue(sv: *@This(), val_ptr: *JSValue) !void {
-                try scanPreservedValueObject(sv.rt, sv.visited, sv.preserved, sv.symbol_roots, val_ptr.*);
+                try scanPreservedValueObject(sv.rt, sv.symbol_roots, sv.preserved_count, val_ptr.*);
             }
 
             pub fn visitSymbol(sv: *@This(), sym_ptr: *atom.Atom) !void {
@@ -6199,69 +6244,72 @@ pub const Object = struct {
         };
         var visitor = ScanPreservedVisitor{
             .rt = rt,
-            .visited = visited,
-            .preserved = preserved,
             .symbol_roots = symbol_roots,
+            .preserved_count = preserved_count,
         };
         try self.traceChildEdgesFallible(rt, &visitor);
     }
 
     fn scanPreservedValueObject(
         rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        preserved: *ObjectVisitSet,
         symbol_roots: *SymbolRootSet,
+        preserved_count: *usize,
         stored: JSValue,
     ) ObjectGraphError!void {
         try preserveSymbolValue(rt, symbol_roots, stored);
         if (objectFromValue(stored)) |child| {
-            try scanPreservedObjects(rt, visited, preserved, symbol_roots, child);
+            try scanPreservedObjects(rt, symbol_roots, preserved_count, child);
             return;
         }
         const function_bytecode = functionBytecodeFromValue(stored) orelse return;
-        try scanPreservedFunctionBytecodeChildObjects(rt, visited, preserved, symbol_roots, function_bytecode);
+        try scanPreservedFunctionBytecodeChildObjects(rt, symbol_roots, preserved_count, function_bytecode);
     }
 
     fn scanPreservedFunctionBytecodeChildObjects(
         rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        preserved: *ObjectVisitSet,
         symbol_roots: *SymbolRootSet,
+        preserved_count: *usize,
         function_bytecode: *const FunctionBytecode,
     ) ObjectGraphError!void {
-        if (function_bytecode.class_fields_init) |stored| try scanPreservedValueObject(rt, visited, preserved, symbol_roots, stored);
-        for (function_bytecode.cpool) |stored| try scanPreservedValueObject(rt, visited, preserved, symbol_roots, stored);
+        if (function_bytecode.class_fields_init) |stored| try scanPreservedValueObject(rt, symbol_roots, preserved_count, stored);
+        for (function_bytecode.cpool) |stored| try scanPreservedValueObject(rt, symbol_roots, preserved_count, stored);
     }
 
     fn scanPreservedWeakEdges(
         rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        preserved: *ObjectVisitSet,
+        tmp_head: ?*gc.GcNode,
         symbol_roots: *SymbolRootSet,
+        preserved_count: *usize,
     ) ObjectGraphError!void {
         var changed = true;
         while (changed) {
             changed = false;
-            var iterator = visited.keyIterator();
-            while (iterator.next()) |address| {
-                if (!preserved.contains(address.*)) continue;
-                const current: *Object = @ptrFromInt(address.*);
-                for (current.weakCollectionEntries()) |entry| {
-                    if (!weakEntryKeyIsPreserved(visited, preserved, symbol_roots, entry.key_identity)) continue;
-                    const before = preserved.count();
-                    const before_symbols = symbol_roots.count();
-                    try scanPreservedValueObject(rt, visited, preserved, symbol_roots, entry.value);
-                    if (preserved.count() != before or symbol_roots.count() != before_symbols) changed = true;
-                }
-                for (current.finalizationRegistryCells()) |entry| {
-                    if (!entry.isActive()) continue;
-                    const target_identity = entry.target_identity orelse continue;
-                    if (!weakEntryKeyIsPreserved(visited, preserved, symbol_roots, target_identity)) continue;
-                    const before = preserved.count();
-                    const before_symbols = symbol_roots.count();
-                    try scanPreservedValueObject(rt, visited, preserved, symbol_roots, entry.held_value);
-                    try scanPreservedValueObject(rt, visited, preserved, symbol_roots, entry.unregister_token);
-                    if (preserved.count() != before or symbol_roots.count() != before_symbols) changed = true;
+            // Preserved objects live on the live list or (if resurrected via
+            // weak/finalization edges and not yet moved back) the garbage list.
+            const list_heads = [2]?*gc.GcNode{ rt.gc.gc_obj_list_head, tmp_head };
+            for (list_heads) |list_head| {
+                var node_it = list_head;
+                while (node_it) |node| : (node_it = node.next) {
+                    const h = gc.headerFromGcNode(node);
+                    if (h.kind != .object or !h.flags.cycle_preserved) continue;
+                    const current: *Object = @alignCast(@fieldParentPtr("header", h));
+                    for (current.weakCollectionEntries()) |entry| {
+                        if (!weakEntryKeyIsPreserved(rt, symbol_roots, entry.key_identity)) continue;
+                        const before = preserved_count.*;
+                        const before_symbols = symbol_roots.count();
+                        try scanPreservedValueObject(rt, symbol_roots, preserved_count, entry.value);
+                        if (preserved_count.* != before or symbol_roots.count() != before_symbols) changed = true;
+                    }
+                    for (current.finalizationRegistryCells()) |entry| {
+                        if (!entry.isActive()) continue;
+                        const target_identity = entry.target_identity orelse continue;
+                        if (!weakEntryKeyIsPreserved(rt, symbol_roots, target_identity)) continue;
+                        const before = preserved_count.*;
+                        const before_symbols = symbol_roots.count();
+                        try scanPreservedValueObject(rt, symbol_roots, preserved_count, entry.held_value);
+                        try scanPreservedValueObject(rt, symbol_roots, preserved_count, entry.unregister_token);
+                        if (preserved_count.* != before or symbol_roots.count() != before_symbols) changed = true;
+                    }
                 }
             }
         }
@@ -6269,24 +6317,23 @@ pub const Object = struct {
 
     fn scanPreservedWeakAndFinalizationEdges(
         rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        preserved: *ObjectVisitSet,
+        tmp_head: ?*gc.GcNode,
         symbol_roots: *SymbolRootSet,
+        preserved_count: *usize,
     ) ObjectGraphError!void {
         while (true) {
-            const before_objects = preserved.count();
+            const before_objects = preserved_count.*;
             const before_symbols = symbol_roots.count();
-            try scanPreservedWeakEdges(rt, visited, preserved, symbol_roots);
-            try queueFinalizationCleanupJobs(rt, visited, preserved, symbol_roots);
-            if (preserved.count() == before_objects and symbol_roots.count() == before_symbols) return;
+            try scanPreservedWeakEdges(rt, tmp_head, symbol_roots, preserved_count);
+            try queueFinalizationCleanupJobs(rt, symbol_roots, preserved_count);
+            if (preserved_count.* == before_objects and symbol_roots.count() == before_symbols) return;
         }
     }
 
     fn queueFinalizationCleanupJobs(
         rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        preserved: *ObjectVisitSet,
         symbol_roots: *SymbolRootSet,
+        preserved_count: *usize,
     ) ObjectGraphError!void {
         var current_node = rt.gc.gc_obj_list_head;
         while (current_node) |node| {
@@ -6294,7 +6341,7 @@ pub const Object = struct {
             const header = gc.headerFromGcNode(node);
             if (header.kind == .object) {
                 const current: *Object = @alignCast(@fieldParentPtr("header", header));
-                if (preserved.contains(@intFromPtr(current))) {
+                if (header.flags.cycle_preserved) {
                     const finalization_payload = current.finalizationRegistryPayload() orelse {
                         current.pruneBorrowedReferenceHolderIfEmpty(rt);
                         current_node = next;
@@ -6305,15 +6352,15 @@ pub const Object = struct {
                         const cell = &finalization_payload.cells[cell_index];
                         if (!cell.isActive() and !cell.isPending()) continue;
                         const target_identity = cell.target_identity orelse continue;
-                        if (weakEntryKeyIsPreserved(visited, preserved, symbol_roots, target_identity)) {
+                        if (weakEntryKeyIsPreserved(rt, symbol_roots, target_identity)) {
                             cell.state = .active;
                             continue;
                         }
 
                         cell.state = .pending_enqueue;
-                        try scanPreservedValueObject(rt, visited, preserved, symbol_roots, cell.held_value);
-                        try scanPreservedValueObject(rt, visited, preserved, symbol_roots, cell.unregister_token);
-                        if (weakEntryKeyIsPreserved(visited, preserved, symbol_roots, target_identity)) {
+                        try scanPreservedValueObject(rt, symbol_roots, preserved_count, cell.held_value);
+                        try scanPreservedValueObject(rt, symbol_roots, preserved_count, cell.unregister_token);
+                        if (weakEntryKeyIsPreserved(rt, symbol_roots, target_identity)) {
                             cell.state = .active;
                             continue;
                         }
@@ -6328,25 +6375,21 @@ pub const Object = struct {
 
     fn sweepDeadWeakEntries(
         rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        preserved: *const ObjectVisitSet,
+        preserved_objects: []const *Object,
         symbol_roots: *const SymbolRootSet,
-        free_set: *const ObjectVisitSet,
         internal_bytecodes: *const ObjectVisitSet,
     ) void {
-        var iterator = preserved.keyIterator();
-        while (iterator.next()) |address| {
-            const current: *Object = @ptrFromInt(address.*);
+        for (preserved_objects) |current| {
             var index: usize = 0;
             if (current.collectionPayload()) |payload| {
                 var removed_weak_entry = false;
                 while (index < payload.weak_entries.len) {
-                    if (weakEntryKeyIsPreserved(visited, preserved, symbol_roots, payload.weak_entries[index].key_identity)) {
+                    if (weakEntryKeyIsPreserved(rt, symbol_roots, payload.weak_entries[index].key_identity)) {
                         index += 1;
                         continue;
                     }
 
-                    clearValueReferenceToVisited(rt, &payload.weak_entries[index].value, free_set, internal_bytecodes);
+                    clearValueReferenceToVisited(rt, &payload.weak_entries[index].value, internal_bytecodes);
                     payload.weak_entries[index].destroy(rt);
                     const last_idx = payload.weak_entries.len - 1;
                     if (index < last_idx) {
@@ -6360,7 +6403,7 @@ pub const Object = struct {
 
             if (current.objectDataPayload()) |payload| {
                 if (payload.weak_target_identity) |target_identity| {
-                    if (!weakEntryKeyIsPreserved(visited, preserved, symbol_roots, target_identity)) {
+                    if (!weakEntryKeyIsPreserved(rt, symbol_roots, target_identity)) {
                         payload.weak_target_identity = null;
                     }
                 }
@@ -6375,14 +6418,14 @@ pub const Object = struct {
                     continue;
                 }
                 if (finalization_payload.cells[index].isActive() and target_identity != null and
-                    weakEntryKeyIsPreserved(visited, preserved, symbol_roots, target_identity.?))
+                    weakEntryKeyIsPreserved(rt, symbol_roots, target_identity.?))
                 {
                     index += 1;
                     continue;
                 }
 
-                clearValueReferenceToVisited(rt, &finalization_payload.cells[index].held_value, free_set, internal_bytecodes);
-                clearValueReferenceToVisited(rt, &finalization_payload.cells[index].unregister_token, free_set, internal_bytecodes);
+                clearValueReferenceToVisited(rt, &finalization_payload.cells[index].held_value, internal_bytecodes);
+                clearValueReferenceToVisited(rt, &finalization_payload.cells[index].unregister_token, internal_bytecodes);
                 finalization_payload.cells[index].destroy(rt);
                 const last_idx = finalization_payload.cells.len - 1;
                 if (index < last_idx) {
@@ -6400,8 +6443,7 @@ pub const Object = struct {
     }
 
     fn weakEntryKeyIsPreserved(
-        visited: *const ObjectVisitSet,
-        preserved: *const ObjectVisitSet,
+        rt: *const JSRuntime,
         symbol_roots: *const SymbolRootSet,
         key_identity: usize,
     ) bool {
@@ -6410,31 +6452,31 @@ pub const Object = struct {
             if (atom_id > std.math.maxInt(atom.Atom)) return false;
             return symbol_roots.contains(@intCast(atom_id));
         }
-        return visited.contains(key_identity) and preserved.contains(key_identity);
+        const object = rt.liveObjectFromWeakIdentity(key_identity) orelse return false;
+        return object.header.flags.cycle_visited and object.header.flags.cycle_preserved;
     }
 
-    pub fn weakIdentityFromValue(stored: JSValue) ?usize {
+    /// Returns the weak identity for `stored`, registering objects in the
+    /// runtime's weak identity registry on first use. Symbols encode as
+    /// `(atom << 1) | 1`; objects encode as `weak_id << 1`.
+    pub fn weakIdentityFromValue(rt: *JSRuntime, stored: JSValue) !?usize {
         if (stored.asSymbolAtom()) |atom_id| return (@as(usize, @intCast(atom_id)) << 1) | 1;
+        const object = objectFromWeakCandidate(stored) orelse return null;
+        return try rt.registerWeakObjectIdentity(object);
+    }
+
+    /// Like `weakIdentityFromValue` but never registers: returns null for
+    /// objects that were never weakly referenced.
+    pub fn weakIdentityFromValuePeek(rt: *const JSRuntime, stored: JSValue) ?usize {
+        if (stored.asSymbolAtom()) |atom_id| return (@as(usize, @intCast(atom_id)) << 1) | 1;
+        const object = objectFromWeakCandidate(stored) orelse return null;
+        return rt.peekWeakObjectIdentity(object);
+    }
+
+    fn objectFromWeakCandidate(stored: JSValue) ?*Object {
         const header = stored.refHeader() orelse return null;
         if (header.kind != .object) return null;
-        return @intFromPtr(header) & ~@as(usize, 1);
-    }
-
-    fn liveObjectFromWeakIdentity(rt: *JSRuntime, key_identity: usize) ?*Object {
-        if ((key_identity & 1) != 0) return null;
-        var current = rt.gc.gc_obj_list_head;
-        while (current) |node| {
-            const next = node.next;
-            const header = gc.headerFromGcNode(node);
-            if (header.rc > 0 and header.kind == .object) {
-                if ((@intFromPtr(header) & ~@as(usize, 1)) == key_identity) {
-                    const obj: *Object = @alignCast(@fieldParentPtr("header", header));
-                    return obj;
-                }
-            }
-            current = next;
-        }
-        return null;
+        return @alignCast(@fieldParentPtr("header", header));
     }
 
     fn accumulateIncomingReferences(
@@ -6525,28 +6567,33 @@ pub const Object = struct {
         entry.* += 1;
     }
 
+    /// True when `child` is condemned garbage in the current cycle-removal round
+    /// (it was scanned and was not preserved/resurrected).
+    inline fn objectIsCycleGarbage(child: *const Object) bool {
+        return child.header.flags.cycle_visited and !child.header.flags.cycle_preserved;
+    }
+
     fn clearReferencesToVisited(
         self: *Object,
         rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
         internal_bytecodes: *const ObjectVisitSet,
     ) ObjectGraphError!void {
         const ClearReferencesVisitor = struct {
             rt: *JSRuntime,
-            visited: *const ObjectVisitSet,
             internal_bytecodes: *const ObjectVisitSet,
 
             pub fn visitObject(cv: @This(), obj_ptr: *?*Object) !void {
+                _ = cv;
                 if (obj_ptr.*) |obj| {
                     if (@intFromPtr(obj) == 0) return;
-                    if (cv.visited.contains(@intFromPtr(obj))) {
+                    if (objectIsCycleGarbage(obj)) {
                         obj_ptr.* = null;
                     }
                 }
             }
 
             pub fn visitValue(cv: @This(), val_ptr: *JSValue) !void {
-                clearValueReferenceToVisited(cv.rt, val_ptr, cv.visited, cv.internal_bytecodes);
+                clearValueReferenceToVisited(cv.rt, val_ptr, cv.internal_bytecodes);
             }
 
             pub fn visitSymbol(cv: @This(), sym_ptr: *atom.Atom) !void {
@@ -6555,17 +6602,16 @@ pub const Object = struct {
             }
 
             pub fn visitWeakCollectionEntry(cv: @This(), entry: *WeakCollectionEntry) !void {
-                clearValueReferenceToVisited(cv.rt, &entry.value, cv.visited, cv.internal_bytecodes);
+                clearValueReferenceToVisited(cv.rt, &entry.value, cv.internal_bytecodes);
             }
 
             pub fn visitFinalizationCell(cv: @This(), entry: *FinalizationRegistryCell) !void {
-                clearValueReferenceToVisited(cv.rt, &entry.held_value, cv.visited, cv.internal_bytecodes);
-                clearValueReferenceToVisited(cv.rt, &entry.unregister_token, cv.visited, cv.internal_bytecodes);
+                clearValueReferenceToVisited(cv.rt, &entry.held_value, cv.internal_bytecodes);
+                clearValueReferenceToVisited(cv.rt, &entry.unregister_token, cv.internal_bytecodes);
             }
         };
         try self.traceChildEdgesFallible(rt, ClearReferencesVisitor{
             .rt = rt,
-            .visited = visited,
             .internal_bytecodes = internal_bytecodes,
         });
     }
@@ -6573,18 +6619,17 @@ pub const Object = struct {
     fn clearOptionalReferenceToVisited(
         rt: *JSRuntime,
         maybe_value: *?JSValue,
-        visited: *const ObjectVisitSet,
         internal_bytecodes: *const ObjectVisitSet,
     ) void {
         if (maybe_value.*) |*stored| {
-            if (valueReferencesVisited(stored.*, visited)) {
+            if (valueReferencesVisited(stored.*)) {
                 maybe_value.* = null;
                 return;
             }
             if (functionBytecodeFromValue(stored.*)) |function_bytecode| {
                 if (!internal_bytecodes.contains(@intFromPtr(function_bytecode))) return;
                 maybe_value.* = null;
-                clearFunctionBytecodeReferencesToVisited(rt, function_bytecode, visited, internal_bytecodes);
+                clearFunctionBytecodeReferencesToVisited(rt, function_bytecode, internal_bytecodes);
             }
         }
     }
@@ -6592,38 +6637,36 @@ pub const Object = struct {
     fn clearValueReferenceToVisited(
         rt: *JSRuntime,
         stored: *JSValue,
-        visited: *const ObjectVisitSet,
         internal_bytecodes: *const ObjectVisitSet,
     ) void {
-        if (valueReferencesVisited(stored.*, visited)) {
+        if (valueReferencesVisited(stored.*)) {
             stored.* = JSValue.undefinedValue();
             return;
         }
         if (functionBytecodeFromValue(stored.*)) |function_bytecode| {
             if (!internal_bytecodes.contains(@intFromPtr(function_bytecode))) return;
             stored.* = JSValue.undefinedValue();
-            clearFunctionBytecodeReferencesToVisited(rt, function_bytecode, visited, internal_bytecodes);
+            clearFunctionBytecodeReferencesToVisited(rt, function_bytecode, internal_bytecodes);
             return;
         }
         const cell = varRefCellFromValue(stored.*) orelse return;
         if (cell.varRefValueSlot().*) |cell_value| {
-            if (valueReferencesVisited(cell_value, visited)) cell.varRefValueSlot().* = JSValue.undefinedValue();
+            if (valueReferencesVisited(cell_value)) cell.varRefValueSlot().* = JSValue.undefinedValue();
         }
     }
 
     fn clearFunctionBytecodeReferencesToVisited(
         rt: *JSRuntime,
         function_bytecode: *FunctionBytecode,
-        visited: *const ObjectVisitSet,
         internal_bytecodes: *const ObjectVisitSet,
     ) void {
-        if (function_bytecode.class_fields_init) |*stored| clearValueReferenceToVisited(rt, stored, visited, internal_bytecodes);
-        for (function_bytecode.cpool) |*stored| clearValueReferenceToVisited(rt, stored, visited, internal_bytecodes);
+        if (function_bytecode.class_fields_init) |*stored| clearValueReferenceToVisited(rt, stored, internal_bytecodes);
+        for (function_bytecode.cpool) |*stored| clearValueReferenceToVisited(rt, stored, internal_bytecodes);
     }
 
-    fn valueReferencesVisited(stored: JSValue, visited: *const ObjectVisitSet) bool {
+    fn valueReferencesVisited(stored: JSValue) bool {
         const child = objectFromValue(stored) orelse return false;
-        return visited.contains(@intFromPtr(child));
+        return objectIsCycleGarbage(child);
     }
 
     fn functionBytecodeFromValue(stored: JSValue) ?*FunctionBytecode {
@@ -6916,7 +6959,7 @@ pub const Object = struct {
             if (candidate == self) return error.PrototypeCycle;
             cursor = candidate.prototype;
         }
-        if (!self.extensible and self.prototype != prototype) return error.NotExtensible;
+        if (!self.flags.extensible and self.prototype != prototype) return error.NotExtensible;
         const proto_id = if (prototype) |proto| @intFromPtr(proto) else null;
         const next_shape = if (self.shapeNeedsMutationCopy())
             try rt.shapes.cloneWithPrototype(self.shape_ref, proto_id)
@@ -6926,12 +6969,11 @@ pub const Object = struct {
         if (prototype) |proto| gc.retain(&proto.header);
         errdefer if (prototype) |proto| proto.value().free(rt);
         if (prototype) |proto| {
-            proto.is_prototype = true;
-            if (proto.may_have_indexed_properties) {
+            proto.flags.is_prototype = true;
+            if (proto.flags.may_have_indexed_properties) {
                 rt.any_prototype_may_have_indexed_properties = true;
             }
         }
-        try rt.writeBarrierObjectAt(&self.header, prototype, @ptrCast(&self.prototype));
         const old_prototype = self.prototype;
         self.prototype = prototype;
         if (old_prototype) |old| old.value().free(rt);
@@ -6945,19 +6987,19 @@ pub const Object = struct {
     }
 
     pub fn preventExtensions(self: *Object) void {
-        self.extensible = false;
+        self.flags.extensible = false;
     }
 
     pub fn isExtensible(self: *const Object) bool {
-        return self.extensible;
+        return self.flags.extensible;
     }
 
     pub fn markImmutablePrototype(self: *Object) void {
-        self.immutable_prototype = true;
+        self.flags.immutable_prototype = true;
     }
 
     pub fn hasImmutablePrototype(self: *const Object) bool {
-        return self.immutable_prototype;
+        return self.flags.immutable_prototype;
     }
 
     pub fn getOwnProperty(self: *const Object, atom_id: atom.Atom) ?descriptor.Descriptor {
@@ -6969,42 +7011,51 @@ pub const Object = struct {
         if (self.moduleNamespaceBindingValue(atom_id)) |stored| {
             return descriptor.Descriptor.data(stored, true, true, false);
         }
-        if (self.is_array and atom_id == atom.ids.length) {
-            return descriptor.Descriptor.data(arrayLengthValue(self.length), self.length_writable, false, false);
+        if (self.flags.is_array and atom_id == atom.ids.length) {
+            return descriptor.Descriptor.data(arrayLengthValue(self.length), self.flags.length_writable, false, false);
         }
         if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex) {
             if (self.regexpLastIndex()) |stored| return descriptor.Descriptor.data(stored.dup(), self.regexpLastIndexWritable(), false, false);
         }
         if (self.findProperty(atom_id)) |index| {
             const entry = self.properties[index];
-            if (entry.flags.deleted) return null;
+            const entry_flags = self.propFlagsAt(index);
+            if (entry_flags.deleted) return null;
             // Auto-init placeholders need to be materialized before
-            // the descriptor is built (`fromEntry` cannot synthesize
+            // the descriptor is built (`fromSlot` cannot synthesize
             // a value from `(name, length, rt)` on its own). This
             // mirrors `getProperty`'s first-access promotion -- after
-            // materialization the slot is `.data` and re-reads are
-            // ordinary fast-path data loads.
+            // materialization the slot is `.data` or `.accessor` and
+            // re-reads are ordinary fast-path loads.
             if (entry.slot == .auto_init) {
                 // `materializeAutoInit` returns a fresh ref for
                 // `getProperty` semantics. On success the slot is promoted
-                // to `.data` and `fromEntry` dups that stored value. On OOM
-                // the placeholder stays `.auto_init`, so expose the
-                // fallback value directly instead of passing the placeholder
-                // to `fromEntry`.
+                // and `fromSlot` dups the stored value(s). On OOM the
+                // placeholder stays `.auto_init`, so expose a conservative
+                // fallback descriptor directly instead of passing the
+                // placeholder to `fromSlot`.
                 const transient = materializeAutoInit(@constCast(self), index, entry.slot.auto_init);
                 const after_materialize = self.properties[index];
                 if (after_materialize.slot == .auto_init) {
+                    if (entry_flags.accessor) {
+                        return descriptor.Descriptor.accessor(
+                            transient,
+                            JSValue.undefinedValue(),
+                            entry_flags.enumerable,
+                            entry_flags.configurable,
+                        );
+                    }
                     return descriptor.Descriptor.data(
                         transient,
-                        entry.flags.writable,
-                        entry.flags.enumerable,
-                        entry.flags.configurable,
+                        entry_flags.writable,
+                        entry_flags.enumerable,
+                        entry_flags.configurable,
                     );
                 }
                 transient.free(entry.slot.auto_init.rt);
-                return descriptor.Descriptor.fromEntry(after_materialize);
+                return descriptor.Descriptor.fromSlot(self.propFlagsAt(index), after_materialize.slot);
             }
-            return descriptor.Descriptor.fromEntry(entry);
+            return descriptor.Descriptor.fromSlot(entry_flags, entry.slot);
         }
         if (self.denseArrayElement(atom_id)) |stored| {
             return descriptor.Descriptor.data(stored.dup(), true, true, true);
@@ -7018,16 +7069,16 @@ pub const Object = struct {
     }
 
     pub fn hasProperty(self: *const Object, atom_id: atom.Atom) bool {
-        profile.recordPropLookup(self.is_global);
+        profile.recordPropLookup(self.flags.is_global);
         if (self.hasOwnProperty(atom_id)) return true;
         if (self.prototype) |proto| return proto.hasProperty(atom_id);
         return false;
     }
 
     pub fn getProperty(self: *const Object, atom_id: atom.Atom) JSValue {
-        profile.recordPropLookup(self.is_global);
+        profile.recordPropLookup(self.flags.is_global);
         if (self.moduleNamespaceBindingValue(atom_id)) |stored| return stored;
-        if (self.is_array and atom_id == atom.ids.length) return arrayLengthValue(self.length);
+        if (self.flags.is_array and atom_id == atom.ids.length) return arrayLengthValue(self.length);
         if (self.findProperty(atom_id)) |index| {
             const entry = self.properties[index];
             return switch (entry.slot) {
@@ -7056,9 +7107,8 @@ pub const Object = struct {
     }
 
     /// First-access materialization for an `auto_init` placeholder.
-    /// Builds the underlying value once (always a native function in
-    /// the current scheme), promotes the slot from `auto_init` to
-    /// `data`, and returns a fresh ref for the caller.
+    /// Builds the underlying value once, promotes the slot from `auto_init`
+    /// to `data` or `accessor`, and returns a fresh ref for the caller.
     ///
     /// The slot now owns one ref; the caller receives another via
     /// `.dup()`. On builder failure we fall back to `undefined` to
@@ -7100,65 +7150,36 @@ pub const Object = struct {
             const materialized = JSValue.int32(info.length);
             return self.finishMaterializedAutoInit(index, info, materialized);
         }
+        if (info.kind == .string_constant) {
+            const materialized = materializeStringConstantAutoInit(info) orelse return JSValue.undefinedValue();
+            return self.finishMaterializedAutoInit(index, info, materialized);
+        }
+        if (info.kind == .empty_array) {
+            const materialized = materializeEmptyArrayAutoInit(info) orelse return JSValue.undefinedValue();
+            return self.finishMaterializedAutoInit(index, info, materialized);
+        }
+        if (info.kind == .native_accessor) {
+            const materialized = self.materializeNativeAccessorAutoInit(info) orelse return JSValue.undefinedValue();
+            return self.finishMaterializedAccessorAutoInit(index, info, materialized);
+        }
         if (info.host_function_kind != 0) {
             const materialized = materializeHostFunctionAutoInit(info) orelse return JSValue.undefinedValue();
             return self.finishMaterializedAutoInit(index, info, materialized);
         }
-        const materialized = function.nativeFunction(info.rt, info.name, info.length) catch return JSValue.undefinedValue();
-        if (info.native_builtin_id != 0) {
-            if (materialized.refHeader()) |header| {
-                const obj: *Object = @fieldParentPtr("header", header);
-                obj.nativeFunctionIdSlot().* = info.native_builtin_id;
-            }
-        }
-        applyAutoInitArrayBuiltinMarker(materialized, info.array_builtin_marker);
-        applyAutoInitTypedArrayBuiltinMarker(materialized, info.typed_array_builtin_marker);
-        applyAutoInitArrayIteratorKind(materialized, info.array_iterator_kind);
-        applyAutoInitIteratorIdentity(materialized, info.iterator_identity);
-        applyAutoInitCollectionMethodOwner(materialized, info.collection_method_owner_class);
-        applyAutoInitDisposableStackMethod(materialized, info.disposable_stack_method);
-        applyAutoInitAsyncDisposableStackMethod(materialized, info.async_disposable_stack_method);
-        // Self-wire `[[Prototype]]` to Function.prototype. The lazy
-        // install path skips the eager
-        // `wireNativeFunctionPropertyPrototypes` pass that would have
-        // done this for us, so each materialization sets it here. The
-        // cache is populated by `installStandardGlobals` once the
-        // Function constructor exists; for very early calls (e.g.
-        // materializing an Object.prototype method while Function is
-        // still being built) the cache is null and we leave the
-        // prototype as the default `null`, matching the behavior of
-        // the eager path before constructor-graph wiring.
-        if (functionPrototypeForAutoInit(self, info)) |fp| {
-            const fn_obj_value = materialized;
-            if (fn_obj_value.refHeader()) |header| {
-                const obj: *Object = @fieldParentPtr("header", header);
-                const realm_global: ?*Object = if (info.host_function_realm_global != 0)
-                    @ptrFromInt(info.host_function_realm_global)
-                else
-                    self.functionRealmGlobalPtr();
-                if (obj.functionRealmGlobalPtrSlot().* == null) {
-                    obj.setFunctionRealmGlobalPtr(info.rt, realm_global) catch {
-                        materialized.free(info.rt);
-                        return JSValue.undefinedValue();
-                    };
-                }
-                if (obj != fp and !obj.hasOwnProperty(atom.ids.prototype) and obj.hostFunctionKind() == 0) {
-                    obj.setPrototype(info.rt, fp) catch {};
-                }
-            }
-        }
-        if (sharedLazyNativeFunctionSlotForAutoInit(info)) |cache_slot| {
-            if (cache_slot.*) |cached| {
-                const cached_value = cached.dup();
-                self.installMaterializedAutoInit(index, info.rt, cached_value) catch {
-                    cached_value.free(info.rt);
-                    materialized.free(info.rt);
+        const cache_slot = sharedLazyNativeFunctionSlotForAutoInit(info);
+        if (cache_slot) |slot| {
+            if (slot.*) |cached| {
+                if (!self.prepareAutoInitNativeFunction(info, cached, info.native_builtin_id, true)) {
                     return JSValue.undefinedValue();
-                };
-                materialized.free(info.rt);
+                }
+                const cached_value = cached.dup();
+                self.installMaterializedAutoInit(index, cached_value);
                 return cached_value.dup();
             }
-            self.setOptionalValueSlot(info.rt, cache_slot, materialized.dup()) catch {
+        }
+        const materialized = self.materializeNativeFunctionAutoInit(info) orelse return JSValue.undefinedValue();
+        if (cache_slot) |slot| {
+            self.setOptionalValueSlot(info.rt, slot, materialized.dup()) catch {
                 materialized.free(info.rt);
                 return JSValue.undefinedValue();
             };
@@ -7170,17 +7191,37 @@ pub const Object = struct {
     }
 
     fn finishMaterializedAutoInit(self: *Object, index: usize, info: property.AutoInit, materialized: JSValue) JSValue {
-        self.installMaterializedAutoInit(index, info.rt, materialized) catch {
-            materialized.free(info.rt);
-            return JSValue.undefinedValue();
-        };
+        _ = info;
+        self.installMaterializedAutoInit(index, materialized);
         return materialized.dup();
     }
 
-    fn installMaterializedAutoInit(self: *Object, index: usize, rt: *JSRuntime, materialized: JSValue) !void {
-        const slot_addr: *const anyopaque = @ptrCast(&self.properties[index].slot);
-        try self.writePropertySlotBarrier(rt, slot_addr, .{ .data = materialized });
+    fn finishMaterializedAccessorAutoInit(self: *Object, index: usize, info: property.AutoInit, materialized: property.Accessor) JSValue {
+        _ = info;
+        self.installMaterializedAccessorAutoInit(index, materialized);
+        return materialized.getter.dup();
+    }
+
+    fn installMaterializedAutoInit(self: *Object, index: usize, materialized: JSValue) void {
         self.properties[index].slot = .{ .data = materialized };
+    }
+
+    fn installMaterializedAccessorAutoInit(self: *Object, index: usize, materialized: property.Accessor) void {
+        // Accessor auto-init placeholders are installed with
+        // `flags.accessor` already set (asserted by the define paths),
+        // so the shape-side flags need no update here.
+        std.debug.assert(self.propFlagsAt(index).accessor);
+        self.properties[index].slot = .{ .accessor = materialized };
+    }
+
+    fn materializeAutoInitEntryForMutation(self: *Object, index: usize) !void {
+        if (index >= self.properties.len) return error.IncompatibleDescriptor;
+        const entry = self.properties[index];
+        if (entry.slot != .auto_init) return;
+        const info = entry.slot.auto_init;
+        const transient = materializeAutoInit(self, index, info);
+        transient.free(info.rt);
+        if (self.properties[index].slot == .auto_init) return error.OutOfMemory;
     }
 
     fn materializeNumberConstantAutoInit(info: property.AutoInit) ?JSValue {
@@ -7195,12 +7236,130 @@ pub const Object = struct {
         return null;
     }
 
+    fn materializeStringConstantAutoInit(info: property.AutoInit) ?JSValue {
+        if (info.name.len == 0) {
+            const cached = info.rt.emptyString() catch return null;
+            return cached.value().dup();
+        }
+        const created = string.String.createAscii(info.rt, info.name) catch return null;
+        return created.value();
+    }
+
+    fn materializeEmptyArrayAutoInit(info: property.AutoInit) ?JSValue {
+        const global: *Object = if (info.host_function_realm_global != 0)
+            @ptrFromInt(info.host_function_realm_global)
+        else
+            return null;
+        const array_proto = arrayPrototypeFromGlobalForAutoInit(info.rt, global);
+        const object = Object.createArray(info.rt, array_proto) catch return null;
+        return object.value();
+    }
+
     fn functionPrototypeForAutoInit(self: *Object, info: property.AutoInit) ?*Object {
         const realm_global: ?*Object = if (info.host_function_realm_global != 0)
             @ptrFromInt(info.host_function_realm_global)
         else
             self.functionRealmGlobalPtr();
         return if (realm_global) |global| global.cachedFunctionProto() else null;
+    }
+
+    fn materializeNativeFunctionAutoInit(self: *Object, info: property.AutoInit) ?JSValue {
+        const materialized = function.nativeFunction(info.rt, info.name, info.length) catch return null;
+        if (!self.prepareAutoInitNativeFunction(info, materialized, info.native_builtin_id, true)) {
+            materialized.free(info.rt);
+            return null;
+        }
+        return materialized;
+    }
+
+    fn materializeNativeAccessorAutoInit(self: *Object, info: property.AutoInit) ?property.Accessor {
+        const getter = function.nativeFunction(info.rt, info.name, info.length) catch return null;
+        if (!self.prepareAutoInitNativeFunction(info, getter, info.native_builtin_id, true)) {
+            getter.free(info.rt);
+            return null;
+        }
+        const setter = if (nativeAccessorAutoInitSetterLength(info)) |setter_length| setter: {
+            var setter_name_buf: [128]u8 = undefined;
+            const setter_name = nativeAccessorAutoInitSetterName(info.name, &setter_name_buf) orelse {
+                getter.free(info.rt);
+                return null;
+            };
+            const setter_value = function.nativeFunction(info.rt, setter_name, setter_length) catch {
+                getter.free(info.rt);
+                return null;
+            };
+            const setter_native_id: i32 = @intCast(info.external_host_function_id);
+            if (!self.prepareAutoInitNativeFunction(info, setter_value, setter_native_id, true)) {
+                getter.free(info.rt);
+                setter_value.free(info.rt);
+                return null;
+            }
+            break :setter setter_value;
+        } else JSValue.undefinedValue();
+        return .{
+            .getter = getter,
+            .setter = setter,
+        };
+    }
+
+    fn nativeAccessorAutoInitSetterLength(info: property.AutoInit) ?i32 {
+        if (info.kind != .native_accessor or info.host_function_kind <= 0) return null;
+        return info.host_function_kind;
+    }
+
+    fn nativeAccessorAutoInitSetterName(getter_name: []const u8, buffer: []u8) ?[]const u8 {
+        if (!std.mem.startsWith(u8, getter_name, "get ")) return null;
+        return std.fmt.bufPrint(buffer, "set {s}", .{getter_name["get ".len..]}) catch null;
+    }
+
+    fn prepareAutoInitNativeFunction(
+        self: *Object,
+        info: property.AutoInit,
+        function_value: JSValue,
+        native_builtin_id: i32,
+        apply_markers: bool,
+    ) bool {
+        if (native_builtin_id != 0) {
+            if (function_value.refHeader()) |header| {
+                const obj: *Object = @fieldParentPtr("header", header);
+                obj.nativeFunctionIdSlot().* = native_builtin_id;
+            }
+        }
+        if (apply_markers) {
+            applyAutoInitArrayBuiltinMarker(function_value, info.array_builtin_marker);
+            applyAutoInitTypedArrayBuiltinMarker(function_value, info.typed_array_builtin_marker);
+            applyAutoInitArrayIteratorKind(function_value, info.array_iterator_kind);
+            applyAutoInitIteratorIdentity(function_value, info.iterator_identity);
+            applyAutoInitCollectionMethodOwner(function_value, info.collection_method_owner_class);
+            applyAutoInitDisposableStackMethod(function_value, info.disposable_stack_method);
+            applyAutoInitAsyncDisposableStackMethod(function_value, info.async_disposable_stack_method);
+        }
+        // Self-wire `[[Prototype]]` to Function.prototype. The lazy
+        // install path skips the eager
+        // `wireNativeFunctionPropertyPrototypes` pass that would have
+        // done this for us, so each materialization sets it here. The
+        // cache is populated by `installStandardGlobals` once the
+        // Function constructor exists; for very early calls (e.g.
+        // materializing an Object.prototype method while Function is
+        // still being built) the cache is null and we leave the
+        // prototype as the default `null`, matching the behavior of
+        // the eager path before constructor-graph wiring.
+        if (functionPrototypeForAutoInit(self, info)) |fp| {
+            if (function_value.refHeader()) |header| {
+                const obj: *Object = @fieldParentPtr("header", header);
+                const realm_global: ?*Object = if (info.host_function_realm_global != 0)
+                    @ptrFromInt(info.host_function_realm_global)
+                else
+                    self.functionRealmGlobalPtr();
+                if (obj.functionRealmGlobalPtrSlot().* == null) {
+                    obj.setFunctionRealmGlobalPtr(info.rt, realm_global) catch return false;
+                }
+                if (obj != fp and !obj.hasOwnProperty(atom.ids.prototype) and obj.hostFunctionKind() == 0) {
+                    obj.setPrototype(info.rt, fp) catch {};
+                }
+            }
+        }
+        return true;
     }
 
     fn sharedLazyNativeFunctionSlotForAutoInit(info: property.AutoInit) ?*?JSValue {
@@ -7301,7 +7460,8 @@ pub const Object = struct {
 
     fn materializeHostFunctionAutoInit(info: property.AutoInit) ?JSValue {
         const rt = info.rt;
-        const function_object = Object.create(rt, class.ids.c_function, null) catch return null;
+        const function_capacity: usize = 2 + if (info.host_function_prototype) @as(usize, 1) else 0;
+        const function_object = Object.createWithOwnPropertyCapacity(rt, class.ids.c_function, null, function_capacity) catch return null;
         const function_value = function_object.value();
         function_object.hostFunctionKindSlot().* = info.host_function_kind;
         if (info.external_host_function_id != 0) {
@@ -7337,7 +7497,7 @@ pub const Object = struct {
         };
 
         if (info.host_function_prototype) {
-            const prototype = Object.create(rt, class.ids.object, null) catch {
+            const prototype = Object.createWithOwnPropertyCapacity(rt, class.ids.object, null, 0) catch {
                 function_value.free(rt);
                 return null;
             };
@@ -7389,12 +7549,8 @@ pub const Object = struct {
     fn materializeConsoleAutoInit(info: property.AutoInit) ?JSValue {
         const rt = info.rt;
         if (info.host_function_kind == 0) return null;
-        const console = Object.create(rt, class.ids.object, null) catch return null;
+        const console = Object.createWithOwnPropertyCapacity(rt, class.ids.object, null, 3) catch return null;
         const console_value = console.value();
-        console.reserveOwnPropertyCapacityAssumingPlain(rt, 3) catch {
-            console_value.free(rt);
-            return null;
-        };
         const methods = [_][]const u8{ "log", "warn", "error" };
         for (methods) |name| {
             defineHostAutoInitDataPropertyByName(rt, console, name, 1, info.host_function_kind, info.external_host_function_id, null) catch {
@@ -7412,7 +7568,7 @@ pub const Object = struct {
         else
             return null;
         const object_proto = objectPrototypeFromGlobalForAutoInit(rt, global);
-        const proto = Object.create(rt, class.ids.object, object_proto) catch return null;
+        const proto = Object.createWithOwnPropertyCapacity(rt, class.ids.object, object_proto, 2) catch return null;
         var proto_owned = true;
         defer if (proto_owned) proto.value().free(rt);
 
@@ -7427,6 +7583,10 @@ pub const Object = struct {
 
         const getter = function.nativeFunction(rt, "get userAgent", 0) catch return null;
         defer getter.free(rt);
+        if (getter.refHeader()) |getter_header| {
+            const getter_object: *Object = @fieldParentPtr("header", getter_header);
+            getter_object.nativeFunctionIdSlot().* = function.nativeBuiltinId(.host, @intFromEnum(function.HostGlobalMethod.navigator_user_agent_get));
+        }
         const user_agent = rt.internAtom("userAgent") catch return null;
         defer rt.atoms.free(user_agent);
         proto.defineOwnPropertyAssumingNew(
@@ -7435,7 +7595,7 @@ pub const Object = struct {
             descriptor.Descriptor.accessor(getter, JSValue.undefinedValue(), true, true),
         ) catch return null;
 
-        const navigator = Object.create(rt, class.ids.object, proto) catch return null;
+        const navigator = Object.createWithOwnPropertyCapacity(rt, class.ids.object, proto, 0) catch return null;
         proto.value().free(rt);
         proto_owned = false;
         return navigator.value();
@@ -7448,12 +7608,8 @@ pub const Object = struct {
         else
             return null;
         if (rt.performance_time_origin_ms == 0) rt.performance_time_origin_ms = performanceAutoInitNowMs();
-        const performance = Object.create(rt, class.ids.object, objectPrototypeFromGlobalForAutoInit(rt, global)) catch return null;
+        const performance = Object.createWithOwnPropertyCapacity(rt, class.ids.object, objectPrototypeFromGlobalForAutoInit(rt, global), 2) catch return null;
         const performance_value = performance.value();
-        performance.reserveOwnPropertyCapacityAssumingPlain(rt, 2) catch {
-            performance_value.free(rt);
-            return null;
-        };
 
         const now_key = atom.predefinedId("now", .string).?;
         const method_flags = property.Flags.data(true, false, true);
@@ -7490,10 +7646,26 @@ pub const Object = struct {
     }
 
     fn objectPrototypeFromGlobalForAutoInit(rt: *JSRuntime, global: *Object) ?*Object {
+        if (global.cachedRealmValue(.object_prototype)) |stored| {
+            if (objectFromValue(stored)) |prototype| return prototype;
+        }
         const object_ctor_value = global.getProperty(atom.predefinedId("Object", .string).?);
         defer object_ctor_value.free(rt);
         if (!object_ctor_value.isObject()) return null;
         const prototype_value = objectFromValue(object_ctor_value).?.getProperty(atom.ids.prototype);
+        defer prototype_value.free(rt);
+        return objectFromValue(prototype_value);
+    }
+
+    fn arrayPrototypeFromGlobalForAutoInit(rt: *JSRuntime, global: *Object) ?*Object {
+        if (global.cachedRealmValue(.array_prototype)) |stored| {
+            if (objectFromValue(stored)) |prototype| return prototype;
+        }
+        const array_key = atom.predefinedId("Array", .string) orelse return null;
+        const array_ctor_value = global.getProperty(array_key);
+        defer array_ctor_value.free(rt);
+        if (!array_ctor_value.isObject()) return null;
+        const prototype_value = objectFromValue(array_ctor_value).?.getProperty(atom.ids.prototype);
         defer prototype_value.free(rt);
         return objectFromValue(prototype_value);
     }
@@ -7506,9 +7678,8 @@ pub const Object = struct {
     pub fn getOwnDataObjectBorrowed(self: *const Object, atom_id: atom.Atom) ?*Object {
         if (self.exotic != null) return null;
         if (self.findProperty(atom_id)) |index| {
-            const entry = self.properties[index];
-            if (entry.flags.deleted or entry.flags.accessor) return null;
-            return switch (entry.slot) {
+            if (self.propFlagsAt(index).accessor) return null;
+            return switch (self.properties[index].slot) {
                 .data => |stored| objectFromValue(stored),
                 .auto_init, .accessor, .deleted => null,
             };
@@ -7519,9 +7690,8 @@ pub const Object = struct {
     pub fn getOwnDataPropertyLookup(self: *const Object, atom_id: atom.Atom) ?DataPropertyLookup {
         if (self.exotic != null) return null;
         if (self.findProperty(atom_id)) |index| {
-            const entry = self.properties[index];
-            if (entry.flags.deleted or entry.flags.accessor) return null;
-            return switch (entry.slot) {
+            if (self.propFlagsAt(index).accessor) return null;
+            return switch (self.properties[index].slot) {
                 .data => |stored| .{ .index = index, .value = stored.dup() },
                 .auto_init, .accessor, .deleted => null,
             };
@@ -7530,17 +7700,18 @@ pub const Object = struct {
     }
 
     pub fn getOwnDataPropertyValueAt(self: *const Object, index: usize, atom_id: atom.Atom) ?JSValue {
-        if (self.exotic != null or index >= self.properties.len) return null;
-        const entry = self.properties[index];
-        if (entry.atom_id != atom_id or entry.flags.deleted or entry.flags.accessor) return null;
-        return switch (entry.slot) {
+        if (self.exotic != null or index >= self.shapeProps().len) return null;
+        const prop = self.shape_ref.props[index];
+        const prop_flags = property.Flags.fromBits(prop.flags);
+        if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.accessor) return null;
+        return switch (self.properties[index].slot) {
             .data => |stored| stored.dup(),
             .auto_init, .accessor, .deleted => null,
         };
     }
 
     pub fn getDenseArrayElementValue(self: *const Object, index: u32) ?JSValue {
-        if (!self.is_array or self.arrayElementStorageMode() != .dense) return null;
+        if (!self.flags.is_array or self.arrayElementStorageMode() != .dense) return null;
         const atom_id = atom.atomFromUInt32(index);
         if (self.properties.len != 0 and self.findProperty(atom_id) != null) return null;
         const element_index: usize = @intCast(index);
@@ -7562,7 +7733,7 @@ pub const Object = struct {
         const destroy_actual_desc = try self.prepareMappedArgumentsDescriptorForDefine(rt, atom_id, &actual_desc);
         defer if (destroy_actual_desc) actual_desc.destroy(rt);
 
-        if (self.is_array and atom_id == atom.ids.length) {
+        if (self.flags.is_array and atom_id == atom.ids.length) {
             try self.defineArrayLength(rt, actual_desc);
             return;
         }
@@ -7572,9 +7743,9 @@ pub const Object = struct {
             return;
         }
 
-        if (self.is_array) {
+        if (self.flags.is_array) {
             if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| {
-                if (index >= self.length and !self.length_writable) return error.ReadOnly;
+                if (index >= self.length and !self.flags.length_writable) return error.ReadOnly;
                 try self.defineOrdinaryOwnProperty(rt, atom_id, actual_desc);
                 if (index >= self.length) self.length = index + 1;
                 self.updateArrayStorageMode(index);
@@ -7605,10 +7776,10 @@ pub const Object = struct {
     /// reintroduce the O(n) scan we are trying to avoid).
     pub fn defineOwnPropertyAssumingNew(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
+        std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.extensible);
         try self.addProperty(rt, atom_id, desc);
     }
 
@@ -7619,57 +7790,43 @@ pub const Object = struct {
     /// match-array `index`, `input`, and `groups`.
     pub fn defineOwnNonIndexPropertyAssumingNew(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!(self.is_array and atom_id == atom.ids.length));
+        std.debug.assert(!(self.flags.is_array and atom_id == atom.ids.length));
         std.debug.assert(array.arrayIndexFromAtom(&rt.atoms, atom_id) == null);
         std.debug.assert(self.class_id != class.ids.regexp or atom_id != atom.ids.lastIndex or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.extensible);
         try self.addProperty(rt, atom_id, desc);
     }
 
     pub fn defineRegExpMatchMetadataPropertiesAssumingNew(self: *Object, rt: *JSRuntime, match_index: i32, input_value: JSValue, groups_value: JSValue) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(self.is_array);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.is_array);
+        std.debug.assert(self.flags.extensible);
 
         const index_atom = atom.predefinedId("index", .string).?;
         const input_atom = atom.predefinedId("input", .string).?;
         const groups_atom = atom.predefinedId("groups", .string).?;
         const enumerable_flags = property.Flags.data(true, true, true);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(index_atom),
-            .flags = enumerable_flags,
-            .slot = .{ .data = JSValue.int32(match_index) },
-        });
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(input_atom),
-            .flags = enumerable_flags,
-            .slot = .{ .data = input_value.dup() },
-        });
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(groups_atom),
-            .flags = enumerable_flags,
-            .slot = .{ .data = groups_value.dup() },
-        });
+        try self.appendPreparedPropertyEntry(rt, index_atom, enumerable_flags, .{ .data = JSValue.int32(match_index) });
+        try self.appendPreparedPropertyEntry(rt, input_atom, enumerable_flags, .{ .data = input_value.dup() });
+        try self.appendPreparedPropertyEntry(rt, groups_atom, enumerable_flags, .{ .data = groups_value.dup() });
     }
 
     pub fn defineJsonParseDataProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
+        std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id == class.ids.object);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.extensible);
 
         if (self.findProperty(atom_id)) |index| {
-            var entry = &self.properties[index];
             try self.ensureUniqueShapeForMutation(rt);
-            const next_value = dupPropertyDataValue(&rt.atoms, entry.atom_id, new_value);
+            const entry = &self.properties[index];
+            const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
-            try self.writeValueBarrierAt(rt, next_value, &entry.slot);
             const old_slot = entry.slot;
-            entry.flags = property.Flags.data(true, true, true);
             entry.slot = .{ .data = next_value };
-            rt.shapes.updatePropertyFlags(self.shape_ref, index, entry.flags.bits());
-            destroyPropertySlot(rt, entry.atom_id, old_slot);
+            rt.shapes.updatePropertyFlags(self.shape_ref, index, property.Flags.data(true, true, true).bits());
+            destroyPropertySlot(rt, atom_id, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
         }
@@ -7679,10 +7836,11 @@ pub const Object = struct {
 
     pub fn reserveOwnPropertyCapacityAssumingPlain(self: *Object, rt: *JSRuntime, needed: usize) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
+        std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.extensible);
+        if (needed <= self.property_capacity and rt.shapes.hasReservedOwnPropertyCapacity(self.shape_ref, needed)) return;
         // Bulk install paths build fresh ordinary objects. Once capacity is
         // reserved, keep their shapes unique and append in place instead of
         // creating a transition node per property.
@@ -7756,10 +7914,10 @@ pub const Object = struct {
         shared_native_cache_slot: u8,
     ) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
+        std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.extensible);
         const inserted_holder = if (realm_global != null)
             try registerBorrowedHolderForPendingMutation(rt, self)
         else
@@ -7770,18 +7928,114 @@ pub const Object = struct {
         // (name, length, rt) triple stored in the slot's `auto_init`
         // payload. The atom is still retained the same way `addProperty`
         // would, via `rt.shapes.addProperty` -> `atoms.dup`.
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = name,
-                .length = length,
-                .rt = rt,
-                .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
-                .native_builtin_id = native_builtin_id,
-                .shared_native_cache_slot = shared_native_cache_slot,
-            } },
-        });
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = name,
+            .length = length,
+            .rt = rt,
+            .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
+            .native_builtin_id = native_builtin_id,
+            .shared_native_cache_slot = shared_native_cache_slot,
+        } });
+    }
+
+    pub fn defineAutoInitNonIndexPropertyWithRealmNativeAndCache(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        name: []const u8,
+        length: i32,
+        flags: property.Flags,
+        realm_global: ?*Object,
+        native_builtin_id: i32,
+        shared_native_cache_slot: u8,
+    ) !void {
+        std.debug.assert(self.exotic == null);
+        std.debug.assert(!(self.flags.is_array and atom_id == atom.ids.length));
+        std.debug.assert(array.arrayIndexFromAtom(&rt.atoms, atom_id) == null);
+        std.debug.assert(self.class_id != class.ids.regexp or atom_id != atom.ids.lastIndex or self.regexpLastIndex() == null);
+        std.debug.assert(self.class_id != class.ids.mapped_arguments);
+        std.debug.assert(self.flags.extensible);
+        const inserted_holder = if (realm_global != null)
+            try registerBorrowedHolderForPendingMutation(rt, self)
+        else
+            false;
+        errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = name,
+            .length = length,
+            .rt = rt,
+            .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
+            .native_builtin_id = native_builtin_id,
+            .shared_native_cache_slot = shared_native_cache_slot,
+        } });
+    }
+
+    pub fn defineNativeAccessorAutoInitPropertyWithRealmAndNative(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        getter_name: []const u8,
+        getter_length: i32,
+        flags: property.Flags,
+        realm_global: ?*Object,
+        getter_native_builtin_id: i32,
+    ) !void {
+        std.debug.assert(flags.accessor);
+        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.flags.is_array);
+        std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
+        std.debug.assert(self.class_id != class.ids.mapped_arguments);
+        std.debug.assert(self.flags.extensible);
+        const inserted_holder = if (realm_global != null)
+            try registerBorrowedHolderForPendingMutation(rt, self)
+        else
+            false;
+        errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = getter_name,
+            .length = getter_length,
+            .rt = rt,
+            .kind = .native_accessor,
+            .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
+            .native_builtin_id = getter_native_builtin_id,
+        } });
+    }
+
+    pub fn defineNativeAccessorAutoInitPairPropertyWithRealmAndNative(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        getter_name: []const u8,
+        getter_length: i32,
+        setter_length: i32,
+        flags: property.Flags,
+        realm_global: ?*Object,
+        getter_native_builtin_id: i32,
+        setter_native_builtin_id: i32,
+    ) !void {
+        std.debug.assert(flags.accessor);
+        std.debug.assert(setter_length > 0);
+        std.debug.assert(setter_native_builtin_id >= 0);
+        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.flags.is_array);
+        std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
+        std.debug.assert(self.class_id != class.ids.mapped_arguments);
+        std.debug.assert(self.flags.extensible);
+        const inserted_holder = if (realm_global != null)
+            try registerBorrowedHolderForPendingMutation(rt, self)
+        else
+            false;
+        errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = getter_name,
+            .length = getter_length,
+            .rt = rt,
+            .kind = .native_accessor,
+            .host_function_kind = setter_length,
+            .external_host_function_id = @intCast(setter_native_builtin_id),
+            .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
+            .native_builtin_id = getter_native_builtin_id,
+        } });
     }
 
     pub fn replaceAutoInitPropertyWithRealmNativeAndCache(
@@ -7800,11 +8054,13 @@ pub const Object = struct {
         else
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        for (self.properties) |*entry| {
-            if (entry.flags.deleted or entry.atom_id != atom_id) continue;
-            if (entry.slot != .auto_init) return error.TypeError;
-            entry.flags = flags;
-            entry.slot = .{ .auto_init = .{
+        if (self.findProperty(atom_id)) |index| {
+            if (self.properties[index].slot != .auto_init) return error.TypeError;
+            if (self.propFlagsAt(index).bits() != flags.bits()) {
+                try self.ensureUniqueShapeForMutation(rt);
+                rt.shapes.updatePropertyFlags(self.shape_ref, index, flags.bits());
+            }
+            self.properties[index].slot = .{ .auto_init = .{
                 .name = name,
                 .length = length,
                 .rt = rt,
@@ -7826,21 +8082,17 @@ pub const Object = struct {
         realm_global: *Object,
     ) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
-        std.debug.assert(self.extensible);
+        std.debug.assert(!self.flags.is_array);
+        std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = "navigator",
-                .length = 0,
-                .rt = rt,
-                .kind = .navigator,
-                .host_function_realm_global = @intFromPtr(realm_global),
-            } },
-        });
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = "navigator",
+            .length = 0,
+            .rt = rt,
+            .kind = .navigator,
+            .host_function_realm_global = @intFromPtr(realm_global),
+        } });
     }
 
     pub fn defineConsoleAutoInitProperty(
@@ -7854,20 +8106,16 @@ pub const Object = struct {
         std.debug.assert(host_function_kind != 0);
         std.debug.assert(external_host_function_id == 0 or host_function_kind == host_function.ids.external_host);
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
-        std.debug.assert(self.extensible);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = "console",
-                .length = 0,
-                .rt = rt,
-                .kind = .console,
-                .host_function_kind = host_function_kind,
-                .external_host_function_id = external_host_function_id,
-            } },
-        });
+        std.debug.assert(!self.flags.is_array);
+        std.debug.assert(self.flags.extensible);
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = "console",
+            .length = 0,
+            .rt = rt,
+            .kind = .console,
+            .host_function_kind = host_function_kind,
+            .external_host_function_id = external_host_function_id,
+        } });
     }
 
     pub fn definePerformanceAutoInitProperty(
@@ -7878,21 +8126,17 @@ pub const Object = struct {
         realm_global: *Object,
     ) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
-        std.debug.assert(self.extensible);
+        std.debug.assert(!self.flags.is_array);
+        std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = "performance",
-                .length = 0,
-                .rt = rt,
-                .kind = .performance,
-                .host_function_realm_global = @intFromPtr(realm_global),
-            } },
-        });
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = "performance",
+            .length = 0,
+            .rt = rt,
+            .kind = .performance,
+            .host_function_realm_global = @intFromPtr(realm_global),
+        } });
     }
 
     pub fn defineBuiltinNamespaceAutoInitProperty(
@@ -7909,21 +8153,17 @@ pub const Object = struct {
             kind == .reflect_namespace or
             kind == .atomics_namespace);
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
-        std.debug.assert(self.extensible);
+        std.debug.assert(!self.flags.is_array);
+        std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = name,
-                .length = 0,
-                .rt = rt,
-                .kind = kind,
-                .host_function_realm_global = @intFromPtr(realm_global),
-            } },
-        });
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = name,
+            .length = 0,
+            .rt = rt,
+            .kind = kind,
+            .host_function_realm_global = @intFromPtr(realm_global),
+        } });
     }
 
     pub fn defineArrayUnscopablesAutoInitProperty(
@@ -7933,17 +8173,13 @@ pub const Object = struct {
         flags: property.Flags,
     ) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(self.extensible);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = "[Symbol.unscopables]",
-                .length = 0,
-                .rt = rt,
-                .kind = .array_unscopables,
-            } },
-        });
+        std.debug.assert(self.flags.extensible);
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = "[Symbol.unscopables]",
+            .length = 0,
+            .rt = rt,
+            .kind = .array_unscopables,
+        } });
     }
 
     pub fn defineNumberConstantAutoInitProperty(
@@ -7954,20 +8190,16 @@ pub const Object = struct {
         flags: property.Flags,
     ) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
+        std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.extensible);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = name,
-                .length = 0,
-                .rt = rt,
-                .kind = .number_constant,
-            } },
-        });
+        std.debug.assert(self.flags.extensible);
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = name,
+            .length = 0,
+            .rt = rt,
+            .kind = .number_constant,
+        } });
     }
 
     pub fn defineInt32ConstantAutoInitProperty(
@@ -7979,20 +8211,77 @@ pub const Object = struct {
         flags: property.Flags,
     ) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
+        std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.extensible);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = name,
-                .length = constant_value,
+        std.debug.assert(self.flags.extensible);
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = name,
+            .length = constant_value,
+            .rt = rt,
+            .kind = .int32_constant,
+        } });
+    }
+
+    pub fn defineStringConstantAutoInitProperty(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        bytes: []const u8,
+        flags: property.Flags,
+    ) !void {
+        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.flags.is_array);
+        std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
+        std.debug.assert(self.class_id != class.ids.mapped_arguments);
+        std.debug.assert(self.flags.extensible);
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = bytes,
+            .length = 0,
+            .rt = rt,
+            .kind = .string_constant,
+        } });
+    }
+
+    pub fn defineEmptyArrayAutoInitProperty(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        flags: property.Flags,
+        realm_global: *Object,
+    ) !void {
+        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.flags.is_array);
+        std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
+        std.debug.assert(self.class_id != class.ids.mapped_arguments);
+        std.debug.assert(self.flags.extensible);
+        std.debug.assert(!flags.accessor);
+        const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
+        errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
+        if (self.findProperty(atom_id)) |index| {
+            if (!self.propFlagsAt(index).configurable) return error.IncompatibleDescriptor;
+            try self.ensureUniqueShapeForMutation(rt);
+            const entry = &self.properties[index];
+            const old_slot = entry.slot;
+            entry.slot = .{ .auto_init = .{
+                .name = "empty array",
+                .length = 0,
                 .rt = rt,
-                .kind = .int32_constant,
-            } },
-        });
+                .kind = .empty_array,
+                .host_function_realm_global = @intFromPtr(realm_global),
+            } };
+            rt.shapes.updatePropertyFlags(self.shape_ref, index, flags.bits());
+            destroyPropertySlot(rt, atom_id, old_slot);
+            self.pruneBorrowedReferenceHolderIfEmpty(rt);
+            return;
+        }
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = "empty array",
+            .length = 0,
+            .rt = rt,
+            .kind = .empty_array,
+            .host_function_realm_global = @intFromPtr(realm_global),
+        } });
     }
 
     pub fn defineHostAutoInitProperty(
@@ -8034,32 +8323,28 @@ pub const Object = struct {
         std.debug.assert(host_function_kind != 0);
         std.debug.assert(external_host_function_id == 0 or host_function_kind == host_function.ids.external_host);
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
+        std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.extensible);
         const inserted_holder = if (host_function_realm_global != null)
             try registerBorrowedHolderForPendingMutation(rt, self)
         else
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = name,
-                .length = length,
-                .rt = rt,
-                .host_function_kind = host_function_kind,
-                .external_host_function_id = external_host_function_id,
-                .host_function_prototype = host_function_prototype,
-                .host_function_realm_global = if (host_function_realm_global) |realm| @intFromPtr(realm) else 0,
-            } },
-        });
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = name,
+            .length = length,
+            .rt = rt,
+            .host_function_kind = host_function_kind,
+            .external_host_function_id = external_host_function_id,
+            .host_function_prototype = host_function_prototype,
+            .host_function_realm_global = if (host_function_realm_global) |realm| @intFromPtr(realm) else 0,
+        } });
     }
 
     pub fn writeDenseArrayIndex(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (!self.is_array or !self.length_writable) return false;
+        if (!self.flags.is_array or !self.flags.length_writable) return false;
         if (self.arrayElementStorageMode() != .dense) return false;
         if (self.properties.len != 0 and self.findProperty(atom_id) != null) return false;
         const elements = self.arrayElements();
@@ -8070,16 +8355,15 @@ pub const Object = struct {
 
         const element_slot = &self.arrayElementsSlot().*[@intCast(index)];
         const old_value = element_slot.*;
-        try self.writeValueBarrierAt(rt, new_value, element_slot);
         element_slot.* = new_value.dup();
         if (old_value) |old| old.free(rt);
         return true;
     }
 
     pub fn appendDenseArrayIndex(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (!self.is_array or index != self.length or !self.length_writable) return false;
+        if (!self.flags.is_array or index != self.length or !self.flags.length_writable) return false;
         if (self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
-        if (!self.extensible) return false;
+        if (!self.flags.extensible) return false;
         if (self.properties.len != 0 and self.findProperty(atom_id) != null) return false;
         if (self.prototype) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt) and proto.hasProperty(atom_id)) return false;
@@ -8091,7 +8375,6 @@ pub const Object = struct {
         elements.* = elements.*.ptr[0 .. @as(usize, @intCast(index)) + 1];
         if (elements.*.len > old_len) @memset(elements.*[old_len..], null);
         const element_slot = &elements.*[@intCast(index)];
-        try self.writeValueBarrierAt(rt, new_value, element_slot);
         element_slot.* = new_value.dup();
         self.markIndexedProperties(rt);
         self.length = index + 1;
@@ -8099,16 +8382,15 @@ pub const Object = struct {
     }
 
     pub fn initDenseArrayIndexZeroAssumingEmpty(self: *Object, rt: *JSRuntime, new_value: JSValue) !void {
-        std.debug.assert(self.is_array);
+        std.debug.assert(self.flags.is_array);
         std.debug.assert(self.length == 0);
-        std.debug.assert(self.length_writable);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.length_writable);
+        std.debug.assert(self.flags.extensible);
         std.debug.assert(self.arrayElements().len == 0);
         std.debug.assert(self.arrayElementsCapacity() == 0);
 
         const elements = try rt.memory.alloc(?JSValue, 1);
         errdefer rt.memory.free(?JSValue, elements);
-        try self.writeValueBarrierAt(rt, new_value, &elements[0]);
         elements[0] = new_value.dup();
         self.arrayElementsSlot().* = elements[0..1];
         self.arrayElementsCapacitySlot().* = 1;
@@ -8117,8 +8399,8 @@ pub const Object = struct {
     }
 
     pub fn appendDenseArrayLiteralIndex(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !bool {
-        if (!self.is_array or index != self.length or !self.length_writable) return false;
-        if (!self.extensible) return false;
+        if (!self.flags.is_array or index != self.length or !self.flags.length_writable) return false;
+        if (!self.flags.extensible) return false;
 
         try self.ensureArrayElementCapacity(rt, index + 1);
         const elements = self.arrayElementsSlot();
@@ -8126,7 +8408,6 @@ pub const Object = struct {
         elements.* = elements.*.ptr[0 .. @as(usize, @intCast(index)) + 1];
         if (elements.*.len > old_len) @memset(elements.*[old_len..], null);
         const element_slot = &elements.*[@intCast(index)];
-        try self.writeValueBarrierAt(rt, new_value, element_slot);
         element_slot.* = new_value.dup();
         self.markIndexedProperties(rt);
         self.length = index + 1;
@@ -8134,7 +8415,7 @@ pub const Object = struct {
     }
 
     pub fn initDenseArrayLiteralValuesAssumingEmpty(self: *Object, rt: *JSRuntime, values: []const JSValue) !bool {
-        if (!self.is_array or !self.length_writable or !self.extensible) return false;
+        if (!self.flags.is_array or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.length != 0 or self.properties.len != 0) return false;
         if (self.arrayElementStorageMode() != .dense) return false;
         if (values.len > array.max_array_length) return false;
@@ -8144,7 +8425,6 @@ pub const Object = struct {
         elements.* = elements.*.ptr[0..values.len];
         for (values, 0..) |item, index| {
             const element_slot = &elements.*[index];
-            try self.writeValueBarrierAt(rt, item, element_slot);
             element_slot.* = item.dup();
         }
         if (values.len != 0) self.markIndexedProperties(rt);
@@ -8153,8 +8433,8 @@ pub const Object = struct {
     }
 
     pub fn appendDenseArrayInt32Range(self: *Object, rt: *JSRuntime, start: u32, limit: u32) !bool {
-        if (!self.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
-        if (start != self.length or start >= limit or !self.length_writable or !self.extensible) return false;
+        if (!self.flags.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
+        if (start != self.length or start >= limit or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.prototype) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
         }
@@ -8201,8 +8481,8 @@ pub const Object = struct {
 
     pub fn appendDenseArrayInt32ValueRange(self: *Object, rt: *JSRuntime, start_index: u32, start_value: i32, count: u32) !bool {
         if (count == 0) return true;
-        if (!self.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
-        if (start_index != self.length or !self.length_writable or !self.extensible) return false;
+        if (!self.flags.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
+        if (start_index != self.length or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.prototype) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
         }
@@ -8245,8 +8525,8 @@ pub const Object = struct {
     pub fn appendDenseArrayInt32MulAndMaskRange(self: *Object, rt: *JSRuntime, start_index: u32, limit: u32, multiplier: i32, mask: i32) !bool {
         if (start_index >= limit) return true;
         if (multiplier < 0 or mask < 0) return false;
-        if (!self.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
-        if (start_index != self.length or !self.length_writable or !self.extensible) return false;
+        if (!self.flags.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
+        if (start_index != self.length or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.prototype) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
         }
@@ -8285,33 +8565,66 @@ pub const Object = struct {
         return true;
     }
 
+    pub fn overwriteDenseArrayInt32MaskedIndexRange(self: *Object, rt: *JSRuntime, start: u32, limit: u32, mask: u32) !bool {
+        if (start >= limit) return true;
+        if (limit > @as(u32, @intCast(std.math.maxInt(i32)))) return false;
+        if (mask > atom.max_int_atom) return false;
+        if (!self.flags.is_array or !self.flags.length_writable) return false;
+        if (self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
+        if (self.prototype) |proto| {
+            if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
+        }
+
+        const elements = self.arrayElementsSlot();
+        const mask_index: usize = @intCast(mask);
+        if (mask_index >= elements.*.len) return false;
+
+        var guard_index: u32 = 0;
+        while (guard_index <= mask) : (guard_index += 1) {
+            const atom_id = atom.atomFromUInt32(guard_index);
+            if (self.properties.len != 0 and self.findProperty(atom_id) != null) return false;
+            if (elements.*[@intCast(guard_index)] == null) return false;
+            if (guard_index == std.math.maxInt(u32)) break;
+        }
+
+        var value_index = start;
+        while (value_index < limit) : (value_index += 1) {
+            const element_index: usize = @intCast(value_index & mask);
+            const element_slot = &elements.*[element_index];
+            const old = element_slot.*;
+            const new_value = JSValue.int32(@intCast(value_index));
+            element_slot.* = new_value;
+            if (old) |stored| stored.free(rt);
+        }
+        return true;
+    }
+
     pub fn reserveDenseArrayElements(self: *Object, rt: *JSRuntime, needed: u32) !void {
-        if (!self.is_array) return;
+        if (!self.flags.is_array) return;
         try self.ensureArrayElementCapacity(rt, needed);
     }
 
     pub fn defineDenseArrayDataProperty(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !bool {
-        if (!self.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
+        if (!self.flags.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
         const atom_id = atom.atomFromUInt32(index);
         if (self.findProperty(atom_id) != null) return false;
 
         const element_index: usize = @intCast(index);
         const elements = self.arrayElementsSlot();
         if (element_index >= elements.*.len) {
-            if (!self.extensible) return false;
-            if (index >= self.length and !self.length_writable) return false;
+            if (!self.flags.extensible) return false;
+            if (index >= self.length and !self.flags.length_writable) return false;
             try self.ensureArrayElementCapacity(rt, index + 1);
             const old_len = elements.*.len;
             elements.* = elements.*.ptr[0 .. element_index + 1];
             if (elements.*.len > old_len) @memset(elements.*[old_len..], null);
-        } else if (elements.*[element_index] == null and !self.extensible) {
+        } else if (elements.*[element_index] == null and !self.flags.extensible) {
             return false;
         }
 
         const next_value = new_value.dup();
         errdefer next_value.free(rt);
         const element_slot = &elements.*[element_index];
-        try self.writeValueBarrierAt(rt, next_value, element_slot);
         const old = element_slot.*;
         element_slot.* = next_value;
         self.markIndexedProperties(rt);
@@ -8321,8 +8634,8 @@ pub const Object = struct {
     }
 
     pub fn markIndexedProperties(self: *Object, rt: *JSRuntime) void {
-        self.may_have_indexed_properties = true;
-        if (self.is_prototype) {
+        self.flags.may_have_indexed_properties = true;
+        if (self.flags.is_prototype) {
             rt.any_prototype_may_have_indexed_properties = true;
         }
     }
@@ -8331,23 +8644,23 @@ pub const Object = struct {
         if (!rt.any_prototype_may_have_indexed_properties) return true;
         var cursor: ?*Object = proto;
         while (cursor) |object| {
-            if (object.may_have_indexed_properties) return false;
+            if (object.flags.may_have_indexed_properties) return false;
             cursor = object.getPrototype();
         }
         return true;
     }
 
     pub fn canDefineDenseArrayDataPropertiesUnchecked(self: Object) bool {
-        return self.is_array and
+        return self.flags.is_array and
             self.exotic == null and
             self.arrayElementStorageMode() == .dense and
-            self.extensible and
+            self.flags.extensible and
             self.properties.len == 0;
     }
 
     pub fn defineDenseArrayDataPropertyUnchecked(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !void {
         std.debug.assert(self.canDefineDenseArrayDataPropertiesUnchecked());
-        std.debug.assert(index < self.length or self.length_writable);
+        std.debug.assert(index < self.length or self.flags.length_writable);
 
         const element_index: usize = @intCast(index);
         const elements = self.arrayElementsSlot();
@@ -8361,7 +8674,6 @@ pub const Object = struct {
         const next_value = new_value.dup();
         errdefer next_value.free(rt);
         const element_slot = &elements.*[element_index];
-        try self.writeValueBarrierAt(rt, next_value, element_slot);
         const old = element_slot.*;
         element_slot.* = next_value;
         self.markIndexedProperties(rt);
@@ -8376,8 +8688,8 @@ pub const Object = struct {
                 return error.ReadOnly;
             }
         }
-        if (self.is_array and atom_id == atom.ids.length) {
-            if (!self.length_writable) return error.ReadOnly;
+        if (self.flags.is_array and atom_id == atom.ids.length) {
+            if (!self.flags.length_writable) return error.ReadOnly;
             try self.defineArrayLength(rt, descriptor.Descriptor.data(new_value, true, false, false));
             return;
         }
@@ -8386,25 +8698,26 @@ pub const Object = struct {
             const last_index = self.regexpLastIndexSlot();
             const next_value = new_value.dup();
             errdefer next_value.free(rt);
-            try self.writeValueBarrierAt(rt, next_value, last_index);
             const old_value = last_index.*.?;
             last_index.* = next_value;
             old_value.free(rt);
             return;
         }
         if (self.findProperty(atom_id)) |index| {
-            var entry = &self.properties[index];
-            if (entry.flags.accessor) {
+            const entry_flags = self.propFlagsAt(index);
+            if (entry_flags.accessor) {
+                try self.materializeAutoInitEntryForMutation(index);
+                const entry = &self.properties[index];
                 if (entry.slot.accessor.setter.isUndefined()) return error.AccessorWithoutSetter;
                 return;
             }
-            if (!entry.flags.writable) return error.ReadOnly;
-            const next_value = dupPropertyDataValue(&rt.atoms, entry.atom_id, new_value);
+            if (!entry_flags.writable) return error.ReadOnly;
+            const entry = &self.properties[index];
+            const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
-            try self.writeValueBarrierAt(rt, next_value, &entry.slot);
             const old_slot = entry.slot;
             entry.slot = .{ .data = next_value };
-            destroyPropertySlot(rt, entry.atom_id, old_slot);
+            destroyPropertySlot(rt, atom_id, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
         }
@@ -8414,9 +8727,13 @@ pub const Object = struct {
         var prototype = self.prototype;
         while (prototype) |proto| {
             if (proto.findProperty(atom_id)) |index| {
+                const inherited_flags = proto.propFlagsAt(index);
+                if (inherited_flags.accessor) {
+                    try proto.materializeAutoInitEntryForMutation(index);
+                }
                 const inherited = proto.properties[index];
-                if (inherited.flags.accessor and inherited.slot.accessor.setter.isUndefined()) return error.AccessorWithoutSetter;
-                if (!inherited.flags.accessor and !inherited.flags.writable) return error.ReadOnly;
+                if (inherited_flags.accessor and inherited.slot.accessor.setter.isUndefined()) return error.AccessorWithoutSetter;
+                if (!inherited_flags.accessor and !inherited_flags.writable) return error.ReadOnly;
             }
             prototype = proto.prototype;
         }
@@ -8432,15 +8749,26 @@ pub const Object = struct {
             }
         }
         if (self.findProperty(atom_id)) |index| {
-            var entry = &self.properties[index];
-            if (entry.flags.accessor) return false;
-            if (!entry.flags.writable) return false;
-            const next_value = dupPropertyDataValue(&rt.atoms, entry.atom_id, new_value);
+            const entry_flags = self.propFlagsAt(index);
+            if (entry_flags.accessor) return false;
+            if (!entry_flags.writable) return false;
+            const entry = &self.properties[index];
+            if (atom_id != atom.ids.Private_brand) {
+                switch (entry.slot) {
+                    .data => |*stored| {
+                        if (!stored.requiresRefCount() and !new_value.requiresRefCount()) {
+                            stored.* = new_value;
+                            return true;
+                        }
+                    },
+                    .auto_init, .accessor, .deleted => {},
+                }
+            }
+            const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
-            try self.writeValueBarrierAt(rt, next_value, &entry.slot);
             const old_slot = entry.slot;
             entry.slot = .{ .data = next_value };
-            destroyPropertySlot(rt, entry.atom_id, old_slot);
+            destroyPropertySlot(rt, atom_id, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return true;
         }
@@ -8448,19 +8776,20 @@ pub const Object = struct {
     }
 
     pub inline fn setOwnDataPropertyAtForLexicalSync(self: *Object, rt: *JSRuntime, index: usize, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (self.exotic != null or index >= self.properties.len) return false;
-        var entry = &self.properties[index];
-        if (entry.atom_id != atom_id or entry.flags.deleted or entry.flags.accessor) return false;
+        if (self.exotic != null or index >= self.shapeProps().len) return false;
+        const prop = self.shape_ref.props[index];
+        const prop_flags = property.Flags.fromBits(prop.flags);
+        if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.accessor) return false;
+        const entry = &self.properties[index];
         switch (entry.slot) {
             .data => |*stored| {
-                if (!entry.flags.writable and !stored.isUninitialized()) return false;
-                if (entry.atom_id == atom.ids.Private_brand) {
-                    const next = dupPropertyDataValue(&rt.atoms, entry.atom_id, new_value);
+                if (!prop_flags.writable and !stored.isUninitialized()) return false;
+                if (atom_id == atom.ids.Private_brand) {
+                    const next = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
                     errdefer next.free(rt);
-                    try self.writeValueBarrierAt(rt, next, stored);
                     const old = stored.*;
                     stored.* = next;
-                    destroyPropertySlot(rt, entry.atom_id, .{ .data = old });
+                    destroyPropertySlot(rt, atom_id, .{ .data = old });
                     return true;
                 }
                 if (!stored.requiresRefCount() and !new_value.requiresRefCount()) {
@@ -8469,9 +8798,27 @@ pub const Object = struct {
                 }
                 const next = new_value.dup();
                 errdefer next.free(rt);
-                try self.writeValueBarrierAt(rt, next, stored);
                 const old = stored.*;
                 stored.* = next;
+                old.free(rt);
+                return true;
+            },
+            .auto_init, .accessor, .deleted => return false,
+        }
+    }
+
+    pub inline fn setOwnDataPropertyAtForLexicalSyncOwned(self: *Object, rt: *JSRuntime, index: usize, atom_id: atom.Atom, new_value: JSValue) !bool {
+        if (self.exotic != null or index >= self.shapeProps().len) return false;
+        const prop = self.shape_ref.props[index];
+        const prop_flags = property.Flags.fromBits(prop.flags);
+        if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.accessor) return false;
+        const entry = &self.properties[index];
+        switch (entry.slot) {
+            .data => |*stored| {
+                if (!prop_flags.writable and !stored.isUninitialized()) return false;
+                if (atom_id == atom.ids.Private_brand) return false;
+                const old = stored.*;
+                stored.* = new_value;
                 old.free(rt);
                 return true;
             },
@@ -8487,15 +8834,26 @@ pub const Object = struct {
             }
         }
         if (self.findProperty(atom_id)) |index| {
-            var entry = &self.properties[index];
-            if (entry.flags.accessor) return false;
-            if (!entry.flags.writable) return false;
-            const next_value = dupPropertyDataValue(&rt.atoms, entry.atom_id, new_value);
+            const entry_flags = self.propFlagsAt(index);
+            if (entry_flags.accessor) return false;
+            if (!entry_flags.writable) return false;
+            const entry = &self.properties[index];
+            if (atom_id != atom.ids.Private_brand) {
+                switch (entry.slot) {
+                    .data => |*stored| {
+                        if (!stored.requiresRefCount() and !new_value.requiresRefCount()) {
+                            stored.* = new_value;
+                            return true;
+                        }
+                    },
+                    .auto_init, .accessor, .deleted => {},
+                }
+            }
+            const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
-            try self.writeValueBarrierAt(rt, next_value, &entry.slot);
             const old_slot = entry.slot;
             entry.slot = .{ .data = next_value };
-            destroyPropertySlot(rt, entry.atom_id, old_slot);
+            destroyPropertySlot(rt, atom_id, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return true;
         }
@@ -8508,11 +8866,11 @@ pub const Object = struct {
     }
 
     fn defineNewOwnDataPropertyForSimpleSetKnownNoOwn(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (self.exotic != null or self.proxyTarget() != null or self.is_global or self.is_with_environment) return false;
-        if (!self.extensible) return false;
+        if (self.exotic != null or self.proxyTarget() != null or self.flags.is_global or self.flags.is_with_environment) return false;
+        if (!self.flags.extensible) return false;
         if (self.class_id == class.ids.module_ns or self.class_id == class.ids.regexp or self.class_id == class.ids.mapped_arguments) return false;
         if (isTypedArrayObjectForSetFastPath(self)) return false;
-        if (self.is_array and atom_id == atom.ids.length) return false;
+        if (self.flags.is_array and atom_id == atom.ids.length) return false;
         if (array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
 
         var prototype = self.prototype;
@@ -8550,25 +8908,26 @@ pub const Object = struct {
         if (self.exotic) |methods| {
             if (methods.delete_property) |hook| return hook(self, atom_id);
         }
-        if (self.is_array and atom_id == atom.ids.length) return false;
+        if (self.flags.is_array and atom_id == atom.ids.length) return false;
         if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex and self.regexpLastIndex() != null) return false;
 
         if (self.findProperty(atom_id)) |index| {
-            var entry = &self.properties[index];
-            if (!entry.flags.configurable) return false;
+            if (!self.propFlagsAt(index).configurable) return false;
             self.ensureUniqueShapeForMutation(rt) catch return false;
+            const entry = &self.properties[index];
             const old_slot = entry.slot;
             entry.slot = .deleted;
-            entry.flags.deleted = true;
-            entry.flags.accessor = false;
-            entry.flags.writable = false;
-            rt.shapes.markPropertyDeleted(self.shape_ref, index, entry.flags.bits());
+            var entry_flags = self.propFlagsAt(index);
+            entry_flags.deleted = true;
+            entry_flags.accessor = false;
+            entry_flags.writable = false;
+            rt.shapes.markPropertyDeleted(self.shape_ref, index, entry_flags.bits());
             if (self.class_id == class.ids.mapped_arguments) {
                 if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |mapped_index| {
                     if (mapped_index < self.argumentsVarRefs().len) self.deleteMappedArgumentsBinding(rt, mapped_index);
                 }
             }
-            destroyPropertySlot(rt, entry.atom_id, old_slot);
+            destroyPropertySlot(rt, atom_id, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return true;
         }
@@ -8622,13 +8981,13 @@ pub const Object = struct {
                     .atom_id = atom.atomFromUInt32(dense_index),
                 });
             }
-            for (self.properties) |entry| {
-                if (entry.flags.deleted) continue;
-                const index = array.arrayIndexFromAtom(&rt.atoms, entry.atom_id) orelse continue;
+            for (self.shapeProps()) |prop| {
+                if (property.Flags.fromBits(prop.flags).deleted) continue;
+                const index = array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;
                 if (self.hasDenseArrayElement(index)) continue;
                 try index_keys.append(rt.memory.allocator, .{
                     .index = index,
-                    .atom_id = entry.atom_id,
+                    .atom_id = prop.atom_id,
                 });
             }
             std.mem.sort(IndexKey, index_keys.items, {}, indexKeyLessThan);
@@ -8642,21 +9001,21 @@ pub const Object = struct {
             }
         }
 
-        if (self.is_array) try appendAtom(rt, &keys, atom.ids.length);
+        if (self.flags.is_array) try appendAtom(rt, &keys, atom.ids.length);
         if (self.class_id == class.ids.regexp and self.regexpLastIndex() != null) try appendAtom(rt, &keys, atom.ids.lastIndex);
 
-        for (self.properties) |entry| {
-            if (entry.flags.deleted) continue;
-            if (array.arrayIndexFromAtom(&rt.atoms, entry.atom_id) != null) continue;
-            const atom_kind = rt.atoms.kind(entry.atom_id);
+        for (self.shapeProps()) |prop| {
+            if (property.Flags.fromBits(prop.flags).deleted) continue;
+            if (array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) != null) continue;
+            const atom_kind = rt.atoms.kind(prop.atom_id);
             if (atom_kind == .symbol or atom_kind == .private) continue;
-            try appendAtom(rt, &keys, entry.atom_id);
+            try appendAtom(rt, &keys, prop.atom_id);
         }
 
-        for (self.properties) |entry| {
-            if (entry.flags.deleted) continue;
-            if (rt.atoms.kind(entry.atom_id) != .symbol) continue;
-            try appendAtom(rt, &keys, entry.atom_id);
+        for (self.shapeProps()) |prop| {
+            if (property.Flags.fromBits(prop.flags).deleted) continue;
+            if (rt.atoms.kind(prop.atom_id) != .symbol) continue;
+            try appendAtom(rt, &keys, prop.atom_id);
         }
 
         return keys;
@@ -8668,28 +9027,31 @@ pub const Object = struct {
     }
 
     pub fn seal(self: *Object, rt: *JSRuntime) !void {
-        self.extensible = false;
+        self.flags.extensible = false;
         try self.ensureUniqueShapeForMutation(rt);
-        for (self.properties, 0..) |*entry, index| {
-            if (entry.flags.deleted or !entry.flags.configurable) continue;
-            entry.flags.configurable = false;
-            rt.shapes.updatePropertyFlags(self.shape_ref, index, entry.flags.bits());
+        for (0..self.properties.len) |index| {
+            var entry_flags = self.propFlagsAt(index);
+            if (entry_flags.deleted or !entry_flags.configurable) continue;
+            entry_flags.configurable = false;
+            rt.shapes.updatePropertyFlags(self.shape_ref, index, entry_flags.bits());
         }
     }
 
     pub fn freeze(self: *Object, rt: *JSRuntime) !void {
         try self.seal(rt);
-        for (self.properties, 0..) |*entry, index| {
-            if (entry.flags.deleted or entry.flags.accessor or !entry.flags.writable) continue;
-            entry.flags.writable = false;
-            rt.shapes.updatePropertyFlags(self.shape_ref, index, entry.flags.bits());
+        for (0..self.properties.len) |index| {
+            var entry_flags = self.propFlagsAt(index);
+            if (entry_flags.deleted or entry_flags.accessor or !entry_flags.writable) continue;
+            entry_flags.writable = false;
+            rt.shapes.updatePropertyFlags(self.shape_ref, index, entry_flags.bits());
         }
-        if (self.is_array) self.length_writable = false;
+        if (self.flags.is_array) self.flags.length_writable = false;
     }
 
     fn defineOrdinaryOwnProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
         if (self.findProperty(atom_id)) |index| {
-            if (!isCompatible(self.properties[index], desc)) return error.IncompatibleDescriptor;
+            try self.materializeAutoInitEntryForMutation(index);
+            if (!isCompatible(self.propFlagsAt(index), self.properties[index].slot, desc)) return error.IncompatibleDescriptor;
             try self.replaceProperty(rt, index, desc);
             return;
         }
@@ -8698,13 +9060,10 @@ pub const Object = struct {
             const element_index: usize = @intCast(array_index);
             if (element_index < self.arrayElements().len) {
                 if (self.arrayElements()[element_index]) |stored| {
-                    const current = property.Entry{
-                        .atom_id = atom_id,
-                        .flags = property.Flags.data(true, true, true),
-                        .slot = .{ .data = stored },
-                    };
-                    if (!isCompatible(current, desc)) return error.IncompatibleDescriptor;
-                    try self.addProperty(rt, atom_id, mergeDescriptor(current, desc));
+                    const current_flags = property.Flags.data(true, true, true);
+                    const current_slot = property.Slot{ .data = stored };
+                    if (!isCompatible(current_flags, current_slot, desc)) return error.IncompatibleDescriptor;
+                    try self.addProperty(rt, atom_id, mergeDescriptor(current_flags, current_slot, desc));
                     self.arrayElements()[element_index] = null;
                     stored.free(rt);
                     return;
@@ -8712,7 +9071,7 @@ pub const Object = struct {
             }
         }
 
-        if (!self.extensible) return error.NotExtensible;
+        if (!self.flags.extensible) return error.NotExtensible;
         try self.addProperty(rt, atom_id, desc);
     }
 
@@ -8726,8 +9085,8 @@ pub const Object = struct {
         if (desc.enumerable orelse false) return error.IncompatibleDescriptor;
         if (!desc.value_present) {
             if (desc.writable) |writable| {
-                if (self.length_writable or !writable) {
-                    self.length_writable = writable;
+                if (self.flags.length_writable or !writable) {
+                    self.flags.length_writable = writable;
                 } else {
                     return error.IncompatibleDescriptor;
                 }
@@ -8735,23 +9094,23 @@ pub const Object = struct {
             return;
         }
         const target_len = new_len.?;
-        if (!self.length_writable) {
+        if (!self.flags.length_writable) {
             if (target_len != self.length or (desc.writable orelse false)) return error.IncompatibleDescriptor;
         }
-        if (target_len > self.length and !self.length_writable) return error.ReadOnly;
+        if (target_len > self.length and !self.flags.length_writable) return error.ReadOnly;
         if (target_len < self.length) {
             var i = self.properties.len;
             while (i > 0) {
                 i -= 1;
-                const entry = self.properties[i];
-                if (entry.flags.deleted) continue;
-                const index = array.arrayIndexFromAtom(&rt.atoms, entry.atom_id) orelse continue;
-                if (index >= target_len and !self.deleteProperty(rt, entry.atom_id)) {
+                if (self.propFlagsAt(i).deleted) continue;
+                const prop_atom = self.propAtomAt(i);
+                const index = array.arrayIndexFromAtom(&rt.atoms, prop_atom) orelse continue;
+                if (index >= target_len and !self.deleteProperty(rt, prop_atom)) {
                     const adjusted_len = index + 1;
                     self.truncateArrayElements(rt, adjusted_len);
                     self.length = adjusted_len;
                     self.recomputeArrayStorageMode(rt);
-                    if (desc.writable == false) self.length_writable = false;
+                    if (desc.writable == false) self.flags.length_writable = false;
                     return error.IncompatibleDescriptor;
                 }
             }
@@ -8759,7 +9118,7 @@ pub const Object = struct {
         self.truncateArrayElements(rt, target_len);
         self.length = target_len;
         self.recomputeArrayStorageMode(rt);
-        if (desc.writable) |writable| self.length_writable = writable;
+        if (desc.writable) |writable| self.flags.length_writable = writable;
     }
 
     fn defineRegExpLastIndex(self: *Object, rt: *JSRuntime, desc: descriptor.Descriptor) !void {
@@ -8781,7 +9140,6 @@ pub const Object = struct {
         if (desc.value_present) {
             const next_value = desc.value.dup();
             errdefer next_value.free(rt);
-            try self.writeValueBarrierAt(rt, next_value, last_index);
             const old_value = last_index.*.?;
             last_index.* = next_value;
             old_value.free(rt);
@@ -8802,7 +9160,7 @@ pub const Object = struct {
     }
 
     fn denseArrayElement(self: *const Object, atom_id: atom.Atom) ?JSValue {
-        if (!self.is_array) return null;
+        if (!self.flags.is_array) return null;
         if (!atom.isTaggedInt(atom_id)) return null;
         const index: usize = @intCast(atom.atomToUInt32(atom_id));
         if (index >= self.arrayElements().len) return null;
@@ -8816,14 +9174,13 @@ pub const Object = struct {
     }
 
     fn setDenseArrayElement(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !bool {
-        if (!self.is_array) return false;
+        if (!self.flags.is_array) return false;
         const element_index: usize = @intCast(index);
         const elements = self.arrayElementsSlot();
         if (element_index >= elements.*.len or elements.*[element_index] == null) return false;
         const next_value = new_value.dup();
         errdefer next_value.free(rt);
         const element_slot = &elements.*[element_index];
-        try self.writeValueBarrierAt(rt, next_value, element_slot);
         const old = element_slot.*;
         element_slot.* = next_value;
         self.markIndexedProperties(rt);
@@ -8850,47 +9207,28 @@ pub const Object = struct {
     }
 
     fn updateArrayStorageMode(self: *Object, index: u32) void {
-        if (!self.is_array) return;
+        if (!self.flags.is_array) return;
         if (index > self.properties.len * 2 + 8) self.arrayStorageModeSlot().* = .sparse;
     }
 
     fn recomputeArrayStorageMode(self: *Object, rt: *JSRuntime) void {
-        if (!self.is_array) return;
+        if (!self.flags.is_array) return;
         self.arrayStorageModeSlot().* = .dense;
-        for (self.properties) |entry| {
-            if (entry.flags.deleted) continue;
-            const index = array.arrayIndexFromAtom(&rt.atoms, entry.atom_id) orelse continue;
+        for (self.shapeProps()) |prop| {
+            if (property.Flags.fromBits(prop.flags).deleted) continue;
+            const index = array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;
             self.updateArrayStorageMode(index);
         }
     }
 
     fn addProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
-        const entry = try entryFromDescriptor(&rt.atoms, atom_id, desc);
-        try self.appendPreparedPropertyEntry(rt, entry);
+        const slot = slotFromDescriptor(&rt.atoms, atom_id, desc);
+        try self.appendPreparedPropertyEntry(rt, atom_id, flagsFromDescriptor(desc), slot);
     }
 
-    fn writeValueBarrierAt(self: *Object, rt: *JSRuntime, stored_value: JSValue, slot_addr: *const anyopaque) !void {
-        try rt.writeBarrierValueAt(&self.header, stored_value, slot_addr);
-    }
-
-    fn writePropertySlotBarrier(self: *Object, rt: *JSRuntime, slot_addr: *const anyopaque, slot: property.Slot) !void {
-        switch (slot) {
-            .data => |stored_value| try self.writeValueBarrierAt(rt, stored_value, slot_addr),
-            .accessor => |accessor| {
-                try self.writeValueBarrierAt(rt, accessor.getter, slot_addr);
-                try self.writeValueBarrierAt(rt, accessor.setter, slot_addr);
-            },
-            .auto_init, .deleted => {},
-        }
-    }
-
-    fn writePropertyEntryBarrier(self: *Object, rt: *JSRuntime, entry: *const property.Entry) !void {
-        try self.writePropertySlotBarrier(rt, @ptrCast(&entry.slot), entry.slot);
-    }
-
-    fn appendPreparedPropertyEntry(self: *Object, rt: *JSRuntime, entry: property.Entry) !void {
-        var entry_owned = true;
-        errdefer if (entry_owned) destroyPropertyEntry(rt, entry);
+    fn appendPreparedPropertyEntry(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
+        var slot_owned = true;
+        errdefer if (slot_owned) destroyPropertySlot(rt, atom_id, slot);
 
         const old_len = self.properties.len;
         const old_capacity = self.property_capacity;
@@ -8907,17 +9245,17 @@ pub const Object = struct {
             grew_properties = true;
         }
 
-        const old_may_have_indexed_properties = self.may_have_indexed_properties;
+        const old_may_have_indexed_properties = self.flags.may_have_indexed_properties;
         self.properties = self.properties.ptr[0 .. old_len + 1];
-        self.properties[old_len] = entry;
-        entry_owned = false;
+        self.properties[old_len] = .{ .slot = slot };
+        slot_owned = false;
 
         var inserted = true;
         errdefer if (inserted) {
-            destroyPropertyEntry(rt, self.properties[old_len]);
+            destroyPropertySlot(rt, atom_id, self.properties[old_len].slot);
             self.properties[old_len] = .{};
             self.properties = self.properties.ptr[0..old_len];
-            self.may_have_indexed_properties = old_may_have_indexed_properties;
+            self.flags.may_have_indexed_properties = old_may_have_indexed_properties;
             if (grew_properties) {
                 const new_properties = self.properties.ptr[0..self.property_capacity];
                 self.properties = old_properties[0..old_len];
@@ -8926,12 +9264,10 @@ pub const Object = struct {
             }
         };
 
-        try self.writePropertyEntryBarrier(rt, &self.properties[old_len]);
-        const entry_atom = self.properties[old_len].atom_id;
-        if (array.arrayIndexFromAtom(&rt.atoms, entry_atom) != null) {
+        if (array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) {
             self.markIndexedProperties(rt);
         }
-        try self.adoptShapeForNewProperty(rt, entry_atom, self.properties[old_len].flags.bits());
+        try self.adoptShapeForNewProperty(rt, atom_id, entry_flags.bits());
         if (grew_properties and old_capacity != 0) rt.memory.free(property.Entry, old_properties);
         inserted = false;
     }
@@ -8979,21 +9315,42 @@ pub const Object = struct {
     }
 
     fn replaceProperty(self: *Object, rt: *JSRuntime, index: usize, desc: descriptor.Descriptor) !void {
-        const atom_id = self.properties[index].atom_id;
-        const next = try entryFromDescriptor(&rt.atoms, atom_id, mergeDescriptor(self.properties[index], desc));
+        const atom_id = self.propAtomAt(index);
+        const merged = mergeDescriptor(self.propFlagsAt(index), self.properties[index].slot, desc);
+        const next_flags = flagsFromDescriptor(merged);
+        const next_slot = slotFromDescriptor(&rt.atoms, atom_id, merged);
         var next_owned = true;
-        errdefer if (next_owned) destroyPropertyEntry(rt, next);
-        try self.writePropertySlotBarrier(rt, @ptrCast(&self.properties[index].slot), next.slot);
+        errdefer if (next_owned) destroyPropertySlot(rt, atom_id, next_slot);
         try self.ensureUniqueShapeForMutation(rt);
-        const old = self.properties[index];
-        self.properties[index] = next;
+        const old_slot = self.properties[index].slot;
+        self.properties[index] = .{ .slot = next_slot };
         next_owned = false;
-        rt.shapes.updatePropertyFlags(self.shape_ref, index, next.flags.bits());
-        destroyPropertyEntry(rt, old);
+        rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.bits());
+        destroyPropertySlot(rt, atom_id, old_slot);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
 
+    /// Key atom for the own property stored at `index`. Property
+    /// metadata (atom + flags) lives in the shape; `self.properties`
+    /// holds only the value slots, indexed 1:1 with the shape props.
+    pub inline fn propAtomAt(self: *const Object, index: usize) atom.Atom {
+        return self.shape_ref.props[index].atom_id;
+    }
+
+    /// Flags for the own property stored at `index` (see `propAtomAt`).
+    pub inline fn propFlagsAt(self: *const Object, index: usize) property.Flags {
+        return property.Flags.fromBits(self.shape_ref.props[index].flags);
+    }
+
+    /// Shape-side metadata records matching `self.properties` by index.
+    /// Clamped to the entry count so a partially appended property
+    /// (entry pushed, shape not yet transitioned) is never exposed.
+    pub inline fn shapeProps(self: *const Object) []const shape.Property {
+        return self.shape_ref.props[0..@min(self.shape_ref.prop_count, self.properties.len)];
+    }
+
     pub fn findProperty(self: *const Object, atom_id: atom.Atom) ?usize {
+        const props = self.shapeProps();
         if (self.shape_ref.hasPropertyHash()) {
             var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
             var steps: usize = 0;
@@ -9001,13 +9358,14 @@ pub const Object = struct {
                 const index: usize = @intCast(shape_index);
                 if (index >= self.shape_ref.prop_count) break;
                 shape_index = self.shape_ref.props[index].hash_next;
-                if (index >= self.properties.len) continue;
-                const entry = self.properties[index];
-                if (!entry.flags.deleted and entry.atom_id == atom_id) return index;
+                if (index >= props.len) continue;
+                const prop = props[index];
+                if (prop.atom_id == atom_id and !property.Flags.fromBits(prop.flags).deleted) return index;
             }
+            return null;
         }
-        for (self.properties, 0..) |entry, index| {
-            if (!entry.flags.deleted and entry.atom_id == atom_id) return index;
+        for (props, 0..) |prop, index| {
+            if (prop.atom_id == atom_id and !property.Flags.fromBits(prop.flags).deleted) return index;
         }
         return null;
     }
@@ -9056,7 +9414,6 @@ pub const Object = struct {
         const next_value = new_value.dup();
         errdefer next_value.free(rt);
         const value_slot = &refs.*[slot_index];
-        try self.writeValueBarrierAt(rt, next_value, value_slot);
         const old_value = value_slot.*;
         value_slot.* = next_value;
         old_value.free(rt);
@@ -9117,33 +9474,23 @@ test "external object value roots seed nested symbol roots" {
     try std.testing.expect(rt.atoms.name(nested_symbol) == null);
 }
 
-fn entryFromDescriptor(atoms: *atom.AtomTable, atom_id: atom.Atom, desc: descriptor.Descriptor) !property.Entry {
-    const retained_atom = atoms.dup(atom_id);
+fn flagsFromDescriptor(desc: descriptor.Descriptor) property.Flags {
     return switch (desc.kind) {
-        .generic => .{
-            .atom_id = retained_atom,
-            .flags = property.Flags.data(false, desc.enumerable orelse false, desc.configurable orelse false),
-            .slot = .{ .data = JSValue.undefinedValue() },
-        },
-        .data => .{
-            .atom_id = retained_atom,
-            .flags = property.Flags.data(desc.writable orelse false, desc.enumerable orelse false, desc.configurable orelse false),
-            .slot = .{ .data = dupPropertyDataValue(atoms, atom_id, desc.value) },
-        },
-        .accessor => .{
-            .atom_id = retained_atom,
-            .flags = property.Flags.accessorFlags(desc.enumerable orelse false, desc.configurable orelse false),
-            .slot = .{ .accessor = .{
-                .getter = desc.getter.dup(),
-                .setter = desc.setter.dup(),
-            } },
-        },
+        .generic => property.Flags.data(false, desc.enumerable orelse false, desc.configurable orelse false),
+        .data => property.Flags.data(desc.writable orelse false, desc.enumerable orelse false, desc.configurable orelse false),
+        .accessor => property.Flags.accessorFlags(desc.enumerable orelse false, desc.configurable orelse false),
     };
 }
 
-fn destroyPropertyEntry(rt: *JSRuntime, entry: property.Entry) void {
-    destroyPropertySlot(rt, entry.atom_id, entry.slot);
-    if (entry.atom_id != atom.null_atom) rt.atoms.free(entry.atom_id);
+fn slotFromDescriptor(atoms: *atom.AtomTable, atom_id: atom.Atom, desc: descriptor.Descriptor) property.Slot {
+    return switch (desc.kind) {
+        .generic => .{ .data = JSValue.undefinedValue() },
+        .data => .{ .data = dupPropertyDataValue(atoms, atom_id, desc.value) },
+        .accessor => .{ .accessor = .{
+            .getter = desc.getter.dup(),
+            .setter = desc.setter.dup(),
+        } },
+    };
 }
 
 pub fn dupPropertyDataValue(atoms: *atom.AtomTable, atom_id: atom.Atom, value: JSValue) JSValue {
@@ -9170,44 +9517,176 @@ pub fn destroyPropertySlot(rt: *JSRuntime, atom_id: atom.Atom, slot: property.Sl
 }
 
 fn isTypedArrayObjectForSetFastPath(object: *const Object) bool {
+    return isTypedArrayObject(object);
+}
+
+// --- TypedArray element mechanism (engine core) -----------------------------
+//
+// QuickJS source map: the typed-array length/bounds/detach helpers live in the
+// engine core (quickjs.c), with builtins as clients. These are thin predicates
+// over the core typed-array storage slots (`Object.typedArrayBuffer()`,
+// `typedArrayByteOffset()`, `typedArrayElementSize()`, `typedArrayFixedLength()`,
+// `arrayBufferDetached()`, ...); this block holds the storage-shape mechanism
+// the VM consults directly. The element read/write *value coercion*
+// (ToNumber/ToBigInt over primitives, shared with the DataView and ArrayBuffer
+// paths) and the buffer storage operations live in `src/core/typed_array.zig`,
+// which imports these predicates. `src/builtins/buffer.zig` re-exports both
+// blocks under their original names.
+
+fn typedArrayBackingBufferObject(object: *Object) !*Object {
+    const value = object.typedArrayBuffer() orelse return error.TypeError;
+    const header = value.refHeader() orelse return error.TypeError;
+    if (!value.isObject()) return error.TypeError;
+    const buffer: *Object = @fieldParentPtr("header", header);
+    if (buffer.class_id != class.ids.array_buffer and buffer.class_id != class.ids.shared_array_buffer) return error.TypeError;
+    return buffer;
+}
+
+pub fn isTypedArrayObject(object: *const Object) bool {
     return object.typedArrayBuffer() != null and object.typedArrayElementSize() != 0;
 }
 
-fn isCompatible(current: property.Entry, desc: descriptor.Descriptor) bool {
-    if (current.flags.configurable) return true;
+pub fn typedArrayOutOfBounds(object: *Object) !bool {
+    const buffer = try typedArrayBackingBufferObject(object);
+    if (object.typedArrayByteOffset() > buffer.byteStorage().len) return true;
+    if (object.typedArrayFixedLength()) |fixed| {
+        const bytes = @as(usize, fixed) * object.typedArrayElementSize();
+        return bytes > buffer.byteStorage().len - object.typedArrayByteOffset();
+    }
+    return false;
+}
+
+pub fn typedArrayDetached(object: *Object) !bool {
+    const buffer = try typedArrayBackingBufferObject(object);
+    return buffer.arrayBufferDetached();
+}
+
+pub fn typedArrayLength(rt: *JSRuntime, object: *Object) !u32 {
+    _ = rt;
+    const buffer = try typedArrayBackingBufferObject(object);
+    if (buffer.arrayBufferDetached()) return 0;
+    if (object.typedArrayByteOffset() > buffer.byteStorage().len) return 0;
+    if (object.typedArrayFixedLength()) |fixed| {
+        const bytes = @as(usize, fixed) * object.typedArrayElementSize();
+        if (bytes > buffer.byteStorage().len - object.typedArrayByteOffset()) return 0;
+        return fixed;
+    }
+    return @intCast(@divTrunc(buffer.byteStorage().len - object.typedArrayByteOffset(), object.typedArrayElementSize()));
+}
+
+pub fn typedArrayByteLength(rt: *JSRuntime, object: *Object) !usize {
+    const length = try typedArrayLength(rt, object);
+    return @as(usize, length) * object.typedArrayElementSize();
+}
+
+pub fn typedArrayEffectiveByteOffset(object: *Object) !usize {
+    if (try typedArrayDetached(object)) return 0;
+    if (try typedArrayOutOfBounds(object)) return 0;
+    return object.typedArrayByteOffset();
+}
+
+pub fn typedArrayIndexValid(rt: *JSRuntime, object: *Object, index: u32) !bool {
+    const length = try typedArrayLength(rt, object);
+    return index < length;
+}
+
+pub const TypedArrayCanonicalIndex = union(enum) {
+    none,
+    invalid,
+    index: u32,
+};
+
+pub fn typedArrayCanonicalNumericIndex(rt: *JSRuntime, atom_id: atom.Atom) !TypedArrayCanonicalIndex {
+    if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| return .{ .index = index };
+    if (rt.atoms.kind(atom_id) != .string) return .none;
+    const name = rt.atoms.name(atom_id) orelse return .none;
+    if (name.len == 0) return .none;
+    if (std.mem.eql(u8, name, "-0")) return .invalid;
+
+    const number: f64 = if (std.mem.eql(u8, name, "NaN"))
+        std.math.nan(f64)
+    else if (std.mem.eql(u8, name, "Infinity"))
+        std.math.inf(f64)
+    else if (std.mem.eql(u8, name, "-Infinity"))
+        -std.math.inf(f64)
+    else
+        std.fmt.parseFloat(f64, name) catch return .none;
+
+    var buf: [64]u8 = undefined;
+    const printed = if (std.math.isNan(number))
+        "NaN"
+    else if (std.math.isPositiveInf(number))
+        "Infinity"
+    else if (std.math.isNegativeInf(number))
+        "-Infinity"
+    else
+        try value_format.formatFiniteNumber(&buf, number);
+    if (!std.mem.eql(u8, name, printed)) return .none;
+    if (!std.math.isFinite(number) or @trunc(number) != number or number < 0 or number > @as(f64, @floatFromInt(std.math.maxInt(u32)))) return .invalid;
+    return .{ .index = @intFromFloat(number) };
+}
+
+pub fn typedArrayBackedByResizableBuffer(object: *Object) bool {
+    if (!isTypedArrayObject(object)) return false;
+    const buffer = typedArrayBackingBufferObject(object) catch return false;
+    return buffer.arrayBufferMaxByteLength() != null;
+}
+
+pub fn arrayBufferIsImmutable(rt: *JSRuntime, object: *Object) bool {
+    _ = rt;
+    return object.arrayBufferImmutable();
+}
+
+pub fn markArrayBufferImmutable(rt: *JSRuntime, object: *Object) !void {
+    _ = rt;
+    object.arrayBufferImmutableSlot().* = true;
+}
+
+pub fn typedArrayImmutableBuffer(rt: *JSRuntime, object: *Object) !bool {
+    const buffer = try typedArrayBackingBufferObject(object);
+    return arrayBufferIsImmutable(rt, buffer);
+}
+
+pub fn typedArrayRejectImmutableBuffer(rt: *JSRuntime, object: *Object) !void {
+    if (try typedArrayImmutableBuffer(rt, object)) return error.TypeError;
+}
+
+fn isCompatible(current_flags: property.Flags, current_slot: property.Slot, desc: descriptor.Descriptor) bool {
+    if (current_flags.configurable) return true;
     if (desc.configurable orelse false) return false;
     if (desc.enumerable) |enumerable| {
-        if (enumerable != current.flags.enumerable) return false;
+        if (enumerable != current_flags.enumerable) return false;
     }
     if (desc.kind == .generic) return true;
 
-    const current_is_accessor = current.flags.accessor;
+    const current_is_accessor = current_flags.accessor;
     if ((desc.kind == .accessor) != current_is_accessor) return false;
-    if (!current_is_accessor and !current.flags.writable) {
+    if (!current_is_accessor and !current_flags.writable) {
         if (desc.writable orelse false) return false;
-        if (desc.kind == .data and desc.value_present and !current.slot.data.sameValue(desc.value)) return false;
+        if (desc.kind == .data and desc.value_present and !current_slot.data.sameValue(desc.value)) return false;
     }
     if (current_is_accessor and desc.kind == .accessor) {
-        if (desc.getter_present and !current.slot.accessor.getter.sameValue(desc.getter)) return false;
-        if (desc.setter_present and !current.slot.accessor.setter.sameValue(desc.setter)) return false;
+        if (current_slot != .accessor) return false;
+        if (desc.getter_present and !current_slot.accessor.getter.sameValue(desc.getter)) return false;
+        if (desc.setter_present and !current_slot.accessor.setter.sameValue(desc.setter)) return false;
     }
     return true;
 }
 
-fn mergeDescriptor(current: property.Entry, desc: descriptor.Descriptor) descriptor.Descriptor {
+fn mergeDescriptor(current_flags: property.Flags, current_slot: property.Slot, desc: descriptor.Descriptor) descriptor.Descriptor {
     return switch (desc.kind) {
-        .generic => switch (current.slot) {
+        .generic => switch (current_slot) {
             .data => |value| descriptor.Descriptor.data(
                 value,
-                current.flags.writable,
-                desc.enumerable orelse current.flags.enumerable,
-                desc.configurable orelse current.flags.configurable,
+                current_flags.writable,
+                desc.enumerable orelse current_flags.enumerable,
+                desc.configurable orelse current_flags.configurable,
             ),
             .accessor => |accessor| descriptor.Descriptor.accessor(
                 accessor.getter,
                 accessor.setter,
-                desc.enumerable orelse current.flags.enumerable,
-                desc.configurable orelse current.flags.configurable,
+                desc.enumerable orelse current_flags.enumerable,
+                desc.configurable orelse current_flags.configurable,
             ),
             // Auto-init placeholders should be materialized by the
             // caller before reaching `mergeDescriptor`; defining
@@ -9218,25 +9697,25 @@ fn mergeDescriptor(current: property.Entry, desc: descriptor.Descriptor) descrip
             .deleted => desc,
         },
         .data => descriptor.Descriptor.data(
-            if (desc.value_present) desc.value else switch (current.slot) {
+            if (desc.value_present) desc.value else switch (current_slot) {
                 .data => |value| value,
                 else => desc.value,
             },
-            desc.writable orelse if (current.flags.accessor) false else current.flags.writable,
-            desc.enumerable orelse current.flags.enumerable,
-            desc.configurable orelse current.flags.configurable,
+            desc.writable orelse if (current_flags.accessor) false else current_flags.writable,
+            desc.enumerable orelse current_flags.enumerable,
+            desc.configurable orelse current_flags.configurable,
         ),
         .accessor => descriptor.Descriptor.accessor(
-            if (desc.getter_present) desc.getter else switch (current.slot) {
+            if (desc.getter_present) desc.getter else switch (current_slot) {
                 .accessor => |accessor| accessor.getter,
                 else => desc.getter,
             },
-            if (desc.setter_present) desc.setter else switch (current.slot) {
+            if (desc.setter_present) desc.setter else switch (current_slot) {
                 .accessor => |accessor| accessor.setter,
                 else => desc.setter,
             },
-            desc.enumerable orelse current.flags.enumerable,
-            desc.configurable orelse current.flags.configurable,
+            desc.enumerable orelse current_flags.enumerable,
+            desc.configurable orelse current_flags.configurable,
         ),
     };
 }
@@ -9282,7 +9761,8 @@ fn arrayLengthNumber(rt: *JSRuntime, value: JSValue) !?f64 {
 
 fn arrayLengthStringNumber(rt: *JSRuntime, value: JSValue) !f64 {
     const header = value.refHeader() orelse return std.math.nan(f64);
-    const string_value: *const @import("string.zig").String = @fieldParentPtr("header", header);
+    const string_value: *@import("string.zig").String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
     try bytes.ensureTotalCapacity(rt.memory.allocator, string_value.len());
@@ -9327,9 +9807,9 @@ const IndexKey = struct {
 };
 
 fn hasPropertyIndexKeys(self: Object, rt: *JSRuntime) bool {
-    for (self.properties) |entry| {
-        if (entry.flags.deleted) continue;
-        const index = array.arrayIndexFromAtom(&rt.atoms, entry.atom_id) orelse continue;
+    for (self.shapeProps()) |prop| {
+        if (property.Flags.fromBits(prop.flags).deleted) continue;
+        const index = array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;
         if (!self.hasDenseArrayElement(index)) return true;
     }
     return false;
@@ -9337,4 +9817,181 @@ fn hasPropertyIndexKeys(self: Object, rt: *JSRuntime) bool {
 
 fn indexKeyLessThan(_: void, lhs: IndexKey, rhs: IndexKey) bool {
     return lhs.index < rhs.index;
+}
+
+// --- Object.keys/values/entries own-property iteration ----------------------
+//
+// `ownEntriesArray` builds the result array for the bare-runtime
+// Object.keys/values/entries fallback. Relocated to engine core in Phase 6b-3
+// STEP 2 (it is a pure property-iteration constructor with no exec/VM deps);
+// `builtins/object.zig` re-exports `EntriesMode`/`ownEntriesArray` unchanged.
+
+/// Selects which projection `ownEntriesArray` produces.
+pub const EntriesMode = enum {
+    keys,
+    values,
+    entries,
+};
+
+fn ownEntriesExpectObject(value: JSValue) !*Object {
+    const header = value.refHeader() orelse return error.TypeError;
+    if (!value.isObject()) return error.TypeError;
+    return @fieldParentPtr("header", header);
+}
+
+fn entriesAtomToStringValue(rt: *JSRuntime, atom_id: atom.Atom) !JSValue {
+    return rt.atoms.toStringValue(rt, atom_id);
+}
+
+fn entryArrayValue(rt: *JSRuntime, key: atom.Atom, value: JSValue) !JSValue {
+    var rooted_value = value;
+    defer rooted_value.free(rt);
+    var root_values = [_]runtime_mod.ValueRootValue{
+        .{ .value = &rooted_value },
+    };
+    const root_frame = runtime_mod.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = &root_values,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
+
+    const arr = try Object.createArray(rt, null);
+    errdefer Object.destroyFromHeader(rt, &arr.header);
+    const key_value = try entriesAtomToStringValue(rt, key);
+    defer key_value.free(rt);
+    try arr.defineOwnProperty(rt, atom.atomFromUInt32(0), descriptor.Descriptor.data(key_value, true, true, true));
+    try arr.defineOwnProperty(rt, atom.atomFromUInt32(1), descriptor.Descriptor.data(rooted_value, true, true, true));
+    return arr.value();
+}
+
+pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode) !JSValue {
+    var rooted_value = value;
+    var out_value = JSValue.undefinedValue();
+    var element_val = JSValue.undefinedValue();
+    var root_values = [_]runtime_mod.ValueRootValue{
+        .{ .value = &rooted_value },
+        .{ .value = &out_value },
+        .{ .value = &element_val },
+    };
+    const root_frame = runtime_mod.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = &root_values,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
+
+    const object = try ownEntriesExpectObject(rooted_value);
+    const owned_keys = try object.ownKeys(rt);
+    defer Object.freeKeys(rt, owned_keys);
+
+    const out = try Object.createArray(rt, null);
+    out_value = out.value();
+    errdefer {
+        Object.destroyFromHeader(rt, &out.header);
+        out_value = JSValue.undefinedValue();
+    }
+    var out_index: u32 = 0;
+    for (owned_keys) |key| {
+        if (rt.atoms.kind(key) == .symbol) continue;
+        const desc = object.getOwnProperty(key) orelse continue;
+        defer desc.destroy(rt);
+        if (!(desc.enumerable orelse false)) continue;
+        element_val = switch (mode) {
+            .keys => try entriesAtomToStringValue(rt, key),
+            .values => object.getProperty(key),
+            .entries => try entryArrayValue(rt, key, object.getProperty(key)),
+        };
+        defer {
+            element_val.free(rt);
+            element_val = JSValue.undefinedValue();
+        }
+        try out.defineOwnProperty(rt, atom.atomFromUInt32(out_index), descriptor.Descriptor.data(element_val, true, true, true));
+        out_index += 1;
+    }
+    return out_value;
+}
+
+// --- String Iterator factory ------------------------------------------------
+//
+// `stringIterator` builds a fresh String Iterator object for a string (or
+// String wrapper) receiver. It is the fast-path engine primitive the exec
+// iteration machinery (for-of, spread, async-from-sync) uses instead of the
+// `String.prototype[Symbol.iterator]` property lookup. Relocated to engine core
+// in Phase 6b-3 STEP 6: it is a pure object/native-function constructor that
+// touches only core string/object/function primitives (no exec/VM deps and no
+// realm/global state). The produced iterator's `next` carries the
+// `(.string, iterator_next)` native id, so the actual `next` body still
+// dispatches through the record table into `builtins/string.zig`.
+
+/// Extract the primitive string value from a string or String-wrapper receiver.
+fn stringIteratorPrimitiveValue(value: JSValue) !JSValue {
+    if (value.isString()) return value.dup();
+    const header = value.refHeader() orelse return error.TypeError;
+    if (!value.isObject()) return error.TypeError;
+    const object: *Object = @fieldParentPtr("header", header);
+    if (object.class_id != class.ids.string) return error.TypeError;
+    return (object.objectData() orelse return error.TypeError).dup();
+}
+
+fn defineStringIteratorToStringTag(rt: *JSRuntime, object: *Object, tag_name: []const u8) !void {
+    const tag_atom = atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
+    const tag_value = try string.String.createUtf8(rt, tag_name);
+    defer tag_value.value().free(rt);
+    try object.defineOwnProperty(rt, tag_atom, descriptor.Descriptor.data(tag_value.value(), false, false, true));
+}
+
+fn stringIteratorPrototype(rt: *JSRuntime, tag_name: []const u8) !*Object {
+    const base = try Object.create(rt, class.ids.object, null);
+    var base_raw_owned = true;
+    errdefer if (base_raw_owned) Object.destroyFromHeader(rt, &base.header);
+    try defineStringIteratorToStringTag(rt, base, "Iterator");
+    const specific = try Object.create(rt, class.ids.object, base);
+    errdefer Object.destroyFromHeader(rt, &specific.header);
+    base_raw_owned = false;
+    base.value().free(rt);
+    try defineStringIteratorToStringTag(rt, specific, tag_name);
+    const next = try function.nativeFunction(rt, "next", 0);
+    defer next.free(rt);
+    const next_object = (next.refHeader() orelse return error.TypeError);
+    if (!next.isObject()) return error.TypeError;
+    const next_function: *Object = @fieldParentPtr("header", next_object);
+    next_function.nativeFunctionIdSlot().* = function.nativeBuiltinId(.string, @intFromEnum(host_function.builtin_method_ids.string.PrototypeMethod.iterator_next));
+    try specific.defineOwnProperty(rt, atom.predefinedId("next", .string).?, descriptor.Descriptor.data(next, true, false, true));
+    return specific;
+}
+
+pub fn stringIterator(rt: *JSRuntime, receiver: JSValue) !JSValue {
+    var rooted_receiver = receiver;
+    var target = JSValue.undefinedValue();
+    var prototype_value = JSValue.undefinedValue();
+    var object_value = JSValue.undefinedValue();
+    var root_values = [_]runtime_mod.ValueRootValue{
+        .{ .value = &rooted_receiver },
+        .{ .value = &target },
+        .{ .value = &prototype_value },
+        .{ .value = &object_value },
+    };
+    const root_frame = runtime_mod.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = &root_values,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
+
+    target = try stringIteratorPrimitiveValue(rooted_receiver);
+    defer target.free(rt);
+    const prototype = try stringIteratorPrototype(rt, "String Iterator");
+    prototype_value = prototype.value();
+    defer prototype_value.free(rt);
+    const object = try Object.create(rt, class.ids.string_iterator, prototype);
+    object_value = object.value();
+    errdefer {
+        const failed_object = object_value;
+        object_value = JSValue.undefinedValue();
+        failed_object.free(rt);
+    }
+    try object.setOptionalValueSlot(rt, object.iteratorTargetSlot(), target.dup());
+    object.iteratorIndexSlot().* = 0;
+    return object_value;
 }

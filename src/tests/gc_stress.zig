@@ -9,6 +9,7 @@ const core = zjs.core;
 const Rng = std.Random.DefaultPrng;
 
 fn appendWeakCollectionEntry(rt: *core.JSRuntime, collection: *core.Object, key: *core.Object, value: core.JSValue) !void {
+    const key_identity = (try core.Object.weakIdentityFromValue(rt, key.value())) orelse unreachable;
     const entries_slot = collection.weakCollectionEntriesSlot();
     const index = entries_slot.*.len;
     const inserted_holder = !rt.borrowedReferenceHolderRegistered(collection);
@@ -18,7 +19,7 @@ fn appendWeakCollectionEntry(rt: *core.JSRuntime, collection: *core.Object, key:
     const refreshed_entries = collection.weakCollectionEntriesSlot();
     refreshed_entries.* = refreshed_entries.*.ptr[0 .. index + 1];
     refreshed_entries.*[index] = .{
-        .key_identity = @intFromPtr(&key.header) & ~@as(usize, 1),
+        .key_identity = key_identity,
         .value = value.dup(),
     };
 }

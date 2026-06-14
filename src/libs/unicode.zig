@@ -22,6 +22,10 @@ pub fn asciiCategory(c: u21) Category {
 pub const case_mapping_max_len = 3;
 const unicode_limit: u21 = 0x110000;
 const max_code_point: u21 = 0x10ffff;
+const high_surrogate_min: u21 = 0xd800;
+const high_surrogate_max: u21 = 0xdbff;
+const low_surrogate_min: u21 = 0xdc00;
+const low_surrogate_max: u21 = 0xdfff;
 
 pub const CaseMapping = struct {
     codepoints: [case_mapping_max_len]u21,
@@ -38,6 +42,24 @@ pub const NormalizationForm = enum {
 pub const CodePointRange = struct {
     lo: u21,
     hi: u21,
+};
+
+pub const ecmaWhitespaceOrLineTerminatorRanges = [_]CodePointRange{
+    .{ .lo = 0x0009, .hi = 0x000d + 1 },
+    .{ .lo = 0x0020, .hi = 0x0020 + 1 },
+    .{ .lo = 0x00a0, .hi = 0x00a0 + 1 },
+    .{ .lo = 0x1680, .hi = 0x1680 + 1 },
+    .{ .lo = 0x2000, .hi = 0x200a + 1 },
+    .{ .lo = 0x2028, .hi = 0x2029 + 1 },
+    .{ .lo = 0x202f, .hi = 0x202f + 1 },
+    .{ .lo = 0x205f, .hi = 0x205f + 1 },
+    .{ .lo = 0x3000, .hi = 0x3000 + 1 },
+    .{ .lo = 0xfeff, .hi = 0xfeff + 1 },
+};
+
+pub const SurrogatePair = struct {
+    high: u16,
+    low: u16,
 };
 
 const UnicodeError = std.mem.Allocator.Error || error{InvalidProperty};
@@ -93,6 +115,229 @@ pub fn isCaseIgnorable(c: u21) bool {
 
 pub fn isWhiteSpace(c: u21) bool {
     return isInTable(c, data.unicode_prop_White_Space_table[0..], data.unicode_prop_White_Space_index[0..]);
+}
+
+pub fn isEcmaLineTerminatorCodePoint(cp: u21) bool {
+    return cp == '\n' or cp == '\r' or cp == 0x2028 or cp == 0x2029;
+}
+
+pub fn isEcmaLineTerminatorUnit(unit: u16) bool {
+    return isEcmaLineTerminatorCodePoint(@intCast(unit));
+}
+
+pub fn isEcmaWhitespaceOrLineTerminatorCodePoint(cp: u21) bool {
+    inline for (ecmaWhitespaceOrLineTerminatorRanges) |range| {
+        if (cp >= range.lo and cp < range.hi) return true;
+    }
+    return false;
+}
+
+pub fn isEcmaWhitespaceOrLineTerminatorUnit(unit: u16) bool {
+    return isEcmaWhitespaceOrLineTerminatorCodePoint(@intCast(unit));
+}
+
+pub fn isAsciiWhitespaceByte(byte: u8) bool {
+    return byte == ' ' or byte == '\t' or byte == '\n' or byte == '\r' or byte == 0x0b or byte == 0x0c;
+}
+
+pub fn isAsciiDigitUnit(unit: u16) bool {
+    return isAsciiDigitCodePoint(@intCast(unit));
+}
+
+pub fn isAsciiAlphaUnit(unit: u16) bool {
+    return isAsciiAlphaCodePoint(@intCast(unit));
+}
+
+pub fn isAsciiLowerUnit(unit: u16) bool {
+    return isAsciiLowerCodePoint(@intCast(unit));
+}
+
+pub fn isAsciiWordUnit(unit: u16) bool {
+    return isAsciiWordCodePoint(@intCast(unit));
+}
+
+pub fn isAsciiIdentifierStartByte(byte: u8) bool {
+    return isAsciiAlphaByte(byte) or byte == '_' or byte == '$';
+}
+
+pub fn isAsciiIdentifierPartByte(byte: u8) bool {
+    return isAsciiIdentifierStartByte(byte) or isAsciiDigitByte(byte);
+}
+
+pub fn asciiRadixDigitValueByte(byte: u8) ?u8 {
+    if (byte >= '0' and byte <= '9') return byte - '0';
+    if (byte >= 'a' and byte <= 'f') return byte - 'a' + 10;
+    if (byte >= 'A' and byte <= 'F') return byte - 'A' + 10;
+    if (byte >= 'g' and byte <= 'z') return byte - 'a' + 10;
+    if (byte >= 'G' and byte <= 'Z') return byte - 'A' + 10;
+    return null;
+}
+
+pub fn isAsciiBinaryDigitByte(byte: u8) bool {
+    return byte == '0' or byte == '1';
+}
+
+pub fn isAsciiOctalDigitByte(byte: u8) bool {
+    return byte >= '0' and byte <= '7';
+}
+
+pub fn isAsciiDigitByte(byte: u8) bool {
+    return isAsciiDigitCodePoint(byte);
+}
+
+pub fn isAsciiUpperByte(byte: u8) bool {
+    return isAsciiUpperCodePoint(byte);
+}
+
+pub fn isAsciiLowerByte(byte: u8) bool {
+    return isAsciiLowerCodePoint(byte);
+}
+
+pub fn isAsciiAlphaByte(byte: u8) bool {
+    return isAsciiUpperByte(byte) or isAsciiLowerByte(byte);
+}
+
+pub fn isAsciiAlphanumericByte(byte: u8) bool {
+    return isAsciiAlphaByte(byte) or isAsciiDigitByte(byte);
+}
+
+pub fn isAsciiWordByte(byte: u8) bool {
+    return isAsciiAlphanumericByte(byte) or byte == '_';
+}
+
+pub fn asciiHexDigitValueByte(byte: u8) ?u8 {
+    const value = asciiRadixDigitValueByte(byte) orelse return null;
+    if (value >= 16) return null;
+    return value;
+}
+
+pub fn asciiUpperHexDigitValueByte(byte: u8) ?u8 {
+    if (byte >= '0' and byte <= '9') return byte - '0';
+    if (byte >= 'A' and byte <= 'F') return byte - 'A' + 10;
+    return null;
+}
+
+pub fn asciiLowerHexDigitChar(nibble: usize) u8 {
+    std.debug.assert(nibble < 16);
+    return "0123456789abcdef"[nibble];
+}
+
+pub fn asciiUpperHexDigitChar(nibble: usize) u8 {
+    std.debug.assert(nibble < 16);
+    return "0123456789ABCDEF"[nibble];
+}
+
+pub fn isAsciiHexDigitByte(byte: u8) bool {
+    return asciiHexDigitValueByte(byte) != null;
+}
+
+pub fn asciiHexDigitValueUnit(unit: u16) ?u8 {
+    if (unit > std.math.maxInt(u8)) return null;
+    return asciiHexDigitValueByte(@intCast(unit));
+}
+
+pub fn isAsciiHexDigitUnit(unit: u16) bool {
+    return asciiHexDigitValueUnit(unit) != null;
+}
+
+pub fn isAsciiDigitCodePoint(cp: u21) bool {
+    return cp >= '0' and cp <= '9';
+}
+
+pub fn isAsciiUpperCodePoint(cp: u21) bool {
+    return cp >= 'A' and cp <= 'Z';
+}
+
+pub fn isAsciiLowerCodePoint(cp: u21) bool {
+    return cp >= 'a' and cp <= 'z';
+}
+
+pub fn isAsciiAlphaCodePoint(cp: u21) bool {
+    return isAsciiUpperCodePoint(cp) or isAsciiLowerCodePoint(cp);
+}
+
+pub fn isAsciiAlphanumericCodePoint(cp: u21) bool {
+    return isAsciiAlphaCodePoint(cp) or isAsciiDigitCodePoint(cp);
+}
+
+pub fn isAsciiWordCodePoint(cp: u21) bool {
+    return isAsciiAlphanumericCodePoint(cp) or cp == '_';
+}
+
+pub fn isHighSurrogateUnit(unit: u16) bool {
+    return isHighSurrogateCodePoint(@intCast(unit));
+}
+
+pub fn isLowSurrogateUnit(unit: u16) bool {
+    return isLowSurrogateCodePoint(@intCast(unit));
+}
+
+pub fn isHighSurrogateCodePoint(cp: u21) bool {
+    return cp >= high_surrogate_min and cp <= high_surrogate_max;
+}
+
+pub fn isLowSurrogateCodePoint(cp: u21) bool {
+    return cp >= low_surrogate_min and cp <= low_surrogate_max;
+}
+
+pub fn isSurrogateCodePoint(cp: u21) bool {
+    return isHighSurrogateCodePoint(cp) or isLowSurrogateCodePoint(cp);
+}
+
+pub fn codePointFromSurrogatePair(high: u16, low: u16) u21 {
+    return 0x10000 + ((@as(u21, high) - high_surrogate_min) << 10) + (@as(u21, low) - low_surrogate_min);
+}
+
+pub fn surrogatePairFromCodePoint(code_point: u21) SurrogatePair {
+    const value = code_point - 0x10000;
+    return .{
+        .high = @intCast(high_surrogate_min + (value >> 10)),
+        .low = @intCast(low_surrogate_min + (value & 0x3ff)),
+    };
+}
+
+pub fn appendUtf16CodePoint(allocator: std.mem.Allocator, units: *std.ArrayList(u16), code_point: u21) std.mem.Allocator.Error!void {
+    if (code_point <= std.math.maxInt(u16)) {
+        try units.append(allocator, @intCast(code_point));
+        return;
+    }
+    const pair = surrogatePairFromCodePoint(code_point);
+    try units.append(allocator, pair.high);
+    try units.append(allocator, pair.low);
+}
+
+pub fn appendUtf8CodePoint(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), cp: u32) std.mem.Allocator.Error!void {
+    if (cp <= 0x7f) {
+        try buffer.append(allocator, @intCast(cp));
+    } else if (cp <= 0x7ff) {
+        try buffer.append(allocator, @intCast(0xc0 | (cp >> 6)));
+        try buffer.append(allocator, @intCast(0x80 | (cp & 0x3f)));
+    } else if (cp <= 0xffff) {
+        try buffer.append(allocator, @intCast(0xe0 | (cp >> 12)));
+        try buffer.append(allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
+        try buffer.append(allocator, @intCast(0x80 | (cp & 0x3f)));
+    } else {
+        try buffer.append(allocator, @intCast(0xf0 | (cp >> 18)));
+        try buffer.append(allocator, @intCast(0x80 | ((cp >> 12) & 0x3f)));
+        try buffer.append(allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
+        try buffer.append(allocator, @intCast(0x80 | (cp & 0x3f)));
+    }
+}
+
+pub fn appendUtf16UnitsAsUtf8(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), units: []const u16) std.mem.Allocator.Error!void {
+    var index: usize = 0;
+    while (index < units.len) : (index += 1) {
+        const unit = units[index];
+        if (isHighSurrogateUnit(unit) and index + 1 < units.len) {
+            const next = units[index + 1];
+            if (isLowSurrogateUnit(next)) {
+                try appendUtf8CodePoint(allocator, buffer, codePointFromSurrogatePair(unit, next));
+                index += 1;
+                continue;
+            }
+        }
+        try appendUtf8CodePoint(allocator, buffer, unit);
+    }
 }
 
 /// Returns owned UTF-32 code points. Caller must free with the same allocator.
@@ -1309,6 +1554,271 @@ test "unicode functionality" {
     try std.testing.expect(rangesContain(unknown_script_ext_ranges, 0x0e01f0));
     try std.testing.expect(rangesContain(unknown_script_ext_ranges, 0x10ffff));
     try std.testing.expect(!rangesContain(unknown_script_ext_ranges, 0x03c0));
+}
+
+test "unicode surrogate range helpers cover boundaries" {
+    try std.testing.expect(!isHighSurrogateUnit(0xd7ff));
+    try std.testing.expect(isHighSurrogateUnit(0xd800));
+    try std.testing.expect(isHighSurrogateUnit(0xdbff));
+    try std.testing.expect(!isHighSurrogateUnit(0xdc00));
+
+    try std.testing.expect(!isLowSurrogateUnit(0xdbff));
+    try std.testing.expect(isLowSurrogateUnit(0xdc00));
+    try std.testing.expect(isLowSurrogateUnit(0xdfff));
+    try std.testing.expect(!isLowSurrogateUnit(0xe000));
+
+    try std.testing.expect(isHighSurrogateCodePoint(0xd800));
+    try std.testing.expect(isLowSurrogateCodePoint(0xdfff));
+    try std.testing.expect(!isHighSurrogateCodePoint(0x10000));
+    try std.testing.expect(!isLowSurrogateCodePoint(0x10ffff));
+    try std.testing.expect(isSurrogateCodePoint(0xd800));
+    try std.testing.expect(isSurrogateCodePoint(0xdfff));
+    try std.testing.expect(!isSurrogateCodePoint(0xe000));
+
+    try std.testing.expectEqual(@as(u21, 0x10000), codePointFromSurrogatePair(0xd800, 0xdc00));
+    try std.testing.expectEqual(@as(u21, 0x1f600), codePointFromSurrogatePair(0xd83d, 0xde00));
+    try std.testing.expectEqual(@as(u21, 0x10ffff), codePointFromSurrogatePair(0xdbff, 0xdfff));
+
+    try std.testing.expectEqual(SurrogatePair{ .high = 0xd800, .low = 0xdc00 }, surrogatePairFromCodePoint(0x10000));
+    try std.testing.expectEqual(SurrogatePair{ .high = 0xd83d, .low = 0xde00 }, surrogatePairFromCodePoint(0x1f600));
+    try std.testing.expectEqual(SurrogatePair{ .high = 0xdbff, .low = 0xdfff }, surrogatePairFromCodePoint(0x10ffff));
+}
+
+test "unicode UTF-16 append helper emits BMP units and surrogate pairs" {
+    var out = std.ArrayList(u16).empty;
+    defer out.deinit(std.testing.allocator);
+
+    try appendUtf16CodePoint(std.testing.allocator, &out, 'A');
+    try appendUtf16CodePoint(std.testing.allocator, &out, 0xd800);
+    try appendUtf16CodePoint(std.testing.allocator, &out, 0x1f600);
+    try std.testing.expectEqualSlices(u16, &.{ 'A', 0xd800, 0xd83d, 0xde00 }, out.items);
+}
+
+test "unicode UTF-8 append helper preserves existing surrogate-half encoding" {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+
+    try appendUtf8CodePoint(std.testing.allocator, &out, 'A');
+    try std.testing.expectEqualStrings("A", out.items);
+
+    out.clearRetainingCapacity();
+    try appendUtf8CodePoint(std.testing.allocator, &out, 0x00e9);
+    try std.testing.expectEqualSlices(u8, "\xc3\xa9", out.items);
+
+    out.clearRetainingCapacity();
+    try appendUtf8CodePoint(std.testing.allocator, &out, 0xd800);
+    try std.testing.expectEqualSlices(u8, "\xed\xa0\x80", out.items);
+
+    out.clearRetainingCapacity();
+    try appendUtf8CodePoint(std.testing.allocator, &out, 0x1f600);
+    try std.testing.expectEqualSlices(u8, "\xf0\x9f\x98\x80", out.items);
+}
+
+test "unicode UTF-16 append helper combines surrogate pairs and preserves lone halves" {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+
+    try appendUtf16UnitsAsUtf8(std.testing.allocator, &out, &.{ 'A', 0x00e9, 0xd83d, 0xde00, 0xd800 });
+    try std.testing.expectEqualSlices(u8, "A\xc3\xa9\xf0\x9f\x98\x80\xed\xa0\x80", out.items);
+}
+
+test "unicode ascii character helpers cover ECMAScript regexp sets" {
+    try std.testing.expect(isAsciiDigitUnit('0'));
+    try std.testing.expect(isAsciiDigitUnit('9'));
+    try std.testing.expect(!isAsciiDigitUnit('/'));
+    try std.testing.expect(!isAsciiDigitUnit(':'));
+
+    try std.testing.expect(isAsciiAlphaCodePoint('A'));
+    try std.testing.expect(isAsciiAlphaCodePoint('z'));
+    try std.testing.expect(!isAsciiAlphaCodePoint('_'));
+    try std.testing.expect(!isAsciiAlphaCodePoint(0x80));
+
+    try std.testing.expect(isAsciiWordUnit('_'));
+    try std.testing.expect(isAsciiWordUnit('a'));
+    try std.testing.expect(isAsciiWordUnit('9'));
+    try std.testing.expect(!isAsciiWordUnit('-'));
+    try std.testing.expect(!isAsciiWordCodePoint(0x80));
+}
+
+test "unicode ECMAScript whitespace and line terminator helper covers spec units" {
+    const whitespace_units = [_]u16{
+        0x0009,
+        0x000a,
+        0x000b,
+        0x000c,
+        0x000d,
+        0x0020,
+        0x00a0,
+        0x1680,
+        0x2000,
+        0x2001,
+        0x2002,
+        0x2003,
+        0x2004,
+        0x2005,
+        0x2006,
+        0x2007,
+        0x2008,
+        0x2009,
+        0x200a,
+        0x2028,
+        0x2029,
+        0x202f,
+        0x205f,
+        0x3000,
+        0xfeff,
+    };
+    for (whitespace_units) |unit| {
+        try std.testing.expect(isEcmaWhitespaceOrLineTerminatorUnit(unit));
+        try std.testing.expect(isEcmaWhitespaceOrLineTerminatorCodePoint(unit));
+        try std.testing.expect(rangesContain(ecmaWhitespaceOrLineTerminatorRanges[0..], unit));
+    }
+
+    const non_whitespace_units = [_]u16{
+        0x0008,
+        0x000e,
+        'A',
+        '_',
+        0x180e,
+        0x200b,
+        0x2060,
+        0xfffe,
+    };
+    for (non_whitespace_units) |unit| {
+        try std.testing.expect(!isEcmaWhitespaceOrLineTerminatorUnit(unit));
+        try std.testing.expect(!isEcmaWhitespaceOrLineTerminatorCodePoint(unit));
+        try std.testing.expect(!rangesContain(ecmaWhitespaceOrLineTerminatorRanges[0..], unit));
+    }
+}
+
+test "unicode ECMAScript line terminator helpers cover unit and code point forms" {
+    const line_terminators = [_]u21{ '\n', '\r', 0x2028, 0x2029 };
+    for (line_terminators) |cp| {
+        try std.testing.expect(isEcmaLineTerminatorCodePoint(cp));
+        try std.testing.expect(isEcmaLineTerminatorUnit(@intCast(cp)));
+    }
+
+    const non_line_terminators = [_]u21{ 0x000b, 0x000c, ' ', 0x0085, 0x2000, 0xfeff, 0x10000 };
+    for (non_line_terminators) |cp| {
+        try std.testing.expect(!isEcmaLineTerminatorCodePoint(cp));
+        if (cp <= std.math.maxInt(u16)) {
+            try std.testing.expect(!isEcmaLineTerminatorUnit(@intCast(cp)));
+        }
+    }
+}
+
+test "unicode ascii identifier byte helpers cover ECMAScript starts and parts" {
+    try std.testing.expect(isAsciiIdentifierStartByte('A'));
+    try std.testing.expect(isAsciiIdentifierStartByte('z'));
+    try std.testing.expect(isAsciiIdentifierStartByte('_'));
+    try std.testing.expect(isAsciiIdentifierStartByte('$'));
+    try std.testing.expect(!isAsciiIdentifierStartByte('0'));
+    try std.testing.expect(!isAsciiIdentifierStartByte(0x80));
+
+    try std.testing.expect(isAsciiIdentifierPartByte('A'));
+    try std.testing.expect(isAsciiIdentifierPartByte('9'));
+    try std.testing.expect(isAsciiIdentifierPartByte('_'));
+    try std.testing.expect(isAsciiIdentifierPartByte('$'));
+    try std.testing.expect(!isAsciiIdentifierPartByte('-'));
+    try std.testing.expect(!isAsciiIdentifierPartByte(0x80));
+}
+
+test "unicode ascii whitespace byte helper covers source scanners" {
+    try std.testing.expect(isAsciiWhitespaceByte(' '));
+    try std.testing.expect(isAsciiWhitespaceByte('\t'));
+    try std.testing.expect(isAsciiWhitespaceByte('\n'));
+    try std.testing.expect(isAsciiWhitespaceByte('\r'));
+    try std.testing.expect(isAsciiWhitespaceByte(0x0b));
+    try std.testing.expect(isAsciiWhitespaceByte(0x0c));
+    try std.testing.expect(!isAsciiWhitespaceByte('a'));
+    try std.testing.expect(!isAsciiWhitespaceByte(0x85));
+}
+
+test "unicode ascii digit byte helpers cover numeric literal digit sets" {
+    try std.testing.expect(isAsciiBinaryDigitByte('0'));
+    try std.testing.expect(isAsciiBinaryDigitByte('1'));
+    try std.testing.expect(!isAsciiBinaryDigitByte('2'));
+
+    try std.testing.expect(isAsciiOctalDigitByte('0'));
+    try std.testing.expect(isAsciiOctalDigitByte('7'));
+    try std.testing.expect(!isAsciiOctalDigitByte('8'));
+
+    try std.testing.expect(isAsciiDigitByte('0'));
+    try std.testing.expect(isAsciiDigitByte('9'));
+    try std.testing.expect(!isAsciiDigitByte('/'));
+    try std.testing.expect(!isAsciiDigitByte(':'));
+}
+
+test "unicode ascii alpha byte helpers cover ECMAScript ASCII classes" {
+    try std.testing.expect(isAsciiUpperByte('A'));
+    try std.testing.expect(isAsciiUpperByte('Z'));
+    try std.testing.expect(!isAsciiUpperByte('a'));
+
+    try std.testing.expect(isAsciiLowerByte('a'));
+    try std.testing.expect(isAsciiLowerByte('z'));
+    try std.testing.expect(!isAsciiLowerByte('A'));
+
+    try std.testing.expect(isAsciiAlphaByte('A'));
+    try std.testing.expect(isAsciiAlphaByte('z'));
+    try std.testing.expect(!isAsciiAlphaByte('_'));
+
+    try std.testing.expect(isAsciiAlphanumericByte('A'));
+    try std.testing.expect(isAsciiAlphanumericByte('9'));
+    try std.testing.expect(!isAsciiAlphanumericByte('_'));
+
+    try std.testing.expect(isAsciiWordByte('_'));
+    try std.testing.expect(isAsciiWordByte('a'));
+    try std.testing.expect(isAsciiWordByte('9'));
+    try std.testing.expect(!isAsciiWordByte('-'));
+}
+
+test "unicode ascii hex helpers cover digit values" {
+    try std.testing.expectEqual(@as(u8, 0), asciiHexDigitValueByte('0'));
+    try std.testing.expectEqual(@as(u8, 9), asciiHexDigitValueByte('9'));
+    try std.testing.expectEqual(@as(u8, 10), asciiHexDigitValueByte('a'));
+    try std.testing.expectEqual(@as(u8, 15), asciiHexDigitValueByte('f'));
+    try std.testing.expectEqual(@as(u8, 10), asciiHexDigitValueByte('A'));
+    try std.testing.expectEqual(@as(u8, 15), asciiHexDigitValueByte('F'));
+    try std.testing.expectEqual(@as(?u8, null), asciiHexDigitValueByte('g'));
+    try std.testing.expectEqual(@as(?u8, null), asciiHexDigitValueByte('/'));
+
+    try std.testing.expectEqual(@as(u8, 15), asciiHexDigitValueUnit('F'));
+    try std.testing.expectEqual(@as(?u8, null), asciiHexDigitValueUnit(0x100));
+
+    try std.testing.expect(isAsciiHexDigitByte('0'));
+    try std.testing.expect(isAsciiHexDigitByte('f'));
+    try std.testing.expect(isAsciiHexDigitByte('F'));
+    try std.testing.expect(!isAsciiHexDigitByte('g'));
+    try std.testing.expect(!isAsciiHexDigitByte('_'));
+
+    try std.testing.expect(isAsciiHexDigitUnit('a'));
+    try std.testing.expect(!isAsciiHexDigitUnit(0x100));
+
+    try std.testing.expectEqual(@as(u8, 0), asciiUpperHexDigitValueByte('0'));
+    try std.testing.expectEqual(@as(u8, 9), asciiUpperHexDigitValueByte('9'));
+    try std.testing.expectEqual(@as(u8, 10), asciiUpperHexDigitValueByte('A'));
+    try std.testing.expectEqual(@as(u8, 15), asciiUpperHexDigitValueByte('F'));
+    try std.testing.expectEqual(@as(?u8, null), asciiUpperHexDigitValueByte('a'));
+    try std.testing.expectEqual(@as(?u8, null), asciiUpperHexDigitValueByte('g'));
+
+    try std.testing.expectEqual(@as(u8, '0'), asciiLowerHexDigitChar(0));
+    try std.testing.expectEqual(@as(u8, 'a'), asciiLowerHexDigitChar(10));
+    try std.testing.expectEqual(@as(u8, 'f'), asciiLowerHexDigitChar(15));
+
+    try std.testing.expectEqual(@as(u8, '0'), asciiUpperHexDigitChar(0));
+    try std.testing.expectEqual(@as(u8, 'A'), asciiUpperHexDigitChar(10));
+    try std.testing.expectEqual(@as(u8, 'F'), asciiUpperHexDigitChar(15));
+}
+
+test "unicode ascii radix digit helper covers base-36 digit values" {
+    try std.testing.expectEqual(@as(u8, 0), asciiRadixDigitValueByte('0'));
+    try std.testing.expectEqual(@as(u8, 9), asciiRadixDigitValueByte('9'));
+    try std.testing.expectEqual(@as(u8, 10), asciiRadixDigitValueByte('a'));
+    try std.testing.expectEqual(@as(u8, 35), asciiRadixDigitValueByte('z'));
+    try std.testing.expectEqual(@as(u8, 10), asciiRadixDigitValueByte('A'));
+    try std.testing.expectEqual(@as(u8, 35), asciiRadixDigitValueByte('Z'));
+    try std.testing.expectEqual(@as(?u8, null), asciiRadixDigitValueByte('_'));
+    try std.testing.expectEqual(@as(?u8, null), asciiRadixDigitValueByte(0x80));
 }
 
 fn rangesContain(ranges: []const CodePointRange, code_point: u21) bool {

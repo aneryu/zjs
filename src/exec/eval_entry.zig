@@ -7,7 +7,8 @@ const call = @import("call.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const module_exec = @import("module.zig");
 const property_ops = @import("property_ops.zig");
-const shared = @import("shared.zig");
+const call_runtime = @import("call_runtime.zig");
+const string_ops = @import("string_ops.zig");
 const stack_mod = @import("stack.zig");
 const zjs_vm = @import("zjs_vm.zig");
 
@@ -20,7 +21,7 @@ pub fn evalScriptValue(ctx: *core.JSContext, source_value: core.JSValue, options
     if (!source_value.isString()) return error.TypeError;
     var source = std.ArrayList(u8).empty;
     defer source.deinit(ctx.runtime.memory.allocator);
-    try shared.appendSourceStringUtf8(ctx.runtime, &source, source_value);
+    try string_ops.appendSourceStringUtf8(ctx.runtime, &source, source_value);
     return evalScriptSource(ctx, source.items, options);
 }
 
@@ -42,7 +43,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         var msg_buf = std.ArrayList(u8).empty;
         defer msg_buf.deinit(rt.memory.allocator);
         try msg_buf.print(rt.memory.allocator, "SYNTAX ERROR in {s}:{d}:{d} - {s}", .{ options.filename, err.position.line, err.position.column, err.message });
-        const error_val = try exception_ops.createNamedError(rt, global, "SyntaxError", msg_buf.items);
+        const error_val = try exception_ops.createNamedError(ctx, global, "SyntaxError", msg_buf.items);
         _ = ctx.throwValue(error_val);
         return error.SyntaxError;
     }
@@ -67,7 +68,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
             var msg_buf = std.ArrayList(u8).empty;
             defer msg_buf.deinit(rt.memory.allocator);
             try msg_buf.print(rt.memory.allocator, "LINK ERROR for module {s}: {s}", .{ options.filename, @errorName(err) });
-            const error_val = try exception_ops.createNamedError(rt, global, "SyntaxError", msg_buf.items);
+            const error_val = try exception_ops.createNamedError(ctx, global, "SyntaxError", msg_buf.items);
             _ = ctx.throwValue(error_val);
             return moduleResolutionError(err);
         };
@@ -78,6 +79,10 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         module_var_refs = try module_exec.buildModuleVarRefs(ctx, module_name, &compiled.function);
     }
     defer module_exec.freeModuleVarRefs(rt, module_var_refs);
+
+    if (!has_module_record and canReturnUndefinedWithoutVm(&compiled.function)) {
+        return core.JSValue.undefinedValue();
+    }
 
     const result = if (has_module_record)
         try runEvalModuleWithVarRefs(ctx, &compiled.function, options.output, module_var_refs, options.timing)
@@ -90,6 +95,10 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         if (options.timing) |timing| timing.vm_run_ns += elapsedNanosSince(vm_start);
         break :blk value;
     };
+    // The completion value is owned here while the post-run steps below can
+    // still fail (e.g. OOM while draining promise jobs); release it on every
+    // error exit (found by test-oom injection).
+    errdefer result.free(rt);
 
     const global_object = try zjs_vm.contextGlobal(ctx);
     const jobs_start = monotonicNanos();
@@ -101,6 +110,22 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         return core.JSValue.undefinedValue();
     }
     return result;
+}
+
+fn canReturnUndefinedWithoutVm(function: *const bytecode.Bytecode) bool {
+    if (function.flags.is_module or function.module_record != null) return false;
+    if (function.code.len != 1 or function.code[0] != bytecode.opcode.op.return_undef) return false;
+    return function.var_count == 0 and
+        function.arg_count == 0 and
+        function.var_names.len == 0 and
+        function.var_is_lexical.len == 0 and
+        function.var_is_const.len == 0 and
+        function.var_ref_names.len == 0 and
+        function.var_ref_is_lexical.len == 0 and
+        function.var_ref_is_const.len == 0 and
+        function.global_var_names.len == 0 and
+        function.private_bound_names.len == 0 and
+        function.constants.values.len == 0;
 }
 
 fn runEvalModuleWithVarRefs(
@@ -199,16 +224,26 @@ fn isWhitespaceSeparatedNumericScript(source_text: []const u8) bool {
     var saw_digit = false;
     var saw_space_after_digit = false;
     for (source_text) |ch| {
-        if (std.ascii.isDigit(ch)) {
+        if (string_ops.isAsciiDigitByte(ch)) {
             if (saw_space_after_digit) return true;
             saw_digit = true;
-        } else if (std.ascii.isWhitespace(ch)) {
+        } else if (call_runtime.isAsciiWhitespace(ch)) {
             if (saw_digit) saw_space_after_digit = true;
         } else {
             return false;
         }
     }
     return false;
+}
+
+test "eval numeric script fallback uses shared ASCII classifiers" {
+    try std.testing.expect(isWhitespaceSeparatedNumericScript("1 2"));
+    try std.testing.expect(isWhitespaceSeparatedNumericScript("1\t2"));
+    try std.testing.expect(isWhitespaceSeparatedNumericScript("1\x0b2"));
+    try std.testing.expect(isWhitespaceSeparatedNumericScript("1\x0c2"));
+    try std.testing.expect(!isWhitespaceSeparatedNumericScript("12"));
+    try std.testing.expect(!isWhitespaceSeparatedNumericScript("1a2"));
+    try std.testing.expect(!isWhitespaceSeparatedNumericScript("1  "));
 }
 
 fn elapsedNanosSince(start: u64) u64 {
@@ -220,4 +255,14 @@ fn monotonicNanos() u64 {
     var ts: std.c.timespec = undefined;
     if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
+// Eval compile wrappers (moved from the dissolved exec/eval.zig).
+
+pub fn compileDirect(rt: *core.JSRuntime, source: []const u8) !parser.Result {
+    return parser.parse(rt, source, .{ .mode = .eval_direct, .filename = "<eval>" });
+}
+
+pub fn compileIndirect(rt: *core.JSRuntime, source: []const u8) !parser.Result {
+    return parser.parse(rt, source, .{ .mode = .eval_indirect, .filename = "<eval>" });
 }

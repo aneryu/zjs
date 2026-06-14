@@ -11,7 +11,6 @@ const memory = @import("../../core/memory.zig");
 const bytecode_function = @import("../function.zig");
 const function_def_mod = @import("../function_def.zig");
 const opcode = @import("../opcode.zig");
-const scope = @import("../scope.zig");
 
 // Global variable definition flags (mirrors quickjs.c)
 const DEFINE_GLOBAL_LEX_VAR: u8 = 1 << 7;
@@ -77,10 +76,12 @@ pub const JSContext = struct {
 ///
 /// Full QuickJS alignment (closure variables, TDZ, eval) will be added
 /// when FunctionDef is integrated into the parser.
-/// Total byte length (opcode + operands) for `op_id`, driven by the
-/// comptime-baked `opcode.opcode_size` table. Returns 1 for ids with
-/// no table entry so callers can safely fall through unknown opcodes
-/// one byte at a time (matching QuickJS's unknown-op pass-through).
+/// Total byte length (opcode + operands) for `op_id` in final-form
+/// (non-temp) encoding, from the generated metadata table. Returns 1
+/// for ids with no table entry so callers can safely fall through
+/// unknown opcodes one byte at a time (matching QuickJS's unknown-op
+/// pass-through). Temp opcodes this pass consumes are special-cased
+/// at each walk site (or use `inputInstrSizeForRefTailScan`).
 fn instrSize(op_id: u8) usize {
     const total = opcode.sizeOf(op_id);
     return if (total == 0) 1 else total;
@@ -425,6 +426,79 @@ fn writeLoweredPrivateField(ctx: *const JSContext, output: []u8, out_idx: *usize
     out_idx.* += 1;
 }
 
+/// True if the local slot `loc_idx` is captured by a closure — either the
+/// parser marked it (`ensureClosureChain` sets `VarDef.is_captured`, the
+/// `capture_var` equivalent of quickjs.c:33022) or a child FunctionDef
+/// references the slot through its closure_var table (retrofit capture
+/// paths that do not set the flag).
+pub fn localIsCaptured(fd: *const function_def_mod.FunctionDef, loc_idx: u16) bool {
+    if (loc_idx < fd.vars.len and fd.vars[loc_idx].is_captured) return true;
+    for (fd.child_list) |child| {
+        for (child.closure_var) |cv| {
+            if ((cv.closure_type == .local or cv.closure_type == .ref) and cv.var_idx == loc_idx) return true;
+        }
+    }
+    return false;
+}
+
+/// Lexical vars with `.normal` kind get their TDZ bit re-armed on scope
+/// entry. Block function declarations are excluded: their inline
+/// `fclosure` init does not always clear the TDZ bit, so re-arming them
+/// would fault later reads (QuickJS re-instantiates them in
+/// `enter_scope` instead, quickjs.c:34488).
+fn varNeedsTdzRearm(vd: function_def_mod.VarDef) bool {
+    return vd.is_lexical and vd.var_kind == .normal;
+}
+
+/// Byte size of the `enter_scope <scope>` lowering. Mirrors the QuickJS
+/// `OP_enter_scope` case (quickjs.c:34476): one `set_loc_uninitialized`
+/// per lexical var of the scope. In addition zjs emits one `close_loc`
+/// per captured var: QuickJS detaches captured stack slots at
+/// `OP_leave_scope` (quickjs.c:34510) and at break/continue jump sites
+/// (`close_scopes`, quickjs.c:27948); zjs's boxed-cell model instead
+/// detaches at scope *entry*, which dominates every re-entry path
+/// (normal back-edge, `continue`, jumps out of inner blocks) with a
+/// single emission site. This is observationally equivalent because
+/// local slots are never reused and a detached cell is only reachable
+/// through the closures that captured it.
+fn enterScopeRefreshSize(ctx: *const JSContext, scope: i32) usize {
+    const fd = ctx.function_def orelse return 0;
+    if (scope < 0 or @as(usize, @intCast(scope)) >= fd.scopes.len) return 0;
+    var total: usize = 0;
+    var idx = fd.scopes[@intCast(scope)].first;
+    while (idx >= 0 and @as(usize, @intCast(idx)) < fd.vars.len) {
+        const vd = fd.vars[@intCast(idx)];
+        if (vd.scope_level != scope) break;
+        if (localIsCaptured(fd, @intCast(idx))) total += 3;
+        if (varNeedsTdzRearm(vd)) total += 3;
+        idx = vd.scope_next;
+    }
+    return total;
+}
+
+/// Emit the `enter_scope` lowering described in `enterScopeRefreshSize`.
+fn writeEnterScopeRefresh(ctx: *const JSContext, output: []u8, out_idx: *usize, scope: i32) void {
+    const fd = ctx.function_def orelse return;
+    if (scope < 0 or @as(usize, @intCast(scope)) >= fd.scopes.len) return;
+    var idx = fd.scopes[@intCast(scope)].first;
+    while (idx >= 0 and @as(usize, @intCast(idx)) < fd.vars.len) {
+        const vd = fd.vars[@intCast(idx)];
+        if (vd.scope_level != scope) break;
+        const loc_idx: u16 = @intCast(idx);
+        if (localIsCaptured(fd, loc_idx)) {
+            output[out_idx.*] = opcode.op.close_loc;
+            std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], loc_idx, .little);
+            out_idx.* += 3;
+        }
+        if (varNeedsTdzRearm(vd)) {
+            output[out_idx.*] = opcode.op.set_loc_uninitialized;
+            std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], loc_idx, .little);
+            out_idx.* += 3;
+        }
+        idx = vd.scope_next;
+    }
+}
+
 fn isAncestorLocalOrArg(ctx: *const JSContext, atom_id: u32) bool {
     const fd = ctx.function_def orelse return false;
     var maybe_parent = fd.parent;
@@ -673,6 +747,16 @@ const JumpSite = struct {
     operand_pos: usize,
 };
 
+const GLOBAL_REF_TAIL_NONE: u8 = 0;
+const GLOBAL_REF_TAIL_PUT: u8 = 1;
+const GLOBAL_REF_TAIL_DUP_PUT: u8 = 2;
+
+const GlobalRefPutTail = struct {
+    pc: usize,
+    original_size: usize,
+    kind: u8,
+};
+
 /// Returns the byte offset within this opcode of the absolute u32
 /// label operand, or `null` if the format has no such operand. Only
 /// the `.label` format (u32 absolute target) is relevant for the
@@ -685,6 +769,116 @@ fn labelOperandOffset(op_id: u8) ?usize {
         .atom_label_u8, .atom_label_u16 => 5, // atom at bytes[1..5], target at bytes[5..9]
         else => null,
     };
+}
+
+fn globalRefPutTailReplacementSize(kind: u8) usize {
+    return switch (kind) {
+        GLOBAL_REF_TAIL_PUT => 5,
+        GLOBAL_REF_TAIL_DUP_PUT => 6,
+        else => 0,
+    };
+}
+
+fn decodeGlobalRefPutTail(code: []const u8, pc: usize) ?GlobalRefPutTail {
+    if (pc >= code.len) return null;
+    if (code[pc] == opcode.op.put_ref_value) {
+        return .{ .pc = pc, .original_size = 1, .kind = GLOBAL_REF_TAIL_PUT };
+    }
+    if (pc + 2 > code.len or code[pc + 1] != opcode.op.put_ref_value) return null;
+    return switch (code[pc]) {
+        opcode.op.insert3 => .{ .pc = pc, .original_size = 2, .kind = GLOBAL_REF_TAIL_DUP_PUT },
+        opcode.op.nop, opcode.op.perm4, opcode.op.rot3l => .{ .pc = pc, .original_size = 2, .kind = GLOBAL_REF_TAIL_PUT },
+        else => null,
+    };
+}
+
+/// Instruction size for the Phase 1 input stream this pass consumes:
+/// temp opcodes in the overlap range size as their temp forms
+/// (`opcode.sizeOfPhase1`). Returns null when the stream cannot be
+/// decoded, stopping the tail scan.
+fn inputInstrSizeForRefTailScan(code: []const u8, pc: usize) ?usize {
+    if (pc >= code.len) return null;
+    const size: usize = opcode.sizeOfPhase1(code[pc]);
+    if (size == 0 or pc + size > code.len) return null;
+    return size;
+}
+
+fn stopsGlobalRefTailScan(op_id: u8) bool {
+    if (op_id == opcode.op.scope_make_ref or
+        op_id == opcode.op.scope_get_ref or
+        op_id == opcode.op.scope_delete_var or
+        op_id == opcode.op.eval or
+        op_id == opcode.op.apply_eval or
+        op_id == opcode.op.@"return" or
+        op_id == opcode.op.return_undef or
+        op_id == opcode.op.return_async or
+        op_id == opcode.op.throw or
+        op_id == opcode.op.goto or
+        op_id == opcode.op.goto8 or
+        op_id == opcode.op.goto16 or
+        op_id == opcode.op.if_false or
+        op_id == opcode.op.if_false8 or
+        op_id == opcode.op.if_true or
+        op_id == opcode.op.if_true8 or
+        op_id == opcode.op.@"catch" or
+        op_id == opcode.op.label or
+        op_id == opcode.op.gosub or
+        op_id == opcode.op.ret or
+        op_id == opcode.op.call or
+        op_id == opcode.op.call0 or
+        op_id == opcode.op.call1 or
+        op_id == opcode.op.call2 or
+        op_id == opcode.op.call3 or
+        op_id == opcode.op.call_method or
+        op_id == opcode.op.tail_call or
+        op_id == opcode.op.tail_call_method)
+    {
+        return true;
+    }
+    return false;
+}
+
+fn findGlobalRefPutTail(code: []const u8, make_ref_pc: usize) ?GlobalRefPutTail {
+    if (make_ref_pc + 11 > code.len or code[make_ref_pc] != opcode.op.scope_make_ref) return null;
+    const label_pc = std.mem.readInt(u32, code[make_ref_pc + 5 ..][0..4], .little);
+    if (label_pc > make_ref_pc and label_pc < code.len) {
+        if (decodeGlobalRefPutTail(code, @intCast(label_pc))) |tail| return tail;
+    }
+
+    var pc = make_ref_pc + 11;
+    var steps: usize = 0;
+    while (pc < code.len and steps < 16) : (steps += 1) {
+        if (decodeGlobalRefPutTail(code, pc)) |tail| return tail;
+        const op_id = code[pc];
+        if (stopsGlobalRefTailScan(op_id)) return null;
+        const size = inputInstrSizeForRefTailScan(code, pc) orelse return null;
+        pc += size;
+    }
+    return null;
+}
+
+fn scopeMakeRefResolvesToGlobal(ctx: *const JSContext, atom_id: u32, scope_level: i16) bool {
+    if (lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level) != null) return false;
+    if (resolveLocalOrArg(ctx, atom_id, scope_level) != null) return false;
+    if (lookupClosureVar(ctx, atom_id) != null) return false;
+    return true;
+}
+
+fn functionIsStrict(ctx: *const JSContext) bool {
+    if (ctx.function_def) |fd| return fd.is_strict_mode;
+    return ctx.function.flags.is_strict or ctx.function.flags.runtime_strict;
+}
+
+fn functionDeclaresGlobalVar(ctx: *const JSContext, atom_id: u32) bool {
+    const fd = ctx.function_def orelse return false;
+    for (fd.global_vars) |global_var| {
+        if (global_var.var_name == atom_id) return true;
+    }
+    return false;
+}
+
+fn canOptimizeGlobalRefPutTail(ctx: *const JSContext, atom_id: u32) bool {
+    return !functionIsStrict(ctx) or functionDeclaresGlobalVar(ctx, atom_id);
 }
 
 pub fn run(ctx: *JSContext) !void {
@@ -749,6 +943,10 @@ pub fn run(ctx: *JSContext) !void {
 
     const init_bypassed = if (ctx.function_def) |fd| blk: {
         const bytes = try ctx.memory.alloc(bool, fd.vars.len);
+        // The block below allocates and can fail with InvalidBytecode; the
+        // owning `defer` only binds after `break :blk`, so error exits inside
+        // the block must release `bytes` here (found by test-oom injection).
+        errdefer if (bytes.len != 0) ctx.memory.free(bool, bytes);
         @memset(bytes, false);
 
         // Pre-pass: find init_pc for each var and check if any forward jump bypasses it
@@ -875,6 +1073,12 @@ pub fn run(ctx: *JSContext) !void {
     var jump_count: usize = 0;
     var i: usize = 0;
     var scan_atom_idx: usize = 0;
+    var global_ref_tail_atoms: []atom.Atom = if (func.code.len == 0) &.{} else try ctx.memory.alloc(atom.Atom, func.code.len);
+    defer if (global_ref_tail_atoms.len != 0) ctx.memory.free(atom.Atom, global_ref_tail_atoms);
+    var global_ref_tail_kinds: []u8 = if (func.code.len == 0) &.{} else try ctx.memory.alloc(u8, func.code.len);
+    defer if (global_ref_tail_kinds.len != 0) ctx.memory.free(u8, global_ref_tail_kinds);
+    if (global_ref_tail_atoms.len != 0) @memset(global_ref_tail_atoms, atom.null_atom);
+    if (global_ref_tail_kinds.len != 0) @memset(global_ref_tail_kinds, GLOBAL_REF_TAIL_NONE);
     const var_initialized = if (ctx.function_def) |fd| blk: {
         const bytes = try ctx.memory.alloc(bool, fd.vars.len);
         @memset(bytes, false);
@@ -883,6 +1087,12 @@ pub fn run(ctx: *JSContext) !void {
     defer if (var_initialized.len != 0) ctx.memory.free(bool, var_initialized);
     while (i < func.code.len) {
         const op = func.code[i];
+        if (global_ref_tail_kinds.len != 0 and global_ref_tail_kinds[i] != GLOBAL_REF_TAIL_NONE) {
+            output_size += globalRefPutTailReplacementSize(global_ref_tail_kinds[i]);
+            output_atom_count += 1;
+            i += (decodeGlobalRefPutTail(func.code, i) orelse return error.InvalidBytecode).original_size;
+            continue;
+        }
         // Handle OP_eval and OP_apply_eval scope_idx rewrite (mirrors quickjs.c:33690-33702)
         if (op == opcode.op.eval) {
             if (i + 5 > func.code.len) return error.InvalidBytecode;
@@ -974,8 +1184,7 @@ pub fn run(ctx: *JSContext) !void {
                             const init_safe = var_initialized[loc_idx] and !init_bypassed[loc_idx];
                             break :blk !init_safe and (isConstLocal(ctx, loc_idx) or localTdzEmittedAtDecl(ctx, loc_idx));
                         }
-                    })
-                    {
+                    }) {
                         // Lexical: 3-byte TDZ-check variant.
                         output_size += 3;
                     } else {
@@ -1010,6 +1219,17 @@ pub fn run(ctx: *JSContext) !void {
             if (i + 11 > func.code.len) return error.InvalidBytecode;
             const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
             const scope_level = std.mem.readInt(i16, func.code[i + 9 ..][0..2], .little);
+            if (canOptimizeGlobalRefPutTail(ctx, atom_id) and scopeMakeRefResolvesToGlobal(ctx, atom_id, scope_level)) {
+                if (findGlobalRefPutTail(func.code, i)) |tail| {
+                    if (tail.pc < global_ref_tail_kinds.len and global_ref_tail_kinds[tail.pc] == GLOBAL_REF_TAIL_NONE) {
+                        global_ref_tail_atoms[tail.pc] = atom_id;
+                        global_ref_tail_kinds[tail.pc] = tail.kind;
+                        scan_atom_idx += 1;
+                        i += 11;
+                        continue;
+                    }
+                }
+            }
             if (resolveLocalOrArg(ctx, atom_id, scope_level) != null) {
                 output_size += 7;
                 output_atom_count += 1;
@@ -1076,6 +1296,11 @@ pub fn run(ctx: *JSContext) !void {
             scan_atom_idx += 1;
             i += 7;
         } else if (op == opcode.op.enter_scope or op == opcode.op.leave_scope) {
+            if (i + 3 > func.code.len) return error.InvalidBytecode;
+            if (op == opcode.op.enter_scope) {
+                const scope = std.mem.readInt(u16, func.code[i + 1 ..][0..2], .little);
+                output_size += enterScopeRefreshSize(ctx, scope);
+            }
             i += 3;
         } else {
             const size = instrSize(op);
@@ -1249,6 +1474,20 @@ pub fn run(ctx: *JSContext) !void {
         // the post-prologue body resolve correctly.
         pc_map[i] = out_idx;
         const op = func.code[i];
+        if (global_ref_tail_kinds.len != 0 and global_ref_tail_kinds[i] != GLOBAL_REF_TAIL_NONE) {
+            const atom_id = global_ref_tail_atoms[i];
+            if (global_ref_tail_kinds[i] == GLOBAL_REF_TAIL_DUP_PUT) {
+                output[out_idx] = opcode.op.dup;
+                out_idx += 1;
+            }
+            output[out_idx] = opcode.op.put_var;
+            std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], atom_id, .little);
+            output_atoms[out_atom_idx] = func.atoms.dup(atom_id);
+            out_idx += 5;
+            out_atom_idx += 1;
+            i += (decodeGlobalRefPutTail(func.code, i) orelse return error.InvalidBytecode).original_size;
+            continue;
+        }
         // Handle OP_eval and OP_apply_eval scope_idx rewrite (mirrors quickjs.c:33690-33702)
         if (op == opcode.op.eval) {
             if (i + 5 > func.code.len) return error.InvalidBytecode;
@@ -1372,8 +1611,7 @@ pub fn run(ctx: *JSContext) !void {
                             const init_safe = var_initialized_pass2[loc_idx] and !init_bypassed[loc_idx];
                             break :blk !init_safe and (isConstLocal(ctx, loc_idx) or localTdzEmittedAtDecl(ctx, loc_idx));
                         }
-                    })
-                    {
+                    }) {
                         output[out_idx] = lowerScopeVarOpLexical(op);
                         std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], loc_idx, .little);
                         out_idx += 3;
@@ -1425,6 +1663,18 @@ pub fn run(ctx: *JSContext) !void {
             if (i + 11 > func.code.len) return error.InvalidBytecode;
             const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
             const scope_level = std.mem.readInt(i16, func.code[i + 9 ..][0..2], .little);
+            if (canOptimizeGlobalRefPutTail(ctx, atom_id) and scopeMakeRefResolvesToGlobal(ctx, atom_id, scope_level)) {
+                if (findGlobalRefPutTail(func.code, i)) |tail| {
+                    if (tail.pc < global_ref_tail_kinds.len and
+                        global_ref_tail_kinds[tail.pc] != GLOBAL_REF_TAIL_NONE and
+                        global_ref_tail_atoms[tail.pc] == atom_id)
+                    {
+                        in_atom_idx += 1;
+                        i += 11;
+                        continue;
+                    }
+                }
+            }
             if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| switch (binding) {
                 .arg => |arg_idx| {
                     output[out_idx] = opcode.op.make_arg_ref;
@@ -1538,6 +1788,10 @@ pub fn run(ctx: *JSContext) !void {
             i += 7;
         } else if (op == opcode.op.enter_scope or op == opcode.op.leave_scope) {
             if (i + 3 > func.code.len) return error.InvalidBytecode;
+            if (op == opcode.op.enter_scope) {
+                const scope = std.mem.readInt(u16, func.code[i + 1 ..][0..2], .little);
+                writeEnterScopeRefresh(ctx, output, &out_idx, scope);
+            }
             i += 3;
         } else {
             const size = instrSize(op);
@@ -1614,6 +1868,7 @@ pub fn run(ctx: *JSContext) !void {
     // Replace the old code buffer. `installCode` frees any prior buffer,
     // including capacity allocated by the parser via geometric growth.
     func.remapSourceLocs(pc_map);
+    func.remapDirectCallSites(pc_map);
     if (code_to_install.ptr != output.ptr and output_owned) {
         ctx.memory.free(u8, output);
         output_owned = false;
