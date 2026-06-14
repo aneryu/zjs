@@ -1804,6 +1804,57 @@ pub const ParseState = struct {
         return false;
     }
 
+    /// Like `functionDefUsesAtom`, but also returns true when any (transitive)
+    /// nested child function references `atom_id` without shadowing it. Used by
+    /// the forward-capture retrofit so an intermediate function that merely
+    /// *propagates* a binding to a deeper closure (and never names it directly)
+    /// still receives a closure-var link. Mirrors QuickJS resolving the whole
+    /// function tree after parsing, where such chains are built unconditionally.
+    fn functionDefUsesAtomTransitive(fd: *const function_def_mod.FunctionDef, atom_id: Atom) bool {
+        if (functionDefUsesAtom(fd, atom_id)) return true;
+        for (fd.child_list) |*child| {
+            if (child.findVar(atom_id) >= 0 or child.findArg(atom_id) >= 0) continue;
+            if (functionDefUsesAtomTransitive(child, atom_id)) return true;
+        }
+        return false;
+    }
+
+    /// Recursively extend a forward-capture chain into the descendants of `fd`.
+    /// `fd_ref_idx` is the index, within `fd.closure_var`, of the entry that
+    /// already holds `atom_id`. Every descendant that transitively uses the atom
+    /// (and does not shadow it) gets a `.ref` closure var pointing at its
+    /// parent's entry, so the runtime can thread the cell down the whole chain.
+    fn propagateForwardCaptureToDescendants(
+        self: *ParseState,
+        fd: *function_def_mod.FunctionDef,
+        atom_id: Atom,
+        fd_ref_idx: u16,
+        is_lexical: bool,
+        is_const: bool,
+        var_kind: function_def_mod.VarKind,
+    ) Error!void {
+        for (fd.child_list) |*child| {
+            if (child.findVar(atom_id) >= 0 or child.findArg(atom_id) >= 0) continue;
+            if (!functionDefUsesAtomTransitive(child, atom_id)) continue;
+            const child_ref_idx: u16 = if (findClosureVarIndex(child, atom_id)) |existing| blk: {
+                child.closure_var[existing].closure_type = .ref;
+                child.closure_var[existing].is_lexical = is_lexical;
+                child.closure_var[existing].is_const = is_const;
+                child.closure_var[existing].var_kind = var_kind;
+                child.closure_var[existing].var_idx = fd_ref_idx;
+                break :blk existing;
+            } else @intCast(try child.addClosureVar(.{
+                .closure_type = .ref,
+                .is_lexical = is_lexical,
+                .is_const = is_const,
+                .var_kind = var_kind,
+                .var_idx = fd_ref_idx,
+                .var_name = atom_id,
+            }));
+            try self.propagateForwardCaptureToDescendants(child, atom_id, child_ref_idx, is_lexical, is_const, var_kind);
+        }
+    }
+
     fn scopeChainContains(fd: *const function_def_mod.FunctionDef, start_scope: i32, target_scope: i32) bool {
         var scope_idx = start_scope;
         while (scope_idx >= 0 and @as(usize, @intCast(scope_idx)) < fd.scopes.len) {
@@ -1831,18 +1882,21 @@ pub const ParseState = struct {
         is_const: bool,
         var_kind: function_def_mod.VarKind,
     ) Error!void {
-        _ = self;
         for (parent_fd.child_list) |*child| {
-            if (!functionDefUsesAtom(child, atom_id)) continue;
-            if (findClosureVarIndex(child, atom_id) != null) continue;
-            _ = try child.addClosureVar(.{
-                .closure_type = .ref,
-                .is_lexical = is_lexical,
-                .is_const = is_const,
-                .var_kind = var_kind,
-                .var_idx = parent_ref_idx,
-                .var_name = atom_id,
-            });
+            if (!functionDefUsesAtomTransitive(child, atom_id)) continue;
+            if (child.findVar(atom_id) >= 0 or child.findArg(atom_id) >= 0) continue;
+            const child_ref_idx: u16 = if (findClosureVarIndex(child, atom_id)) |existing|
+                existing
+            else
+                @intCast(try child.addClosureVar(.{
+                    .closure_type = .ref,
+                    .is_lexical = is_lexical,
+                    .is_const = is_const,
+                    .var_kind = var_kind,
+                    .var_idx = parent_ref_idx,
+                    .var_name = atom_id,
+                }));
+            try self.propagateForwardCaptureToDescendants(child, atom_id, child_ref_idx, is_lexical, is_const, var_kind);
         }
     }
 
@@ -1852,13 +1906,12 @@ pub const ParseState = struct {
         atom_id: Atom,
         local_idx: u16,
     ) Error!void {
-        _ = self;
         const local = parent_fd.vars[local_idx];
         for (parent_fd.child_list) |*child| {
-            if (!functionDefUsesAtom(child, atom_id)) continue;
+            if (!functionDefUsesAtomTransitive(child, atom_id)) continue;
             if (child.findVar(atom_id) >= 0 or child.findArg(atom_id) >= 0) continue;
             if (!scopeChainContains(parent_fd, child.parent_scope_level, local.scope_level)) continue;
-            if (findClosureVarIndex(child, atom_id)) |existing| {
+            const child_ref_idx: u16 = if (findClosureVarIndex(child, atom_id)) |existing| blk: {
                 if (child.closure_var[existing].closure_type == .local and
                     child.closure_var[existing].var_idx < parent_fd.vars.len)
                 {
@@ -1872,16 +1925,16 @@ pub const ParseState = struct {
                 child.closure_var[existing].is_const = local.is_const;
                 child.closure_var[existing].var_kind = local.var_kind;
                 child.closure_var[existing].var_idx = local_idx;
-                continue;
-            }
-            _ = try child.addClosureVar(.{
+                break :blk existing;
+            } else @intCast(try child.addClosureVar(.{
                 .closure_type = .local,
                 .is_lexical = local.is_lexical,
                 .is_const = local.is_const,
                 .var_kind = local.var_kind,
                 .var_idx = local_idx,
                 .var_name = atom_id,
-            });
+            }));
+            try self.propagateForwardCaptureToDescendants(child, atom_id, child_ref_idx, local.is_lexical, local.is_const, local.var_kind);
         }
     }
 

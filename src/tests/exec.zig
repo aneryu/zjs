@@ -976,6 +976,65 @@ test "TDZ: closure update and return of captured const throws TypeError" {
     ));
 }
 
+test "forward-ref top-level lexical captured through a nested closure resolves after init" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // `mk` is declared textually before `const G`, and only the inner closure
+    // names G. The forward-capture retrofit must thread a closure-var chain
+    // through `mk` (which never names G itself) down to the inner function;
+    // otherwise the reference falls back to a global lookup and reads
+    // undefined. Mirrors QuickJS, which resolves the whole tree post-parse.
+    const result = try vm_helpers.parseStmtAndRunWithTopLevelChildren(rt, ctx,
+        \\function mk() { return function inner() { return G; }; }
+        \\const G = 42;
+        \\mk()();
+    );
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
+}
+
+test "forward-ref lexical captured through nested closure still honors TDZ before init" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // The retrofitted chain must capture the binding's cell (not a snapshot):
+    // calling the closure before `const G` is initialized throws ReferenceError
+    // (TDZ), and the same closure reads 42 once initialized. Result encodes
+    // 2 = ReferenceError thrown pre-init.
+    const result = try vm_helpers.parseStmtAndRunWithTopLevelChildren(rt, ctx,
+        \\function mk() { return function inner() { return G; }; }
+        \\const early = mk();
+        \\let code = 0;
+        \\try { early(); code = 1; } catch (e) { code = (e instanceof ReferenceError) ? 2 : 3; }
+        \\const G = 42;
+        \\code;
+    );
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 2), result.asInt32().?);
+}
+
+test "forward-ref top-level lexical threads through three closure levels" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // Two intermediate functions, neither naming G, must each receive a
+    // propagated closure-var link so the innermost arrow resolves G.
+    const result = try vm_helpers.parseStmtAndRunWithTopLevelChildren(rt, ctx,
+        \\function a() { return function b() { return () => G; }; }
+        \\const G = 7;
+        \\a()()();
+    );
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 7), result.asInt32().?);
+}
+
 test "test262 helpers own SameValue assertions" {
     const run_test262 = @import("../cli/run_test262.zig");
     const same_nan = try run_test262.assertSameValue(core.JSValue.float64(std.math.nan(f64)), core.JSValue.float64(std.math.nan(f64)));
