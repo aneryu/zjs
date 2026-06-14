@@ -3,11 +3,21 @@ const bignum = @import("../libs/bignum.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 const builtin_dispatch = @import("../exec/builtin_dispatch.zig");
-const builtin_glue = @import("../exec/builtin_glue.zig");
 const exceptions = @import("../exec/exceptions.zig");
+const string_ops = @import("../exec/string_ops.zig");
 
 const HostError = exceptions.HostError;
 const InternalCall = core.host_function.InternalCall;
+
+/// Domain-local ids for the legacy `escape`/`unescape` globals (relocated to
+/// `core/uri.zig` so exec's string-name fallback can route their bodies
+/// through `callInternalRecord` without naming this builtin). The four
+/// `encodeURI`/`decodeURI` records use the `methodId` mode selector (1..4);
+/// these continue the same `.uri` id space. Reachable only through the record
+/// table (`bindUriNativeRecords` skips them, so the installed `escape`/
+/// `unescape` functions keep their existing dispatch).
+const escape_id = core.uri.escape_id;
+const unescape_id = core.uri.unescape_id;
 
 const AppendStringError = error{
     OutOfMemory,
@@ -16,63 +26,81 @@ const AppendStringError = error{
     NoSpaceLeft,
 };
 
-/// Declaration table: one entry per global URI builtin. `id` is the
-/// `methodId` value (encode/decode mode selector), reused as the dispatch
-/// `magic`. The record `call` fn mirrors the legacy
-/// `callUriNativeFunctionRecord` dispatch: realm callers take the VM string
-/// coercion path in `builtin_glue` (shared with the fast-call entry points),
-/// bare-runtime callers use the primitive-only `call` fallback below.
+/// Declaration table: one entry per global URI builtin plus the legacy
+/// `escape`/`unescape` globals. `id` is the `methodId` mode selector (1..4)
+/// for the URI functions and `escape_id`/`unescape_id` for the legacy pair,
+/// reused as the dispatch `magic`. The record `call` fn (`uriCall`) coerces
+/// the input through the VM Annex B ToString path when a realm global is
+/// present and falls back to the primitive-only bodies (`call`/`escape`/
+/// `unescape`) on bare runtimes.
 pub const internal_entries = [_]core.host_function.InternalEntry{
     uriEntry("encodeURI", 1),
     uriEntry("encodeURIComponent", 2),
     uriEntry("decodeURI", 3),
     uriEntry("decodeURIComponent", 4),
+    .{ .name = "escape", .length = 1, .id = escape_id, .magic = escape_id, .prepared_call_ok = true, .call = &uriCall },
+    .{ .name = "unescape", .length = 1, .id = unescape_id, .magic = unescape_id, .prepared_call_ok = true, .call = &uriCall },
 };
 
 fn uriEntry(comptime name: []const u8, comptime mode: u32) core.host_function.InternalEntry {
     return .{ .name = name, .length = 1, .id = mode, .magic = mode, .prepared_call_ok = true, .call = &uriCall };
 }
 
-/// Shared record handler for the four global URI functions. With a realm
-/// global the input is string-coerced through the VM (Annex B ToString);
-/// without one the primitive-only `call` path preserves the legacy host
-/// behavior on bare runtimes.
+/// Shared record handler for the global URI functions and the legacy
+/// `escape`/`unescape` pair. With a realm global the input is string-coerced
+/// through the VM (Annex B ToString); without one the primitive-only bodies
+/// preserve the legacy host behavior on bare runtimes. Both modes invoke the
+/// same method bodies (`call`/`escape`/`unescape`) below, so exec routes its
+/// direct call sites here through `callInternalRecord` instead of naming them.
 fn uriCall(host_call: InternalCall) HostError!core.JSValue {
     const ctx = host_call.ctx;
     const mode: u32 = host_call.magic;
+    const input = if (host_call.args.len >= 1) host_call.args[0] else core.JSValue.undefinedValue();
     if (host_call.global) |global| {
-        return builtin_glue.qjsUriCallForNativeRecord(
+        // Realm path: coerce the argument through the user-visible ToString
+        // (Annex B) before the body, except an already-string input which the
+        // body consumes directly (matching the retired exec coercion glue).
+        if (input.isString()) return uriBody(ctx.runtime, mode, input);
+        const string_value = try string_ops.toStringForAnnexB(
             ctx,
             host_call.output,
             global,
-            mode,
-            host_call.args,
+            input,
             builtin_dispatch.callerBytecode(host_call),
             builtin_dispatch.callerFrame(host_call),
-        ) catch |err| switch (err) {
-            error.TypeError, error.URIError => err,
-            else => err,
-        };
+        );
+        defer string_value.free(ctx.runtime);
+        return uriBody(ctx.runtime, mode, string_value);
     }
-    const input = if (host_call.args.len >= 1) host_call.args[0] else core.JSValue.undefinedValue();
-    return call(ctx.runtime, mode, input) catch |err| switch (err) {
+    // Bare-runtime primitive path.
+    return uriBody(ctx.runtime, mode, input);
+}
+
+/// Dispatch a `.uri` record id to its primitive method body.
+fn uriBody(rt: *core.JSRuntime, mode: u32, input: core.JSValue) HostError!core.JSValue {
+    return switch (mode) {
+        escape_id => escape(rt, input),
+        unescape_id => unescape(rt, input),
+        else => call(rt, mode, input),
+    } catch |err| switch (err) {
         error.TypeError, error.URIError => err,
         else => err,
     };
 }
 
-pub const FourByteEscapeUnits = struct {
-    high: u16,
-    low: u16,
-};
+// `FourByteEscapeUnits` + the single-four-byte-escape probe relocated to
+// engine core (`core/uri.zig`) in Phase 6b-3 STEP 5B so exec's
+// `decodeURI(...) === String.fromCharCode(...)` fusion can reach it without
+// naming this builtin; re-exported here for the decode bodies below.
+pub const FourByteEscapeUnits = core.uri.FourByteEscapeUnits;
+pub const decodeSingleFourByteEscapeUnits = core.uri.decodeSingleFourByteEscapeUnits;
+const decodeSingleFourByteEscapeUnitsFromAscii = core.uri.decodeSingleFourByteEscapeUnitsFromAscii;
+const fastHexPair = core.uri.fastHexPair;
 
-pub fn methodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "encodeURI")) return 1;
-    if (std.mem.eql(u8, name, "encodeURIComponent")) return 2;
-    if (std.mem.eql(u8, name, "decodeURI")) return 3;
-    if (std.mem.eql(u8, name, "decodeURIComponent")) return 4;
-    return null;
-}
+// `methodId` relocated to engine core
+// (`core/host_function.zig`, `builtin_method_id_lookup.uri`) in Phase 6b-3
+// STEP 2; re-exported here unchanged.
+pub const methodId = core.host_function.builtin_method_id_lookup.uri.methodId;
 
 /// QuickJS source map: global URI encode/decode functions in quickjs.c. This
 /// is the current narrow URI subset used by transitional `uri_call` bytecode.
@@ -182,70 +210,6 @@ fn decodeSingleFourByteEscape(rt: *core.JSRuntime, bytes: []const u8) !?core.JSV
     return cached.value().dup();
 }
 
-pub fn decodeSingleFourByteEscapeUnits(value: core.JSValue) !?FourByteEscapeUnits {
-    if (!value.isString()) return null;
-    const header = value.refHeader() orelse return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
-    const bytes = switch (string_value.resolveData()) {
-        .latin1 => |latin1| latin1,
-        .utf16 => return null,
-    };
-    return decodeSingleFourByteEscapeUnitsFromAscii(bytes);
-}
-
-fn decodeSingleFourByteEscapeUnitsFromAscii(bytes: []const u8) !?FourByteEscapeUnits {
-    if (bytes.len != 12) return null;
-
-    if (bytes[0] != '%' or bytes[3] != '%' or bytes[6] != '%' or bytes[9] != '%') return null;
-    const h01 = fastHexPair(bytes[1], bytes[2]) orelse return null;
-    const h23 = fastHexPair(bytes[4], bytes[5]) orelse return null;
-    const h45 = fastHexPair(bytes[7], bytes[8]) orelse return null;
-    const h67 = fastHexPair(bytes[10], bytes[11]) orelse return null;
-
-    const b0 = h01;
-    if (b0 < 0xf0) return null;
-    if (b0 > 0xf4) return error.URIError;
-    if ((h23 & 0xc0) != 0x80 or (h45 & 0xc0) != 0x80 or (h67 & 0xc0) != 0x80) {
-        return error.URIError;
-    }
-
-    const codepoint: u21 =
-        (@as(u21, b0 & 0x07) << 18) |
-        (@as(u21, h23 & 0x3f) << 12) |
-        (@as(u21, h45 & 0x3f) << 6) |
-        @as(u21, h67 & 0x3f);
-    if (codepoint < 0x10000 or codepoint > 0x10ffff) return error.URIError;
-
-    const pair = unicode.surrogatePairFromCodePoint(codepoint);
-    return .{ .high = pair.high, .low = pair.low };
-}
-
-fn fastHexPair(high: u8, low: u8) ?u8 {
-    return (fastHexValue(high) orelse return null) << 4 | (fastHexValue(low) orelse return null);
-}
-
-const fast_hex_table: [256]i8 = initFastHexTable();
-
-fn initFastHexTable() [256]i8 {
-    var table: [256]i8 = @splat(-1);
-    var digit: usize = 0;
-    while (digit < 10) : (digit += 1) {
-        table['0' + digit] = @intCast(digit);
-    }
-    var upper: usize = 0;
-    while (upper < 6) : (upper += 1) {
-        const value: i8 = @intCast(upper + 10);
-        table['A' + upper] = value;
-        table['a' + upper] = value;
-    }
-    return table;
-}
-
-fn fastHexValue(byte: u8) ?u8 {
-    const value = fast_hex_table[byte];
-    if (value < 0) return null;
-    return @intCast(value);
-}
 
 pub fn escape(rt: *core.JSRuntime, input: core.JSValue) !core.JSValue {
     var units = std.ArrayList(u16).empty;

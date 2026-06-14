@@ -27,18 +27,7 @@ pub const ConstructorMethod = core.host_function.builtin_method_ids.regexp.Const
 
 pub const PrototypeMethod = core.host_function.builtin_method_ids.regexp.PrototypeMethod;
 
-pub const AccessorMethod = enum(u32) {
-    source = 201,
-    flags = 202,
-    global = 203,
-    ignore_case = 204,
-    multiline = 205,
-    dot_all = 206,
-    unicode = 207,
-    sticky = 208,
-    has_indices = 209,
-    unicode_sets = 210,
-};
+pub const AccessorMethod = core.host_function.builtin_method_ids.regexp.AccessorMethod;
 
 pub const LegacyAccessorMethod = core.host_function.builtin_method_ids.regexp.LegacyAccessorMethod;
 
@@ -86,78 +75,15 @@ pub fn decodePrototypeMethodId(id: u32) ?u32 {
     };
 }
 
-pub fn accessorMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "source")) return @intFromEnum(AccessorMethod.source);
-    if (std.mem.eql(u8, name, "flags")) return @intFromEnum(AccessorMethod.flags);
-    if (std.mem.eql(u8, name, "global")) return @intFromEnum(AccessorMethod.global);
-    if (std.mem.eql(u8, name, "ignoreCase")) return @intFromEnum(AccessorMethod.ignore_case);
-    if (std.mem.eql(u8, name, "multiline")) return @intFromEnum(AccessorMethod.multiline);
-    if (std.mem.eql(u8, name, "dotAll")) return @intFromEnum(AccessorMethod.dot_all);
-    if (std.mem.eql(u8, name, "unicode")) return @intFromEnum(AccessorMethod.unicode);
-    if (std.mem.eql(u8, name, "sticky")) return @intFromEnum(AccessorMethod.sticky);
-    if (std.mem.eql(u8, name, "hasIndices")) return @intFromEnum(AccessorMethod.has_indices);
-    if (std.mem.eql(u8, name, "unicodeSets")) return @intFromEnum(AccessorMethod.unicode_sets);
-    return null;
-}
-
-pub fn accessorNameFromId(id: u32) ?[]const u8 {
-    return switch (id) {
-        @intFromEnum(AccessorMethod.source) => "source",
-        @intFromEnum(AccessorMethod.flags) => "flags",
-        @intFromEnum(AccessorMethod.global) => "global",
-        @intFromEnum(AccessorMethod.ignore_case) => "ignoreCase",
-        @intFromEnum(AccessorMethod.multiline) => "multiline",
-        @intFromEnum(AccessorMethod.dot_all) => "dotAll",
-        @intFromEnum(AccessorMethod.unicode) => "unicode",
-        @intFromEnum(AccessorMethod.sticky) => "sticky",
-        @intFromEnum(AccessorMethod.has_indices) => "hasIndices",
-        @intFromEnum(AccessorMethod.unicode_sets) => "unicodeSets",
-        else => null,
-    };
-}
-
-pub fn accessorNameFromGetterName(name: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, name, "get ")) return null;
-    const accessor_name = name["get ".len..];
-    const id = accessorMethodId(accessor_name) orelse return null;
-    return accessorNameFromId(id);
-}
-
-pub fn legacyAccessorMethodFromId(id: u32) ?LegacyAccessorMethod {
-    return switch (id) {
-        @intFromEnum(LegacyAccessorMethod.get_input) => .get_input,
-        @intFromEnum(LegacyAccessorMethod.set_input) => .set_input,
-        @intFromEnum(LegacyAccessorMethod.get_last_match) => .get_last_match,
-        @intFromEnum(LegacyAccessorMethod.get_last_paren) => .get_last_paren,
-        @intFromEnum(LegacyAccessorMethod.get_left_context) => .get_left_context,
-        @intFromEnum(LegacyAccessorMethod.get_right_context) => .get_right_context,
-        @intFromEnum(LegacyAccessorMethod.get_capture_1) => .get_capture_1,
-        @intFromEnum(LegacyAccessorMethod.get_capture_2) => .get_capture_2,
-        @intFromEnum(LegacyAccessorMethod.get_capture_3) => .get_capture_3,
-        @intFromEnum(LegacyAccessorMethod.get_capture_4) => .get_capture_4,
-        @intFromEnum(LegacyAccessorMethod.get_capture_5) => .get_capture_5,
-        @intFromEnum(LegacyAccessorMethod.get_capture_6) => .get_capture_6,
-        @intFromEnum(LegacyAccessorMethod.get_capture_7) => .get_capture_7,
-        @intFromEnum(LegacyAccessorMethod.get_capture_8) => .get_capture_8,
-        @intFromEnum(LegacyAccessorMethod.get_capture_9) => .get_capture_9,
-        else => null,
-    };
-}
-
-pub fn legacyCaptureIndex(method: LegacyAccessorMethod) ?usize {
-    return switch (method) {
-        .get_capture_1 => 0,
-        .get_capture_2 => 1,
-        .get_capture_3 => 2,
-        .get_capture_4 => 3,
-        .get_capture_5 => 4,
-        .get_capture_6 => 5,
-        .get_capture_7 => 6,
-        .get_capture_8 => 7,
-        .get_capture_9 => 8,
-        else => null,
-    };
-}
+// Pure accessor/legacy-accessor id<->name(/kind) mappers relocated to engine
+// core (`core/host_function.zig`, `builtin_method_id_lookup.regexp`) in Phase
+// 6b-3 STEP 5B so exec's RegExp accessor cascade dispatches by id without
+// naming this builtin; re-exported here for the install/dispatch side.
+pub const accessorMethodId = core.host_function.builtin_method_id_lookup.regexp.accessorMethodId;
+pub const accessorNameFromId = core.host_function.builtin_method_id_lookup.regexp.accessorNameFromId;
+pub const accessorNameFromGetterName = core.host_function.builtin_method_id_lookup.regexp.accessorNameFromGetterName;
+pub const legacyAccessorMethodFromId = core.host_function.builtin_method_id_lookup.regexp.legacyAccessorMethodFromId;
+pub const legacyCaptureIndex = core.host_function.builtin_method_id_lookup.regexp.legacyCaptureIndex;
 
 /// Declaration + dispatch table for the `.regexp` native-builtin domain
 /// (QuickJS js_regexp_funcs / js_regexp_proto_funcs analogue). One shared
@@ -186,6 +112,10 @@ pub const internal_entries = regexpEntries: {
     break :regexpEntries [_]Entry{
         // Constructor + static.
         regexpConstructorEntry("RegExp", 2, @intFromEnum(ConstructorMethod.construct)),
+        // Internal-only construct record for parser-prevalidated literals; not
+        // installed as a property (no constructor object names this id), only
+        // dispatched through the construct record table.
+        regexpConstructorEntry("RegExp", 2, @intFromEnum(ConstructorMethod.construct_prevalidated)),
         regexpEntry("escape", 1, @intFromEnum(StaticMethod.escape), false),
         // Prototype methods (the subset `prototypeMethodId` maps and
         // `decodePrototypeMethodId` decodes).
@@ -256,6 +186,19 @@ fn regexpCall(host_call: InternalCall) HostError!core.JSValue {
     const caller_function = builtin_dispatch.callerBytecode(host_call);
     const caller_frame = builtin_dispatch.callerFrame(host_call);
 
+    if (id == @intFromEnum(ConstructorMethod.construct_prevalidated)) {
+        // Parser-prevalidated RegExp literal fast path: `args` are the already
+        // validated source/flags string values, so construct the object without
+        // recompiling the pattern (the validation the parser performed must not
+        // be repeated on every literal evaluation). Reachable only through the
+        // construct record table from the VM literal fusion sites.
+        const rt = ctx.runtime;
+        const source = if (args.len >= 1) args[0] else try createStringValue(rt, "");
+        defer if (args.len < 1) source.free(rt);
+        const stored_flags = if (args.len >= 2) args[1] else try createStringValue(rt, "");
+        defer if (args.len < 2) stored_flags.free(rt);
+        return constructPrevalidatedLiteralWithValues(rt, source, stored_flags, host_call.new_target);
+    }
     if (id == @intFromEnum(ConstructorMethod.construct)) {
         // `new RegExp(pattern, flags)` arrives through the construct record
         // path with `flags.constructor` set and the resolved instance prototype
@@ -609,18 +552,6 @@ fn invalidUnicodeEscape(pattern: []const u8, index: *usize, in_class: bool) bool
     }
 }
 
-fn consumeUnicodePropertyEscape(pattern: []const u8, index: *usize) bool {
-    if (index.* + 3 >= pattern.len or pattern[index.* + 2] != '{') return true;
-    var scan = index.* + 3;
-    const name_start = scan;
-    while (scan < pattern.len and pattern[scan] != '}') : (scan += 1) {}
-    if (scan == name_start or scan >= pattern.len or pattern[scan] != '}') return true;
-    const name = pattern[name_start..scan];
-    if (!regexp_validate.isSupportedUnicodePropertyExpression(name)) return true;
-    index.* = scan + 1;
-    return false;
-}
-
 fn consumeNamedBackreference(pattern: []const u8, index: *usize, in_class: bool) bool {
     if (in_class or index.* + 2 >= pattern.len or pattern[index.* + 2] != '<') return true;
     var scan = index.* + 3;
@@ -957,73 +888,18 @@ fn trimLeadingZeroes(digits: []const u8) []const u8 {
     return digits[index..];
 }
 
-const ClassRangeAtomKind = enum { single, character_class };
-
-const ClassRangeAtom = struct {
-    kind: ClassRangeAtomKind,
-    value: u32 = 0,
-};
-
-pub fn classMatchesUtf16Unit(source: []const u8, unit: u16) bool {
-    if (source.len == 2 and source[0] == '\\') {
-        if (characterClassEscapeUnitMatches(source[1], unit)) |matched| return matched;
-    }
-    if (source.len < 2 or source[0] != '[' or source[source.len - 1] != ']') return false;
-
-    const class_end = source.len - 1;
-    var index: usize = 1;
-    var negated = false;
-    if (index < class_end and source[index] == '^') {
-        negated = true;
-        index += 1;
-    }
-
-    var matched = false;
-    var at_start = true;
-    while (index < class_end) {
-        if (source[index] == ']' and !at_start) break;
-
-        var atom_end = index;
-        const lhs = readClassRangeAtom(source, &atom_end) orelse {
-            index += 1;
-            at_start = false;
-            continue;
-        };
-        if (lhs.kind == .single and
-            atom_end < class_end and
-            source[atom_end] == '-' and
-            atom_end + 1 < class_end and
-            source[atom_end + 1] != ']')
-        {
-            var rhs_end = atom_end + 1;
-            if (readClassRangeAtom(source, &rhs_end)) |rhs| {
-                if (rhs.kind == .single) {
-                    const lower = @min(lhs.value, rhs.value);
-                    const upper = @max(lhs.value, rhs.value);
-                    if (@as(u32, unit) >= lower and @as(u32, unit) <= upper) matched = true;
-                    index = rhs_end;
-                    at_start = false;
-                    continue;
-                }
-            }
-        }
-
-        switch (lhs.kind) {
-            .single => {
-                if (lhs.value == unit) matched = true;
-            },
-            .character_class => {
-                if (characterClassEscapeUnitMatches(@intCast(lhs.value), unit)) |class_matched| {
-                    if (class_matched) matched = true;
-                }
-            },
-        }
-        index = atom_end;
-        at_start = false;
-    }
-
-    return if (negated) !matched else matched;
-}
+// Relocated to engine core (`core/regexp.zig`) in Phase 6b-3 STEP 2: the
+// character-class membership predicate and its class-range parsing primitives
+// are pure (std + core.unicode + libs/regexp_validate) and are consumed by the
+// VM string fast paths without importing builtins. Re-exported here so the
+// RegExp pattern validators below (hasDescendingCharacterClassRange /
+// scanClassForDescendingRange / hasUnicodeClassEscapeRange / invalidUnicodeEscape)
+// keep a single source of truth in core.
+pub const classMatchesUtf16Unit = core.regexp.classMatchesUtf16Unit;
+const ClassRangeAtom = core.regexp.ClassRangeAtom;
+const readClassRangeAtom = core.regexp.readClassRangeAtom;
+const isCharacterClassEscape = core.regexp.isCharacterClassEscape;
+const consumeUnicodePropertyEscape = core.regexp.consumeUnicodePropertyEscape;
 
 fn hasDescendingCharacterClassRange(pattern: []const u8) bool {
     var index: usize = 0;
@@ -1074,126 +950,6 @@ fn scanClassForDescendingRange(pattern: []const u8, index: *usize) bool {
     return false;
 }
 
-fn readClassRangeAtom(pattern: []const u8, index: *usize) ?ClassRangeAtom {
-    if (index.* >= pattern.len or pattern[index.*] == ']') return null;
-    if (pattern[index.*] != '\\') {
-        const len = std.unicode.utf8ByteSequenceLength(pattern[index.*]) catch 1;
-        if (len > 1 and index.* + len <= pattern.len) {
-            const cp = std.unicode.utf8Decode(pattern[index.* .. index.* + len]) catch pattern[index.*];
-            index.* += len;
-            return .{ .kind = .single, .value = cp };
-        }
-        const value = pattern[index.*];
-        index.* += 1;
-        return .{ .kind = .single, .value = value };
-    }
-
-    if (index.* + 1 >= pattern.len) return null;
-    const escaped = pattern[index.* + 1];
-    if (escaped == 'p' or escaped == 'P') {
-        var escaped_end = index.*;
-        if (consumeUnicodePropertyEscape(pattern, &escaped_end)) return null;
-        index.* = escaped_end;
-        return .{ .kind = .character_class };
-    }
-    if (isCharacterClassEscape(escaped)) {
-        index.* += 2;
-        return .{ .kind = .character_class, .value = escaped };
-    }
-
-    switch (escaped) {
-        'b' => {
-            index.* += 2;
-            return .{ .kind = .single, .value = 0x08 };
-        },
-        't' => {
-            index.* += 2;
-            return .{ .kind = .single, .value = 0x09 };
-        },
-        'n' => {
-            index.* += 2;
-            return .{ .kind = .single, .value = 0x0a };
-        },
-        'v' => {
-            index.* += 2;
-            return .{ .kind = .single, .value = 0x0b };
-        },
-        'f' => {
-            index.* += 2;
-            return .{ .kind = .single, .value = 0x0c };
-        },
-        'r' => {
-            index.* += 2;
-            return .{ .kind = .single, .value = 0x0d };
-        },
-        'x' => return readFixedHexClassRangeAtom(pattern, index, 2, 2),
-        'u' => return readUnicodeClassRangeAtom(pattern, index),
-        'c' => {
-            if (index.* + 2 < pattern.len) {
-                const value = pattern[index.* + 2] & 0x1f;
-                index.* += 3;
-                return .{ .kind = .single, .value = value };
-            }
-        },
-        '0'...'9' => {
-            var scan = index.* + 1;
-            var value: u32 = 0;
-            while (scan < pattern.len and unicode.isAsciiOctalDigitByte(pattern[scan])) : (scan += 1) {
-                value = value * 8 + (pattern[scan] - '0');
-            }
-            index.* = scan;
-            return .{ .kind = .single, .value = value };
-        },
-        else => {},
-    }
-
-    index.* += 2;
-    return .{ .kind = .single, .value = escaped };
-}
-
-fn readFixedHexClassRangeAtom(pattern: []const u8, index: *usize, prefix_len: usize, digit_count: usize) ?ClassRangeAtom {
-    var scan = index.* + prefix_len;
-    if (scan + digit_count > pattern.len) {
-        index.* += prefix_len;
-        return .{ .kind = .single, .value = pattern[index.* - 1] };
-    }
-    var value: u32 = 0;
-    var count: usize = 0;
-    while (count < digit_count) : (count += 1) {
-        const digit = unicode.asciiHexDigitValueByte(pattern[scan + count]) orelse {
-            index.* += prefix_len;
-            return .{ .kind = .single, .value = pattern[index.* - 1] };
-        };
-        value = value * 16 + digit;
-    }
-    scan += digit_count;
-    index.* = scan;
-    return .{ .kind = .single, .value = value };
-}
-
-fn readUnicodeClassRangeAtom(pattern: []const u8, index: *usize) ?ClassRangeAtom {
-    if (index.* + 2 < pattern.len and pattern[index.* + 2] == '{') {
-        var scan = index.* + 3;
-        var value: u32 = 0;
-        var saw_digit = false;
-        while (scan < pattern.len and pattern[scan] != '}') : (scan += 1) {
-            const digit = unicode.asciiHexDigitValueByte(pattern[scan]) orelse {
-                index.* += 2;
-                return .{ .kind = .single, .value = 'u' };
-            };
-            saw_digit = true;
-            value = value * 16 + digit;
-        }
-        if (saw_digit and scan < pattern.len and pattern[scan] == '}') {
-            index.* = scan + 1;
-            return .{ .kind = .single, .value = value };
-        }
-        index.* += 2;
-        return .{ .kind = .single, .value = 'u' };
-    }
-    return readFixedHexClassRangeAtom(pattern, index, 2, 4);
-}
-
 fn hasUnicodeClassEscapeRange(pattern: []const u8) bool {
     var index: usize = 0;
     var in_class = false;
@@ -1233,32 +989,6 @@ fn hasUnicodeClassEscapeRange(pattern: []const u8) bool {
         index += 1;
     }
     return false;
-}
-
-fn isCharacterClassEscape(byte: u8) bool {
-    return byte == 'd' or byte == 'D' or
-        byte == 's' or byte == 'S' or
-        byte == 'w' or byte == 'W';
-}
-
-fn characterClassEscapeUnitMatches(byte: u8, unit: u16) ?bool {
-    return switch (byte) {
-        'd' => isAsciiDigitUnit(unit),
-        'D' => !isAsciiDigitUnit(unit),
-        's' => unicode.isEcmaWhitespaceOrLineTerminatorUnit(unit),
-        'S' => !unicode.isEcmaWhitespaceOrLineTerminatorUnit(unit),
-        'w' => isAsciiWordUnit(unit),
-        'W' => !isAsciiWordUnit(unit),
-        else => null,
-    };
-}
-
-fn isAsciiDigitUnit(unit: u16) bool {
-    return unicode.isAsciiDigitUnit(unit);
-}
-
-fn isAsciiWordUnit(unit: u16) bool {
-    return unicode.isAsciiWordUnit(unit);
 }
 
 fn validateNamedGroupNames(pattern: []const u8, is_unicode: bool) bool {

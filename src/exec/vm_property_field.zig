@@ -3,7 +3,6 @@
 const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const frame_mod = @import("frame.zig");
@@ -502,10 +501,11 @@ fn tryFuseNumberStaticLiteralCallFromField2(
     if (native_ref.domain != .number) return false;
 
     const code = function.code;
-    const number_mod = builtins.number;
+    const number_static = method_ids.number.StaticMethod;
+    const number_parse = core.number;
     var call_end_pc: usize = undefined;
     const result_number = switch (native_ref.id) {
-        @intFromEnum(number_mod.StaticMethod.parse_int) => blk: {
+        @intFromEnum(number_static.parse_int) => blk: {
             if (pc + 5 > code.len or code[pc] != op.push_atom_value) return false;
             const string_atom = readInt(u32, code[pc + 1 ..][0..4]);
             var atom_buf: [10]u8 = undefined;
@@ -514,9 +514,9 @@ fn tryFuseNumberStaticLiteralCallFromField2(
             if (radix_operand.next_pc + 3 > code.len or code[radix_operand.next_pc] != op.call_method) return false;
             if (readInt(u16, code[radix_operand.next_pc + 1 ..][0..2]) != 2) return false;
             call_end_pc = radix_operand.next_pc + 3;
-            break :blk number_mod.parseIntLatin1Bytes(text, radix_operand.value);
+            break :blk number_parse.parseIntLatin1Bytes(text, radix_operand.value);
         },
-        @intFromEnum(number_mod.StaticMethod.parse_float) => blk: {
+        @intFromEnum(number_static.parse_float) => blk: {
             if (pc + 8 > code.len or code[pc] != op.push_atom_value) return false;
             const string_atom = readInt(u32, code[pc + 1 ..][0..4]);
             var atom_buf: [10]u8 = undefined;
@@ -525,7 +525,7 @@ fn tryFuseNumberStaticLiteralCallFromField2(
             if (code[call_pc] != op.call_method) return false;
             if (readInt(u16, code[call_pc + 1 ..][0..2]) != 1) return false;
             call_end_pc = call_pc + 3;
-            break :blk number_mod.parseFloatLatin1Bytes(text);
+            break :blk number_parse.parseFloatLatin1Bytes(text);
         },
         else => return false,
     };

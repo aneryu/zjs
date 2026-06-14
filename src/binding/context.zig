@@ -29,6 +29,14 @@ pub const JSContext = struct {
                 }
             }.cb;
         }
+        // The context-global materializer above bootstraps the standard globals
+        // through `rt.installStandardGlobals`; wire the builtins installer so
+        // exec never names the registry directly (Phase 6b-3 STEP 7B).
+        if (rt.install_standard_globals_cb == null) {
+            builtins.registry.registerStandardGlobalsDefault();
+            rt.install_standard_globals_cb = builtins.registry.installStandardGlobals;
+            rt.standard_global_own_property_capacity = builtins.registry.standardGlobalOwnPropertyCapacity();
+        }
         try ctx.core.init(rt, options);
         return ctx;
     }
@@ -40,6 +48,14 @@ pub const JSContext = struct {
                     return try exec.zjs_vm.contextGlobal(c);
                 }
             }.cb;
+        }
+        // The context-global materializer above bootstraps the standard globals
+        // through `rt.installStandardGlobals`; wire the builtins installer so
+        // exec never names the registry directly (Phase 6b-3 STEP 7B).
+        if (rt.install_standard_globals_cb == null) {
+            builtins.registry.registerStandardGlobalsDefault();
+            rt.install_standard_globals_cb = builtins.registry.installStandardGlobals;
+            rt.standard_global_own_property_capacity = builtins.registry.standardGlobalOwnPropertyCapacity();
         }
         try self.core.init(rt, options);
     }

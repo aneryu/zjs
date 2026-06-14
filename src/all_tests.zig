@@ -109,10 +109,6 @@ test {
     std.testing.refAllDecls(@import("tests/frontend.zig"));
     std.testing.refAllDecls(@import("tests/exec.zig"));
     std.testing.refAllDecls(@import("tests/builtins.zig"));
-    // json_ops carries GC-rooting safety tests reached only incidentally
-    // through the recursive decl walk; anchor it explicitly so removing
-    // unrelated callers cannot silently drop its coverage.
-    std.testing.refAllDecls(@import("exec/json_ops.zig"));
     std.testing.refAllDecls(runtime);
 
     // Relative imports for files that are not module roots

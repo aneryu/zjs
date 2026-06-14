@@ -1,11 +1,11 @@
 const bignum = @import("../libs/bignum.zig");
 const std = @import("std");
+const core = @import("../core/root.zig");
 
-pub fn staticUnsignedMode(name: []const u8) ?bool {
-    if (std.mem.eql(u8, name, "asIntN")) return false;
-    if (std.mem.eql(u8, name, "asUintN")) return true;
-    return null;
-}
+// `staticUnsignedMode` relocated to engine core
+// (`core/host_function.zig`, `builtin_method_id_lookup.bigint`) in Phase 6b-3
+// STEP 2; re-exported here unchanged.
+pub const staticUnsignedMode = core.host_function.builtin_method_id_lookup.bigint.staticUnsignedMode;
 
 pub fn add(a: bignum.BigInt, b: bignum.BigInt) !bignum.BigInt {
     return a.add(b);

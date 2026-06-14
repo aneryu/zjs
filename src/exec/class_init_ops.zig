@@ -1,6 +1,6 @@
 //! Class instance element initialization and super/arrow lexical-this helpers.
 
-const builtins = @import("../builtins/root.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
 const bytecode = @import("../bytecode/root.zig");
 const construct_mod = @import("construct.zig");
 const core = @import("../core/root.zig");
@@ -9,6 +9,14 @@ const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const std = @import("std");
 const value_ops = @import("value_ops.zig");
+
+// `class X extends Array` super-construction routes through the Array construct
+// record (Phase 6b-3 STEP 4); the constructor object carries no native id, so
+// the record is reached with this explicit ref.
+const array_construct_ref = core.function.NativeBuiltinRef{
+    .domain = .array,
+    .id = @intFromEnum(core.host_function.builtin_method_ids.array.ConstructorMethod.construct),
+};
 
 const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
@@ -125,9 +133,9 @@ pub fn constructBuiltinSuperConstructor(
         const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
         return instance.value();
     }
-    if (std.mem.eql(u8, name, "Array")) return builtins.array.constructConstructorWithPrototype(ctx.runtime, args, prototype) catch |err| switch (err) {
+    if (std.mem.eql(u8, name, "Array")) return builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, null, array_construct_ref, prototype, args, caller_function, caller_frame) catch |err| switch (err) {
         error.RangeError => return @as(?core.JSValue, try throwRangeErrorMessage(ctx, global, "invalid array length")),
-        else => err,
+        else => return err,
     };
     if (std.mem.eql(u8, name, "String")) return try qjsStringConstructWithPrototype(ctx, output, global, prototype, args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "Number")) {
@@ -161,7 +169,7 @@ pub fn constructBuiltinSuperConstructor(
     }
     if (std.mem.eql(u8, name, "DisposableStack")) return try qjsDisposableStackConstructWithPrototype(ctx, global, prototype);
     if (std.mem.eql(u8, name, "AsyncDisposableStack")) return try qjsAsyncDisposableStackConstructWithPrototype(ctx, global, prototype);
-    if (builtins.collection.constructorId(name)) |kind| return try constructCollectionWithPrototypeFromVm(ctx, output, global, kind, args, prototype);
+    if (core.host_function.builtin_method_id_lookup.collection.constructorId(name)) |kind| return try constructCollectionWithPrototypeFromVm(ctx, output, global, kind, args, prototype);
     if (std.mem.eql(u8, name, "DataView")) return try core.typed_array.dataViewConstruct(ctx.runtime, args, prototype);
     if (construct_mod.typedArrayElement(name)) |element| return try construct_mod.constructTypedArrayValue(ctx.runtime, prototype, element, args, global);
 

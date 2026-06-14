@@ -25,6 +25,36 @@ pub const default_gc_threshold = 256 * 1024;
 
 pub const InterruptHandler = *const fn (*JSRuntime, ?*anyopaque) bool;
 
+/// Installs the standard ECMAScript global object (every builtin constructor,
+/// prototype, namespace, and the `rt.internal_builtins` record table) onto a
+/// freshly-created global `Object`. The implementation lives in the builtins
+/// subsystem (`builtins/registry.zig`); core only holds the function pointer so
+/// the bootstrap install can be invoked without core or exec naming builtins.
+/// This is the engine bootstrap seam: exec's context/realm initialization calls
+/// the runtime's installer rather than importing the builtins registry.
+pub const StandardGlobalsInstaller = *const fn (rt: *JSRuntime, global: *Object) anyerror!void;
+
+/// Process-global default standard-globals installer, registered once by the
+/// builtins subsystem (`builtins.registry.registerStandardGlobalsDefault`). New
+/// runtimes copy this into their per-runtime `install_standard_globals_cb` at
+/// `init`, so a bare `core.JSRuntime.create` (e.g. in engine unit tests) still
+/// gets the installer wired without the creator naming builtins. Mirrors the
+/// `profile.setOpcodeNameProvider` process-global registration pattern.
+var default_standard_globals_installer: ?StandardGlobalsInstaller = null;
+var default_standard_global_own_property_capacity: usize = 0;
+
+/// Register (or clear, with `null`) the process-global standard-globals
+/// installer and the own-property capacity its global object reserves. Called by
+/// the builtins subsystem during engine setup; idempotent and safe to call more
+/// than once with the same values.
+pub fn setDefaultStandardGlobalsInstaller(
+    installer: ?StandardGlobalsInstaller,
+    own_property_capacity: usize,
+) void {
+    default_standard_globals_installer = installer;
+    default_standard_global_own_property_capacity = own_property_capacity;
+}
+
 /// Contiguous VM value-stack arena mirroring QuickJS's `alloca`-based
 /// `JS_CallInternal` frame layout. Call frames carve LIFO windows for
 /// `[args | locals | operand stack]` instead of per-call heap allocations.
@@ -568,6 +598,14 @@ pub const JSRuntime = struct {
     modules: module.Registry,
     materialize_builtin_namespace_cb: ?*const fn (rt: *JSRuntime, global: *Object, kind: property.AutoInitKind) anyerror!?JSValue = null,
     materialize_context_global_cb: ?*const fn (ctx: *context_mod.JSContext) anyerror!*Object = null,
+    /// Bootstrap install seam: builds the standard global object. Seeded from the
+    /// process-global default at `init`; the builtins subsystem registers that
+    /// default (`builtins.registry.registerStandardGlobalsDefault`). Exec invokes
+    /// this through `installStandardGlobals` instead of importing builtins.
+    install_standard_globals_cb: ?StandardGlobalsInstaller = null,
+    /// Own-property count to reserve on a global object before running
+    /// `install_standard_globals_cb`. Seeded alongside the installer at `init`.
+    standard_global_own_property_capacity: usize = 0,
 
     borrowed_reference_holders: []*Object = &.{},
     borrowed_reference_holders_capacity: usize = 0,
@@ -737,6 +775,8 @@ pub const JSRuntime = struct {
         rt.modules = module.Registry.init(&rt.memory, &rt.atoms);
         rt.materialize_builtin_namespace_cb = null;
         rt.materialize_context_global_cb = null;
+        rt.install_standard_globals_cb = default_standard_globals_installer;
+        rt.standard_global_own_property_capacity = default_standard_global_own_property_capacity;
         rt.borrowed_reference_holders = &.{};
         rt.borrowed_reference_holders_capacity = 0;
         rt.root_providers_inline = undefined;
@@ -2029,6 +2069,29 @@ pub const JSRuntime = struct {
     pub fn setInterruptHandler(self: *JSRuntime, handler: ?*const fn (*JSRuntime, ?*anyopaque) bool, context: ?*anyopaque) void {
         self.interrupt_handler = handler;
         self.interrupt_context = context;
+    }
+
+    /// Reserve count for a global object's own-property table prior to running
+    /// the standard-globals installer. Returns the count registered with the
+    /// installer (0 if none is wired, in which case `installStandardGlobals`
+    /// will fail).
+    pub fn standardGlobalOwnPropertyCapacity(self: *const JSRuntime) usize {
+        return self.standard_global_own_property_capacity;
+    }
+
+    /// Bootstrap the standard ECMAScript global object onto `global` via the
+    /// registered installer. Fails with `error.InvalidBuiltinRegistry` if the
+    /// builtins subsystem never registered one (the installer also wires
+    /// `internal_builtins` and `materialize_builtin_namespace_cb`).
+    ///
+    /// The installer callback is typed `anyerror` so core need not name the
+    /// builtins error set, but the install only ever produces engine errors;
+    /// narrow the result back to the engine-wide `DynamicImportError` set so the
+    /// bounded-error callers of `installHostGlobals`/`contextGlobal` (notably the
+    /// `DynamicImportCallback` host hook) keep a concrete error set.
+    pub fn installStandardGlobals(self: *JSRuntime, global: *Object) context_mod.DynamicImportError!void {
+        const installer = self.install_standard_globals_cb orelse return error.InvalidBuiltinRegistry;
+        installer(self, global) catch |err| return @errorCast(err);
     }
 
     pub fn hasInterruptHandler(self: JSRuntime) bool {

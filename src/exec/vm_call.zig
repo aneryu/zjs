@@ -2,7 +2,6 @@ const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const frame_mod = @import("frame.zig");
@@ -993,12 +992,15 @@ fn callPreparedNativeTarget(
             },
             else => {},
         },
-        // Collection keeps its dedicated branch: the prepared path has
-        // dropped-result (`methodCallDroppedResult`) and AutoInit owner-class
-        // semantics that the `.collection` record handler
-        // (`builtins.collection.collectionCall`, which also requires a function
-        // object) does not replicate, so it must not go through the table.
-        .collection => if (try callPreparedCollectionNativeTarget(ctx, global, receiver, target, args, caller_function, caller_frame)) |value| return value,
+        // Collection keeps a thin dedicated branch only for the AutoInit
+        // owner-class gate, which is keyed on the prepared `auto_init` record
+        // (not a materialized function object). Past that gate the prepared call
+        // routes through the same record table as every other domain: the
+        // collection record handler's func-object-free path replicates the
+        // dropped-result fast path (`callerResultIsDropped`) and the realm
+        // dispatch the retired `methodCallDroppedResult`/`methodCallObjectWithGlobal`
+        // pair performed, so exec carries no compile-time knowledge of the builtin.
+        .collection => if (try callPreparedCollectionNativeTarget(ctx, output, global, receiver, target, args, caller_function, caller_frame)) |value| return value,
         // Array now joins the uniform path: route the prepared (no-func-object)
         // call through the same builtins-owned record table the slow record
         // dispatch and the VM fast path use, so exec carries zero compile-time
@@ -1019,6 +1021,7 @@ fn callPreparedNativeTarget(
 
 fn callPreparedCollectionNativeTarget(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: core.JSValue,
     target: frame_mod.PreparedNativeCallTarget,
@@ -1031,17 +1034,13 @@ fn callPreparedCollectionNativeTarget(
     if (info.collection_method_owner_class != core.class.invalid_class_id and object.class_id != info.collection_method_owner_class) {
         return error.TypeError;
     }
-    if (preparedCallResultIsDropped(caller_function, caller_frame)) {
-        const handled = try builtins.collection.methodCallDroppedResult(ctx.runtime, object, target.native_ref.id, args);
-        if (handled) return core.JSValue.undefinedValue();
-    }
-    return try builtins.collection.methodCallObjectWithGlobal(ctx, global, object, target.native_ref.id, args, &.{});
-}
-
-fn preparedCallResultIsDropped(caller_function: ?*const bytecode.Bytecode, caller_frame: ?*frame_mod.Frame) bool {
-    const function = caller_function orelse return false;
-    const frame = caller_frame orelse return false;
-    return frame.pc < function.code.len and function.code[frame.pc] == op.drop;
+    // Owner class validated from the prepared record; dispatch the body through
+    // the collection record table. With no function object and the realm
+    // `global`, the handler takes its func-object-free path: it honors the
+    // dropped-result fast path (the retired `methodCallDroppedResult`) and
+    // otherwise runs `methodCallObjectWithGlobal(ctx, global, object, id, args,
+    // &.{})`, exactly as this branch did when it named the builtin directly.
+    return (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, null, receiver, target.native_ref, args, caller_function, caller_frame)) orelse error.TypeError;
 }
 
 fn objectFromValue(value: core.JSValue) ?*core.Object {

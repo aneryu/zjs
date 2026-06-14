@@ -3,7 +3,7 @@
 const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const frame_mod = @import("frame.zig");
@@ -11,6 +11,15 @@ const arith_vm = @import("vm_arith.zig");
 const property_ic = @import("property_ic.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
+
+// Parser-prevalidated RegExp literal construct record: the test-fusion fast
+// path constructs its RegExp through the record table (Phase 6b-3 STEP 4)
+// rather than naming `builtins.regexp` directly. The prevalidated construct
+// branch skips recompilation and reads only `args`/`new_target`.
+const regexp_construct_prevalidated_ref = core.function.NativeBuiltinRef{
+    .domain = .regexp,
+    .id = @intFromEnum(method_ids.regexp.ConstructorMethod.construct_prevalidated),
+};
 
 const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
@@ -1313,7 +1322,8 @@ fn tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(
     defer flags_value.free(ctx.runtime);
     const input_value = (try stringLiteralRefValueForFastPath(ctx.runtime, input_ref)) orelse return false;
     defer input_value.free(ctx.runtime);
-    const regexp_value = try builtins.regexp.constructPrevalidatedLiteralWithValues(ctx.runtime, source_value, flags_value, regexp_proto);
+    const regexp_args = [_]core.JSValue{ source_value, flags_value };
+    const regexp_value = (try builtin_dispatch.callConstructRecord(ctx, null, null, &.{}, null, regexp_construct_prevalidated_ref, regexp_proto, &regexp_args, null, null)) orelse return false;
     defer regexp_value.free(ctx.runtime);
     const regexp_object = objectFromValue(regexp_value) orelse return false;
     const matched = try regexp_fastpath.qjsRegExpTestFastNoResult(ctx, regexp_object, input_value) orelse return false;
@@ -2313,7 +2323,7 @@ fn tryFuseCheckedLocalMapSetLatin1PrefixInt32Range(
     const goto_target_i64 = @as(i64, @intCast(goto_operand_pc)) + @as(i64, goto_diff);
     if (goto_target_i64 < 0 or @as(usize, @intCast(goto_target_i64)) != condition_pc) return false;
 
-    try builtins.collection.mapSetLatin1PrefixInt32Range(ctx.runtime, map_object, key.prefix, current_i, limit);
+    try core.collection.mapSetLatin1PrefixInt32Range(ctx.runtime, map_object, key.prefix, current_i, limit);
     try storeLocalCompletionBorrowedValue(ctx, function, global, frame, completion_tail.completion_put, receiver, sync_global_lexical_locals);
     try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
@@ -2384,7 +2394,7 @@ fn tryFuseCheckedLocalMapGetLatin1PrefixInt32SumRange(
     var total = @as(i64, (bindingReadableBorrowed(frame, accumulator_get) orelse return false).asInt32() orelse return false);
     var index = current_i;
     while (index < limit) : (index += 1) {
-        const value = builtins.collection.mapGetLatin1PrefixIntValue(map_object, key.prefix, index) orelse return false;
+        const value = core.collection.mapGetLatin1PrefixIntValue(map_object, key.prefix, index) orelse return false;
         defer value.free(ctx.runtime);
         const int_value = value.asInt32() orelse return false;
         total += int_value;

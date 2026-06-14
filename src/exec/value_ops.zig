@@ -3,7 +3,6 @@ const core = @import("../core/root.zig");
 const dtoa = @import("../libs/dtoa.zig");
 const bignum = @import("../libs/bignum.zig");
 const unicode_lib = @import("../libs/unicode.zig");
-const symbol_builtin = @import("../builtins/symbol.zig");
 const std = @import("std");
 
 pub const AppendStringError = error{
@@ -636,7 +635,7 @@ pub fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: c
 
 pub fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
     if (value.asSymbolAtom()) |atom_id| {
-        const description = symbol_builtin.description(&rt.atoms, atom_id) orelse "";
+        const description = core.symbol.description(&rt.atoms, atom_id) orelse "";
         try buffer.appendSlice(rt.memory.allocator, "Symbol(");
         try buffer.appendSlice(rt.memory.allocator, description);
         try buffer.append(rt.memory.allocator, ')');

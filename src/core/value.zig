@@ -419,6 +419,29 @@ pub const JSValue = extern struct {
         }
         return self.same(other);
     }
+
+    /// SameValueZero (ECMA-262): like SameValue but treats `+0` and `-0` as
+    /// equal. Used by `Array.prototype.includes`, the Map/Set key comparison,
+    /// and `Object.is`-adjacent collection lookups. Pure: no allocation, no VM
+    /// state.
+    pub fn sameValueZero(self: JSValue, other: JSValue) bool {
+        if (numberValue(self)) |lhs| {
+            if (numberValue(other)) |rhs| {
+                if (std.math.isNan(lhs) and std.math.isNan(rhs)) return true;
+                return lhs == rhs;
+            }
+        }
+        if (self.asBool()) |lhs| {
+            if (other.asBool()) |rhs| return lhs == rhs;
+        }
+        if (self.isNull() or self.isUndefined()) return self.same(other);
+        if (self.isBigInt() and other.isBigInt()) return self.sameValue(other);
+        if (self.isString() and other.isString()) {
+            if (self.same(other)) return true;
+            return (compareStringValues(self, other) orelse 1) == 0;
+        }
+        return self.same(other);
+    }
 };
 
 fn numberValue(value: JSValue) ?f64 {

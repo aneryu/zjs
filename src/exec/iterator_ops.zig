@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const exceptions = @import("exceptions.zig");
@@ -58,7 +57,7 @@ pub fn forOfStart(
     var owns_iterator_value = false;
     const iterable_object = property_ops.expectObject(iterable) catch null;
     if (iterable.isString()) {
-        const iterator = try builtins.string.iterator(ctx.runtime, iterable);
+        const iterator = try core.object.stringIterator(ctx.runtime, iterable);
         var iterator_owned = true;
         errdefer if (iterator_owned) iterator.free(ctx.runtime);
         if (is_async) {
@@ -75,7 +74,7 @@ pub fn forOfStart(
             owns_iterator_value = true;
         }
     } else if (iterable_object != null and iterable_object.?.class_id == core.class.ids.string) {
-        const iterator = try builtins.string.iterator(ctx.runtime, iterable);
+        const iterator = try core.object.stringIterator(ctx.runtime, iterable);
         var iterator_owned = true;
         errdefer if (iterator_owned) iterator.free(ctx.runtime);
         if (is_async) {

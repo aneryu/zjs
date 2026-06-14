@@ -103,9 +103,10 @@ pub const primitive_symbol_ctor_call_id: u32 = 43;
 pub const primitive_symbol_description_get_id: u32 = 44;
 pub const primitive_symbol_to_primitive_id: u32 = 45;
 
-// QuickJS CLI exposes navigator.userAgent as "quickjs-ng/<JS_GetVersion()>".
-// Keep this tied to the QuickJS reference version used by the local fixtures.
-pub const navigator_user_agent = "quickjs-ng/0.14.0";
+// `navigator_user_agent` relocated to engine core (`core/function.zig`, beside
+// the `navigator_user_agent_get` host getter id) in Phase 6b-3 STEP 2;
+// re-exported here unchanged.
+pub const navigator_user_agent = core.function.navigator_user_agent;
 
 const shared_lazy_parse_int_slot: u8 = 1;
 const shared_lazy_parse_float_slot: u8 = 2;
@@ -724,7 +725,22 @@ fn materializeBuiltinNamespace(rt: *core.JSRuntime, global: *core.Object, kind: 
     return try materializeBuiltinNamespaceAutoInit(rt, global, kind);
 }
 
+/// Register this subsystem's standard-globals installer as the engine-wide
+/// default so `core.JSRuntime` (which must not name builtins) can bootstrap the
+/// global object through `rt.installStandardGlobals`. Idempotent; call during
+/// engine/runtime setup before the first global object is built. The exec layer
+/// drives the install via the runtime callback rather than importing this
+/// registry directly (Phase 6b-3 STEP 7B: the last exec->builtins holdout).
+pub fn registerStandardGlobalsDefault() void {
+    core.runtime.setDefaultStandardGlobalsInstaller(installStandardGlobals, standardGlobalOwnPropertyCapacity());
+}
+
 pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
+    // Keep the per-runtime + process-global installer hooks live for any later
+    // runtime/realm built off this one, even when bootstrap reached us directly.
+    registerStandardGlobalsDefault();
+    rt.install_standard_globals_cb = installStandardGlobals;
+    rt.standard_global_own_property_capacity = standardGlobalOwnPropertyCapacity();
     rt.materialize_builtin_namespace_cb = materializeBuiltinNamespace;
     rt.internal_builtins = &internal_table.table;
     try global.reserveOwnPropertyCapacityAssumingPlain(rt, standardGlobalOwnPropertyCapacity());
@@ -1120,6 +1136,10 @@ fn bindObjectPrototypeNativeRecords(rt: *core.JSRuntime, ctor: *core.Object) !vo
 
 fn bindUriNativeRecords(rt: *core.JSRuntime, global: *core.Object) !void {
     for (uri_builtin.internal_entries) |entry| {
+        // The legacy `escape`/`unescape` records are reachable only through the
+        // table (exec routes their bodies via `callInternalRecord`); leave the
+        // installed globals on their existing dispatch by skipping the bind.
+        if (std.mem.eql(u8, entry.name, "escape") or std.mem.eql(u8, entry.name, "unescape")) continue;
         try bindNativeRecordByName(rt, global, entry.name, .uri, entry.id);
     }
 }

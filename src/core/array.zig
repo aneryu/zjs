@@ -1,4 +1,9 @@
 const atom = @import("atom.zig");
+const JSValue = @import("value.zig").JSValue;
+const Object = @import("object.zig").Object;
+const JSRuntime = @import("runtime.zig").JSRuntime;
+const runtime = @import("runtime.zig");
+const Descriptor = @import("descriptor.zig").Descriptor;
 
 pub const max_array_index: u32 = 0xffff_fffe;
 pub const max_array_length: u32 = 0xffff_ffff;
@@ -39,6 +44,116 @@ pub fn canonicalNumericIndex(bytes: []const u8) ?f64 {
         if (std.mem.eql(u8, printed, bytes)) return value;
     } else |_| {}
     return null;
+}
+
+fn objectFromValue(value: JSValue) ?*Object {
+    const header = value.refHeader() orelse return null;
+    if (!value.isObject()) return null;
+    return @fieldParentPtr("header", header);
+}
+
+fn expectObject(value: JSValue) !*Object {
+    const header = value.refHeader() orelse return error.TypeError;
+    if (!value.isObject()) return error.TypeError;
+    return @fieldParentPtr("header", header);
+}
+
+/// Proxy-aware `Array.isArray` predicate. Pure: walks the proxy target chain
+/// via the object's `is_proxy`/`is_array` flags with no VM state. Relocated to
+/// engine core in Phase 6b-3 STEP 2; `builtins/array.zig` re-exports it.
+pub fn isArrayValue(value: JSValue) !bool {
+    const object = objectFromValue(value) orelse return false;
+    if (object.flags.is_proxy) {
+        if (object.proxyHandler() == null) return error.TypeError;
+        const target = object.proxyTarget() orelse return error.TypeError;
+        return isArrayValue(target);
+    }
+    return object.flags.is_array;
+}
+
+/// Coerce a value to an array `*Object` or fail with TypeError. Pure object
+/// predicate (object shape + `is_array` flag); relocated to engine core in
+/// Phase 6b-3 STEP 2 and re-exported from `builtins/array.zig`.
+pub fn expectArray(value: JSValue) !*Object {
+    const object = try expectObject(value);
+    if (!object.flags.is_array) return error.TypeError;
+    return object;
+}
+
+const RootedValueCopies = struct {
+    values: []JSValue,
+    roots: []runtime.ValueRootValue,
+
+    fn init(rt: *JSRuntime, source: []const JSValue) !RootedValueCopies {
+        const values = try rt.memory.alloc(JSValue, source.len);
+        errdefer rt.memory.free(JSValue, values);
+        @memcpy(values, source);
+
+        const roots = try rt.memory.alloc(runtime.ValueRootValue, source.len);
+        errdefer rt.memory.free(runtime.ValueRootValue, roots);
+        for (values, 0..) |*value, index| {
+            roots[index] = .{ .value = value };
+        }
+
+        return .{ .values = values, .roots = roots };
+    }
+
+    fn deinit(self: RootedValueCopies, rt: *JSRuntime) void {
+        rt.memory.free(runtime.ValueRootValue, self.roots);
+        rt.memory.free(JSValue, self.values);
+    }
+};
+
+fn valuesRequireNoRoots(values: []const JSValue) bool {
+    for (values) |value| {
+        if (value.requiresRefCount()) return false;
+    }
+    return true;
+}
+
+/// Construct a dense array from already-evaluated literal element `values` for
+/// the `array_from`/array-literal opcode. Pure (only core `Object` array
+/// primitives + descriptor ops), so it lives in engine core; `src/exec/vm_literal.zig`
+/// calls it directly without naming `builtins`. Unlike the Array *constructor*
+/// (`constructConstructorWithPrototype`) this never applies the single-number
+/// length semantics — a one-element `[n]` literal yields `[n]`, not a length-n
+/// hole array — so it is intentionally not routed through the Array construct
+/// record.
+pub fn constructLiteralWithPrototype(rt: *JSRuntime, values: []const JSValue, prototype: ?*Object) !JSValue {
+    if (valuesRequireNoRoots(values)) {
+        const object = try Object.createArray(rt, prototype);
+        var object_owned = true;
+        errdefer if (object_owned) Object.destroyFromHeader(rt, &object.header);
+
+        if (try object.initDenseArrayLiteralValuesAssumingEmpty(rt, values)) {
+            object_owned = false;
+            return object.value();
+        }
+        Object.destroyFromHeader(rt, &object.header);
+        object_owned = false;
+    }
+
+    const rooted = try RootedValueCopies.init(rt, values);
+    defer rooted.deinit(rt);
+    const root_frame = runtime.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = rooted.roots,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
+
+    const object = try Object.createArray(rt, prototype);
+    errdefer Object.destroyFromHeader(rt, &object.header);
+
+    if (try object.initDenseArrayLiteralValuesAssumingEmpty(rt, rooted.values)) return object.value();
+
+    try object.reserveDenseArrayElements(rt, @intCast(rooted.values.len));
+    for (rooted.values, 0..) |value, index| {
+        const atom_id = atom.atomFromUInt32(@intCast(index));
+        if (try object.appendDenseArrayLiteralIndex(rt, @intCast(index), value)) continue;
+        try object.defineOwnProperty(rt, atom_id, Descriptor.data(value, true, true, true));
+    }
+    return object.value();
 }
 
 const std = @import("std");

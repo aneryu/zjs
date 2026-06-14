@@ -2,7 +2,7 @@ const std = @import("std");
 
 const regexp_unicode = @import("../libs/regexp_unicode.zig");
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const string_id_lookup = core.host_function.builtin_method_id_lookup.string;
@@ -441,6 +441,20 @@ pub fn qjsStringFunctionCall(
     return toStringForAnnexB(ctx, output, global, args[0], caller_function, caller_frame);
 }
 
+// Construct records the string ops route through (Phase 6b-3 STEP 4) instead
+// of naming `builtins.{string,regexp}.constructWithPrototype` directly: the
+// observable coercion stays here and the coerced primitives + resolved
+// prototype are threaded to the record. Both construct branches read only
+// `args`/`new_target`, so no constructor function object is threaded.
+const string_construct_ref = core.function.NativeBuiltinRef{
+    .domain = .string,
+    .id = @intFromEnum(method_ids.string.ConstructorMethod.call),
+};
+const regexp_construct_ref = core.function.NativeBuiltinRef{
+    .domain = .regexp,
+    .id = @intFromEnum(method_ids.regexp.ConstructorMethod.construct),
+};
+
 pub fn qjsStringConstructWithPrototype(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -455,7 +469,7 @@ pub fn qjsStringConstructWithPrototype(
     else
         try toStringForAnnexB(ctx, output, global, args[0], caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
-    return builtins.string.constructWithPrototype(ctx.runtime, &.{string_value}, prototype);
+    return (try builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, null, string_construct_ref, prototype, &.{string_value}, caller_function, caller_frame)) orelse error.TypeError;
 }
 
 pub fn qjsStringConcat(
@@ -1082,7 +1096,7 @@ pub fn simpleAsciiLiteralClassPlusLiteralMatchBytes(pattern: SimpleAsciiLiteralC
 
         var class_end = start + pattern.prefix.len;
         const class_min_end = class_end + 1;
-        while (class_end < input.len and builtins.regexp.classMatchesUtf16Unit(pattern.class_source, input[class_end])) : (class_end += 1) {}
+        while (class_end < input.len and core.regexp.classMatchesUtf16Unit(pattern.class_source, input[class_end])) : (class_end += 1) {}
         if (class_end >= class_min_end) {
             if (pattern.suffix.len == 0) return true;
 
@@ -1234,7 +1248,8 @@ pub fn qjsStringMatchAll(
 
     const flags = try value_ops.createStringValue(ctx.runtime, "g");
     defer flags.free(ctx.runtime);
-    const matcher = try builtins.regexp.constructWithPrototype(ctx.runtime, regexp, flags, constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"));
+    const regexp_args = [_]core.JSValue{ regexp, flags };
+    const matcher = (try builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, null, regexp_construct_ref, constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"), &regexp_args, caller_function, caller_frame)) orelse return error.TypeError;
     defer matcher.free(ctx.runtime);
     const match_all = try getValueProperty(ctx, output, global, matcher, match_all_atom, caller_function, caller_frame);
     defer match_all.free(ctx.runtime);
@@ -2273,6 +2288,36 @@ pub fn unicodePropertyOnlyClassCodePointMatches(source: []const u8, code_point: 
     return false;
 }
 
+/// Route a reused String method *body* through the record table's
+/// func-object-free arm. `decoded_method_id` is the legacy selector the builtin
+/// string bodies switch on; it is re-encoded to its `PrototypeMethod` record id
+/// so the dispatch lands on `builtins/string.zig` `stringCall`, whose
+/// `func_obj == null` arm runs the pure `methodCall` (or, for `charAt`,
+/// `charAtValue`) body directly. `string_value` is the resolved receiver and
+/// `args` are already coerced. This replaces the former direct
+/// `builtins.string.methodCall`/`charAtValue` calls so exec carries no
+/// compile-time String body knowledge.
+pub fn callStringBody(
+    ctx: *core.JSContext,
+    string_value: core.JSValue,
+    decoded_method_id: u32,
+    args: []const core.JSValue,
+) !core.JSValue {
+    const native_ref = core.function.NativeBuiltinRef{ .domain = .string, .id = string_id_lookup.encodePrototypeMethodId(decoded_method_id) orelse return error.TypeError };
+    return (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, string_value, native_ref, args, null, null)) orelse error.TypeError;
+}
+
+/// Route `String.prototype.charAt` (decoded id 0, the `charAtValue` body)
+/// through the table. The receiver is `string_value` and the single index is
+/// forwarded as `args[0]`.
+pub fn callStringCharAtBody(
+    ctx: *core.JSContext,
+    string_value: core.JSValue,
+    index_value: core.JSValue,
+) !core.JSValue {
+    return callStringBody(ctx, string_value, 0, &.{index_value});
+}
+
 pub fn qjsStringTrim(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2284,7 +2329,7 @@ pub fn qjsStringTrim(
 ) !core.JSValue {
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
-    return builtins.string.methodCall(ctx.runtime, string_value, method_id, &.{});
+    return callStringBody(ctx, string_value, method_id, &.{});
 }
 
 pub fn qjsStringPrototypeMethod(
@@ -2316,37 +2361,36 @@ pub fn qjsStringPrototypeMethod(
     if (method_id == string_id_lookup.legacy_match_all_method_id) {
         return qjsStringMatchAll(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
-    // Pad / Html / Normalize / LocaleCompare / NumericArgs bodies were
-    // relocated to `builtins/string.zig` (Phase 6b-2). This dispatcher stays in
-    // exec because it is BOTH-reachable (the `call_runtime` host-call path also
-    // routes prototype methods through it), so it forwards the relocated ids
-    // into builtins. The RegExp-coupled bodies (search/match/split/replaceAll/
-    // matchAll and `qjsStringSearchPositionMethod`, which observes RegExp via
-    // `isRegExpForStringSearch`) and the BOTH bodies (concat) stay in exec.
+    // Pad / Html / Normalize / LocaleCompare / NumericArgs bodies live in this
+    // file (Phase 6b-3 STEP 3B moved them back from `builtins/string.zig`): they
+    // are exec-only, reachable solely through this dispatcher. The RegExp-coupled
+    // bodies (search/match/split/replaceAll/matchAll and
+    // `qjsStringSearchPositionMethod`, which observes RegExp via
+    // `isRegExpForStringSearch`) and the BOTH bodies (concat) also stay in exec.
     if (method_id == 34 or method_id == 35) {
-        return builtins.string.qjsStringPad(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
+        return qjsStringPad(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
     }
     if (method_id == 11 or method_id == 12 or method_id == 13 or method_id == 14 or method_id == 15 or
         method_id == 16 or method_id == 17 or method_id == 18 or method_id == 19 or method_id == 20 or
         method_id == 23 or method_id == 24 or method_id == 26)
     {
-        return builtins.string.qjsStringHtmlMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
+        return qjsStringHtmlMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
     }
     if (method_id == string_id_lookup.legacy_normalize_method_id) {
-        return builtins.string.qjsStringNormalize(ctx, output, global, this_value, args, caller_function, caller_frame);
+        return qjsStringNormalize(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
     if (method_id == 36) {
-        return builtins.string.qjsStringLocaleCompare(ctx, output, global, this_value, args, caller_function, caller_frame);
+        return qjsStringLocaleCompare(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
     if (method_id == 4 or method_id == 5 or method_id == 6 or method_id == 7 or method_id == 28) {
         return qjsStringSearchPositionMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
     }
     if (method_id == 0 or method_id == 1 or method_id == 25 or method_id == 29 or method_id == 30 or method_id == 31 or method_id == 32 or method_id == 33) {
-        return builtins.string.qjsStringNumericArgsMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
+        return qjsStringNumericArgsMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
     }
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
-    return builtins.string.methodCall(ctx.runtime, string_value, method_id, args) catch |err| switch (err) {
+    return callStringBody(ctx, string_value, method_id, args) catch |err| switch (err) {
         error.RangeError => return throwRangeErrorMessage(ctx, global, "invalid repeat count"),
         else => err,
     };
@@ -2408,7 +2452,7 @@ pub fn qjsStringSearchPositionMethod(
         count = 2;
     }
 
-    return builtins.string.methodCall(ctx.runtime, string_value, method_id, coerced[0..count]);
+    return callStringBody(ctx, string_value, method_id, coerced[0..count]);
 }
 
 pub fn isRegExpForStringSearch(
@@ -2783,7 +2827,7 @@ pub fn qjsStringSplitBuiltinArray(
     string_value: core.JSValue,
     args: []const core.JSValue,
 ) !core.JSValue {
-    const result = try builtins.string.methodCall(ctx.runtime, string_value, string_id_lookup.legacy_split_method_id, args);
+    const result = try callStringBody(ctx, string_value, string_id_lookup.legacy_split_method_id, args);
     errdefer result.free(ctx.runtime);
     if (objectFromValue(result)) |object| {
         if (object.flags.is_array and object.getPrototype() == null) {
@@ -3055,23 +3099,23 @@ pub fn findCharacterClassSourceMatch(value: core.JSValue, source: []const u8, st
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {
             if (sticky) {
-                if (start >= bytes.len or !builtins.regexp.classMatchesUtf16Unit(source, bytes[start])) return null;
+                if (start >= bytes.len or !core.regexp.classMatchesUtf16Unit(source, bytes[start])) return null;
                 return RegExpMatch{ .index = start, .len = 1 };
             }
             var index = start;
             while (index < bytes.len) : (index += 1) {
-                if (!builtins.regexp.classMatchesUtf16Unit(source, bytes[index])) continue;
+                if (!core.regexp.classMatchesUtf16Unit(source, bytes[index])) continue;
                 return RegExpMatch{ .index = index, .len = 1 };
             }
         },
         .utf16 => |units| {
             if (sticky) {
-                if (start >= units.len or !builtins.regexp.classMatchesUtf16Unit(source, units[start])) return null;
+                if (start >= units.len or !core.regexp.classMatchesUtf16Unit(source, units[start])) return null;
                 return RegExpMatch{ .index = start, .len = 1 };
             }
             var index = start;
             while (index < units.len) : (index += 1) {
-                if (!builtins.regexp.classMatchesUtf16Unit(source, units[index])) continue;
+                if (!core.regexp.classMatchesUtf16Unit(source, units[index])) continue;
                 return RegExpMatch{ .index = index, .len = 1 };
             }
         },
@@ -3254,7 +3298,7 @@ pub fn simpleCaptureSequenceAtomMatches(atom: SimpleCaptureSequenceAtom, unit: u
 
 pub fn simpleClassPredicateMatches(predicate: SimpleClassPredicate, source: []const u8, unit: u16) bool {
     return switch (predicate) {
-        .generic => builtins.regexp.classMatchesUtf16Unit(source, unit),
+        .generic => core.regexp.classMatchesUtf16Unit(source, unit),
         .ascii_digit, .ascii_decimal => isAsciiDigitUnit(unit),
         .ascii_not_digit => !isAsciiDigitUnit(unit),
         .ascii_word => isAsciiWordUnit(unit),
@@ -4228,7 +4272,7 @@ pub fn qjsArraySearchCall(
             };
             defer item.free(ctx.runtime);
             if (mode == .includes) {
-                if (builtins.collection.sameValueZero(item, search_value)) return core.JSValue.boolean(true);
+                if (item.sameValueZero(search_value)) return core.JSValue.boolean(true);
                 continue;
             }
             if (try valuesStrictEqual(ctx.runtime, item, search_value)) return lengthIndexValue(cursor);
@@ -4804,4 +4848,357 @@ pub fn isHighSurrogateUnit(unit: u16) bool {
 
 pub fn isLowSurrogateUnit(unit: u16) bool {
     return unicode_lib.isLowSurrogateUnit(unit);
+}
+
+// ---------------------------------------------------------------------------
+// Realm-aware String.prototype method bodies (pad / HTML wrappers / normalize /
+// localeCompare / numeric-arg methods). These are reachable ONLY through the
+// `qjsStringPrototypeMethod` dispatcher above (the `.string` builtin record
+// handler `stringCall` routes every prototype method to it), never from a
+// builtin dispatch table entry, so they are exec-only. They were briefly hosted
+// in `builtins/string.zig` (Phase 6b-2) and were moved back here in Phase 6b-3
+// STEP 3B to keep the dependency edge exec -> builtins out of these bodies. They
+// reuse the file-local rope/UTF helpers (`toStringForAnnexB`,
+// `appendStringValueUnits`, `appendUtf32FromStringValue`, `appendUtf16CodePoint`,
+// `appendAsciiUnits`) plus the shared `value_ops`/`coercion_ops`/`builtin_glue`
+// ops. The two leaf bodies they still defer to (the `charAtValue` and
+// `methodCall` method-impl bodies that stay in builtins) are reached through the
+// record table via `callStringBody`/`callStringCharAtBody` (Phase 6b-3 STEP 5),
+// so exec no longer names them directly.
+
+pub fn qjsStringPad(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    method_id: u32,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
+    defer string_value.free(ctx.runtime);
+
+    var source_units = std.ArrayList(u16).empty;
+    defer source_units.deinit(ctx.runtime.memory.allocator);
+    try appendStringValueUnits(ctx.runtime, &source_units, string_value);
+
+    const max_length_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const target_length = try coercion_ops.toLengthIndex(ctx, output, global, max_length_value);
+    if (target_length <= source_units.items.len) return string_value.dup();
+
+    const fill_value = if (args.len >= 2 and !args[1].isUndefined()) blk: {
+        break :blk try toStringForAnnexB(ctx, output, global, args[1], caller_function, caller_frame);
+    } else try value_ops.createStringValue(ctx.runtime, " ");
+    defer fill_value.free(ctx.runtime);
+
+    var fill_units = std.ArrayList(u16).empty;
+    defer fill_units.deinit(ctx.runtime.memory.allocator);
+    try appendStringValueUnits(ctx.runtime, &fill_units, fill_value);
+    if (fill_units.items.len == 0) return string_value.dup();
+
+    const fill_length = target_length - source_units.items.len;
+    var out = std.ArrayList(u16).empty;
+    defer out.deinit(ctx.runtime.memory.allocator);
+    if (method_id == 34) {
+        try appendRepeatedFillUnits(ctx.runtime, &out, fill_units.items, fill_length);
+        try out.appendSlice(ctx.runtime.memory.allocator, source_units.items);
+    } else {
+        try out.appendSlice(ctx.runtime.memory.allocator, source_units.items);
+        try appendRepeatedFillUnits(ctx.runtime, &out, fill_units.items, fill_length);
+    }
+    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
+}
+
+fn appendRepeatedFillUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), fill: []const u16, length: usize) !void {
+    var index: usize = 0;
+    while (index < length) : (index += 1) {
+        try out.append(rt.memory.allocator, fill[index % fill.len]);
+    }
+}
+
+pub fn qjsStringNormalize(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
+    defer string_value.free(ctx.runtime);
+
+    const form: unicode_lib.NormalizationForm = if (args.len == 0 or args[0].isUndefined()) .nfc else blk: {
+        const form_value = try toStringForAnnexB(ctx, output, global, args[0], caller_function, caller_frame);
+        defer form_value.free(ctx.runtime);
+        var form_bytes = std.ArrayList(u8).empty;
+        defer form_bytes.deinit(ctx.runtime.memory.allocator);
+        try value_ops.appendRawString(ctx.runtime, &form_bytes, form_value);
+        if (std.mem.eql(u8, form_bytes.items, "NFC")) break :blk unicode_lib.NormalizationForm.nfc;
+        if (std.mem.eql(u8, form_bytes.items, "NFD")) break :blk unicode_lib.NormalizationForm.nfd;
+        if (std.mem.eql(u8, form_bytes.items, "NFKC")) break :blk unicode_lib.NormalizationForm.nfkc;
+        if (std.mem.eql(u8, form_bytes.items, "NFKD")) break :blk unicode_lib.NormalizationForm.nfkd;
+        return error.RangeError;
+    };
+
+    var input = std.ArrayList(u32).empty;
+    defer input.deinit(ctx.runtime.memory.allocator);
+    try appendUtf32FromStringValue(ctx.runtime, &input, string_value);
+    const normalized_slice = try unicode_lib.normalizeAlloc(ctx.runtime.memory.allocator, input.items, form);
+    defer ctx.runtime.memory.allocator.free(normalized_slice);
+
+    var out = std.ArrayList(u16).empty;
+    defer out.deinit(ctx.runtime.memory.allocator);
+    for (normalized_slice) |code_point| try appendUtf16CodePoint(ctx.runtime, &out, code_point);
+    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
+}
+
+pub fn qjsStringLocaleCompare(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    const lhs = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
+    defer lhs.free(ctx.runtime);
+    const rhs_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const rhs = try toStringForAnnexB(ctx, output, global, rhs_input, caller_function, caller_frame);
+    defer rhs.free(ctx.runtime);
+
+    const lhs_nfc = try normalizedUtf32(ctx.runtime, lhs, .nfc);
+    defer lhs_nfc.deinit();
+    const rhs_nfc = try normalizedUtf32(ctx.runtime, rhs, .nfc);
+    defer rhs_nfc.deinit();
+
+    const result: i32 = switch (std.mem.order(u32, lhs_nfc.slice, rhs_nfc.slice)) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    };
+    return core.JSValue.int32(result);
+}
+
+const NormalizedUtf32 = struct {
+    allocator: std.mem.Allocator,
+    slice: []u32,
+
+    fn deinit(self: NormalizedUtf32) void {
+        self.allocator.free(self.slice);
+    }
+};
+
+fn normalizedUtf32(rt: *core.JSRuntime, value: core.JSValue, form: unicode_lib.NormalizationForm) !NormalizedUtf32 {
+    var input = std.ArrayList(u32).empty;
+    defer input.deinit(rt.memory.allocator);
+    try appendUtf32FromStringValue(rt, &input, value);
+    return .{
+        .allocator = rt.memory.allocator,
+        .slice = try unicode_lib.normalizeAlloc(rt.memory.allocator, input.items, form),
+    };
+}
+
+pub fn qjsStringNumericArgsMethod(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    method_id: u32,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    const string_value = if (this_value.isString())
+        this_value
+    else
+        try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
+    defer if (!this_value.isString()) string_value.free(ctx.runtime);
+
+    var coerced: [2]core.JSValue = .{ core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    const count = @min(args.len, coerced.len);
+    for (args[0..count], 0..) |arg, index| {
+        coerced[index] = if (arg.isUndefined())
+            core.JSValue.undefinedValue()
+        else if (arg.isNumber())
+            arg
+        else
+            try builtin_glue.toNumberLikeArgument(ctx, output, global, arg);
+    }
+
+    if (method_id == 1) {
+        if (try fastLatin1Substring(ctx.runtime, string_value, coerced[0..count])) |value| return value;
+    }
+    if (method_id == 0) {
+        const index = if (count >= 1) coerced[0] else core.JSValue.int32(0);
+        return callStringCharAtBody(ctx, string_value, index);
+    }
+    if (method_id == 25) {
+        return qjsStringSubstr(ctx, output, global, string_value, coerced[0..count]);
+    }
+    return callStringBody(ctx, string_value, method_id, coerced[0..count]) catch |err| switch (err) {
+        error.RangeError => return throwRangeErrorMessage(ctx, global, "invalid repeat count"),
+        else => err,
+    };
+}
+
+fn fastLatin1Substring(rt: *core.JSRuntime, string_value: core.JSValue, args: []const core.JSValue) !?core.JSValue {
+    if (!string_value.isString() or args.len > 2) return null;
+    const header = string_value.refHeader() orelse return null;
+    const string: *core.string.String = @fieldParentPtr("header", header);
+    try string.ensureFlat(rt);
+    const bytes = switch (string.resolveData()) {
+        .latin1 => |latin1| latin1,
+        .utf16 => return null,
+    };
+    const len: i64 = @intCast(string.len());
+    const start_raw = if (args.len >= 1) int32OrUndefinedStringIndex(args[0]) orelse return null else 0;
+    const end_raw = if (args.len >= 2 and !args[1].isUndefined()) int32OrUndefinedStringIndex(args[1]) orelse return null else len;
+    const start: usize = @intCast(@max(@as(i64, 0), @min(start_raw, len)));
+    const end: usize = @intCast(@max(@as(i64, 0), @min(end_raw, len)));
+    const lo = @min(start, end);
+    const hi = @max(start, end);
+    if (lo == hi) {
+        const empty = try rt.emptyString();
+        return empty.value().dup();
+    }
+    return (try core.string.String.createLatin1(rt, bytes[lo..hi])).value();
+}
+
+fn int32OrUndefinedStringIndex(value: core.JSValue) ?i64 {
+    if (value.isUndefined()) return null;
+    return if (value.asInt32()) |int_value| @as(i64, int_value) else null;
+}
+
+pub fn qjsStringSubstr(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    string_value: core.JSValue,
+    args: []const core.JSValue,
+) !core.JSValue {
+    var units = std.ArrayList(u16).empty;
+    defer units.deinit(ctx.runtime.memory.allocator);
+    try appendStringValueUnits(ctx.runtime, &units, string_value);
+
+    const size = units.items.len;
+    const start_number = if (args.len >= 1 and !args[0].isUndefined())
+        value_ops.numberValue(args[0]) orelse std.math.nan(f64)
+    else
+        0;
+    var start: usize = 0;
+    if (std.math.isNan(start_number) or start_number == 0) {
+        start = 0;
+    } else if (start_number < 0) {
+        const integer_start = @trunc(start_number);
+        if (integer_start == 0) {
+            start = 0;
+        } else if (std.math.isNegativeInf(integer_start)) {
+            start = 0;
+        } else {
+            const abs_start: usize = @intFromFloat(@min(@abs(integer_start), @as(f64, @floatFromInt(size))));
+            start = size - abs_start;
+        }
+    } else if (std.math.isPositiveInf(start_number)) {
+        start = size;
+    } else {
+        start = @min(@as(usize, @intFromFloat(@trunc(start_number))), size);
+    }
+
+    const max_len = size - start;
+    const requested_len = if (args.len >= 2 and !args[1].isUndefined()) blk: {
+        const length_number = value_ops.numberValue(args[1]) orelse std.math.nan(f64);
+        if (std.math.isNan(length_number) or length_number <= 0) break :blk @as(usize, 0);
+        if (std.math.isPositiveInf(length_number)) break :blk max_len;
+        break :blk @min(@as(usize, @intFromFloat(@trunc(length_number))), max_len);
+    } else max_len;
+
+    _ = output;
+    _ = global;
+    return (try core.string.String.createUtf16(ctx.runtime, units.items[start..][0..requested_len])).value();
+}
+
+pub fn qjsStringHtmlMethod(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    method_id: u32,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
+    var string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
+    defer string_value.free(ctx.runtime);
+
+    var string_units = std.ArrayList(u16).empty;
+    defer string_units.deinit(ctx.runtime.memory.allocator);
+    try appendStringValueUnits(ctx.runtime, &string_units, string_value);
+
+    switch (method_id) {
+        11 => return qjsStringCreateHtml(ctx, string_units.items, "a", "name", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
+        12 => return qjsStringCreateHtml(ctx, string_units.items, "big", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        13 => return qjsStringCreateHtml(ctx, string_units.items, "blink", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        14 => return qjsStringCreateHtml(ctx, string_units.items, "b", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        15 => return qjsStringCreateHtml(ctx, string_units.items, "tt", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        16 => return qjsStringCreateHtml(ctx, string_units.items, "font", "color", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
+        17 => return qjsStringCreateHtml(ctx, string_units.items, "font", "size", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
+        18 => return qjsStringCreateHtml(ctx, string_units.items, "i", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        19 => return qjsStringCreateHtml(ctx, string_units.items, "a", "href", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
+        20 => return qjsStringCreateHtml(ctx, string_units.items, "small", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        23 => return qjsStringCreateHtml(ctx, string_units.items, "strike", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        24 => return qjsStringCreateHtml(ctx, string_units.items, "sub", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        26 => return qjsStringCreateHtml(ctx, string_units.items, "sup", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        else => return error.TypeError,
+    }
+}
+
+fn qjsStringCreateHtml(
+    ctx: *core.JSContext,
+    string_units: []const u16,
+    tag: []const u8,
+    attr: []const u8,
+    attr_value: core.JSValue,
+    has_attr: bool,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    var out = std.ArrayList(u16).empty;
+    defer out.deinit(ctx.runtime.memory.allocator);
+    try appendAsciiUnits(ctx.runtime, &out, "<");
+    try appendAsciiUnits(ctx.runtime, &out, tag);
+    if (has_attr) {
+        const value = try toStringForAnnexB(ctx, output, global, attr_value, caller_function, caller_frame);
+        defer value.free(ctx.runtime);
+        var attr_units = std.ArrayList(u16).empty;
+        defer attr_units.deinit(ctx.runtime.memory.allocator);
+        try appendStringValueUnits(ctx.runtime, &attr_units, value);
+
+        try appendAsciiUnits(ctx.runtime, &out, " ");
+        try appendAsciiUnits(ctx.runtime, &out, attr);
+        try appendAsciiUnits(ctx.runtime, &out, "=\"");
+        for (attr_units.items) |unit| {
+            if (unit == '"') {
+                try appendAsciiUnits(ctx.runtime, &out, "&quot;");
+            } else {
+                try out.append(ctx.runtime.memory.allocator, unit);
+            }
+        }
+        try appendAsciiUnits(ctx.runtime, &out, "\"");
+    }
+    try appendAsciiUnits(ctx.runtime, &out, ">");
+    try out.appendSlice(ctx.runtime.memory.allocator, string_units);
+    try appendAsciiUnits(ctx.runtime, &out, "</");
+    try appendAsciiUnits(ctx.runtime, &out, tag);
+    try appendAsciiUnits(ctx.runtime, &out, ">");
+    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
 }

@@ -1,7 +1,6 @@
 //! Native-record glue for Math, Number/BigInt, parseInt/parseFloat, URI, JSON and Date builtins,
 //! plus collections (Map/Set), weak refs/FinalizationRegistry, Symbol registry and DataView.
 
-const builtins = @import("../builtins/root.zig");
 const call_mod = @import("call.zig");
 const bytecode = @import("../bytecode/root.zig");
 const collection_vm = @import("array_ops.zig");
@@ -10,7 +9,6 @@ const method_ids = core.host_function.builtin_method_ids;
 const buffer_id_lookup = core.host_function.builtin_method_id_lookup.buffer;
 const date_vm = @import("date_ops.zig");
 const frame_mod = @import("frame.zig");
-const json_vm = @import("json_ops.zig");
 const property_ops = @import("property_ops.zig");
 const std = @import("std");
 const value_ops = @import("value_ops.zig");
@@ -149,60 +147,6 @@ pub fn qjsGlobalIsNaNOrFinite(
     return core.JSValue.boolean(if (is_nan) std.math.isNan(number) else std.math.isFinite(number));
 }
 
-pub fn qjsUriCallForNativeRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    mode: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    if (input.isString()) {
-        return builtins.uri.call(ctx.runtime, mode, input) catch |err| switch (err) {
-            error.TypeError, error.URIError => err,
-            else => err,
-        };
-    }
-    const string_value = try toStringForAnnexB(ctx, output, global, input, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
-    return builtins.uri.call(ctx.runtime, mode, string_value) catch |err| switch (err) {
-        error.TypeError, error.URIError => err,
-        else => err,
-    };
-}
-
-pub fn qjsJsonCallForNativeRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    id: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    const json_mod = builtins.json;
-    return switch (id) {
-        @intFromEnum(json_mod.StaticMethod.is_raw_json) => core.JSValue.boolean(args.len >= 1 and json_mod.isRawJSON(args[0])),
-        @intFromEnum(json_mod.StaticMethod.raw_json) => {
-            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            return json_mod.rawJSON(ctx.runtime, value) catch |err| switch (err) {
-                error.SyntaxError, error.TypeError => err,
-                else => err,
-            };
-        },
-        @intFromEnum(json_mod.StaticMethod.parse) => {
-            if (try json_vm.qjsJsonParseCall(ctx, output, global, args, caller_function, caller_frame)) |value| return value;
-            return error.TypeError;
-        },
-        @intFromEnum(json_mod.StaticMethod.stringify) => {
-            if (try json_vm.qjsJsonStringifyCall(ctx, output, global, args, caller_function, caller_frame)) |value| return value;
-            return error.TypeError;
-        },
-        else => error.TypeError,
-    };
-}
 
 pub fn qjsDateToPrimitiveNativeRecord(
     ctx: *core.JSContext,
@@ -254,7 +198,7 @@ pub fn qjsGlobalParseInt(
         defer number_value.free(ctx.runtime);
         break :blk value_ops.numberToValue(value_ops.numberValue(number_value) orelse std.math.nan(f64));
     } else null;
-    return value_ops.numberToValue(try builtins.number.parseIntValue(ctx.runtime, string_value, radix_value));
+    return value_ops.numberToValue(try core.number.parseIntValue(ctx.runtime, string_value, radix_value));
 }
 
 pub fn qjsGlobalParseFloat(
@@ -271,7 +215,7 @@ pub fn qjsGlobalParseFloat(
     else
         try toStringForAnnexB(ctx, output, global, input, caller_function, caller_frame);
     defer if (!input.isString()) string_value.free(ctx.runtime);
-    return value_ops.numberToValue(try builtins.number.parseFloatValue(ctx.runtime, string_value));
+    return value_ops.numberToValue(try core.number.parseFloatValue(ctx.runtime, string_value));
 }
 
 /// `.array` domain VM-op dispatch glue. Mirrors the retired `call.zig`
@@ -303,7 +247,7 @@ pub fn qjsArrayNativeRecord(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     return switch (id) {
-        @intFromEnum(method_ids.array.StaticMethod.is_array) => core.JSValue.boolean(args.len >= 1 and try builtins.array.isArrayValue(args[0])),
+        @intFromEnum(method_ids.array.StaticMethod.is_array) => core.JSValue.boolean(args.len >= 1 and try core.array.isArrayValue(args[0])),
         @intFromEnum(method_ids.array.StaticMethod.from) => collection_vm.qjsArrayFromCall(ctx, output, global, this_value, (function_object orelse return error.TypeError).value(), args, caller_function, caller_frame),
         @intFromEnum(method_ids.array.StaticMethod.of) => collection_vm.qjsArrayOfCall(ctx, output, global, this_value, (function_object orelse return error.TypeError).value(), args, caller_function, caller_frame),
         else => collection_vm.qjsArrayPrototypeNativeRecord(ctx, output, global, this_value, function_object, id, args, caller_function, caller_frame),
@@ -508,7 +452,7 @@ pub fn qjsFinalizationRegistryAppendCell(
 pub fn qjsCanBeHeldWeakly(rt: *core.JSRuntime, value: core.JSValue) bool {
     if (value.isObject()) return true;
     if (value.asSymbolAtom()) |atom_id| {
-        return rt.atoms.kind(atom_id) == .symbol and builtins.symbol.registryKey(&rt.atoms, atom_id) == null;
+        return rt.atoms.kind(atom_id) == .symbol and core.symbol.registryKey(&rt.atoms, atom_id) == null;
     }
     return false;
 }
@@ -527,7 +471,7 @@ pub fn qjsSymbolFor(
         try ctx.runtime.memory.allocator.dupe(u8, "undefined");
     defer ctx.runtime.memory.allocator.free(key);
 
-    const registered = try std.fmt.allocPrint(ctx.runtime.memory.allocator, "{s}{s}", .{ builtins.symbol.registry_prefix, key });
+    const registered = try std.fmt.allocPrint(ctx.runtime.memory.allocator, "{s}{s}", .{ core.symbol.registry_prefix, key });
     defer ctx.runtime.memory.allocator.free(registered);
     const atom_id = try ctx.runtime.atoms.internRegisteredValueSymbol(registered);
     return core.JSValue.symbol(atom_id);
@@ -536,7 +480,7 @@ pub fn qjsSymbolFor(
 pub fn qjsSymbolKeyFor(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const atom_id = value.asSymbolAtom() orelse return error.TypeError;
-    const key = builtins.symbol.registryKey(&rt.atoms, atom_id) orelse return core.JSValue.undefinedValue();
+    const key = core.symbol.registryKey(&rt.atoms, atom_id) orelse return core.JSValue.undefinedValue();
     return value_ops.createStringValue(rt, key);
 }
 

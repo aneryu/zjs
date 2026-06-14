@@ -2,7 +2,7 @@ const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
 const dtoa = @import("../libs/dtoa.zig");
 const frame_mod = @import("frame.zig");
@@ -14,6 +14,15 @@ const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
 const op = bytecode.opcode.op;
+
+// `ToObject(string)` (the `with`-statement / Object coercion) builds its String
+// wrapper through the String construct record (Phase 6b-3 STEP 4) rather than
+// naming `builtins.string.constructWithPrototype`; the construct branch is pure
+// (reads only `args`/`new_target`).
+const string_construct_ref = core.function.NativeBuiltinRef{
+    .domain = .string,
+    .id = @intFromEnum(core.host_function.builtin_method_ids.string.ConstructorMethod.call),
+};
 
 pub const DropResult = union(enum) {
     value,
@@ -358,7 +367,7 @@ pub fn pushThisVm(
 pub fn toObject(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(ctx.runtime);
-    var object_value = try toObjectForWith(ctx.runtime, value);
+    var object_value = try toObjectForWith(ctx, value);
     errdefer object_value.free(ctx.runtime);
     const object = try property_ops.expectObject(object_value);
     object.flags.is_with_environment = true;
@@ -692,10 +701,11 @@ pub fn isNull(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     try stack.pushOwned(core.JSValue.boolean(value.isNull()));
 }
 
-pub fn toObjectForWith(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
+pub fn toObjectForWith(ctx: *core.JSContext, value: core.JSValue) !core.JSValue {
+    const rt = ctx.runtime;
     if (value.isObject()) return value.dup();
     if (value.isNull() or value.isUndefined()) return error.TypeError;
-    if (value.isString()) return builtins.string.constructWithPrototype(rt, &.{value}, null);
+    if (value.isString()) return (try builtin_dispatch.callConstructRecord(ctx, null, null, &.{}, null, string_construct_ref, null, &.{value}, null, null)) orelse error.TypeError;
     if (value.isNumber()) return primitiveObject(rt, core.class.ids.number, value);
     if (value.asBool() != null) return primitiveObject(rt, core.class.ids.boolean, value);
     if (value.isBigInt()) return primitiveObject(rt, core.class.ids.big_int, value);

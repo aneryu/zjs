@@ -41,15 +41,10 @@ const RootedValueCopies = struct {
     }
 };
 
-fn valuesRequireNoRoots(values: []const core.JSValue) bool {
-    for (values) |value| {
-        if (value.requiresRefCount()) return false;
-    }
-    return true;
-}
 
 pub const StaticMethod = core.host_function.builtin_method_ids.array.StaticMethod;
 pub const PrototypeMethod = core.host_function.builtin_method_ids.array.PrototypeMethod;
+pub const ConstructorMethod = core.host_function.builtin_method_ids.array.ConstructorMethod;
 
 pub fn staticMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "from")) return @intFromEnum(StaticMethod.from);
@@ -154,6 +149,13 @@ pub fn legacyPrototypeMethodId(name: []const u8) ?u32 {
 pub const internal_entries = arrayEntries: {
     const Entry = core.host_function.InternalEntry;
     break :arrayEntries [_]Entry{
+        // Array constructor (`new Array(...)` / `Array(...)`). Construct-capable
+        // so the construct dispatch path routes through `arrayCall`'s construct
+        // branch; the Array constructor object is not installed with this native
+        // id (its call-as-function/species recognition stays on the existing
+        // name + `arrayBuiltinMarker` paths), so this record is reached only
+        // through `builtin_dispatch.callConstructRecord` with an explicit ref.
+        arrayConstructorEntry("Array", 1, @intFromEnum(ConstructorMethod.construct)),
         // Array static methods.
         arrayEntry("from", 1, @intFromEnum(StaticMethod.from)),
         arrayEntry("isArray", 1, @intFromEnum(StaticMethod.is_array)),
@@ -204,6 +206,24 @@ fn arrayEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) 
     return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .call = &arrayCall };
 }
 
+/// The Array constructor record: construct-capable so `new Array(...)` (and
+/// `Array(...)` called as a function, routed with `flags.constructor == false`)
+/// reach `arrayCall`'s construct branch. Never prepared-eligible.
+fn arrayConstructorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .constructor = true, .call = &arrayCall };
+}
+
+/// The realm's default `Array.prototype` for the call-as-function construct
+/// fallback (the construct path passes `new_target` instead). Returns null when
+/// the realm cache is not yet populated, in which case the array is created
+/// with the engine default prototype.
+fn arrayPrototypeFromGlobal(global: *core.Object) ?*core.Object {
+    const stored = global.cachedRealmValue(.array_prototype) orelse return null;
+    if (!stored.isObject()) return null;
+    const header = stored.refHeader() orelse return null;
+    return @fieldParentPtr("header", header);
+}
+
 /// Shared record handler for the `.array` domain. Mirrors the retired
 /// `call.zig` `callArrayNativeFunctionRecord`: forward the record id to the
 /// exec dispatch glue, and surface the corrupt-id / null-result case (e.g. an
@@ -223,6 +243,27 @@ fn arrayEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) 
 /// caller bytecode/frame are recovered and threaded so the relocated table path
 /// keeps the inline-cache hint the dedicated prepared bypass used to carry.
 fn arrayCall(host_call: InternalCall) HostError!core.JSValue {
+    const id: u32 = host_call.magic;
+    if (id == @intFromEnum(ConstructorMethod.construct)) {
+        // `new Array(...)` arrives through the construct record path with
+        // `flags.constructor` set and the resolved instance prototype in
+        // `new_target`. `Array(...)` called as a function behaves identically
+        // (per spec) but is currently name-dispatched and so does not reach this
+        // id; the `flags.constructor == false` branch falls back to the realm's
+        // default Array.prototype (null when no realm global is threaded — e.g.
+        // a bare `Reflect.construct` against an unwired native function — which
+        // yields the engine default prototype). The construct branch runs before
+        // the `global` requirement below because it needs no realm global, just
+        // like the Date/RegExp/String construct records. RangeError surfaces
+        // unchanged for an invalid `new Array(length)`.
+        const prototype = if (host_call.flags.constructor)
+            host_call.new_target
+        else if (host_call.global) |global|
+            arrayPrototypeFromGlobal(global)
+        else
+            null;
+        return constructConstructorWithPrototype(host_call.ctx.runtime, host_call.args, prototype);
+    }
     const global = host_call.global orelse return error.TypeError;
     if (try builtin_glue.qjsArrayNativeRecord(
         host_call.ctx,
@@ -242,15 +283,9 @@ pub fn isArrayIndex(bytes: []const u8) bool {
     return core_array.isArrayIndexName(bytes);
 }
 
-pub fn isArrayValue(value: core.JSValue) !bool {
-    const object = objectFromValue(value) orelse return false;
-    if (object.flags.is_proxy) {
-        if (object.proxyHandler() == null) return error.TypeError;
-        const target = object.proxyTarget() orelse return error.TypeError;
-        return isArrayValue(target);
-    }
-    return object.flags.is_array;
-}
+// Proxy-aware `Array.isArray` predicate relocated to engine core
+// (`core/array.zig`) in Phase 6b-3 STEP 2; re-exported here unchanged.
+pub const isArrayValue = core_array.isArrayValue;
 
 pub fn lengthAfterSet(index: u32, current: u32) u32 {
     if (index >= current) return index + 1;
@@ -296,42 +331,10 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, values: []const core.JSValue,
     return object.value();
 }
 
-pub fn constructLiteralWithPrototype(rt: *core.JSRuntime, values: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
-    if (valuesRequireNoRoots(values)) {
-        const object = try core.Object.createArray(rt, prototype);
-        var object_owned = true;
-        errdefer if (object_owned) core.Object.destroyFromHeader(rt, &object.header);
-
-        if (try object.initDenseArrayLiteralValuesAssumingEmpty(rt, values)) {
-            object_owned = false;
-            return object.value();
-        }
-        core.Object.destroyFromHeader(rt, &object.header);
-        object_owned = false;
-    }
-
-    const rooted = try RootedValueCopies.init(rt, values);
-    defer rooted.deinit(rt);
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = rooted.roots,
-    };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
-
-    const object = try core.Object.createArray(rt, prototype);
-    errdefer core.Object.destroyFromHeader(rt, &object.header);
-
-    if (try object.initDenseArrayLiteralValuesAssumingEmpty(rt, rooted.values)) return object.value();
-
-    try object.reserveDenseArrayElements(rt, @intCast(rooted.values.len));
-    for (rooted.values, 0..) |value, index| {
-        const atom_id = core.atom.atomFromUInt32(@intCast(index));
-        if (try object.appendDenseArrayLiteralIndex(rt, @intCast(index), value)) continue;
-        try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true));
-    }
-    return object.value();
-}
+// `constructLiteralWithPrototype` (the array-literal opcode helper) is pure and
+// was relocated to engine core (`core/array.zig`) in Phase 6b-3 STEP 4 so
+// `src/exec/vm_literal.zig` can call it without importing builtins; it is not
+// re-exported here because the only caller was that exec opcode handler.
 
 fn arrayLengthFromNumber(value: core.JSValue) ?u32 {
     const number: f64 = if (value.asInt32()) |int_value|
@@ -1095,11 +1098,9 @@ fn objectFromValue(value: core.JSValue) ?*core.Object {
     return @fieldParentPtr("header", header);
 }
 
-pub fn expectArray(value: core.JSValue) !*core.Object {
-    const object = try expectObject(value);
-    if (!object.flags.is_array) return error.TypeError;
-    return object;
-}
+// `expectArray` relocated to engine core (`core/array.zig`) in Phase 6b-3
+// STEP 2; re-exported here unchanged.
+pub const expectArray = core_array.expectArray;
 
 fn expectArrayIteratorTarget(value: core.JSValue) !*core.Object {
     const object = try expectObject(value);

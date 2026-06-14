@@ -48,11 +48,10 @@ const arrayPrototypeFromGlobal = array_ops.arrayPrototypeFromGlobal;
 const valueTruthy = coercion_ops.valueTruthy;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
 
-pub const EntriesMode = enum {
-    keys,
-    values,
-    entries,
-};
+// `EntriesMode` + `ownEntriesArray` relocated to engine core
+// (`core/object.zig`) in Phase 6b-3 STEP 2; re-exported here unchanged so the
+// install/dispatch side keeps the original names.
+pub const EntriesMode = core.object.EntriesMode;
 
 const RootedValueCopies = struct {
     values: []core.JSValue,
@@ -395,52 +394,11 @@ test "object literal roots direct function bytecode values while creating object
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-pub fn ownEntriesArray(rt: *core.JSRuntime, value: core.JSValue, mode: EntriesMode) !core.JSValue {
-    var rooted_value = value;
-    var out_value = core.JSValue.undefinedValue();
-    var element_val = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-        .{ .value = &out_value },
-        .{ .value = &element_val },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
-
-    const object = try expectObject(rooted_value);
-    const owned_keys = try object.ownKeys(rt);
-    defer core.Object.freeKeys(rt, owned_keys);
-
-    const out = try core.Object.createArray(rt, null);
-    out_value = out.value();
-    errdefer {
-        core.Object.destroyFromHeader(rt, &out.header);
-        out_value = core.JSValue.undefinedValue();
-    }
-    var out_index: u32 = 0;
-    for (owned_keys) |key| {
-        if (rt.atoms.kind(key) == .symbol) continue;
-        const desc = object.getOwnProperty(key) orelse continue;
-        defer desc.destroy(rt);
-        if (!(desc.enumerable orelse false)) continue;
-        element_val = switch (mode) {
-            .keys => try atomToStringValue(rt, key),
-            .values => object.getProperty(key),
-            .entries => try entryArrayValue(rt, key, object.getProperty(key)),
-        };
-        defer {
-            element_val.free(rt);
-            element_val = core.JSValue.undefinedValue();
-        }
-        try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out_index), core.Descriptor.data(element_val, true, true, true));
-        out_index += 1;
-    }
-    return out_value;
-}
+// Relocated to engine core (`core/object.zig`) in Phase 6b-3 STEP 2; the pure
+// own-property iteration constructor now lives there. Re-exported unchanged.
+// (The `entryArrayValue`/`atomToStringValue` helpers below remain here only as
+// the subjects of the GC-rooting unit test that follows.)
+pub const ownEntriesArray = core.object.ownEntriesArray;
 
 fn expectObject(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;

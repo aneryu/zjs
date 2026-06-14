@@ -2,13 +2,40 @@ const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
 const op = bytecode.opcode.op;
+
+// RegExp construct records keyed by native-builtin ref: the literal opcode
+// handlers run the builtin RegExp constructor bodies through the record table
+// (Phase 6b-3 STEP 4) rather than naming `builtins.regexp` directly. The
+// `.construct` ref validates the (pattern, flags) value pair; the
+// `.construct_prevalidated` ref skips recompilation for parser-validated
+// literals. Both construct branches read only `args`/`new_target`, so no
+// constructor function object or caller frame is threaded.
+const regexp_construct_ref = core.function.NativeBuiltinRef{
+    .domain = .regexp,
+    .id = @intFromEnum(core.host_function.builtin_method_ids.regexp.ConstructorMethod.construct),
+};
+const regexp_construct_prevalidated_ref = core.function.NativeBuiltinRef{
+    .domain = .regexp,
+    .id = @intFromEnum(core.host_function.builtin_method_ids.regexp.ConstructorMethod.construct_prevalidated),
+};
+
+fn constructRegExpRecord(
+    ctx: *core.JSContext,
+    native_ref: core.function.NativeBuiltinRef,
+    prototype: ?*core.Object,
+    pattern: core.JSValue,
+    flags: core.JSValue,
+) !core.JSValue {
+    const args = [_]core.JSValue{ pattern, flags };
+    return (try builtin_dispatch.callConstructRecord(ctx, null, null, &.{}, null, native_ref, prototype, &args, null, null)) orelse error.TypeError;
+}
 
 pub fn pushLiteral(
     ctx: *core.JSContext,
@@ -20,7 +47,7 @@ pub fn pushLiteral(
     const pattern = try stack.pop();
     defer pattern.free(ctx.runtime);
 
-    const value = try builtins.regexp.constructWithPrototype(ctx.runtime, pattern, flags, prototype);
+    const value = try constructRegExpRecord(ctx, regexp_construct_ref, prototype, pattern, flags);
     errdefer value.free(ctx.runtime);
     try stack.pushOwned(value);
 }
@@ -68,7 +95,7 @@ pub fn tryPushLiteralFromAtomPair(
         (try ctx.runtime.emptyString()).value().dup();
     defer flags.free(ctx.runtime);
 
-    const value = try builtins.regexp.constructPrevalidatedLiteralWithValues(ctx.runtime, pattern, flags, prototype);
+    const value = try constructRegExpRecord(ctx, regexp_construct_prevalidated_ref, prototype, pattern, flags);
     errdefer value.free(ctx.runtime);
     try stack.pushOwned(value);
     frame.pc = after_regexp_pc;

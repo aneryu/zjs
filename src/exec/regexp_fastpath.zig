@@ -1,12 +1,12 @@
 //! RegExp fast paths and simple-pattern matchers shared between the VM and builtins.
 
-const builtins = @import("../builtins/root.zig");
 const bytecode = @import("../bytecode/root.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const quickjs_regexp = @import("../libs/quickjs_regexp.zig");
+const regexp_validate = @import("../libs/regexp_validate.zig");
 const std = @import("std");
 const unicode_lib = @import("../libs/unicode.zig");
 const value_ops = @import("value_ops.zig");
@@ -58,7 +58,6 @@ const appendStringValueUnits = string_ops.appendStringValueUnits;
 const appendUtf16UnitsAsUtf8 = string_ops.appendUtf16UnitsAsUtf8;
 const appendUtf8CodePointForRegExpName = string_ops.appendUtf8CodePointForRegExpName;
 const arrayPrototypeFromGlobal = array_ops.arrayPrototypeFromGlobal;
-const byteIsAscii = string_ops.byteIsAscii;
 const bytesAreAscii = string_ops.bytesAreAscii;
 const callValueOrBytecode = call_runtime.callValueOrBytecode;
 const classEscapeUnitMatches = string_ops.classEscapeUnitMatches;
@@ -204,7 +203,7 @@ pub fn qjsRegExpFunctionCall(
         flags = string_value;
     }
 
-    return builtins.regexp.constructWithPrototype(ctx.runtime, pattern, flags, constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"));
+    return constructRegExpRecord(ctx, output, global, constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"), pattern, flags, caller_function, caller_frame);
 }
 
 pub fn qjsRegExpConstructCall(
@@ -221,17 +220,12 @@ pub fn qjsRegExpConstructCall(
     if ((input_pattern.isString() or input_pattern.isUndefined()) and
         (input_flags.isString() or input_flags.isUndefined()))
     {
-        if (input_pattern.isString()) {
-            if (latin1StringSlice(input_pattern)) |pattern_bytes| {
-                const flag_bytes: ?[]const u8 = if (input_flags.isUndefined()) "" else latin1StringSlice(input_flags);
-                if (flag_bytes) |flags| {
-                    if (canConstructRegExpFromBorrowedLatin1(pattern_bytes)) {
-                        const prototype = try reflectConstructPrototypeVm(ctx, output, global, "RegExp", new_target, caller_function, caller_frame);
-                        return builtins.regexp.constructLiteral(ctx.runtime, pattern_bytes, flags, prototype);
-                    }
-                }
-            }
-        }
+        // Both operands are already string/undefined primitives, so the
+        // construct record's value path runs no observable coercion: thread
+        // the (pattern, flags) values straight through the table. (The former
+        // borrowed-Latin1 fast path produced an identical object for these
+        // inputs and is subsumed here now that the construct logic is owned by
+        // the record.)
         const prototype = try reflectConstructPrototypeVm(ctx, output, global, "RegExp", new_target, caller_function, caller_frame);
         return constructRegExpRecord(ctx, output, global, prototype, input_pattern, input_flags, caller_function, caller_frame);
     }
@@ -360,48 +354,6 @@ pub fn qjsRegExpTestMethod(
     return core.JSValue.boolean(!result.isNull());
 }
 
-pub fn qjsRegExpNativeCallById(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    func: core.JSValue,
-    this_value: core.JSValue,
-    native_id: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    return switch (native_id) {
-        @intFromEnum(method_ids.regexp.StaticMethod.escape) => try builtins.regexp.escape(ctx.runtime, args),
-        @intFromEnum(method_ids.regexp.PrototypeMethod.to_string) => try qjsRegExpToString(ctx, output, global, this_value, caller_function, caller_frame),
-        @intFromEnum(method_ids.regexp.PrototypeMethod.exec) => try qjsRegExpExecMethod(ctx, output, global, this_value, args, caller_function, caller_frame),
-        @intFromEnum(method_ids.regexp.PrototypeMethod.test_) => try qjsRegExpTestMethod(ctx, output, global, this_value, args, caller_function, caller_frame),
-        @intFromEnum(method_ids.regexp.PrototypeMethod.compile) => blk: {
-            const function_object = objectFromValue(func) orelse break :blk try qjsRegExpCompile(ctx, output, global, this_value, args, caller_function, caller_frame);
-            const compile_global = objectRealmGlobal(function_object) orelse global;
-            break :blk try qjsRegExpCompile(ctx, output, compile_global, this_value, args, caller_function, caller_frame);
-        },
-        @intFromEnum(method_ids.regexp.PrototypeMethod.symbol_search) => try qjsRegExpSymbolSearch(ctx, output, global, this_value, args, caller_function, caller_frame),
-        @intFromEnum(method_ids.regexp.PrototypeMethod.symbol_match) => try qjsRegExpSymbolMatch(ctx, output, global, this_value, args, caller_function, caller_frame),
-        @intFromEnum(method_ids.regexp.PrototypeMethod.symbol_match_all) => try qjsRegExpSymbolMatchAll(ctx, output, global, this_value, args, caller_function, caller_frame),
-        @intFromEnum(method_ids.regexp.PrototypeMethod.symbol_replace) => try qjsRegExpSymbolReplace(ctx, output, global, this_value, args, caller_function, caller_frame),
-        @intFromEnum(method_ids.regexp.PrototypeMethod.symbol_split) => try qjsRegExpSymbolSplit(ctx, output, global, this_value, args, caller_function, caller_frame),
-        else => blk: {
-            if (builtins.regexp.legacyAccessorMethodFromId(native_id)) |method| {
-                const function_object = objectFromValue(func) orelse return error.TypeError;
-                break :blk try qjsRegExpLegacyAccessor(ctx, output, global, this_value, function_object, method, args, caller_function, caller_frame);
-            }
-            if (builtins.regexp.accessorNameFromId(native_id)) |accessor_name| {
-                if (try qjsRegExpAccessor(ctx, output, global, this_value, func, accessor_name, caller_function, caller_frame)) |value| break :blk value;
-                break :blk builtins.regexp.accessor(ctx.runtime, this_value, accessor_name) catch |err| switch (err) {
-                    error.TypeError => error.TypeError,
-                    else => err,
-                };
-            }
-            break :blk null;
-        },
-    };
-}
 
 pub const RegExpBorrowedSourceFlags = struct {
     source: []const u8,
@@ -577,18 +529,6 @@ pub fn regexpBorrowedLatin1SourceFlags(object: *core.Object) ?RegExpBorrowedSour
     return .{ .source = source, .flags = flags };
 }
 
-pub fn canConstructRegExpFromBorrowedLatin1(pattern: []const u8) bool {
-    if (pattern.len == 0) return false;
-    for (pattern) |byte| {
-        switch (byte) {
-            '/', '\n', '\r' => return false,
-            else => {},
-        }
-        if (!byteIsAscii(byte)) return false;
-    }
-    return true;
-}
-
 pub fn regExpLastIndexCanSkipCoercion(object: *core.Object) bool {
     const value = object.regexpLastIndex() orelse return false;
     if (value.isObject() or value.isBigInt() or value.isSymbol()) return false;
@@ -644,7 +584,7 @@ pub fn qjsRegExpCompile(
     var flag_bytes = std.ArrayList(u8).empty;
     defer flag_bytes.deinit(ctx.runtime.memory.allocator);
     try value_ops.appendValueString(ctx.runtime, &flag_bytes, flags_value);
-    if (!builtins.regexp.validatePatternAndFlags(source_bytes.items, flag_bytes.items)) return error.SyntaxError;
+    if (!regexp_validate.validatePatternAndFlags(source_bytes.items, flag_bytes.items)) return error.SyntaxError;
 
     const next_source = source_value.dup();
     var next_source_owned = true;
@@ -887,7 +827,7 @@ pub fn qjsRegExpLegacyAccessor(
         .get_left_context => return regExpLegacyNoCaptureSliceValue(ctx.runtime, legacy, .left) orelse regExpLegacySlotValue(ctx.runtime, legacy.left_context),
         .get_right_context => return regExpLegacyNoCaptureSliceValue(ctx.runtime, legacy, .right) orelse regExpLegacySlotValue(ctx.runtime, legacy.right_context),
         else => {
-            const capture_index = builtins.regexp.legacyCaptureIndex(method) orelse return error.TypeError;
+            const capture_index = core.host_function.builtin_method_id_lookup.regexp.legacyCaptureIndex(method) orelse return error.TypeError;
             return regExpLegacySlotValue(ctx.runtime, legacy.captures[capture_index]);
         },
     }

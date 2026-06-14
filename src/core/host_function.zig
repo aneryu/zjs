@@ -2,6 +2,7 @@ const std = @import("std");
 const Object = @import("object.zig").Object;
 const JSValue = @import("value.zig").JSValue;
 const JSContext = @import("context.zig").JSContext;
+const JSRuntime = @import("runtime.zig").JSRuntime;
 const global_slots = @import("global_slots.zig");
 const class = @import("class.zig");
 const ClassId = class.ClassId;
@@ -27,6 +28,128 @@ pub const ExternalRecord = struct {
     ptr: *anyopaque,
     call: ExternalCallFn,
     finalizer: ?ExternalFinalizer = null,
+};
+
+// --- Collection callback protocol -------------------------------------------
+//
+// The collection iteration helpers (Map/Set forEach, Array.prototype callback
+// methods, group-by) invoke a user callback through this small protocol struct.
+// It is pure: a function-pointer pair plus the realm global slots, with zero VM
+// dependence, so it lives in core beside the other host-function protocol
+// types. `src/exec/collection_adapter.zig` supplies the concrete `call`/`kind`
+// implementations that route into the VM, and `builtins/collection.zig`
+// re-exports these names so its method bodies keep using them unchanged.
+
+/// Error set surfaced by collection callbacks. Mirrors the engine's host error
+/// surface so a callback's failure can propagate unchanged through the pure
+/// collection helpers.
+pub const CallbackError = error{
+    AccessorWithoutSetter,
+    AmbiguousExport,
+    AwaitOutsideAsyncFunction,
+    BigIntTooLarge,
+    BytecodeCorrupt,
+    BytecodeOverflow,
+    ClosureVarNotFound,
+    CodepointTooLarge,
+    DivisionByZero,
+    DuplicateClass,
+    EvalError,
+    IncompatibleDescriptor,
+    Interrupted,
+    InvalidAssignmentTarget,
+    InvalidAtom,
+    InvalidBytecode,
+    InvalidBuiltinRegistry,
+    InvalidCharacter,
+    InvalidCharacterError,
+    InvalidClassId,
+    InvalidEscape,
+    InvalidIdentifier,
+    InvalidLength,
+    InvalidLhs,
+    InvalidNumber,
+    InvalidNumberLiteral,
+    InvalidOpcode,
+    InvalidPattern,
+    InvalidPrivateName,
+    InvalidRadix,
+    InvalidRegExp,
+    InvalidUnicodeEscape,
+    InvalidUtf8,
+    LegacyOctalInStrictMode,
+    MissingExport,
+    ModuleLinkFailed,
+    ModuleNotFound,
+    NegativeExponent,
+    NoSpaceLeft,
+    NotExtensible,
+    NotRegExpLiteral,
+    NotSimpleNumericCall,
+    OutOfMemory,
+    Overflow,
+    Pc2LineOverflow,
+    Pc2LineTruncated,
+    ProcessExit,
+    PrototypeCycle,
+    RangeError,
+    ReadOnly,
+    ReferenceError,
+    StackMismatch,
+    StackOverflow,
+    StackUnderflow,
+    SyntaxError,
+    SystemError,
+    JSException,
+    Timeout,
+    TooManyJobArgs,
+    TypeError,
+    URIError,
+    UnhandledPromiseRejection,
+    UnterminatedComment,
+    UnterminatedRegExp,
+    UnterminatedString,
+    UnterminatedTemplate,
+    UnexpectedEof,
+    UnexpectedToken,
+    UnsupportedSimpleJson,
+    Utf8CannotEncodeSurrogateHalf,
+    Utf8EncodesSurrogateHalf,
+    YieldOutsideGenerator,
+    HtmlCommentInModule,
+};
+
+pub const CallbackCallFn = *const fn (
+    rt: *JSRuntime,
+    callback: JSValue,
+    this_value: JSValue,
+    args: []const JSValue,
+    globals: []global_slots.Slot,
+) CallbackError!JSValue;
+
+pub const CallbackKindFn = *const fn (
+    rt: *JSRuntime,
+    callback: JSValue,
+) CallbackError!i32;
+
+pub const CallbackHost = struct {
+    globals: []global_slots.Slot = &.{},
+    call: ?CallbackCallFn = null,
+    kind: ?CallbackKindFn = null,
+
+    pub fn callWithThis(self: CallbackHost, rt: *JSRuntime, callback: JSValue, this_value: JSValue, args: []const JSValue) !JSValue {
+        const call_fn = self.call orelse return error.TypeError;
+        return call_fn(rt, callback, this_value, args, self.globals);
+    }
+
+    pub fn callValue(self: CallbackHost, rt: *JSRuntime, callback: JSValue, args: []const JSValue) !JSValue {
+        return self.callWithThis(rt, callback, JSValue.undefinedValue(), args);
+    }
+
+    pub fn closureKind(self: CallbackHost, rt: *JSRuntime, callback: JSValue) ?i32 {
+        const kind_fn = self.kind orelse return null;
+        return kind_fn(rt, callback) catch null;
+    }
 };
 
 // --- Internal builtin records -----------------------------------------------
@@ -134,6 +257,17 @@ pub const builtin_method_ids = struct {
             of = 3,
         };
 
+        pub const ConstructorMethod = enum(u32) {
+            // `new Array(...)` / `Array(...)`. Construct-capable record shared by
+            // `arrayCall`; the construct branch runs
+            // `constructConstructorWithPrototype` (single-number-length vs
+            // element list). Kept above the prototype-method id range; the Array
+            // constructor object itself is recognized for the species fast path
+            // by its `arrayBuiltinMarker`, not this id, so the two mechanisms
+            // stay independent.
+            construct = 200,
+        };
+
         pub const PrototypeMethod = enum(u32) {
             to_string = 100,
             to_locale_string = 101,
@@ -173,6 +307,20 @@ pub const builtin_method_ids = struct {
             keys = 135,
             values = 136,
             entries = 137,
+        };
+    };
+
+    pub const json = struct {
+        // `JSON.*` static method ids. Mirrored here (next to the other domain
+        // id enums) so import-free exec sites -- e.g. the synthetic JSON module
+        // loader in exec/module.zig -- can name `JSON.parse`'s native id when
+        // routing through the internal record table without importing builtins.
+        // `builtins/json.zig` re-exports this as its `StaticMethod`.
+        pub const StaticMethod = enum(u32) {
+            is_raw_json = 1,
+            parse = 2,
+            raw_json = 3,
+            stringify = 4,
         };
     };
 
@@ -309,6 +457,21 @@ pub const builtin_method_ids = struct {
             symmetric_difference = 20,
             union_ = 21,
         };
+
+        // Construct record ids for `new Map/Set/WeakMap/WeakSet(...)`. Distinct
+        // from the PrototypeMethod (1-21) and StaticMethod (101) id ranges so
+        // they densify into their own record slots. Each maps to the matching
+        // `builtin_method_id_lookup.collection.ConstructorKind`; the constructor
+        // objects themselves carry no native id (collection construct is
+        // resolved by name -> `constructorId`), so these records are reached
+        // only through `builtin_dispatch.callConstructRecord` with an explicit
+        // ref. Phase 6b-3 STEP 4.
+        pub const ConstructorMethod = enum(u32) {
+            construct_map = 200,
+            construct_set = 201,
+            construct_weak_map = 202,
+            construct_weak_set = 203,
+        };
     };
 
     pub const date = struct {
@@ -320,6 +483,56 @@ pub const builtin_method_ids = struct {
 
         pub const ConstructorMethod = enum(u32) {
             construct = 100,
+        };
+
+        pub const PrototypeMethod = enum(u32) {
+            get_time = 101,
+            value_of = 102,
+            get_full_year = 103,
+            get_month = 104,
+            get_date = 105,
+            get_hours = 106,
+            get_minutes = 107,
+            get_seconds = 108,
+            get_milliseconds = 109,
+            to_iso_string = 110,
+            to_json = 111,
+            get_utc_full_year = 112,
+            get_utc_month = 113,
+            get_utc_date = 114,
+            get_utc_hours = 115,
+            get_utc_minutes = 116,
+            get_utc_seconds = 117,
+            get_utc_milliseconds = 118,
+            get_day = 119,
+            to_string = 120,
+            to_utc_string = 121,
+            get_year = 122,
+            set_year = 123,
+            set_time = 124,
+            set_milliseconds = 125,
+            set_seconds = 126,
+            set_minutes = 127,
+            set_hours = 128,
+            set_date = 129,
+            set_month = 130,
+            set_full_year = 131,
+            get_timezone_offset = 132,
+            to_date_string = 133,
+            to_time_string = 134,
+            to_primitive = 135,
+            // Engine-internal record ids (not installed as Date.prototype
+            // properties; the registry installs only the named methods above).
+            // The exec VM-coercion glue (`exec/date_ops.zig`) captures
+            // `[[DateValue]]` before coercing setter arguments, then routes the
+            // already-coerced apply through the record table's func-object-free
+            // arm using these selectors so it never names the builtin body
+            // directly. `set_year_with_captured_ms`: args[0]=captured ms,
+            // args[1]=coerced year. `set_parts_with_captured_ms`: args[0]=captured
+            // ms, args[1]=int32 decoded setter id (25..31), args[2..]=coerced
+            // field args.
+            set_year_with_captured_ms = 136,
+            set_parts_with_captured_ms = 137,
         };
     };
 
@@ -421,6 +634,14 @@ pub const builtin_method_ids = struct {
 
         pub const ConstructorMethod = enum(u32) {
             construct = 1000,
+            // Internal construct selector for parser-prevalidated RegExp
+            // literals: the VM literal fast paths (`vm_regexp`,
+            // `vm_property_locals`) route their already-validated source/flags
+            // through the construct record under this id so the handler runs
+            // `constructPrevalidatedLiteralWithValues` (which skips
+            // recompilation) instead of `constructWithPrototype`. Not installed
+            // as a property; reachable only through the record table.
+            construct_prevalidated = 1001,
         };
 
         pub const PrototypeMethod = enum(u32) {
@@ -433,6 +654,19 @@ pub const builtin_method_ids = struct {
             symbol_replace = 107,
             symbol_split = 108,
             compile = 109,
+        };
+
+        pub const AccessorMethod = enum(u32) {
+            source = 201,
+            flags = 202,
+            global = 203,
+            ignore_case = 204,
+            multiline = 205,
+            dot_all = 206,
+            unicode = 207,
+            sticky = 208,
+            has_indices = 209,
+            unicode_sets = 210,
         };
 
         pub const LegacyAccessorMethod = enum(u32) {
@@ -601,6 +835,50 @@ pub const builtin_method_id_lookup = struct {
                 else => null,
             };
         }
+
+        /// Inverse of `decodePrototypeMethodId`: map a legacy decoded method id
+        /// back to its `PrototypeMethod` record id. The exec string dispatcher
+        /// and fast paths hold decoded ids; they use this to build the
+        /// `NativeBuiltinRef` for the record-table dispatch
+        /// (`builtin_dispatch.callInternalRecord`) of the reused `methodCall` /
+        /// `charAtValue` bodies, so they route through the table instead of
+        /// naming the builtin directly. Returns null for decoded ids with no
+        /// installed record (e.g. the exec-only `substr` id 25, or the HTML and
+        /// pad/normalize/locale/search bodies that live in exec/string_ops.zig).
+        pub fn encodePrototypeMethodId(decoded: u32) ?u32 {
+            return switch (decoded) {
+                0 => @intFromEnum(PrototypeMethod.char_at),
+                1 => @intFromEnum(PrototypeMethod.substring),
+                2 => @intFromEnum(PrototypeMethod.to_upper_case),
+                3 => @intFromEnum(PrototypeMethod.to_lower_case),
+                4 => @intFromEnum(PrototypeMethod.index_of),
+                5 => @intFromEnum(PrototypeMethod.includes),
+                6 => @intFromEnum(PrototypeMethod.starts_with),
+                7 => @intFromEnum(PrototypeMethod.ends_with),
+                8 => @intFromEnum(PrototypeMethod.trim),
+                10 => @intFromEnum(PrototypeMethod.concat),
+                21 => @intFromEnum(PrototypeMethod.trim_start),
+                22 => @intFromEnum(PrototypeMethod.trim_end),
+                legacy_split_method_id => @intFromEnum(PrototypeMethod.split),
+                28 => @intFromEnum(PrototypeMethod.last_index_of),
+                29 => @intFromEnum(PrototypeMethod.char_code_at),
+                30 => @intFromEnum(PrototypeMethod.at),
+                31 => @intFromEnum(PrototypeMethod.code_point_at),
+                32 => @intFromEnum(PrototypeMethod.slice),
+                33 => @intFromEnum(PrototypeMethod.repeat),
+                34 => @intFromEnum(PrototypeMethod.pad_start),
+                35 => @intFromEnum(PrototypeMethod.pad_end),
+                36 => @intFromEnum(PrototypeMethod.locale_compare),
+                legacy_normalize_method_id => @intFromEnum(PrototypeMethod.normalize),
+                38 => @intFromEnum(PrototypeMethod.is_well_formed),
+                39 => @intFromEnum(PrototypeMethod.to_well_formed),
+                legacy_search_method_id => @intFromEnum(PrototypeMethod.search),
+                legacy_match_method_id => @intFromEnum(PrototypeMethod.match),
+                legacy_replace_all_method_id => @intFromEnum(PrototypeMethod.replace_all),
+                legacy_match_all_method_id => @intFromEnum(PrototypeMethod.match_all),
+                else => null,
+            };
+        }
     };
 
     pub const array = struct {
@@ -634,6 +912,38 @@ pub const builtin_method_id_lookup = struct {
     pub const collection = struct {
         const StaticMethod = builtin_method_ids.collection.StaticMethod;
         const PrototypeMethod = builtin_method_ids.collection.PrototypeMethod;
+        const ConstructorMethod = builtin_method_ids.collection.ConstructorMethod;
+
+        /// Map/Set/WeakMap/WeakSet constructor selector. Pure name->id mapping
+        /// (no VM state) used by the collection construct dispatch. Enum values
+        /// are load-bearing (baked into construct routing) and must not change.
+        pub const ConstructorKind = enum(u32) {
+            map = 1,
+            set = 2,
+            weak_map = 3,
+            weak_set = 4,
+        };
+
+        pub fn constructorId(name: []const u8) ?u32 {
+            if (std.mem.eql(u8, name, "Map")) return @intFromEnum(ConstructorKind.map);
+            if (std.mem.eql(u8, name, "Set")) return @intFromEnum(ConstructorKind.set);
+            if (std.mem.eql(u8, name, "WeakMap")) return @intFromEnum(ConstructorKind.weak_map);
+            if (std.mem.eql(u8, name, "WeakSet")) return @intFromEnum(ConstructorKind.weak_set);
+            return null;
+        }
+
+        /// The native-builtin construct id for a given `ConstructorKind` value,
+        /// used by the exec construct sites to build the record ref. Pure id
+        /// mapping with zero VM state. Phase 6b-3 STEP 6.
+        pub fn constructIdForKind(kind: u32) ?u32 {
+            return switch (kind) {
+                @intFromEnum(ConstructorKind.map) => @intFromEnum(ConstructorMethod.construct_map),
+                @intFromEnum(ConstructorKind.set) => @intFromEnum(ConstructorMethod.construct_set),
+                @intFromEnum(ConstructorKind.weak_map) => @intFromEnum(ConstructorMethod.construct_weak_map),
+                @intFromEnum(ConstructorKind.weak_set) => @intFromEnum(ConstructorMethod.construct_weak_set),
+                else => null,
+            };
+        }
 
         pub fn prototypeMethodId(name: []const u8) ?u32 {
             if (std.mem.eql(u8, name, "set")) return @intFromEnum(PrototypeMethod.set);
@@ -713,12 +1023,103 @@ pub const builtin_method_id_lookup = struct {
 
     pub const date = struct {
         const StaticMethod = builtin_method_ids.date.StaticMethod;
+        const PrototypeMethod = builtin_method_ids.date.PrototypeMethod;
 
         pub fn staticMethodId(name: []const u8) ?u32 {
             if (std.mem.eql(u8, name, "UTC")) return @intFromEnum(StaticMethod.utc);
             if (std.mem.eql(u8, name, "parse")) return @intFromEnum(StaticMethod.parse);
             if (std.mem.eql(u8, name, "now")) return @intFromEnum(StaticMethod.now);
             return null;
+        }
+
+        /// Map a `PrototypeMethod` record id to the legacy decoded method id
+        /// (1..34) the builtin date method bodies switch on. The record handler
+        /// (`builtins/date.zig` `dateCall`) uses this before delegating to the
+        /// exec date dispatcher / pure body. Returns null for non-prototype ids
+        /// (statics, constructor, the captured-setter internal selectors).
+        pub fn decodePrototypeMethodId(id: u32) ?u32 {
+            return switch (id) {
+                @intFromEnum(PrototypeMethod.get_time) => 1,
+                @intFromEnum(PrototypeMethod.value_of) => 2,
+                @intFromEnum(PrototypeMethod.get_full_year) => 3,
+                @intFromEnum(PrototypeMethod.get_month) => 4,
+                @intFromEnum(PrototypeMethod.get_date) => 5,
+                @intFromEnum(PrototypeMethod.get_hours) => 6,
+                @intFromEnum(PrototypeMethod.get_minutes) => 7,
+                @intFromEnum(PrototypeMethod.get_seconds) => 8,
+                @intFromEnum(PrototypeMethod.get_milliseconds) => 9,
+                @intFromEnum(PrototypeMethod.to_iso_string) => 10,
+                @intFromEnum(PrototypeMethod.to_json) => 11,
+                @intFromEnum(PrototypeMethod.get_utc_full_year) => 12,
+                @intFromEnum(PrototypeMethod.get_utc_month) => 13,
+                @intFromEnum(PrototypeMethod.get_utc_date) => 14,
+                @intFromEnum(PrototypeMethod.get_utc_hours) => 15,
+                @intFromEnum(PrototypeMethod.get_utc_minutes) => 16,
+                @intFromEnum(PrototypeMethod.get_utc_seconds) => 17,
+                @intFromEnum(PrototypeMethod.get_utc_milliseconds) => 18,
+                @intFromEnum(PrototypeMethod.get_day) => 19,
+                @intFromEnum(PrototypeMethod.to_string) => 20,
+                @intFromEnum(PrototypeMethod.to_utc_string) => 21,
+                @intFromEnum(PrototypeMethod.get_year) => 22,
+                @intFromEnum(PrototypeMethod.set_year) => 23,
+                @intFromEnum(PrototypeMethod.set_time) => 24,
+                @intFromEnum(PrototypeMethod.set_milliseconds) => 25,
+                @intFromEnum(PrototypeMethod.set_seconds) => 26,
+                @intFromEnum(PrototypeMethod.set_minutes) => 27,
+                @intFromEnum(PrototypeMethod.set_hours) => 28,
+                @intFromEnum(PrototypeMethod.set_date) => 29,
+                @intFromEnum(PrototypeMethod.set_month) => 30,
+                @intFromEnum(PrototypeMethod.set_full_year) => 31,
+                @intFromEnum(PrototypeMethod.get_timezone_offset) => 32,
+                @intFromEnum(PrototypeMethod.to_date_string) => 33,
+                @intFromEnum(PrototypeMethod.to_time_string) => 34,
+                else => null,
+            };
+        }
+
+        /// Inverse of `decodePrototypeMethodId`: map a legacy decoded method id
+        /// (1..34) back to its `PrototypeMethod` record id. The exec date glue
+        /// holds decoded ids; it uses this to build the `NativeBuiltinRef` for
+        /// the record-table dispatch (`builtin_dispatch.callInternalRecord`) so
+        /// it routes the body through the table instead of naming it directly.
+        pub fn encodePrototypeMethodId(decoded: u32) ?u32 {
+            return switch (decoded) {
+                1 => @intFromEnum(PrototypeMethod.get_time),
+                2 => @intFromEnum(PrototypeMethod.value_of),
+                3 => @intFromEnum(PrototypeMethod.get_full_year),
+                4 => @intFromEnum(PrototypeMethod.get_month),
+                5 => @intFromEnum(PrototypeMethod.get_date),
+                6 => @intFromEnum(PrototypeMethod.get_hours),
+                7 => @intFromEnum(PrototypeMethod.get_minutes),
+                8 => @intFromEnum(PrototypeMethod.get_seconds),
+                9 => @intFromEnum(PrototypeMethod.get_milliseconds),
+                10 => @intFromEnum(PrototypeMethod.to_iso_string),
+                11 => @intFromEnum(PrototypeMethod.to_json),
+                12 => @intFromEnum(PrototypeMethod.get_utc_full_year),
+                13 => @intFromEnum(PrototypeMethod.get_utc_month),
+                14 => @intFromEnum(PrototypeMethod.get_utc_date),
+                15 => @intFromEnum(PrototypeMethod.get_utc_hours),
+                16 => @intFromEnum(PrototypeMethod.get_utc_minutes),
+                17 => @intFromEnum(PrototypeMethod.get_utc_seconds),
+                18 => @intFromEnum(PrototypeMethod.get_utc_milliseconds),
+                19 => @intFromEnum(PrototypeMethod.get_day),
+                20 => @intFromEnum(PrototypeMethod.to_string),
+                21 => @intFromEnum(PrototypeMethod.to_utc_string),
+                22 => @intFromEnum(PrototypeMethod.get_year),
+                23 => @intFromEnum(PrototypeMethod.set_year),
+                24 => @intFromEnum(PrototypeMethod.set_time),
+                25 => @intFromEnum(PrototypeMethod.set_milliseconds),
+                26 => @intFromEnum(PrototypeMethod.set_seconds),
+                27 => @intFromEnum(PrototypeMethod.set_minutes),
+                28 => @intFromEnum(PrototypeMethod.set_hours),
+                29 => @intFromEnum(PrototypeMethod.set_date),
+                30 => @intFromEnum(PrototypeMethod.set_month),
+                31 => @intFromEnum(PrototypeMethod.set_full_year),
+                32 => @intFromEnum(PrototypeMethod.get_timezone_offset),
+                33 => @intFromEnum(PrototypeMethod.to_date_string),
+                34 => @intFromEnum(PrototypeMethod.to_time_string),
+                else => null,
+            };
         }
     };
 
@@ -864,6 +1265,121 @@ pub const builtin_method_id_lookup = struct {
                 @intFromEnum(TypedArrayAccessorMethod.to_string_tag) => "[Symbol.toStringTag]",
                 else => null,
             };
+        }
+    };
+
+    pub const regexp = struct {
+        const AccessorMethod = builtin_method_ids.regexp.AccessorMethod;
+        const LegacyAccessorMethod = builtin_method_ids.regexp.LegacyAccessorMethod;
+
+        /// Pure `.regexp` accessor/legacy-accessor id<->name(/kind) mappers
+        /// (no VM state). Relocated to engine core in Phase 6b-3 STEP 5B so the
+        /// RegExp accessor cascade in exec (`regexp_fastpath`, `call_runtime`)
+        /// dispatches by id without naming the builtin; `builtins/regexp.zig`
+        /// re-exports each under its original name. Returned values are
+        /// load-bearing (baked into the `.regexp` record table and compiled
+        /// bytecode native ids) and must not change here.
+        pub fn accessorMethodId(name: []const u8) ?u32 {
+            if (std.mem.eql(u8, name, "source")) return @intFromEnum(AccessorMethod.source);
+            if (std.mem.eql(u8, name, "flags")) return @intFromEnum(AccessorMethod.flags);
+            if (std.mem.eql(u8, name, "global")) return @intFromEnum(AccessorMethod.global);
+            if (std.mem.eql(u8, name, "ignoreCase")) return @intFromEnum(AccessorMethod.ignore_case);
+            if (std.mem.eql(u8, name, "multiline")) return @intFromEnum(AccessorMethod.multiline);
+            if (std.mem.eql(u8, name, "dotAll")) return @intFromEnum(AccessorMethod.dot_all);
+            if (std.mem.eql(u8, name, "unicode")) return @intFromEnum(AccessorMethod.unicode);
+            if (std.mem.eql(u8, name, "sticky")) return @intFromEnum(AccessorMethod.sticky);
+            if (std.mem.eql(u8, name, "hasIndices")) return @intFromEnum(AccessorMethod.has_indices);
+            if (std.mem.eql(u8, name, "unicodeSets")) return @intFromEnum(AccessorMethod.unicode_sets);
+            return null;
+        }
+
+        pub fn accessorNameFromId(id: u32) ?[]const u8 {
+            return switch (id) {
+                @intFromEnum(AccessorMethod.source) => "source",
+                @intFromEnum(AccessorMethod.flags) => "flags",
+                @intFromEnum(AccessorMethod.global) => "global",
+                @intFromEnum(AccessorMethod.ignore_case) => "ignoreCase",
+                @intFromEnum(AccessorMethod.multiline) => "multiline",
+                @intFromEnum(AccessorMethod.dot_all) => "dotAll",
+                @intFromEnum(AccessorMethod.unicode) => "unicode",
+                @intFromEnum(AccessorMethod.sticky) => "sticky",
+                @intFromEnum(AccessorMethod.has_indices) => "hasIndices",
+                @intFromEnum(AccessorMethod.unicode_sets) => "unicodeSets",
+                else => null,
+            };
+        }
+
+        pub fn accessorNameFromGetterName(name: []const u8) ?[]const u8 {
+            const id = accessorIdFromGetterName(name) orelse return null;
+            return accessorNameFromId(id);
+        }
+
+        /// Map a `get <accessor>` getter name directly to its accessor id.
+        pub fn accessorIdFromGetterName(name: []const u8) ?u32 {
+            if (!std.mem.startsWith(u8, name, "get ")) return null;
+            return accessorMethodId(name["get ".len..]);
+        }
+
+        pub fn legacyAccessorMethodFromId(id: u32) ?LegacyAccessorMethod {
+            return switch (id) {
+                @intFromEnum(LegacyAccessorMethod.get_input) => .get_input,
+                @intFromEnum(LegacyAccessorMethod.set_input) => .set_input,
+                @intFromEnum(LegacyAccessorMethod.get_last_match) => .get_last_match,
+                @intFromEnum(LegacyAccessorMethod.get_last_paren) => .get_last_paren,
+                @intFromEnum(LegacyAccessorMethod.get_left_context) => .get_left_context,
+                @intFromEnum(LegacyAccessorMethod.get_right_context) => .get_right_context,
+                @intFromEnum(LegacyAccessorMethod.get_capture_1) => .get_capture_1,
+                @intFromEnum(LegacyAccessorMethod.get_capture_2) => .get_capture_2,
+                @intFromEnum(LegacyAccessorMethod.get_capture_3) => .get_capture_3,
+                @intFromEnum(LegacyAccessorMethod.get_capture_4) => .get_capture_4,
+                @intFromEnum(LegacyAccessorMethod.get_capture_5) => .get_capture_5,
+                @intFromEnum(LegacyAccessorMethod.get_capture_6) => .get_capture_6,
+                @intFromEnum(LegacyAccessorMethod.get_capture_7) => .get_capture_7,
+                @intFromEnum(LegacyAccessorMethod.get_capture_8) => .get_capture_8,
+                @intFromEnum(LegacyAccessorMethod.get_capture_9) => .get_capture_9,
+                else => null,
+            };
+        }
+
+        pub fn legacyCaptureIndex(method: LegacyAccessorMethod) ?usize {
+            return switch (method) {
+                .get_capture_1 => 0,
+                .get_capture_2 => 1,
+                .get_capture_3 => 2,
+                .get_capture_4 => 3,
+                .get_capture_5 => 4,
+                .get_capture_6 => 5,
+                .get_capture_7 => 6,
+                .get_capture_8 => 7,
+                .get_capture_9 => 8,
+                else => null,
+            };
+        }
+    };
+
+    pub const uri = struct {
+        /// Maps a global URI function name to its encode/decode mode selector
+        /// (1=encodeURI, 2=encodeURIComponent, 3=decodeURI,
+        /// 4=decodeURIComponent). Pure name->id mapping; relocated to engine
+        /// core in Phase 6b-3 STEP 2. `builtins/uri.zig` re-exports it.
+        pub fn methodId(name: []const u8) ?u32 {
+            if (std.mem.eql(u8, name, "encodeURI")) return 1;
+            if (std.mem.eql(u8, name, "encodeURIComponent")) return 2;
+            if (std.mem.eql(u8, name, "decodeURI")) return 3;
+            if (std.mem.eql(u8, name, "decodeURIComponent")) return 4;
+            return null;
+        }
+    };
+
+    pub const bigint = struct {
+        /// `BigInt.asIntN`/`asUintN` signedness selector: false => signed
+        /// (asIntN), true => unsigned (asUintN). Pure name->bool dispatch;
+        /// relocated to engine core in Phase 6b-3 STEP 2. `builtins/bigint.zig`
+        /// re-exports it.
+        pub fn staticUnsignedMode(name: []const u8) ?bool {
+            if (std.mem.eql(u8, name, "asIntN")) return false;
+            if (std.mem.eql(u8, name, "asUintN")) return true;
+            return null;
         }
     };
 };

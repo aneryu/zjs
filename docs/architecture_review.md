@@ -199,6 +199,46 @@ Exception handling uses both Zig errors and VM-level catch handling:
 - backtrace source locations resolve through `source_loc_slots` and `pc2line_buf`
   where available.
 
+### 4.1 Builtins — QuickJS Client Model
+
+`src/builtins/` are **clients of the engine**, not a layer the engine depends on
+(QuickJS model: the `js_*_funcs` JSCFunctionListEntry arrays implement methods on
+top of the engine; `JS_CallInternal` dispatches to them by function pointer with
+zero compile-time knowledge of any specific builtin). The dependency direction is
+fixed and enforced:
+
+- **`exec` must not import `builtins`** (`tools/architecture/check_deps.js`).
+  `builtins` import `exec` freely — they implement ECMAScript methods on top of
+  exec VM ops.
+- All builtin call/construct dispatch flows through a **core-owned comptime
+  record table**: `builtins/internal_table.zig` materializes a
+  `[NativeBuiltinDomain][id]` table of `core.host_function.InternalRecord`;
+  `JSRuntime.internal_builtins` points at it; `registry.installStandardGlobals`
+  wires it during context setup (inverted through `JSRuntime`'s
+  `install_standard_globals_cb` so exec never imports the installer). exec
+  dispatches via `exec/builtin_dispatch.zig` `callInternalRecord` /
+  `callConstructRecord` — one indirect call, the same shape QuickJS pays.
+- The VM caller pair (`?*const Bytecode`, `?*Frame`) is carried as opaque
+  pointers in `InternalCall` so core never names exec/bytecode types;
+  `builtin_dispatch` owns the typed erase/recover helpers.
+
+Method implementations that are **pure builtin bodies** live in `builtins/*.zig`
+and are reached only through the table. Implementations that double as **VM ops**
+(directly invoked by opcode handlers — Array fast-array/map-fusion, property
+lookup, coercion, TypedArray element access) stay in `exec`/`core`; the builtin
+record is a thin entry that the table routes to. Engine-core primitives the
+migration had to relocate out of builtins live in `core/` (`core/typed_array.zig`,
+`core/promise.zig`, `core/collection.zig`, `core/json.zig`, `core/regexp.zig`,
+`core/number.zig`, `core/symbol.zig`, `core/uri.zig`,
+`core/{error,typed_array}_names.zig`, plus `sameValue`/`sameValueZero` /
+`stringIterator` / the builtin method-id enums in `core/object.zig` and
+`core/host_function.zig`).
+
+`exec/call.zig`'s `HostFunction` enum is a **separate** mechanism: it dispatches
+the embedder/runtime host helpers (`print` output, destructuring runtime
+helpers, the external-host-function registry, disposable-stack throw glue) — not
+ECMAScript builtins. It is orthogonal to the builtin record table and stays.
+
 ## 5. Object Shapes And Property IC
 
 Object-shape state lives in `src/core/shape.zig`; IC slot storage lives in

@@ -1,7 +1,7 @@
 const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
 const unicode_lib = @import("../libs/unicode.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
@@ -240,7 +240,7 @@ pub fn qjsArrayPrototypeNativeRecord(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const array_mod = builtins.array;
+    const array_mod = method_ids.array;
     // Prepared (no-function-object) path: the gate admits only `push`/`pop`,
     // which are func-object-free, so route them straight to their `*Impl`
     // bodies and reject every other id. Kept off the hot non-null path so the
@@ -3481,7 +3481,14 @@ pub fn qjsArrayFromCall(
             return try qjsArrayFromArrayLike(ctx, output, global, constructor_value, source_object.value(), null, map_fn, this_arg, caller_function, caller_frame);
         }
         if (source_object.class_id == core.class.ids.set or source_object.class_id == core.class.ids.map) {
-            const iterator = try builtins.collection.methodCall(ctx.runtime, source_object.value(), if (source_object.class_id == core.class.ids.set) 8 else 9, &.{});
+            // Drain the Map/Set through its values/entries iterator. Route the
+            // collection method body through the record table with no function
+            // object and `global == null`, reproducing the bare primitive
+            // iterator the retired `builtins.collection.methodCall` produced
+            // (ctx-less, fresh iterator prototype) so exec carries no
+            // compile-time knowledge of the builtin.
+            const collection_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = if (source_object.class_id == core.class.ids.set) 8 else 9 };
+            const iterator = (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, source_object.value(), collection_ref, &.{}, null, null)) orelse return error.TypeError;
             defer iterator.free(ctx.runtime);
             return try qjsArrayFromIteratorLike(ctx, output, global, constructor_value, iterator, map_fn, this_arg, caller_function, caller_frame);
         }
@@ -3557,7 +3564,11 @@ pub fn qjsTypedArrayFromStaticCall(
             return try qjsTypedArrayFromIteratorValue(ctx, output, global, constructor_value, source, map_fn, this_arg, caller_function, caller_frame);
         }
         if (source_object.class_id == core.class.ids.set or source_object.class_id == core.class.ids.map) {
-            const iterator = try builtins.collection.methodCall(ctx.runtime, source_object.value(), if (source_object.class_id == core.class.ids.set) 8 else 9, &.{});
+            // Same Map/Set drain as `qjsArrayFrom`, but feeding the typed-array
+            // factory: route through the record table with no function object
+            // and `global == null` to keep the bare primitive iterator.
+            const collection_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = if (source_object.class_id == core.class.ids.set) 8 else 9 };
+            const iterator = (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, source_object.value(), collection_ref, &.{}, null, null)) orelse return error.TypeError;
             defer iterator.free(ctx.runtime);
             return try qjsTypedArrayFromIteratorValue(ctx, output, global, constructor_value, iterator, map_fn, this_arg, caller_function, caller_frame);
         }

@@ -9818,3 +9818,180 @@ fn hasPropertyIndexKeys(self: Object, rt: *JSRuntime) bool {
 fn indexKeyLessThan(_: void, lhs: IndexKey, rhs: IndexKey) bool {
     return lhs.index < rhs.index;
 }
+
+// --- Object.keys/values/entries own-property iteration ----------------------
+//
+// `ownEntriesArray` builds the result array for the bare-runtime
+// Object.keys/values/entries fallback. Relocated to engine core in Phase 6b-3
+// STEP 2 (it is a pure property-iteration constructor with no exec/VM deps);
+// `builtins/object.zig` re-exports `EntriesMode`/`ownEntriesArray` unchanged.
+
+/// Selects which projection `ownEntriesArray` produces.
+pub const EntriesMode = enum {
+    keys,
+    values,
+    entries,
+};
+
+fn ownEntriesExpectObject(value: JSValue) !*Object {
+    const header = value.refHeader() orelse return error.TypeError;
+    if (!value.isObject()) return error.TypeError;
+    return @fieldParentPtr("header", header);
+}
+
+fn entriesAtomToStringValue(rt: *JSRuntime, atom_id: atom.Atom) !JSValue {
+    return rt.atoms.toStringValue(rt, atom_id);
+}
+
+fn entryArrayValue(rt: *JSRuntime, key: atom.Atom, value: JSValue) !JSValue {
+    var rooted_value = value;
+    defer rooted_value.free(rt);
+    var root_values = [_]runtime_mod.ValueRootValue{
+        .{ .value = &rooted_value },
+    };
+    const root_frame = runtime_mod.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = &root_values,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
+
+    const arr = try Object.createArray(rt, null);
+    errdefer Object.destroyFromHeader(rt, &arr.header);
+    const key_value = try entriesAtomToStringValue(rt, key);
+    defer key_value.free(rt);
+    try arr.defineOwnProperty(rt, atom.atomFromUInt32(0), descriptor.Descriptor.data(key_value, true, true, true));
+    try arr.defineOwnProperty(rt, atom.atomFromUInt32(1), descriptor.Descriptor.data(rooted_value, true, true, true));
+    return arr.value();
+}
+
+pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode) !JSValue {
+    var rooted_value = value;
+    var out_value = JSValue.undefinedValue();
+    var element_val = JSValue.undefinedValue();
+    var root_values = [_]runtime_mod.ValueRootValue{
+        .{ .value = &rooted_value },
+        .{ .value = &out_value },
+        .{ .value = &element_val },
+    };
+    const root_frame = runtime_mod.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = &root_values,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
+
+    const object = try ownEntriesExpectObject(rooted_value);
+    const owned_keys = try object.ownKeys(rt);
+    defer Object.freeKeys(rt, owned_keys);
+
+    const out = try Object.createArray(rt, null);
+    out_value = out.value();
+    errdefer {
+        Object.destroyFromHeader(rt, &out.header);
+        out_value = JSValue.undefinedValue();
+    }
+    var out_index: u32 = 0;
+    for (owned_keys) |key| {
+        if (rt.atoms.kind(key) == .symbol) continue;
+        const desc = object.getOwnProperty(key) orelse continue;
+        defer desc.destroy(rt);
+        if (!(desc.enumerable orelse false)) continue;
+        element_val = switch (mode) {
+            .keys => try entriesAtomToStringValue(rt, key),
+            .values => object.getProperty(key),
+            .entries => try entryArrayValue(rt, key, object.getProperty(key)),
+        };
+        defer {
+            element_val.free(rt);
+            element_val = JSValue.undefinedValue();
+        }
+        try out.defineOwnProperty(rt, atom.atomFromUInt32(out_index), descriptor.Descriptor.data(element_val, true, true, true));
+        out_index += 1;
+    }
+    return out_value;
+}
+
+// --- String Iterator factory ------------------------------------------------
+//
+// `stringIterator` builds a fresh String Iterator object for a string (or
+// String wrapper) receiver. It is the fast-path engine primitive the exec
+// iteration machinery (for-of, spread, async-from-sync) uses instead of the
+// `String.prototype[Symbol.iterator]` property lookup. Relocated to engine core
+// in Phase 6b-3 STEP 6: it is a pure object/native-function constructor that
+// touches only core string/object/function primitives (no exec/VM deps and no
+// realm/global state). The produced iterator's `next` carries the
+// `(.string, iterator_next)` native id, so the actual `next` body still
+// dispatches through the record table into `builtins/string.zig`.
+
+/// Extract the primitive string value from a string or String-wrapper receiver.
+fn stringIteratorPrimitiveValue(value: JSValue) !JSValue {
+    if (value.isString()) return value.dup();
+    const header = value.refHeader() orelse return error.TypeError;
+    if (!value.isObject()) return error.TypeError;
+    const object: *Object = @fieldParentPtr("header", header);
+    if (object.class_id != class.ids.string) return error.TypeError;
+    return (object.objectData() orelse return error.TypeError).dup();
+}
+
+fn defineStringIteratorToStringTag(rt: *JSRuntime, object: *Object, tag_name: []const u8) !void {
+    const tag_atom = atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
+    const tag_value = try string.String.createUtf8(rt, tag_name);
+    defer tag_value.value().free(rt);
+    try object.defineOwnProperty(rt, tag_atom, descriptor.Descriptor.data(tag_value.value(), false, false, true));
+}
+
+fn stringIteratorPrototype(rt: *JSRuntime, tag_name: []const u8) !*Object {
+    const base = try Object.create(rt, class.ids.object, null);
+    var base_raw_owned = true;
+    errdefer if (base_raw_owned) Object.destroyFromHeader(rt, &base.header);
+    try defineStringIteratorToStringTag(rt, base, "Iterator");
+    const specific = try Object.create(rt, class.ids.object, base);
+    errdefer Object.destroyFromHeader(rt, &specific.header);
+    base_raw_owned = false;
+    base.value().free(rt);
+    try defineStringIteratorToStringTag(rt, specific, tag_name);
+    const next = try function.nativeFunction(rt, "next", 0);
+    defer next.free(rt);
+    const next_object = (next.refHeader() orelse return error.TypeError);
+    if (!next.isObject()) return error.TypeError;
+    const next_function: *Object = @fieldParentPtr("header", next_object);
+    next_function.nativeFunctionIdSlot().* = function.nativeBuiltinId(.string, @intFromEnum(host_function.builtin_method_ids.string.PrototypeMethod.iterator_next));
+    try specific.defineOwnProperty(rt, atom.predefinedId("next", .string).?, descriptor.Descriptor.data(next, true, false, true));
+    return specific;
+}
+
+pub fn stringIterator(rt: *JSRuntime, receiver: JSValue) !JSValue {
+    var rooted_receiver = receiver;
+    var target = JSValue.undefinedValue();
+    var prototype_value = JSValue.undefinedValue();
+    var object_value = JSValue.undefinedValue();
+    var root_values = [_]runtime_mod.ValueRootValue{
+        .{ .value = &rooted_receiver },
+        .{ .value = &target },
+        .{ .value = &prototype_value },
+        .{ .value = &object_value },
+    };
+    const root_frame = runtime_mod.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = &root_values,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
+
+    target = try stringIteratorPrimitiveValue(rooted_receiver);
+    defer target.free(rt);
+    const prototype = try stringIteratorPrototype(rt, "String Iterator");
+    prototype_value = prototype.value();
+    defer prototype_value.free(rt);
+    const object = try Object.create(rt, class.ids.string_iterator, prototype);
+    object_value = object.value();
+    errdefer {
+        const failed_object = object_value;
+        object_value = JSValue.undefinedValue();
+        failed_object.free(rt);
+    }
+    try object.setOptionalValueSlot(rt, object.iteratorTargetSlot(), target.dup());
+    object.iteratorIndexSlot().* = 0;
+    return object_value;
+}

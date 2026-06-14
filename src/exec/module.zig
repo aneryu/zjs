@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_mod = @import("call.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
@@ -872,7 +872,28 @@ pub fn initializeSyntheticFileModule(
         .json => blk: {
             const string = try core.string.String.createUtf8(ctx.runtime, source_text);
             defer string.value().free(ctx.runtime);
-            break :blk try builtins.json.parse(ctx.runtime, global, string.value());
+            // Route JSON-module parsing through the internal record table
+            // (JSON.parse, no reviver) so exec carries no compile-time JSON
+            // knowledge. The input is a freshly built string, so the method's
+            // ToString coercion is an identity step and no VM caller frame is
+            // needed. The json domain is always installed, so the table never
+            // misses here.
+            const json_parse_ref = core.function.NativeBuiltinRef{
+                .domain = .json,
+                .id = @intFromEnum(core.host_function.builtin_method_ids.json.StaticMethod.parse),
+            };
+            break :blk (try builtin_dispatch.callInternalRecord(
+                ctx,
+                null,
+                global,
+                &.{},
+                null,
+                core.JSValue.undefinedValue(),
+                json_parse_ref,
+                &.{string.value()},
+                null,
+                null,
+            )) orelse return error.SyntaxError;
         },
         .text => (try core.string.String.createUtf8(ctx.runtime, source_text)).value(),
         .bytes => try syntheticBytesModuleValue(ctx, global, source_text),

@@ -3,7 +3,6 @@
 const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const dtoa = @import("../libs/dtoa.zig");
@@ -15,6 +14,7 @@ const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
 const call_runtime = @import("call_runtime.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const call_mod = @import("call.zig");
 const eval_ops = @import("eval_ops.zig");
@@ -1105,7 +1105,10 @@ fn tryFuseGlobalDateNowCall(
     const native_ref = functionOwnNativeBuiltinRefForFastPath(function, pc, ctx.runtime, receiver, atom_id) orelse return false;
     if (native_ref.domain != .date or native_ref.id != @intFromEnum(method_ids.date.StaticMethod.now)) return false;
 
-    const result = try builtins.date.staticCall(ctx.runtime, native_ref.id, &.{});
+    // `Date.now()` fast path: route the static body through the record table's
+    // func-object-free arm (the `now` record needs no receiver/realm) instead of
+    // naming the builtin from exec.
+    const result = (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, core.JSValue.undefinedValue(), native_ref, &.{}, null, null)) orelse return false;
     errdefer result.free(ctx.runtime);
     try stack.pushOwned(result);
     frame.pc = pc + 8;
@@ -1133,10 +1136,14 @@ fn tryFuseGlobalUriCall1(
 
     if (fusion_stats.counted(.tryFuseUriDecodeSingleFourByteStrictEqFromCharCode, try tryFuseUriDecodeSingleFourByteStrictEqFromCharCode(ctx, stack, function, frame, catch_target, global, native_ref.id, call_arg.value, call_arg.next_pc, eval_local_names, eval_var_ref_names, eval_with_object))) |step| return step;
 
-    const result = builtins.uri.call(ctx.runtime, native_ref.id, call_arg.value) catch |err| {
+    // `call_arg.value` is always a string here (see `uriCall1StringArgument`),
+    // so route the already-coerced argument through the `.uri` record on the
+    // bare-runtime primitive path (`global = null`) — the same body the
+    // retired direct `builtins.uri.call` reached, without re-coercion.
+    const result = (builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, core.JSValue.undefinedValue(), native_ref, &.{call_arg.value}, null, null) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
-    };
+    }) orelse return null;
     errdefer result.free(ctx.runtime);
     try stack.pushOwned(result);
     frame.pc = call_arg.next_pc;
@@ -1862,7 +1869,7 @@ fn tryFuseUriDecodeSingleFourByteStrictEqFromCharCode(
     const strict_eq_pc = call_pc + 3;
     if (code[strict_eq_pc] != op.strict_eq) return null;
 
-    const units = builtins.uri.decodeSingleFourByteEscapeUnits(argument) catch |err| {
+    const units = core.uri.decodeSingleFourByteEscapeUnits(argument) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     } orelse return null;
@@ -2132,9 +2139,10 @@ fn numberStaticLiteralResultAt(
     pc: usize,
 ) ?NumberStaticLiteralResult {
     const code = function.code;
-    const number_mod = builtins.number;
+    const number_static = method_ids.number.StaticMethod;
+    const number_parse = core.number;
     return switch (native_id) {
-        @intFromEnum(number_mod.StaticMethod.parse_int) => blk: {
+        @intFromEnum(number_static.parse_int) => blk: {
             if (pc + 5 > code.len or code[pc] != op.push_atom_value) return null;
             const string_atom = readInt(u32, code[pc + 1 ..][0..4]);
             var atom_buf: [10]u8 = undefined;
@@ -2143,11 +2151,11 @@ fn numberStaticLiteralResultAt(
             if (radix_operand.next_pc + 3 > code.len or code[radix_operand.next_pc] != op.call_method) return null;
             if (readInt(u16, code[radix_operand.next_pc + 1 ..][0..2]) != 2) return null;
             break :blk .{
-                .number = number_mod.parseIntLatin1Bytes(text, radix_operand.value),
+                .number = number_parse.parseIntLatin1Bytes(text, radix_operand.value),
                 .next_pc = radix_operand.next_pc + 3,
             };
         },
-        @intFromEnum(number_mod.StaticMethod.parse_float) => blk: {
+        @intFromEnum(number_static.parse_float) => blk: {
             if (pc + 8 > code.len or code[pc] != op.push_atom_value) return null;
             const string_atom = readInt(u32, code[pc + 1 ..][0..4]);
             var atom_buf: [10]u8 = undefined;
@@ -2156,7 +2164,7 @@ fn numberStaticLiteralResultAt(
             if (code[call_pc] != op.call_method) return null;
             if (readInt(u16, code[call_pc + 1 ..][0..2]) != 1) return null;
             break :blk .{
-                .number = number_mod.parseFloatLatin1Bytes(text),
+                .number = number_parse.parseFloatLatin1Bytes(text),
                 .next_pc = call_pc + 3,
             };
         },

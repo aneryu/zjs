@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
@@ -152,7 +151,7 @@ pub fn dynamicImport(
             return;
         };
         defer namespace.free(ctx.runtime);
-        const promise = try builtins.promise.fulfilledWithPrototype(ctx.runtime, namespace, prototype);
+        const promise = try core.promise.fulfilledWithPrototype(ctx.runtime, namespace, prototype);
         errdefer promise.free(ctx.runtime);
         try stack.pushOwned(promise);
         return;
@@ -208,7 +207,7 @@ fn pushRejectedTypeError(
 ) !void {
     const error_value = try exception_ops.createNamedError(ctx, global, "TypeError", message);
     defer error_value.free(ctx.runtime);
-    const promise = try builtins.promise.rejectedWithPrototype(ctx.runtime, error_value, prototype);
+    const promise = try core.promise.rejectedWithPrototype(ctx.runtime, error_value, prototype);
     errdefer promise.free(ctx.runtime);
     try stack.pushOwned(promise);
 }

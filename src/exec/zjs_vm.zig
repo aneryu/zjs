@@ -27,7 +27,6 @@ const exceptions = @import("exceptions.zig");
 const gen_async_vm = @import("vm_gen_async.zig");
 const inline_calls = @import("inline_calls.zig");
 const iter_vm = @import("iterator_ops.zig");
-const json_vm = @import("json_ops.zig");
 const literal_vm = @import("vm_literal.zig");
 const vm_property_field = @import("vm_property_field.zig");
 const vm_property_globals = @import("vm_property_globals.zig");
@@ -106,7 +105,7 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
         ctx.runtime,
         core.class.ids.object,
         null,
-        call_mod.contextGlobalOwnPropertyCapacity(),
+        call_mod.contextGlobalOwnPropertyCapacity(ctx.runtime),
     );
     errdefer global_object.value().free(ctx.runtime);
     global_object.flags.is_global = true;
@@ -1106,27 +1105,7 @@ pub const cleanupAtomicsWaitersForContext = call_runtime.cleanupAtomicsWaitersFo
 const throwTypeErrorIntrinsicForGlobal = call_runtime.throwTypeErrorIntrinsicForGlobal;
 pub const getValueProperty = class_vm.getValueProperty;
 
-test "engine eval host globals and throw intrinsic tear down cleanly" {
-    const exec = @import("root.zig");
-
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
-    defer ctx.destroy();
-
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    global.flags.is_global = true;
-    defer global.value().free(rt);
-
-    try exec.call.installHostGlobals(rt, global);
-
-    var output_buffer: [64]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
-
-    const eval_entry = @import("eval_entry.zig");
-    const value = try eval_entry.eval(ctx, "print(1);", .{ .output = &output });
-    defer value.free(rt);
-
-    try std.testing.expect(value.isUndefined());
-    try std.testing.expectEqualStrings("1\n", output.buffered());
-}
+// `engine eval host globals and throw intrinsic tear down cleanly` was relocated
+// to `src/tests/exec.zig` in Phase 6b-3 STEP 7B: it bootstraps a bare runtime's
+// standard globals through `rt.installStandardGlobals`, which needs the builtins
+// installer registered, and exec source must not name the builtins registry.

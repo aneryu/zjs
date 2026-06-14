@@ -17,6 +17,21 @@ const countJob = helpers.countJob;
 const countJobArgs = helpers.countJobArgs;
 
 pub const helpers = struct {
+    /// Install the standard + host globals on a bare `core.JSRuntime` global for
+    /// tests that build a runtime directly (bypassing the binding-layer context
+    /// create that wires the installer). Phase 6b-3 STEP 7B routed the install
+    /// through `rt.installStandardGlobals`, which needs the builtins installer
+    /// registered first; exec source cannot name the builtins registry, so the
+    /// test tree (which imports builtins) registers it here. Idempotent.
+    pub fn installHostGlobalsBare(rt: *core.JSRuntime, global: *core.Object) !void {
+        const registry = engine.builtins.registry;
+        const exec_call = engine.exec.call;
+        registry.registerStandardGlobalsDefault();
+        rt.install_standard_globals_cb = registry.installStandardGlobals;
+        rt.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+        try exec_call.installHostGlobals(rt, global);
+    }
+
     pub fn makeFunction(rt: *core.JSRuntime, code: []const u8) !engine.bytecode.Bytecode {
         const name = try rt.internAtom("exec");
         defer rt.atoms.free(name);
@@ -976,7 +991,7 @@ test "call subsystem installs and invokes host globals" {
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
     const run_test262 = @import("../cli/run_test262.zig");
     try run_test262.installTest262Globals(rt, @ptrCast(ctx), global);
 
@@ -1083,7 +1098,7 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const math_key = try rt.internAtom("Math");
     defer rt.atoms.free(math_key);
@@ -1654,7 +1669,7 @@ test "number native builtin records cover static and prototype dispatch" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const number_key = try rt.internAtom("Number");
     defer rt.atoms.free(number_key);
@@ -1732,7 +1747,7 @@ test "string static native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const string_key = try rt.internAtom("String");
     defer rt.atoms.free(string_key);
@@ -1783,7 +1798,7 @@ test "string prototype native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const string_key = try rt.internAtom("String");
     defer rt.atoms.free(string_key);
@@ -1840,7 +1855,7 @@ test "date static native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const date_key = try rt.internAtom("Date");
     defer rt.atoms.free(date_key);
@@ -1890,7 +1905,7 @@ test "date constructor native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const date_key = try rt.internAtom("Date");
     defer rt.atoms.free(date_key);
@@ -1979,7 +1994,7 @@ test "date prototype native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const date_key = try rt.internAtom("Date");
     defer rt.atoms.free(date_key);
@@ -2034,7 +2049,7 @@ test "array static native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const array_key = try rt.internAtom("Array");
     defer rt.atoms.free(array_key);
@@ -2109,7 +2124,7 @@ test "array prototype native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const array_key = try rt.internAtom("Array");
     defer rt.atoms.free(array_key);
@@ -2212,7 +2227,7 @@ test "collection native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const map_key = try rt.internAtom("Map");
     defer rt.atoms.free(map_key);
@@ -2337,7 +2352,7 @@ test "buffer native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const array_buffer_key = try rt.internAtom("ArrayBuffer");
     defer rt.atoms.free(array_buffer_key);
@@ -2502,7 +2517,7 @@ test "typed array accessor native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const typed_array_key = try rt.internAtom("TypedArray");
     defer rt.atoms.free(typed_array_key);
@@ -2596,7 +2611,7 @@ test "regexp static native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const regexp_key = try rt.internAtom("RegExp");
     defer rt.atoms.free(regexp_key);
@@ -2650,7 +2665,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const regexp_key = try rt.internAtom("RegExp");
     defer rt.atoms.free(regexp_key);
@@ -2766,7 +2781,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const regexp_key = try rt.internAtom("RegExp");
     defer rt.atoms.free(regexp_key);
@@ -2908,7 +2923,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    try engine.exec.call.installHostGlobals(rt, global);
+    try helpers.installHostGlobalsBare(rt, global);
 
     const regexp_key = try rt.internAtom("RegExp");
     defer rt.atoms.free(regexp_key);
@@ -4706,4 +4721,149 @@ fn loadFixtureModule(
         .kind = module.kind,
         .owned = false,
     };
+}
+
+// Bootstrap-integration tests relocated from src/exec/{call,zjs_vm}.zig during
+// Phase 6b-3 STEP 7B. They build a bare `core.JSRuntime` and install the
+// standard globals through `rt.installStandardGlobals`, which needs the builtins
+// installer wired; exec source must not name the builtins registry, so they live
+// here where the test tree may import builtins (via `helpers.installHostGlobalsBare`).
+
+test "host global bootstrap installs and tears down builtin plus host domains" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+    global.flags.is_global = true;
+    defer global.value().free(rt);
+
+    try helpers.installHostGlobalsBare(rt, global);
+}
+
+test "engine eval host globals and throw intrinsic tear down cleanly" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+    global.flags.is_global = true;
+    defer global.value().free(rt);
+
+    try helpers.installHostGlobalsBare(rt, global);
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+
+    const value = try engine.exec.eval_entry.eval(ctx, "print(1);", .{ .output = &output });
+    defer value.free(rt);
+
+    try std.testing.expect(value.isUndefined());
+    try std.testing.expectEqualStrings("1\n", output.buffered());
+}
+
+const ReflectActiveRootSymbolProbe = struct {
+    rt: *core.JSRuntime,
+    atom_id: u32,
+    saw_symbol: bool = false,
+    trace_failed: bool = false,
+
+    fn trigger(context: ?*anyopaque, size: usize) void {
+        _ = size;
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const saved_trigger_fn = self.rt.memory.trigger_gc_fn;
+        const saved_trigger_ctx = self.rt.memory.trigger_gc_ctx;
+        self.rt.memory.trigger_gc_fn = null;
+        self.rt.memory.trigger_gc_ctx = null;
+        defer {
+            self.rt.memory.trigger_gc_fn = saved_trigger_fn;
+            self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+        }
+        var visitor = core.runtime.RootVisitor{
+            .context = self,
+            .visit_value = @This().visitValue,
+            .visit_object = @This().visitObject,
+        };
+        self.rt.traceActiveRoots(&visitor) catch {
+            self.trace_failed = true;
+        };
+    }
+
+    fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (slot.asSymbolAtom()) |atom_id| {
+            if (atom_id == self.atom_id) self.saw_symbol = true;
+        }
+    }
+
+    fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
+        _ = context;
+        _ = slot;
+    }
+};
+
+fn reflectTestSetArrayIndex(rt: *core.JSRuntime, array: *core.Object, index: u32, value: core.JSValue) !void {
+    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, true, true, true));
+    if (array.length <= index) array.length = index + 1;
+}
+
+test "reflect construct roots argument list while resolving prototype" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // `reflectConstruct` routes builtin construction (Array, like Date/RegExp/
+    // String) through the internal record table, so the realm globals must be
+    // installed to wire `rt.internal_builtins` before the construct record is
+    // reachable.
+    const realm_global = try core.Object.create(rt, core.class.ids.object, null);
+    realm_global.flags.is_global = true;
+    defer realm_global.value().free(rt);
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    rt.install_standard_globals_cb = engine.builtins.registry.installStandardGlobals;
+    rt.standard_global_own_property_capacity = engine.builtins.registry.standardGlobalOwnPropertyCapacity();
+    try rt.installStandardGlobals(realm_global);
+
+    const target = try core.function.nativeFunction(rt, "Array", 1);
+    defer target.free(rt);
+    const new_target = try core.function.nativeFunction(rt, "Array", 1);
+    defer new_target.free(rt);
+    const new_target_object = engine.exec.call.thisObject(new_target) orelse return error.TypeError;
+    try new_target_object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(core.JSValue.int32(1), true, false, true));
+
+    const args_object = try core.Object.createArray(rt, null);
+    var args_alive = true;
+    defer if (args_alive) args_object.value().free(rt);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-reflect-construct-argument-root");
+    try reflectTestSetArrayIndex(rt, args_object, 0, core.JSValue.symbol(symbol_atom));
+
+    const saved_trigger_fn = rt.memory.trigger_gc_fn;
+    const saved_trigger_ctx = rt.memory.trigger_gc_ctx;
+    var probe = ReflectActiveRootSymbolProbe{
+        .rt = rt,
+        .atom_id = symbol_atom,
+    };
+    rt.memory.trigger_gc_fn = ReflectActiveRootSymbolProbe.trigger;
+    rt.memory.trigger_gc_ctx = &probe;
+    defer {
+        rt.memory.trigger_gc_fn = saved_trigger_fn;
+        rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+    }
+
+    var globals = [_]engine.exec.globals.Slot{};
+    const reflect_args = [_]core.JSValue{ target, args_object.value(), new_target };
+    const result = try engine.exec.reflect_ops.reflectConstruct(ctx, &reflect_args, globals[0..]);
+    var result_alive = true;
+    defer if (result_alive) result.free(rt);
+
+    try std.testing.expect(!probe.trace_failed);
+    try std.testing.expect(probe.saw_symbol);
+
+    args_object.value().free(rt);
+    args_alive = false;
+    result.free(rt);
+    result_alive = false;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }

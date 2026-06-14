@@ -1,7 +1,5 @@
 const core = @import("../core/root.zig");
 const bytecode = @import("../bytecode/root.zig");
-const array_builtin = @import("../builtins/array.zig");
-const collection_builtin = @import("../builtins/collection.zig");
 const globals_mod = @import("globals.zig");
 const value_ops = @import("value_ops.zig");
 const std = @import("std");
@@ -604,7 +602,7 @@ test "appendPairToGlobalArray roots direct function bytecode entries while creat
     {
         const stored_pair_value = results.getProperty(core.atom.atomFromUInt32(0));
         defer stored_pair_value.free(rt);
-        const stored_pair = try array_builtin.expectArray(stored_pair_value);
+        const stored_pair = try core.array.expectArray(stored_pair_value);
         try expectArrayIndexSame(rt, stored_pair, 0, pair_key.value);
         try expectArrayIndexSame(rt, stored_pair, 1, pair_value.value);
     }
@@ -797,7 +795,7 @@ fn setGlobalWeakMapString(rt: *core.JSRuntime, globals: []globals_mod.Slot, map_
     defer key_value.free(rt);
     const value = try value_ops.createStringValue(rt, bytes);
     defer value.free(rt);
-    try collection_builtin.setWeakMapEntry(rt, map_object, key_value, value);
+    try core.collection.setWeakMapEntry(rt, map_object, key_value, value);
 }
 
 fn appendRecordToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8, value: core.JSValue, key: core.JSValue, this_arg: core.JSValue) !void {
@@ -853,7 +851,7 @@ fn appendWeakMapAdderRecord(rt: *core.JSRuntime, globals: []globals_mod.Slot, ke
 fn assertAndShiftExpected(rt: *core.JSRuntime, globals: []globals_mod.Slot, actual: core.JSValue) !void {
     const expects_value = try globals_mod.getByName(rt, globals, "expects");
     defer expects_value.free(rt);
-    const expects = try array_builtin.expectArray(expects_value);
+    const expects = try core.array.expectArray(expects_value);
     if (expects.length == 0) return error.JSException;
     const expected = expects.getProperty(core.atom.atomFromUInt32(0));
     defer expected.free(rt);
@@ -1007,7 +1005,7 @@ fn appendToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: [
         array_value = try getGlobalObjectProperty(rt, globals, name);
     }
     defer array_value.free(rt);
-    const array = try array_builtin.expectArray(array_value);
+    const array = try core.array.expectArray(array_value);
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.length), core.Descriptor.data(rooted_value, true, true, true));
 }
 

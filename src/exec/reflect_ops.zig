@@ -3,7 +3,6 @@
 const core = @import("../core/root.zig");
 const std = @import("std");
 
-const builtins = @import("../builtins/root.zig");
 const array_ops = @import("array_ops.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call = @import("call.zig");
@@ -20,6 +19,15 @@ const ValueSliceRoot = array_ops.ValueSliceRoot;
 
 // Static-method ids stay with the registration data in builtins/reflect_proxy.zig.
 const StaticMethod = core.host_function.builtin_method_ids.reflect.StaticMethod;
+
+// `Reflect.construct(Array, ...)` routes through the Array construct record; the
+// Array constructor object carries no native id (so the native-id construct
+// dispatch above misses it and the name cascade reaches here), hence this
+// explicit ref.
+const array_construct_ref = core.function.NativeBuiltinRef{
+    .domain = .array,
+    .id = @intFromEnum(core.host_function.builtin_method_ids.array.ConstructorMethod.construct),
+};
 
 // Shared call-runtime helpers that stay with the dispatcher in exec/call.zig.
 const activeGlobalObject = call.activeGlobalObject;
@@ -70,7 +78,7 @@ pub fn reflectConstruct(ctx: *core.JSContext, args: []const core.JSValue, global
             try construct_args.init(rt, args[1]);
             defer construct_args.deinit();
             const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
-            return builtins.array.constructConstructorWithPrototype(rt, construct_args.values, prototype);
+            return (try builtin_dispatch.callConstructRecord(ctx, null, null, globals, target, array_construct_ref, prototype, construct_args.values, null, null)) orelse error.TypeError;
         }
         if (std.mem.eql(u8, name, "Iterator")) {
             if (new_target.sameValue(args[0])) return error.TypeError;
@@ -88,7 +96,7 @@ pub fn reflectConstruct(ctx: *core.JSContext, args: []const core.JSValue, global
                 break :blk value_ops.numberToValue(try value_ops.toIntegerOrInfinity(rt, construct_args.values[0]));
             } else core.JSValue.int32(0);
             const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
-            return primitiveWrapper(rt, core.class.ids.number, primitive, prototype);
+            return primitiveWrapper(ctx, core.class.ids.number, primitive, prototype);
         }
         if (std.mem.eql(u8, name, "FinalizationRegistry")) {
             var construct_args = ReflectConstructArguments{};
@@ -107,16 +115,15 @@ pub fn reflectConstruct(ctx: *core.JSContext, args: []const core.JSValue, global
             try construct_args.init(rt, args[1]);
             defer construct_args.deinit();
             const target_value = if (construct_args.values.len >= 1) construct_args.values[0] else return error.TypeError;
-            if (!builtins.symbol.canBeHeldWeakly(rt, target_value)) return error.TypeError;
+            if (!core.symbol.canBeHeldWeakly(rt, target_value)) return error.TypeError;
             const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
             return construct_mod.weakRefWithPrototype(rt, target_value, prototype);
         }
-        if (builtins.collection.constructorId(name)) |kind| {
+        if (core.host_function.builtin_method_id_lookup.collection.constructorId(name)) |kind| {
             const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
-            return builtins.collection.constructWithPrototype(rt, kind, prototype) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                else => err,
-            };
+            const construct_id = core.host_function.builtin_method_id_lookup.collection.constructIdForKind(kind) orelse return error.TypeError;
+            const collection_construct_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = construct_id };
+            return (try builtin_dispatch.callConstructRecord(ctx, null, null, globals, target, collection_construct_ref, prototype, &.{}, null, null)) orelse error.TypeError;
         }
         if (construct_mod.typedArrayElement(name)) |element| {
             var construct_args = ReflectConstructArguments{};

@@ -155,10 +155,11 @@ function violationReason(source, target) {
   if (source.startsWith('src/exec/')) {
     const disallowed = [
       'src/binding/',
+      'src/builtins/',
       'src/cli/',
       'src/runtime/',
     ];
-    return targetStarts(target, disallowed) ? 'exec must not depend on runtime, binding, or CLI; host policy reaches exec through core interfaces (e.g. HostEventLoop) or the external host-function registry' : null;
+    return targetStarts(target, disallowed) ? 'exec must not depend on builtins, runtime, binding, or CLI (Phase 6 terminal: builtins are clients of exec — they import exec VM ops; exec dispatches to them only through the core-owned internal record table, never by importing builtins). Host policy reaches exec through core interfaces (e.g. HostEventLoop) or the external host-function registry' : null;
   }
 
   if (source.startsWith('src/runtime/')) {

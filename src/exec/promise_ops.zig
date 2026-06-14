@@ -1,6 +1,5 @@
 const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
 const frontend = @import("../frontend/root.zig");
 const call_mod = @import("call.zig");
@@ -689,7 +688,7 @@ pub fn qjsPromiseConstructWithPrototype(
 ) !core.JSValue {
     const executor = if (args.len >= 1) args[0] else return throwTypeErrorMessage(ctx, global, "not a function");
     if (!isCallableValue(executor)) return throwTypeErrorMessage(ctx, global, "not a function");
-    const promise = try builtins.promise.constructWithPrototype(ctx.runtime, prototype);
+    const promise = try core.promise.constructWithPrototype(ctx.runtime, prototype);
     errdefer promise.free(ctx.runtime);
 
     const resolving = try createPromiseResolvingPair(ctx.runtime, global, promise);
@@ -2692,7 +2691,7 @@ pub fn qjsAtomicsWaitAsync(
         return atomicsWaitAsyncResult(ctx, false, result);
     }
 
-    const promise = try builtins.promise.constructWithPrototype(ctx.runtime, promisePrototypeFromGlobal(ctx.runtime, global));
+    const promise = try core.promise.constructWithPrototype(ctx.runtime, promisePrototypeFromGlobal(ctx.runtime, global));
     defer promise.free(ctx.runtime);
     if (objectFromValue(promise)) |promise_object| {
         promise_object.promiseAtomicsWaitAsyncSlot().* = true;
@@ -2796,7 +2795,7 @@ pub fn qjsAsyncFunctionStart(
     eval_var_ref_names: []const core.Atom,
     eval_var_refs: []const core.JSValue,
 ) HostError!core.JSValue {
-    const promise = try builtins.promise.constructWithPrototype(ctx.runtime, promisePrototypeFromGlobal(ctx.runtime, global));
+    const promise = try core.promise.constructWithPrototype(ctx.runtime, promisePrototypeFromGlobal(ctx.runtime, global));
     errdefer promise.free(ctx.runtime);
 
     const continuation_value = try createGeneratorObject(ctx, func, current_function_value, this_value, args, var_refs, output, global, eval_var_ref_names, eval_var_refs, false);
@@ -2989,7 +2988,7 @@ test "qjsAsyncFunctionSettle roots direct symbol result before promise stores it
         rt.destroy();
     }
 
-    const promise = try builtins.promise.constructWithPrototype(rt, promisePrototypeFromGlobal(rt, global));
+    const promise = try core.promise.constructWithPrototype(rt, promisePrototypeFromGlobal(rt, global));
     defer promise.free(rt);
     try continuation.setOptionalValueSlot(rt, continuation.generatorAsyncPromiseSlot(), promise.dup());
 
@@ -3045,7 +3044,7 @@ pub fn qjsAsyncIteratorAsyncDispose(
     };
     defer return_method.free(ctx.runtime);
     if (return_method.isUndefined() or return_method.isNull()) {
-        return try builtins.promise.fulfilledWithPrototype(ctx.runtime, core.JSValue.undefinedValue(), promisePrototypeFromGlobal(ctx.runtime, global));
+        return try core.promise.fulfilledWithPrototype(ctx.runtime, core.JSValue.undefinedValue(), promisePrototypeFromGlobal(ctx.runtime, global));
     }
     if (!isCallableValue(return_method)) {
         return try rejectedPromiseForRuntimeError(ctx, global, error.TypeError, promisePrototypeFromGlobal(ctx.runtime, global));
@@ -3064,16 +3063,16 @@ pub fn qjsAsyncIteratorAsyncDispose(
         if (result_object.promiseIsRejected()) {
             const reason = if (result_object.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
             defer reason.free(ctx.runtime);
-            return try builtins.promise.rejectedWithPrototype(ctx.runtime, reason, promisePrototypeFromGlobal(ctx.runtime, global));
+            return try core.promise.rejectedWithPrototype(ctx.runtime, reason, promisePrototypeFromGlobal(ctx.runtime, global));
         }
     }
-    return try builtins.promise.fulfilledWithPrototype(ctx.runtime, core.JSValue.undefinedValue(), promisePrototypeFromGlobal(ctx.runtime, global));
+    return try core.promise.fulfilledWithPrototype(ctx.runtime, core.JSValue.undefinedValue(), promisePrototypeFromGlobal(ctx.runtime, global));
 }
 
 pub fn asyncGeneratorFulfilledIteratorResult(ctx: *core.JSContext, global: *core.Object, value: core.JSValue, done: bool) !core.JSValue {
     const iterator_result = try createIteratorResult(ctx.runtime, global, value, done);
     defer iterator_result.free(ctx.runtime);
-    return builtins.promise.fulfilledWithPrototype(ctx.runtime, iterator_result, promisePrototypeFromGlobal(ctx.runtime, global));
+    return core.promise.fulfilledWithPrototype(ctx.runtime, iterator_result, promisePrototypeFromGlobal(ctx.runtime, global));
 }
 
 pub fn asyncGeneratorIteratorResultFromPromise(
@@ -3083,7 +3082,7 @@ pub fn asyncGeneratorIteratorResultFromPromise(
     promise_value: core.JSValue,
     done: bool,
 ) !core.JSValue {
-    const promise = try builtins.promise.constructWithPrototype(ctx.runtime, promisePrototypeFromGlobal(ctx.runtime, global));
+    const promise = try core.promise.constructWithPrototype(ctx.runtime, promisePrototypeFromGlobal(ctx.runtime, global));
     errdefer promise.free(ctx.runtime);
     const resolving = try createPromiseResolvingPair(ctx.runtime, global, promise);
     defer resolving.resolve.free(ctx.runtime);
@@ -3167,7 +3166,7 @@ pub fn qjsAsyncFromSyncIteratorReturn(
     if (return_method.isUndefined() or return_method.isNull()) {
         const done_result = try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
         defer done_result.free(ctx.runtime);
-        return builtins.promise.fulfilledWithPrototype(ctx.runtime, done_result, promisePrototypeFromGlobal(ctx.runtime, global));
+        return core.promise.fulfilledWithPrototype(ctx.runtime, done_result, promisePrototypeFromGlobal(ctx.runtime, global));
     }
     if (!isCallableValue(return_method)) return error.TypeError;
     const result = if (args.len > 0)
@@ -3452,7 +3451,7 @@ pub fn qjsPerformPromiseThen(
         try qjsSettlePendingThenableJobs(ctx, output, global, object);
     }
 
-    if (object.promiseIsRejected()) builtins.promise.markHandled(ctx, object);
+    if (object.promiseIsRejected()) core.promise.markHandled(ctx, object);
     const reaction = try qjsPromiseReactionRecord(ctx.runtime, on_fulfilled, on_rejected, resolve_value, reject_value);
     defer reaction.free(ctx.runtime);
     if (object.promiseResultSlot().* == null) {
@@ -3504,7 +3503,7 @@ pub fn qjsPromiseThen(
         try qjsSettlePendingThenableJobs(ctx, output, global, object);
     }
 
-    if (object.promiseIsRejected()) builtins.promise.markHandled(ctx, object);
+    if (object.promiseIsRejected()) core.promise.markHandled(ctx, object);
     const on_fulfilled = if (is_catch) core.JSValue.undefinedValue() else if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const on_rejected = if (is_catch) (if (args.len >= 1) args[0] else core.JSValue.undefinedValue()) else if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     if (object.promiseResultSlot().* == null) {
@@ -3776,7 +3775,7 @@ pub fn awaitThenableValue(
     defer then_value.free(ctx.runtime);
     if (!isCallableValue(then_value)) return null;
 
-    const promise = try builtins.promise.constructWithPrototype(ctx.runtime, promisePrototypeFromGlobal(ctx.runtime, global));
+    const promise = try core.promise.constructWithPrototype(ctx.runtime, promisePrototypeFromGlobal(ctx.runtime, global));
     defer promise.free(ctx.runtime);
     const promise_object = objectFromValue(promise) orelse return error.TypeError;
     const resolving = try createPromiseResolvingPair(ctx.runtime, global, promise);
@@ -3882,7 +3881,7 @@ test "promise enqueues reactions and executes jobs via engine" {
     defer ctx.destroy();
 
     promise_jobs = 0;
-    try builtins.promise.enqueueReaction(ctx, countPromiseJob, &.{core.JSValue.int32(2)});
+    try core.promise.enqueueReaction(ctx, countPromiseJob, &.{core.JSValue.int32(2)});
 
     rt.job_queue.runAll();
     const global_object = try ctx.globalObject();

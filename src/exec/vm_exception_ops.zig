@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
 const error_stack_ops = @import("error_stack_ops.zig");
 const property_ops = @import("property_ops.zig");
@@ -225,14 +224,14 @@ pub fn rejectedPromiseForRuntimeError(
 ) !core.JSValue {
     if (pendingExceptionMatchesError(ctx, err)) {
         const thrown_value = ctx.exception_slot.value;
-        const promise = try builtins.promise.rejectedWithPrototype(ctx.runtime, thrown_value, prototype);
+        const promise = try core.promise.rejectedWithPrototype(ctx.runtime, thrown_value, prototype);
         ctx.clearException();
         return promise;
     }
     const error_info = runtimeErrorInfo(err) orelse return err;
     const error_value = try createNamedError(ctx, global, error_info.name, error_info.message);
     defer error_value.free(ctx.runtime);
-    const promise = try builtins.promise.rejectedWithPrototype(ctx.runtime, error_value, prototype);
+    const promise = try core.promise.rejectedWithPrototype(ctx.runtime, error_value, prototype);
     if (ctx.hasException()) ctx.clearException();
     return promise;
 }

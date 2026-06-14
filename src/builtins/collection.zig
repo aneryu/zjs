@@ -2,8 +2,6 @@ const core = @import("../core/root.zig");
 const function_builtin = @import("function.zig");
 const symbol_builtin = @import("symbol.zig");
 const globals_mod = core.global_slots;
-const bignum = @import("../libs/bignum.zig");
-const dtoa = @import("../libs/dtoa.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 const builtin_dispatch = @import("../exec/builtin_dispatch.zig");
@@ -21,132 +19,43 @@ const value_ops = @import("../exec/value_ops.zig");
 const HostError = exceptions.HostError;
 const InternalCall = core.host_function.InternalCall;
 
-pub const CallbackError = error{
-    AccessorWithoutSetter,
-    AmbiguousExport,
-    AwaitOutsideAsyncFunction,
-    BigIntTooLarge,
-    BytecodeCorrupt,
-    BytecodeOverflow,
-    ClosureVarNotFound,
-    CodepointTooLarge,
-    DivisionByZero,
-    DuplicateClass,
-    EvalError,
-    IncompatibleDescriptor,
-    Interrupted,
-    InvalidAssignmentTarget,
-    InvalidAtom,
-    InvalidBytecode,
-    InvalidBuiltinRegistry,
-    InvalidCharacter,
-    InvalidCharacterError,
-    InvalidClassId,
-    InvalidEscape,
-    InvalidIdentifier,
-    InvalidLength,
-    InvalidLhs,
-    InvalidNumber,
-    InvalidNumberLiteral,
-    InvalidOpcode,
-    InvalidPattern,
-    InvalidPrivateName,
-    InvalidRadix,
-    InvalidRegExp,
-    InvalidUnicodeEscape,
-    InvalidUtf8,
-    LegacyOctalInStrictMode,
-    MissingExport,
-    ModuleLinkFailed,
-    ModuleNotFound,
-    NegativeExponent,
-    NoSpaceLeft,
-    NotExtensible,
-    NotRegExpLiteral,
-    NotSimpleNumericCall,
-    OutOfMemory,
-    Overflow,
-    Pc2LineOverflow,
-    Pc2LineTruncated,
-    ProcessExit,
-    PrototypeCycle,
-    RangeError,
-    ReadOnly,
-    ReferenceError,
-    StackMismatch,
-    StackOverflow,
-    StackUnderflow,
-    SyntaxError,
-    SystemError,
-    JSException,
-    Timeout,
-    TooManyJobArgs,
-    TypeError,
-    URIError,
-    UnhandledPromiseRejection,
-    UnterminatedComment,
-    UnterminatedRegExp,
-    UnterminatedString,
-    UnterminatedTemplate,
-    UnexpectedEof,
-    UnexpectedToken,
-    UnsupportedSimpleJson,
-    Utf8CannotEncodeSurrogateHalf,
-    Utf8EncodesSurrogateHalf,
-    YieldOutsideGenerator,
-    HtmlCommentInModule,
-};
-
-pub const CallbackCallFn = *const fn (
-    rt: *core.JSRuntime,
-    callback: core.JSValue,
-    this_value: core.JSValue,
-    args: []const core.JSValue,
-    globals: []globals_mod.Slot,
-) CallbackError!core.JSValue;
-
-pub const CallbackKindFn = *const fn (
-    rt: *core.JSRuntime,
-    callback: core.JSValue,
-) CallbackError!i32;
-
-pub const CallbackHost = struct {
-    globals: []globals_mod.Slot = &.{},
-    call: ?CallbackCallFn = null,
-    kind: ?CallbackKindFn = null,
-
-    fn callWithThis(self: CallbackHost, rt: *core.JSRuntime, callback: core.JSValue, this_value: core.JSValue, args: []const core.JSValue) !core.JSValue {
-        const call_fn = self.call orelse return error.TypeError;
-        return call_fn(rt, callback, this_value, args, self.globals);
-    }
-
-    fn callValue(self: CallbackHost, rt: *core.JSRuntime, callback: core.JSValue, args: []const core.JSValue) !core.JSValue {
-        return self.callWithThis(rt, callback, core.JSValue.undefinedValue(), args);
-    }
-
-    fn closureKind(self: CallbackHost, rt: *core.JSRuntime, callback: core.JSValue) ?i32 {
-        const kind_fn = self.kind orelse return null;
-        return kind_fn(rt, callback) catch null;
-    }
-};
+// The collection callback protocol relocated to engine core
+// (`core/host_function.zig`, beside ExternalCall/InternalCall) in Phase 6b-3
+// STEP 2: it is a pure function-pointer protocol with zero VM dependence.
+// Re-exported here under the original names so the collection method bodies and
+// `collection_adapter` keep referencing them unchanged.
+pub const CallbackError = core.host_function.CallbackError;
+pub const CallbackCallFn = core.host_function.CallbackCallFn;
+pub const CallbackKindFn = core.host_function.CallbackKindFn;
+pub const CallbackHost = core.host_function.CallbackHost;
 
 pub const StaticMethod = enum(u32) {
     group_by = 101,
 };
 
-pub const ConstructorKind = enum(u32) {
-    map = 1,
-    set = 2,
-    weak_map = 3,
-    weak_set = 4,
-};
+// ConstructorMethod + ConstructorKind + constructorId + constructIdForKind
+// relocated to engine core (`core/host_function.zig`:
+// `builtin_method_ids.collection` for the construct-record id enum,
+// `builtin_method_id_lookup.collection` for the pure name/kind->id helpers) in
+// Phase 6b-3 STEP 2/6 alongside the other pure collection id helpers;
+// re-exported here so the construct/install side keeps the original names.
+// `constructorKindFromId` below (construct record handler reverse mapper, not
+// VM-referenced) keeps its local definition and consumes the re-exports.
+pub const ConstructorMethod = core.host_function.builtin_method_ids.collection.ConstructorMethod;
+pub const ConstructorKind = core.host_function.builtin_method_id_lookup.collection.ConstructorKind;
+pub const constructorId = core.host_function.builtin_method_id_lookup.collection.constructorId;
+pub const constructIdForKind = core.host_function.builtin_method_id_lookup.collection.constructIdForKind;
 
-pub fn constructorId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "Map")) return @intFromEnum(ConstructorKind.map);
-    if (std.mem.eql(u8, name, "Set")) return @intFromEnum(ConstructorKind.set);
-    if (std.mem.eql(u8, name, "WeakMap")) return @intFromEnum(ConstructorKind.weak_map);
-    if (std.mem.eql(u8, name, "WeakSet")) return @intFromEnum(ConstructorKind.weak_set);
-    return null;
+/// Construct id -> `ConstructorKind` value (map=1, set=2, weak_map=3,
+/// weak_set=4) for the construct record handler.
+fn constructorKindFromId(id: u32) ?u32 {
+    return switch (id) {
+        @intFromEnum(ConstructorMethod.construct_map) => @intFromEnum(ConstructorKind.map),
+        @intFromEnum(ConstructorMethod.construct_set) => @intFromEnum(ConstructorKind.set),
+        @intFromEnum(ConstructorMethod.construct_weak_map) => @intFromEnum(ConstructorKind.weak_map),
+        @intFromEnum(ConstructorMethod.construct_weak_set) => @intFromEnum(ConstructorKind.weak_set),
+        else => null,
+    };
 }
 
 pub fn staticMethodId(name: []const u8) ?u32 {
@@ -222,6 +131,14 @@ fn legacyBasePrototypeMethodId(id: u32) ?u32 {
 pub const internal_entries = collectionEntries: {
     const RecordEntry = core.host_function.InternalEntry;
     break :collectionEntries [_]RecordEntry{
+        // Map/Set/WeakMap/WeakSet constructors. Construct-capable so
+        // `new Map(...)` etc. route through `collectionCall`'s construct branch;
+        // not installed with a native id on the constructor objects (resolved by
+        // name), so reached only via `callConstructRecord` with an explicit ref.
+        collectionConstructorEntry("Map", 0, @intFromEnum(ConstructorMethod.construct_map)),
+        collectionConstructorEntry("Set", 0, @intFromEnum(ConstructorMethod.construct_set)),
+        collectionConstructorEntry("WeakMap", 0, @intFromEnum(ConstructorMethod.construct_weak_map)),
+        collectionConstructorEntry("WeakSet", 0, @intFromEnum(ConstructorMethod.construct_weak_set)),
         collectionEntry("set", 2, @intFromEnum(PrototypeMethod.set), true),
         collectionEntry("get", 1, @intFromEnum(PrototypeMethod.get), true),
         collectionEntry("has", 1, @intFromEnum(PrototypeMethod.has), true),
@@ -251,6 +168,13 @@ fn collectionEntry(comptime name: []const u8, comptime length: u8, comptime id: 
     return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = prepared, .call = &collectionCall };
 }
 
+/// A collection constructor record (one per `ConstructorKind`): construct-capable
+/// so `new Map/Set/WeakMap/WeakSet(...)` reach `collectionCall`'s construct
+/// branch. Never prepared-eligible.
+fn collectionConstructorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .constructor = true, .call = &collectionCall };
+}
+
 /// Shared record handler for the `.collection` domain. Mirrors the retired
 /// `call.zig` `callCollectionNativeFunctionRecord`: the `Map.groupBy` static and
 /// the prototype methods delegate to the collection VM ops (with a realm global)
@@ -267,10 +191,39 @@ fn collectionCall(host_call: InternalCall) HostError!core.JSValue {
     const caller_function = builtin_dispatch.callerBytecode(host_call);
     const caller_frame = builtin_dispatch.callerFrame(host_call);
 
+    if (constructorKindFromId(id)) |kind| {
+        // `new Map/Set/WeakMap/WeakSet(...)` arrives through the construct record
+        // path with the resolved instance prototype in `new_target`; the adder
+        // (set/add) protocol filling from an iterable argument is driven by the
+        // VM construct sites after this object is created, exactly as before.
+        return constructWithPrototype(ctx.runtime, kind, host_call.new_target);
+    }
     if (id == @intFromEnum(StaticMethod.group_by)) {
         return collectionGroupByRecord(ctx, output, host_call.global, globals, this_value, args, caller_function, caller_frame);
     }
-    const function_object = host_call.func_obj orelse return error.TypeError;
+    const function_object = host_call.func_obj orelse {
+        // Internal engine call sites route a collection method body through the
+        // table without a materialized function object: `Array.from`/`Array.of`
+        // and the typed-array static factories draining a Map/Set iterator
+        // (`global == null`, the bare primitive iterator); the collection
+        // construct adder fill (`global == null`, primitive set/add); and the
+        // prepared opcode fast path (`global != null`, the receiver's
+        // owner-class already validated by `vm_call`). With no function object
+        // there is no installed-prototype owner class to re-derive here, so
+        // dispatch the body directly, mirroring the historical direct callers:
+        // `methodCallObjectWithGlobal` for the realm path (dropped-result
+        // honored, exactly the retired `callPreparedCollectionNativeTarget`) and
+        // the primitive `methodCallWithCallbackHost` for the global-less path
+        // (exactly the retired `methodCall`/`methodCallWithCallbackHost`).
+        if (host_call.global) |active_global| {
+            const receiver = object_ops.objectFromValue(this_value) orelse return error.TypeError;
+            if (collectionCallResultIsDropped(caller_function, caller_frame)) {
+                if (try methodCallDroppedResult(ctx.runtime, receiver, id, args)) return core.JSValue.undefinedValue();
+            }
+            return methodCallObjectWithGlobal(ctx, active_global, receiver, id, args, globals);
+        }
+        return methodCallWithCallbackHost(ctx.runtime, this_value, id, args, collection_adapter.host(globals));
+    };
     const active_global = host_call.global orelse return collectionRecordWithoutGlobal(ctx, globals, this_value, function_object, id, args);
     if (try qjsCollectionNativeRecord(ctx, output, active_global, this_value, function_object, id, args, caller_function, caller_frame)) |value| return value;
     return error.TypeError;
@@ -348,25 +301,13 @@ fn collectionRecordWithoutGlobal(
     };
 }
 
+// Relocated to engine core (`core/value.zig`, beside `JSValue.sameValue`) in
+// Phase 6b-3 STEP 2: SameValueZero is a pure value comparison consumed by the
+// VM (Array.prototype.includes) without importing builtins. Kept here as a thin
+// free-function shim so the Map/Set key-lookup callers below and the install
+// path keep the original `sameValueZero(a, b)` spelling.
 pub fn sameValueZero(a: core.JSValue, b: core.JSValue) bool {
-    if (numberValue(a)) |lhs| {
-        if (numberValue(b)) |rhs| {
-            if (std.math.isNan(lhs) and std.math.isNan(rhs)) return true;
-            return lhs == rhs;
-        }
-    }
-    if (a.asBool()) |lhs| {
-        if (b.asBool()) |rhs| return lhs == rhs;
-    }
-    if (a.isNull() or a.isUndefined()) return a.same(b);
-    if (a.isBigInt() and b.isBigInt()) return a.sameValue(b);
-    if (a.isString() and b.isString()) {
-        if (a.same(b)) return true;
-        const lhs = stringFromValue(a) orelse return false;
-        const rhs = stringFromValue(b) orelse return false;
-        return lhs.eqlString(rhs.*);
-    }
-    return a.same(b);
+    return a.sameValueZero(b);
 }
 
 pub const Entry = struct {
@@ -647,31 +588,13 @@ fn mapSetNoResult(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, 
     }
 }
 
-pub fn setWeakMapEntry(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, value: core.JSValue) !void {
-    if (object.class_id != core.class.ids.weakmap) return error.TypeError;
-    const key_identity = (try weakKeyIdentityRegister(rt, key)) orelse return error.TypeError;
-    try setWeakMapEntryByIdentityChecked(rt, object, key_identity, value);
-}
-
-pub fn setWeakMapEntryByIdentity(rt: *core.JSRuntime, object: *core.Object, key_identity: usize, value: core.JSValue) !void {
-    if (object.class_id != core.class.ids.weakmap) return error.TypeError;
-    try setWeakMapEntryByIdentityChecked(rt, object, key_identity, value);
-}
-
-fn setWeakMapEntryByIdentityChecked(rt: *core.JSRuntime, object: *core.Object, key_identity: usize, value: core.JSValue) !void {
-    if (findWeakEntry(object, key_identity)) |index| {
-        const entry = &object.weakCollectionEntriesSlot().*[index];
-        const next_value = value.dup();
-        const old_value = entry.value;
-        entry.value = next_value;
-        old_value.free(rt);
-        return;
-    }
-
-    var entry = core.object.WeakCollectionEntry{ .key_identity = key_identity, .value = value.dup() };
-    errdefer entry.destroy(rt);
-    try appendWeakEntry(rt, object, entry);
-}
+// WeakMap entry mutation relocated to engine core (`core/collection.zig`) in
+// Phase 6b-3 STEP 7A; re-exported here so the collection method bodies and the
+// `engine.builtins.collection.setWeakMapEntry` public surface (consumed by the
+// WeakMap unit test) keep the original spelling.
+pub const setWeakMapEntry = core.collection.setWeakMapEntry;
+pub const setWeakMapEntryByIdentity = core.collection.setWeakMapEntryByIdentity;
+const setWeakMapEntryByIdentityChecked = core.collection.setWeakMapEntryByIdentityChecked;
 
 fn mapGet(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue) !core.JSValue {
     if (object.class_id == core.class.ids.weakmap) {
@@ -685,61 +608,12 @@ fn mapGet(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue) !core.JS
     return object.collectionEntriesSlot().*[index].value.dup();
 }
 
-pub fn mapGetLatin1PrefixIntValue(object: *core.Object, prefix: []const u8, int_value: i32) ?core.JSValue {
-    if (object.class_id != core.class.ids.map) return null;
-    var int_buf: [16]u8 = undefined;
-    const digits = dtoa.formatInt32(&int_buf, int_value);
-    const hash = strongEntryHashLatin1Concat(prefix, digits);
-    const index = findStrongEntryLatin1Concat(object, prefix, digits, hash) orelse return null;
-    return object.collectionEntriesSlot().*[index].value.dup();
-}
-
-pub fn mapSetLatin1PrefixInt32Range(
-    rt: *core.JSRuntime,
-    object: *core.Object,
-    prefix: []const u8,
-    start: i32,
-    limit: i32,
-) !void {
-    if (object.class_id != core.class.ids.map or start < 0 or limit < start) return error.TypeError;
-    const max_new_count: usize = @intCast(limit - start);
-    if (max_new_count == 0) return;
-    try object.ensureCollectionEntryCapacity(rt, object.collectionEntriesSlot().*.len + max_new_count);
-    try ensureStrongIndexForInsert(rt, object, object.collectionActiveCount() + max_new_count);
-
-    const original_len = object.collectionEntriesSlot().*.len;
-    const original_active_count = object.collectionActiveCount();
-    var inserted = false;
-    errdefer if (inserted) rollbackStrongEntriesTo(rt, object, original_len, original_active_count);
-
-    const prefix_seed = core.string.hashLatin1(prefix, 0);
-    var int_buf: [16]u8 = undefined;
-    var int_value = start;
-    while (int_value < limit) : (int_value += 1) {
-        const digits = dtoa.formatInt32(&int_buf, int_value);
-        const hash = strongEntryHashLatin1ConcatWithSeed(prefix, digits, prefix_seed);
-        if (findStrongEntryLatin1Concat(object, prefix, digits, hash)) |index| {
-            const entry = &object.collectionEntriesSlot().*[index];
-            const old_value = entry.value;
-            entry.value = core.JSValue.int32(int_value);
-            old_value.free(rt);
-            continue;
-        }
-
-        const key = (try core.string.String.createLatin1ConcatWithSeed(rt, prefix, digits, prefix_seed)).value();
-        const entry = core.object.CollectionEntry{
-            .key = key,
-            .value = core.JSValue.int32(int_value),
-            .hash = hash,
-            .hash_next = strong_no_entry,
-        };
-        errdefer entry.destroy(rt);
-        _ = try appendStrongEntryWithHash(rt, object, entry, hash);
-        inserted = true;
-    }
-
-    if (inserted) inserted = false;
-}
+// Map latin1-prefix-int fusion fast paths relocated to engine core
+// (`core/collection.zig`) in Phase 6b-3 STEP 7A so the VM loop-fusion caller
+// (`exec/vm_property_locals.zig`) imports them straight from core; re-exported
+// here under the original names for any builtins-side caller.
+pub const mapGetLatin1PrefixIntValue = core.collection.mapGetLatin1PrefixIntValue;
+pub const mapSetLatin1PrefixInt32Range = core.collection.mapSetLatin1PrefixInt32Range;
 
 const CollectionIteratorKind = enum(u8) {
     key = 1,
@@ -2011,471 +1885,30 @@ fn isCallableObject(value: core.JSValue) bool {
     return object.class_id == core.class.ids.c_closure or object.class_id == core.class.ids.c_function;
 }
 
-pub fn sweepWeakEntries(
-    rt: *core.JSRuntime,
-    object: *core.Object,
-    context: ?*anyopaque,
-    isLive: *const fn (?*anyopaque, usize) bool,
-) !usize {
-    if (object.class_id != core.class.ids.weakmap and object.class_id != core.class.ids.weakset) return error.TypeError;
-    var removed: usize = 0;
-    var i: usize = 0;
-    while (i < object.weakCollectionEntriesSlot().*.len) {
-        if (isLive(context, object.weakCollectionEntriesSlot().*[i].key_identity)) {
-            i += 1;
-            continue;
-        }
-        try removeWeakEntry(rt, object, i);
-        removed += 1;
-    }
-    return removed;
-}
+// Weak-collection GC sweep relocated to engine core (`core/collection.zig`) in
+// Phase 6b-3 STEP 7A; re-exported so the collection public surface keeps it.
+pub const sweepWeakEntries = core.collection.sweepWeakEntries;
 
-const strong_no_entry = core.object.collection_no_entry;
-const weak_no_entry = core.object.collection_no_entry;
-const strong_index_threshold: usize = 8;
-const weak_index_threshold: usize = 8;
-
-fn findStrongEntry(object: *core.Object, key: core.JSValue) ?usize {
-    const hash = strongEntryHash(key);
-    const heads = object.collectionBucketHeads();
-    if (heads.len != 0) {
-        var cursor = heads[bucketIndex(hash, heads.len)];
-        const entries = object.collectionEntriesSlot().*;
-        while (cursor != strong_no_entry) {
-            if (cursor >= entries.len) return null;
-            const entry = entries[cursor];
-            if (entry.active and entry.hash == hash and sameValueZero(entry.key, key)) return cursor;
-            cursor = entry.hash_next;
-        }
-        return null;
-    }
-
-    for (object.collectionEntriesSlot().*, 0..) |entry, index| {
-        if (!entry.active) continue;
-        if (sameValueZero(entry.key, key)) return index;
-    }
-    return null;
-}
-
-fn findStrongEntryLatin1Concat(object: *core.Object, prefix: []const u8, digits: []const u8, hash: u64) ?usize {
-    const heads = object.collectionBucketHeads();
-    if (heads.len != 0) {
-        var cursor = heads[bucketIndex(hash, heads.len)];
-        const entries = object.collectionEntriesSlot().*;
-        while (cursor != strong_no_entry) {
-            if (cursor >= entries.len) return null;
-            const entry = entries[cursor];
-            if (entry.active and entry.hash == hash and stringValueEqlLatin1Concat(entry.key, prefix, digits)) return cursor;
-            cursor = entry.hash_next;
-        }
-        return null;
-    }
-
-    for (object.collectionEntriesSlot().*, 0..) |entry, index| {
-        if (!entry.active) continue;
-        if (stringValueEqlLatin1Concat(entry.key, prefix, digits)) return index;
-    }
-    return null;
-}
-
-fn strongSize(object: *core.Object) usize {
-    return object.collectionActiveCount();
-}
-
-fn strongEntryHash(value: core.JSValue) u64 {
-    return switch (value.tagOf()) {
-        core.Tag.int => hashNumber(@floatFromInt(value.asInt32().?)),
-        core.Tag.float64 => hashNumber(value.asFloat64().?),
-        core.Tag.boolean => mix64(if (value.asBool().?) 0x8d53_0d8d_f34a_2d55 else 0x2eac_9a17_54d3_1c11),
-        core.Tag.null_value => mix64(0x6c8e_9cf5_7093_c241),
-        core.Tag.undefined_value => mix64(0x3c6e_f372_fe94_f82b),
-        core.Tag.short_big_int, core.Tag.big_int => hashBigIntValue(value),
-        core.Tag.string, core.Tag.string_rope => hashStringValue(value),
-        core.Tag.symbol => mix64(0x19e3_7789_7cc9_8f7d ^ @as(u64, value.asSymbolAtom().?)),
-        core.Tag.object, core.Tag.module => hashRefPointer(value),
-        core.Tag.function_bytecode => hashObjectPointer(value),
-        else => mix64(tagHashBits(value.tagOf())),
-    };
-}
-
-fn hashNumber(number: f64) u64 {
-    if (std.math.isNan(number)) return mix64(0x7ff8_0000_0000_0000);
-    if (number == 0) return mix64(0);
-    const bits: u64 = @bitCast(number);
-    return mix64(bits);
-}
-
-fn hashStringValue(value: core.JSValue) u64 {
-    const string = stringFromValue(value) orelse return hashRefPointer(value);
-    return mix64(@as(u64, string.contentHash()) ^ (@as(u64, string.len()) << 32));
-}
-
-fn strongEntryHashLatin1Concat(prefix: []const u8, digits: []const u8) u64 {
-    const seed = core.string.hashLatin1(prefix, 0);
-    return strongEntryHashLatin1ConcatWithSeed(prefix, digits, seed);
-}
-
-fn strongEntryHashLatin1ConcatWithSeed(prefix: []const u8, digits: []const u8, seed: u32) u64 {
-    const hash = core.string.hashLatin1(digits, seed);
-    return mix64(@as(u64, hash) ^ (@as(u64, prefix.len + digits.len) << 32));
-}
-
-fn stringValueEqlLatin1Concat(value: core.JSValue, prefix: []const u8, digits: []const u8) bool {
-    const string = stringFromValue(value) orelse return false;
-    const len = prefix.len + digits.len;
-    if (string.len() != len) return false;
-    return switch (string.resolveData()) {
-        .latin1 => |bytes| std.mem.eql(u8, bytes[0..prefix.len], prefix) and std.mem.eql(u8, bytes[prefix.len..], digits),
-        .utf16 => |units| utf16EqlLatin1Concat(units, prefix, digits),
-    };
-}
-
-fn utf16EqlLatin1Concat(units: []const u16, prefix: []const u8, digits: []const u8) bool {
-    if (units.len != prefix.len + digits.len) return false;
-    for (prefix, 0..) |byte, index| {
-        if (units[index] != byte) return false;
-    }
-    for (digits, 0..) |byte, digit_index| {
-        if (units[prefix.len + digit_index] != byte) return false;
-    }
-    return true;
-}
-
-const BigIntHashParts = struct {
-    negative: bool,
-    limbs: []const bignum.Limb,
-};
-
-fn bigIntHashParts(value: core.JSValue, scratch: *[2]bignum.Limb) ?BigIntHashParts {
-    if (value.asShortBigInt()) |short| {
-        const signed: i128 = short;
-        var magnitude: u128 = if (signed < 0) @intCast(-signed) else @intCast(signed);
-        var len: usize = 0;
-        while (magnitude != 0) {
-            scratch[len] = @truncate(magnitude);
-            magnitude >>= @bitSizeOf(bignum.Limb);
-            len += 1;
-        }
-        return .{ .negative = short < 0, .limbs = scratch[0..len] };
-    }
-    const header = value.refHeader() orelse return null;
-    const bigint: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-    return .{ .negative = bigint.value.negative, .limbs = bigint.value.limbs };
-}
-
-fn hashBigIntValue(value: core.JSValue) u64 {
-    var scratch: [2]bignum.Limb = undefined;
-    const parts = bigIntHashParts(value, &scratch) orelse return hashRefPointer(value);
-    var hash: u64 = if (parts.negative) 0x9d77_4424_2d81_353f else 0x4f1b_bcdc_baa7_2b39;
-    hash ^= @as(u64, parts.limbs.len) *% 0x9e37_79b9_7f4a_7c15;
-    for (parts.limbs) |limb| hash = mix64(hash ^ limb);
-    return mix64(hash);
-}
-
-fn hashRefPointer(value: core.JSValue) u64 {
-    const header = value.refHeader() orelse return mix64(tagHashBits(value.tagOf()));
-    return mix64(@as(u64, @intCast(@intFromPtr(header))));
-}
-
-fn hashObjectPointer(value: core.JSValue) u64 {
-    const header = value.objectHeader() orelse return mix64(tagHashBits(value.tagOf()));
-    return mix64(@as(u64, @intCast(@intFromPtr(header))));
-}
-
-fn mix64(input: u64) u64 {
-    var value = input +% 0x9e37_79b9_7f4a_7c15;
-    value = (value ^ (value >> 30)) *% 0xbf58_476d_1ce4_e5b9;
-    value = (value ^ (value >> 27)) *% 0x94d0_49bb_1331_11eb;
-    return value ^ (value >> 31);
-}
-
-fn tagHashBits(tag: i32) u64 {
-    return @bitCast(@as(i64, tag));
-}
-
-fn bucketIndex(hash: u64, bucket_count: usize) usize {
-    return @intCast(hash & @as(u64, @intCast(bucket_count - 1)));
-}
-
-fn findWeakEntry(object: *core.Object, key_identity: usize) ?usize {
-    const hash = weakEntryHash(key_identity);
-    const heads = object.collectionBucketHeads();
-    if (heads.len != 0) {
-        var cursor = heads[bucketIndex(hash, heads.len)];
-        const entries = object.weakCollectionEntriesSlot().*;
-        while (cursor != weak_no_entry) {
-            if (cursor >= entries.len) return null;
-            const entry = entries[cursor];
-            if (entry.hash == hash and entry.key_identity == key_identity) return cursor;
-            cursor = entry.hash_next;
-        }
-        return null;
-    }
-
-    for (object.weakCollectionEntriesSlot().*, 0..) |entry, index| {
-        if (entry.key_identity == key_identity) return index;
-    }
-    return null;
-}
-
-fn weakEntryHash(key_identity: usize) u64 {
-    return mix64(@as(u64, @intCast(key_identity)));
-}
-
-fn appendStrongEntry(rt: *core.JSRuntime, object: *core.Object, entry: core.object.CollectionEntry) !usize {
-    return try appendStrongEntryWithHash(rt, object, entry, strongEntryHash(entry.key));
-}
-
-fn appendStrongEntryWithHash(rt: *core.JSRuntime, object: *core.Object, entry: core.object.CollectionEntry, hash: u64) !usize {
-    var stored = entry;
-    stored.hash = hash;
-    stored.hash_next = strong_no_entry;
-    const next_active_count = object.collectionActiveCount() + 1;
-    try ensureStrongIndexForInsert(rt, object, next_active_count);
-    const index = try object.appendCollectionEntryUnindexed(rt, stored);
-    object.collectionActiveCountSlot().* = next_active_count;
-    linkStrongEntry(object, index);
-    return index;
-}
-
-fn appendStrongEntryOwned(rt: *core.JSRuntime, object: *core.Object, entry: core.object.CollectionEntry) !void {
-    var entry_owned = true;
-    errdefer if (entry_owned) entry.destroy(rt);
-    const index = try appendStrongEntry(rt, object, entry);
-    entry_owned = false;
-    var inserted = true;
-    errdefer if (inserted) rollbackLastStrongEntry(rt, object, index);
-    inserted = false;
-}
-
-fn ensureStrongIndexForInsert(rt: *core.JSRuntime, object: *core.Object, next_active_count: usize) !void {
-    if (next_active_count < strong_index_threshold) return;
-    const heads = object.collectionBucketHeads();
-    if (heads.len == 0) {
-        try rebuildStrongIndex(rt, object, bucketCountForActiveCount(next_active_count));
-        return;
-    }
-    if (next_active_count * 4 > heads.len * 3) {
-        try rebuildStrongIndex(rt, object, heads.len * 2);
-    }
-}
-
-fn bucketCountForActiveCount(active_count: usize) usize {
-    var bucket_count: usize = 16;
-    while (active_count * 4 > bucket_count * 3) bucket_count *= 2;
-    return bucket_count;
-}
-
-fn rebuildStrongIndex(rt: *core.JSRuntime, object: *core.Object, bucket_count: usize) !void {
-    const next = try rt.memory.alloc(usize, bucket_count);
-    errdefer rt.memory.free(usize, next);
-    @memset(next, strong_no_entry);
-
-    for (object.collectionEntriesSlot().*, 0..) |*entry, index| {
-        entry.hash_next = strong_no_entry;
-        if (!entry.active) continue;
-        entry.hash = strongEntryHash(entry.key);
-        const bucket = bucketIndex(entry.hash, next.len);
-        entry.hash_next = next[bucket];
-        next[bucket] = index;
-    }
-
-    const heads = object.collectionBucketHeadsSlot();
-    if (heads.*.len != 0) rt.memory.free(usize, heads.*);
-    heads.* = next;
-}
-
-fn linkStrongEntry(object: *core.Object, index: usize) void {
-    const heads = object.collectionBucketHeadsSlot();
-    if (heads.*.len == 0) return;
-    const entries = object.collectionEntriesSlot().*;
-    const bucket = bucketIndex(entries[index].hash, heads.*.len);
-    entries[index].hash_next = heads.*[bucket];
-    heads.*[bucket] = index;
-}
-
-fn unlinkStrongEntry(object: *core.Object, index: usize) void {
-    const heads = object.collectionBucketHeadsSlot();
-    if (heads.*.len == 0) return;
-    const entries = object.collectionEntriesSlot().*;
-    if (index >= entries.len) return;
-    var link = &heads.*[bucketIndex(entries[index].hash, heads.*.len)];
-    while (link.* != strong_no_entry) {
-        const current = link.*;
-        if (current >= entries.len) {
-            link.* = strong_no_entry;
-            return;
-        }
-        if (current == index) {
-            link.* = entries[current].hash_next;
-            return;
-        }
-        link = &entries[current].hash_next;
-    }
-}
-
-fn appendWeakEntry(rt: *core.JSRuntime, object: *core.Object, entry: core.object.WeakCollectionEntry) !void {
-    var stored = entry;
-    stored.hash = weakEntryHash(stored.key_identity);
-    stored.hash_next = weak_no_entry;
-    const entries_slot = object.weakCollectionEntriesSlot();
-    const index = entries_slot.*.len;
-    const inserted_holder = !rt.borrowedReferenceHolderRegistered(object);
-    if (inserted_holder) try rt.registerBorrowedReferenceHolder(object);
-    errdefer if (inserted_holder) rt.unregisterBorrowedReferenceHolder(object);
-    try ensureWeakIndexForInsert(rt, object, index + 1);
-    try object.ensureWeakCollectionEntryCapacity(rt, index + 1);
-    const refreshed_entries = object.weakCollectionEntriesSlot();
-    refreshed_entries.* = refreshed_entries.*.ptr[0 .. index + 1];
-    errdefer refreshed_entries.* = refreshed_entries.*[0..index];
-    refreshed_entries.*[index] = stored;
-    linkWeakEntry(object, index);
-}
-
-fn ensureWeakIndexForInsert(rt: *core.JSRuntime, object: *core.Object, next_count: usize) !void {
-    if (next_count < weak_index_threshold) return;
-    const heads = object.collectionBucketHeads();
-    if (heads.len == 0) {
-        try rebuildWeakIndex(rt, object, bucketCountForActiveCount(next_count));
-        return;
-    }
-    if (next_count * 4 > heads.len * 3) {
-        try rebuildWeakIndex(rt, object, heads.len * 2);
-    }
-}
-
-fn rebuildWeakIndex(rt: *core.JSRuntime, object: *core.Object, bucket_count: usize) !void {
-    const next = try rt.memory.alloc(usize, bucket_count);
-    errdefer rt.memory.free(usize, next);
-    @memset(next, weak_no_entry);
-
-    for (object.weakCollectionEntriesSlot().*, 0..) |*entry, index| {
-        entry.hash = weakEntryHash(entry.key_identity);
-        entry.hash_next = weak_no_entry;
-        const bucket = bucketIndex(entry.hash, next.len);
-        entry.hash_next = next[bucket];
-        next[bucket] = index;
-    }
-
-    const heads = object.collectionBucketHeadsSlot();
-    if (heads.*.len != 0) rt.memory.free(usize, heads.*);
-    heads.* = next;
-}
-
-fn linkWeakEntry(object: *core.Object, index: usize) void {
-    const heads = object.collectionBucketHeadsSlot();
-    if (heads.*.len == 0) return;
-    const entries = object.weakCollectionEntriesSlot().*;
-    const bucket = bucketIndex(entries[index].hash, heads.*.len);
-    entries[index].hash_next = heads.*[bucket];
-    heads.*[bucket] = index;
-}
-
-fn relinkWeakIndex(object: *core.Object) void {
-    const heads = object.collectionBucketHeadsSlot();
-    if (heads.*.len == 0) return;
-    @memset(heads.*, weak_no_entry);
-    for (object.weakCollectionEntriesSlot().*, 0..) |*entry, index| {
-        entry.hash = weakEntryHash(entry.key_identity);
-        entry.hash_next = weak_no_entry;
-        linkWeakEntry(object, index);
-    }
-}
-
-fn removeStrongEntry(rt: *core.JSRuntime, object: *core.Object, index: usize) void {
-    const removed = takeStrongEntry(object, index) orelse return;
-    removed.destroy(rt);
-}
-
-fn rollbackLastStrongEntry(rt: *core.JSRuntime, object: *core.Object, index: usize) void {
-    const entries_slot = object.collectionEntriesSlot();
-    std.debug.assert(index + 1 == entries_slot.*.len);
-    const entry = takeStrongEntry(object, index) orelse return;
-    entries_slot.* = entries_slot.*.ptr[0..index];
-    entry.destroy(rt);
-}
-
-fn rollbackStrongEntriesTo(rt: *core.JSRuntime, object: *core.Object, len: usize, active_count: usize) void {
-    const entries_slot = object.collectionEntriesSlot();
-    while (entries_slot.*.len > len) {
-        rollbackLastStrongEntry(rt, object, entries_slot.*.len - 1);
-    }
-    object.collectionActiveCountSlot().* = active_count;
-}
-
-fn removeWeakEntry(rt: *core.JSRuntime, object: *core.Object, index: usize) !void {
-    const entries_slot = object.weakCollectionEntriesSlot();
-    const entry = entries_slot.*[index];
-    if (index + 1 < entries_slot.*.len) {
-        @memmove(entries_slot.*[index .. entries_slot.*.len - 1], entries_slot.*[index + 1 ..]);
-    }
-    entries_slot.* = entries_slot.*.ptr[0 .. entries_slot.*.len - 1];
-    relinkWeakIndex(object);
-    entry.destroy(rt);
-    object.pruneBorrowedReferenceHolderIfEmpty(rt);
-}
-
-fn clearStrongEntries(rt: *core.JSRuntime, object: *core.Object) void {
-    const active_count = object.collectionActiveCount();
-    if (active_count == 0) return;
-
-    var index: usize = 0;
-    while (index < object.collectionEntriesSlot().*.len) : (index += 1) {
-        const entry = takeStrongEntry(object, index) orelse continue;
-        entry.destroy(rt);
-    }
-    const heads = object.collectionBucketHeadsSlot();
-    if (heads.*.len != 0) @memset(heads.*, strong_no_entry);
-}
-
-fn takeStrongEntry(object: *core.Object, index: usize) ?core.object.CollectionEntry {
-    const entries_slot = object.collectionEntriesSlot();
-    if (index >= entries_slot.*.len or !entries_slot.*[index].active) return null;
-    unlinkStrongEntry(object, index);
-    const entry = entries_slot.*[index];
-    entries_slot.*[index] = .{ .key = core.JSValue.undefinedValue(), .value = core.JSValue.undefinedValue(), .active = false, .hash_next = strong_no_entry };
-    const active_count = object.collectionActiveCountSlot();
-    if (active_count.* != 0) active_count.* -= 1;
-    return entry;
-}
-
-fn clearWeakEntries(rt: *core.JSRuntime, object: *core.Object) void {
-    const entries_slot = object.weakCollectionEntriesSlot();
-    while (entries_slot.*.len != 0) {
-        const index = entries_slot.*.len - 1;
-        const entry = entries_slot.*[index];
-        entries_slot.* = entries_slot.*.ptr[0..index];
-        entry.destroy(rt);
-    }
-    const heads = object.collectionBucketHeadsSlot();
-    if (heads.*.len != 0) @memset(heads.*, weak_no_entry);
-    object.pruneBorrowedReferenceHolderIfEmpty(rt);
-}
-
-/// Returns the weak identity for a WeakMap/WeakSet key, registering objects
-/// in the runtime weak identity registry. Use for inserting paths.
-fn weakKeyIdentityRegister(rt: *core.JSRuntime, value: core.JSValue) !?usize {
-    if (!weakKeyCanBeHeldWeakly(rt, value)) return null;
-    return try core.Object.weakIdentityFromValue(rt, value);
-}
-
-/// Returns the weak identity for a WeakMap/WeakSet key without registering.
-/// Use for read-only paths (get/has/delete): a key that was never weakly
-/// referenced cannot be present in any weak collection.
-fn weakKeyIdentityPeek(rt: *core.JSRuntime, value: core.JSValue) ?usize {
-    if (!weakKeyCanBeHeldWeakly(rt, value)) return null;
-    return core.Object.weakIdentityFromValuePeek(rt, value);
-}
-
-fn weakKeyCanBeHeldWeakly(rt: *core.JSRuntime, value: core.JSValue) bool {
-    if (value.asSymbolAtom()) |id| {
-        if (rt.atoms.kind(id) != .symbol) return false;
-        if (symbol_builtin.registryKey(&rt.atoms, id) != null) return false;
-        return true;
-    }
-    return value.isObject();
-}
+// Map/Set/WeakMap/WeakSet hash + index backend relocated to engine core
+// (`core/collection.zig`) in Phase 6b-3 STEP 7A: the strong/weak entry hashing,
+// bucket index linking/growth, entry append/take/rollback, weak-key identity
+// resolution, and weak sweep are pure `core.Object` storage-slot operations with
+// zero exec/builtins/VM dependence. They are re-exported here under the original
+// names so the collection method bodies above keep calling them unchanged, and
+// so the VM Map-fusion fast paths (`vm_property_locals`) and the WeakMap
+// test-support mutator (`closure`) can import them straight from core.
+const collection_core = core.collection;
+const findStrongEntry = collection_core.findStrongEntry;
+const strongSize = collection_core.strongSize;
+const findWeakEntry = collection_core.findWeakEntry;
+const appendStrongEntryOwned = collection_core.appendStrongEntryOwned;
+const appendWeakEntry = collection_core.appendWeakEntry;
+const removeStrongEntry = collection_core.removeStrongEntry;
+const removeWeakEntry = collection_core.removeWeakEntry;
+const clearStrongEntries = collection_core.clearStrongEntries;
+const clearWeakEntries = collection_core.clearWeakEntries;
+const weakKeyIdentityRegister = collection_core.weakKeyIdentityRegister;
+const weakKeyIdentityPeek = collection_core.weakKeyIdentityPeek;
 
 fn collectionClassId(kind: u32) ?core.ClassId {
     return switch (kind) {
@@ -2553,12 +1986,6 @@ fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const 
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, true, true));
-}
-
-fn numberValue(value: core.JSValue) ?f64 {
-    if (value.asInt32()) |int_value| return @floatFromInt(int_value);
-    if (value.asFloat64()) |float_value| return float_value;
-    return null;
 }
 
 fn stringFromValue(value: core.JSValue) ?*core.string.String {

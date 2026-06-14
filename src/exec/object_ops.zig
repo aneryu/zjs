@@ -1,6 +1,6 @@
 const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const call_mod = @import("call.zig");
@@ -64,7 +64,6 @@ const callSiteFunctionNameValue = error_stack_ops.callSiteFunctionNameValue;
 const callValueOrBytecode = call_runtime.callValueOrBytecode;
 const captureErrorStack = error_stack_ops.captureErrorStack;
 const closeIteratorForFromEntriesAbrupt = call_runtime.closeIteratorForFromEntriesAbrupt;
-const coerceOptionalNumberMethodArgument = coercion_ops.coerceOptionalNumberMethodArgument;
 const constructValueOrBytecode = call_runtime.constructValueOrBytecode;
 const createArrayFromArgs = array_ops.createArrayFromArgs;
 const createIteratorResult = call_runtime.createIteratorResult;
@@ -1346,11 +1345,19 @@ pub fn qjsDatePrototypeMethod(
         if (try date_vm.qjsDateSetTime(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
     }
     if (try date_vm.qjsDateCapturedSetterCall(ctx, output, global, this_value, method_id, args, caller_function, caller_frame)) |value| return value;
-    return builtins.date.methodCallArgs(ctx.runtime, this_value, method_id, args) catch |err| switch (err) {
+    // Remaining (non-special-cased) prototype ids run the plain `methodCallArgs`
+    // body, which lives in `builtins/date.zig`. Route it through the record
+    // table's func-object-free arm (re-encoding the decoded id to its
+    // `PrototypeMethod` record id) so exec carries no compile-time Date body
+    // knowledge. The arm dispatches the body directly, so this does not re-enter
+    // the dispatcher.
+    const native_ref = core.function.NativeBuiltinRef{ .domain = .date, .id = core.host_function.builtin_method_id_lookup.date.encodePrototypeMethodId(method_id) orelse return throwTypeErrorMessage(ctx, global, "not a Date object") };
+    const result = builtin_dispatch.callInternalRecord(ctx, output, null, &.{}, null, this_value, native_ref, args, caller_function, caller_frame) catch |err| switch (err) {
         error.TypeError => return throwTypeErrorMessage(ctx, global, "not a Date object"),
         error.RangeError => return throwRangeErrorMessage(ctx, global, "Date value is NaN"),
-        else => err,
+        else => return err,
     };
+    return result orelse throwTypeErrorMessage(ctx, global, "not a Date object");
 }
 
 pub fn isAnchoredBinaryPropertySource(source: []const u8) bool {
@@ -3065,9 +3072,15 @@ pub fn qjsPrimitivePrototypeMethod(
     const primitive = primitivePrototypeThisValue(rt, this_value, class_tag) catch return throwPrimitivePrototypeTypeError(ctx, global, function_object);
     defer primitive.free(rt);
     return switch (method_tag) {
-        1 => if (class_tag == 1)
-            builtins.number.toStringMethod(rt, primitive, args)
-        else if (class_tag == 3)
+        1 => if (class_tag == 1) blk: {
+            // `Number.prototype.toString` body lives in `builtins/number.zig`;
+            // route the already-coerced number primitive through the `.number`
+            // record (`primitivePrototypeThisValue` is idempotent for a number,
+            // so the record's receiver re-check is a no-op) instead of naming
+            // the builtin from exec.
+            const native_ref = core.function.NativeBuiltinRef{ .domain = .number, .id = @intFromEnum(method_ids.number.PrototypeMethod.to_string) };
+            break :blk (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, null, primitive, native_ref, args, caller_function, caller_frame)) orelse error.TypeError;
+        } else if (class_tag == 3)
             qjsBigIntPrototypeToString(ctx, output, global, primitive, args, caller_function, caller_frame)
         else
             value_ops.toStringValue(rt, primitive),
@@ -3097,7 +3110,7 @@ fn qjsSymbolConstructorCall(
             try value_ops.appendRawString(rt, &buffer, string_value);
             break :blk try buffer.toOwnedSlice(rt.memory.allocator);
         }
-        break :blk try rt.memory.allocator.dupe(u8, builtins.symbol.undefined_description);
+        break :blk try rt.memory.allocator.dupe(u8, core.symbol.undefined_description);
     };
     defer rt.memory.allocator.free(description);
     const symbol_atom = try rt.atoms.newValueSymbol(description);
@@ -3110,7 +3123,7 @@ fn symbolDescriptionValue(rt: *core.JSRuntime, this_value: core.JSValue) !core.J
     const primitive = try symbolPrimitiveValue(rt, this_value);
     defer primitive.free(rt);
     const atom_id = primitive.asSymbolAtom() orelse return error.TypeError;
-    const desc = builtins.symbol.description(&rt.atoms, atom_id) orelse return core.JSValue.undefinedValue();
+    const desc = core.symbol.description(&rt.atoms, atom_id) orelse return core.JSValue.undefinedValue();
     return value_ops.createStringValue(rt, desc);
 }
 
@@ -3166,31 +3179,23 @@ pub fn qjsNumberPrototypeMethod(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const primitive = primitivePrototypeThisValue(ctx.runtime, this_value, 1) catch |err| switch (err) {
-        error.TypeError => return throwTypeErrorMessage(ctx, global, "not a number"),
+    // Route to the `.number` domain record (the method body lives in
+    // `builtins/number.zig`, which legally imports exec for its coercion). The
+    // record handler coerces the receiver/argument itself, so the raw
+    // `this_value`/`args` are forwarded unchanged. Accept the legacy small ids
+    // (1..5) used by historical fast-call sites as well as the
+    // `PrototypeMethod` enum ids baked into installed native functions.
+    const id: u32 = switch (method_id) {
+        1, @intFromEnum(method_ids.number.PrototypeMethod.to_string) => @intFromEnum(method_ids.number.PrototypeMethod.to_string),
+        2, @intFromEnum(method_ids.number.PrototypeMethod.to_locale_string) => @intFromEnum(method_ids.number.PrototypeMethod.to_locale_string),
+        3, @intFromEnum(method_ids.number.PrototypeMethod.to_fixed) => @intFromEnum(method_ids.number.PrototypeMethod.to_fixed),
+        4, @intFromEnum(method_ids.number.PrototypeMethod.to_exponential) => @intFromEnum(method_ids.number.PrototypeMethod.to_exponential),
+        5, @intFromEnum(method_ids.number.PrototypeMethod.to_precision) => @intFromEnum(method_ids.number.PrototypeMethod.to_precision),
+        else => return throwTypeErrorMessage(ctx, global, "not a number"),
     };
-    defer primitive.free(ctx.runtime);
-    const coerced_arg: ?core.JSValue = try coerceOptionalNumberMethodArgument(ctx, output, global, args, true);
-    defer if (coerced_arg) |value| value.free(ctx.runtime);
-    var coerced_storage: [1]core.JSValue = undefined;
-    const method_args = if (coerced_arg) |value| blk: {
-        coerced_storage[0] = value;
-        break :blk coerced_storage[0..];
-    } else args;
-    _ = caller_function;
-    _ = caller_frame;
-    return (switch (method_id) {
-        1, @intFromEnum(method_ids.number.PrototypeMethod.to_string) => builtins.number.toStringMethod(ctx.runtime, primitive, method_args),
-        2, @intFromEnum(method_ids.number.PrototypeMethod.to_locale_string) => builtins.number.toStringMethod(ctx.runtime, primitive, &.{}),
-        3, @intFromEnum(method_ids.number.PrototypeMethod.to_fixed) => builtins.number.toFixed(ctx.runtime, primitive, method_args),
-        4, @intFromEnum(method_ids.number.PrototypeMethod.to_exponential) => builtins.number.toExponential(ctx.runtime, primitive, method_args),
-        5, @intFromEnum(method_ids.number.PrototypeMethod.to_precision) => builtins.number.toPrecision(ctx.runtime, primitive, method_args),
-        else => error.TypeError,
-    }) catch |err| switch (err) {
-        error.TypeError => return throwTypeErrorMessage(ctx, global, "not a number"),
-        error.RangeError => return throwRangeErrorMessage(ctx, global, "invalid number of digits"),
-        else => err,
-    };
+    const native_ref = core.function.NativeBuiltinRef{ .domain = .number, .id = id };
+    return (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, null, this_value, native_ref, args, caller_function, caller_frame)) orelse
+        throwTypeErrorMessage(ctx, global, "not a number");
 }
 
 pub fn primitivePrototypeThisValue(rt: *core.JSRuntime, value: core.JSValue, class_tag: i32) !core.JSValue {
@@ -3293,7 +3298,14 @@ pub fn constructCollectionWithPrototypeFromVm(
     args: []const core.JSValue,
     prototype: ?*core.Object,
 ) !core.JSValue {
-    const collection_value = try builtins.collection.constructWithPrototype(ctx.runtime, kind, prototype);
+    // Only the empty Map/Set/WeakMap/WeakSet creation routes through the
+    // collection construct record (Phase 6b-3 STEP 4); the adder protocol below
+    // that fills it from an iterable argument stays in exec. The collection
+    // constructors carry no native id, so the record is reached with an explicit
+    // ref built from `kind`.
+    const construct_id = core.host_function.builtin_method_id_lookup.collection.constructIdForKind(kind) orelse return error.TypeError;
+    const collection_construct_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = construct_id };
+    const collection_value = (try builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, null, collection_construct_ref, prototype, &.{}, null, null)) orelse return error.TypeError;
     errdefer collection_value.free(ctx.runtime);
     if (args.len == 0 or args[0].isUndefined() or args[0].isNull()) return collection_value;
 
@@ -3519,7 +3531,7 @@ pub fn qjsDestructuringObjectRest(
     args: []const core.JSValue,
 ) !core.JSValue {
     if (args.len < 1) return error.TypeError;
-    var source_value = try value_vm.toObjectForWith(ctx.runtime, args[0]);
+    var source_value = try value_vm.toObjectForWith(ctx, args[0]);
     defer source_value.free(ctx.runtime);
     const source = try property_ops.expectObject(source_value);
 
@@ -4909,7 +4921,7 @@ pub fn qjsObjectEnumerableOwnPropertiesCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    mode: builtins.object.EntriesMode,
+    mode: core.object.EntriesMode,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {

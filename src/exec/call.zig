@@ -1,5 +1,4 @@
 const core = @import("../core/root.zig");
-const builtins = @import("../builtins/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const bytecode_opcode = @import("../bytecode/opcode.zig");
 const function_bytecode = @import("../bytecode/function.zig");
@@ -8,7 +7,6 @@ const construct_mod = @import("construct.zig");
 const frame_mod = @import("frame.zig");
 const globals_mod = @import("globals.zig");
 const host_dispatch_stats = @import("host_dispatch_stats.zig");
-const json_vm = @import("json_ops.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
 const call_runtime = @import("call_runtime.zig");
@@ -28,6 +26,15 @@ const exceptions = @import("exceptions.zig");
 const HostError = exceptions.HostError;
 const PrintError = HostError || error{InvalidRadix};
 
+// Construct ref for the String wrapper boxing path (`primitiveWrapper`). The
+// String constructor record's construct branch forwards `args`/`new_target` to
+// `constructWithPrototype`, so routing boxing through it (Phase 6b-3 STEP 6)
+// keeps exec free of a direct `builtins.string.constructWithPrototype` call.
+const string_construct_ref = core.function.NativeBuiltinRef{
+    .domain = .string,
+    .id = @intFromEnum(core.host_function.builtin_method_ids.string.ConstructorMethod.call),
+};
+
 fn hostResult(result: anytype) HostError!switch (@typeInfo(@TypeOf(result))) {
     .error_union => |info| info.payload,
     else => @compileError("hostResult expects an error union"),
@@ -42,29 +49,25 @@ pub fn returnThis(this_value: core.JSValue) core.JSValue {
 /// QuickJS source map: JS_CallInternal() dispatches callable objects after the
 /// VM has prepared callee/argument values. This Zig slice currently owns the
 /// host callables installed for the CLI-visible global object.
-pub fn hostGlobalOwnPropertyCapacity() usize {
-    return builtins.registry.standardGlobalOwnPropertyCapacity() + 6; // print, globalThis, NaN, Infinity, undefined, console
+pub fn hostGlobalOwnPropertyCapacity(rt: *core.JSRuntime) usize {
+    return rt.standardGlobalOwnPropertyCapacity() + 6; // print, globalThis, NaN, Infinity, undefined, console
 }
 
-pub fn contextGlobalOwnPropertyCapacity() usize {
-    return hostGlobalOwnPropertyCapacity() + 1; // scriptArgs, installed by the public CLI host setup
+pub fn contextGlobalOwnPropertyCapacity(rt: *core.JSRuntime) usize {
+    return hostGlobalOwnPropertyCapacity(rt) + 1; // scriptArgs, installed by the public CLI host setup
 }
 
 pub fn installHostGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
-    try global.reserveOwnPropertyCapacityAssumingPlain(rt, hostGlobalOwnPropertyCapacity());
+    try global.reserveOwnPropertyCapacityAssumingPlain(rt, hostGlobalOwnPropertyCapacity(rt));
     const output_external_id = try registerOutputExternalHostFunction(rt);
     try definePredefinedExternalHostFunction(rt, global, "print", hostFunctionLength(.output), output_external_id);
-    try installStandardGlobals(rt, global);
+    try rt.installStandardGlobals(global);
     try defineGlobalThisProperty(rt, global);
     try defineNumberConstantPropertyAssumingNew(rt, global, "NaN", std.math.nan(f64));
     try defineNumberConstantPropertyAssumingNew(rt, global, "Infinity", std.math.inf(f64));
     try global.defineOwnPropertyAssumingNew(rt, core.atom.ids.undefined_, core.Descriptor.data(core.JSValue.undefinedValue(), false, false, false));
 
     try defineConsoleObject(rt, global, output_external_id);
-}
-
-fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
-    try builtins.registry.installStandardGlobals(rt, global);
 }
 
 fn defineConsoleObject(rt: *core.JSRuntime, global: *core.Object, output_external_id: u32) !void {
@@ -182,7 +185,7 @@ pub fn callValueWithThisGlobalsAndGlobal(
         const closure_kind = closure_mod.closureKind(ctx.runtime, callee) catch 0;
         if (closure_kind == 51) {
             const encoded = try closure_mod.closureValue(ctx.runtime, callee);
-            return construct_mod.constructCollectionClosure(ctx.runtime, encoded, globals);
+            return construct_mod.constructCollectionClosure(ctx, encoded, globals);
         }
         return closure_mod.callWithThis(ctx.runtime, callee, this_value, args, globals) catch |err| switch (err) {
             else => err,
@@ -872,7 +875,7 @@ fn createPromiseCapability(
 
     if (try constructorNameEql(ctx.runtime, constructor_object, "Promise")) {
         const active_global = try activeGlobalObject(ctx.runtime, global, globals);
-        promise_val = try builtins.promise.constructWithPrototype(ctx.runtime, constructorPrototype(ctx.runtime, constructor_object));
+        promise_val = try core.promise.constructWithPrototype(ctx.runtime, constructorPrototype(ctx.runtime, constructor_object));
         resolve_val = try createPromiseBuiltinFunction(ctx.runtime, active_global, "", 1);
         reject_val = try createPromiseBuiltinFunction(ctx.runtime, active_global, "", 1);
         const resolve_object = thisObject(resolve_val) orelse return error.TypeError;
@@ -959,7 +962,7 @@ pub fn getValueProperty(
     receiver: core.JSValue,
     key: core.Atom,
 ) !core.JSValue {
-    const receiver_value = try objectStaticToObjectValue(ctx.runtime, global, receiver);
+    const receiver_value = try objectStaticToObjectValue(ctx, global, receiver);
     defer receiver_value.free(ctx.runtime);
     const object = try expectObjectArg(receiver_value);
     var cursor: ?*core.Object = object;
@@ -1023,7 +1026,7 @@ fn getPromiseIterator(
     iterable: core.JSValue,
 ) !PromiseIterator {
     if (iterable.isString()) {
-        const iterator = try builtins.string.iterator(ctx.runtime, iterable);
+        const iterator = try core.object.stringIterator(ctx.runtime, iterable);
         errdefer iterator.free(ctx.runtime);
         const next_key = try ctx.runtime.internAtom("next");
         defer ctx.runtime.atoms.free(next_key);
@@ -1034,7 +1037,7 @@ fn getPromiseIterator(
     }
     if (thisObject(iterable)) |iterable_object| {
         if (iterable_object.class_id == core.class.ids.string) {
-            const iterator = try builtins.string.iterator(ctx.runtime, iterable);
+            const iterator = try core.object.stringIterator(ctx.runtime, iterable);
             errdefer iterator.free(ctx.runtime);
             const next_key = try ctx.runtime.internAtom("next");
             defer ctx.runtime.atoms.free(next_key);
@@ -1519,7 +1522,7 @@ fn callHostGlobalNativeFunctionRecord(
         @intFromEnum(core.function.HostGlobalMethod.atob) => try globalAtob(ctx, global, args),
         @intFromEnum(core.function.HostGlobalMethod.queue_microtask) => try globalQueueMicrotask(ctx, global, args),
         @intFromEnum(core.function.HostGlobalMethod.gc) => globalGc(ctx),
-        @intFromEnum(core.function.HostGlobalMethod.navigator_user_agent_get) => try value_ops.createStringValue(ctx.runtime, builtins.registry.navigator_user_agent),
+        @intFromEnum(core.function.HostGlobalMethod.navigator_user_agent_get) => try value_ops.createStringValue(ctx.runtime, core.function.navigator_user_agent),
         @intFromEnum(core.function.HostGlobalMethod.dom_exception_ctor_call) => {
             const active_global = global orelse function_object.functionRealmGlobalPtr() orelse return error.TypeError;
             return exception_ops.throwTypeErrorMessage(ctx, active_global, "constructor requires 'new'");
@@ -1591,13 +1594,13 @@ fn callPromiseStaticNativeFunctionRecord(
         const callback_args = if (args.len >= 1) args[1..] else args[0..0];
         const result = callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, core.JSValue.undefinedValue(), callback, callback_args) catch {
             const reason = core.JSValue.undefinedValue();
-            return builtins.promise.rejectedWithPrototype(ctx.runtime, reason, promise_proto);
+            return core.promise.rejectedWithPrototype(ctx.runtime, reason, promise_proto);
         };
         defer result.free(ctx.runtime);
-        return builtins.promise.fulfilledWithPrototype(ctx.runtime, result, promise_proto);
+        return core.promise.fulfilledWithPrototype(ctx.runtime, result, promise_proto);
     }
     const payload: ?core.JSValue = if (args.len >= 1) args[0] else null;
-    return builtins.promise.staticCallWithPrototype(ctx, id, payload, constructorPrototype(ctx.runtime, receiver), global) catch |err| switch (err) {
+    return core.promise.staticCallWithPrototype(ctx, id, payload, constructorPrototype(ctx.runtime, receiver), global) catch |err| switch (err) {
         error.TypeError => error.TypeError,
         else => err,
     };
@@ -1636,12 +1639,12 @@ pub fn createRealmObject(rt: *core.JSRuntime) HostError!core.JSValue {
         rt,
         core.class.ids.object,
         null,
-        builtins.registry.standardGlobalOwnPropertyCapacity() + 1,
+        rt.standardGlobalOwnPropertyCapacity() + 1,
     );
     var realm_global_owned = true;
     errdefer if (realm_global_owned) realm_global.value().free(rt);
     realm_global.flags.is_global = true;
-    try builtins.registry.installStandardGlobals(rt, realm_global);
+    try rt.installStandardGlobals(realm_global);
     try defineGlobalThisProperty(rt, realm_global);
     try tagRealmEval(rt, realm_global);
     try tagRealmFunctionConstructor(rt, realm_global);
@@ -1710,94 +1713,14 @@ fn tagRealmRegExpAccessorErrors(rt: *core.JSRuntime, realm_global: *core.Object)
 
 const ValueSliceRoot = array_ops.ValueSliceRoot;
 
-const ActiveRootSymbolProbe = struct {
-    rt: *core.JSRuntime,
-    atom_id: u32,
-    saw_symbol: bool = false,
-    trace_failed: bool = false,
-
-    fn trigger(context: ?*anyopaque, size: usize) void {
-        _ = size;
-        const self: *@This() = @ptrCast(@alignCast(context.?));
-        const saved_trigger_fn = self.rt.memory.trigger_gc_fn;
-        const saved_trigger_ctx = self.rt.memory.trigger_gc_ctx;
-        self.rt.memory.trigger_gc_fn = null;
-        self.rt.memory.trigger_gc_ctx = null;
-        defer {
-            self.rt.memory.trigger_gc_fn = saved_trigger_fn;
-            self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
-        }
-        var visitor = core.runtime.RootVisitor{
-            .context = self,
-            .visit_value = @This().visitValue,
-            .visit_object = @This().visitObject,
-        };
-        self.rt.traceActiveRoots(&visitor) catch {
-            self.trace_failed = true;
-        };
-    }
-
-    fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
-        const self: *@This() = @ptrCast(@alignCast(context));
-        if (slot.asSymbolAtom()) |atom_id| {
-            if (atom_id == self.atom_id) self.saw_symbol = true;
-        }
-    }
-
-    fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
-        _ = context;
-        _ = slot;
-    }
-};
-
-test "reflect construct roots argument list while resolving prototype" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
-    defer ctx.destroy();
-
-    const target = try core.function.nativeFunction(rt, "Array", 1);
-    defer target.free(rt);
-    const new_target = try core.function.nativeFunction(rt, "Array", 1);
-    defer new_target.free(rt);
-    const new_target_object = thisObject(new_target) orelse return error.TypeError;
-    try new_target_object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(core.JSValue.int32(1), true, false, true));
-
-    const args_object = try core.Object.createArray(rt, null);
-    var args_alive = true;
-    defer if (args_alive) args_object.value().free(rt);
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-reflect-construct-argument-root");
-    try setArrayIndex(rt, args_object, 0, core.JSValue.symbol(symbol_atom));
-
-    const saved_trigger_fn = rt.memory.trigger_gc_fn;
-    const saved_trigger_ctx = rt.memory.trigger_gc_ctx;
-    var probe = ActiveRootSymbolProbe{
-        .rt = rt,
-        .atom_id = symbol_atom,
-    };
-    rt.memory.trigger_gc_fn = ActiveRootSymbolProbe.trigger;
-    rt.memory.trigger_gc_ctx = &probe;
-    defer {
-        rt.memory.trigger_gc_fn = saved_trigger_fn;
-        rt.memory.trigger_gc_ctx = saved_trigger_ctx;
-    }
-
-    var globals = [_]globals_mod.Slot{};
-    const reflect_args = [_]core.JSValue{ target, args_object.value(), new_target };
-    const result = try reflect_ops.reflectConstruct(ctx, &reflect_args, globals[0..]);
-    var result_alive = true;
-    defer if (result_alive) result.free(rt);
-
-    try std.testing.expect(!probe.trace_failed);
-    try std.testing.expect(probe.saw_symbol);
-
-    args_object.value().free(rt);
-    args_alive = false;
-    result.free(rt);
-    result_alive = false;
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
-}
+// The `reflect construct roots argument list while resolving prototype` test,
+// the `host global bootstrap ...` test, and the matching `engine eval host
+// globals ...` test in `zjs_vm.zig` were relocated to `src/tests/exec.zig`
+// during Phase 6b-3 STEP 7B. They build a bare `core.JSRuntime` and install the
+// standard globals, which now flows through `rt.installStandardGlobals` and so
+// needs the builtins installer registered first; exec source cannot name the
+// builtins registry, so the bootstrap-integration tests live in the test tree
+// (which may import builtins) instead.
 
 pub fn realmPrototypeKey(rt: *core.JSRuntime, name: []const u8) ![]u8 {
     return std.fmt.allocPrint(rt.memory.allocator, "__realm_{s}_proto", .{name});
@@ -1822,12 +1745,12 @@ pub fn callObjectStatic(
     const rt = ctx.runtime;
     if (id == @intFromEnum(method_ids.object.StaticMethod.assign)) {
         if (args.len < 1) return error.TypeError;
-        const target_value = try objectStaticToObjectValue(rt, global, args[0]);
+        const target_value = try objectStaticToObjectValue(ctx, global, args[0]);
         errdefer target_value.free(rt);
         const target = try expectObjectArg(target_value);
         for (args[1..]) |source_arg| {
             if (source_arg.isNull() or source_arg.isUndefined()) continue;
-            const source_value = try objectStaticToObjectValue(rt, global, source_arg);
+            const source_value = try objectStaticToObjectValue(ctx, global, source_arg);
             defer source_value.free(rt);
             const source = try expectObjectArg(source_value);
             const keys = try source.ownKeys(rt);
@@ -1864,25 +1787,25 @@ pub fn callObjectStatic(
     }
     if (id == @intFromEnum(method_ids.object.StaticMethod.keys)) {
         if (args.len < 1) return error.TypeError;
-        const object_value = try objectStaticToObjectValue(rt, global, args[0]);
+        const object_value = try objectStaticToObjectValue(ctx, global, args[0]);
         defer object_value.free(rt);
-        return builtins.object.ownEntriesArray(rt, object_value, .keys);
+        return core.object.ownEntriesArray(rt, object_value, .keys);
     }
     if (id == @intFromEnum(method_ids.object.StaticMethod.values)) {
         if (args.len < 1) return error.TypeError;
-        const object_value = try objectStaticToObjectValue(rt, global, args[0]);
+        const object_value = try objectStaticToObjectValue(ctx, global, args[0]);
         defer object_value.free(rt);
-        return builtins.object.ownEntriesArray(rt, object_value, .values);
+        return core.object.ownEntriesArray(rt, object_value, .values);
     }
     if (id == @intFromEnum(method_ids.object.StaticMethod.entries)) {
         if (args.len < 1) return error.TypeError;
-        const object_value = try objectStaticToObjectValue(rt, global, args[0]);
+        const object_value = try objectStaticToObjectValue(ctx, global, args[0]);
         defer object_value.free(rt);
-        return builtins.object.ownEntriesArray(rt, object_value, .entries);
+        return core.object.ownEntriesArray(rt, object_value, .entries);
     }
     if (id == @intFromEnum(method_ids.object.StaticMethod.get_own_property_descriptor)) {
         if (args.len < 1) return error.TypeError;
-        const object_value = try objectStaticToObjectValue(rt, global, args[0]);
+        const object_value = try objectStaticToObjectValue(ctx, global, args[0]);
         defer object_value.free(rt);
         const object = try expectObjectArg(object_value);
         const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
@@ -1895,7 +1818,7 @@ pub fn callObjectStatic(
     }
     if (id == @intFromEnum(method_ids.object.StaticMethod.get_own_property_descriptors)) {
         if (args.len < 1) return error.TypeError;
-        const object_value = try objectStaticToObjectValue(rt, global, args[0]);
+        const object_value = try objectStaticToObjectValue(ctx, global, args[0]);
         defer object_value.free(rt);
         const object = try expectObjectArg(object_value);
         const keys = try object.ownKeys(rt);
@@ -1914,7 +1837,7 @@ pub fn callObjectStatic(
     }
     if (id == @intFromEnum(method_ids.object.StaticMethod.get_own_property_names)) {
         if (args.len < 1) return error.TypeError;
-        const object_value = try objectStaticToObjectValue(rt, global, args[0]);
+        const object_value = try objectStaticToObjectValue(ctx, global, args[0]);
         defer object_value.free(rt);
         const object = try expectObjectArg(object_value);
         const keys = try object.ownKeys(rt);
@@ -1932,7 +1855,7 @@ pub fn callObjectStatic(
     }
     if (id == @intFromEnum(method_ids.object.StaticMethod.get_own_property_symbols)) {
         if (args.len < 1) return error.TypeError;
-        const object_value = try objectStaticToObjectValue(rt, global, args[0]);
+        const object_value = try objectStaticToObjectValue(ctx, global, args[0]);
         defer object_value.free(rt);
         const object = try expectObjectArg(object_value);
         const keys = try object.ownKeys(rt);
@@ -1947,7 +1870,7 @@ pub fn callObjectStatic(
     }
     if (id == @intFromEnum(method_ids.object.StaticMethod.has_own)) {
         if (args.len < 1) return error.TypeError;
-        const object_value = try objectStaticToObjectValue(rt, global, args[0]);
+        const object_value = try objectStaticToObjectValue(ctx, global, args[0]);
         defer object_value.free(rt);
         const object = try expectObjectArg(object_value);
         const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
@@ -1961,7 +1884,7 @@ pub fn callObjectStatic(
     }
     if (id == @intFromEnum(method_ids.object.StaticMethod.get_prototype_of)) {
         if (args.len < 1) return error.TypeError;
-        const object_value = try objectStaticToObjectValue(rt, global, args[0]);
+        const object_value = try objectStaticToObjectValue(ctx, global, args[0]);
         defer object_value.free(rt);
         const object = try expectObjectArg(object_value);
         if (object.getPrototype()) |prototype| return prototype.value().dup();
@@ -2038,7 +1961,8 @@ pub fn callObjectStatic(
     return error.TypeError;
 }
 
-fn objectStaticToObjectValue(rt: *core.JSRuntime, global: ?*core.Object, value: core.JSValue) !core.JSValue {
+fn objectStaticToObjectValue(ctx: *core.JSContext, global: ?*core.Object, value: core.JSValue) !core.JSValue {
+    const rt = ctx.runtime;
     if (value.isNull() or value.isUndefined()) return error.TypeError;
     if (value.isObject()) return value.dup();
     const class_id: core.class.ClassId = if (value.isString())
@@ -2057,7 +1981,7 @@ fn objectStaticToObjectValue(rt: *core.JSRuntime, global: ?*core.Object, value: 
         const object = try core.Object.create(rt, core.class.ids.object, null);
         return object.value();
     }
-    return primitiveWrapper(rt, class_id, value, primitivePrototypeFromGlobal(rt, global, class_id));
+    return primitiveWrapper(ctx, class_id, value, primitivePrototypeFromGlobal(rt, global, class_id));
 }
 
 fn objectAssignGet(
@@ -2172,21 +2096,21 @@ pub fn objectPrototypeMethodCall(
         2 => {
             const to_string_key = try ctx.runtime.internAtom("toString");
             defer ctx.runtime.atoms.free(to_string_key);
-            const receiver_value = try objectStaticToObjectValue(ctx.runtime, global, this_value);
+            const receiver_value = try objectStaticToObjectValue(ctx, global, this_value);
             defer receiver_value.free(ctx.runtime);
             const receiver = try expectObjectArg(receiver_value);
             const method_value = receiver.getProperty(to_string_key);
             defer method_value.free(ctx.runtime);
             return callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, receiver_value, method_value, &.{});
         },
-        3 => objectPrototypeValueOf(ctx.runtime, global, this_value),
-        4 => objectPrototypeHasOwn(ctx.runtime, global, this_value, args),
-        5 => objectPrototypeIsPrototypeOf(ctx.runtime, global, this_value, args),
-        6 => objectPrototypePropertyIsEnumerable(ctx.runtime, global, this_value, args),
-        7 => objectPrototypeDefineAccessor(ctx.runtime, global, this_value, args, true),
-        8 => objectPrototypeDefineAccessor(ctx.runtime, global, this_value, args, false),
-        9 => objectPrototypeLookupAccessor(ctx.runtime, global, this_value, args, true),
-        10 => objectPrototypeLookupAccessor(ctx.runtime, global, this_value, args, false),
+        3 => objectPrototypeValueOf(ctx, global, this_value),
+        4 => objectPrototypeHasOwn(ctx, global, this_value, args),
+        5 => objectPrototypeIsPrototypeOf(ctx, global, this_value, args),
+        6 => objectPrototypePropertyIsEnumerable(ctx, global, this_value, args),
+        7 => objectPrototypeDefineAccessor(ctx, global, this_value, args, true),
+        8 => objectPrototypeDefineAccessor(ctx, global, this_value, args, false),
+        9 => objectPrototypeLookupAccessor(ctx, global, this_value, args, true),
+        10 => objectPrototypeLookupAccessor(ctx, global, this_value, args, false),
         else => error.TypeError,
     };
 }
@@ -2202,15 +2126,16 @@ fn objectPrototypeToString(rt: *core.JSRuntime, receiver: core.JSValue) !core.JS
     return objectToString(rt, receiver);
 }
 
-fn objectPrototypeValueOf(rt: *core.JSRuntime, global: ?*core.Object, receiver: core.JSValue) !core.JSValue {
-    return objectStaticToObjectValue(rt, global, receiver);
+fn objectPrototypeValueOf(ctx: *core.JSContext, global: ?*core.Object, receiver: core.JSValue) !core.JSValue {
+    return objectStaticToObjectValue(ctx, global, receiver);
 }
 
-fn objectPrototypeHasOwn(rt: *core.JSRuntime, global: ?*core.Object, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
+fn objectPrototypeHasOwn(ctx: *core.JSContext, global: ?*core.Object, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
+    const rt = ctx.runtime;
     const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const key = try atomFromPropertyKey(rt, key_value);
     defer rt.atoms.free(key);
-    const receiver_value = try objectStaticToObjectValue(rt, global, receiver);
+    const receiver_value = try objectStaticToObjectValue(ctx, global, receiver);
     defer receiver_value.free(rt);
     const object = try expectObjectArg(receiver_value);
     if (object.getOwnProperty(key)) |desc| {
@@ -2220,11 +2145,12 @@ fn objectPrototypeHasOwn(rt: *core.JSRuntime, global: ?*core.Object, receiver: c
     return core.JSValue.boolean(false);
 }
 
-fn objectPrototypePropertyIsEnumerable(rt: *core.JSRuntime, global: ?*core.Object, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
+fn objectPrototypePropertyIsEnumerable(ctx: *core.JSContext, global: ?*core.Object, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
+    const rt = ctx.runtime;
     const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const key = try atomFromPropertyKey(rt, key_value);
     defer rt.atoms.free(key);
-    const receiver_value = try objectStaticToObjectValue(rt, global, receiver);
+    const receiver_value = try objectStaticToObjectValue(ctx, global, receiver);
     defer receiver_value.free(rt);
     const object = try expectObjectArg(receiver_value);
     const desc = object.getOwnProperty(key) orelse return core.JSValue.boolean(false);
@@ -2232,11 +2158,11 @@ fn objectPrototypePropertyIsEnumerable(rt: *core.JSRuntime, global: ?*core.Objec
     return core.JSValue.boolean(desc.enumerable orelse false);
 }
 
-fn objectPrototypeIsPrototypeOf(rt: *core.JSRuntime, global: ?*core.Object, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
+fn objectPrototypeIsPrototypeOf(ctx: *core.JSContext, global: ?*core.Object, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const value_object = thisObject(value) orelse return core.JSValue.boolean(false);
-    const receiver_value = try objectStaticToObjectValue(rt, global, receiver);
-    defer receiver_value.free(rt);
+    const receiver_value = try objectStaticToObjectValue(ctx, global, receiver);
+    defer receiver_value.free(ctx.runtime);
     const object = try expectObjectArg(receiver_value);
     var proto = value_object.getPrototype();
     while (proto) |candidate| : (proto = candidate.getPrototype()) {
@@ -2245,8 +2171,9 @@ fn objectPrototypeIsPrototypeOf(rt: *core.JSRuntime, global: ?*core.Object, rece
     return core.JSValue.boolean(false);
 }
 
-fn objectPrototypeDefineAccessor(rt: *core.JSRuntime, global: ?*core.Object, receiver: core.JSValue, args: []const core.JSValue, getter: bool) !core.JSValue {
-    const receiver_value = try objectStaticToObjectValue(rt, global, receiver);
+fn objectPrototypeDefineAccessor(ctx: *core.JSContext, global: ?*core.Object, receiver: core.JSValue, args: []const core.JSValue, getter: bool) !core.JSValue {
+    const rt = ctx.runtime;
+    const receiver_value = try objectStaticToObjectValue(ctx, global, receiver);
     defer receiver_value.free(rt);
     const object = try expectObjectArg(receiver_value);
     const accessor_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
@@ -2266,8 +2193,9 @@ fn objectPrototypeDefineAccessor(rt: *core.JSRuntime, global: ?*core.Object, rec
     return core.JSValue.undefinedValue();
 }
 
-fn objectPrototypeLookupAccessor(rt: *core.JSRuntime, global: ?*core.Object, receiver: core.JSValue, args: []const core.JSValue, getter: bool) !core.JSValue {
-    const receiver_value = try objectStaticToObjectValue(rt, global, receiver);
+fn objectPrototypeLookupAccessor(ctx: *core.JSContext, global: ?*core.Object, receiver: core.JSValue, args: []const core.JSValue, getter: bool) !core.JSValue {
+    const rt = ctx.runtime;
+    const receiver_value = try objectStaticToObjectValue(ctx, global, receiver);
     defer receiver_value.free(rt);
     const object = try expectObjectArg(receiver_value);
     const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -2291,8 +2219,15 @@ pub fn isCallableObjectValue(value: core.JSValue) bool {
         object.class_id == core.class.ids.bytecode_function;
 }
 
-pub fn primitiveWrapper(rt: *core.JSRuntime, class_id: core.class.ClassId, primitive: core.JSValue, prototype: ?*core.Object) !core.JSValue {
-    if (class_id == core.class.ids.string) return builtins.string.constructWithPrototype(rt, &.{primitive}, prototype);
+pub fn primitiveWrapper(ctx: *core.JSContext, class_id: core.class.ClassId, primitive: core.JSValue, prototype: ?*core.Object) !core.JSValue {
+    const rt = ctx.runtime;
+    if (class_id == core.class.ids.string) {
+        // Route `new String(primitive)` / `Object(stringPrimitive)` boxing
+        // through the String construct record (Phase 6b-3 STEP 6) instead of
+        // naming `builtins.string.constructWithPrototype`: the record's
+        // construct branch forwards `args`/`new_target` straight to that body.
+        return (try builtin_dispatch.callConstructRecord(ctx, null, null, &.{}, null, string_construct_ref, prototype, &.{primitive}, null, null)) orelse error.TypeError;
+    }
     var rooted_primitive = primitive;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_primitive },
@@ -2313,13 +2248,15 @@ pub fn primitiveWrapper(rt: *core.JSRuntime, class_id: core.class.ClassId, primi
 test "primitiveWrapper roots direct symbol while creating call wrapper" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-call-wrapper-symbol");
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const wrapper_value = try primitiveWrapper(rt, core.class.ids.symbol, core.JSValue.symbol(symbol_atom), null);
+    const wrapper_value = try primitiveWrapper(ctx, core.class.ids.symbol, core.JSValue.symbol(symbol_atom), null);
     var wrapper_alive = true;
     defer if (wrapper_alive) wrapper_value.free(rt);
     const wrapper = property_ops.expectObject(wrapper_value) catch return error.TypeError;
@@ -3421,15 +3358,4 @@ pub fn qjsEvalGlobalScriptSource(
     return zjs_vm.runWithArgsState(ctx, &nested_stack, &compiled.function, global.value(), &.{}, &.{}, output, global, true, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), true, false) catch |err| {
         return exception_ops.normalizeEvalRuntimeError(err);
     };
-}
-
-test "host global bootstrap installs and tears down builtin plus host domains" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    global.flags.is_global = true;
-    defer global.value().free(rt);
-
-    try installHostGlobals(rt, global);
 }

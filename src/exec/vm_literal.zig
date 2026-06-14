@@ -2,7 +2,6 @@ const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
@@ -48,7 +47,7 @@ pub fn arrayFrom(
         values[remaining] = try stack.pop();
     }
     defer for (values) |value| value.free(ctx.runtime);
-    const array = try builtins.array.constructLiteralWithPrototype(ctx.runtime, values, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
+    const array = try core.array.constructLiteralWithPrototype(ctx.runtime, values, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
     errdefer array.free(ctx.runtime);
     try stack.pushOwned(array);
 }

@@ -96,11 +96,10 @@ pub fn sourceFunction(rt: *core.JSRuntime, name: []const u8, source: []const u8)
     return function_value;
 }
 
-pub fn defineNativeMethod(rt: *core.JSRuntime, target: *core.Object, name: []const u8, length: i32) !void {
-    const method = try nativeFunction(rt, name, length);
-    defer method.free(rt);
-    try defineData(rt, target, name, method, true, false, true);
-}
+/// Re-export of the core lazy method-install primitive. The body lives in
+/// `core/function.zig` so engine-core callers (e.g. Promise instance
+/// materialization) can install `then`/`catch` without importing builtins.
+pub const defineNativeMethod = core.function.defineNativeMethod;
 
 fn defineData(
     rt: *core.JSRuntime,
