@@ -18,23 +18,23 @@ todos:
     content: "迁移前: 小项——architecture_review.md 撤幽灵 bytecode/ic.zig 表述；LIMITATIONS.md 记 PTC 排除与失败形态；双值表示平台理由注记"
     status: completed
   - id: p6-record-table
-    content: "Phase 6: comptime internal record 表机制落地（fn 指针类型与 id 命名空间留 core/host_function.zig，builtins 侧构建表，JSRuntime 持指针，exec 经 rt.internal_builtins[id] 分发）"
-    status: pending
+    content: "**[已收口于 p6-flip-rule 规则反转 LIVE]** Phase 6: comptime internal record 表机制落地（fn 指针类型与 id 命名空间留 core/host_function.zig，builtins 侧构建表，JSRuntime 持指针，exec 经 rt.internal_builtins[id] 分发）。表机制是规则反转的基石、已 LIVE。"
+    status: completed
   - id: p6-pilot
-    content: "Phase 6: Math/JSON 试点迁移，验证留/迁判据与表机制"
-    status: pending
+    content: "**[已收口于 p6-flip-rule 规则反转 LIVE]** Phase 6: Math/JSON 试点迁移，验证留/迁判据与表机制。试点已并入全量迁移、LIVE。"
+    status: completed
   - id: p6-sweep
     content: "Phase 6a: 16 个 domain 的慢路径分发全部走 builtins internal record 表（math/json/uri/number/date/error/function/primitive/iterator/collection/reflect/buffer/string/object/array/regexp）。已完成、全门禁绿；实现仍在 exec（双路径共用），见 6b。"
     status: completed
   - id: p6b-fastpath
-    content: "Phase 6b-1: VM 快路径 callNativeBuiltinRecordForVm 也route through 表（exec 双路径零编译期 builtin 知识）。关键：快路径只有 global 对象无 globals 槽数组，需让 collection/error/function handler 对空 globals 回退 host.global。微基准门控热路径间接调用。"
-    status: pending
+    content: "**[已收口于 p6-flip-rule 规则反转 LIVE]** Phase 6b-1: VM 快路径 callNativeBuiltinRecordForVm 也route through 表（exec 双路径零编译期 builtin 知识）。关键：快路径只有 global 对象无 globals 槽数组，需让 collection/error/function handler 对空 globals 回退 host.global。微基准门控热路径间接调用。dispatch 统一全部完成（4 路径走表，见 p6b-relocate-done）。"
+    status: completed
   - id: p6b-relocate
-    content: "Phase 6b-2 (进行中): object（−667 行）、string（−333 行）方法实现已搬进 builtins。**终态第一步已完成且验证**：vm_call.zig 四条 dispatch 路径全部统一走表（删 fastNativeMethodCall 热子集 switch + Math hybrid + 死代码），严格同机度量证明**删 bypass 性能中性**（new/old≈1.00，string_fromcharcode 反快 2.2×）——uniform 决策实证成立，bypass 是零收益架构债。below-QuickJS 的点（math 3-5×/array_foreach 10×）是预先存在的 property-IC+InternalCall ABI gap，非统一引入，留 cproto/lean-ABI 后续。连带修复：refAllDeclsRecursive 漏收 json_ops 的 2 个 GC-rooting 测试，已在 all_tests.zig 显式锚定。**①已完成**：array 残留 prepared 路径统一——vm_call.zig:1005 的 `.array` prepared 分支改走 `callInternalRecord`（func_obj=null），arrayCall/qjsArrayNativeRecord/qjsArrayPrototypeNativeRecord 容忍 null func_obj（仅 push/pop 经门 `arrayNativeSupportedWithoutFunctionObject` 到达，直调 *Impl），删 `qjsArrayPreparedNativeCall`。度量（同机 vs ../quickjs/build/qjs）：push 紧循环 zjs≈0.03s/QuickJS≈0.60s（zjs 快 ~20×，与旧 bypass 持平）；pop 紧循环 zjs≈2.98s/QuickJS≈1.57s——pop 旧 bypass 亦 <QuickJS（baseline≈2.78s），是预存 property-IC+InternalCall ABI gap，统一仅叠加 ~7% 既定 ABI 成本，按裁决不恢复 bypass。**②array 搬迁结论**：经逐函数 reachability 核实，与 String 不同，几乎所有 Array.prototype/static 实现体被 opcode 绑定的 fast-array fast-call（qjsArrayMethodFastCall）/map fusion（tryFastMapCallDense）直调 = BOTH，按 client model 核心留 exec、builtins 持薄 arrayCall 入口（已是现状）；唯 join/from/of 仅经 native-dispatch surface（表+call_runtime name cascade）可达但 from/of 缠绕 iterator/TypedArray-construction（留 exec）、且其 name-cascade caller 在 call_runtime.zig（本轮文件范围外），故本轮 array 不搬迁实现体（iterator 协议核心 qjsArrayIteratorMethodRecord 亦留）。**剩余**：③各 domain 剩余 delegation；④见 p6-flip-rule。"
-    status: pending
+    content: "**[已收口于 p6-flip-rule 规则反转 LIVE]** Phase 6b-2: object（−667 行）、string（−333 行）方法实现已搬进 builtins。**终态第一步已完成且验证**：vm_call.zig 四条 dispatch 路径全部统一走表（删 fastNativeMethodCall 热子集 switch + Math hybrid + 死代码），严格同机度量证明**删 bypass 性能中性**（new/old≈1.00，string_fromcharcode 反快 2.2×）——uniform 决策实证成立，bypass 是零收益架构债。below-QuickJS 的点（math 3-5×/array_foreach 10×）是预先存在的 property-IC+InternalCall ABI gap，非统一引入，留 cproto/lean-ABI 后续。连带修复：refAllDeclsRecursive 漏收 json_ops 的 2 个 GC-rooting 测试，已在 all_tests.zig 显式锚定。**①已完成**：array 残留 prepared 路径统一——vm_call.zig:1005 的 `.array` prepared 分支改走 `callInternalRecord`（func_obj=null），arrayCall/qjsArrayNativeRecord/qjsArrayPrototypeNativeRecord 容忍 null func_obj（仅 push/pop 经门 `arrayNativeSupportedWithoutFunctionObject` 到达，直调 *Impl），删 `qjsArrayPreparedNativeCall`。度量（同机 vs ../quickjs/build/qjs）：push 紧循环 zjs≈0.03s/QuickJS≈0.60s（zjs 快 ~20×，与旧 bypass 持平）；pop 紧循环 zjs≈2.98s/QuickJS≈1.57s——pop 旧 bypass 亦 <QuickJS（baseline≈2.78s），是预存 property-IC+InternalCall ABI gap，统一仅叠加 ~7% 既定 ABI 成本，按裁决不恢复 bypass。**②array 搬迁结论**：经逐函数 reachability 核实，与 String 不同，几乎所有 Array.prototype/static 实现体被 opcode 绑定的 fast-array fast-call（qjsArrayMethodFastCall）/map fusion（tryFastMapCallDense）直调 = BOTH，按 client model 核心留 exec、builtins 持薄 arrayCall 入口（已是现状）；唯 join/from/of 仅经 native-dispatch surface（表+call_runtime name cascade）可达但 from/of 缠绕 iterator/TypedArray-construction（留 exec）、且其 name-cascade caller 在 call_runtime.zig（本轮文件范围外），故本轮 array 不搬迁实现体（iterator 协议核心 qjsArrayIteratorMethodRecord 亦留）。**剩余**：③各 domain 剩余 delegation；④见 p6-flip-rule（③④ 均已于 p6-flip-rule 规则反转 LIVE 收口）。"
+    status: completed
   - id: p6b-terminal-design
-    content: "终态设计（grill 裁决，纠正前一版「hybrid」误判）：**QuickJS 不是 hybrid**——源码证实它只有唯一 dispatch 路径 js_call_c_function（quickjs.c:17352），唯一专门化是 cproto 参数编组（f_f 让 Math 免装箱，在同一路径内），解释器无 per-builtin bypass，Array.push 是普通 generic_magic。zjs 的多条 bypass 快路径是 zjs 独有发明（让 zjs 快于 QuickJS，代价是钉死实现）。裁决：采 **QuickJS 统一模型**——一条路径（表）、所有实现搬 builtins、删除全部 bypass（含 fastNativeMethodCall 热子集 + array hub + Math hybrid）。**先架构后优化**：先纯统一（标准 InternalCall record，含 Math），度量基准 = ../quickjs/build/qjs（不是 zjs 旧 bypass）；zjs-统一只要不低于 QuickJS 水平就接受（=zjs 旧 bypass 的 ~5% 是统一既定代价）；若低于 QuickJS（被 11 字段 InternalCall 结构体拖累），修法是精简调用 ABI / 补 cproto-lean record，**不恢复 bypass**。cproto 与 lean-ABI 是测量门控的可选后续，非前置。lazy 物化经 prepared 路径走表（func_obj=null）已保留。"
-    status: pending
+    content: "**[已收口于 p6-flip-rule 规则反转 LIVE — 统一模型已实施]** 终态设计（grill 裁决，纠正前一版「hybrid」误判）：**QuickJS 不是 hybrid**——源码证实它只有唯一 dispatch 路径 js_call_c_function（quickjs.c:17352），唯一专门化是 cproto 参数编组（f_f 让 Math 免装箱，在同一路径内），解释器无 per-builtin bypass，Array.push 是普通 generic_magic。zjs 的多条 bypass 快路径是 zjs 独有发明（让 zjs 快于 QuickJS，代价是钉死实现）。裁决：采 **QuickJS 统一模型**——一条路径（表）、所有实现搬 builtins、删除全部 bypass（含 fastNativeMethodCall 热子集 + array hub + Math hybrid）。**先架构后优化**：先纯统一（标准 InternalCall record，含 Math），度量基准 = ../quickjs/build/qjs（不是 zjs 旧 bypass）；zjs-统一只要不低于 QuickJS 水平就接受（=zjs 旧 bypass 的 ~5% 是统一既定代价）；若低于 QuickJS（被 11 字段 InternalCall 结构体拖累），修法是精简调用 ABI / 补 cproto-lean record，**不恢复 bypass**。cproto 与 lean-ABI 是测量门控的可选后续，非前置。lazy 物化经 prepared 路径走表（func_obj=null）已保留。"
+    status: completed
   - id: p6b-relocate-done
     content: "Phase 6b-2 relocation 进度：object −667、string −333、collection −945（搬出 array_ops 的合并区，array_ops 6981→6036）已搬进 builtins。array 实现体留 exec（justified：被 fast-array fast-call/map fusion opcode 绑定 = VM op，非纯分发）。dispatch 统一全部完成（4 路径走表，含 array prepared 残留，性能中性已验证）。"
     status: completed
@@ -58,15 +58,22 @@ todos:
     content: "Phase 7: 微基准语料补 arrow case；method/arrow 位置 1e5 深递归 runner fixtures。**已完成**：(1) 微基准语料（tools/compare/microbench_cases.js）补 `arrow_call_loop`（arrow 调用循环，镜像 call2_loop）+ `arrow_tail_recursion`（arrow 尾递归非 fusion 体，深度 100×500 复用内联帧）——perf-self-check 75/75 兼容、0 验证失败、几何均值 zjs/qjs ~1.00。(2) Zig 单测 fixtures（src/tests/exec.zig）：「arrow and method tail calls reuse inline frames for deep recursion」40000 深（超 8192 内联存储上限→证帧复用而非仅内联）覆盖 arrow plain-tail + method 互/自 tail；「inlined arrow keeps lexical this and ignores any receiver」证 bound.call/method 调用不改 arrow 词法 this。test262 不覆盖 method/arrow 位置深尾递归，故自建。注：未刷新 reports/perf/baseline JSON（独立干净 perf 运行任务，新 case 已对照 qjs live 验证、不阻塞门禁）。"
     status: completed
   - id: p8-gc-header
-    content: "Phase 8: GC 循环回收三 AutoHashMap→header 2-bit 状态机（专门会话+全门禁，先基准证收益）"
-    status: pending
+    content: "Phase 8: GC 循环回收三 AutoHashMap→header 2-bit 状态机。**已完成（Phase 4，commit e2d0b4e「Replace cycle-GC hash sets with header scan bits」，早于 R5 roadmap 撰写）**：runObjectCycleRemoval 不再填三个全堆 AutoHashMap（visited/preserved/free_set），GCObjectHeader.BlockFlags 增 cycle_visited/cycle_preserved bits（header 仍 8 字节），free 成员派生 = visited && !preserved；~20 个 contains/put/getOrPut 点改为 bit 读写，Registry.visited/preserved/free_set 及 init/deinit 删除。唯一残留 AutoHashMap 是非-Object 的 preserved_bytecodes（FunctionBytecode 无 object header，需侧表，正当例外）。Phase 7 会话复核确认。**注：R5 撰写时此项已完成，被 architecture_review.md「已评估待做」stale 段误列为 pending。**"
+    status: completed
   - id: p8-shape-dedup
-    content: "Phase 8: shape.props 与 object.properties 的 atom_id/flags 双份元数据去重（shape 持元数据、对象持值，QuickJS 模型；先基准证收益）"
-    status: pending
+    content: "Phase 8: shape.props 与 object.properties 的 atom_id/flags 双份元数据去重（shape 持元数据、对象持值，QuickJS 模型）。**已完成（Phase 4，commit d352733「Deduplicate property metadata: shape owns atom/flags, entries own values」，早于 R5 roadmap 撰写）**：property.Entry 只持 slot:Slot（QuickJS JSProperty 模型），key atom + writable/enumerable/configurable/accessor/deleted flags 全在 shape.Property，与 Entry 数组 1:1 索引（Object.propAtomAt/propFlagsAt 读元数据）。Phase 7 会话复核确认。**注：同 p8-gc-header，R5 撰写时已完成被误列 pending。**"
+    status: completed
 isProject: false
 ---
 
 # zjs 架构改进路线图 R5（builtins 翻转轮）
+
+> **状态：全部完成（2026-06-14 收口）。** 迁移前清障 5 项、Phase 6 builtins
+> 依赖翻转（规则反转 LIVE，test262 0/49775）、Phase 7 调用形态手术（arrow 内联
+> 资格 + method 尾调用帧复用，commit b0c9a32）均已落地。**Phase 8（GC header
+> 2-bit、shape/object 元数据去重）经复核确认早在 Phase 4 即完成**（commit
+> e2d0b4e / d352733）——R5 撰写时被 architecture_review.md 的 stale「已评估待做」
+> 段误列为 pending。按完成惯例，本文可移出活动树。
 
 接替已全部完成的 R4 路线图（`zjs_架构改进路线图_cd73a21f.plan.md`，已按
 完成惯例移出活动树，git 历史可找回）。本文是
