@@ -1588,7 +1588,6 @@ pub fn run(ctx: *JSContext) !void {
                             else => unreachable,
                         }
                         out_idx += form.size;
-                        in_atom_idx += 1;
                     } else if (isTopLevelGlobalLexical(ctx, atom_id, loc_idx)) {
                         output[out_idx] = lowerScopeVarOpGlobal(op);
                         std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], atom_id, .little);

@@ -1053,6 +1053,69 @@ test "resolve_variables: unknown atom falls back to global get_var" {
     try std.testing.expectEqual(z_atom, bc.atom_operands[0]);
 }
 
+test "resolve_variables: module class binding consumes one input atom before property atom" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    const class_atom = try rt.internAtom("A");
+    const field_atom = try rt.internAtom("x");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(class_atom);
+    defer rt.atoms.free(field_atom);
+
+    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+    _ = try fd.appendScope(-1);
+    _ = try fd.appendScope(0);
+    _ = try fd.addScopeVar(class_atom, .normal, 0, true, true);
+    _ = try fd.addClosureVar(.{
+        .closure_type = .module_decl,
+        .is_lexical = true,
+        .is_const = false,
+        .var_idx = 0,
+        .var_name = class_atom,
+    });
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 14;
+    input[0] = op.scope_get_var;
+    std.mem.writeInt(u32, input[1..5], class_atom, .little);
+    std.mem.writeInt(u16, input[5..7], 1, .little);
+    input[7] = op.get_field;
+    std.mem.writeInt(u32, input[8..12], field_atom, .little);
+    input[12] = op.drop;
+    input[13] = op.return_undef;
+
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(class_atom);
+    try bc.retainAtomOperand(field_atom);
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 1), bc.atom_operands.len);
+    try std.testing.expectEqual(field_atom, bc.atom_operands[0]);
+    var saw_field = false;
+    var pc: usize = 0;
+    while (pc < bc.code.len) {
+        const size = bytecode.opcode.sizeOf(bc.code[pc]);
+        try std.testing.expect(size != 0);
+        if (bc.code[pc] == op.get_field) {
+            const resolved_field = std.mem.readInt(u32, bc.code[pc + 1 ..][0..4], .little);
+            try std.testing.expectEqual(field_atom, resolved_field);
+            saw_field = true;
+            break;
+        }
+        pc += size;
+    }
+    try std.testing.expect(saw_field);
+}
+
 // ---- F10.2: short-form selection (`put_short_code` mirror) ----
 
 test "F10.2: idx<4 selects 1-byte short form (get_loc0..3)" {
