@@ -236,17 +236,24 @@ pub const object = struct {
         visitor_context: anytype,
         comptime visitor: anytype,
     ) !void {
-        for (toCore(obj).properties) |entry| {
-            if (entry.flags.deleted or entry.flags.accessor) continue;
-            const stored = switch (entry.slot) {
+        // Property storage is split across two parallel arrays: the shape
+        // (`shape_ref.props[i]`) carries the per-property flags + atom_id, while
+        // `properties[i].slot` carries the value union. (Mirrors the core
+        // accessor `Object.getOwnDataPropertyValueAt`.)
+        const core_obj = toCore(obj);
+        const shape_props = core_obj.shapeProps();
+        for (shape_props, 0..) |shape_prop, i| {
+            const flags = zjs_core.property.Flags.fromBits(shape_prop.flags);
+            if (flags.deleted or flags.accessor) continue;
+            const stored = switch (core_obj.properties[i].slot) {
                 .data => |value_slot| value_slot,
                 else => continue,
             };
-            const name = rt.atoms.name(entry.atom_id) orelse continue;
+            const name = rt.atoms.name(shape_prop.atom_id) orelse continue;
             try visitor(visitor_context, OwnDataProperty{
                 .name = name,
                 .value = stored,
-                .enumerable = entry.flags.enumerable,
+                .enumerable = flags.enumerable,
             });
         }
     }
