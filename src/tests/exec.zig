@@ -1228,6 +1228,25 @@ test "native dispatch metadata is internal and ignores user properties" {
     try std.testing.expectEqualStrings("false\ntrue\ntrue\ntrue\ntrue\n1\ntrue\n2\n2\n", stream.buffered());
 }
 
+test "scope resolver skips popped lexical shadow for destructured parameter" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function f({ comment, items }) {
+        \\  { let comment = null; }
+        \\  for (let i = 0; i < items.length; ++i) {
+        \\    let comment = "inner";
+        \\  }
+        \\  return comment;
+        \\}
+        \\assert.sameValue(f({ comment: "ok", items: [1] }), "ok");
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "__zjs-prefixed user properties are ordinary own properties" {
     var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();

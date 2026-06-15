@@ -74,6 +74,12 @@ pub const ParseFlags = packed struct(u32) {
     pub const default = ParseFlags{ .in_accepted = true };
 };
 
+fn forceResultNeeded(flags: ParseFlags) ParseFlags {
+    var value_flags = flags;
+    value_flags.result_needed = true;
+    return value_flags;
+}
+
 /// Mirror `quickjs.c:21352` — BlockEnv for break/continue/finally tracking.
 pub const BlockEnv = struct {
     prev: ?*BlockEnv,
@@ -106,6 +112,7 @@ const ControlFrames = struct {
     break_frame_lens: std.ArrayList(usize),
     break_frame_catch_marker_depths: std.ArrayList(u32),
     break_frame_cleanup_drops: std.ArrayList(u8),
+    break_frame_cross_cleanup_drops: std.ArrayList(u8),
     continue_fixups: std.ArrayList(usize),
     continue_frame_lens: std.ArrayList(usize),
     continue_frame_catch_marker_depths: std.ArrayList(u32),
@@ -461,6 +468,7 @@ pub const ParseState = struct {
     continue_frame_lens: std.ArrayList(usize) = .empty,
     break_frame_catch_marker_depths: std.ArrayList(u32) = .empty,
     break_frame_cleanup_drops: std.ArrayList(u8) = .empty,
+    break_frame_cross_cleanup_drops: std.ArrayList(u8) = .empty,
     continue_frame_catch_marker_depths: std.ArrayList(u32) = .empty,
     continue_frame_cleanup_drops: std.ArrayList(u8) = .empty,
     label_frames: std.ArrayList(LabelFrame) = .empty,
@@ -532,6 +540,7 @@ pub const ParseState = struct {
         self.continue_frame_lens.deinit(self.function.memory.allocator);
         self.break_frame_catch_marker_depths.deinit(self.function.memory.allocator);
         self.break_frame_cleanup_drops.deinit(self.function.memory.allocator);
+        self.break_frame_cross_cleanup_drops.deinit(self.function.memory.allocator);
         self.continue_frame_catch_marker_depths.deinit(self.function.memory.allocator);
         self.continue_frame_cleanup_drops.deinit(self.function.memory.allocator);
         for (self.label_frames.items) |*frame| {
@@ -987,7 +996,7 @@ pub const ParseState = struct {
         var frame_depth = s.break_frame_cleanup_drops.items.len;
         while (frame_depth > s.label_frames.items[frame_index].control_frame_depth) {
             frame_depth -= 1;
-            try emitCrossFrameCleanup(s, s.break_frame_cleanup_drops.items[frame_depth]);
+            try emitCrossFrameCleanup(s, s.break_frame_cross_cleanup_drops.items[frame_depth]);
         }
         if (s.label_frames.items[frame_index].allow_continue and s.label_frames.items[frame_index].control_frame_depth > 0) {
             try emitUnlabelledBreakCleanup(s, s.break_frame_cleanup_drops.items[s.label_frames.items[frame_index].control_frame_depth - 1]);
@@ -1009,7 +1018,7 @@ pub const ParseState = struct {
         var frame_depth = s.continue_frame_lens.items.len;
         while (frame_depth > s.label_frames.items[frame_index].control_frame_depth) {
             frame_depth -= 1;
-            try emitCrossFrameCleanup(s, s.break_frame_cleanup_drops.items[frame_depth]);
+            try emitCrossFrameCleanup(s, s.break_frame_cross_cleanup_drops.items[frame_depth]);
         }
         if (s.label_frames.items[frame_index].control_frame_depth > 0) {
             try emitCrossFrameCleanup(s, s.continue_frame_cleanup_drops.items[s.label_frames.items[frame_index].control_frame_depth - 1]);
@@ -1041,6 +1050,7 @@ pub const ParseState = struct {
         s.break_frame_lens.deinit(allocator);
         s.break_frame_catch_marker_depths.deinit(allocator);
         s.break_frame_cleanup_drops.deinit(allocator);
+        s.break_frame_cross_cleanup_drops.deinit(allocator);
         s.continue_fixups.deinit(allocator);
         s.continue_frame_lens.deinit(allocator);
         s.continue_frame_catch_marker_depths.deinit(allocator);
@@ -1058,6 +1068,7 @@ pub const ParseState = struct {
             .break_frame_lens = s.break_frame_lens,
             .break_frame_catch_marker_depths = s.break_frame_catch_marker_depths,
             .break_frame_cleanup_drops = s.break_frame_cleanup_drops,
+            .break_frame_cross_cleanup_drops = s.break_frame_cross_cleanup_drops,
             .continue_fixups = s.continue_fixups,
             .continue_frame_lens = s.continue_frame_lens,
             .continue_frame_catch_marker_depths = s.continue_frame_catch_marker_depths,
@@ -1072,6 +1083,7 @@ pub const ParseState = struct {
         s.break_frame_lens = .empty;
         s.break_frame_catch_marker_depths = .empty;
         s.break_frame_cleanup_drops = .empty;
+        s.break_frame_cross_cleanup_drops = .empty;
         s.continue_fixups = .empty;
         s.continue_frame_lens = .empty;
         s.continue_frame_catch_marker_depths = .empty;
@@ -1090,6 +1102,7 @@ pub const ParseState = struct {
         s.break_frame_lens = saved.break_frame_lens;
         s.break_frame_catch_marker_depths = saved.break_frame_catch_marker_depths;
         s.break_frame_cleanup_drops = saved.break_frame_cleanup_drops;
+        s.break_frame_cross_cleanup_drops = saved.break_frame_cross_cleanup_drops;
         s.continue_fixups = saved.continue_fixups;
         s.continue_frame_lens = saved.continue_frame_lens;
         s.continue_frame_catch_marker_depths = saved.continue_frame_catch_marker_depths;
@@ -3540,6 +3553,7 @@ pub fn parseCoalesceExpr(s: *ParseState, flags: ParseFlags) Error!void {
         s.last_coalesce_expr_depth = s.assign_expr_depth;
         var end_jumps: std.ArrayList(usize) = .empty;
         defer end_jumps.deinit(s.lex.allocator);
+        const rhs_flags = forceResultNeeded(flags);
 
         while (s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
             try s.advance();
@@ -3552,7 +3566,7 @@ pub fn parseCoalesceExpr(s: *ParseState, flags: ParseFlags) Error!void {
             const skip_jump = try emitForwardJump(s, opcode.op.if_false);
             try end_jumps.append(s.lex.allocator, skip_jump);
             try s.emitOp(opcode.op.drop);
-            try parseExprBinaryWithoutPendingFunctionName(s, 8, flags);
+            try parseExprBinaryWithoutPendingFunctionName(s, 8, rhs_flags);
         }
         for (end_jumps.items) |skip_jump| {
             try patchForwardJump(s, skip_jump);
@@ -3572,7 +3586,7 @@ pub fn parseLogicalAndOr(s: *ParseState, op_kind: tok.TokenKind, flags: ParseFla
             try s.emitOp(opcode.op.dup);
             const skip_jump = try emitForwardJump(s, opcode.op.if_true);
             try s.emitOp(opcode.op.drop);
-            try parseLogicalAndOrWithoutPendingFunctionName(s, tok.TOK_LAND, flags);
+            try parseLogicalAndOrWithoutPendingFunctionName(s, tok.TOK_LAND, forceResultNeeded(flags));
             try patchForwardJump(s, skip_jump);
             s.last_anonymous_function_expr = false;
             s.last_was_direct_eval_callee = false;
@@ -3588,7 +3602,7 @@ pub fn parseLogicalAndOr(s: *ParseState, op_kind: tok.TokenKind, flags: ParseFla
             try s.emitOp(opcode.op.dup);
             const skip_jump = try emitForwardJump(s, opcode.op.if_false);
             try s.emitOp(opcode.op.drop);
-            try parseExprBinaryWithoutPendingFunctionName(s, 8, flags);
+            try parseExprBinaryWithoutPendingFunctionName(s, 8, forceResultNeeded(flags));
             try patchForwardJump(s, skip_jump);
             s.last_anonymous_function_expr = false;
             s.last_was_direct_eval_callee = false;
@@ -3747,7 +3761,8 @@ pub fn parseUnary(s: *ParseState, flags: ParseFlags) Error!void {
         } else if (isIdentifierLikeToken(s) and
             s.peekNextKind() != @as(tok.TokenKind, @intCast('(')) and
             s.peekNextKind() != @as(tok.TokenKind, @intCast('.')) and
-            s.peekNextKind() != @as(tok.TokenKind, @intCast('[')))
+            s.peekNextKind() != @as(tok.TokenKind, @intCast('[')) and
+            s.peekNextKind() != tok.TOK_QUESTION_MARK_DOT)
         {
             const ident = identifierLikeAtom(s);
             if (s.class_field_initializer_depth > 0 and atomNameEquals(s, ident, "arguments")) {
@@ -4763,9 +4778,18 @@ fn parseMemberChain(s: *ParseState, flags: ParseFlags, chain_buf: []usize, chain
                         try s.emitOpU16At(opcode.op.apply, 0, callee_line, callee_col);
                     },
                 }
-            } else if (next == tok.TOK_IDENT or next == tok.TOK_PRIVATE_NAME) {
+            } else if (next == tok.TOK_IDENT or next == tok.TOK_PRIVATE_NAME or tok.isKeyword(next) or next == tok.TOK_DELETE or next == tok.TOK_CATCH) {
                 const private_name = next == tok.TOK_PRIVATE_NAME;
-                const raw_name = s.token.payload.ident.atom;
+                const raw_name = if (next == tok.TOK_IDENT or private_name)
+                    s.token.payload.ident.atom
+                else if (tok.isKeyword(next))
+                    tok.keywordAtom(next)
+                else if (next == tok.TOK_DELETE)
+                    @as(Atom, 9)
+                else if (next == tok.TOK_CATCH)
+                    @as(Atom, 25)
+                else
+                    unreachable;
                 if (private_name and !s.in_class) return Error.UnexpectedToken;
                 const private_atom = if (private_name) try privateNameAtom(s, raw_name) else null;
                 defer if (private_atom) |atom_id| s.function.atoms.free(atom_id);
@@ -5388,7 +5412,7 @@ fn parsePrimary(s: *ParseState, flags: ParseFlags) Error!void {
                     return;
                 }
                 try s.advance();
-                try parseExpr2(s, flags);
+                try parseExpr2(s, forceResultNeeded(flags));
                 const parenthesized_had_comma = s.last_expr_had_comma;
                 try expectPunct(s, ')');
                 if (!parenthesized_had_comma and
@@ -6373,6 +6397,7 @@ fn pushBreakFrame(s: *ParseState) Error!void {
     try s.continue_frame_lens.append(s.function.memory.allocator, s.continue_fixups.items.len);
     try s.break_frame_catch_marker_depths.append(s.function.memory.allocator, s.active_catch_marker_depth);
     try s.break_frame_cleanup_drops.append(s.function.memory.allocator, 0);
+    try s.break_frame_cross_cleanup_drops.append(s.function.memory.allocator, 0);
     try s.continue_frame_catch_marker_depths.append(s.function.memory.allocator, s.active_catch_marker_depth);
     try s.continue_frame_cleanup_drops.append(s.function.memory.allocator, 0);
 }
@@ -6381,11 +6406,18 @@ fn pushBreakOnlyFrame(s: *ParseState) Error!void {
     try s.break_frame_lens.append(s.function.memory.allocator, s.break_fixups.items.len);
     try s.break_frame_catch_marker_depths.append(s.function.memory.allocator, s.active_catch_marker_depth);
     try s.break_frame_cleanup_drops.append(s.function.memory.allocator, 0);
+    try s.break_frame_cross_cleanup_drops.append(s.function.memory.allocator, 0);
 }
 
 fn setCurrentBreakCleanupDrops(s: *ParseState, drops: u8) void {
     if (s.break_frame_cleanup_drops.items.len == 0) return;
     s.break_frame_cleanup_drops.items[s.break_frame_cleanup_drops.items.len - 1] = drops;
+    s.break_frame_cross_cleanup_drops.items[s.break_frame_cross_cleanup_drops.items.len - 1] = drops;
+}
+
+fn setCurrentBreakCrossCleanupDrops(s: *ParseState, drops: u8) void {
+    if (s.break_frame_cross_cleanup_drops.items.len == 0) return;
+    s.break_frame_cross_cleanup_drops.items[s.break_frame_cross_cleanup_drops.items.len - 1] = drops;
 }
 
 fn emitUnlabelledBreakCleanup(s: *ParseState, cleanup_drops: u8) Error!void {
@@ -6598,6 +6630,7 @@ fn popBreakFrameAndPatch(s: *ParseState) Error!void {
     const start = s.break_frame_lens.pop().?;
     _ = s.break_frame_catch_marker_depths.pop().?;
     _ = s.break_frame_cleanup_drops.pop().?;
+    _ = s.break_frame_cross_cleanup_drops.pop().?;
     for (s.break_fixups.items[start..]) |off| {
         try patchForwardJump(s, off);
     }
@@ -6609,6 +6642,7 @@ fn popBreakOnlyFrameAndPatch(s: *ParseState) Error!void {
     const start = s.break_frame_lens.pop().?;
     _ = s.break_frame_catch_marker_depths.pop().?;
     _ = s.break_frame_cleanup_drops.pop().?;
+    _ = s.break_frame_cross_cleanup_drops.pop().?;
     for (s.break_fixups.items[start..]) |off| {
         try patchForwardJump(s, off);
     }
@@ -8135,6 +8169,7 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
             s.in_switch_case_block_scope = true;
             defer s.in_switch_case_block_scope = saved_switch_case_block_scope;
             try pushBreakOnlyFrame(s);
+            setCurrentBreakCrossCleanupDrops(s, 1);
             enterSwitchContinueCleanup(s);
             defer leaveSwitchContinueCleanup(s);
             const label_frame = if (switch_label) |atom_id| try s.pushLabelFrame(atom_id, false) else null;

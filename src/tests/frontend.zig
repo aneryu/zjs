@@ -1109,6 +1109,15 @@ test "F4: typeof identifier uses get_var_undef + typeof" {
     try std.testing.expectEqual(op.typeof, fn_bc.code[5]);
 }
 
+test "F4: typeof optional chain parses full chain" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "typeof x?.y?.z");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expectEqual(op.typeof, fn_bc.code[fn_bc.code.len - 1]);
+}
+
 test "F4: void evaluates and discards then pushes undefined" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -1194,6 +1203,32 @@ test "M3.1 F4: nullish coalescing chains and rejects direct logical mixing" {
     try expectParseStatementError(&env, "var r = x && y ?? z;");
     try expectParseStatementError(&env, "var r = x ?? y || z;");
     try expectParseStatementError(&env, "var r = x ?? y && z;");
+}
+
+test "F4: discarded short-circuit with assignment RHS keeps function stack balanced" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const failing_cases = [_][]const u8{
+        "function f(p){ p ?? (p = 5); }",
+        "function f(p){ p || (p = 5); }",
+        "function f(p){ p && (p = 5); }",
+        "const f = (p) => { p ?? (p = 5); };",
+    };
+    for (failing_cases) |source| {
+        var fn_bc = try parseStatementWithTopLevelChildren(&env, source);
+        defer fn_bc.deinit(env.rt);
+    }
+
+    const control_cases = [_][]const u8{
+        "function f(p){ let x = p ?? 5; return x; }",
+        "function f(p){ p ?? 5; }",
+        "pos ?? (pos = 5);",
+    };
+    for (control_cases) |source| {
+        var fn_bc = try parseStatement(&env, source);
+        defer fn_bc.deinit(env.rt);
+    }
 }
 
 test "F4: ternary cond ? a : b emits if_false + goto skeleton" {
@@ -2194,6 +2229,22 @@ test "F4: method-on-opt-chain obj?.b(x) uses get_field2 + call_method" {
     try std.testing.expectEqual(@as(u16, 1), argc);
 }
 
+test "F4: optional chain accepts keyword property names" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const cases = [_][]const u8{
+        "x.issues[i]?.continue !== true",
+        "obj?.delete",
+        "obj?.catch()",
+    };
+    for (cases) |source| {
+        var fn_bc = try parseExpr(&env, source);
+        defer fn_bc.deinit(env.rt);
+        try std.testing.expect(fn_bc.code.len > 0);
+    }
+}
+
 test "F4: indexed-call-on-opt-chain obj?.[k](x) uses get_array_el2 + call_method" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -2695,6 +2746,20 @@ test "F5: expression statement" {
     try std.testing.expectEqual(@as(usize, 6), fn_bc.code.len);
     try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
     try std.testing.expectEqual(op.drop, fn_bc.code[5]);
+}
+
+test "F5: labelled break crossing switch drops discriminant" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const cases = [_][]const u8{
+        "function f(){ loop: for(;;){ switch(x){ default: break loop; } } }",
+        "function* f(){ loop: for(;;){ switch(x){ default: break loop; } } }",
+    };
+    for (cases) |source| {
+        var fn_bc = try parseStatementWithTopLevelChildren(&env, source);
+        defer fn_bc.deinit(env.rt);
+    }
 }
 
 test "F5: var declaration without initializer" {

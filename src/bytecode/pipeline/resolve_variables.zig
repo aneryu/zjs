@@ -628,15 +628,17 @@ fn resolveScopeVar(ctx: *const JSContext, atom_id: u32, scope_level: i32) ?u16 {
         while (flat_i > 0) {
             flat_i -= 1;
             const v = fd.vars[flat_i];
-            if (v.var_name == atom_id and v.scope_level == scope_level) return @intCast(flat_i);
+            if (v.var_name == atom_id and scopeChainContains(fd, scope_level, v.scope_level)) return @intCast(flat_i);
         }
         return null;
     }
-    const flat = fd.findVar(atom_id);
-    if (flat < 0) return null;
-    const vd = fd.vars[@intCast(flat)];
-    if (vd.scope_level != scope_level and (vd.is_lexical or vd.scope_level != 0)) return null;
-    return @intCast(flat);
+    var flat_i: usize = fd.vars.len;
+    while (flat_i > 0) {
+        flat_i -= 1;
+        const vd = fd.vars[flat_i];
+        if (vd.var_name == atom_id and scopeChainContains(fd, scope_level, vd.scope_level)) return @intCast(flat_i);
+    }
+    return null;
 }
 
 const LocalOrArg = union(enum) {
