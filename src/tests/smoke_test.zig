@@ -8,6 +8,16 @@ const ProfileCase = struct {
     max_opcodes: u64,
 };
 
+fn resolvedZjsPath(buf: *[1024]u8) []const u8 {
+    const configured_path = build_options.zjs_executable_path;
+    if (std.Io.Dir.cwd().openFile(std.testing.io, configured_path, .{})) |file| {
+        file.close(std.testing.io);
+        return configured_path;
+    } else |_| {
+        return std.fmt.bufPrint(buf, "../../{s}", .{configured_path}) catch configured_path;
+    }
+}
+
 fn perfOpcodeCount(stderr: []const u8) !u64 {
     const needle = "\"opcodes_executed\": ";
     const start = (std.mem.indexOf(u8, stderr, needle) orelse return error.MissingOpcodeCount) + needle.len;
@@ -20,14 +30,7 @@ fn perfOpcodeCount(stderr: []const u8) !u64 {
 test "zjs CLI behavior" {
     const allocator = std.testing.allocator;
     var zjs_path_buf: [1024]u8 = undefined;
-    var zjs_path = build_options.zjs_executable_path;
-
-    // If zjs_path doesn't exist under current CWD, check relative to parent directory
-    if (std.Io.Dir.cwd().openFile(std.testing.io, zjs_path, .{})) |file| {
-        file.close(std.testing.io);
-    } else |_| {
-        zjs_path = std.fmt.bufPrint(&zjs_path_buf, "../../{s}", .{zjs_path}) catch zjs_path;
-    }
+    const zjs_path = resolvedZjsPath(&zjs_path_buf);
 
     // 1. Basic Eval
     {
@@ -187,7 +190,8 @@ test "zjs CLI behavior" {
 
 test "prepared method calls capture callee before argument side effects" {
     const allocator = std.testing.allocator;
-    const zjs_path = build_options.zjs_executable_path;
+    var zjs_path_buf: [1024]u8 = undefined;
+    const zjs_path = resolvedZjsPath(&zjs_path_buf);
     const source =
         \\let log = "";
         \\let old = function(x) { log += "old" + x; };
@@ -215,7 +219,8 @@ test "prepared method calls capture callee before argument side effects" {
 
 test "CLI top-level range fast paths collapse completion-store loops" {
     const allocator = std.testing.allocator;
-    const zjs_path = build_options.zjs_executable_path;
+    var zjs_path_buf: [1024]u8 = undefined;
+    const zjs_path = resolvedZjsPath(&zjs_path_buf);
 
     const cases = [_]ProfileCase{
         .{
