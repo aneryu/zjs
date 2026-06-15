@@ -237,7 +237,7 @@ pub const object = struct {
         comptime visitor: anytype,
     ) !void {
         // Property storage is split across two parallel arrays: the shape
-        // (`shape_ref.props[i]`) carries the per-property flags + atom_id, while
+        // (`shapeProps()[i]`) carries the per-property flags + atom_id, while
         // `properties[i].slot` carries the value union. (Mirrors the core
         // accessor `Object.getOwnDataPropertyValueAt`.)
         const core_obj = toCore(obj);
