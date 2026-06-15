@@ -28,10 +28,9 @@ zig build run-test262 --summary all
 ```
 
 As currently tracked, the gate has no unexpected failures and no checked-in
-known failures. The latest local run selected 49,671 tests from 53,292 total
-tests, excluded 3,621 by config, skipped 5,225 by feature, and reported
-`0/49,671` errors with 44,446 passing tests. `test262_errors.txt` is currently
-empty.
+known failures. The checked report under `reports/test262-latest/` records the
+latest local bucket, per-directory, feature-skip, and failure details;
+`test262_errors.txt` is currently empty.
 
 ## Configured Skips and Excludes
 
@@ -41,9 +40,9 @@ changed with a concrete implementation plan:
 - `test262/test/intl402/` is excluded. Intl requires data and API surface that
   are outside the current core-engine target.
 - Test262 features marked `=skip` include `Temporal`, `ShadowRealm`,
-  `decorators`, `tail-call-optimization`, `host-gc-required`, `import-defer`,
-  source-phase imports, canonical time zone data, duplicate RegExp named
-  groups, and the Intl feature groups listed in `test262.conf`.
+  `decorators`, `host-gc-required`, `import-defer`, source-phase imports,
+  canonical time zone data, and the Intl feature groups listed in
+  `test262.conf`.
 - Generated RegExp string-property and UnicodeSets cases that still exceed the
   current parity boundary are excluded individually.
 - Most `test262/test/staging/` tests are excluded by default, with selected
@@ -88,7 +87,8 @@ upstream QuickJS:
 
 - **Atomics.waitAsync**: Fully supported and validated in `zjs` (including engine-deinit cleanup validation), whereas upstream QuickJS lists this as unsupported and skips it.
 - **Other Enabled Features**: Features like `await-dictionary`, `legacy-regexp`, `nonextensible-applies-to-private`, and `regexp-modifiers` are enabled and validated in `zjs` but skipped in upstream QuickJS.
-- **Import Bytes**: Both `zjs` and upstream QuickJS validate binary module imports (`import-bytes`).
+- **Import Bytes**: The local profile enables and validates binary module
+  imports (`import-bytes`) within the repository validation boundary.
 
 ## Validation Commands
 

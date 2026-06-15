@@ -5,8 +5,6 @@
 - Fixed Array sort writeback when an indexed setter mutates a successor
   element, Error.prototype.stack setter edge cases, and TypedArray
   DefineOwnProperty detach-during-conversion semantics.
-- Moved `import-bytes` out of the Production v1 active test262 profile; binary
-  module imports remain unsupported in this release boundary.
 - Removed the historical C QuickJS performance comparison workflow and
   `perf-compare`; the checked performance gate is the ZJS self-baseline.
 - Added a `run_runtime_profile.js` helper and `zig build perf-uri-profile`

@@ -61,25 +61,26 @@ module loading are not supported.
 
 ## Proper Tail Calls
 
-- Plain `tail_call` sites (including tail-position direct `eval` calls that do
-  not resolve to %eval%) run as real tail-call optimization through frame
-  reuse: logical call depth stays constant. `test262.conf` enables the
-  `tail-call-optimization` feature.
+- Plain `tail_call` sites, tail-position direct `eval` calls that do not
+  resolve to %eval%, arrow targets, and `tail_call_method` sites can run as
+  real tail-call optimization through inline-frame reuse when the target is
+  inline-eligible: logical call depth stays constant. `test262.conf` enables
+  the `tail-call-optimization` feature.
 - Tail targets that still take the recursive slow path, where deep tail
-  recursion grows the native stack: L0 frames (generator/eval shells),
-  arrow / class-constructor / cross-realm callees, and `tail_call_method`.
-  Arrow inlining and `tail_call_method` frame reuse are scheduled as R5
-  roadmap Phase 7. The class-constructor exclusion is spec-correct: calling a
-  class constructor without `new` throws TypeError, so no deep recursion
-  exists there.
+  recursion grows the native stack, include L0 frames (generator/eval shells),
+  class-constructor calls, cross-realm callees, async/generator targets, native
+  builtins, and simple fusion bodies that deliberately use their specialized
+  path. The class-constructor exclusion is spec-correct: calling a class
+  constructor without `new` throws TypeError, so no deep recursion exists
+  there.
 - Failure shape: the recursive path is protected by the dual depth guard
   (native depth `max(16, stack_limit / 16384)` plus the logical depth limit)
   and throws RangeError when exceeded — it is not a crash. The consequence is
-  that spec-legal deep tail recursion in method/arrow position hits RangeError
-  early, deviating from PTC's constant-stack semantics.
+  that spec-legal deep tail recursion through a non-inline-eligible tail target
+  hits RangeError early, deviating from PTC's constant-stack semantics.
 - Note: test262 has no coverage for deep tail recursion in method/arrow
-  position (`tco-member-args.js` actually contains a plain call), so a green
-  gate is not evidence for those shapes.
+  position (`tco-member-args.js` actually contains a plain call), so those
+  shapes are guarded by focused Zig regression fixtures.
 
 ## Performance
 

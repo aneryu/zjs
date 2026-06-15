@@ -69,21 +69,27 @@ zig-out/bin/zjs --perf-json path/to/file.js 2> perf.json
 
 Missing or invalid arguments print usage and exit non-zero.
 
+## Documentation
+
+Read [docs/README.md](docs/README.md) for the active documentation map.
+Completed roadmaps, snapshot ledgers, and one-off audits are intentionally not
+kept in the active tree; recover them from git history when needed.
+
+Key authorities:
+
+- [GUIDE.md](GUIDE.md): engineering rules and validation workflow.
+- [COMPATIBILITY.md](COMPATIBILITY.md): current validation boundary.
+- [LIMITATIONS.md](LIMITATIONS.md): runtime and product-scope limitations.
+- [docs/architecture.md](docs/architecture.md): current architecture snapshot.
+- [docs/public-api-contract.md](docs/public-api-contract.md): public Zig API
+  contract.
+- [docs/embedding-cookbook.md](docs/embedding-cookbook.md): Zig-native
+  embedding examples.
+
 ## Compatibility
 
 Read [COMPATIBILITY.md](COMPATIBILITY.md) for the current validation boundary
 and [LIMITATIONS.md](LIMITATIONS.md) for runtime limitations.
-
-Read [docs/embedding-cookbook.md](docs/embedding-cookbook.md) for public
-Zig-native embedding examples: runtime/context lifecycle, host functions,
-handle scopes, persistent values, byte stores, limits, interrupts, and module
-evaluation.
-
-Read [docs/public-api-contract.md](docs/public-api-contract.md) for the current
-public Zig API contract, [docs/api-boundary.md](docs/api-boundary.md) for the
-core/runtime boundary, and
-[docs/runtime-plugin-abi.md](docs/runtime-plugin-abi.md) for the dynamic runtime
-plugin ABI.
 
 The full direct test262 invocation is:
 
