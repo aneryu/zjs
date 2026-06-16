@@ -2123,19 +2123,22 @@ fn checkIdentArrowHead(s: *ParseState) bool {
     const saved_pos = s.lex.pos;
     const saved_line = s.lex.line;
     const saved_col = s.lex.col;
+    const saved_got_lf = s.lex.got_lf;
     const saved_mark_pos = s.lex.mark_pos;
     const saved_mark_line = s.lex.mark_line;
     const saved_mark_col = s.lex.mark_col;
-    const peek_token = s.lex.next() catch return false;
     defer {
-        s.lex.freeToken(@constCast(&peek_token));
         s.lex.pos = saved_pos;
         s.lex.line = saved_line;
         s.lex.col = saved_col;
+        s.lex.got_lf = saved_got_lf;
         s.lex.mark_pos = saved_mark_pos;
         s.lex.mark_line = saved_mark_line;
         s.lex.mark_col = saved_mark_col;
     }
+
+    var peek_token = nextRegexpAwareLookaheadToken(s, s.peekKind()) catch return false;
+    defer s.lex.freeToken(&peek_token);
     return peek_token.val == tok.TOK_ARROW;
 }
 
@@ -2150,10 +2153,8 @@ fn checkAsyncSingleParamArrowHead(s: *ParseState) bool {
     const saved_mark_pos = s.lex.mark_pos;
     const saved_mark_line = s.lex.mark_line;
     const saved_mark_col = s.lex.mark_col;
-    const saved_token = s.token;
 
     defer {
-        s.lex.freeToken(&s.token);
         s.lex.pos = saved_pos;
         s.lex.line = saved_line;
         s.lex.col = saved_col;
@@ -2161,24 +2162,17 @@ fn checkAsyncSingleParamArrowHead(s: *ParseState) bool {
         s.lex.mark_pos = saved_mark_pos;
         s.lex.mark_line = saved_mark_line;
         s.lex.mark_col = saved_mark_col;
-        s.token = saved_token;
     }
 
-    const advanceLocal = struct {
-        fn call(state: *ParseState) bool {
-            const next = state.lex.next() catch return false;
-            state.lex.freeToken(&state.token);
-            state.token = next;
-            return true;
-        }
-    }.call;
+    var param_token = nextRegexpAwareLookaheadToken(s, s.peekKind()) catch return false;
+    defer s.lex.freeToken(&param_token);
+    if (s.lex.gotLineTerminator()) return false;
+    if (param_token.val != tok.TOK_IDENT) return false;
 
-    if (!advanceLocal(s)) return false; // async
+    var arrow_token = nextRegexpAwareLookaheadToken(s, param_token.val) catch return false;
+    defer s.lex.freeToken(&arrow_token);
     if (s.lex.gotLineTerminator()) return false;
-    if (s.peekKind() != tok.TOK_IDENT) return false;
-    if (!advanceLocal(s)) return false; // single parameter
-    if (s.lex.gotLineTerminator()) return false;
-    return s.peekKind() == tok.TOK_ARROW;
+    return arrow_token.val == tok.TOK_ARROW;
 }
 
 /// Check if contextual `async` is followed by a parenthesized async arrow head:
@@ -2194,10 +2188,8 @@ fn checkAsyncParenArrowHead(s: *ParseState) bool {
     const saved_mark_pos = s.lex.mark_pos;
     const saved_mark_line = s.lex.mark_line;
     const saved_mark_col = s.lex.mark_col;
-    const saved_token = s.token;
 
     defer {
-        s.lex.freeToken(&s.token);
         s.lex.pos = saved_pos;
         s.lex.line = saved_line;
         s.lex.col = saved_col;
@@ -2205,104 +2197,102 @@ fn checkAsyncParenArrowHead(s: *ParseState) bool {
         s.lex.mark_pos = saved_mark_pos;
         s.lex.mark_line = saved_mark_line;
         s.lex.mark_col = saved_mark_col;
-        s.token = saved_token;
     }
 
-    const advanceLocal = struct {
-        fn call(state: *ParseState) bool {
-            const next = state.lex.next() catch return false;
-            state.lex.freeToken(&state.token);
-            state.token = next;
-            return true;
-        }
-    }.call;
-
-    if (!advanceLocal(s)) return false; // async
+    var previous_token_kind: tok.TokenKind = s.peekKind();
+    var open_token = nextRegexpAwareLookaheadToken(s, previous_token_kind) catch return false;
+    defer s.lex.freeToken(&open_token);
     if (s.lex.gotLineTerminator()) return false;
-    if (s.peekKind() != '(') return false;
-    if (!advanceLocal(s)) return false; // (
+    if (open_token.val != '(') return false;
+    previous_token_kind = open_token.val;
+
     var depth: i32 = 1;
     while (depth > 0) {
-        const k = s.peekKind();
+        var scan_token = nextRegexpAwareLookaheadToken(s, previous_token_kind) catch return false;
+        const k = scan_token.val;
+        s.lex.freeToken(&scan_token);
         if (k == tok.TOK_EOF) return false;
         if (k == '(') depth += 1;
         if (k == ')') depth -= 1;
+        previous_token_kind = k;
         if (depth == 0) break;
-        if (!advanceLocal(s)) return false;
     }
-    if (!advanceLocal(s)) return false; // )
-    return s.peekKind() == tok.TOK_ARROW and !s.lex.gotLineTerminator();
+
+    var arrow_token = nextRegexpAwareLookaheadToken(s, previous_token_kind) catch return false;
+    defer s.lex.freeToken(&arrow_token);
+    return arrow_token.val == tok.TOK_ARROW and !s.lex.gotLineTerminator();
 }
 
 /// Check if we're at an arrow function head
 /// Mirrors `js_parse_skip_parens_token` in quickjs.c:24194.
 ///
-/// Saves the lexer position and current token, performs lookahead by
-/// repeatedly advancing through tokens, then restores both on return.
-/// Each scan step both updates `s.token` (so peekKind reflects the
-/// lookahead) and frees the consumed token's payload to avoid leaks.
+/// Saves the lexer position, scans forward with scratch tokens, then
+/// restores the lexer so the cached parser token remains valid.
 fn checkArrowHead(s: *ParseState) bool {
-    // Save lexer position and the cached one-token lookahead.
     const saved_pos = s.lex.pos;
     const saved_line = s.lex.line;
     const saved_col = s.lex.col;
+    const saved_got_lf = s.lex.got_lf;
     const saved_mark_pos = s.lex.mark_pos;
     const saved_mark_line = s.lex.mark_line;
     const saved_mark_col = s.lex.mark_col;
-    const saved_token = s.token;
-
-    // Restore lexer + token state on every exit path. The intermediate
-    // scratch tokens we advance through get freed during the scan.
-    var success = false;
     defer {
-        // Free the final scratch token (if any) before restoring.
-        if (!success) {
-            s.lex.freeToken(&s.token);
-        } else {
-            s.lex.freeToken(&s.token);
-        }
         s.lex.pos = saved_pos;
         s.lex.line = saved_line;
         s.lex.col = saved_col;
+        s.lex.got_lf = saved_got_lf;
         s.lex.mark_pos = saved_mark_pos;
         s.lex.mark_line = saved_mark_line;
         s.lex.mark_col = saved_mark_col;
-        s.token = saved_token;
     }
 
-    // Helper: advance s.token to the next token. Frees the consumed
-    // token's payload. Returns false on lex error.
-    const advanceLocal = struct {
-        fn call(state: *ParseState) bool {
-            const next = state.lex.next() catch return false;
-            state.lex.freeToken(&state.token);
-            state.token = next;
-            return true;
-        }
-    }.call;
-
-    // Check for ( ... ) => or ident =>
+    var previous_token_kind: tok.TokenKind = s.peekKind();
     if (s.peekKind() == '(') {
-        if (!advanceLocal(s)) return false; // consume the '('
         var depth: i32 = 1;
         while (depth > 0) {
-            const k = s.peekKind();
+            var scan_token = nextRegexpAwareLookaheadToken(s, previous_token_kind) catch return false;
+            const k = scan_token.val;
+            s.lex.freeToken(&scan_token);
             if (k == tok.TOK_EOF) return false;
             if (k == '(') depth += 1;
             if (k == ')') depth -= 1;
+            previous_token_kind = k;
             if (depth == 0) break;
-            if (!advanceLocal(s)) return false;
         }
-        if (!advanceLocal(s)) return false; // consume the ')'
     } else if (s.peekKind() == tok.TOK_IDENT) {
-        if (!advanceLocal(s)) return false;
+        var arrow_token = nextRegexpAwareLookaheadToken(s, previous_token_kind) catch return false;
+        defer s.lex.freeToken(&arrow_token);
+        return arrow_token.val == tok.TOK_ARROW;
     } else {
         return false;
     }
 
-    // Check for =>
-    success = s.peekKind() == tok.TOK_ARROW;
-    return success;
+    var arrow_token = nextRegexpAwareLookaheadToken(s, previous_token_kind) catch return false;
+    defer s.lex.freeToken(&arrow_token);
+    return arrow_token.val == tok.TOK_ARROW;
+}
+
+fn nextRegexpAwareLookaheadToken(s: *ParseState, previous_token_kind: ?tok.TokenKind) Error!tok.Token {
+    var token = s.lex.next() catch return Error.UnexpectedToken;
+    errdefer s.lex.freeToken(&token);
+    try rescanLookaheadTokenIfRegexp(s, &token, previous_token_kind);
+    return token;
+}
+
+fn rescanLookaheadTokenIfRegexp(s: *ParseState, token: *tok.Token, previous_token_kind: ?tok.TokenKind) Error!void {
+    if (!(token.val == @as(tok.TokenKind, @intCast('/')) or token.val == tok.TOK_DIV_ASSIGN)) return;
+    if (!predeclareSlashStartsRegexp(s, previous_token_kind)) return;
+
+    const slash_offset = s.lex.mark_pos;
+    const regexp_token = s.lex.rescanRegexp(slash_offset) catch return Error.UnexpectedToken;
+    s.lex.freeToken(token);
+    token.* = regexp_token;
+}
+
+fn advanceRegexpAwareSpeculativeToken(s: *ParseState, previous_token_kind: *?tok.TokenKind) Error!void {
+    try rescanLookaheadTokenIfRegexp(s, &s.token, previous_token_kind.*);
+    previous_token_kind.* = s.peekKind();
+    try s.advance();
 }
 
 // =====================================================================
@@ -12143,12 +12133,13 @@ fn collectSimpleArrowParamNames(s: *ParseState) Error!std.ArrayList(?Atom) {
             if (s.peekKind() == '=') {
                 try s.advance();
                 var depth: usize = 0;
+                var previous_token_kind: ?tok.TokenKind = '=';
                 while (s.peekKind() != tok.TOK_EOF) {
                     const k = s.peekKind();
                     if (depth == 0 and (k == ',' or k == ')')) break;
                     if (k == '(' or k == '[' or k == '{') depth += 1;
                     if ((k == ')' or k == ']' or k == '}') and depth > 0) depth -= 1;
-                    try s.advance();
+                    try advanceRegexpAwareSpeculativeToken(s, &previous_token_kind);
                 }
             }
         } else if (s.peekKind() == tok.TOK_ELLIPSIS) {
@@ -12163,12 +12154,13 @@ fn collectSimpleArrowParamNames(s: *ParseState) Error!std.ArrayList(?Atom) {
         } else {
             try names.append(s.function.memory.allocator, null);
             var depth: usize = 0;
+            var previous_token_kind: ?tok.TokenKind = null;
             while (s.peekKind() != tok.TOK_EOF) {
                 const k = s.peekKind();
                 if (depth == 0 and (k == ',' or k == ')')) break;
                 if (k == '(' or k == '[' or k == '{') depth += 1;
                 if ((k == ')' or k == ']' or k == '}') and depth > 0) depth -= 1;
-                try s.advance();
+                try advanceRegexpAwareSpeculativeToken(s, &previous_token_kind);
             }
         }
 
@@ -12204,6 +12196,7 @@ fn parameterInitializerContainsAwait(s: *ParseState) bool {
     var paren_depth: usize = 0;
     var bracket_depth: usize = 0;
     var brace_depth: usize = 0;
+    var previous_token_kind: ?tok.TokenKind = null;
     while (s.peekKind() != tok.TOK_EOF) {
         const k = s.peekKind();
         if (k == tok.TOK_AWAIT) return true;
@@ -12230,7 +12223,7 @@ fn parameterInitializerContainsAwait(s: *ParseState) bool {
             },
             else => {},
         }
-        s.advance() catch return false;
+        advanceRegexpAwareSpeculativeToken(s, &previous_token_kind) catch return false;
     }
     return false;
 }

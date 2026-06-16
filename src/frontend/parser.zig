@@ -267,16 +267,107 @@ fn setFallbackSyntaxError(
 ) !void {
     var lex = zjs_lexer.Lexer.init(rt.memory.allocator, &rt.atoms, source);
     var pos = source_pos.Position{ .line = 1, .column = 1, .offset = 0 };
+    var previous_token_kind: ?zjs_token.TokenKind = null;
     while (true) {
-        var tok = lex.next() catch |err| {
+        var tok = nextFallbackSyntaxToken(&lex, previous_token_kind) catch |err| {
             result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, pos, @errorName(err));
             result.parse_path = .syntax_error_guard;
             return;
         };
         pos = .{ .line = lex.line, .column = lex.col, .offset = lex.pos };
-        if (tok.val == zjs_token.TOK_EOF) break;
+        if (tok.val == zjs_token.TOK_EOF) {
+            lex.freeToken(&tok);
+            break;
+        }
+        previous_token_kind = tok.val;
         lex.freeToken(&tok);
     }
     result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, pos, message);
     result.parse_path = .syntax_error_guard;
+}
+
+fn nextFallbackSyntaxToken(lex: *zjs_lexer.Lexer, previous_token_kind: ?zjs_token.TokenKind) zjs_lexer.Error!zjs_token.Token {
+    var token = try lex.next();
+    errdefer lex.freeToken(&token);
+
+    if ((token.val == @as(zjs_token.TokenKind, @intCast('/')) or token.val == zjs_token.TOK_DIV_ASSIGN) and
+        fallbackSlashStartsRegexp(previous_token_kind))
+    {
+        const slash_offset = lex.mark_pos;
+        const regexp_token = try lex.rescanRegexp(slash_offset);
+        lex.freeToken(&token);
+        token = regexp_token;
+    }
+
+    return token;
+}
+
+fn fallbackSlashStartsRegexp(previous_token_kind: ?zjs_token.TokenKind) bool {
+    const previous = previous_token_kind orelse return true;
+    return switch (previous) {
+        '(',
+        '[',
+        '{',
+        ',',
+        ';',
+        ':',
+        '?',
+        '=',
+        '!',
+        '~',
+        '+',
+        '-',
+        '*',
+        '%',
+        '&',
+        '|',
+        '^',
+        zjs_token.TOK_ARROW,
+        zjs_token.TOK_LT,
+        zjs_token.TOK_LTE,
+        zjs_token.TOK_GT,
+        zjs_token.TOK_GTE,
+        zjs_token.TOK_EQ,
+        zjs_token.TOK_STRICT_EQ,
+        zjs_token.TOK_NEQ,
+        zjs_token.TOK_STRICT_NEQ,
+        zjs_token.TOK_SHL,
+        zjs_token.TOK_SAR,
+        zjs_token.TOK_SHR,
+        zjs_token.TOK_LAND,
+        zjs_token.TOK_LOR,
+        zjs_token.TOK_POW,
+        zjs_token.TOK_DOUBLE_QUESTION_MARK,
+        zjs_token.TOK_QUESTION_MARK_DOT,
+        zjs_token.TOK_MUL_ASSIGN,
+        zjs_token.TOK_DIV_ASSIGN,
+        zjs_token.TOK_MOD_ASSIGN,
+        zjs_token.TOK_PLUS_ASSIGN,
+        zjs_token.TOK_MINUS_ASSIGN,
+        zjs_token.TOK_SHL_ASSIGN,
+        zjs_token.TOK_SAR_ASSIGN,
+        zjs_token.TOK_SHR_ASSIGN,
+        zjs_token.TOK_AND_ASSIGN,
+        zjs_token.TOK_XOR_ASSIGN,
+        zjs_token.TOK_OR_ASSIGN,
+        zjs_token.TOK_POW_ASSIGN,
+        zjs_token.TOK_LAND_ASSIGN,
+        zjs_token.TOK_LOR_ASSIGN,
+        zjs_token.TOK_DOUBLE_QUESTION_MARK_ASSIGN,
+        zjs_token.TOK_RETURN,
+        zjs_token.TOK_CASE,
+        zjs_token.TOK_THROW,
+        zjs_token.TOK_DELETE,
+        zjs_token.TOK_VOID,
+        zjs_token.TOK_TYPEOF,
+        zjs_token.TOK_NEW,
+        zjs_token.TOK_IN,
+        zjs_token.TOK_INSTANCEOF,
+        zjs_token.TOK_DO,
+        zjs_token.TOK_ELSE,
+        zjs_token.TOK_YIELD,
+        zjs_token.TOK_AWAIT,
+        => true,
+        else => false,
+    };
 }

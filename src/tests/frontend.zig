@@ -4831,6 +4831,55 @@ test "module parse mode records import export metadata and strict flag" {
     try std.testing.expect(record.has_top_level_await);
 }
 
+test "module parser preserves regex literals across zod-like lookahead scans" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const source =
+        \\const globalConfig = {};
+        \\export function helper00(value) { return value; }
+        \\export function helper01(value) { return helper00(value); }
+        \\export function helper02(value) { return helper01(value); }
+        \\export function helper03(value) { return helper02(value); }
+        \\export function helper04(value) { return helper03(value); }
+        \\export function helper05(value) { return helper04(value); }
+        \\export function helper06(value) { return helper05(value); }
+        \\export function helper07(value) { return helper06(value); }
+        \\export function helper08(value) { return helper07(value); }
+        \\export function helper09(value) { return helper08(value); }
+        \\export function randomString(length = 10) {
+        \\    const chars = "abcdefghijklmnopqrstuvwxyz";
+        \\    let str = "";
+        \\    for (let i = 0; i < length; i++) {
+        \\        str += chars[Math.floor(Math.random() * chars.length)];
+        \\    }
+        \\    return str;
+        \\}
+        \\export function esc(str) {
+        \\    return JSON.stringify(str);
+        \\}
+        \\export function slugify(input) {
+        \\    return input
+        \\        .toLowerCase()
+        \\        .trim()
+        \\        .replace(/[^\w\s-]/g, "")
+        \\        .replace(/[\s_-]+/g, "-")
+        \\        .replace(/^-+|-+$/g, "");
+        \\}
+        \\export const captureStackTrace = ("captureStackTrace" in Error ? Error.captureStackTrace : (..._args) => { });
+        \\export const arrowDefault = (value = /[^\w\s-]/g) => value;
+        \\export function isObject(data) {
+        \\    return typeof data === "object" && data !== null;
+        \\}
+    ;
+
+    var parsed = try frontend.parser.parse(rt, source, .{ .mode = .module, .filename = "zod-regex-lookahead.mjs" });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+}
+
 test "module import local names are compiled as module var refs" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
