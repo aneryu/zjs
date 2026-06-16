@@ -5,16 +5,23 @@ not a phase plan.
 
 Primary owners:
 
-- `src/engine/bytecode/ic.zig`
-- `src/engine/bytecode/function.zig`
-- `src/engine/exec/vm/property.zig`
-- `src/engine/core/profile.zig`
+- `src/core/ic.zig`
+- `src/bytecode/function.zig`
+- `src/exec/vm_property.zig`
+- `src/exec/property_ic.zig`
+- `src/core/profile.zig`
+
+`src/exec/property_ic.zig` owns the shape-keyed property IC adapter, low-level
+own-data slot lookup/write helpers, and the declared/own global data
+lookup-store fallback used by global fast paths. `src/exec/vm_property.zig`
+owns opcode sequencing, scope guards, catchability, and stack/frame updates
+around those helpers.
 
 Inline caches are enabled by default and can be disabled with:
 
 ```sh
 zig build test -Dzjs_enable_ic=false --summary all
-zig build qjs -Dzjs_enable_ic=false --summary all
+zig build zjs -Dzjs_enable_ic=false --summary all
 ```
 
 ## Cacheable Opcodes
@@ -96,7 +103,7 @@ Megamorphic sites do not re-enter mono/poly during the function lifetime.
 Expose the counters with:
 
 ```sh
-zig-out/bin/zjs --perf-json tests/zig-smoke/arith.js 2> reports/perf/current/arith-perf.json
+zig-out/bin/zjs --perf-json -e "for(var i=0; i<100000; i++) {}" 2> .zig-cache/perf/current/perf.json
 ```
 
 The JSON is written to stderr.

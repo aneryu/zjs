@@ -46,13 +46,13 @@ done
 tmp_diff="$(mktemp)"
 trap 'rm -f "$tmp_diff"' EXIT
 
-git diff --unified=0 -- src/engine tools/perf "${diff_args[@]}" > "$tmp_diff"
+git diff --unified=0 -- src tools/perf "${diff_args[@]}" > "$tmp_diff"
 
 status=0
 
 try_fuse_matches="$(
   awk '
-    /^\+\+\+ b\/src\/engine\// { in_engine = 1; next }
+    /^\+\+\+ b\/src\/(builtins|bytecode|core|exec|frontend|libs|root\.zig)/ { in_engine = 1; next }
     /^\+\+\+ b\// { in_engine = 0 }
     in_engine && /^\+[^+]/ && $0 ~ /(^|[^A-Za-z0-9_])tryFuse[A-Za-z0-9_]*/ {
       print FNR ":" $0
@@ -68,7 +68,7 @@ fi
 
 anyerror_matches="$(
   awk '
-    /^\+\+\+ b\/src\/engine\// { in_engine = 1; next }
+    /^\+\+\+ b\/src\/(builtins|bytecode|core|exec|frontend|libs|root\.zig)/ { in_engine = 1; next }
     /^\+\+\+ b\// { in_engine = 0 }
     in_engine && /^\+[^+]/ && $0 ~ /(^|[^A-Za-z0-9_])anyerror([^A-Za-z0-9_]|$)/ {
       print FNR ":" $0
@@ -84,7 +84,7 @@ fi
 
 runtime_field_matches="$(
   awk '
-    /^\+\+\+ b\/src\/engine\/core\/runtime\.zig$/ { in_runtime = 1; next }
+    /^\+\+\+ b\/src\/core\/runtime\.zig$/ { in_runtime = 1; next }
     /^\+\+\+ b\// { in_runtime = 0 }
     in_runtime && /^\+[^+]/ && $0 ~ /^\+[[:space:]]+[A-Za-z_][A-Za-z0-9_]*:[[:space:]]/ {
       print FNR ":" $0
@@ -106,6 +106,7 @@ import sys
 
 expected = [
     "header",
+    "gc",
     "class_id",
     "class_payload",
     "class_payload_kind",
@@ -113,21 +114,26 @@ expected = [
     "prototype",
     "null_prototype",
     "extensible",
+    "immutable_prototype",
     "is_array",
     "is_proxy",
     "is_global",
     "shared_lazy_native_functions",
-    "global_lexical_env",
+    "cached_iterator_next",
     "is_html_dda",
+    "may_have_indexed_properties",
     "length",
     "length_writable",
     "is_with_environment",
+    "is_prototype",
+    "reserved_class_payload_finalizer_slot",
+    "in_weak_cleanup",
     "properties",
     "property_capacity",
     "exotic",
 ]
 
-path = Path("src/engine/core/object.zig")
+path = Path("src/core/object.zig")
 try:
     lines = path.read_text().splitlines()
 except OSError as err:

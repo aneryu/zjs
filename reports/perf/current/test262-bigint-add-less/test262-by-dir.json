@@ -1,4 +1,0 @@
-[
-  { "dir": "language/expressions", "passed": 129, "failed": 2, "known_failed": 0 },
-  { "dir": "language/statements", "passed": 381, "failed": 0, "known_failed": 0 }
-]

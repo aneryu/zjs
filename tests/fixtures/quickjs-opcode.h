@@ -1,5 +1,13 @@
 /*
- * QuickJS opcode definitions
+ * QuickJS opcode definitions, adapted to the zjs opcode set.
+ *
+ * This file is the single definition source for zjs opcodes: it is
+ * parsed by tools/gen_opcodes.py to produce
+ * src/bytecode/opcodes_generated.zig. It follows upstream
+ * quickjs-opcode.h (DEF = real opcode, def = phase-1 temporary
+ * opcode, temps listed between OP_nop and the short opcodes) but
+ * carries zjs deviations: no using_* opcodes, iterator_check_object
+ * naming, and zjs-specific opcodes appended after the short section.
  *
  * Copyright (c) 2017-2018 Fabrice Bellard
  * Copyright (c) 2017-2018 Charlie Gordon
@@ -363,6 +371,13 @@ DEF(   is_undefined, 1, 1, 1, none)
 DEF(        is_null, 1, 1, 1, none)
 DEF(typeof_is_undefined, 1, 1, 1, none)
 DEF( typeof_is_function, 1, 1, 1, none)
+
+/* zjs-specific opcodes (not in upstream QuickJS) */
+DEF(get_field_data_slot, 5, 0, 0, u32)    /* reserved runtime IC slot form, never emitted */
+DEF(get_global_data_slot, 5, 0, 0, u32)   /* reserved runtime IC slot form, never emitted */
+DEF(get_global_lexical_slot, 5, 0, 0, u32) /* reserved runtime IC slot form, never emitted */
+DEF(prepare_call_prop_atom, 5, 0, 0, u32) /* rewritten from get_field2 by prepared_calls */
+DEF(  call_prepared, 3, 1, 1, npop)       /* rewritten from call_method by prepared_calls */
 
 #undef DEF
 #undef def

@@ -16,8 +16,7 @@
 - [ ] `zig build smoke --summary all`
 - [ ] `git diff --check`
 - [ ] Relevant test262 slice:
-- [ ] `zig build f10-parity --summary all` if bytecode, emitter, or opcode
-  behavior changed.
+- [ ] `zig build test262-gate --summary all` if semantic or bytecode behavior changed.
 - [ ] Perf report paths if this change affects performance:
 
 ## Rollback Notes

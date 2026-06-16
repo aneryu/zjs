@@ -27,8 +27,10 @@ zig build run-test262 --summary all
 ./zig-out/bin/run-test262 -t 8 -c test262.conf -d test262/test 0 100000
 ```
 
-As currently tracked, `reports/test262-latest/test262-buckets.json` records
-`total_failed: 0`, and `test262_errors.txt` is empty.
+As currently tracked, the gate has no unexpected failures and no checked-in
+known failures. The checked report under `reports/test262-latest/` records the
+latest local bucket, per-directory, feature-skip, and failure details;
+`test262_errors.txt` is currently empty.
 
 ## Configured Skips and Excludes
 
@@ -38,14 +40,15 @@ changed with a concrete implementation plan:
 - `test262/test/intl402/` is excluded. Intl requires data and API surface that
   are outside the current core-engine target.
 - Test262 features marked `=skip` include `Temporal`, `ShadowRealm`,
-  `decorators`, `tail-call-optimization`, `host-gc-required`, `import-defer`,
-  source-phase imports, canonical time zone data, duplicate RegExp named
-  groups, and the Intl feature groups listed in `test262.conf`.
+  `decorators`, `host-gc-required`, `import-defer`, source-phase imports,
+  canonical time zone data, and the Intl feature groups listed in
+  `test262.conf`.
 - Generated RegExp string-property and UnicodeSets cases that still exceed the
   current parity boundary are excluded individually.
 - Most `test262/test/staging/` tests are excluded by default, with selected
   locally useful staging slices re-included. Known SpiderMonkey staging
-  divergences remain explicitly excluded.
+  divergences remain explicitly excluded or tracked in `test262_errors.txt`
+  when the selected path stays useful in the gate.
 
 Do not broaden skips or excludes to manufacture a green gate. Any change to the
 compatibility boundary needs a failing scenario, QuickJS reference evidence,
@@ -72,9 +75,20 @@ management, JSON parse source context, promise combinators, Set methods,
 RegExp match indices/modifiers/escape/property escapes, and modern Array,
 String, Object, and Promise additions listed in `test262.conf`.
 
-Additional smoke fixtures in `tests/zig-smoke/manifest.txt` cover CLI behavior,
+Additional smoke fixtures in `src/tests/smoke_test.zig` cover CLI behavior,
 QuickJS parity markers, host module behavior, and targeted regressions that are
 faster to run than the full test262 gate.
+
+## Comparison With Upstream QuickJS
+
+While `zjs` targets semantic parity with QuickJS, its local validation profile
+enables and validates several features that are skipped or unsupported in
+upstream QuickJS:
+
+- **Atomics.waitAsync**: Fully supported and validated in `zjs` (including engine-deinit cleanup validation), whereas upstream QuickJS lists this as unsupported and skips it.
+- **Other Enabled Features**: Features like `await-dictionary`, `legacy-regexp`, `nonextensible-applies-to-private`, and `regexp-modifiers` are enabled and validated in `zjs` but skipped in upstream QuickJS.
+- **Import Bytes**: The local profile enables and validates binary module
+  imports (`import-bytes`) within the repository validation boundary.
 
 ## Validation Commands
 
@@ -99,12 +113,20 @@ record the QuickJS reference evidence with the owning change.
 
 ## Production v1
 
-The engine-only Production v1 target is defined in
-[docs/compatibility-v1.md](docs/compatibility-v1.md). The top-level release
-gate is:
+The engine-only Production v1 compatibility target is QuickJS parity within the
+repository validation profile. Required gates from a clean checkout:
 
 ```sh
+zig build test --summary all
+zig build test -Doptimize=ReleaseSafe --summary all
+zig build test262-gate --summary all
 zig build engine-production-gate --summary all
+git diff --check
 ```
 
-This gate is expected to pass for the active Production v1 validation profile.
+The `engine-production-gate` build step is the engine semantic and architecture
+gate and must pass before cutting a Production v1 release. Its sub-gates include
+semantic tests, smoke coverage, test262, public API snapshot validation, and
+architecture dependency checks; a failure in any sub-gate is release-blocking.
+The complete release decision also requires the other commands listed above,
+including ReleaseSafe testing and diff hygiene.

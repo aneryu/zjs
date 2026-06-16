@@ -5,3 +5,6 @@ parsers/
 .devin/
 .antigravitycli/
 quickjs/
+
+# Claude Code session worktrees and local state
+.claude/

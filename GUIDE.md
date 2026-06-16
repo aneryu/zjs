@@ -402,14 +402,12 @@ correctness first, then performance.
 
 - [ ] `zig fmt .` ran?
 - [ ] Debug tests pass?
-- [ ] ReleaseSafe tests pass?
 
 ```bash
 zig fmt .
 zig build test --summary all
-zig build test-debug --summary all
-zig build test-oom --summary all
-zig build test-oom-exhaustive --summary all
+# 阶段收口档位 / phase-close tier:
+# zig build test-oom --summary all (OOM 注入门禁：corpus×注入+恢复金丝雀 / OOM injection gate: corpus x injection + recovery canaries)
 ```
 
 ### A.11 Conclusion

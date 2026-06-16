@@ -4,30 +4,40 @@
 reference, while this repository keeps the active validation profile in the
 root `test262` checkout and fixture snapshots under `tests/fixtures/`.
 
-This is a Production v1 Candidate. It has reached production-grade maturity for its targeted validation profile and embedded runtime use cases, but it is not a general-purpose drop-in replacement for Node.js or Deno outside its specified API surface.
+This is a Production v1 Candidate. It has reached production-grade maturity for
+its targeted validation profile and Zig-native embedded runtime use cases, but
+it is not a general-purpose drop-in replacement for Node.js, Deno, or the
+QuickJS C API outside its specified API surface.
 
 ## Status
 
-The active local test262 gate is expected to pass with an empty known-error
-file:
+The active local test262 gate is expected to pass with no unexpected errors and
+no checked-in known failures. The current `test262_errors.txt` boundary is
+empty.
 
 ```sh
 zig build test262-gate --summary all
 ```
 
-The gate uses `test262.conf` and writes the latest bucket/failure
-reports under `reports/test262-latest/`. Skips and excludes in that config are
-part of the current compatibility boundary.
+The gate uses `test262.conf` and writes the latest bucket/failure reports under
+`reports/test262-latest/`. Skips and excludes in that config are part of the
+current compatibility boundary.
+
+`zig build engine-production-gate --summary all` is the engine semantic and
+architecture gate. A Production v1 release requires this gate to pass from a
+clean checkout; the full release checklist also requires ReleaseSafe testing,
+diff hygiene, and performance evidence when runtime-sensitive code changed.
 
 ## Requirements
 
 - Zig 0.16.0
 - A POSIX-like shell for helper scripts
+- Bun, only for the optional multi-case performance self-baseline workflow
 
 ## Build
 
 ```sh
-zig build qjs --summary all
+zig build zjs --summary all
 zig build run-test262 --summary all
 ```
 
@@ -38,12 +48,11 @@ Useful build steps:
 
 ```sh
 zig build test --summary all
-zig build test-fast --summary all
-zig build test-oom --summary all
-zig build test-oom-exhaustive --summary all
-zig build leak-check-engine --summary all
-zig build gc-stress --summary all
+zig build test -Doptimize=ReleaseSafe --summary all
 zig build smoke --summary all
+zig build test-oom --summary all # OOM 注入门禁（corpus×注入+恢复金丝雀），阶段收口档位执行 / OOM injection gate (corpus x injection + recovery canaries), phase-close tier
+zig build gc-stress --summary all
+zig build perf-self-check --summary all
 zig build engine-production-gate --summary all
 ```
 
@@ -60,16 +69,27 @@ zig-out/bin/zjs --perf-json path/to/file.js 2> perf.json
 
 Missing or invalid arguments print usage and exit non-zero.
 
+## Documentation
+
+Read [docs/README.md](docs/README.md) for the active documentation map.
+Completed roadmaps, snapshot ledgers, and one-off audits are intentionally not
+kept in the active tree; recover them from git history when needed.
+
+Key authorities:
+
+- [GUIDE.md](GUIDE.md): engineering rules and validation workflow.
+- [COMPATIBILITY.md](COMPATIBILITY.md): current validation boundary.
+- [LIMITATIONS.md](LIMITATIONS.md): runtime and product-scope limitations.
+- [docs/architecture.md](docs/architecture.md): current architecture snapshot.
+- [docs/public-api-contract.md](docs/public-api-contract.md): public Zig API
+  contract.
+- [docs/embedding-cookbook.md](docs/embedding-cookbook.md): Zig-native
+  embedding examples.
+
 ## Compatibility
 
 Read [COMPATIBILITY.md](COMPATIBILITY.md) for the current validation boundary
 and [LIMITATIONS.md](LIMITATIONS.md) for runtime limitations.
-
-The engine-only Production v1 roadmap and contract are tracked in
-[docs/production-grade-plan.md](docs/production-grade-plan.md),
-[docs/engine-api-v1.md](docs/engine-api-v1.md),
-[docs/compatibility-v1.md](docs/compatibility-v1.md), and
-[docs/release-checklist.md](docs/release-checklist.md).
 
 The full direct test262 invocation is:
 
@@ -86,10 +106,11 @@ zjs uses non-atomic reference counting for immediate lifetime management and a
 cycle-removal pass for `Object` and `FunctionBytecode` graphs. The runtime is
 single-threaded; JS values must not be shared across threads.
 
-Every host-owned `Value` must either remain inside an active `ValueRootFrame`
-for the duration of a call or be stored in a `PersistentValue` handle. A
-`PersistentValue` duplicates the value, registers nested symbol roots, and must
-be destroyed before `Runtime.destroy`.
+Every host-owned `JSValue` must either remain inside an active
+`JSValue.Scope` / local handle for the duration of a call, or be stored in a
+`JSValue.Persistent` handle when it crosses callbacks, ticks, or host object
+state. Persistent handles duplicate the value, register nested symbol roots,
+and must be destroyed before `JSRuntime.destroy`.
 
 GC may run only at audited safe points where VM temporaries are rooted.
 Low-level allocation marks GC as pending but does not directly collect.
@@ -100,21 +121,15 @@ pending and is retried by a later GC pass.
 
 ## Performance
 
-The checked-in performance reports under `reports/perf/` are historical
-artifacts from the previous local QuickJS comparison toolchain.
+The repeatable performance gate is a ZJS self-baseline regression check, which
+does not require a C QuickJS binary:
 
-- 72 compatible cases, 1 unsupported case, 0 skipped cases.
-- Geometric mean `zjs/qjs` ratio: `1.0158`, roughly parity with the local C
-  QuickJS baseline for this external-process benchmark.
-- 24 cases currently favor `zjs`, 41 favor C QuickJS, and 7 are near ties.
+```sh
+zig build perf-self-check --summary all
+```
 
-Wins in that report include `global_read_loop`, `regexp_test_cached`,
-`array_map_callback`, and `map_string_keys`. Slower areas in that report
-include dense array write/read, integer sums, monomorphic/prototype property
-reads, URI decoding, and some function-call loops.
-
-See [docs/perf/README.md](docs/perf/README.md) for historical performance
-context. The current repeatable diagnostic benchmark entry is:
+See [docs/perf/README.md](docs/perf/README.md) for performance workflow details.
+A smaller single-script diagnostic benchmark is also available:
 
 ```sh
 zig build perf-benchmark --summary all
@@ -122,21 +137,21 @@ zig build perf-benchmark --summary all
 
 ## Repository Layout
 
-- `src/engine/root.zig`: public engine entrypoint.
-- `src/engine/core/`: values, runtime/context, atoms, strings, objects,
+- `src/root.zig`: public engine entrypoint.
+- `src/core/`: values, runtime/context, atoms, strings, objects,
   properties, arrays, GC, and core ownership.
-- `src/engine/frontend/`: lexer, parser, source positions, and frontend
+- `src/frontend/`: lexer, parser, source positions, and frontend
   parsing.
-- `src/engine/bytecode/`: bytecode, constants, scopes, module metadata,
+- `src/bytecode/`: bytecode, constants, scopes, module metadata,
   inline-cache slots, and pipeline passes.
-- `src/engine/exec/`: bytecode execution, calls, eval, exceptions, modules,
-  promises, and job queue.
-- `src/engine/builtins/`: ECMAScript built-in objects and constructors.
-- `src/engine/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
+- `src/exec/`: bytecode execution, calls, eval, exceptions, modules,
+  promises, VM opcode shards, and job queue.
+- `src/runtime/`: host/runtime policy helpers for event loop, cleanup,
+  module file graphs, plugins, and buffer operations.
+- `src/builtins/`: ECMAScript built-in objects and constructors.
+- `src/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
 - `src/cli/`: `zjs` and test262 CLI entrypoints.
-- `src/tools/`: smoke runner, test262 runner, and shared validation tooling.
 - `src/tests/`: Zig unit and integration test entrypoints.
-- `tests/zig-smoke/`: JavaScript smoke fixtures and golden output.
 - `test262/`: local test262 checkout used by the gate.
 - `tests/fixtures/`: vendored fixture snapshots used by opcode and runner
   tests.
