@@ -321,6 +321,22 @@ test "F1.2: regex literal exposes pattern and flags" {
     try std.testing.expectEqualStrings("gi", tok.payload.regexp.flags);
 }
 
+test "F1.2: regex literal may begin with equals after slash rescan" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer("/=/g");
+    var div_assign = try lx.next();
+    defer freeAndDrain(&lx, &div_assign);
+    try std.testing.expectEqual(t.TOK_DIV_ASSIGN, div_assign.val);
+
+    var tok = try lx.rescanRegexp(lx.mark_pos);
+    defer freeAndDrain(&lx, &tok);
+    try std.testing.expectEqual(t.TOK_REGEXP, tok.val);
+    try std.testing.expectEqualStrings("=", tok.payload.regexp.pattern);
+    try std.testing.expectEqualStrings("g", tok.payload.regexp.flags);
+}
+
 // ---- F1.3 ------------------------------------------------------------
 
 test "F1.3: private name keeps the # prefix in the atom" {
@@ -4874,6 +4890,37 @@ test "module parser preserves regex literals across zod-like lookahead scans" {
     ;
 
     var parsed = try frontend.parser.parse(rt, source, .{ .mode = .module, .filename = "zod-regex-lookahead.mjs" });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+}
+
+test "parser rescans divide-assign token as regex literal beginning with equals" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const source =
+        \\function fromReturn(s) {
+        \\    return s.replace(/=/g, "");
+        \\}
+        \\function fromSwitch(s) {
+        \\    switch (s) {
+        \\        case "x":
+        \\            return s.replace(/=/g, "");
+        \\        default:
+        \\            return s;
+        \\    }
+        \\}
+        \\function fromDeclarators(s) {
+        \\    const stripEquals = /=/g;
+        \\    var oneEquals = /=/;
+        \\    return s.replace(stripEquals, "").replace(oneEquals, "");
+        \\}
+        \\globalThis.__eq_regex = [fromReturn, fromSwitch, fromDeclarators];
+    ;
+
+    var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "eq-regex-rescan.js" });
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
