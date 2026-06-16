@@ -337,6 +337,11 @@ pub const ParseState = struct {
     /// operator. Parenthesized member calls preserve references only for
     /// single expressions, not for `(0, obj.method)()`.
     last_expr_had_comma: bool = false,
+    /// Whether the last expression value can arrive through a short-circuit
+    /// or conditional merge. A trailing member load in that shape cannot be
+    /// promoted to a two-slot method reference for a following parenthesized
+    /// call because sibling predecessors still leave one stack slot.
+    last_expr_was_short_circuit_or_cond: bool = false,
     /// Prefix update parses the lvalue after consuming `++` / `--`, so
     /// the identifier parser cannot see an assignment-like lookahead.
     force_with_lvalue: bool = false,
@@ -2346,6 +2351,7 @@ pub fn parseAssignExpr2(s: *ParseState, flags: ParseFlags) Error!void {
     // std.debug.print("parseAssignExpr2: s.token.val={d} ('{c}')\n", .{ s.token.val, @as(u8, @intCast(if (s.token.val >= 0 and s.token.val <= 255) s.token.val else ' ' )) });
     s.assign_expr_depth += 1;
     const current_assign_depth = s.assign_expr_depth;
+    s.last_expr_was_short_circuit_or_cond = false;
     if (s.last_coalesce_expr_depth == current_assign_depth) {
         s.last_coalesce_expr_depth = null;
     }
@@ -3531,6 +3537,7 @@ pub fn parseCondExpr(s: *ParseState, flags: ParseFlags) Error!void {
             s.return_expr_emitted_return = true;
             s.last_anonymous_function_expr = false;
             s.last_was_direct_eval_callee = false;
+            s.last_expr_was_short_circuit_or_cond = true;
             return;
         }
         try parseAssignExprWithoutPendingFunctionName(s, then_flags);
@@ -3543,6 +3550,7 @@ pub fn parseCondExpr(s: *ParseState, flags: ParseFlags) Error!void {
         try patchForwardJump(s, end_jump_offset);
         s.last_anonymous_function_expr = false;
         s.last_was_direct_eval_callee = false;
+        s.last_expr_was_short_circuit_or_cond = true;
     }
 }
 
@@ -3573,6 +3581,7 @@ pub fn parseCoalesceExpr(s: *ParseState, flags: ParseFlags) Error!void {
         }
         s.last_anonymous_function_expr = false;
         s.last_was_direct_eval_callee = false;
+        s.last_expr_was_short_circuit_or_cond = true;
     }
 }
 
@@ -3580,7 +3589,9 @@ pub fn parseCoalesceExpr(s: *ParseState, flags: ParseFlags) Error!void {
 pub fn parseLogicalAndOr(s: *ParseState, op_kind: tok.TokenKind, flags: ParseFlags) Error!void {
     if (op_kind == tok.TOK_LOR) {
         try parseLogicalAndOr(s, tok.TOK_LAND, flags);
+        var saw_short_circuit = false;
         while (s.peekKind() == tok.TOK_LOR) {
+            saw_short_circuit = true;
             try s.advance();
             // `a || b` → `dup ; if_true L_skip ; drop ; <b> ; L_skip:`
             try s.emitOp(opcode.op.dup);
@@ -3594,9 +3605,12 @@ pub fn parseLogicalAndOr(s: *ParseState, op_kind: tok.TokenKind, flags: ParseFla
                 return Error.UnexpectedToken;
             }
         }
+        if (saw_short_circuit) s.last_expr_was_short_circuit_or_cond = true;
     } else {
         try parseExprBinary(s, 8, flags);
+        var saw_short_circuit = false;
         while (s.peekKind() == tok.TOK_LAND) {
+            saw_short_circuit = true;
             try s.advance();
             // `a && b` → `dup ; if_false L_skip ; drop ; <b> ; L_skip:`
             try s.emitOp(opcode.op.dup);
@@ -3610,6 +3624,7 @@ pub fn parseLogicalAndOr(s: *ParseState, op_kind: tok.TokenKind, flags: ParseFla
                 return Error.UnexpectedToken;
             }
         }
+        if (saw_short_circuit) s.last_expr_was_short_circuit_or_cond = true;
     }
 }
 
@@ -4252,6 +4267,10 @@ fn optionalCallFollows(s: *ParseState) bool {
         s.peekNextKind() == @as(tok.TokenKind, @intCast('('));
 }
 
+fn clearShortCircuitOrConditionalTail(s: *ParseState) void {
+    s.last_expr_was_short_circuit_or_cond = false;
+}
+
 fn rewriteTrailingMemberReferenceForCall(s: *ParseState) Error!bool {
     const should_promote_optional_exit = s.last_lhs_had_optional_chain;
     const code = s.currentCode();
@@ -4613,13 +4632,16 @@ fn parseNewCalleeMemberAccess(s: *ParseState, flags: ParseFlags) Error!void {
             defer s.function.atoms.free(retained_name);
             try s.advance();
             try s.emitOpAtom(opcode.op.get_field, retained_name);
+            clearShortCircuitOrConditionalTail(s);
         } else if (k == @as(tok.TokenKind, @intCast('['))) {
             try s.advance();
             try parseExpr(s);
             try expectPunct(s, ']');
             try s.emitOp(opcode.op.get_array_el);
+            clearShortCircuitOrConditionalTail(s);
         } else if (k == tok.TOK_TEMPLATE) {
             try parseTaggedTemplateInvocation(s);
+            clearShortCircuitOrConditionalTail(s);
         } else {
             _ = flags;
             return;
@@ -4722,6 +4744,7 @@ fn parseMemberChain(s: *ParseState, flags: ParseFlags, chain_buf: []usize, chain
                     try s.emitOpAtom(opcode.op.get_field, retained_name);
                 }
             }
+            clearShortCircuitOrConditionalTail(s);
         } else if (k == tok.TOK_QUESTION_MARK_DOT) {
             s.last_anonymous_function_expr = false;
             s.last_was_direct_eval_callee = false;
@@ -4824,6 +4847,7 @@ fn parseMemberChain(s: *ParseState, flags: ParseFlags, chain_buf: []usize, chain
             } else {
                 return Error.UnexpectedToken;
             }
+            clearShortCircuitOrConditionalTail(s);
         } else if (k == @as(tok.TokenKind, @intCast('['))) {
             s.last_anonymous_function_expr = false;
             s.last_was_direct_eval_callee = false;
@@ -4876,6 +4900,7 @@ fn parseMemberChain(s: *ParseState, flags: ParseFlags, chain_buf: []usize, chain
                     }
                 }
             }
+            clearShortCircuitOrConditionalTail(s);
         } else if (k == @as(tok.TokenKind, @intCast('('))) {
             s.last_anonymous_function_expr = false;
             const callee_line = s.last_token_line_num;
@@ -4956,9 +4981,11 @@ fn parseMemberChain(s: *ParseState, flags: ParseFlags, chain_buf: []usize, chain
                     }
                 },
             }
+            clearShortCircuitOrConditionalTail(s);
         } else if (k == tok.TOK_TEMPLATE) {
             if (chain_count.* > 0) return Error.UnexpectedToken;
             try parseTaggedTemplateInvocation(s);
+            clearShortCircuitOrConditionalTail(s);
         } else {
             break;
         }
@@ -5414,8 +5441,10 @@ fn parsePrimary(s: *ParseState, flags: ParseFlags) Error!void {
                 try s.advance();
                 try parseExpr2(s, forceResultNeeded(flags));
                 const parenthesized_had_comma = s.last_expr_had_comma;
+                const parenthesized_had_branchy_tail = s.last_expr_was_short_circuit_or_cond;
                 try expectPunct(s, ')');
                 if (!parenthesized_had_comma and
+                    !parenthesized_had_branchy_tail and
                     (s.peekKind() == @as(tok.TokenKind, @intCast('(')) or optionalCallFollows(s)))
                 {
                     if (try rewriteTrailingMemberReferenceForCall(s)) {

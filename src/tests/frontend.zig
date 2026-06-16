@@ -4323,6 +4323,44 @@ test "quick parser preserves parenthesized postfix bases" {
     try std.testing.expectEqual(@as(usize, 1), get_index_count);
 }
 
+test "quick parser keeps conditional member callee branches at one stack slot" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const source =
+        \\var o = { x: function () { return 5; }, y: function () { return 6; } };
+        \\var A = null;
+        \\var B = true;
+        \\(A ?? o.x)();
+        \\(A || o.x)();
+        \\(B && o.x)();
+        \\(B ? A : o.x)();
+        \\(A ?? o["y"])();
+        \\new (A ?? o.x)();
+        \\new (B ? A : o.x)();
+    ;
+    var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "conditional-member-callee.js" });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method));
+    try std.testing.expect(countCalls(parsed.function.code) >= 5);
+    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_constructor) >= 2);
+}
+
+test "quick parser still promotes unconditional parenthesized member calls" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "var o = { x: function () {} }; (o.x)(); ((o.x))(); ((A ?? o).x)();", .{ .mode = .script, .filename = "parenthesized-member-call.js" });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(@as(usize, 3), countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method));
+}
+
 test "quick parser lowers JSON stringify and parse to transitional JSON bytecode" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
