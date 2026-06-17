@@ -1572,6 +1572,9 @@ pub fn qjsRegExpSymbolReplaceGeneric(
             if (try replaceGlobalSimpleCaptureSequence(ctx, output, global, rx, regexp_object, string_value, replacement_string, flags_string, caller_function, caller_frame)) |fast| return fast;
         }
     }
+    if (!functional_replace and !stringValueContainsUnitByte(replacement_string, '$') and try regExpExecPropertyIsDefault(ctx, output, global, rx, caller_function, caller_frame)) {
+        return qjsRegExpSymbolReplaceLiteral(ctx, output, global, rx, string_value, replacement_string, is_global, full_unicode, caller_function, caller_frame);
+    }
 
     var matches = std.ArrayList(ReplaceMatch).empty;
     defer matches.deinit(ctx.runtime.memory.allocator);
@@ -1601,6 +1604,9 @@ pub fn qjsRegExpSymbolReplaceGeneric(
     }
     if (matches.items.len == 0) return string_value.dup();
 
+    const replacement_is_empty = !functional_replace and (try stringLengthIndex(ctx.runtime, replacement_string) == 0);
+    const replacement_is_literal = !functional_replace and !replacement_is_empty and !stringValueContainsUnitByte(replacement_string, '$');
+
     var source_units = std.ArrayList(u16).empty;
     defer source_units.deinit(ctx.runtime.memory.allocator);
     try appendStringValueUnits(ctx.runtime, &source_units, string_value);
@@ -1616,14 +1622,113 @@ pub fn qjsRegExpSymbolReplaceGeneric(
 
         const replacement = if (functional_replace)
             try callReplaceFunction(ctx, output, global, replace_value, match, string_value, caller_function, caller_frame)
+        else if (replacement_is_empty and match.groups.isUndefined())
+            core.JSValue.undefinedValue()
+        else if (replacement_is_literal and match.groups.isUndefined())
+            replacement_string.dup()
         else
             try getSubstitutionString(ctx, output, global, match, string_value, replacement_string, caller_function, caller_frame);
         defer replacement.free(ctx.runtime);
-        try appendStringValueUnits(ctx.runtime, &out, replacement);
+        if (!replacement_is_empty) try appendStringValueUnits(ctx.runtime, &out, replacement);
         next_source_position = @min(source_units.items.len, position + matched_len);
     }
     try out.appendSlice(ctx.runtime.memory.allocator, source_units.items[next_source_position..]);
     return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
+}
+
+const ReplaceLiteralMatch = struct {
+    result: core.JSValue,
+    matched: core.JSValue,
+    index: usize,
+};
+
+pub fn qjsRegExpSymbolReplaceLiteral(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    rx: core.JSValue,
+    string_value: core.JSValue,
+    replacement_string: core.JSValue,
+    is_global: bool,
+    full_unicode: bool,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    var source_units = std.ArrayList(u16).empty;
+    defer source_units.deinit(ctx.runtime.memory.allocator);
+    try appendStringValueUnits(ctx.runtime, &source_units, string_value);
+
+    var replacement_units = std.ArrayList(u16).empty;
+    defer replacement_units.deinit(ctx.runtime.memory.allocator);
+    try appendStringValueUnits(ctx.runtime, &replacement_units, replacement_string);
+
+    var out = std.ArrayList(u16).empty;
+    defer out.deinit(ctx.runtime.memory.allocator);
+    var next_source_position: usize = 0;
+    var matched_any = false;
+
+    while (true) {
+        const result = try qjsRegExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
+        if (result.isNull()) {
+            result.free(ctx.runtime);
+            break;
+        }
+        if (!result.isObject()) {
+            result.free(ctx.runtime);
+            return error.TypeError;
+        }
+
+        const match = try captureReplaceLiteralMatch(ctx, output, global, result, string_value, caller_function, caller_frame);
+        defer {
+            match.result.free(ctx.runtime);
+            match.matched.free(ctx.runtime);
+        }
+
+        matched_any = true;
+        const matched_len = try stringLengthIndex(ctx.runtime, match.matched);
+        const position = @min(match.index, source_units.items.len);
+        if (position >= next_source_position) {
+            try out.appendSlice(ctx.runtime.memory.allocator, source_units.items[next_source_position..position]);
+            try out.appendSlice(ctx.runtime.memory.allocator, replacement_units.items);
+            next_source_position = @min(source_units.items.len, position + matched_len);
+        }
+
+        if (!is_global) break;
+        if (isEmptyStringValue(ctx.runtime, match.matched)) {
+            const last_index = try getValueProperty(ctx, output, global, rx, core.atom.ids.lastIndex, caller_function, caller_frame);
+            defer last_index.free(ctx.runtime);
+            const next = try advanceStringIndexNumber(ctx, output, global, string_value, last_index, full_unicode);
+            try setValuePropertyStrict(ctx, output, global, rx, core.atom.ids.lastIndex, next, caller_function, caller_frame);
+        }
+    }
+
+    if (!matched_any) return string_value.dup();
+    try out.appendSlice(ctx.runtime.memory.allocator, source_units.items[next_source_position..]);
+    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
+}
+
+pub fn captureReplaceLiteralMatch(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    result: core.JSValue,
+    string_value: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !ReplaceLiteralMatch {
+    errdefer result.free(ctx.runtime);
+    const matched_value = try getValueProperty(ctx, output, global, result, core.atom.atomFromUInt32(0), caller_function, caller_frame);
+    errdefer matched_value.free(ctx.runtime);
+    const matched = try toStringForAnnexB(ctx, output, global, matched_value, caller_function, caller_frame);
+    matched_value.free(ctx.runtime);
+    errdefer matched.free(ctx.runtime);
+
+    const index_atom = core.atom.predefinedId("index", .string) orelse return error.TypeError;
+    const index_value = try getValueProperty(ctx, output, global, result, index_atom, caller_function, caller_frame);
+    defer index_value.free(ctx.runtime);
+    const string_len = try stringLengthIndex(ctx.runtime, string_value);
+    const index = @min(try toLengthIndex(ctx, output, global, index_value), string_len);
+    return .{ .result = result, .matched = matched, .index = index };
 }
 
 pub fn replaceSingleUnitGlobalSimpleClassEscape(
