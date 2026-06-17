@@ -40,14 +40,23 @@ const NanBox = struct {
     const float_max: u64 = 0xFFF0_0000_0000_0000;
     const canonical_nan: u64 = 0x7FF8_0000_0000_0000;
 
+    // Ordered so the reference-counted tags occupy a CONTIGUOUS dense-index
+    // range, letting `requiresRefCount`/`dup`/`free` test them with a single
+    // prefix range compare instead of a `tag_by_index` table lookup (QuickJS's
+    // `JS_VALUE_HAS_REF_COUNT` is likewise a single `tag >= FIRST` range test).
+    // Refcounted, in this order: the gc.Header (`gc.retain`) tags first
+    // (big_int, string, string_rope, module, object) then function_bytecode,
+    // with the deinit-phase skip set {module, object, function_bytecode} placed
+    // last among them so it is also a contiguous range. Non-refcounted tags
+    // follow. `tag_assertions` below pins these invariants at comptime.
     const boxed_tags = [_]i32{
         Tag.big_int,
-        Tag.symbol,
         Tag.string,
         Tag.string_rope,
         Tag.module,
-        Tag.function_bytecode,
         Tag.object,
+        Tag.function_bytecode,
+        Tag.symbol,
         Tag.int,
         Tag.boolean,
         Tag.null_value,
@@ -56,6 +65,37 @@ const NanBox = struct {
         Tag.catch_offset,
         Tag.exception,
         Tag.short_big_int,
+    };
+
+    /// Inclusive prefix range of all reference-counted tags.
+    const refcount_min: u64 = prefixOf(Tag.big_int);
+    const refcount_max: u64 = prefixOf(Tag.function_bytecode);
+    /// Lowest prefix of the deinit-phase skip set {module, object, function_bytecode}.
+    const deinit_skip_min: u64 = prefixOf(Tag.module);
+
+    inline fn prefixBits(bits: u64) u64 {
+        return bits >> payload_bits;
+    }
+
+    const tag_assertions = blk: {
+        // Refcounted tags must form the contiguous range [refcount_min, refcount_max].
+        for ([_]i32{ Tag.big_int, Tag.string, Tag.string_rope, Tag.module, Tag.object, Tag.function_bytecode }) |tag| {
+            const p = prefixOf(tag);
+            if (p < refcount_min or p > refcount_max) @compileError("refcounted tag escaped the contiguous prefix range");
+        }
+        // Non-refcounted boxed tags must sit OUTSIDE that range.
+        for ([_]i32{ Tag.symbol, Tag.int, Tag.boolean, Tag.null_value, Tag.undefined_value, Tag.uninitialized, Tag.catch_offset, Tag.exception, Tag.short_big_int }) |tag| {
+            const p = prefixOf(tag);
+            if (p >= refcount_min and p <= refcount_max) @compileError("non-refcounted tag landed inside the refcount prefix range");
+        }
+        // The deinit-skip set must be the contiguous tail [deinit_skip_min, refcount_max].
+        for ([_]i32{ Tag.module, Tag.object, Tag.function_bytecode }) |tag| {
+            const p = prefixOf(tag);
+            if (p < deinit_skip_min or p > refcount_max) @compileError("deinit-skip tag escaped its contiguous range");
+        }
+        // Float canonical range must be strictly below the boxed prefixes.
+        if (refcount_min <= (float_max >> payload_bits)) @compileError("refcount prefixes overlap the float range");
+        break :blk true;
     };
 
     /// Dense 1-based tag index; index 0 is reserved so that no boxed encoding
@@ -101,6 +141,7 @@ pub const JSValue = extern struct {
     comptime {
         std.debug.assert(@sizeOf(JSValue) == if (nan_boxing) 8 else 16);
         std.debug.assert(@alignOf(JSValue) == 8);
+        if (nan_boxing) _ = NanBox.tag_assertions;
     }
 
     /// Number of bits available for the immediate short big int payload.
@@ -289,6 +330,13 @@ pub const JSValue = extern struct {
     }
 
     pub inline fn requiresRefCount(self: JSValue) bool {
+        if (comptime nan_boxing) {
+            // Single prefix range test, no `tag_by_index` table load. Floats
+            // (prefix <= float range) and non-refcounted boxed tags (prefix >
+            // refcount_max) both fall outside [refcount_min, refcount_max].
+            const p = NanBox.prefixBits(self.repr.bits);
+            return p >= NanBox.refcount_min and p <= NanBox.refcount_max;
+        }
         switch (self.tagOf()) {
             Tag.big_int, Tag.string, Tag.string_rope, Tag.object, Tag.module, Tag.function_bytecode => return true,
             else => return false,
@@ -403,6 +451,18 @@ pub const JSValue = extern struct {
     }
 
     pub fn dup(self: JSValue) JSValue {
+        if (comptime nan_boxing) {
+            // All refcounted tags (gc.Header *and* function_bytecode) share one
+            // header type (`gc.Header == gc.GCObjectHeader`) and one retain
+            // (`gc.retain` == `BlockHeader.retain`), so a single prefix range
+            // test + one header reconstruction replaces the former
+            // requiresRefCount + refHeader + objectHeader (3 table lookups).
+            const p = NanBox.prefixBits(self.repr.bits);
+            if (p >= NanBox.refcount_min and p <= NanBox.refcount_max) {
+                gc.retain(ptrFromPayload(gc.Header, self.payloadOf()).?);
+            }
+            return self;
+        }
         if (!self.requiresRefCount()) return self;
         if (self.refHeader()) |header| gc.retain(header);
         if (self.objectHeader()) |header| header.retain();
@@ -410,6 +470,16 @@ pub const JSValue = extern struct {
     }
 
     pub fn free(self: JSValue, rt: anytype) void {
+        if (comptime nan_boxing) {
+            const p = NanBox.prefixBits(self.repr.bits);
+            if (p < NanBox.refcount_min or p > NanBox.refcount_max) return;
+            // deinit-phase skip for {module, object, function_bytecode} — the
+            // contiguous tail [deinit_skip_min, refcount_max].
+            if (rt.gc.phase == .deinit and p >= NanBox.deinit_skip_min) return;
+            if (rt.opcode_profile) |prof| prof.recordValueFree();
+            gc.release(rt, ptrFromPayload(gc.Header, self.payloadOf()).?);
+            return;
+        }
         if (!self.requiresRefCount()) return;
         if (rt.gc.phase == .deinit) {
             switch (self.tagOf()) {
