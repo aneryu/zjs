@@ -1439,7 +1439,7 @@ pub fn constructor(
     defer for (args_buf) |arg| arg.free(ctx.runtime);
     const top = try stack.pop();
     const has_explicit_new_target = stack.len() != 0;
-    const new_target = if (has_explicit_new_target) top else top.dup();
+    const new_target = top;
     const func = if (has_explicit_new_target)
         stack.pop() catch |err| {
             top.free(ctx.runtime);
@@ -1447,7 +1447,7 @@ pub fn constructor(
         }
     else
         top;
-    defer new_target.free(ctx.runtime);
+    defer if (has_explicit_new_target) new_target.free(ctx.runtime);
     defer func.free(ctx.runtime);
     const fused_typed_array_result = fusion_stats.counted(.tryFuseTypedArrayFromArrayBufferConstructorSequence, collection_vm.tryFuseTypedArrayFromArrayBufferConstructorSequence(
         ctx,

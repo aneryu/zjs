@@ -115,6 +115,93 @@ const atom_number = core.atom.predefinedId("Number", .string).?;
 const atom_print = core.atom.predefinedId("print", .string).?;
 const atom_string = core.atom.predefinedId("String", .string).?;
 
+inline fn inactiveGlobalOverlayState(
+    ctx: *const core.JSContext,
+    function: *const bytecode.Bytecode,
+    frame: *const frame_mod.Frame,
+    atom_id: core.Atom,
+    eval_local_names: []const core.Atom,
+    eval_var_ref_names: []const core.Atom,
+    eval_with_object: core.JSValue,
+) bool {
+    if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return false;
+    if (!eval_with_object.isUndefined()) return false;
+    if (ctx.lexicals) |env| {
+        if (env.shapeProps().len != 0) return false;
+    }
+    if (!frame.current_function.isUndefined()) return false;
+    if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
+    if (frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return false;
+    if (function.var_ref_names.len != 0 and frame.var_refs.len != 0 and frameHasVarRefBinding(function, frame, atom_id)) return false;
+    return true;
+}
+
+inline fn cachedGlobalDataSlotIndex(
+    function: *const bytecode.Bytecode,
+    global: *core.Object,
+    site_pc: usize,
+    atom_id: core.Atom,
+) ?usize {
+    const slot = function.icSlotForPc(site_pc) orelse return null;
+    if (slot.state == .mono) {
+        const entry = slot.entries[0];
+        if (entry.holder_shape_ref == null and
+            entry.shape_ref == global.shape_ref and
+            entry.atom_id == atom_id and
+            entry.version == global.shape_ref.version)
+        {
+            return entry.slot_index;
+        }
+        return null;
+    }
+    return switch (slot.lookupOwnDataResult(global, atom_id)) {
+        .hit => |index| index,
+        .miss, .invalidated => null,
+    };
+}
+
+inline fn cachedGlobalDataValue(
+    function: *const bytecode.Bytecode,
+    global: *core.Object,
+    site_pc: usize,
+    atom_id: core.Atom,
+) ?core.JSValue {
+    const index = cachedGlobalDataSlotIndex(function, global, site_pc, atom_id) orelse return null;
+    if (index >= global.properties.len) return null;
+    return switch (global.properties[index].slot) {
+        .data => |stored| stored,
+        .auto_init, .accessor, .deleted => null,
+    };
+}
+
+inline fn pushBorrowedFast(stack: *stack_mod.Stack, value: core.JSValue) !void {
+    if (stack.values.len < stack.capacity) {
+        stack.pushAssumeCapacity(value);
+    } else {
+        try stack.push(value);
+    }
+}
+
+inline fn setCachedGlobalWritableDataAtOwned(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    atom_id: core.Atom,
+    index: usize,
+    value: core.JSValue,
+) bool {
+    const props = global.shapeProps();
+    if (index >= props.len or !core.property.Flags.fromBits(props[index].flags).writable) return false;
+    const entry = &global.properties[index];
+    switch (entry.slot) {
+        .data => {},
+        .auto_init, .accessor, .deleted => return false,
+    }
+    const old_slot = entry.slot;
+    entry.slot = .{ .data = value };
+    core.object.destroyPropertySlot(rt, atom_id, old_slot);
+    return true;
+}
+
 fn tryFuseGlobalInductionInt32AddRange(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
@@ -232,7 +319,17 @@ pub fn getVar(
     const site_pc = frame.pc - 1;
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
-    if (ctx.runtime.opcode_profile != null) core.profile.recordGlobalLookup();
+    const opcode_profile = ctx.runtime.opcode_profile;
+    if (opcode_profile == null) {
+        if (cachedGlobalDataValue(function, global, site_pc, atom_id)) |value| {
+            if (inactiveGlobalOverlayState(ctx, function, frame, atom_id, eval_local_names, eval_var_ref_names, eval_with_object)) {
+                try pushBorrowedFast(stack, value);
+                return .done;
+            }
+        }
+    } else {
+        core.profile.recordGlobalLookup();
+    }
     if (atom_id == core.atom.ids.undefined_ and canUseFastGlobalUndefinedLookup(function, frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
         if (call_runtime.globalLexicalValue(ctx, atom_id)) |lex_value| {
             lex_value.free(ctx.runtime);
@@ -2022,8 +2119,19 @@ pub fn putVar(
 ) !Step {
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
-    if (ctx.runtime.opcode_profile != null) core.profile.recordGlobalLookup();
+    const opcode_profile = ctx.runtime.opcode_profile;
+    if (opcode_profile != null) core.profile.recordGlobalLookup();
     const value = try stack.pop();
+    if (opcode_profile == null) {
+        const site_pc = frame.pc - 5;
+        if (cachedGlobalDataSlotIndex(function, global, site_pc, atom_id)) |index| {
+            if (inactiveGlobalOverlayState(ctx, function, frame, atom_id, eval_local_names, eval_var_ref_names, eval_with_object) and
+                setCachedGlobalWritableDataAtOwned(ctx.runtime, global, atom_id, index, value))
+            {
+                return .continue_loop;
+            }
+        }
+    }
     const runtime_strict = function.flags.is_strict or function.flags.runtime_strict;
     if (canUseFastGlobalVarWrite(ctx, function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
         if (call_runtime.setGlobalLexicalValueForFastPathOwned(ctx, atom_id, value) catch |err| {
