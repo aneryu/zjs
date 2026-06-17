@@ -278,38 +278,39 @@ pub fn field(
     switch (opc) {
         op.get_field => {
             const site_pc = frame.pc - 5;
-            const obj = try stack.pop();
+            if (stack.values.len == 0) return error.StackUnderflow;
+            const top_index = stack.values.len - 1;
+            const receiver = stack.values[top_index];
+            if (dataPropertyValueForFastPath(function, site_pc, ctx.runtime, receiver, atom_id)) |value| {
+                replaceTopBorrowed(ctx.runtime, stack, top_index, receiver, value);
+                return .done;
+            }
+            if (ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, receiver, atom_id)) |value| {
+                replaceTopBorrowed(ctx.runtime, stack, top_index, receiver, value);
+                return .done;
+            }
+            if (fastRegExpPrototypeMethodValue(ctx.runtime, receiver, atom_id)) |value| {
+                replaceTopOwned(ctx.runtime, stack, top_index, receiver, value);
+                return .done;
+            }
+            if (functionOwnDataPropertyValueForFastPath(ctx.runtime, receiver, atom_id)) |value| {
+                replaceTopOwned(ctx.runtime, stack, top_index, receiver, value);
+                return .done;
+            }
+            if (fastCollectionPrototypeMethodValue(ctx.runtime, receiver, atom_id)) |value| {
+                replaceTopOwned(ctx.runtime, stack, top_index, receiver, value);
+                return .done;
+            }
+            stack.values = stack.values.ptr[0..top_index];
+            const obj = receiver;
             defer obj.free(ctx.runtime);
-            if (dataPropertyValueForFastPath(function, site_pc, ctx.runtime, obj, atom_id)) |value| {
-                try stack.push(value);
-                return .done;
-            }
-            if (ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, obj, atom_id)) |value| {
-                try stack.push(value);
-                return .done;
-            }
-            if (fastRegExpPrototypeMethodValue(ctx.runtime, obj, atom_id)) |value| {
-                errdefer value.free(ctx.runtime);
-                try stack.pushOwned(value);
-                return .done;
-            }
-            if (functionOwnDataPropertyValueForFastPath(ctx.runtime, obj, atom_id)) |value| {
-                errdefer value.free(ctx.runtime);
-                try stack.pushOwned(value);
-                return .done;
-            }
-            if (fastCollectionPrototypeMethodValue(ctx.runtime, obj, atom_id)) |value| {
-                errdefer value.free(ctx.runtime);
-                try stack.pushOwned(value);
-                return .done;
-            }
             const value = object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame) catch |err| {
                 try forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(ctx, output, global, stack, frame);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             errdefer value.free(ctx.runtime);
-            try stack.pushOwned(value);
+            stack.pushOwnedAssumeCapacity(value);
         },
         op.get_field2 => {
             const site_pc = frame.pc - 5;
@@ -370,6 +371,28 @@ pub fn field(
         else => unreachable,
     }
     return .done;
+}
+
+inline fn replaceTopBorrowed(
+    rt: *core.JSRuntime,
+    stack: *stack_mod.Stack,
+    index: usize,
+    old_value: core.JSValue,
+    new_value: core.JSValue,
+) void {
+    stack.values[index] = if (new_value.requiresRefCount()) new_value.dup() else new_value;
+    old_value.free(rt);
+}
+
+inline fn replaceTopOwned(
+    rt: *core.JSRuntime,
+    stack: *stack_mod.Stack,
+    index: usize,
+    old_value: core.JSValue,
+    new_value: core.JSValue,
+) void {
+    stack.values[index] = new_value;
+    old_value.free(rt);
 }
 
 fn setArrayLengthForPutFieldFastPath(

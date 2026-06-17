@@ -26,7 +26,6 @@ const stack_mod = @import("stack.zig");
 const vm_call = @import("vm_call.zig");
 
 const HostError = @import("exceptions.zig").HostError;
-const popCallFuncFromStack = call_runtime.popCallFuncFromStack;
 
 /// An eligible bytecode-to-bytecode call target resolved from a callable
 /// value on the operand stack. All values are borrowed from the caller's
@@ -119,6 +118,7 @@ pub const Entry = struct {
     catch_target: ?usize,
     arena_mark: core.VmStackArena.Mark,
     profile_guard: vm_call.CallProfileGuard,
+    backtrace_mode: BacktraceMode,
     /// Owned merged slices backing `view.var_ref_names` / the frame's
     /// var-ref initialization when the callee carries direct-eval bindings
     /// (mirrors `callFunctionBytecodeModeState`'s combined slices). The
@@ -128,6 +128,8 @@ pub const Entry = struct {
     merged_var_ref_names: []core.Atom,
     merged_var_refs: []core.JSValue,
 };
+
+const BacktraceMode = enum { owned, borrowed_atoms };
 
 const entries_per_chunk: usize = 16;
 const max_chunks: usize = 512;
@@ -252,10 +254,8 @@ pub const Machine = struct {
         entry.profile_guard = vm_call.enterCallProfile(rt);
         errdefer entry.profile_guard.deinit();
 
-        const callable = switch (source) {
-            .stack_region, .prepared => target.callable,
-            .moved => |moved| moved.values[if (moved.has_receiver) 1 else 0],
-        };
+        const callable_slot = sourceCallableSlot(source);
+        const callable = callable_slot.*;
 
         // Direct-eval bindings extend the callee's var-ref view, mirroring
         // the combined slices `callFunctionBytecodeModeState` builds on the
@@ -269,7 +269,8 @@ pub const Machine = struct {
         }
         errdefer freeMergedSlices(rt, entry);
 
-        try ctx.pushBacktraceFrameLazyName(
+        entry.backtrace_mode = try pushInlineBacktraceFrame(
+            ctx,
             entry.view.name,
             entry.view.filename,
             entry.view.line_num,
@@ -278,7 +279,7 @@ pub const Machine = struct {
             exception_ops.resolveBacktraceLocation,
             callable,
         );
-        errdefer ctx.popBacktraceFrame();
+        errdefer popInlineBacktraceFrame(ctx, entry.backtrace_mode);
 
         entry.arena_mark = rt.vm_stack.mark();
         errdefer rt.vm_stack.restore(entry.arena_mark);
@@ -305,7 +306,8 @@ pub const Machine = struct {
         defer if (boxed_this) |value| value.free(rt);
         const fb_strict = target.fb.is_strict_mode or target.fb.runtime_strict_mode;
         const effective_this = try call_runtime.coerceCallThis(ctx, global, fb_strict, target.this_value, &boxed_this);
-        entry.eval_snapshot = try entry.frame.initCallBindings(rt, .{
+
+        var binding_inputs = frame_mod.CallBindingInputs{
             .initial_this_value = effective_this,
             .current_function_value = callable,
             .new_target_value = target.new_target,
@@ -318,26 +320,55 @@ pub const Machine = struct {
             .inherited_eval_local_slots = &.{},
             .inherited_eval_var_ref_names = &.{},
             .inherited_eval_var_refs = &.{},
-        });
-        errdefer entry.eval_snapshot.deinit(rt);
+        };
+        var binding_modes = frame_mod.CallBindingModes{
+            .this_value = .borrow,
+            .constructor_this_value = .borrow,
+            .current_function = .take,
+            .new_target = .borrow,
+        };
+
+        const receiver_slot = sourceReceiverSlot(source);
+        var take_receiver_as_this = false;
+        if (boxed_this) |boxed| {
+            binding_inputs.initial_this_value = boxed;
+            binding_modes.this_value = .take;
+            boxed_this = null;
+        } else if (!target.fb.is_arrow_function) {
+            if (receiver_slot) |slot| {
+                if (effective_this.same(slot.*)) {
+                    take_receiver_as_this = true;
+                }
+            }
+        }
+
+        var cleanup_stack_source = false;
+        errdefer if (cleanup_stack_source) cleanupStackSource(rt, source);
+
+        binding_inputs.current_function_value = takeSourceSlot(callable_slot);
+        if (sourceHasStackRegion(source)) cleanup_stack_source = true;
+        if (take_receiver_as_this) {
+            binding_inputs.initial_this_value = takeSourceSlot(receiver_slot.?);
+        }
+
+        entry.eval_snapshot = .{};
+        entry.frame.initCallBindingValues(binding_inputs, binding_modes);
 
         entry.frame_roots = .{};
         entry.frame_roots.init(rt, &entry.stack, &entry.frame, &entry.eval_snapshot);
         errdefer entry.frame_roots.deinit();
 
+        entry.eval_snapshot = try entry.frame.initCallEvalBindings(rt, binding_inputs);
+        errdefer entry.eval_snapshot.deinit(rt);
+
         try vm_call.initFrameLocals(ctx, &entry.view, &entry.frame, &.{}, &.{}, true);
         switch (source) {
             .stack_region => |region| {
-                // Drop the receiver slot (method calls) then the callable slot
-                // — both already duplicated into the frame's bindings — leaving
-                // `[args...]` at region_base for initArgumentsFromStack to move.
-                if (region.has_receiver) popCallFuncFromStack(rt, region.stack, region.region_base);
-                popCallFuncFromStack(rt, region.stack, region.region_base);
-                try entry.frame.initArgumentsFromStack(
+                const args_start = region.region_base + 1 + @as(usize, @intFromBool(region.has_receiver));
+                try entry.frame.initArgumentsMoved(
                     &rt.memory,
                     &rt.vm_stack,
-                    region.stack,
-                    region.argc,
+                    region.stack.values[args_start..][0..region.argc],
                     true,
                     frame_mod.argumentsNeedsOriginalSnapshot(&entry.view),
                 );
@@ -345,32 +376,66 @@ pub const Machine = struct {
             .moved => |moved| try entry.frame.initArgumentsMoved(
                 &rt.memory,
                 &rt.vm_stack,
-                moved.values[if (moved.has_receiver) 2 else 1 ..],
+                moved.values[if (moved.has_receiver) 2 else 1..],
                 true,
                 frame_mod.argumentsNeedsOriginalSnapshot(&entry.view),
             ),
             .prepared => |region| {
-                // [receiver, args..., callable]: pop+free the callable on top
-                // (already duplicated into the frame's bindings), then drop the
-                // receiver slot (captured as `this`), leaving [args...] for
-                // initArgumentsFromStack to move.
-                const callable_owned = try region.stack.pop();
-                callable_owned.free(rt);
-                popCallFuncFromStack(rt, region.stack, region.region_base);
-                try entry.frame.initArgumentsFromStack(
+                try entry.frame.initArgumentsMoved(
                     &rt.memory,
                     &rt.vm_stack,
-                    region.stack,
-                    region.argc,
+                    region.stack.values[region.region_base + 1 ..][0..region.argc],
                     true,
                     frame_mod.argumentsNeedsOriginalSnapshot(&entry.view),
                 );
             },
         }
-        try vm_call.initFrameVarRefs(ctx, global, &entry.view, &entry.frame, frame_var_refs, true);
+        cleanupStackSource(rt, source);
+        cleanup_stack_source = false;
+
+        if (frame_var_refs.len != 0 or entry.view.var_ref_names.len != 0) {
+            try vm_call.initFrameVarRefs(ctx, global, &entry.view, &entry.frame, frame_var_refs, true);
+        }
 
         self.depth += 1;
         self.switched = true;
+    }
+
+    fn sourceCallableSlot(source: ArgsSource) *core.JSValue {
+        return switch (source) {
+            .stack_region => |region| &region.stack.values[region.region_base + @as(usize, @intFromBool(region.has_receiver))],
+            .moved => |moved| &moved.values[if (moved.has_receiver) 1 else 0],
+            .prepared => |region| &region.stack.values[region.region_base + 1 + @as(usize, region.argc)],
+        };
+    }
+
+    fn sourceReceiverSlot(source: ArgsSource) ?*core.JSValue {
+        return switch (source) {
+            .stack_region => |region| if (region.has_receiver) &region.stack.values[region.region_base] else null,
+            .moved => |moved| if (moved.has_receiver) &moved.values[0] else null,
+            .prepared => |region| &region.stack.values[region.region_base],
+        };
+    }
+
+    fn takeSourceSlot(slot: *core.JSValue) core.JSValue {
+        const value = slot.*;
+        slot.* = core.JSValue.undefinedValue();
+        return value;
+    }
+
+    fn sourceHasStackRegion(source: ArgsSource) bool {
+        return switch (source) {
+            .stack_region, .prepared => true,
+            .moved => false,
+        };
+    }
+
+    fn cleanupStackSource(rt: *core.JSRuntime, source: ArgsSource) void {
+        switch (source) {
+            .stack_region => |region| call_runtime.popOwnedStackRegion(rt, region.stack, region.region_base),
+            .prepared => |region| call_runtime.popOwnedStackRegion(rt, region.stack, region.region_base),
+            .moved => {},
+        }
     }
 
     /// Build the entry-owned merged `var_ref_names` / var_refs slices for a
@@ -490,7 +555,7 @@ pub const Machine = struct {
         entry.stack.deinit(rt);
         freeMergedSlices(rt, entry);
         rt.vm_stack.restore(entry.arena_mark);
-        ctx.popBacktraceFrame();
+        popInlineBacktraceFrame(ctx, entry.backtrace_mode);
         entry.profile_guard.deinit();
         ctx.call_depth -= 1;
         self.depth -= 1;
@@ -533,3 +598,54 @@ pub const Machine = struct {
         return false;
     }
 };
+
+fn pushInlineBacktraceFrame(
+    ctx: *core.JSContext,
+    function_name: core.Atom,
+    filename: core.Atom,
+    line_num: i32,
+    col_num: i32,
+    location_data: ?*const anyopaque,
+    location_resolver: core.context.BacktraceLocationResolver,
+    function_value: core.JSValue,
+) !BacktraceMode {
+    const name = ctx.runtime.atoms.name(function_name) orelse "";
+    const file = ctx.runtime.atoms.name(filename) orelse "";
+    if (name.len == 0 or std.mem.eql(u8, name, file)) {
+        try ctx.pushBacktraceFrameLazyName(function_name, filename, line_num, col_num, location_data, location_resolver, function_value);
+        return .owned;
+    }
+
+    if (ctx.backtrace_frames.len == ctx.backtrace_capacity) {
+        var next_capacity: usize = if (ctx.backtrace_capacity == 0) 16 else ctx.backtrace_capacity * 2;
+        if (next_capacity < ctx.backtrace_frames.len + 1) next_capacity = ctx.backtrace_frames.len + 1;
+        const next = try ctx.runtime.memory.alloc(core.BacktraceFrame, next_capacity);
+        const old_frames = ctx.backtrace_frames;
+        const old_capacity = ctx.backtrace_capacity;
+        @memcpy(next[0..old_frames.len], old_frames);
+        ctx.backtrace_frames = next[0..old_frames.len];
+        ctx.backtrace_capacity = next_capacity;
+        if (old_capacity != 0) ctx.runtime.memory.free(core.BacktraceFrame, old_frames.ptr[0..old_capacity]);
+    }
+    ctx.backtrace_frames.ptr[ctx.backtrace_frames.len] = .{
+        .function_name = function_name,
+        .filename = filename,
+        .line_num = line_num,
+        .col_num = col_num,
+        .location_data = location_data,
+        .location_resolver = location_resolver,
+        .function_value = core.JSValue.undefinedValue(),
+    };
+    ctx.backtrace_frames = ctx.backtrace_frames.ptr[0 .. ctx.backtrace_frames.len + 1];
+    return .borrowed_atoms;
+}
+
+fn popInlineBacktraceFrame(ctx: *core.JSContext, mode: BacktraceMode) void {
+    switch (mode) {
+        .owned => ctx.popBacktraceFrame(),
+        .borrowed_atoms => {
+            if (ctx.backtrace_frames.len == 0) return;
+            ctx.backtrace_frames = ctx.backtrace_frames.ptr[0 .. ctx.backtrace_frames.len - 1];
+        },
+    }
+}

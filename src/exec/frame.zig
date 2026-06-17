@@ -118,6 +118,22 @@ pub const CallBindingInputs = struct {
     inherited_eval_var_refs: []const JSValue,
 };
 
+pub const CallBindingValueMode = enum {
+    /// Retain a new frame-owned reference to the value.
+    dup,
+    /// Transfer an already-owned value into the frame.
+    take,
+    /// Keep a borrowed value rooted by the frame but do not release it.
+    borrow,
+};
+
+pub const CallBindingModes = struct {
+    this_value: CallBindingValueMode = .dup,
+    constructor_this_value: CallBindingValueMode = .dup,
+    current_function: CallBindingValueMode = .dup,
+    new_target: CallBindingValueMode = .dup,
+};
+
 /// `original_args` (a pre-mutation snapshot of the call arguments) is only
 /// observable through the unmapped arguments object and implicit derived
 /// constructor calls. Sloppy simple-parameter functions always use the
@@ -178,18 +194,34 @@ pub const Frame = struct {
     global_lexical_sync_slots: []bool = &.{},
     global_lexical_sync_indices: []usize = &.{},
     global_lexical_sync_checked: bool = false,
+    this_value_owned: bool = true,
+    constructor_this_value_owned: bool = true,
+    current_function_owned: bool = true,
+    new_target_owned: bool = true,
 
     pub fn init(function: *const bytecode.Bytecode) Frame {
         return .{ .function = function };
     }
 
     pub fn initCallBindings(self: *Frame, rt: *JSRuntime, inputs: CallBindingInputs) !EvalVarRefSnapshot {
-        self.this_value = inputs.initial_this_value.dup();
-        self.constructor_this_value = inputs.constructor_this_value.dup();
-        self.current_function = inputs.current_function_value.dup();
-        self.new_target = inputs.new_target_value.dup();
+        self.initCallBindingValues(inputs, .{});
         errdefer self.releaseCallBindings(rt);
 
+        return try self.initCallEvalBindings(rt, inputs);
+    }
+
+    pub fn initCallBindingValues(self: *Frame, inputs: CallBindingInputs, modes: CallBindingModes) void {
+        self.this_value = bindCallValue(inputs.initial_this_value, modes.this_value);
+        self.constructor_this_value = bindCallValue(inputs.constructor_this_value, modes.constructor_this_value);
+        self.current_function = bindCallValue(inputs.current_function_value, modes.current_function);
+        self.new_target = bindCallValue(inputs.new_target_value, modes.new_target);
+        self.this_value_owned = modeOwnsValue(modes.this_value);
+        self.constructor_this_value_owned = modeOwnsValue(modes.constructor_this_value);
+        self.current_function_owned = modeOwnsValue(modes.current_function);
+        self.new_target_owned = modeOwnsValue(modes.new_target);
+    }
+
+    pub fn initCallEvalBindings(self: *Frame, rt: *JSRuntime, inputs: CallBindingInputs) !EvalVarRefSnapshot {
         self.eval_local_names = if (inputs.inherited_eval_local_names.len != 0) inputs.inherited_eval_local_names else inputs.eval_local_names;
         self.eval_local_slots = if (inputs.inherited_eval_local_names.len != 0) inputs.inherited_eval_local_slots else inputs.eval_local_slots;
         const frame_eval_var_ref_names = if (inputs.inherited_eval_var_ref_names.len != 0) inputs.inherited_eval_var_ref_names else inputs.input_eval_var_ref_names;
@@ -213,7 +245,7 @@ pub const Frame = struct {
         const frame_arg_count = @max(args.len, @as(usize, @intCast(self.function.arg_count)));
         if (frame_arg_count > 0) {
             const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, use_inline_storage);
-            @memset(owned_args, JSValue.undefinedValue());
+            if (frame_arg_count > args.len) @memset(owned_args[args.len..], JSValue.undefinedValue());
             for (args, 0..) |arg, idx| owned_args[idx] = arg.dup();
             self.args = owned_args;
         }
@@ -238,7 +270,7 @@ pub const Frame = struct {
         if (frame_arg_count > 0) {
             if (stack.values.len < argc) return error.StackUnderflow;
             const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, use_inline_storage);
-            @memset(owned_args, JSValue.undefinedValue());
+            if (frame_arg_count > argc) @memset(owned_args[argc..], JSValue.undefinedValue());
             var remaining = argc;
             while (remaining > 0) {
                 remaining -= 1;
@@ -318,16 +350,24 @@ pub const Frame = struct {
         const constructor_this_value = self.constructor_this_value;
         const current_function = self.current_function;
         const new_target = self.new_target;
+        const this_value_owned = self.this_value_owned;
+        const constructor_this_value_owned = self.constructor_this_value_owned;
+        const current_function_owned = self.current_function_owned;
+        const new_target_owned = self.new_target_owned;
         self.this_value = JSValue.undefinedValue();
         self.constructor_this_value = JSValue.undefinedValue();
         self.current_function = JSValue.undefinedValue();
         self.new_target = JSValue.undefinedValue();
+        self.this_value_owned = true;
+        self.constructor_this_value_owned = true;
+        self.current_function_owned = true;
+        self.new_target_owned = true;
         self.eval_local_names = &.{};
         self.eval_local_slots = &.{};
-        this_value.free(rt);
-        constructor_this_value.free(rt);
-        current_function.free(rt);
-        new_target.free(rt);
+        if (this_value_owned) this_value.free(rt);
+        if (constructor_this_value_owned) constructor_this_value.free(rt);
+        if (current_function_owned) current_function.free(rt);
+        if (new_target_owned) new_target.free(rt);
     }
 
     pub fn deinit(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
@@ -336,16 +376,24 @@ pub const Frame = struct {
         const current_function = self.current_function;
         const new_target = self.new_target;
         const arguments_object = self.arguments_object;
+        const this_value_owned = self.this_value_owned;
+        const constructor_this_value_owned = self.constructor_this_value_owned;
+        const current_function_owned = self.current_function_owned;
+        const new_target_owned = self.new_target_owned;
         self.this_value = JSValue.undefinedValue();
         self.constructor_this_value = JSValue.undefinedValue();
         self.current_function = JSValue.undefinedValue();
         self.new_target = JSValue.undefinedValue();
         self.arguments_object = null;
+        self.this_value_owned = true;
+        self.constructor_this_value_owned = true;
+        self.current_function_owned = true;
+        self.new_target_owned = true;
 
-        this_value.free(rt);
-        constructor_this_value.free(rt);
-        current_function.free(rt);
-        new_target.free(rt);
+        if (this_value_owned) this_value.free(rt);
+        if (constructor_this_value_owned) constructor_this_value.free(rt);
+        if (current_function_owned) current_function.free(rt);
+        if (new_target_owned) new_target.free(rt);
         if (arguments_object) |value| value.free(rt);
         self.clearPreparedCallTargets(rt);
 
@@ -610,6 +658,17 @@ pub const Frame = struct {
         }
     }
 };
+
+fn bindCallValue(value: JSValue, mode: CallBindingValueMode) JSValue {
+    return switch (mode) {
+        .dup => value.dup(),
+        .take, .borrow => value,
+    };
+}
+
+fn modeOwnsValue(mode: CallBindingValueMode) bool {
+    return mode != .borrow;
+}
 
 fn dupAtomSlice(rt: *JSRuntime, atoms: []const Atom) ![]Atom {
     if (atoms.len == 0) return &.{};
