@@ -1018,22 +1018,21 @@ pub const JSRuntime = struct {
     }
 
     pub fn registerBorrowedReferenceHolder(self: *JSRuntime, object: *Object) !void {
-        for (self.borrowed_reference_holders) |holder| {
-            if (holder == object) return;
-        }
+        if (object.flags.is_borrowed_reference_holder) return;
         try appendRuntimeObject(&self.memory, &self.borrowed_reference_holders, &self.borrowed_reference_holders_capacity, object);
+        object.flags.is_borrowed_reference_holder = true;
     }
 
     pub fn borrowedReferenceHolderRegistered(self: *const JSRuntime, object: *Object) bool {
-        for (self.borrowed_reference_holders) |holder| {
-            if (holder == object) return true;
-        }
-        return false;
+        _ = self;
+        return object.flags.is_borrowed_reference_holder;
     }
 
     pub fn unregisterBorrowedReferenceHolder(self: *JSRuntime, object: *Object) void {
+        if (!object.flags.is_borrowed_reference_holder) return;
         if (self.borrowed_reference_holders.len != 0 and self.borrowed_reference_holders[self.borrowed_reference_holders.len - 1] == object) {
             self.borrowed_reference_holders = self.borrowed_reference_holders[0 .. self.borrowed_reference_holders.len - 1];
+            object.flags.is_borrowed_reference_holder = false;
             return;
         }
         var found: ?usize = null;
@@ -1048,6 +1047,7 @@ pub const JSRuntime = struct {
             std.mem.copyForwards(*Object, self.borrowed_reference_holders[index .. self.borrowed_reference_holders.len - 1], self.borrowed_reference_holders[index + 1 ..]);
         }
         self.borrowed_reference_holders = self.borrowed_reference_holders[0 .. self.borrowed_reference_holders.len - 1];
+        object.flags.is_borrowed_reference_holder = false;
     }
 
     pub fn registerRootProvider(self: *JSRuntime, provider: RootProvider) !void {
