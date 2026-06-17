@@ -255,7 +255,7 @@ pub fn getVar(
             try stack.pushOwned(lex_value);
             return .done;
         }
-        if (fusion_stats.counted(.tryFuseHostOutputAutoInitAtomCall1, try tryFuseHostOutputAutoInitAtomCall1(ctx, output, global, stack, function, frame, atom_id, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
+        if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputAutoInitAtomCall1, try tryFuseHostOutputAutoInitAtomCall1(ctx, output, global, stack, function, frame, atom_id, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
         if (globalDataPropertyValueForFastPath(ctx.runtime, global, function, site_pc, atom_id)) |value| {
             return try useFastGlobalDataValue(ctx, output, stack, function, global, frame, catch_target, site_pc, atom_id, value, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object);
         }
@@ -409,19 +409,19 @@ fn tryFuseHostOutputCall1(
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
 ) !bool {
-    if (fusion_stats.counted(.tryFuseHostOutputAtomLiteralCall1, try tryFuseHostOutputAtomLiteralCall1(ctx, output, stack, function, frame))) return true;
-    if (fusion_stats.counted(.tryFuseHostOutputStringNumberConstCall1, try tryFuseHostOutputStringNumberConstCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
-    if (fusion_stats.counted(.tryFuseHostOutputStringLocalNumberCall1, try tryFuseHostOutputStringLocalNumberCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
-    if (fusion_stats.counted(.tryFuseHostOutputNumberStaticLiteralCall1, try tryFuseHostOutputNumberStaticLiteralCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
-    if (fusion_stats.counted(.tryFuseHostOutputLocalInt32AddCall1, try tryFuseHostOutputLocalInt32AddCall1(ctx, output, stack, function, frame))) return true;
-    if (fusion_stats.counted(.tryFuseHostOutputLocalSimpleNumericCall0Call1, try tryFuseHostOutputLocalSimpleNumericCall0Call1(ctx, output, stack, function, frame))) return true;
-    if (fusion_stats.counted(.tryFuseHostOutputLocalCall1, try tryFuseHostOutputLocalCall1(ctx, output, stack, function, frame))) return true;
-    if (fusion_stats.counted(.tryFuseHostOutputTypeofLocalCall1, try tryFuseHostOutputTypeofLocalCall1(ctx, output, stack, function, frame))) return true;
-    if (fusion_stats.counted(.tryFuseHostOutputLocalFieldStrictEqUndefinedCall1, try tryFuseHostOutputLocalFieldStrictEqUndefinedCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
-    if (fusion_stats.counted(.tryFuseHostOutputLocalImmediateCompareCall1, try tryFuseHostOutputLocalImmediateCompareCall1(ctx, output, stack, function, frame))) return true;
-    if (fusion_stats.counted(.tryFuseHostOutputLocalLengthCall1, try tryFuseHostOutputLocalLengthCall1(ctx, output, stack, function, frame))) return true;
-    if (fusion_stats.counted(.tryFuseHostOutputLocalFieldCall1, try tryFuseHostOutputLocalFieldCall1(ctx, output, stack, function, frame))) return true;
-    if (fusion_stats.counted(.tryFuseHostOutputLocalDenseElementCall1, try tryFuseHostOutputLocalDenseElementCall1(ctx, output, stack, function, frame))) return true;
+    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputAtomLiteralCall1, try tryFuseHostOutputAtomLiteralCall1(ctx, output, stack, function, frame))) return true;
+    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputStringNumberConstCall1, try tryFuseHostOutputStringNumberConstCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
+    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputStringLocalNumberCall1, try tryFuseHostOutputStringLocalNumberCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
+    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputNumberStaticLiteralCall1, try tryFuseHostOutputNumberStaticLiteralCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
+    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputLocalInt32AddCall1, try tryFuseHostOutputLocalInt32AddCall1(ctx, output, stack, function, frame))) return true;
+    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputLocalSimpleNumericCall0Call1, try tryFuseHostOutputLocalSimpleNumericCall0Call1(ctx, output, stack, function, frame))) return true;
+    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputLocalCall1, try tryFuseHostOutputLocalCall1(ctx, output, stack, function, frame))) return true;
+    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputTypeofLocalCall1, try tryFuseHostOutputTypeofLocalCall1(ctx, output, stack, function, frame))) return true;
+    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputLocalFieldStrictEqUndefinedCall1, try tryFuseHostOutputLocalFieldStrictEqUndefinedCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
+    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputLocalImmediateCompareCall1, try tryFuseHostOutputLocalImmediateCompareCall1(ctx, output, stack, function, frame))) return true;
+    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputLocalLengthCall1, try tryFuseHostOutputLocalLengthCall1(ctx, output, stack, function, frame))) return true;
+    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputLocalFieldCall1, try tryFuseHostOutputLocalFieldCall1(ctx, output, stack, function, frame))) return true;
+    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputLocalDenseElementCall1, try tryFuseHostOutputLocalDenseElementCall1(ctx, output, stack, function, frame))) return true;
     return false;
 }
 
@@ -826,11 +826,11 @@ fn useFastGlobalDataValue(
         fusion_stats.counted(.tryFuseHostOutputCall1, try tryFuseHostOutputCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
     if (atom_id == atom_date and fusion_stats.counted(.tryFuseGlobalDateNowCall, try tryFuseGlobalDateNowCall(ctx, stack, function, frame, value))) return .done;
     if (atom_id == atom_string and fusion_stats.counted(.tryFuseGlobalStringCall1NumberConst, try tryFuseGlobalStringCall1NumberConst(ctx.runtime, stack, function, frame, value))) return .done;
-    if (fusion_stats.counted(.tryFuseGlobalInductionInt32AddRange, try tryFuseGlobalInductionInt32AddRange(ctx, function, global, frame, atom_id, value, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
+    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseGlobalInductionInt32AddRange, try tryFuseGlobalInductionInt32AddRange(ctx, function, global, frame, atom_id, value, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
     const value_int = value.asInt32();
     if (value_int != null) {
-        if (fusion_stats.counted(.tryFuseGlobalDataInt32CompareFalseBranch, tryFuseGlobalDataInt32CompareFalseBranch(function, frame, value))) return .done;
-        if (fusion_stats.counted(.tryFuseGlobalDataInt32ImmediateBinary, try tryFuseGlobalDataInt32ImmediateBinary(ctx, global, stack, function, frame, atom_id, value, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
+        if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseGlobalDataInt32CompareFalseBranch, tryFuseGlobalDataInt32CompareFalseBranch(function, frame, value))) return .done;
+        if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseGlobalDataInt32ImmediateBinary, try tryFuseGlobalDataInt32ImmediateBinary(ctx, global, stack, function, frame, atom_id, value, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
     }
     if (value_int != null or value.asShortBigInt() != null) {
         if (nextOpIsPostUpdate(function, frame) and
@@ -1376,7 +1376,7 @@ fn tryFuseFollowingSameGlobalDataInt32ImmediateBinaryStore(
     if (!consumed) return false;
 
     frame.pc = pc;
-    if (fusion_stats.counted(.tryFuseGlobalDataValueStore, tryFuseGlobalDataValueStore(ctx, global, function, frame, core.JSValue.int32(current), eval_local_names, eval_var_ref_names, eval_with_object)) != null) return true;
+    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseGlobalDataValueStore, tryFuseGlobalDataValueStore(ctx, global, function, frame, core.JSValue.int32(current), eval_local_names, eval_var_ref_names, eval_with_object)) != null) return true;
     frame.pc = start_pc;
     return false;
 }
@@ -1423,7 +1423,7 @@ fn pushImmediateBinaryResultMaybeFuseStackBinaryOrGlobalStore(
                     const lhs_owned = try stack.pop();
                     defer lhs_owned.free(ctx.runtime);
                     frame.pc += 1;
-                    if (fusion_stats.counted(.tryFuseGlobalDataValueStore, tryFuseGlobalDataValueStore(ctx, global, function, frame, result, eval_local_names, eval_var_ref_names, eval_with_object)) != null) {
+                    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseGlobalDataValueStore, tryFuseGlobalDataValueStore(ctx, global, function, frame, result, eval_local_names, eval_var_ref_names, eval_with_object)) != null) {
                         return;
                     }
                     try stack.pushOwned(result);
@@ -1720,7 +1720,7 @@ fn tryFuseGlobalStringPercentHexAddStore(
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
 ) !?Step {
-    if (fusion_stats.counted(.tryFuseGlobalUriFourByteDecodeCountRange, try tryFuseGlobalUriFourByteDecodeCountRange(ctx, function, global, frame, lhs, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
+    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseGlobalUriFourByteDecodeCountRange, try tryFuseGlobalUriFourByteDecodeCountRange(ctx, function, global, frame, lhs, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
 
     const callee_get = decodeVarRefGet(function.code, frame.pc) orelse return null;
     const callee = varRefReadableBorrowed(frame, callee_get.idx) orelse return null;

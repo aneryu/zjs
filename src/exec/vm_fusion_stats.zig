@@ -14,6 +14,11 @@ const build_options = @import("build_options");
 
 pub const enabled = build_options.zjs_enable_opcode_profile;
 
+/// Master comptime gate for the hand-written runtime `tryFuse*` fast paths.
+/// When false, the hot-opcode dispatch skips the speculative pattern matchers
+/// entirely so non-matching real code pays no per-execution fusion tax.
+pub const fusions_enabled = build_options.zjs_enable_fusions;
+
 /// One tag per hand-written multi-instruction fusion entry point.
 pub const Fusion = enum(u16) {
     tryFuseArrayLengthLessThanFalseBranch,
