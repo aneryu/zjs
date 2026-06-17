@@ -2490,13 +2490,44 @@ fn isControlKeyword(txt: []const u8) bool {
         textEql(txt, "switch") or textEql(txt, "with") or textEql(txt, "catch");
 }
 
+fn isVariableDeclarationKeyword(txt: []const u8) bool {
+    return textEql(txt, "let") or textEql(txt, "const") or textEql(txt, "var");
+}
+
 fn isVariableDeclarationType(src: []const u8, tokens: []const TSToken, colon_idx: usize) bool {
     var stmt_start: usize = 0;
+    var paren: usize = 0;
+    var bracket: usize = 0;
+    var brace: usize = 0;
     var i = colon_idx;
     while (i > 0) {
         i -= 1;
         const txt = tokens[i].text(src);
-        if (textEql(txt, ";") or textEql(txt, "{") or textEql(txt, "}")) {
+        if (textEql(txt, ")")) {
+            paren += 1;
+        } else if (textEql(txt, "]")) {
+            bracket += 1;
+        } else if (textEql(txt, "}")) {
+            brace += 1;
+        } else if (textEql(txt, "(")) {
+            if (paren == 0) {
+                stmt_start = i + 1;
+                break;
+            }
+            paren -= 1;
+        } else if (textEql(txt, "[")) {
+            if (bracket == 0) {
+                stmt_start = i + 1;
+                break;
+            }
+            bracket -= 1;
+        } else if (textEql(txt, "{")) {
+            if (brace == 0) {
+                stmt_start = i + 1;
+                break;
+            }
+            brace -= 1;
+        } else if (paren == 0 and bracket == 0 and brace == 0 and textEql(txt, ";")) {
             stmt_start = i + 1;
             break;
         }
@@ -2504,21 +2535,54 @@ fn isVariableDeclarationType(src: []const u8, tokens: []const TSToken, colon_idx
 
     var saw_decl = false;
     var last_comma_or_decl = stmt_start;
+    paren = 0;
+    bracket = 0;
+    brace = 0;
     i = stmt_start;
     while (i < colon_idx) : (i += 1) {
         const txt = tokens[i].text(src);
-        if (textEql(txt, "let") or textEql(txt, "const") or textEql(txt, "var")) {
+        if (paren == 0 and bracket == 0 and brace == 0 and isVariableDeclarationKeyword(txt)) {
             saw_decl = true;
             last_comma_or_decl = i + 1;
-        } else if (textEql(txt, ",")) {
+        } else if (textEql(txt, "(")) {
+            paren += 1;
+        } else if (textEql(txt, ")")) {
+            paren -|= 1;
+        } else if (textEql(txt, "[")) {
+            bracket += 1;
+        } else if (textEql(txt, "]")) {
+            bracket -|= 1;
+        } else if (textEql(txt, "{")) {
+            brace += 1;
+        } else if (textEql(txt, "}")) {
+            brace -|= 1;
+        } else if (paren == 0 and bracket == 0 and brace == 0 and textEql(txt, ",")) {
             last_comma_or_decl = i + 1;
         }
     }
     if (!saw_decl) return false;
 
+    paren = 0;
+    bracket = 0;
+    brace = 0;
     i = last_comma_or_decl;
     while (i < colon_idx) : (i += 1) {
-        if (tokenTextEql(src, tokens, i, "=")) return false;
+        const txt = tokens[i].text(src);
+        if (textEql(txt, "(")) {
+            paren += 1;
+        } else if (textEql(txt, ")")) {
+            paren -|= 1;
+        } else if (textEql(txt, "[")) {
+            bracket += 1;
+        } else if (textEql(txt, "]")) {
+            bracket -|= 1;
+        } else if (textEql(txt, "{")) {
+            brace += 1;
+        } else if (textEql(txt, "}")) {
+            brace -|= 1;
+        } else if (paren == 0 and bracket == 0 and brace == 0 and textEql(txt, "=")) {
+            return false;
+        }
     }
     return true;
 }
