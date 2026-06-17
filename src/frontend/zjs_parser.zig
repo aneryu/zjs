@@ -6649,6 +6649,7 @@ fn popBreakFrameAndPatch(s: *ParseState) Error!void {
     if (s.break_frame_lens.items.len == 0 or s.continue_frame_lens.items.len == 0) return Error.UnexpectedToken;
     _ = s.continue_frame_lens.pop().?;
     _ = s.continue_frame_catch_marker_depths.pop().?;
+    _ = s.continue_frame_cleanup_drops.pop().?;
     const start = s.break_frame_lens.pop().?;
     _ = s.break_frame_catch_marker_depths.pop().?;
     _ = s.break_frame_cleanup_drops.pop().?;

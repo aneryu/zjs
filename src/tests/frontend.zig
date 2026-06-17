@@ -2813,6 +2813,23 @@ test "F5: labelled break crossing switch drops discriminant" {
     }
 }
 
+test "F5: labelled continue inside switch case keeps discriminant stack balanced" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var fn_bc = try parseStatementWithTopLevelChildren(&env,
+        \\function f(a, b) {
+        \\  while (true) { a = a + 1; if (a > 2) break; }
+        \\  switch (b) {
+        \\  case 1:
+        \\    M: while (true) { if (a) break; continue M; }
+        \\  }
+        \\  return a;
+        \\}
+    );
+    defer fn_bc.deinit(env.rt);
+}
+
 test "F5: var declaration without initializer" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
