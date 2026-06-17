@@ -477,7 +477,7 @@ pub fn getLength(
 ) !Step {
     const value = try stack.pop();
     defer value.free(ctx.runtime);
-    if (fusion_stats.counted(.tryFuseArrayLengthLessThanFalseBranch, tryFuseArrayLengthLessThanFalseBranch(ctx.runtime, stack, function, frame, value))) return .done;
+    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseArrayLengthLessThanFalseBranch, tryFuseArrayLengthLessThanFalseBranch(ctx.runtime, stack, function, frame, value))) return .done;
     const length = object_ops.getValueProperty(ctx, output, global, value, core.atom.ids.length, function, frame) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;

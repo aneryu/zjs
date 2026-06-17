@@ -153,6 +153,47 @@ pub fn compareVm(
     return .done;
 }
 
+/// Inline operand-stack fast path for two int32 operands of an arithmetic /
+/// bitwise binary op. Identical semantics to `binary()`'s int32 branch (same
+/// `fastBinaryInt32` helper, same overflow->float promotion), but operates in
+/// place on the operand stack: no `binaryVm`/`binary` call frames, no
+/// pop/defer-free traffic (int32 values are never refcounted). Returns false
+/// (leaving the stack untouched) whenever either operand is not an int32, so
+/// the caller falls through to the generic path. The `*2` (keep-receiver) and
+/// string/object/bigint/coercion cases are entirely the generic path's job.
+pub inline fn tryInt32Binary(stack: *stack_mod.Stack, binop: u8) bool {
+    const n = stack.values.len;
+    if (n < 2) return false;
+    const lhs_int = stack.values[n - 2].asInt32() orelse return false;
+    const rhs_int = stack.values[n - 1].asInt32() orelse return false;
+    const result = fastBinaryInt32(binop, lhs_int, rhs_int) orelse return false;
+    stack.values[n - 2] = result;
+    stack.values = stack.values.ptr[0 .. n - 1];
+    return true;
+}
+
+/// Inline operand-stack fast path for two int32 operands of a comparison op.
+/// Mirrors `compare()`'s int32 branch exactly (same per-op boolean switch).
+/// Returns false untouched when either operand is not int32.
+pub inline fn tryInt32Compare(stack: *stack_mod.Stack, cmp: u8) bool {
+    const n = stack.values.len;
+    if (n < 2) return false;
+    const lhs_int = stack.values[n - 2].asInt32() orelse return false;
+    const rhs_int = stack.values[n - 1].asInt32() orelse return false;
+    const result = switch (cmp) {
+        op.lt => lhs_int < rhs_int,
+        op.lte => lhs_int <= rhs_int,
+        op.gt => lhs_int > rhs_int,
+        op.gte => lhs_int >= rhs_int,
+        op.eq, op.strict_eq => lhs_int == rhs_int,
+        op.neq, op.strict_neq => lhs_int != rhs_int,
+        else => return false,
+    };
+    stack.values[n - 2] = core.JSValue.boolean(result);
+    stack.values = stack.values.ptr[0 .. n - 1];
+    return true;
+}
+
 pub fn unary(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,

@@ -315,12 +315,12 @@ pub fn field(
             const site_pc = frame.pc - 5;
             const obj = try stackValueFromTop(stack, 0);
             defer obj.free(ctx.runtime);
-            if (fusion_stats.counted(.tryFuseRegExpTestConstStringFromField2, try tryFuseRegExpTestConstStringFromField2(ctx, function, frame, stack, obj, atom_id))) return .done;
-            if (fusion_stats.counted(.tryFuseNumberStaticLiteralCallFromField2, try tryFuseNumberStaticLiteralCallFromField2(ctx, output, function, frame, stack, obj, atom_id, site_pc))) return .done;
-            if (fusion_stats.counted(.tryFuseMathMinMaxPrimitiveCallFromField2, try tryFuseMathMinMaxPrimitiveCallFromField2(ctx, function, frame, stack, obj, atom_id))) return .done;
-            if (fusion_stats.counted(.tryFuseStringFromCharCodeInt32CallFromField2, try tryFuseStringFromCharCodeInt32CallFromField2(ctx, function, frame, stack, obj, atom_id, site_pc))) return .done;
-            if (fusion_stats.counted(.tryFuseStringSliceConstLocalStoreFromField2, try tryFuseStringSliceConstLocalStoreFromField2(ctx, function, global, frame, stack, obj, atom_id, sync_global_lexical_locals))) return .done;
-            if (fusion_stats.counted(.tryFuseArrayPushCallFromField2, try tryFuseArrayPushCallFromField2(ctx, function, global, frame, stack, obj, atom_id, sync_global_lexical_locals))) return .done;
+            if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseRegExpTestConstStringFromField2, try tryFuseRegExpTestConstStringFromField2(ctx, function, frame, stack, obj, atom_id))) return .done;
+            if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseNumberStaticLiteralCallFromField2, try tryFuseNumberStaticLiteralCallFromField2(ctx, output, function, frame, stack, obj, atom_id, site_pc))) return .done;
+            if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseMathMinMaxPrimitiveCallFromField2, try tryFuseMathMinMaxPrimitiveCallFromField2(ctx, function, frame, stack, obj, atom_id))) return .done;
+            if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseStringFromCharCodeInt32CallFromField2, try tryFuseStringFromCharCodeInt32CallFromField2(ctx, function, frame, stack, obj, atom_id, site_pc))) return .done;
+            if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseStringSliceConstLocalStoreFromField2, try tryFuseStringSliceConstLocalStoreFromField2(ctx, function, global, frame, stack, obj, atom_id, sync_global_lexical_locals))) return .done;
+            if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseArrayPushCallFromField2, try tryFuseArrayPushCallFromField2(ctx, function, global, frame, stack, obj, atom_id, sync_global_lexical_locals))) return .done;
             if (dataPropertyValueForFastPath(function, site_pc, ctx.runtime, obj, atom_id)) |value| {
                 try stack.push(value);
                 return .done;

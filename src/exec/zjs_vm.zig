@@ -31,6 +31,7 @@ const literal_vm = @import("vm_literal.zig");
 const vm_property_field = @import("vm_property_field.zig");
 const vm_property_globals = @import("vm_property_globals.zig");
 const vm_property_locals = @import("vm_property_locals.zig");
+const slot_ops = @import("slot_ops.zig");
 const vm_property_private = @import("vm_property_private.zig");
 const vm_property_ref = @import("vm_property_ref.zig");
 const profile_vm = @import("vm_profile.zig");
@@ -43,9 +44,36 @@ const value_vm = @import("vm_value.zig");
 const HostError = exceptions.HostError;
 
 const op = bytecode.opcode.op;
+const build_options = @import("build_options");
 const eval_class_field_initializer_flag: u16 = 0x8000;
 const eval_parameter_initializer_flag: u16 = 0x4000;
 const eval_ret_atom: core.Atom = 82;
+
+/// Threaded (computed-goto-style) dispatch is enabled only when per-opcode
+/// profiling is compiled out, because threaded arms bypass the per-iteration
+/// `enterOpcode` scope. QuickJS dispatches the same way (`goto *dispatch[*pc++]`).
+const thread_dispatch = !build_options.zjs_enable_opcode_profile;
+
+/// Hot-path opcode fetch used by threaded dispatch arms. Mirrors the cheap part
+/// of the main loop prologue (interrupt poll + fetch) but skips the
+/// `machine.switched` reload, which only matters after a call/return changes
+/// frame depth. Returns null for the cases that must re-enter the full prologue
+/// loop: function-boundary fall-through and generator single-step
+/// (`entry_stop_before_pc != null`); the caller then does a bare `continue`.
+inline fn nextOpcode(
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    poller: *control_vm.InterruptPoller,
+    rt: *core.JSRuntime,
+    entry_stop_before_pc: ?usize,
+) !?u8 {
+    if (entry_stop_before_pc != null) return null;
+    if (frame.pc >= function.code.len) return null;
+    try poller.poll(rt);
+    const opc = function.code[frame.pc];
+    frame.pc += 1;
+    return opc;
+}
 
 /// Execute QuickJS-format bytecode.
 pub fn run(
@@ -419,6 +447,10 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
     machine.switched = true;
 
     var interrupt_poller = control_vm.InterruptPoller.init(ctx.runtime);
+    // `opc` lives across `continue :sw` threaded re-dispatch so combined arms
+    // (get_loc0..3, binary, get_var, ...) read the *current* opcode, not the
+    // stale one the labeled switch was originally entered with.
+    var opc: u8 = undefined;
     while (true) {
         if (machine.switched) {
             machine.switched = false;
@@ -473,13 +505,19 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             if (try gen_async_vm.stopBeforePc(ctx, stack, frame, generator_state, stop_before_pc)) |result| return result;
         }
 
-        const opc = function.code[frame.pc];
+        opc = function.code[frame.pc];
         frame.pc += 1;
         const opcode_profile_scope = profile_vm.enterOpcode(ctx.runtime, opc);
         defer opcode_profile_scope.deinit();
-        switch (opc) {
+        sw: switch (opc) {
             // ---- Push constants ----
-            op.push_i32 => try value_vm.pushInt32Operand(stack, function, frame),
+            op.push_i32 => {
+                try value_vm.pushInt32Operand(stack, function, frame);
+                if (comptime thread_dispatch) {
+                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
+                    continue;
+                }
+            },
             op.push_bigint_i32 => try value_vm.pushBigIntI32Operand(stack, function, frame),
             op.push_i16 => {
                 try value_vm.pushI16OperandVm(ctx, stack, function, frame, .{
@@ -489,16 +527,16 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     .eval_with_object = eval_with_object,
                 });
             },
-            op.push_i8 => try value_vm.pushI8Operand(stack, function, frame),
-            op.push_minus1 => try value_vm.pushSmallIntMaybeFuse(stack, function, frame, -1),
-            op.push_0 => try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 0),
-            op.push_1 => try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 1),
-            op.push_2 => try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 2),
-            op.push_3 => try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 3),
-            op.push_4 => try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 4),
-            op.push_5 => try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 5),
-            op.push_6 => try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 6),
-            op.push_7 => try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 7),
+            op.push_i8 => { try value_vm.pushI8Operand(stack, function, frame); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
+            op.push_minus1 => { try value_vm.pushSmallIntMaybeFuse(stack, function, frame, -1); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
+            op.push_0 => { try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 0); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
+            op.push_1 => { try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 1); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
+            op.push_2 => { try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 2); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
+            op.push_3 => { try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 3); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
+            op.push_4 => { try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 4); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
+            op.push_5 => { try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 5); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
+            op.push_6 => { try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 6); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
+            op.push_7 => { try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 7); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
             op.push_const => try value_vm.pushConst(ctx, stack, function, frame, opc),
             op.push_const8 => try value_vm.pushConst8(ctx, stack, function, frame, opc),
             op.private_symbol => try value_vm.pushPrivateSymbol(ctx, stack, function, frame),
@@ -520,7 +558,34 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             //   - idx ∈ [0, 4)    → 1-byte short form (idx in opcode)
             //   - idx ∈ [4, 256)  → 2-byte u8-form (`get_loc8`, ...)
             //   - idx ∈ [256, 2^16) → 3-byte u16-form
-            op.get_loc, op.put_loc, op.set_loc, op.get_loc8, op.put_loc8, op.set_loc8, op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3, op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.set_loc0, op.set_loc1, op.set_loc2, op.set_loc3, op.get_loc0_loc1 => try vm_property_locals.loc(ctx, function, global, frame, stack, opc, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object),
+            // Hot single-byte local store opcodes get dedicated inline arms
+            // (no fusion cascade applies to put_loc0..3) that skip
+            // vm_property_locals.loc()'s 11-arg call + 19-way re-dispatch,
+            // mirroring qjs's inlined OP_put_loc0..3.
+            op.put_loc0 => {
+                try slot_ops.execPutLoc(ctx, function, global, frame, stack, 0, 0, opc, sync_global_lexical_locals);
+                if (comptime thread_dispatch) {
+                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
+                    continue;
+                }
+            },
+            op.put_loc1 => {
+                try slot_ops.execPutLoc(ctx, function, global, frame, stack, 1, 0, opc, sync_global_lexical_locals);
+                if (comptime thread_dispatch) {
+                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
+                    continue;
+                }
+            },
+            op.put_loc2 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, 2, 0, opc, sync_global_lexical_locals),
+            op.put_loc3 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, 3, 0, opc, sync_global_lexical_locals),
+
+            op.get_loc, op.put_loc, op.set_loc, op.get_loc8, op.put_loc8, op.set_loc8, op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3, op.set_loc0, op.set_loc1, op.set_loc2, op.set_loc3, op.get_loc0_loc1 => {
+                try vm_property_locals.loc(ctx, function, global, frame, stack, opc, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object);
+                if (comptime thread_dispatch) {
+                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
+                    continue;
+                }
+            },
 
             op.get_arg, op.put_arg, op.set_arg, op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3, op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3, op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 => try vm_property_locals.arg(ctx, function, frame, stack, opc),
 
@@ -574,7 +639,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 },
             },
             op.nip_catch => try value_vm.nipCatch(ctx.runtime, stack),
-            op.dup => try value_vm.dup(ctx, stack, opc),
+            op.dup => { try value_vm.dup(ctx, stack, opc); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
             op.swap => try value_vm.swap(ctx, stack),
 
             // ---- Return ----
@@ -596,7 +661,17 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
 
             // ---- Binary arithmetic ----
             op.add, op.sub, op.mul, op.div, op.mod, op.pow, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor => {
-                if (opc == op.add) {
+                // Inline int32 fast path: replaces binaryVm->binary call frames
+                // and pop/defer-free traffic for the common two-int operand case.
+                // Semantically identical to binary()'s int32 branch (shared
+                // fastBinaryInt32). pow is excluded (no int fast path there).
+                if (opc != op.pow and arith_vm.tryInt32Binary(stack, opc)) {
+                    if (comptime thread_dispatch) {
+                        if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
+                    }
+                    continue;
+                }
+                if (fusion_stats.fusions_enabled and opc == op.add) {
                     // Fusion failures (string-append OOM in particular) must
                     // reach the frame's catch handler just like the unfused
                     // `binaryVm` path would.
@@ -604,17 +679,17 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
                         return err;
                     };
-                    if (fusion_stats.counted(.tryFuseLocalStringAppend, fused_local_append)) continue;
+                    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseLocalStringAppend, fused_local_append)) continue;
                     const fused_global_append = arith_vm.tryFuseGlobalStringAppend(ctx, stack, function, global, frame, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object) catch |err| {
                         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
                         return err;
                     };
-                    if (fusion_stats.counted(.tryFuseGlobalStringAppend, fused_global_append)) continue;
+                    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseGlobalStringAppend, fused_global_append)) continue;
                     const fused_global_add = arith_vm.tryFuseGlobalDataAdd(ctx, stack, function, global, frame, eval_local_names, eval_var_ref_names, eval_with_object) catch |err| {
                         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
                         return err;
                     };
-                    if (fusion_stats.counted(.tryFuseGlobalDataAdd, fused_global_add)) continue;
+                    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseGlobalDataAdd, fused_global_add)) continue;
                 }
                 switch (try arith_vm.binaryVm(ctx, stack, frame, catch_target, opc, output, global)) {
                     .done => {},
@@ -624,6 +699,13 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
 
             // ---- Comparisons ----
             op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq => {
+                // Inline int32 fast path (mirrors compare()'s int32 branch).
+                if (arith_vm.tryInt32Compare(stack, opc)) {
+                    if (comptime thread_dispatch) {
+                        if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
+                    }
+                    continue;
+                }
                 switch (try arith_vm.compareVm(ctx, stack, frame, catch_target, opc, output, global)) {
                     .done => {},
                     .continue_loop => continue,
@@ -663,28 +745,43 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
 
             // ---- Control flow ----
             op.goto => {
-                if (stop_before_pc == null and fusion_stats.counted(.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch, vm_property_globals.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto, eval_local_names, eval_var_ref_names, eval_with_object))) continue;
+                if (fusion_stats.fusions_enabled and stop_before_pc == null and fusion_stats.counted(.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch, vm_property_globals.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto, eval_local_names, eval_var_ref_names, eval_with_object))) continue;
                 control_vm.jump32(function, frame);
+                if (comptime thread_dispatch) {
+                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
+                    continue;
+                }
             },
             op.goto16 => {
-                if (stop_before_pc == null and fusion_stats.counted(.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch, vm_property_globals.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto16, eval_local_names, eval_var_ref_names, eval_with_object))) continue;
+                if (fusion_stats.fusions_enabled and stop_before_pc == null and fusion_stats.counted(.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch, vm_property_globals.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto16, eval_local_names, eval_var_ref_names, eval_with_object))) continue;
                 control_vm.jump16(function, frame);
+                if (comptime thread_dispatch) {
+                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
+                    continue;
+                }
             },
             op.goto8 => {
-                if (stop_before_pc == null and fusion_stats.counted(.tryFuseGoto8LocalLessThanFalseBranch, control_vm.tryFuseGoto8LocalLessThanFalseBranch(function, frame))) continue;
-                if (stop_before_pc == null and fusion_stats.counted(.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch, vm_property_globals.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto8, eval_local_names, eval_var_ref_names, eval_with_object))) continue;
+                if (fusion_stats.fusions_enabled and stop_before_pc == null and fusion_stats.counted(.tryFuseGoto8LocalLessThanFalseBranch, control_vm.tryFuseGoto8LocalLessThanFalseBranch(function, frame))) continue;
+                if (fusion_stats.fusions_enabled and stop_before_pc == null and fusion_stats.counted(.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch, vm_property_globals.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto8, eval_local_names, eval_var_ref_names, eval_with_object))) continue;
                 control_vm.jump8(function, frame);
+                if (comptime thread_dispatch) {
+                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
+                    continue;
+                }
             },
             op.if_false => try control_vm.branch32(ctx, stack, function, frame, false),
             op.if_true => try control_vm.branch32(ctx, stack, function, frame, true),
-            op.if_false8 => try control_vm.branch8(ctx, stack, function, frame, false),
-            op.if_true8 => try control_vm.branch8(ctx, stack, function, frame, true),
+            op.if_false8 => { try control_vm.branch8(ctx, stack, function, frame, false); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
+            op.if_true8 => { try control_vm.branch8(ctx, stack, function, frame, true); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
             op.gosub => try control_vm.gosub(function, frame, stack),
             op.ret => try control_vm.ret(ctx, function, frame, stack),
 
             // ---- Variable access ----
             op.get_var, op.get_var_undef => switch (try vm_property_globals.getVar(ctx, output, global, stack, function, frame, catch_target, opc, sync_global_lexical_locals, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, eval_with_object)) {
-                .done => {},
+                .done => if (comptime thread_dispatch) {
+                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
+                    continue;
+                },
                 .continue_loop => continue,
             },
             op.make_loc_ref, op.make_arg_ref, op.make_var_ref_ref => try vm_property_ref.makeSlotRef(ctx, stack, function, frame, opc),
@@ -707,7 +804,10 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 }
             },
             op.put_var => switch (try vm_property_globals.putVar(ctx, output, global, stack, function, frame, catch_target, strict_unresolved_get_var, eval_global_var_bindings, is_eval_code, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, eval_with_object)) {
-                .done => {},
+                .done => if (comptime thread_dispatch) {
+                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
+                    continue;
+                },
                 .continue_loop => continue,
             },
             op.with_get_var, op.with_delete_var, op.with_make_ref, op.with_get_ref, op.with_get_ref_undef => switch (try vm_property_ref.withGetOrDelete(ctx, output, global, stack, function, frame, catch_target, opc)) {
