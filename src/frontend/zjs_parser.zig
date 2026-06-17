@@ -7757,6 +7757,11 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
                 try parseLetKeywordExpressionStatement(s);
                 return;
             }
+            if (s.lex.is_typescript and tok_kind == tok.TOK_CONST and s.peekNextKind() == tok.TOK_ENUM) {
+                try s.advance();
+                try parseEnumDeclaration(s);
+                return;
+            }
             if (!decl_mask.other and (tok_kind == tok.TOK_LET or tok_kind == tok.TOK_CONST)) {
                 return Error.UnexpectedToken;
             }

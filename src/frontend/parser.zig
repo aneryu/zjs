@@ -81,6 +81,33 @@ pub fn parse(rt: *JSRuntime, source: []const u8, options: Options) !Result {
     function.flags.is_module = options.mode == .module;
     function.flags.is_indirect_eval = options.mode == .eval_indirect;
 
+    if (zjs_lexer.shouldStrip(options.source_kind, options.filename)) {
+        if (try zjs_lexer.findUnsupportedTypeScriptSyntax(rt.memory.allocator, source)) |unsupported| {
+            var result = Result{
+                .runtime = rt,
+                .function = function,
+                .mode = options.mode,
+                .direct_eval = options.mode == .eval_direct,
+                .arena = undefined,
+            };
+            function_owned = false;
+            result.syntax_error = try source_pos.SyntaxError.create(
+                &rt.memory,
+                &rt.atoms,
+                filename_atom,
+                .{
+                    .line = unsupported.line,
+                    .column = unsupported.column,
+                    .offset = unsupported.offset,
+                },
+                unsupported.message,
+            );
+            result.parse_path = .syntax_error_guard;
+            result.arena = arena;
+            return result;
+        }
+    }
+
     var features = std.EnumSet(Feature).initEmpty();
 
     compileQjsProgram(rt, filename_atom, source, options, &function, &features) catch |err| switch (err) {

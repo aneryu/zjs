@@ -692,11 +692,29 @@ fn parseTSStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
+    defer lex.deinit();
     try lex.enableTypeScript();
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
+    return function;
+}
+
+fn parseTSProgram(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    errdefer function.deinit(env.rt);
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
+    defer lex.deinit();
+    try lex.enableTypeScript();
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+    state.top_level_functions_as_children = true;
+    try zjs_parser.parseDirectives(&state);
+    try zjs_parser.parseProgramStatements(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.rt);
     return function;
 }
 
@@ -3956,6 +3974,88 @@ test "TS: Enum Declarations" {
     defer bytecode.deinit(env.rt);
     try expectOpcode(bytecode.code, op.put_field);
     try expectOpcode(bytecode.code, op.put_array_el);
+}
+
+test "TS: Const Enum Declarations Lower As Runtime Enums" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSStatement(&env,
+        \\const enum Direction {
+        \\    Up,
+        \\    Down = 2
+        \\}
+    );
+    defer bytecode.deinit(env.rt);
+    try expectOpcode(bytecode.code, op.put_field);
+    try expectOpcode(bytecode.code, op.put_array_el);
+}
+
+test "TS: Nested Generic Greater Tokens" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSProgram(&env,
+        \\type K = string;
+        \\type V = number;
+        \\type K2 = string;
+        \\function id<T>(value: any): any { return value; }
+        \\const a: Promise<Array<number>> = null;
+        \\const b: Map<string, Array<number>> = new Map();
+        \\const c: Record<string, Array<number>> = {};
+        \\const d: Map<K, Map<K2, V>> = new Map();
+        \\const e = id<Map<K, V>>(new Map());
+        \\const f: Array<number>[] = [];
+        \\const shift = 8 >> 1;
+        \\const ge = 3 >= 2;
+    );
+    defer bytecode.deinit(env.rt);
+    try std.testing.expect(bytecode.code.len > 0);
+}
+
+test "TS: Const Type Parameters" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSProgram(&env,
+        \\function f<const T>(x: T): T { return x; }
+        \\class Box<const T> {
+        \\    value: T;
+        \\    constructor(value: T) { this.value = value; }
+        \\}
+    );
+    defer bytecode.deinit(env.rt);
+    try std.testing.expect(bytecode.code.len > 0);
+}
+
+test "TS: Function Overload Signatures Are Skipped" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSProgram(&env,
+        \\function g(x: number): number;
+        \\function g(x: string): string;
+        \\function g(x: any): any { return x; }
+    );
+    defer bytecode.deinit(env.rt);
+    try std.testing.expect(bytecode.code.len > 0);
+}
+
+test "TS: Unsupported Syntax Scan Reports Feature And Position" {
+    const decorator = (try frontend.zjs_lexer.findUnsupportedTypeScriptSyntax(std.testing.allocator,
+        \\class Before {}
+        \\@sealed
+        \\class C {}
+    )).?;
+    try std.testing.expectEqual(@as(u32, 2), decorator.line);
+    try std.testing.expectEqual(@as(u32, 1), decorator.column);
+    try std.testing.expect(std.mem.indexOf(u8, decorator.message, "TS decorators") != null);
+    try std.testing.expect(std.mem.indexOf(u8, decorator.message, "remove the decorator") != null);
+
+    const import_equals = (try frontend.zjs_lexer.findUnsupportedTypeScriptSyntax(
+        std.testing.allocator,
+        "import X = require(\"x\");",
+    )).?;
+    try std.testing.expectEqual(@as(u32, 1), import_equals.line);
+    try std.testing.expectEqual(@as(u32, 10), import_equals.column);
+    try std.testing.expect(std.mem.indexOf(u8, import_equals.message, "TS import=/export=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, import_equals.message, "use ESM import/export") != null);
 }
 
 test "TS: Namespaces" {
