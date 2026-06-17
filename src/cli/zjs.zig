@@ -252,8 +252,8 @@ pub fn main(init: std.process.Init) !void {
             .mode = .script,
             .filename = "<eval>",
             .output = &stdout_writer.interface,
-            .parse_strict = true,
-            .runtime_strict = true,
+            .parse_strict = false,
+            .runtime_strict = false,
             .discard_script_result = true,
             .timing = &eval_timing,
         }),
@@ -265,7 +265,7 @@ pub fn main(init: std.process.Init) !void {
                 .filename = file.path,
                 .output = &stdout_writer.interface,
                 .parse_strict = false,
-                .runtime_strict = true,
+                .runtime_strict = false,
                 .discard_script_result = true,
                 .timing = &eval_timing,
             }),
@@ -393,7 +393,7 @@ fn runIncludeFiles(runtime: *Runtime, options: RuntimeOptions, output: *std.Io.W
                 .filename = path,
                 .output = output,
                 .parse_strict = false,
-                .runtime_strict = true,
+                .runtime_strict = false,
                 .discard_script_result = true,
             });
         result.free(runtime.runtime);

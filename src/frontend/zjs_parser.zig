@@ -3057,7 +3057,7 @@ fn scanAssignmentRhsTokenForDirectEval(
     if (paren_depth.* == 0 and bracket_depth.* == 0 and brace_depth.* == 0 and assignmentRhsScanBoundary(kind)) {
         return .boundary;
     }
-    if ((kind == @as(tok.TokenKind, @intCast('/')) or kind == tok.TOK_DIV_ASSIGN) and expect_operand.*) {
+    if (tokenCanStartSlashRegexp(kind) and expect_operand.*) {
         try skipRegExpLiteralInRhsScan(s, token);
         expect_operand.* = false;
         return .continue_scan;
@@ -3242,7 +3242,7 @@ fn validateSwitchCaseBlockDeclarations(s: *ParseState) Error!void {
                 try s.advance();
                 continue;
             }
-            if (kind == '/') {
+            if (tokenCanStartSlashRegexp(kind)) {
                 if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
                     previous_token_kind = tok.TOK_REGEXP;
                     try s.advance();
@@ -3296,7 +3296,7 @@ fn validateSwitchCaseBlockDeclarations(s: *ParseState) Error!void {
                 previous_token_kind = tok.TOK_TEMPLATE;
                 try s.advance();
             },
-            '/' => {
+            '/', tok.TOK_DIV_ASSIGN => {
                 if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
                     previous_token_kind = tok.TOK_REGEXP;
                     try s.advance();
@@ -3416,11 +3416,16 @@ fn tokenStartsPrimaryExpression(k: tok.TokenKind) bool {
         k == @as(tok.TokenKind, @intCast('(')) or
         k == @as(tok.TokenKind, @intCast('[')) or
         k == @as(tok.TokenKind, @intCast('{')) or
-        k == @as(tok.TokenKind, @intCast('/'));
+        k == @as(tok.TokenKind, @intCast('/')) or
+        k == tok.TOK_DIV_ASSIGN;
 }
 
 fn tokenStartsYieldExpressionOperand(k: tok.TokenKind) bool {
-    return tokenStartsPrimaryExpression(k) and k != @as(tok.TokenKind, @intCast('/'));
+    return tokenStartsPrimaryExpression(k) and !tokenCanStartSlashRegexp(k);
+}
+
+fn tokenCanStartSlashRegexp(k: tok.TokenKind) bool {
+    return k == @as(tok.TokenKind, @intCast('/')) or k == tok.TOK_DIV_ASSIGN;
 }
 
 fn emitWithGetVarFallback(s: *ParseState, with_atom: Atom, ident: Atom) Error!void {
@@ -6649,7 +6654,7 @@ fn predeclareFunctionBodyVars(s: *ParseState) Error!void {
             tok.TOK_FUNCTION => try skipFunctionInPredeclareScan(s),
             tok.TOK_VAR => try predeclareVarDeclarators(s),
             tok.TOK_TEMPLATE => try skipTemplateInPredeclareScan(s, t),
-            '/' => {
+            '/', tok.TOK_DIV_ASSIGN => {
                 if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
                     previous_token_kind = tok.TOK_REGEXP;
                     continue;
@@ -6678,7 +6683,7 @@ fn skipFunctionInPredeclareScan(s: *ParseState) Error!void {
             '{' => depth += 1,
             '}' => depth -= 1,
             tok.TOK_TEMPLATE => try skipTemplateInPredeclareScan(s, t),
-            '/' => {
+            '/', tok.TOK_DIV_ASSIGN => {
                 if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
                     previous_token_kind = tok.TOK_REGEXP;
                     continue;
@@ -6710,7 +6715,7 @@ fn skipTemplateInPredeclareScan(s: *ParseState, first: tok.Token) Error!void {
                     previous_token_kind = tok.TOK_TEMPLATE;
                     continue;
                 },
-                '/' => {
+                '/', tok.TOK_DIV_ASSIGN => {
                     if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
                         previous_token_kind = tok.TOK_REGEXP;
                         continue;
@@ -6761,7 +6766,7 @@ fn predeclareVarDeclarators(s: *ParseState) Error!void {
                 previous_token_kind = tok.TOK_TEMPLATE;
                 continue;
             },
-            '/' => {
+            '/', tok.TOK_DIV_ASSIGN => {
                 if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
                     previous_token_kind = tok.TOK_REGEXP;
                     continue;
@@ -6984,7 +6989,7 @@ fn blockDirectUsingDeclarationKind(s: *ParseState) ?UsingStackKind {
             previous_token_kind = tok.TOK_TEMPLATE;
             continue;
         }
-        if (kind == '/') {
+        if (tokenCanStartSlashRegexp(kind)) {
             if (skipRegexpInPredeclareScan(s, previous_token_kind) catch return result) {
                 s.advance() catch return result;
                 previous_token_kind = tok.TOK_REGEXP;
@@ -7036,7 +7041,7 @@ fn programDirectUsingDeclarationKind(s: *ParseState) ?UsingStackKind {
             previous_token_kind = tok.TOK_TEMPLATE;
             continue;
         }
-        if (kind == '/') {
+        if (tokenCanStartSlashRegexp(kind)) {
             if (skipRegexpInPredeclareScan(s, previous_token_kind) catch return result) {
                 s.advance() catch return result;
                 previous_token_kind = tok.TOK_REGEXP;
@@ -8530,7 +8535,7 @@ fn skipBalancedDelimitedForTryScan(s: *ParseState, open: tok.TokenKind, close: t
             previous_token_kind = tok.TOK_TEMPLATE;
             continue;
         }
-        if (kind == '/') {
+        if (tokenCanStartSlashRegexp(kind)) {
             if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
                 try s.advance();
                 previous_token_kind = tok.TOK_REGEXP;
@@ -14665,7 +14670,7 @@ fn collectClassPrivateBoundNames(s: *ParseState, bound_start: usize) Error!void 
         }
 
         switch (k) {
-            @as(tok.TokenKind, @intCast('/')) => {
+            @as(tok.TokenKind, @intCast('/')), tok.TOK_DIV_ASSIGN => {
                 if (try skipRegexpInPredeclareScan(s, prev_kind)) {
                     prev_kind = tok.TOK_REGEXP;
                     continue;
