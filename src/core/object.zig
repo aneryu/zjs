@@ -7269,6 +7269,11 @@ pub const Object = struct {
     }
 
     fn materializeNativeFunctionAutoInit(self: *Object, info: property.AutoInit) ?JSValue {
+        return self.materializeNativeFunctionAutoInitOnce(info) orelse
+            self.materializeNativeFunctionAutoInitOnce(info);
+    }
+
+    fn materializeNativeFunctionAutoInitOnce(self: *Object, info: property.AutoInit) ?JSValue {
         const materialized = function.nativeFunction(info.rt, info.name, info.length) catch return null;
         if (!self.prepareAutoInitNativeFunction(info, materialized, info.native_builtin_id, true)) {
             materialized.free(info.rt);
