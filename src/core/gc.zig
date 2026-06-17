@@ -186,12 +186,6 @@ pub const PressureRequest = struct {
     urgency: RequestUrgency,
 };
 
-pub const HeapAllocation = struct {
-    header: *GCObjectHeader,
-    is_large: bool = false,
-    bytes: usize = 0,
-};
-
 pub const ExternalTokenEntry = struct {
     id: u64 = 0,
     bytes: usize = 0,
@@ -362,6 +356,7 @@ pub const BlockHeader = extern struct {
 pub const Header = BlockHeader;
 pub const GCObjectHeader = Header;
 pub const ObjectHeader = Header;
+const large_heap_size_class = std.math.maxInt(u16);
 
 /// 11.2 GcNode definition
 pub const GcColor = enum(u8) {
@@ -586,8 +581,6 @@ pub const Registry = struct {
     // GcNode 链表头与尾，仅串联可能参与循环检测的 GcCandidate (如 Object, FunctionBytecode)
     gc_obj_list_head: ?*GcNode = null,
     gc_obj_list_tail: ?*GcNode = null,
-    heap_allocations: []HeapAllocation = &.{},
-    heap_allocations_capacity: usize = 0,
     external_tokens: []ExternalTokenEntry = &.{},
     external_tokens_capacity: usize = 0,
     next_external_token_id: u64 = 1,
@@ -627,7 +620,7 @@ pub const Registry = struct {
         // 释放可能存活的所有 Candidate 对象
         while (self.gc_obj_list_tail) |node| {
             const h = headerFromGcNode(node);
-            self.recordHeapFree(h);
+            self.recordHeapFreeWithBytes(h, heapByteSizeFromHeader(rt, h));
             self.unlinkNode(node);
             h.flags.finalizing = true;
             if (h.kind == .object) {
@@ -644,13 +637,6 @@ pub const Registry = struct {
         self.preserved_bytecodes.deinit();
         self.object_worklist.deinit(self.memory.persistent_allocator);
         self.bytecode_worklist.deinit(self.memory.persistent_allocator);
-        if (self.heap_allocations_capacity != 0) {
-            self.memory.free(HeapAllocation, self.heap_allocations.ptr[0..self.heap_allocations_capacity]);
-        } else if (self.heap_allocations.len != 0) {
-            self.memory.free(HeapAllocation, self.heap_allocations);
-        }
-        self.heap_allocations = &.{};
-        self.heap_allocations_capacity = 0;
         if (self.external_tokens_capacity != 0) {
             self.memory.free(ExternalTokenEntry, self.external_tokens.ptr[0..self.external_tokens_capacity]);
         } else if (self.external_tokens.len != 0) {
@@ -984,20 +970,11 @@ pub const Registry = struct {
 
     pub fn addWithSize(self: *Registry, h: *GCObjectHeader, bytes: usize) !void {
         const is_large = self.isLargeAllocation(bytes);
-        if (bytes != 0) try self.ensureHeapAllocationCapacity(self.heap_allocations.len + 1);
 
         h.rc = 1;
         h.flags = .{};
-        h.size_class = @intCast(@min(bytes, std.math.maxInt(u16)));
+        h.size_class = encodeHeapBytes(bytes);
         self.recordHeapAlloc(is_large, bytes);
-        if (bytes != 0) {
-            self.heap_allocations.ptr[self.heap_allocations.len] = .{
-                .header = h,
-                .is_large = is_large,
-                .bytes = bytes,
-            };
-            self.heap_allocations = self.heap_allocations.ptr[0 .. self.heap_allocations.len + 1];
-        }
 
         if (h.kind == .object) {
             const obj: *object.Object = @alignCast(@fieldParentPtr("header", h));
@@ -1014,6 +991,31 @@ pub const Registry = struct {
         return switch (h.kind) {
             .object => @sizeOf(object.Object),
             .function_bytecode => @sizeOf(FunctionBytecode),
+            .string, .big_int => 0,
+        };
+    }
+
+    fn encodeHeapBytes(bytes: usize) u16 {
+        return @intCast(@min(bytes, large_heap_size_class));
+    }
+
+    fn storedHeapBytes(h: *const GCObjectHeader) ?usize {
+        if (h.size_class == 0) return 0;
+        if (h.size_class == large_heap_size_class) return null;
+        return h.size_class;
+    }
+
+    pub fn heapByteSizeFromHeader(rt: anytype, h: *const GCObjectHeader) usize {
+        if (storedHeapBytes(h)) |bytes| return bytes;
+        return switch (h.kind) {
+            .object => blk: {
+                const obj: *const object.Object = @alignCast(@fieldParentPtr("header", h));
+                break :blk obj.allocationSize(rt);
+            },
+            .function_bytecode => blk: {
+                const fb: *const FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
+                break :blk fb.heapByteSize();
+            },
             .string, .big_int => 0,
         };
     }
@@ -1039,25 +1041,13 @@ pub const Registry = struct {
             self.stats.old_allocated_bytes = std.math.add(usize, self.stats.old_allocated_bytes, bytes) catch std.math.maxInt(usize);
             self.stats.old_alloc_count +|= 1;
         }
-
-        if (self.stats.allocation_debt >= self.policy.major_debt_threshold) {
-            self.requestGC(.allocation_debt, .soon);
-        }
     }
 
-    fn recordHeapFree(self: *Registry, header: *GCObjectHeader) void {
-        const index = self.heapAllocationIndex(header) orelse return;
-        const entry = self.heap_allocations[index];
-        self.subtractLiveHeapBytes(entry.is_large, entry.bytes);
-        self.recordSpaceFree(entry.is_large, entry.bytes);
-        if (index + 1 < self.heap_allocations.len) {
-            std.mem.copyForwards(
-                HeapAllocation,
-                self.heap_allocations[index .. self.heap_allocations.len - 1],
-                self.heap_allocations[index + 1 ..],
-            );
-        }
-        self.heap_allocations = self.heap_allocations[0 .. self.heap_allocations.len - 1];
+    fn recordHeapFreeWithBytes(self: *Registry, header: *GCObjectHeader, bytes: usize) void {
+        if (header.size_class == 0 or bytes == 0) return;
+        const is_large = self.isLargeAllocation(bytes);
+        self.subtractLiveHeapBytes(is_large, bytes);
+        self.recordSpaceFree(is_large, bytes);
         header.size_class = 0;
     }
 
@@ -1128,13 +1118,6 @@ pub const Registry = struct {
         self.refreshSpacePageState();
     }
 
-    fn heapAllocationIndex(self: Registry, header: *const GCObjectHeader) ?usize {
-        for (self.heap_allocations, 0..) |entry, index| {
-            if (entry.header == header) return index;
-        }
-        return null;
-    }
-
     fn externalTokenIndex(self: Registry, id: u64) ?usize {
         for (self.external_tokens, 0..) |entry, index| {
             if (entry.id == id) return index;
@@ -1164,8 +1147,8 @@ pub const Registry = struct {
         return total;
     }
 
-    pub fn unlinkObject(self: *Registry, h: *GCObjectHeader) void {
-        self.recordHeapFree(h);
+    pub fn unlinkObjectWithBytes(self: *Registry, h: *GCObjectHeader, bytes: usize) void {
+        self.recordHeapFreeWithBytes(h, bytes);
         if (h.kind == .object) {
             const obj: *object.Object = @alignCast(@fieldParentPtr("header", h));
             self.unlinkNode(&obj.gc);
@@ -1173,6 +1156,11 @@ pub const Registry = struct {
             const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
             self.unlinkNode(&fb.gc);
         }
+    }
+
+    pub fn unlinkObject(self: *Registry, h: *GCObjectHeader) void {
+        const bytes = storedHeapBytes(h) orelse defaultHeapBytes(h);
+        self.unlinkObjectWithBytes(h, bytes);
     }
 
     pub fn retainObject(self: *Registry, h: *GCObjectHeader) void {
@@ -1190,22 +1178,6 @@ pub const Registry = struct {
             return true;
         }
         return false;
-    }
-
-    fn ensureHeapAllocationCapacity(self: *Registry, required: usize) !void {
-        if (required <= self.heap_allocations_capacity) return;
-        var new_capacity = if (self.heap_allocations_capacity == 0) @as(usize, 8) else self.heap_allocations_capacity * 2;
-        while (new_capacity < required) new_capacity *= 2;
-        const next = try self.memory.alloc(HeapAllocation, new_capacity);
-        errdefer self.memory.free(HeapAllocation, next);
-        @memcpy(next[0..self.heap_allocations.len], self.heap_allocations);
-        if (self.heap_allocations_capacity != 0) {
-            self.memory.free(HeapAllocation, self.heap_allocations.ptr[0..self.heap_allocations_capacity]);
-        } else if (self.heap_allocations.len != 0) {
-            self.memory.free(HeapAllocation, self.heap_allocations);
-        }
-        self.heap_allocations = next[0..self.heap_allocations.len];
-        self.heap_allocations_capacity = new_capacity;
     }
 
     fn ensureExternalTokenCapacity(self: *Registry, required: usize) !void {
@@ -1281,22 +1253,23 @@ pub const Registry = struct {
         if (previous != self.gc_obj_list_tail) return error.CorruptGcList;
     }
 
-    pub fn verifyHeapAccounting(self: Registry) InvariantError!void {
+    pub fn verifyHeapAccounting(self: Registry, rt: anytype) InvariantError!void {
         var heap_live_bytes: usize = 0;
         var old_live_bytes: usize = 0;
         var large_object_bytes: usize = 0;
 
-        for (self.heap_allocations, 0..) |entry, index| {
-            for (self.heap_allocations[0..index]) |previous| {
-                if (previous.header == entry.header) return error.DuplicateHeapAllocation;
-            }
-
-            heap_live_bytes = std.math.add(usize, heap_live_bytes, entry.bytes) catch std.math.maxInt(usize);
-            if (entry.is_large) {
-                large_object_bytes = std.math.add(usize, large_object_bytes, entry.bytes) catch std.math.maxInt(usize);
+        var current = self.gc_obj_list_head;
+        while (current) |node| {
+            const header = headerFromGcNode(node);
+            const bytes = heapByteSizeFromHeader(rt, header);
+            if (bytes == 0) return error.MissingHeapAllocation;
+            heap_live_bytes = std.math.add(usize, heap_live_bytes, bytes) catch std.math.maxInt(usize);
+            if (self.isLargeAllocation(bytes)) {
+                large_object_bytes = std.math.add(usize, large_object_bytes, bytes) catch std.math.maxInt(usize);
             } else {
-                old_live_bytes = std.math.add(usize, old_live_bytes, entry.bytes) catch std.math.maxInt(usize);
+                old_live_bytes = std.math.add(usize, old_live_bytes, bytes) catch std.math.maxInt(usize);
             }
+            current = node.next;
         }
 
         for (self.pin_entries, 0..) |entry, index| {
@@ -1314,15 +1287,6 @@ pub const Registry = struct {
                 if (previous.id == entry.id) return error.DuplicateExternalMemoryToken;
             }
             external_token_bytes = std.math.add(usize, external_token_bytes, entry.bytes) catch std.math.maxInt(usize);
-        }
-
-        var current = self.gc_obj_list_head;
-        while (current) |node| {
-            const header = headerFromGcNode(node);
-            if (defaultHeapBytes(header) != 0 and self.heapAllocationIndex(header) == null) {
-                return error.MissingHeapAllocation;
-            }
-            current = node.next;
         }
 
         if (heap_live_bytes != self.stats.heap_live_bytes) return error.HeapLiveBytesMismatch;
@@ -1456,7 +1420,7 @@ pub fn release(rt: anytype, header: *Header) void {
 
     if (header.rc == 0) {
         if (rt.gc.phase == .deinit and header.kind == .object) return;
-        rt.gc.unlinkObject(header);
+        rt.gc.unlinkObjectWithBytes(header, Registry.heapByteSizeFromHeader(rt, header));
 
         // 10.1 静态 kind switch 派发销毁
         switch (header.kind) {

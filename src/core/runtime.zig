@@ -1014,7 +1014,7 @@ pub const JSRuntime = struct {
             self.clearWeakPersistentIdentity(weak_identity, notify);
         }
         self.unregisterBorrowedReferenceHolder(object);
-        self.gc.unlinkObject(&object.header);
+        self.gc.unlinkObjectWithBytes(&object.header, object.allocationSize(self));
     }
 
     pub fn registerBorrowedReferenceHolder(self: *JSRuntime, object: *Object) !void {
@@ -1626,10 +1626,10 @@ pub const JSRuntime = struct {
     ) gc.CollectionError!gc.CollectionResult {
         if (self.gc_running) return .{};
         if (builtin.mode == .Debug) self.gc.verifyIntrusiveList() catch unreachable;
-        if (builtin.mode == .Debug) self.gc.verifyHeapAccounting() catch unreachable;
+        if (builtin.mode == .Debug) self.gc.verifyHeapAccounting(self) catch unreachable;
         defer if (builtin.mode == .Debug) {
             self.gc.verifyIntrusiveList() catch unreachable;
-            self.gc.verifyHeapAccounting() catch unreachable;
+            self.gc.verifyHeapAccounting(self) catch unreachable;
         };
         self.gc_running = true;
         defer self.gc_running = false;
