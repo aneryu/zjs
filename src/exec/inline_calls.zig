@@ -348,7 +348,14 @@ pub const Machine = struct {
         binding_inputs.current_function_value = takeSourceSlot(callable_slot);
         if (sourceHasStackRegion(source)) cleanup_stack_source = true;
         if (take_receiver_as_this) {
+            // `takeSourceSlot` transfers the receiver slot's owned ref into
+            // `this`; the binding must therefore OWN it (.take), mirroring the
+            // boxed_this branch. Leaving it at the default `.borrow` leaked one
+            // receiver ref per method call (the slot is nulled, so the popped
+            // stack region never frees it) — an O(n^2) live-heap blowup on
+            // allocation+method-heavy code (raytrace/box2d/deltablue).
             binding_inputs.initial_this_value = takeSourceSlot(receiver_slot.?);
+            binding_modes.this_value = .take;
         }
 
         entry.eval_snapshot = .{};
