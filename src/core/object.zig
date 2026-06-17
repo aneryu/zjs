@@ -1616,6 +1616,8 @@ pub const Object = struct {
         // removes the registry entry so stale ids can never resolve again.
         const destroyed_identity = @intFromPtr(&destroyed.header) & ~@as(usize, 1);
         const weak_identity = rt.takeWeakObjectIdentity(destroyed);
+        if (rt.borrowed_reference_holders.len == 0) return;
+        if (weak_identity == null and !destroyed.flags.is_global) return;
         if (rt.borrowedWeakCleanupActive()) {
             if (destroyed.flags.is_global) rt.enqueueBorrowedWeakCleanupRealmIdentity(destroyed_identity);
             if (rt.isCurrentDeferredWeakValueFreeIdentity(destroyed_identity)) return;
@@ -1670,11 +1672,12 @@ pub const Object = struct {
     }
 
     fn clearBorrowedReferencesForMatcher(rt: *JSRuntime, matcher: BorrowedIdentityMatcher) void {
+        compactBorrowedReferenceHolders(rt);
         var index: usize = 0;
         while (index < rt.borrowed_reference_holders.len) {
             const current = rt.borrowed_reference_holders[index];
             if (current.header.rc == 0) {
-                index += 1;
+                rt.unregisterBorrowedReferenceHolder(current);
                 continue;
             }
             if (!current.mayContainBorrowedReferences(rt)) {
@@ -1702,6 +1705,21 @@ pub const Object = struct {
                 index = current_index;
             }
         }
+    }
+
+    fn compactBorrowedReferenceHolders(rt: *JSRuntime) void {
+        var write_index: usize = 0;
+        var read_index: usize = 0;
+        while (read_index < rt.borrowed_reference_holders.len) : (read_index += 1) {
+            const current = rt.borrowed_reference_holders[read_index];
+            if (current.header.rc != 0 and current.hasBorrowedReferences()) {
+                if (write_index != read_index) rt.borrowed_reference_holders[write_index] = current;
+                write_index += 1;
+                continue;
+            }
+            current.flags.is_borrowed_reference_holder = false;
+        }
+        rt.borrowed_reference_holders = rt.borrowed_reference_holders.ptr[0..write_index];
     }
 
     fn runtimeBorrowedReferenceHolderIndex(rt: *JSRuntime, object: *Object) ?usize {
