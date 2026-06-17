@@ -2813,6 +2813,37 @@ test "F5: labelled break crossing switch drops discriminant" {
     }
 }
 
+test "F5: labelled break to loop inside switch keeps discriminant stack balanced" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var fn_bc = try parseStatementWithTopLevelChildren(&env,
+        \\function f(label, r9, r15) {
+        \\  switch (label) {
+        \\  case 92:
+        \\    label = 93;
+        \\    break;
+        \\  }
+        \\  if (label == 93) label = 104;
+        \\  outer: do {
+        \\    if (label == 104) {
+        \\      if (r9 != 0) {
+        \\        loop: while (true) {
+        \\          if (r9 <= r15) {
+        \\            break loop;
+        \\          } else {
+        \\            if (!(r9 != 0)) break loop;
+        \\          }
+        \\        }
+        \\      }
+        \\    }
+        \\  } while (0);
+        \\  r9;
+        \\}
+    );
+    defer fn_bc.deinit(env.rt);
+}
+
 test "F5: labelled continue inside switch case keeps discriminant stack balanced" {
     var env = try ParserTestEnv.init();
     defer env.deinit();

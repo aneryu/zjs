@@ -98,6 +98,7 @@ const LabelFrame = struct {
     allow_continue: bool,
     catch_marker_depth: u32,
     control_frame_depth: usize,
+    break_frame_depth: usize,
     break_fixups: std.ArrayList(usize) = .empty,
     continue_fixups: std.ArrayList(usize) = .empty,
 
@@ -961,6 +962,7 @@ pub const ParseState = struct {
             .allow_continue = allow_continue,
             .catch_marker_depth = s.active_catch_marker_depth,
             .control_frame_depth = s.continue_frame_lens.items.len,
+            .break_frame_depth = s.break_frame_lens.items.len,
         });
         return s.label_frames.items.len - 1;
     }
@@ -1002,12 +1004,12 @@ pub const ParseState = struct {
         try emitPendingAbruptDropsForLabel(s, frame_index);
         try emitCatchMarkerDropsToDepth(s, s.label_frames.items[frame_index].catch_marker_depth);
         var frame_depth = s.break_frame_cleanup_drops.items.len;
-        while (frame_depth > s.label_frames.items[frame_index].control_frame_depth) {
+        while (frame_depth > s.label_frames.items[frame_index].break_frame_depth) {
             frame_depth -= 1;
             try emitCrossFrameCleanup(s, s.break_frame_cross_cleanup_drops.items[frame_depth]);
         }
-        if (s.label_frames.items[frame_index].allow_continue and s.label_frames.items[frame_index].control_frame_depth > 0) {
-            try emitUnlabelledBreakCleanup(s, s.break_frame_cleanup_drops.items[s.label_frames.items[frame_index].control_frame_depth - 1]);
+        if (s.label_frames.items[frame_index].allow_continue and s.label_frames.items[frame_index].break_frame_depth > 0) {
+            try emitUnlabelledBreakCleanup(s, s.break_frame_cleanup_drops.items[s.label_frames.items[frame_index].break_frame_depth - 1]);
         }
         const off = try emitForwardJumpNoSource(s, opcode.op.goto);
         try s.label_frames.items[frame_index].break_fixups.append(s.function.memory.allocator, off);
