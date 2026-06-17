@@ -394,9 +394,16 @@ pub fn call(
         op.call3 => 3,
         else => unreachable,
     };
-    if (try tryFastMathCall(ctx, stack, argc)) return .done;
-    if (try tryFastSimpleStringCall(ctx, stack, argc)) return .done;
-    if (try tryFastSimpleNumericCall(ctx, stack, argc)) return .done;
+    // Speculative builtin-call fast paths (Math.abs / percent-hex / simple
+    // numeric callee). These are the call-site analogue of the tryFuse*
+    // microbench fast paths and tax every ordinary call when they miss, so they
+    // share the fusion comptime gate (default off): an ordinary bytecode-function
+    // call goes straight to execCall.
+    if (comptime fusion_stats.fusions_enabled) {
+        if (try tryFastMathCall(ctx, stack, argc)) return .done;
+        if (try tryFastSimpleStringCall(ctx, stack, argc)) return .done;
+        if (try tryFastSimpleNumericCall(ctx, stack, argc)) return .done;
+    }
     return switch (try call_runtime.execCall(ctx, stack, function, frame, catch_target, argc, output, global, true)) {
         .done => .done,
         .continue_loop => .continue_loop,

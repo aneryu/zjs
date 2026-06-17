@@ -587,7 +587,51 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 }
             },
 
-            op.get_arg, op.put_arg, op.set_arg, op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3, op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3, op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 => try vm_property_locals.arg(ctx, function, frame, stack, opc),
+            // Hot single-byte argument reads inlined into the dispatch (skip
+            // vm_property_locals.arg()'s call + re-switch), mirroring qjs's
+            // inlined OP_get_arg0..3. get_arg0 is the 2nd hottest opcode in
+            // recursive/call-heavy code (fib).
+            op.get_arg0 => {
+                try slot_ops.execGetArg(ctx, frame, stack, 0, 0, opc);
+                if (comptime thread_dispatch) {
+                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| {
+                        opc = n;
+                        continue :sw n;
+                    }
+                    continue;
+                }
+            },
+            op.get_arg1 => {
+                try slot_ops.execGetArg(ctx, frame, stack, 1, 0, opc);
+                if (comptime thread_dispatch) {
+                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| {
+                        opc = n;
+                        continue :sw n;
+                    }
+                    continue;
+                }
+            },
+            op.get_arg2 => {
+                try slot_ops.execGetArg(ctx, frame, stack, 2, 0, opc);
+                if (comptime thread_dispatch) {
+                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| {
+                        opc = n;
+                        continue :sw n;
+                    }
+                    continue;
+                }
+            },
+            op.get_arg3 => {
+                try slot_ops.execGetArg(ctx, frame, stack, 3, 0, opc);
+                if (comptime thread_dispatch) {
+                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| {
+                        opc = n;
+                        continue :sw n;
+                    }
+                    continue;
+                }
+            },
+            op.get_arg, op.put_arg, op.set_arg, op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3, op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 => try vm_property_locals.arg(ctx, function, frame, stack, opc),
 
             op.get_var_ref, op.get_var_ref_check, op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init, op.set_var_ref, op.get_var_ref0, op.get_var_ref1, op.get_var_ref2, op.get_var_ref3, op.put_var_ref0, op.put_var_ref1, op.put_var_ref2, op.put_var_ref3, op.set_var_ref0, op.set_var_ref1, op.set_var_ref2, op.set_var_ref3 => {
                 switch (try vm_property_locals.varRefVm(ctx, function, global, frame, stack, opc, catch_target, eval_global_var_bindings, is_eval_code, eval_local_names, eval_var_ref_names, eval_with_object)) {
