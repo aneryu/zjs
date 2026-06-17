@@ -115,6 +115,7 @@ const ControlFrames = struct {
     break_frame_cross_cleanup_drops: std.ArrayList(u8),
     continue_fixups: std.ArrayList(usize),
     continue_frame_lens: std.ArrayList(usize),
+    continue_frame_break_frame_indices: std.ArrayList(usize),
     continue_frame_catch_marker_depths: std.ArrayList(u32),
     continue_frame_cleanup_drops: std.ArrayList(u8),
     label_frames: std.ArrayList(LabelFrame),
@@ -471,6 +472,7 @@ pub const ParseState = struct {
     break_frame_lens: std.ArrayList(usize) = .empty,
     continue_fixups: std.ArrayList(usize) = .empty,
     continue_frame_lens: std.ArrayList(usize) = .empty,
+    continue_frame_break_frame_indices: std.ArrayList(usize) = .empty,
     break_frame_catch_marker_depths: std.ArrayList(u32) = .empty,
     break_frame_cleanup_drops: std.ArrayList(u8) = .empty,
     break_frame_cross_cleanup_drops: std.ArrayList(u8) = .empty,
@@ -543,6 +545,7 @@ pub const ParseState = struct {
         self.break_frame_lens.deinit(self.function.memory.allocator);
         self.continue_fixups.deinit(self.function.memory.allocator);
         self.continue_frame_lens.deinit(self.function.memory.allocator);
+        self.continue_frame_break_frame_indices.deinit(self.function.memory.allocator);
         self.break_frame_catch_marker_depths.deinit(self.function.memory.allocator);
         self.break_frame_cleanup_drops.deinit(self.function.memory.allocator);
         self.break_frame_cross_cleanup_drops.deinit(self.function.memory.allocator);
@@ -1023,7 +1026,8 @@ pub const ParseState = struct {
         var frame_depth = s.continue_frame_lens.items.len;
         while (frame_depth > s.label_frames.items[frame_index].control_frame_depth) {
             frame_depth -= 1;
-            try emitCrossFrameCleanup(s, s.break_frame_cross_cleanup_drops.items[frame_depth]);
+            const break_frame_index = s.continue_frame_break_frame_indices.items[frame_depth];
+            try emitCrossFrameCleanup(s, s.break_frame_cross_cleanup_drops.items[break_frame_index]);
         }
         if (s.label_frames.items[frame_index].control_frame_depth > 0) {
             try emitCrossFrameCleanup(s, s.continue_frame_cleanup_drops.items[s.label_frames.items[frame_index].control_frame_depth - 1]);
@@ -1058,6 +1062,7 @@ pub const ParseState = struct {
         s.break_frame_cross_cleanup_drops.deinit(allocator);
         s.continue_fixups.deinit(allocator);
         s.continue_frame_lens.deinit(allocator);
+        s.continue_frame_break_frame_indices.deinit(allocator);
         s.continue_frame_catch_marker_depths.deinit(allocator);
         s.continue_frame_cleanup_drops.deinit(allocator);
         for (s.label_frames.items) |*frame| {
@@ -1076,6 +1081,7 @@ pub const ParseState = struct {
             .break_frame_cross_cleanup_drops = s.break_frame_cross_cleanup_drops,
             .continue_fixups = s.continue_fixups,
             .continue_frame_lens = s.continue_frame_lens,
+            .continue_frame_break_frame_indices = s.continue_frame_break_frame_indices,
             .continue_frame_catch_marker_depths = s.continue_frame_catch_marker_depths,
             .continue_frame_cleanup_drops = s.continue_frame_cleanup_drops,
             .label_frames = s.label_frames,
@@ -1091,6 +1097,7 @@ pub const ParseState = struct {
         s.break_frame_cross_cleanup_drops = .empty;
         s.continue_fixups = .empty;
         s.continue_frame_lens = .empty;
+        s.continue_frame_break_frame_indices = .empty;
         s.continue_frame_catch_marker_depths = .empty;
         s.continue_frame_cleanup_drops = .empty;
         s.label_frames = .empty;
@@ -1110,6 +1117,7 @@ pub const ParseState = struct {
         s.break_frame_cross_cleanup_drops = saved.break_frame_cross_cleanup_drops;
         s.continue_fixups = saved.continue_fixups;
         s.continue_frame_lens = saved.continue_frame_lens;
+        s.continue_frame_break_frame_indices = saved.continue_frame_break_frame_indices;
         s.continue_frame_catch_marker_depths = saved.continue_frame_catch_marker_depths;
         s.continue_frame_cleanup_drops = saved.continue_frame_cleanup_drops;
         s.label_frames = saved.label_frames;
@@ -6417,6 +6425,7 @@ fn rebaseMovedBytecodeLabels(code: []u8, atoms: []const Atom, old_base: usize, n
 fn pushBreakFrame(s: *ParseState) Error!void {
     try s.break_frame_lens.append(s.function.memory.allocator, s.break_fixups.items.len);
     try s.continue_frame_lens.append(s.function.memory.allocator, s.continue_fixups.items.len);
+    try s.continue_frame_break_frame_indices.append(s.function.memory.allocator, s.break_frame_lens.items.len - 1);
     try s.break_frame_catch_marker_depths.append(s.function.memory.allocator, s.active_catch_marker_depth);
     try s.break_frame_cleanup_drops.append(s.function.memory.allocator, 0);
     try s.break_frame_cross_cleanup_drops.append(s.function.memory.allocator, 0);
@@ -6648,6 +6657,7 @@ fn patchContinueFrame(s: *ParseState) Error!void {
 fn popBreakFrameAndPatch(s: *ParseState) Error!void {
     if (s.break_frame_lens.items.len == 0 or s.continue_frame_lens.items.len == 0) return Error.UnexpectedToken;
     _ = s.continue_frame_lens.pop().?;
+    _ = s.continue_frame_break_frame_indices.pop().?;
     _ = s.continue_frame_catch_marker_depths.pop().?;
     _ = s.continue_frame_cleanup_drops.pop().?;
     const start = s.break_frame_lens.pop().?;

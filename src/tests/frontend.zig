@@ -2830,6 +2830,27 @@ test "F5: labelled continue inside switch case keeps discriminant stack balanced
     defer fn_bc.deinit(env.rt);
 }
 
+test "F5: labelled continue from nested loop inside switch drops discriminant once" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var fn_bc = try parseStatementWithTopLevelChildren(&env,
+        \\function f(a, b) {
+        \\  outer: while (true) {
+        \\    switch (b) {
+        \\    case 1:
+        \\      while (true) {
+        \\        if (a) continue outer;
+        \\        break;
+        \\      }
+        \\    }
+        \\    break;
+        \\  }
+        \\}
+    );
+    defer fn_bc.deinit(env.rt);
+}
+
 test "F5: var declaration without initializer" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
