@@ -829,7 +829,7 @@ fn syncBytecodeGlobalVarNames(function: *bytecode_function.Bytecode, fd: *const 
 }
 
 fn installChildFunctionBytecodes(fd: *function_def_mod.FunctionDef, rt: anytype) FinalizeError!void {
-    for (fd.child_list) |*child| {
+    for (fd.child_list) |child| {
         const cpool_idx = child.parent_cpool_idx;
         if (cpool_idx < 0 or @as(usize, @intCast(cpool_idx)) >= fd.cpool.len) {
             return error.InvalidBytecode;
@@ -843,7 +843,7 @@ fn installChildFunctionBytecodes(fd: *function_def_mod.FunctionDef, rt: anytype)
         old_value.free(rt);
     }
 
-    for (fd.child_list) |*child| {
+    for (fd.child_list) |child| {
         if (child.class_fields_init_cpool_idx < 0) continue;
         if (child.parent_cpool_idx < 0 or
             @as(usize, @intCast(child.parent_cpool_idx)) >= fd.cpool.len or

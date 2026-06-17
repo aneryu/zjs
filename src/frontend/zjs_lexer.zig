@@ -126,12 +126,21 @@ pub const Lexer = struct {
     pub fn freeToken(self: *Lexer, tok: *t.Token) void {
         switch (tok.payload) {
             .str => |s| {
-                if (s.bytes.len > 0) self.allocator.free(s.bytes);
-                if (s.raw_bytes.len > 0) self.allocator.free(s.raw_bytes);
+                if (s.bytes.len > 0 and !self.isSourceSlice(s.bytes)) self.allocator.free(s.bytes);
+                if (s.raw_bytes.len > 0 and !self.isSourceSlice(s.raw_bytes)) self.allocator.free(s.raw_bytes);
             },
             else => {},
         }
         tok.payload = .none;
+    }
+
+    fn isSourceSlice(self: *const Lexer, bytes: []const u8) bool {
+        if (bytes.len == 0) return true;
+        const source_start = @intFromPtr(self.source.ptr);
+        const source_end = source_start + self.source.len;
+        const bytes_start = @intFromPtr(bytes.ptr);
+        const bytes_end = bytes_start + bytes.len;
+        return bytes_start >= source_start and bytes_end <= source_end;
     }
 
     /// Return whether a line terminator was seen before the most recent token.
@@ -414,6 +423,8 @@ pub const Lexer = struct {
     // ---- identifiers / keywords --------------------------------------
 
     fn lexIdentifier(self: *Lexer) Error!t.Token {
+        if (try self.lexAsciiIdentifierNoEscape()) |token| return token;
+
         var has_escape = false;
         // Scratch buffer for the decoded identifier (used for keyword
         // lookup and atom interning when escapes are present).
@@ -492,6 +503,66 @@ pub const Lexer = struct {
         return self.emit(t.TOK_IDENT, .{ .ident = .{
             .atom = a,
             .has_escape = has_escape,
+            .is_reserved = false,
+        } });
+    }
+
+    fn lexAsciiIdentifierNoEscape(self: *Lexer) Error!?t.Token {
+        if (self.peek() == '\\' or self.peek() >= 0x80) return null;
+
+        const start = self.pos;
+        const start_line = self.line;
+        const start_col = self.col;
+        self.bump();
+        while (self.pos < self.source.len) {
+            const c = self.peek();
+            if (isAsciiIdentContinue(c)) {
+                self.bump();
+                continue;
+            }
+            if (c == '\\' or c >= 0x80) {
+                self.pos = start;
+                self.line = start_line;
+                self.col = start_col;
+                return null;
+            }
+            break;
+        }
+
+        const lexeme = self.source[start..self.pos];
+        if (keywordLookup(lexeme)) |val| {
+            // TOK_ASYNC is a contextual keyword, not a reserved keyword;
+            // keep existing parser behaviour and treat it as an identifier.
+            if (val == t.TOK_ASYNC) {
+                const a = try self.atoms.internString(lexeme);
+                return self.emit(t.TOK_IDENT, .{ .ident = .{
+                    .atom = a,
+                    .has_escape = false,
+                    .is_reserved = false,
+                } });
+            }
+            // Other contextual tokens outside the keyword atom range do
+            // not satisfy the QuickJS keyword-atom arithmetic invariant.
+            if (!t.isKeyword(val)) {
+                const a = try self.atoms.internString(lexeme);
+                return self.emit(val, .{ .ident = .{
+                    .atom = a,
+                    .has_escape = false,
+                    .is_reserved = false,
+                } });
+            }
+            const ka = t.keywordAtom(val);
+            return self.emit(val, .{ .ident = .{
+                .atom = ka,
+                .has_escape = false,
+                .is_reserved = isReservedKeyword(val, self.is_strict_mode),
+            } });
+        }
+
+        const a = try self.atoms.internString(lexeme);
+        return self.emit(t.TOK_IDENT, .{ .ident = .{
+            .atom = a,
+            .has_escape = false,
             .is_reserved = false,
         } });
     }
@@ -683,8 +754,28 @@ pub const Lexer = struct {
 
     fn lexString(self: *Lexer, quote: u8) Error!t.Token {
         self.bump(); // opening quote
+        const content_start = self.pos;
+        while (self.pos < self.source.len) {
+            const c = self.peek();
+            if (c == quote) {
+                const bytes = @constCast(self.source[content_start..self.pos]);
+                self.bump();
+                return self.emit(t.TOK_STRING, .{ .str = .{
+                    .bytes = bytes,
+                    .contains_escape = false,
+                    .contains_legacy_escape = false,
+                    .sep = quote,
+                } });
+            }
+            if (c == '\n' or c == '\r') return error.UnterminatedString;
+            if (c == '\\') break;
+            self.bump();
+        }
+        if (self.pos >= self.source.len) return error.UnterminatedString;
+
         var buf = std.ArrayList(u8).empty;
         defer buf.deinit(self.allocator);
+        try buf.appendSlice(self.allocator, self.source[content_start..self.pos]);
         var contains_escape = false;
         var contains_legacy_escape = false;
 
