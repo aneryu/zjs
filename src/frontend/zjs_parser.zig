@@ -9257,6 +9257,7 @@ fn parseVar(s: *ParseState, var_tok: tok.TokenKind, export_decl: bool, parse_fla
                     s.scope_level = 0;
                     defer s.scope_level = saved;
                     const var_idx = try s.addScopeVar(atom_id, .normal, false, false);
+                    try s.retrofitForwardLocalFunctionCapture(s.cur_func(), atom_id, @intCast(var_idx));
                     if (atomNameEquals(s, atom_id, "arguments")) {
                         s.cur_func().arguments_var_idx = @intCast(var_idx);
                     }

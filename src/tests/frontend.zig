@@ -4239,6 +4239,46 @@ fn functionBytecodeHasKind(fb: *const engine.bytecode.FunctionBytecode, kind: fu
     return false;
 }
 
+fn functionBytecodeHasClosure(
+    rt: *core.JSRuntime,
+    fb: *const engine.bytecode.FunctionBytecode,
+    name: []const u8,
+    closure_type: function_def.ClosureType,
+) bool {
+    for (fb.closure_var) |cv| {
+        if (cv.closure_type == closure_type and std.mem.eql(u8, rt.atoms.name(cv.var_name) orelse "", name)) return true;
+    }
+    for (fb.cpool) |value| {
+        if (functionBytecodeFromValue(value)) |child| {
+            if (functionBytecodeHasClosure(rt, child, name, closure_type)) return true;
+        }
+    }
+    return false;
+}
+
+fn functionHasClosure(
+    rt: *core.JSRuntime,
+    function: *const engine.bytecode.Bytecode,
+    name: []const u8,
+    closure_type: function_def.ClosureType,
+) bool {
+    for (function.constants.values) |value| {
+        if (functionBytecodeFromValue(value)) |fb| {
+            if (functionBytecodeHasClosure(rt, fb, name, closure_type)) return true;
+        }
+    }
+    return false;
+}
+
+fn expectFunctionClosureRecursive(
+    rt: *core.JSRuntime,
+    function: *const engine.bytecode.Bytecode,
+    name: []const u8,
+    closure_type: function_def.ClosureType,
+) !void {
+    try std.testing.expect(functionHasClosure(rt, function, name, closure_type));
+}
+
 fn functionHasKind(function: *const engine.bytecode.Bytecode, kind: function_def.FunctionKind) bool {
     for (function.constants.values) |value| {
         if (functionBytecodeFromValue(value)) |fb| {
@@ -4524,6 +4564,31 @@ test "quick parser keeps conditional member callee branches at one stack slot" {
     try std.testing.expectEqual(@as(usize, 0), countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method));
     try std.testing.expect(countCalls(parsed.function.code) >= 5);
     try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_constructor) >= 2);
+}
+
+test "quick parser retrofits forward var captures into nested closures" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const source =
+        \\function outer(){
+        \\  var get = (function(){ return function(){ return CW; }; })();
+        \\  var CW = 42;
+        \\}
+        \\function wrapper(){
+        \\  var getTarget = function(){ return Target; };
+        \\  var Target = function Target(){};
+        \\  return getTarget;
+        \\}
+    ;
+    var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "forward-var-capture.js" });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try expectFunctionClosureRecursive(rt, &parsed.function, "CW", .local);
+    try expectFunctionClosureRecursive(rt, &parsed.function, "CW", .ref);
+    try expectFunctionClosureRecursive(rt, &parsed.function, "Target", .local);
 }
 
 test "quick parser still promotes unconditional parenthesized member calls" {
