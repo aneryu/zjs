@@ -692,11 +692,29 @@ fn parseTSStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
     errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
+    defer lex.deinit();
     try lex.enableTypeScript();
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
+    return function;
+}
+
+fn parseTSProgram(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    errdefer function.deinit(env.rt);
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
+    defer lex.deinit();
+    try lex.enableTypeScript();
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+    state.top_level_functions_as_children = true;
+    try zjs_parser.parseDirectives(&state);
+    try zjs_parser.parseProgramStatements(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.rt);
     return function;
 }
 
@@ -878,6 +896,20 @@ fn parseFunctionBodyStatement(env: *TestEnv, src: []const u8) !engine.bytecode.B
     try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
+}
+
+fn returnExprEmittedReturn(env: *TestEnv, src: []const u8) !bool {
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+    state.return_expr_mode = true;
+    state.return_expr_emitted_return = false;
+    try zjs_parser.parseExpr(&state);
+    return state.return_expr_emitted_return;
 }
 
 fn expectParseStatementError(env: *TestEnv, src: []const u8) !void {
@@ -1243,6 +1275,23 @@ test "F4: discarded short-circuit with assignment RHS keeps function stack balan
     };
     for (control_cases) |source| {
         var fn_bc = try parseStatement(&env, source);
+        defer fn_bc.deinit(env.rt);
+    }
+}
+
+test "F4: discarded conditional assignment arms keep function stack balanced" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const cases = [_][]const u8{
+        "function f(){ a ? b = 1 : c; }",
+        "function f(){ a ? b : c = 1; }",
+        "function f(){ c ? 0 : p = 1; }",
+        "function f(){ a ? b : c -= 1; }",
+        "function f(){ a ? b : c[d] = b; }",
+    };
+    for (cases) |source| {
+        var fn_bc = try parseStatementWithTopLevelChildren(&env, source);
         defer fn_bc.deinit(env.rt);
     }
 }
@@ -2668,6 +2717,24 @@ test "F5: return statement with value" {
     try std.testing.expectEqual(op.@"return", fn_bc.code[5]);
 }
 
+test "F5: return conditional branch emission only applies to comma tail operand" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    try std.testing.expect(try returnExprEmittedReturn(&env, "a ? b : c"));
+    try std.testing.expect(!try returnExprEmittedReturn(&env, "a ? b : c, d"));
+    try std.testing.expect(try returnExprEmittedReturn(&env, "a, b ? c : d"));
+}
+
+test "F5: return conditional branch emission preserves tail calls" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseFunctionBodyStatement(&env, "return f() ? g() : h();");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expectEqual(@as(usize, 2), countOpcode(fn_bc.code, op.tail_call));
+}
+
 test "F5: throw statement" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -2776,6 +2843,75 @@ test "F5: labelled break crossing switch drops discriminant" {
         var fn_bc = try parseStatementWithTopLevelChildren(&env, source);
         defer fn_bc.deinit(env.rt);
     }
+}
+
+test "F5: labelled break to loop inside switch keeps discriminant stack balanced" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var fn_bc = try parseStatementWithTopLevelChildren(&env,
+        \\function f(label, r9, r15) {
+        \\  switch (label) {
+        \\  case 92:
+        \\    label = 93;
+        \\    break;
+        \\  }
+        \\  if (label == 93) label = 104;
+        \\  outer: do {
+        \\    if (label == 104) {
+        \\      if (r9 != 0) {
+        \\        loop: while (true) {
+        \\          if (r9 <= r15) {
+        \\            break loop;
+        \\          } else {
+        \\            if (!(r9 != 0)) break loop;
+        \\          }
+        \\        }
+        \\      }
+        \\    }
+        \\  } while (0);
+        \\  r9;
+        \\}
+    );
+    defer fn_bc.deinit(env.rt);
+}
+
+test "F5: labelled continue inside switch case keeps discriminant stack balanced" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var fn_bc = try parseStatementWithTopLevelChildren(&env,
+        \\function f(a, b) {
+        \\  while (true) { a = a + 1; if (a > 2) break; }
+        \\  switch (b) {
+        \\  case 1:
+        \\    M: while (true) { if (a) break; continue M; }
+        \\  }
+        \\  return a;
+        \\}
+    );
+    defer fn_bc.deinit(env.rt);
+}
+
+test "F5: labelled continue from nested loop inside switch drops discriminant once" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var fn_bc = try parseStatementWithTopLevelChildren(&env,
+        \\function f(a, b) {
+        \\  outer: while (true) {
+        \\    switch (b) {
+        \\    case 1:
+        \\      while (true) {
+        \\        if (a) continue outer;
+        \\        break;
+        \\      }
+        \\    }
+        \\    break;
+        \\  }
+        \\}
+    );
+    defer fn_bc.deinit(env.rt);
 }
 
 test "F5: var declaration without initializer" {
@@ -2973,6 +3109,16 @@ test "F6: function declaration with parameters" {
     try expectAtomName(&env, child.arg_names[0], "x");
     try expectAtomName(&env, child.arg_names[1], "y");
     try expectOpcode(child.byte_code, op.return_undef);
+}
+
+test "F6: var redeclaration of parameter keeps closure bound to arg" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatementWithTopLevelChildren(&env, "function outer(l1){ var l1; function get(){ return l1; } }");
+    defer fn_bc.deinit(env.rt);
+
+    const outer = try expectFunctionConstant(&fn_bc, 0);
+    try std.testing.expect(functionBytecodeHasClosure(env.rt, outer, "l1", .arg));
 }
 
 test "F6: function declaration with rest parameter" {
@@ -3958,6 +4104,132 @@ test "TS: Enum Declarations" {
     try expectOpcode(bytecode.code, op.put_array_el);
 }
 
+test "TS: Const Enum Declarations Lower As Runtime Enums" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSStatement(&env,
+        \\const enum Direction {
+        \\    Up,
+        \\    Down = 2
+        \\}
+    );
+    defer bytecode.deinit(env.rt);
+    try expectOpcode(bytecode.code, op.put_field);
+    try expectOpcode(bytecode.code, op.put_array_el);
+}
+
+test "TS: Nested Generic Greater Tokens" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSProgram(&env,
+        \\type K = string;
+        \\type V = number;
+        \\type K2 = string;
+        \\function id<T>(value: any): any { return value; }
+        \\const a: Promise<Array<number>> = null;
+        \\const b: Map<string, Array<number>> = new Map();
+        \\const c: Record<string, Array<number>> = {};
+        \\const d: Map<K, Map<K2, V>> = new Map();
+        \\const e = id<Map<K, V>>(new Map());
+        \\const f: Array<number>[] = [];
+        \\const shift = 8 >> 1;
+        \\const ge = 3 >= 2;
+    );
+    defer bytecode.deinit(env.rt);
+    try std.testing.expect(bytecode.code.len > 0);
+}
+
+test "TS: Const Type Parameters" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSProgram(&env,
+        \\function f<const T>(x: T): T { return x; }
+        \\class Box<const T> {
+        \\    value: T;
+        \\    constructor(value: T) { this.value = value; }
+        \\}
+    );
+    defer bytecode.deinit(env.rt);
+    try std.testing.expect(bytecode.code.len > 0);
+}
+
+test "TS: Function Overload Signatures Are Skipped" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSProgram(&env,
+        \\function g(x: number): number;
+        \\function g(x: string): string;
+        \\function g(x: any): any { return x; }
+    );
+    defer bytecode.deinit(env.rt);
+    try std.testing.expect(bytecode.code.len > 0);
+}
+
+test "TS: Class Method Overload Signatures Are Skipped" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSProgram(&env,
+        \\class S {
+        \\    process(x: number): string;
+        \\    process(x: string): number;
+        \\    process(x: any): any { return x; }
+        \\}
+        \\new S().process(1);
+    );
+    defer bytecode.deinit(env.rt);
+    try std.testing.expect(bytecode.code.len > 0);
+}
+
+test "TS: Generic Arrow Type Parameters Are Skipped" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSProgram(&env,
+        \\const f = <T,>(x: T): T => x;
+        \\const id = <T, U>(a: T, b: U): T => a;
+        \\const a = f(7);
+        \\const b = id(1, "x");
+        \\const c = 1 < 2;
+    );
+    defer bytecode.deinit(env.rt);
+    try std.testing.expect(bytecode.code.len > 0);
+}
+
+test "TS: Inline Object Type Parameter Constraints Are Skipped" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSProgram(&env,
+        \\function foo<U extends { x: number }>(u: U) { return u.x; }
+        \\class C<T extends { id: string }> {
+        \\    value: T;
+        \\    constructor(value: T) { this.value = value; }
+        \\}
+        \\foo({ x: 9 });
+    );
+    defer bytecode.deinit(env.rt);
+    try std.testing.expect(bytecode.code.len > 0);
+}
+
+test "TS: Unsupported Syntax Scan Reports Feature And Position" {
+    const decorator = (try frontend.zjs_lexer.findUnsupportedTypeScriptSyntax(std.testing.allocator,
+        \\class Before {}
+        \\@sealed
+        \\class C {}
+    )).?;
+    try std.testing.expectEqual(@as(u32, 2), decorator.line);
+    try std.testing.expectEqual(@as(u32, 1), decorator.column);
+    try std.testing.expect(std.mem.indexOf(u8, decorator.message, "TS decorators") != null);
+    try std.testing.expect(std.mem.indexOf(u8, decorator.message, "remove the decorator") != null);
+
+    const import_equals = (try frontend.zjs_lexer.findUnsupportedTypeScriptSyntax(
+        std.testing.allocator,
+        "import X = require(\"x\");",
+    )).?;
+    try std.testing.expectEqual(@as(u32, 1), import_equals.line);
+    try std.testing.expectEqual(@as(u32, 10), import_equals.column);
+    try std.testing.expect(std.mem.indexOf(u8, import_equals.message, "TS import=/export=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, import_equals.message, "use ESM import/export") != null);
+}
+
 test "TS: Namespaces" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -4076,6 +4348,46 @@ fn functionBytecodeHasKind(fb: *const engine.bytecode.FunctionBytecode, kind: fu
         }
     }
     return false;
+}
+
+fn functionBytecodeHasClosure(
+    rt: *core.JSRuntime,
+    fb: *const engine.bytecode.FunctionBytecode,
+    name: []const u8,
+    closure_type: function_def.ClosureType,
+) bool {
+    for (fb.closure_var) |cv| {
+        if (cv.closure_type == closure_type and std.mem.eql(u8, rt.atoms.name(cv.var_name) orelse "", name)) return true;
+    }
+    for (fb.cpool) |value| {
+        if (functionBytecodeFromValue(value)) |child| {
+            if (functionBytecodeHasClosure(rt, child, name, closure_type)) return true;
+        }
+    }
+    return false;
+}
+
+fn functionHasClosure(
+    rt: *core.JSRuntime,
+    function: *const engine.bytecode.Bytecode,
+    name: []const u8,
+    closure_type: function_def.ClosureType,
+) bool {
+    for (function.constants.values) |value| {
+        if (functionBytecodeFromValue(value)) |fb| {
+            if (functionBytecodeHasClosure(rt, fb, name, closure_type)) return true;
+        }
+    }
+    return false;
+}
+
+fn expectFunctionClosureRecursive(
+    rt: *core.JSRuntime,
+    function: *const engine.bytecode.Bytecode,
+    name: []const u8,
+    closure_type: function_def.ClosureType,
+) !void {
+    try std.testing.expect(functionHasClosure(rt, function, name, closure_type));
 }
 
 fn functionHasKind(function: *const engine.bytecode.Bytecode, kind: function_def.FunctionKind) bool {
@@ -4365,6 +4677,31 @@ test "quick parser keeps conditional member callee branches at one stack slot" {
     try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_constructor) >= 2);
 }
 
+test "quick parser retrofits forward var captures into nested closures" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const source =
+        \\function outer(){
+        \\  var get = (function(){ return function(){ return CW; }; })();
+        \\  var CW = 42;
+        \\}
+        \\function wrapper(){
+        \\  var getTarget = function(){ return Target; };
+        \\  var Target = function Target(){};
+        \\  return getTarget;
+        \\}
+    ;
+    var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "forward-var-capture.js" });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try expectFunctionClosureRecursive(rt, &parsed.function, "CW", .local);
+    try expectFunctionClosureRecursive(rt, &parsed.function, "CW", .ref);
+    try expectFunctionClosureRecursive(rt, &parsed.function, "Target", .local);
+}
+
 test "quick parser still promotes unconditional parenthesized member calls" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -4486,6 +4823,28 @@ test "prepared call lowering preserves RegExp literal fuse while preparing cache
     try std.testing.expectEqual(@as(usize, 0), countOpcode(literal.function.code, engine.bytecode.opcode.op.prepare_call_prop_atom));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(literal.function.code, engine.bytecode.opcode.op.call_prepared));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(literal.function.code, engine.bytecode.opcode.op.call_method));
+}
+
+test "function predeclare scan skips slash-equals regexp literals" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(
+        rt,
+        \\function RegExpBenchmark() {
+        \\  var re0 = /^ba/;
+        \\  var re1 = /(((\w+):\/\/)([^\/:]*)(:(\d+))?)?([^#?]*)(\?([^#]*))?(#(.*))?/;
+        \\  var re8 = /=/;
+        \\  return re0.test("ba") && re1.test("http://example") && re8.test("=");
+        \\}
+        \\RegExpBenchmark();
+    ,
+        .{ .mode = .script, .filename = "regexp-slash-equals-predeclare.js" },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expect(parsed.syntax_error == null);
 }
 
 test "quick parser lowers supported Promise helpers to receiver-preserving property calls" {

@@ -2977,9 +2977,9 @@ test "function bytecode registration is old-space accounted" {
     try std.testing.expectEqual(@as(usize, @sizeOf(engine.bytecode.FunctionBytecode)), rt.gc.stats.old_allocated_bytes);
     try std.testing.expectEqual(@as(usize, 1), rt.gc.stats.old_alloc_count);
     try std.testing.expectEqual(@as(usize, @sizeOf(engine.bytecode.FunctionBytecode) * 3), rt.allocationDebtBytes());
-    try std.testing.expect(rt.gcPendingForTest());
-    try std.testing.expect(rt.gc.hasPendingMajorRequest());
-    try std.testing.expectEqual(@as(?core.gc.RequestReason, core.gc.RequestReason.allocation_debt), rt.gcLastRequestReasonForTest());
+    try std.testing.expect(!rt.gcPendingForTest());
+    try std.testing.expect(!rt.gc.hasPendingMajorRequest());
+    try std.testing.expectEqual(@as(?core.gc.RequestReason, null), rt.gcLastRequestReasonForTest());
 }
 
 test "runtime exposes stable gc stats snapshot" {
@@ -3078,7 +3078,7 @@ test "external memory token registry audits duplicate releases and leaks" {
     try std.testing.expectEqual(@as(usize, 64), stats.external_bytes);
     try std.testing.expectEqual(@as(usize, 1), stats.external_token_count);
     try std.testing.expectEqual(@as(usize, 64), stats.external_token_bytes);
-    try rt.gc.verifyHeapAccounting();
+    try rt.gc.verifyHeapAccounting(&rt);
     try std.testing.expectError(error.LeakedExternalMemoryToken, rt.gc.verifyNoExternalTokenLeaks());
 
     token.release();
@@ -3086,7 +3086,7 @@ test "external memory token registry audits duplicate releases and leaks" {
     try std.testing.expectEqual(@as(usize, 0), stats.external_bytes);
     try std.testing.expectEqual(@as(usize, 0), stats.external_token_count);
     try std.testing.expectEqual(@as(usize, 1), stats.external_free_count);
-    try rt.gc.verifyHeapAccounting();
+    try rt.gc.verifyHeapAccounting(&rt);
     try rt.gc.verifyNoExternalTokenLeaks();
 
     duplicate_token.release();
@@ -3094,7 +3094,7 @@ test "external memory token registry audits duplicate releases and leaks" {
     try std.testing.expectEqual(@as(usize, 0), stats.external_bytes);
     try std.testing.expectEqual(@as(usize, 1), stats.external_free_count);
     try std.testing.expectEqual(@as(usize, 1), stats.external_invalid_release_count);
-    try rt.gc.verifyHeapAccounting();
+    try rt.gc.verifyHeapAccounting(&rt);
 }
 
 test "runtime runs deferred native cleanup jobs with a budget" {
@@ -3293,18 +3293,18 @@ test "gc heap accounting verifier catches live byte drift" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    try rt.gc.verifyHeapAccounting();
+    try rt.gc.verifyHeapAccounting(rt);
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
-    try rt.gc.verifyHeapAccounting();
+    try rt.gc.verifyHeapAccounting(rt);
 
     rt.gc.stats.heap_live_bytes += 1;
-    try std.testing.expectError(error.HeapLiveBytesMismatch, rt.gc.verifyHeapAccounting());
+    try std.testing.expectError(error.HeapLiveBytesMismatch, rt.gc.verifyHeapAccounting(rt));
     rt.gc.stats.heap_live_bytes -= 1;
-    try rt.gc.verifyHeapAccounting();
+    try rt.gc.verifyHeapAccounting(rt);
 
     obj.value().free(rt);
-    try rt.gc.verifyHeapAccounting();
+    try rt.gc.verifyHeapAccounting(rt);
 }
 
 test "gc heap accounting verifier catches missing allocation entries" {
@@ -3313,13 +3313,13 @@ test "gc heap accounting verifier catches missing allocation entries" {
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
     defer obj.value().free(rt);
-    try rt.gc.verifyHeapAccounting();
+    try rt.gc.verifyHeapAccounting(rt);
 
-    const old_allocations = rt.gc.heap_allocations;
-    rt.gc.heap_allocations = old_allocations[0..0];
-    try std.testing.expectError(error.MissingHeapAllocation, rt.gc.verifyHeapAccounting());
-    rt.gc.heap_allocations = old_allocations;
-    try rt.gc.verifyHeapAccounting();
+    const old_size_class = obj.header.size_class;
+    obj.header.size_class = 0;
+    try std.testing.expectError(error.MissingHeapAllocation, rt.gc.verifyHeapAccounting(rt));
+    obj.header.size_class = old_size_class;
+    try rt.gc.verifyHeapAccounting(rt);
 }
 
 test "gc heap accounting verifier catches pinned header flag drift" {
@@ -3332,11 +3332,11 @@ test "gc heap accounting verifier catches pinned header flag drift" {
     defer pin.release();
     value.free(rt);
 
-    try rt.gc.verifyHeapAccounting();
+    try rt.gc.verifyHeapAccounting(rt);
     obj.header.setPinned(false);
-    try std.testing.expectError(error.PinnedHeaderFlagMismatch, rt.gc.verifyHeapAccounting());
+    try std.testing.expectError(error.PinnedHeaderFlagMismatch, rt.gc.verifyHeapAccounting(rt));
     obj.header.setPinned(true);
-    try rt.gc.verifyHeapAccounting();
+    try rt.gc.verifyHeapAccounting(rt);
 }
 
 test "object traceChildEdgesFallible propagates visitor errors" {

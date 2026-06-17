@@ -186,6 +186,50 @@ test "zjs CLI behavior" {
         try std.testing.expectEqualStrings("1\n2\n", result.stdout);
         try std.testing.expectEqualStrings("", result.stderr);
     }
+
+    // 8. Script and eval entrypoints use ordinary sloppy-mode assignment semantics.
+    {
+        const result = try std.process.run(allocator, std.testing.io, .{
+            .argv = &[_][]const u8{ zjs_path, "-e", "cliSloppyGlobal = 1; console.log(cliSloppyGlobal, globalThis.cliSloppyGlobal);" },
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+
+        const exit_code = switch (result.term) {
+            .exited => |code| code,
+            else => 255,
+        };
+        try std.testing.expectEqual(@as(u8, 0), exit_code);
+        try std.testing.expectEqualStrings("1 1\n", result.stdout);
+        try std.testing.expectEqualStrings("", result.stderr);
+    }
+
+    {
+        const root_dir = ".zig-cache/smoke-cli-sloppy-file";
+        const temp_filename = root_dir ++ "/sloppy_assignment.js";
+
+        std.Io.Dir.cwd().deleteTree(std.testing.io, root_dir) catch {};
+        defer std.Io.Dir.cwd().deleteTree(std.testing.io, root_dir) catch {};
+        try std.Io.Dir.cwd().createDirPath(std.testing.io, root_dir);
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+            .sub_path = temp_filename,
+            .data = "fileSloppyGlobal = 2; console.log(fileSloppyGlobal, globalThis.fileSloppyGlobal);",
+        });
+
+        const result = try std.process.run(allocator, std.testing.io, .{
+            .argv = &[_][]const u8{ zjs_path, temp_filename },
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+
+        const exit_code = switch (result.term) {
+            .exited => |code| code,
+            else => 255,
+        };
+        try std.testing.expectEqual(@as(u8, 0), exit_code);
+        try std.testing.expectEqualStrings("2 2\n", result.stdout);
+        try std.testing.expectEqualStrings("", result.stderr);
+    }
 }
 
 test "prepared method calls capture callee before argument side effects" {

@@ -3,7 +3,7 @@ const bytecode = @import("../bytecode/root.zig");
 const core = @import("../core/root.zig");
 const value_ops = @import("value_ops.zig");
 
-fn objectFromValue(value: core.JSValue) ?*core.Object {
+inline fn objectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
     return @fieldParentPtr("header", header);
@@ -65,49 +65,36 @@ const DataSlot = struct {
     value: *core.JSValue,
 };
 
-fn cachedOwnDataPropertyValue(
+pub inline fn dataPropertyValueForFastPath(
     function: *const bytecode.Bytecode,
     site_pc: usize,
     rt: *core.JSRuntime,
     receiver: core.JSValue,
     atom_id: core.Atom,
 ) ?core.JSValue {
-    const object = cacheableOwnDataReceiver(rt, receiver, atom_id) orelse return null;
-    const lookup = cachedOwnDataPropertyLookupForObject(function, site_pc, rt, object, atom_id) orelse return null;
-    return lookup.value;
-}
+    const object = objectFromValue(receiver) orelse return null;
+    if (!cacheableNamedDataObject(rt, object, atom_id)) return null;
 
-fn cachedProtoDataPropertyValue(
-    function: *const bytecode.Bytecode,
-    site_pc: usize,
-    rt: *core.JSRuntime,
-    receiver: core.JSValue,
-    atom_id: core.Atom,
-) ?core.JSValue {
-    const object = cacheableOwnDataReceiver(rt, receiver, atom_id) orelse return null;
-    const lookup = cachedProtoDataPropertyLookupForObject(function, site_pc, rt, object, atom_id) orelse return null;
-    return lookup.value;
-}
+    if (rt.opcode_profile == null) {
+        if (cachedOwnDataPropertyValueForObjectNoProfile(function, site_pc, object, atom_id)) |value| return value;
+        if (cachedProtoDataPropertyValueForObjectNoProfile(function, site_pc, object, atom_id)) |value| return value;
+    } else {
+        if (cachedOwnDataPropertyLookupForObject(function, site_pc, rt, object, atom_id)) |lookup| return lookup.value;
+        if (cachedProtoDataPropertyLookupForObject(function, site_pc, rt, object, atom_id)) |lookup| return lookup.value;
+    }
 
-pub fn dataPropertyValueForFastPath(
-    function: *const bytecode.Bytecode,
-    site_pc: usize,
-    rt: *core.JSRuntime,
-    receiver: core.JSValue,
-    atom_id: core.Atom,
-) ?core.JSValue {
-    if (cachedOwnDataPropertyValue(function, site_pc, rt, receiver, atom_id)) |value| return value;
-    if (cachedProtoDataPropertyValue(function, site_pc, rt, receiver, atom_id)) |value| return value;
-    switch (fastOwnOrdinaryDataPropertyLookup(rt, receiver, atom_id)) {
+    if (rt.atoms.kind(atom_id) == .private) return null;
+
+    switch (fastOwnOrdinaryDataPropertyLookupForObject(object, atom_id)) {
         .value => |lookup| {
-            installOwnDataIc(function, site_pc, rt, receiver, atom_id, lookup.index);
+            installOwnDataIcForObject(function, site_pc, rt, object, atom_id, lookup.index);
             return lookup.value;
         },
         .missing, .slow => {},
     }
-    switch (fastImmediatePrototypeDataPropertyLookup(rt, receiver, atom_id)) {
+    switch (fastImmediatePrototypeDataPropertyLookupForObject(rt, object, atom_id)) {
         .value => |lookup| {
-            installProtoDataIc(function, site_pc, rt, receiver, atom_id, lookup.holder, lookup.index);
+            installProtoDataIcForObject(function, site_pc, rt, object, lookup.holder, atom_id, lookup.index);
             return lookup.value;
         },
         .missing, .slow => {},
@@ -214,16 +201,15 @@ fn installOwnDataIcAfterWrite(
     }
 }
 
-fn installProtoDataIc(
+fn installProtoDataIcForObject(
     function: *const bytecode.Bytecode,
     site_pc: usize,
     rt: *core.JSRuntime,
-    receiver: core.JSValue,
-    atom_id: core.Atom,
+    object: *core.Object,
     holder: *core.Object,
+    atom_id: core.Atom,
     index: usize,
 ) void {
-    const object = cacheableOwnDataReceiver(rt, receiver, atom_id) orelse return;
     if (!cacheableNamedDataObject(rt, holder, atom_id)) return;
     const slot = icSlot(function, site_pc) orelse return;
     recordOwnDataIcInstall(rt, slot.installProtoData(&rt.shapes, object, holder, atom_id, index));
@@ -312,6 +298,31 @@ fn cachedOwnDataPropertyLookupForObjectNoProfile(
     return .{ .index = index, .value = value };
 }
 
+inline fn cachedOwnDataPropertyValueForObjectNoProfile(
+    function: *const bytecode.Bytecode,
+    site_pc: usize,
+    object: *core.Object,
+    atom_id: core.Atom,
+) ?core.JSValue {
+    const slot = icSlot(function, site_pc) orelse return null;
+    if (slot.state == .mono) {
+        const entry = slot.entries[0];
+        if (entry.holder_shape_ref == null and
+            entry.shape_ref == object.shape_ref and
+            entry.atom_id == atom_id and
+            entry.version == object.shape_ref.version)
+        {
+            return trustedDataPropertyBorrowedAt(object, entry.slot_index);
+        }
+        return null;
+    }
+    const index = switch (slot.lookupOwnDataResult(object, atom_id)) {
+        .hit => |index| index,
+        .miss, .invalidated => return null,
+    };
+    return trustedDataPropertyBorrowedAt(object, index);
+}
+
 fn cachedProtoDataPropertyLookupForObject(
     function: *const bytecode.Bytecode,
     site_pc: usize,
@@ -337,6 +348,29 @@ fn cachedProtoDataPropertyLookupForObject(
     };
     recordOwnDataIcHit(rt);
     return .{ .holder = hit.holder, .index = hit.slot_index, .value = value };
+}
+
+inline fn cachedProtoDataPropertyValueForObjectNoProfile(
+    function: *const bytecode.Bytecode,
+    site_pc: usize,
+    object: *core.Object,
+    atom_id: core.Atom,
+) ?core.JSValue {
+    const slot = icSlot(function, site_pc) orelse return null;
+    if (slot.state == .mono) {
+        const entry = slot.entries[0];
+        if (entry.shape_ref != object.shape_ref or entry.atom_id != atom_id) return null;
+        if (entry.version != object.shape_ref.version) return null;
+        const holder_shape = entry.holder_shape_ref orelse return null;
+        const holder = object.getPrototype() orelse return null;
+        if (holder.shape_ref != holder_shape or entry.holder_version != holder.shape_ref.version) return null;
+        return trustedDataPropertyBorrowedAt(holder, entry.slot_index);
+    }
+    const hit = switch (slot.lookupProtoDataResult(object, atom_id)) {
+        .hit => |hit| hit,
+        .miss, .invalidated => return null,
+    };
+    return trustedDataPropertyBorrowedAt(hit.holder, hit.slot_index);
 }
 
 fn installOwnDataIcForObject(
@@ -378,7 +412,7 @@ fn recordOwnDataIcInstall(rt: *core.JSRuntime, result: bytecode.ic.InstallResult
     }
 }
 
-fn icSlot(function: *const bytecode.Bytecode, site_pc: usize) ?*bytecode.ic.Slot {
+inline fn icSlot(function: *const bytecode.Bytecode, site_pc: usize) ?*bytecode.ic.Slot {
     return function.icSlotForPc(site_pc);
 }
 
@@ -389,8 +423,15 @@ fn cacheableOwnDataReceiver(rt: *core.JSRuntime, value: core.JSValue, atom_id: c
     return object;
 }
 
-fn cacheableNamedDataObject(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) bool {
-    if (object.proxyTarget() != null or object.exotic != null) return false;
+inline fn cacheableNamedDataObject(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) bool {
+    if (object.class_id == core.class.ids.object and
+        !object.flags.is_array and
+        !object.flags.is_global and
+        !object.flags.is_proxy)
+    {
+        return object.exotic == null;
+    }
+    if (object.flags.is_proxy or object.exotic != null) return false;
     if (object.flags.is_array) {
         if (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
     } else if (object.class_id != core.class.ids.object and !object.flags.is_global and object.class_id < core.class.ids.init_count) return false;
@@ -402,8 +443,7 @@ fn fastOwnOrdinaryDataPropertyLookup(rt: *core.JSRuntime, value: core.JSValue, a
     return fastOwnOrdinaryDataPropertyLookupForObject(object, atom_id);
 }
 
-fn fastImmediatePrototypeDataPropertyLookup(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) FastProtoDataLookup {
-    const object = cacheableOwnDataReceiver(rt, value, atom_id) orelse return .slow;
+fn fastImmediatePrototypeDataPropertyLookupForObject(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) FastProtoDataLookup {
     switch (fastOwnOrdinaryDataPropertyLookupForObject(object, atom_id)) {
         .value, .slow => return .slow,
         .missing => {},
@@ -418,17 +458,13 @@ fn fastImmediatePrototypeDataPropertyLookup(rt: *core.JSRuntime, value: core.JSV
 }
 
 fn fastOwnOrdinaryDataPropertyLookupForObject(object: *core.Object, atom_id: core.Atom) FastOwnDataLookup {
-    for (object.shapeProps(), 0..) |prop, index| {
-        const prop_flags = core.property.Flags.fromBits(prop.flags);
-        if (prop_flags.deleted or prop.atom_id != atom_id) continue;
-        if (prop_flags.accessor) return .slow;
-        return switch (object.properties[index].slot) {
-            .data => |stored| .{ .value = .{ .index = index, .value = stored } },
-            .auto_init, .accessor => .slow,
-            .deleted => .missing,
-        };
-    }
-    return .missing;
+    const index = object.findProperty(atom_id) orelse return .missing;
+    if (object.propFlagsAt(index).accessor) return .slow;
+    return switch (object.properties[index].slot) {
+        .data => |stored| .{ .value = .{ .index = index, .value = stored } },
+        .auto_init, .accessor => .slow,
+        .deleted => .missing,
+    };
 }
 
 fn ownDataPropertyLookupForFastPath(object: *core.Object, atom_id: core.Atom) ?BorrowedOwnDataLookup {
@@ -522,17 +558,13 @@ fn setOwnDataPropertyAt(rt: *core.JSRuntime, object: *core.Object, index: usize,
 }
 
 fn fastOwnOrdinaryDataPropertyBorrowedValue(object: *core.Object, atom_id: core.Atom) FastOwnDataResult {
-    for (object.shapeProps(), 0..) |prop, index| {
-        const prop_flags = core.property.Flags.fromBits(prop.flags);
-        if (prop_flags.deleted or prop.atom_id != atom_id) continue;
-        if (prop_flags.accessor) return .slow;
-        return switch (object.properties[index].slot) {
-            .data => |stored| .{ .value = stored },
-            .auto_init, .accessor => .slow,
-            .deleted => .missing,
-        };
-    }
-    return .missing;
+    const index = object.findProperty(atom_id) orelse return .missing;
+    if (object.propFlagsAt(index).accessor) return .slow;
+    return switch (object.properties[index].slot) {
+        .data => |stored| .{ .value = stored },
+        .auto_init, .accessor => .slow,
+        .deleted => .missing,
+    };
 }
 
 fn ordinaryDataPropertyLookup(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) OrdinaryDataPropertyLookup {
@@ -819,6 +851,14 @@ fn dataSlotAt(object: *core.Object, index: usize, atom_id: core.Atom) ?DataSlot 
     const entry = &object.properties[index];
     return switch (entry.slot) {
         .data => |*stored| .{ .entry = entry, .value = stored },
+        .auto_init, .accessor, .deleted => null,
+    };
+}
+
+inline fn trustedDataPropertyBorrowedAt(object: *core.Object, index: usize) ?core.JSValue {
+    if (index >= object.properties.len) return null;
+    return switch (object.properties[index].slot) {
+        .data => |stored| stored,
         .auto_init, .accessor, .deleted => null,
     };
 }

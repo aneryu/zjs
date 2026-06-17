@@ -494,8 +494,9 @@ fn callValueOrBytecodeClassModeDispatch(
         if (allow_class_constructor_call and !fb.is_class_constructor) {
             if (fb.is_arrow_function or !fb.has_prototype or fb.func_kind == .generator or fb.func_kind == .async_generator) return error.TypeError;
             const result = try callFunctionBytecodeConstruct(ctx, func, func, this_value, args, &.{}, output, global, &.{}, &.{}, class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
-            defer result.free(ctx.runtime);
-            return if (result.isObject()) result.dup() else this_value.dup();
+            if (result.isObject()) return result;
+            result.free(ctx.runtime);
+            return this_value.dup();
         }
         if (fb.is_class_constructor) {
             if (!allow_class_constructor_call) return error.TypeError;
@@ -519,8 +520,9 @@ fn callValueOrBytecodeClassModeDispatch(
             if (fb.is_arrow_function or !fb.has_prototype or fb.func_kind == .generator or fb.func_kind == .async_generator) return error.TypeError;
             const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
             const result = try callFunctionBytecodeConstruct(ctx, function_value, func, this_value, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNamesSlot().*, function_object.functionEvalLocalRefsSlot().*, class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
-            defer result.free(ctx.runtime);
-            return if (result.isObject()) result.dup() else this_value.dup();
+            if (result.isObject()) return result;
+            result.free(ctx.runtime);
+            return this_value.dup();
         }
         if (fb.is_class_constructor) {
             if (!allow_class_constructor_call) return throwFunctionRealmTypeErrorMessage(ctx, global, function_object, "class constructors must be invoked with 'new'");
@@ -538,10 +540,9 @@ fn callValueOrBytecodeClassModeDispatch(
         }
         const effective_this = function_object.functionLexicalThisSlot().* orelse this_value;
         const effective_new_target = if (fb.is_arrow_function) blk: {
-            if (function_object.functionArrowNewTarget()) |new_target| break :blk new_target.dup();
+            if (function_object.functionArrowNewTarget()) |new_target| break :blk new_target;
             break :blk core.JSValue.undefinedValue();
         } else core.JSValue.undefinedValue();
-        defer effective_new_target.free(ctx.runtime);
         const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
         return callFunctionBytecodeModeState(ctx, function_value, func, effective_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNamesSlot().*, function_object.functionEvalLocalRefsSlot().*, true, null, null, null, effective_new_target, core.JSValue.undefinedValue());
     }
@@ -1704,11 +1705,11 @@ pub fn constructValueOrBytecodeWithNewTarget(
         const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
         const constructor_this = if (fb.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
         const result = try callFunctionBytecodeConstruct(ctx, func, func, initial_this, args, &.{}, output, global, &.{}, &.{}, new_target, constructor_this);
-        defer result.free(ctx.runtime);
         if (result.isObject()) {
             instance.free(ctx.runtime);
-            return result.dup();
+            return result;
         }
+        result.free(ctx.runtime);
         return instance;
     }
     if (object_ops.functionObjectFromValue(func)) |function_object| {
@@ -1719,7 +1720,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
             // This is the VM alignment fix for the "not a constructor" bug in top-level class decl in plain .js scripts
             // (the functionObjectFromValue path was not recognizing is_class_constructor and taking the ordinary path,
             // which rejected class ctors or used wrong initial_this for derived/fields init).
-            const instance = try createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
+            const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
             errdefer instance.free(ctx.runtime);
             if (!fb.is_derived_class_constructor) {
                 try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, instance, fb, caller_function, caller_frame);
@@ -1728,15 +1729,16 @@ pub fn constructValueOrBytecodeWithNewTarget(
             const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
             const constructor_this = if (fb.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
             const result = try callFunctionBytecodeConstruct(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNamesSlot().*, function_object.functionEvalLocalRefsSlot().*, new_target, constructor_this);
-            defer result.free(ctx.runtime);
             if (result.isObject()) {
                 instance.free(ctx.runtime);
-                return result.dup();
+                return result;
             }
+            result.free(ctx.runtime);
             return instance;
         }
         if (fb.is_arrow_function or !fb.has_prototype or fb.func_kind == .generator or fb.func_kind == .async_generator) return error.TypeError;
-        const instance = try createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
+        if (try constructSimpleFieldConstructor(ctx, func, function_object, fb, args, new_target)) |constructed| return constructed;
+        const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
         errdefer instance.free(ctx.runtime);
         if (!fb.is_derived_class_constructor) {
             try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, instance, fb, caller_function, caller_frame);
@@ -1745,11 +1747,11 @@ pub fn constructValueOrBytecodeWithNewTarget(
         const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
         const constructor_this = if (fb.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
         const result = try callFunctionBytecodeConstruct(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNamesSlot().*, function_object.functionEvalLocalRefsSlot().*, new_target, constructor_this);
-        defer result.free(ctx.runtime);
         if (result.isObject()) {
             instance.free(ctx.runtime);
-            return result.dup();
+            return result;
         }
+        result.free(ctx.runtime);
         return instance;
     }
     if (object_ops.objectFromValue(func)) |object| {
@@ -1776,12 +1778,12 @@ fn constructExternalHostFunction(
     errdefer if (instance_owned) instance.free(ctx.runtime);
 
     const result = (try call_mod.callHostFunctionObjectForVm(ctx, output, global, function_object, instance, args)) orelse return error.TypeError;
-    defer result.free(ctx.runtime);
     if (result.isObject()) {
         instance.free(ctx.runtime);
         instance_owned = false;
-        return result.dup();
+        return result;
     }
+    result.free(ctx.runtime);
     instance_owned = false;
     return instance;
 }
@@ -1935,6 +1937,181 @@ pub fn createConstructorInstance(
     const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &instance.header);
     return instance.value();
+}
+
+fn createBytecodeConstructorInstance(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    func: core.JSValue,
+    function_object: *core.Object,
+    new_target: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    if (new_target.sameValue(func)) {
+        if (function_object.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| {
+            const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
+            errdefer core.Object.destroyFromHeader(ctx.runtime, &instance.header);
+            return instance.value();
+        }
+    }
+    return createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
+}
+
+const max_simple_constructor_fields = 8;
+
+const SimpleFieldConstructorPattern = struct {
+    atoms: [max_simple_constructor_fields]core.Atom = undefined,
+    arg_indices: [max_simple_constructor_fields]u16 = undefined,
+    len: usize = 0,
+};
+
+fn constructSimpleFieldConstructor(
+    ctx: *core.JSContext,
+    func: core.JSValue,
+    function_object: *core.Object,
+    fb: *const bytecode.FunctionBytecode,
+    args: []const core.JSValue,
+    new_target: core.JSValue,
+) !?core.JSValue {
+    if (!new_target.sameValue(func)) return null;
+    const pattern = simpleFieldConstructorPattern(fb) orelse return null;
+    const prototype = function_object.getOwnDataObjectBorrowed(core.atom.ids.prototype) orelse return null;
+    if (prototypeChainBlocksSimpleFieldStore(prototype, pattern)) return null;
+
+    const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
+    errdefer core.Object.destroyFromHeader(ctx.runtime, &instance.header);
+    for (pattern.atoms[0..pattern.len], pattern.arg_indices[0..pattern.len]) |atom_id, arg_index| {
+        const value = if (arg_index < args.len) args[arg_index] else core.JSValue.undefinedValue();
+        try instance.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, core.Descriptor.data(value, true, true, true));
+    }
+    return instance.value();
+}
+
+fn simpleFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleFieldConstructorPattern {
+    if (fb.is_class_constructor or fb.is_derived_class_constructor) return null;
+    if (fb.is_arrow_function or fb.func_kind != .normal or !fb.has_prototype) return null;
+    if (fb.var_count > 1 or fb.var_ref_count != 0 or fb.cpool_count != 0) return null;
+    if (fb.class_instance_fields.len != 0 or fb.class_private_names.len != 0 or fb.private_bound_names.len != 0) return null;
+    if (fb.super_call_allowed or fb.super_allowed or fb.arguments_allowed or fb.is_indirect_eval) return null;
+
+    return simpleLocalThisFieldConstructorPattern(fb) orelse simpleStackThisFieldConstructorPattern(fb);
+}
+
+fn simpleLocalThisFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleFieldConstructorPattern {
+    const code = fb.byte_code;
+    var pc: usize = 0;
+    var pattern = SimpleFieldConstructorPattern{};
+    if (pc >= code.len or code[pc] != op.push_this) return null;
+    pc += 1;
+    const this_local = decodeSimpleConstructorPutLoc(code, &pc) orelse return null;
+    while (pc < code.len) {
+        if (code[pc] == op.return_undef) {
+            pc += 1;
+            return if (pc == code.len and pattern.len != 0) pattern else null;
+        }
+        if (pattern.len == max_simple_constructor_fields) return null;
+        const local_index = decodeSimpleConstructorGetLoc(code, &pc) orelse return null;
+        if (local_index != this_local) return null;
+        tryAppendSimpleConstructorField(code, &pc, &pattern) orelse return null;
+    }
+    return null;
+}
+
+fn simpleStackThisFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleFieldConstructorPattern {
+    const code = fb.byte_code;
+    var pc: usize = 0;
+    var pattern = SimpleFieldConstructorPattern{};
+    if (pc >= code.len or code[pc] != op.push_this) return null;
+    pc += 1;
+    while (pc < code.len) {
+        if (code[pc] == op.return_undef) {
+            pc += 1;
+            return if (pc == code.len and pattern.len != 0) pattern else null;
+        }
+        if (pattern.len == max_simple_constructor_fields) return null;
+        const keeps_this_for_next_field = if (code[pc] == op.dup) blk: {
+            pc += 1;
+            break :blk true;
+        } else false;
+        tryAppendSimpleConstructorField(code, &pc, &pattern) orelse return null;
+        if (pc < code.len and code[pc] != op.return_undef and !keeps_this_for_next_field) return null;
+    }
+    return null;
+}
+
+fn tryAppendSimpleConstructorField(code: []const u8, pc: *usize, pattern: *SimpleFieldConstructorPattern) ?void {
+    const arg_index = decodeSimpleConstructorArgGet(code, pc) orelse return null;
+    if (pc.* + 5 > code.len or code[pc.*] != op.put_field) return null;
+    const atom_id = readInt(u32, code[pc.* + 1 ..][0..4]);
+    pc.* += 5;
+    for (pattern.atoms[0..pattern.len]) |existing| {
+        if (existing == atom_id) return null;
+    }
+    pattern.atoms[pattern.len] = atom_id;
+    pattern.arg_indices[pattern.len] = arg_index;
+    pattern.len += 1;
+}
+
+fn decodeSimpleConstructorPutLoc(code: []const u8, pc: *usize) ?u16 {
+    if (pc.* >= code.len) return null;
+    const opcode_id = code[pc.*];
+    pc.* += 1;
+    if (opcode_id >= op.put_loc0 and opcode_id <= op.put_loc3) {
+        return @intCast(opcode_id - op.put_loc0);
+    }
+    if (opcode_id == op.put_loc) {
+        if (pc.* + 2 > code.len) return null;
+        const index = readInt(u16, code[pc.*..][0..2]);
+        pc.* += 2;
+        return index;
+    }
+    return null;
+}
+
+fn decodeSimpleConstructorGetLoc(code: []const u8, pc: *usize) ?u16 {
+    if (pc.* >= code.len) return null;
+    const opcode_id = code[pc.*];
+    pc.* += 1;
+    if (opcode_id >= op.get_loc0 and opcode_id <= op.get_loc3) {
+        return @intCast(opcode_id - op.get_loc0);
+    }
+    if (opcode_id == op.get_loc) {
+        if (pc.* + 2 > code.len) return null;
+        const index = readInt(u16, code[pc.*..][0..2]);
+        pc.* += 2;
+        return index;
+    }
+    return null;
+}
+
+fn decodeSimpleConstructorArgGet(code: []const u8, pc: *usize) ?u16 {
+    if (pc.* >= code.len) return null;
+    const opcode_id = code[pc.*];
+    pc.* += 1;
+    if (opcode_id >= op.get_arg0 and opcode_id <= op.get_arg3) {
+        return @intCast(opcode_id - op.get_arg0);
+    }
+    if (opcode_id == op.get_arg) {
+        if (pc.* + 2 > code.len) return null;
+        const index = readInt(u16, code[pc.*..][0..2]);
+        pc.* += 2;
+        return index;
+    }
+    return null;
+}
+
+fn prototypeChainBlocksSimpleFieldStore(prototype: *core.Object, pattern: SimpleFieldConstructorPattern) bool {
+    var current: ?*core.Object = prototype;
+    while (current) |object| {
+        if (object.exotic != null or object.proxyTarget() != null) return true;
+        for (pattern.atoms[0..pattern.len]) |atom_id| {
+            if (object.hasOwnProperty(atom_id)) return true;
+        }
+        current = object.prototype;
+    }
+    return false;
 }
 
 pub fn constructFunctionFromSource(
@@ -6636,11 +6813,11 @@ pub fn qjsReflectConstructGenericCallable(
         const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
         const constructor_this = if (fb.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
         const result = try callFunctionBytecodeConstruct(ctx, resolved.target, resolved.target, initial_this, resolved_args, &.{}, output, global, &.{}, &.{}, resolved.new_target, constructor_this);
-        defer result.free(ctx.runtime);
         if (result.isObject()) {
             instance.free(ctx.runtime);
-            return result.dup();
+            return result;
         }
+        result.free(ctx.runtime);
         return instance;
     }
 
@@ -6660,11 +6837,11 @@ pub fn qjsReflectConstructGenericCallable(
         const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
         const constructor_this = if (fb.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
         const result = try callFunctionBytecodeConstruct(ctx, function_value, resolved.target, initial_this, resolved_args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNamesSlot().*, function_object.functionEvalLocalRefsSlot().*, resolved.new_target, constructor_this);
-        defer result.free(ctx.runtime);
         if (result.isObject()) {
             instance.free(ctx.runtime);
-            return result.dup();
+            return result;
         }
+        result.free(ctx.runtime);
         return instance;
     }
 

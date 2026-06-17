@@ -1530,6 +1530,13 @@ pub const Range = struct {
     end: usize,
 };
 
+pub const TypeScriptUnsupportedSyntax = struct {
+    message: []const u8,
+    offset: usize,
+    line: u32,
+    column: u32,
+};
+
 pub const SourceKind = enum {
     auto,
     javascript,
@@ -1582,6 +1589,7 @@ fn markTypeRanges(self: *Lexer) !void {
     try markMixedTypeSpecifiers(self.allocator, self.source, tokens.items, &ranges);
     try markClassAndTypeModifiers(self.allocator, self.source, tokens.items, &ranges);
     try markImplementsClauses(self.allocator, self.source, tokens.items, &ranges);
+    try markFunctionOverloadSignatures(self.allocator, self.source, tokens.items, &ranges);
     try markTypeParameters(self.allocator, self.source, tokens.items, &ranges);
     try markTypeAnnotations(self.allocator, self.source, tokens.items, &ranges);
     try markTypeAssertions(self.allocator, self.source, tokens.items, &ranges);
@@ -1596,6 +1604,80 @@ fn markTypeRanges(self: *Lexer) !void {
             self.skipped_intervals.items[self.skipped_intervals.items.len - 1].end = range.end;
         }
     }
+}
+
+pub fn findUnsupportedTypeScriptSyntax(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+) !?TypeScriptUnsupportedSyntax {
+    var tokens = std.ArrayList(TSToken).empty;
+    defer tokens.deinit(allocator);
+    try tsTokenize(allocator, src, &tokens);
+
+    for (tokens.items, 0..) |token, i| {
+        const txt = token.text(src);
+        if (textEql(txt, "@")) {
+            return unsupportedSyntaxAt(
+                src,
+                token.start,
+                "TS decorators are not supported by fun's type-strip; remove the decorator or refactor",
+            );
+        }
+        if (textEql(txt, "import")) {
+            if (tokenTextEql(src, tokens.items, i + 1, "=")) {
+                return unsupportedSyntaxAt(
+                    src,
+                    tokens.items[i + 1].start,
+                    "TS import=/export= (CommonJS-style) is not supported; use ESM import/export",
+                );
+            }
+            if (i + 2 < tokens.items.len and
+                tokens.items[i + 1].kind == .identifier and
+                tokenTextEql(src, tokens.items, i + 2, "="))
+            {
+                return unsupportedSyntaxAt(
+                    src,
+                    tokens.items[i + 2].start,
+                    "TS import=/export= (CommonJS-style) is not supported; use ESM import/export",
+                );
+            }
+        }
+        if (textEql(txt, "export") and tokenTextEql(src, tokens.items, i + 1, "=")) {
+            return unsupportedSyntaxAt(
+                src,
+                tokens.items[i + 1].start,
+                "TS import=/export= (CommonJS-style) is not supported; use ESM import/export",
+            );
+        }
+    }
+
+    return null;
+}
+
+fn unsupportedSyntaxAt(src: []const u8, offset: usize, message: []const u8) TypeScriptUnsupportedSyntax {
+    var line: u32 = 1;
+    var column: u32 = 1;
+    var i: usize = 0;
+    while (i < offset and i < src.len) : (i += 1) {
+        if (src[i] == '\n') {
+            line += 1;
+            column = 1;
+        } else if (src[i] == '\r') {
+            if (i + 1 < offset and i + 1 < src.len and src[i + 1] == '\n') {
+                i += 1;
+            }
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    return .{
+        .message = message,
+        .offset = @min(offset, src.len),
+        .line = line,
+        .column = column,
+    };
 }
 
 fn tsTokenize(allocator: std.mem.Allocator, src: []const u8, tokens: *std.ArrayList(TSToken)) !void {
@@ -2030,6 +2112,249 @@ fn markImplementsClauses(
     }
 }
 
+fn markFunctionOverloadSignatures(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    tokens: []const TSToken,
+    ranges: *std.ArrayList(Range),
+) !void {
+    var i: usize = 0;
+    while (i < tokens.len) : (i += 1) {
+        if (!tokenTextEql(src, tokens, i, "function")) continue;
+
+        var range_start_idx = i;
+        if (i >= 1 and tokenTextEql(src, tokens, i - 1, "async") and !hasLineBreakBetween(src, tokens[i - 1].end, tokens[i].start)) {
+            range_start_idx = i - 1;
+        }
+        if (range_start_idx >= 1 and tokenTextEql(src, tokens, range_start_idx - 1, "default")) {
+            range_start_idx -= 1;
+        }
+        if (range_start_idx >= 1 and tokenTextEql(src, tokens, range_start_idx - 1, "export")) {
+            range_start_idx -= 1;
+        }
+
+        var j = i + 1;
+        if (tokenTextEql(src, tokens, j, "*")) j += 1;
+        if (j >= tokens.len or tokens[j].kind != .identifier) continue;
+        j += 1;
+
+        if (tokenTextEql(src, tokens, j, "<")) {
+            const type_params = findTypeAngleEnd(src, tokens, j) orelse continue;
+            j = type_params.index + 1;
+        }
+
+        if (!tokenTextEql(src, tokens, j, "(")) continue;
+        const close_idx = findMatchingForward(src, tokens, j, "(", ")") orelse continue;
+        j = close_idx + 1;
+
+        const semi_idx = if (tokenTextEql(src, tokens, j, ":")) blk: {
+            const ret_end = findTypeEnd(src, tokens, j + 1, false) orelse continue;
+            if (!tokenTextEql(src, tokens, ret_end.index, ";")) continue;
+            break :blk ret_end.index;
+        } else blk: {
+            if (!tokenTextEql(src, tokens, j, ";")) continue;
+            break :blk j;
+        };
+
+        try addRange(ranges, allocator, tokens[range_start_idx].start, tokens[semi_idx].end);
+        i = semi_idx;
+    }
+
+    try markClassMethodOverloadSignatures(allocator, src, tokens, ranges);
+}
+
+const ClassMethodSignature = struct {
+    start_idx: usize,
+    name_idx: usize,
+    end_idx: usize,
+    has_body: bool,
+};
+
+fn markClassMethodOverloadSignatures(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    tokens: []const TSToken,
+    ranges: *std.ArrayList(Range),
+) !void {
+    var i: usize = 0;
+    while (i < tokens.len) : (i += 1) {
+        if (!tokenTextEql(src, tokens, i, "class")) continue;
+
+        const open_idx = findClassBodyOpen(src, tokens, i) orelse continue;
+        const close_idx = findMatchingForward(src, tokens, open_idx, "{", "}") orelse continue;
+
+        var member_idx = open_idx + 1;
+        while (member_idx < close_idx) {
+            member_idx = skipClassMemberSeparators(src, tokens, member_idx, close_idx);
+            if (member_idx >= close_idx) break;
+
+            const sig = parseClassMethodSignature(src, tokens, member_idx, close_idx) orelse {
+                member_idx = nextClassMemberStart(src, tokens, member_idx, close_idx);
+                continue;
+            };
+
+            if (!sig.has_body and hasFollowingClassMethodImplementation(src, tokens, sig.name_idx, sig.end_idx + 1, close_idx)) {
+                try addRange(ranges, allocator, tokens[sig.start_idx].start, tokens[sig.end_idx].end);
+            }
+            member_idx = sig.end_idx + 1;
+        }
+
+        i = close_idx;
+    }
+}
+
+fn findClassBodyOpen(src: []const u8, tokens: []const TSToken, class_idx: usize) ?usize {
+    var angle: usize = 0;
+    var paren: usize = 0;
+    var bracket: usize = 0;
+    var brace: usize = 0;
+
+    var i = class_idx + 1;
+    while (i < tokens.len) : (i += 1) {
+        const txt = tokens[i].text(src);
+        if (textEql(txt, "<")) {
+            angle += 1;
+        } else if (startsWithGreater(txt) and angle > 0) {
+            _ = consumeTypeAngleClosers(txt, tokens[i].start, &angle);
+        } else if (textEql(txt, "(")) {
+            paren += 1;
+        } else if (textEql(txt, ")")) {
+            if (paren == 0) return null;
+            paren -= 1;
+        } else if (textEql(txt, "[")) {
+            bracket += 1;
+        } else if (textEql(txt, "]")) {
+            if (bracket == 0) return null;
+            bracket -= 1;
+        } else if (textEql(txt, "{")) {
+            if (angle == 0 and paren == 0 and bracket == 0 and brace == 0) return i;
+            brace += 1;
+        } else if (textEql(txt, "}")) {
+            if (brace == 0) return null;
+            brace -= 1;
+        } else if (angle == 0 and paren == 0 and bracket == 0 and brace == 0 and textEql(txt, ";")) {
+            return null;
+        }
+    }
+    return null;
+}
+
+fn skipClassMemberSeparators(src: []const u8, tokens: []const TSToken, start_idx: usize, class_close_idx: usize) usize {
+    var i = start_idx;
+    while (i < class_close_idx and tokenTextEql(src, tokens, i, ";")) : (i += 1) {}
+    return i;
+}
+
+fn parseClassMethodSignature(src: []const u8, tokens: []const TSToken, member_start: usize, class_close_idx: usize) ?ClassMethodSignature {
+    var i = member_start;
+    while (i < class_close_idx and isClassMethodModifierAt(src, tokens, i)) : (i += 1) {}
+    if (i >= class_close_idx) return null;
+
+    if (tokenTextEql(src, tokens, i, "*")) i += 1;
+    if (i >= class_close_idx or tokens[i].kind != .identifier) return null;
+
+    const name_idx = i;
+    i += 1;
+
+    if (tokenTextEql(src, tokens, i, "<")) {
+        const type_params = findTypeAngleEnd(src, tokens, i) orelse return null;
+        i = type_params.index + 1;
+    }
+
+    if (!tokenTextEql(src, tokens, i, "(")) return null;
+    const close_params_idx = findMatchingForward(src, tokens, i, "(", ")") orelse return null;
+    if (close_params_idx >= class_close_idx) return null;
+    i = close_params_idx + 1;
+
+    if (tokenTextEql(src, tokens, i, ":")) {
+        const ret_end = findTypeEnd(src, tokens, i + 1, false) orelse return null;
+        i = ret_end.index;
+    }
+
+    if (tokenTextEql(src, tokens, i, ";")) {
+        return .{
+            .start_idx = member_start,
+            .name_idx = name_idx,
+            .end_idx = i,
+            .has_body = false,
+        };
+    }
+
+    if (tokenTextEql(src, tokens, i, "{")) {
+        const body_close_idx = findMatchingForward(src, tokens, i, "{", "}") orelse return null;
+        if (body_close_idx > class_close_idx) return null;
+        return .{
+            .start_idx = member_start,
+            .name_idx = name_idx,
+            .end_idx = body_close_idx,
+            .has_body = true,
+        };
+    }
+
+    return null;
+}
+
+fn isClassMethodModifierAt(src: []const u8, tokens: []const TSToken, idx: usize) bool {
+    const txt = tokens[idx].text(src);
+    if (isTsModifier(txt)) return true;
+    if (textEql(txt, "static") or textEql(txt, "async")) {
+        return !tokenTextEql(src, tokens, idx + 1, "(");
+    }
+    return false;
+}
+
+fn hasFollowingClassMethodImplementation(src: []const u8, tokens: []const TSToken, name_idx: usize, start_idx: usize, class_close_idx: usize) bool {
+    var i = start_idx;
+    while (i < class_close_idx) {
+        i = skipClassMemberSeparators(src, tokens, i, class_close_idx);
+        if (i >= class_close_idx) return false;
+
+        const sig = parseClassMethodSignature(src, tokens, i, class_close_idx) orelse return false;
+        if (!sameTokenText(src, tokens[name_idx], tokens[sig.name_idx])) return false;
+        if (sig.has_body) return true;
+        i = sig.end_idx + 1;
+    }
+    return false;
+}
+
+fn sameTokenText(src: []const u8, a: TSToken, b: TSToken) bool {
+    return textEql(a.text(src), b.text(src));
+}
+
+fn nextClassMemberStart(src: []const u8, tokens: []const TSToken, start_idx: usize, class_close_idx: usize) usize {
+    var paren: usize = 0;
+    var bracket: usize = 0;
+    var brace: usize = 0;
+
+    var i = start_idx;
+    while (i < class_close_idx) : (i += 1) {
+        const txt = tokens[i].text(src);
+        if (textEql(txt, "(")) {
+            paren += 1;
+        } else if (textEql(txt, ")")) {
+            paren -|= 1;
+        } else if (textEql(txt, "[")) {
+            bracket += 1;
+        } else if (textEql(txt, "]")) {
+            bracket -|= 1;
+        } else if (textEql(txt, "{")) {
+            if (paren == 0 and bracket == 0 and brace == 0) {
+                if (findMatchingForward(src, tokens, i, "{", "}")) |close_idx| {
+                    return @min(close_idx + 1, class_close_idx);
+                }
+                return class_close_idx;
+            }
+            brace += 1;
+        } else if (textEql(txt, "}")) {
+            if (brace == 0) return class_close_idx;
+            brace -= 1;
+        } else if (paren == 0 and bracket == 0 and brace == 0 and textEql(txt, ";")) {
+            return i + 1;
+        }
+    }
+    return class_close_idx;
+}
+
 fn markTypeParameters(
     allocator: std.mem.Allocator,
     src: []const u8,
@@ -2041,8 +2366,8 @@ fn markTypeParameters(
         if (!tokenTextEql(src, tokens, i, "<")) continue;
         if (!looksLikeTypeParameterStart(src, tokens, i)) continue;
         if (findTypeAngleEnd(src, tokens, i)) |end_idx| {
-            try addRange(ranges, allocator, tokens[i].start, tokens[end_idx].end);
-            i = end_idx;
+            try addRange(ranges, allocator, tokens[i].start, end_idx.end);
+            i = end_idx.index;
         }
     }
 }
@@ -2068,9 +2393,9 @@ fn markTypeAnnotations(
         if (!textEql(tok.text(src), ":")) continue;
         if (!isTypeAnnotationColon(src, tokens, i)) continue;
         const stop_arrow = i > 0 and tokenTextEql(src, tokens, i - 1, ")");
-        const end_idx = findTypeEnd(src, tokens, i + 1, stop_arrow) orelse tokens.len;
+        const end_pos = findTypeEnd(src, tokens, i + 1, stop_arrow);
         const start = if (i > 0 and tokenTextEql(src, tokens, i - 1, "?")) tokens[i - 1].start else tok.start;
-        const end = if (end_idx < tokens.len) tokens[end_idx].start else src.len;
+        const end = if (end_pos) |pos| pos.end else src.len;
         if (end > start) try addRange(ranges, allocator, start, end);
     }
 }
@@ -2105,23 +2430,59 @@ fn isTypeAnnotationColon(src: []const u8, tokens: []const TSToken, colon_idx: us
 
 fn isParameterList(src: []const u8, tokens: []const TSToken, open_idx: usize) bool {
     const close_idx = findMatchingForward(src, tokens, open_idx, "(", ")") orelse return false;
-    const before = if (open_idx == 0) "" else tokens[open_idx - 1].text(src);
+    const owner_idx = parameterListOwnerIndex(src, tokens, open_idx) orelse return false;
+    const before = tokens[owner_idx].text(src);
     const after = if (close_idx + 1 < tokens.len) tokens[close_idx + 1].text(src) else "";
     if (isControlKeyword(before)) return false;
     if (textEql(before, "function") or textEql(before, "constructor")) return true;
-    if (open_idx >= 2 and tokens[open_idx - 1].kind == .identifier and tokenTextEql(src, tokens, open_idx - 2, "function")) return true;
-    if (open_idx > 0 and tokens[open_idx - 1].kind == .identifier and (textEql(after, "{") or textEql(after, "=>"))) return true;
-    if (open_idx > 0 and tokens[open_idx - 1].kind == .identifier and textEql(after, ":")) {
+    if (owner_idx >= 1 and tokens[owner_idx].kind == .identifier and tokenTextEql(src, tokens, owner_idx - 1, "function")) return true;
+    if (tokens[owner_idx].kind == .identifier and (textEql(after, "{") or textEql(after, "=>"))) return true;
+    if (tokens[owner_idx].kind == .identifier and textEql(after, ":")) {
         return returnTypeAfterParameterListLeadsToBody(src, tokens, close_idx);
     }
+    if (textEql(after, ":")) return returnTypeAfterParameterListLeadsToBody(src, tokens, close_idx);
     if (textEql(after, "=>")) return true;
     return false;
+}
+
+fn parameterListOwnerIndex(src: []const u8, tokens: []const TSToken, open_idx: usize) ?usize {
+    if (open_idx == 0) return null;
+    var owner_idx = open_idx - 1;
+    if (startsWithGreater(tokens[owner_idx].text(src))) {
+        const type_start = findTypeAngleStartBackward(src, tokens, owner_idx) orelse return null;
+        if (type_start == 0) return null;
+        owner_idx = type_start - 1;
+    }
+    return owner_idx;
+}
+
+fn findTypeAngleStartBackward(src: []const u8, tokens: []const TSToken, gt_idx: usize) ?usize {
+    var depth = leadingGreaterCount(tokens[gt_idx].text(src));
+    if (depth == 0) return null;
+    var i = gt_idx;
+    while (i > 0) {
+        i -= 1;
+        const txt = tokens[i].text(src);
+        if (startsWithGreater(txt)) {
+            depth += leadingGreaterCount(txt);
+        } else if (textEql(txt, "<")) {
+            if (depth == 1) return i;
+            depth -= 1;
+        }
+    }
+    return null;
+}
+
+fn leadingGreaterCount(txt: []const u8) usize {
+    var count: usize = 0;
+    while (count < txt.len and txt[count] == '>') : (count += 1) {}
+    return count;
 }
 
 fn returnTypeAfterParameterListLeadsToBody(src: []const u8, tokens: []const TSToken, close_idx: usize) bool {
     if (!tokenTextEql(src, tokens, close_idx + 1, ":")) return false;
     const end_idx = findTypeEnd(src, tokens, close_idx + 2, true) orelse return false;
-    return tokenTextEql(src, tokens, end_idx, "{") or tokenTextEql(src, tokens, end_idx, "=>");
+    return tokenTextEql(src, tokens, end_idx.index, "{") or tokenTextEql(src, tokens, end_idx.index, "=>");
 }
 
 fn isControlKeyword(txt: []const u8) bool {
@@ -2129,13 +2490,44 @@ fn isControlKeyword(txt: []const u8) bool {
         textEql(txt, "switch") or textEql(txt, "with") or textEql(txt, "catch");
 }
 
+fn isVariableDeclarationKeyword(txt: []const u8) bool {
+    return textEql(txt, "let") or textEql(txt, "const") or textEql(txt, "var");
+}
+
 fn isVariableDeclarationType(src: []const u8, tokens: []const TSToken, colon_idx: usize) bool {
     var stmt_start: usize = 0;
+    var paren: usize = 0;
+    var bracket: usize = 0;
+    var brace: usize = 0;
     var i = colon_idx;
     while (i > 0) {
         i -= 1;
         const txt = tokens[i].text(src);
-        if (textEql(txt, ";") or textEql(txt, "{") or textEql(txt, "}")) {
+        if (textEql(txt, ")")) {
+            paren += 1;
+        } else if (textEql(txt, "]")) {
+            bracket += 1;
+        } else if (textEql(txt, "}")) {
+            brace += 1;
+        } else if (textEql(txt, "(")) {
+            if (paren == 0) {
+                stmt_start = i + 1;
+                break;
+            }
+            paren -= 1;
+        } else if (textEql(txt, "[")) {
+            if (bracket == 0) {
+                stmt_start = i + 1;
+                break;
+            }
+            bracket -= 1;
+        } else if (textEql(txt, "{")) {
+            if (brace == 0) {
+                stmt_start = i + 1;
+                break;
+            }
+            brace -= 1;
+        } else if (paren == 0 and bracket == 0 and brace == 0 and textEql(txt, ";")) {
             stmt_start = i + 1;
             break;
         }
@@ -2143,21 +2535,54 @@ fn isVariableDeclarationType(src: []const u8, tokens: []const TSToken, colon_idx
 
     var saw_decl = false;
     var last_comma_or_decl = stmt_start;
+    paren = 0;
+    bracket = 0;
+    brace = 0;
     i = stmt_start;
     while (i < colon_idx) : (i += 1) {
         const txt = tokens[i].text(src);
-        if (textEql(txt, "let") or textEql(txt, "const") or textEql(txt, "var")) {
+        if (paren == 0 and bracket == 0 and brace == 0 and isVariableDeclarationKeyword(txt)) {
             saw_decl = true;
             last_comma_or_decl = i + 1;
-        } else if (textEql(txt, ",")) {
+        } else if (textEql(txt, "(")) {
+            paren += 1;
+        } else if (textEql(txt, ")")) {
+            paren -|= 1;
+        } else if (textEql(txt, "[")) {
+            bracket += 1;
+        } else if (textEql(txt, "]")) {
+            bracket -|= 1;
+        } else if (textEql(txt, "{")) {
+            brace += 1;
+        } else if (textEql(txt, "}")) {
+            brace -|= 1;
+        } else if (paren == 0 and bracket == 0 and brace == 0 and textEql(txt, ",")) {
             last_comma_or_decl = i + 1;
         }
     }
     if (!saw_decl) return false;
 
+    paren = 0;
+    bracket = 0;
+    brace = 0;
     i = last_comma_or_decl;
     while (i < colon_idx) : (i += 1) {
-        if (tokenTextEql(src, tokens, i, "=")) return false;
+        const txt = tokens[i].text(src);
+        if (textEql(txt, "(")) {
+            paren += 1;
+        } else if (textEql(txt, ")")) {
+            paren -|= 1;
+        } else if (textEql(txt, "[")) {
+            bracket += 1;
+        } else if (textEql(txt, "]")) {
+            bracket -|= 1;
+        } else if (textEql(txt, "{")) {
+            brace += 1;
+        } else if (textEql(txt, "}")) {
+            brace -|= 1;
+        } else if (paren == 0 and bracket == 0 and brace == 0 and textEql(txt, "=")) {
+            return false;
+        }
     }
     return true;
 }
@@ -2190,8 +2615,8 @@ fn markTypeAssertions(
         if (!textEql(txt, "as") and !textEql(txt, "satisfies")) continue;
         if (insideImportOrExportStatement(src, tokens, i)) continue;
         if (!isTypeAssertionOperator(src, tokens, i)) continue;
-        const end_idx = findTypeAssertionEnd(src, tokens, i + 1) orelse tokens.len;
-        const end = if (end_idx < tokens.len) tokens[end_idx].start else src.len;
+        const end_pos = findTypeAssertionEnd(src, tokens, i + 1);
+        const end = if (end_pos) |pos| pos.end else src.len;
         if (end > tok.start) try addRange(ranges, allocator, tok.start, end);
     }
 }
@@ -2247,7 +2672,12 @@ fn identifierCanEndExpression(txt: []const u8) bool {
         !textEql(txt, "await");
 }
 
-fn findTypeEnd(src: []const u8, tokens: []const TSToken, start_idx: usize, stop_arrow: bool) ?usize {
+const TypeScanEnd = struct {
+    index: usize,
+    end: usize,
+};
+
+fn findTypeEnd(src: []const u8, tokens: []const TSToken, start_idx: usize, stop_arrow: bool) ?TypeScanEnd {
     var paren: usize = 0;
     var bracket: usize = 0;
     var brace: usize = 0;
@@ -2256,33 +2686,35 @@ fn findTypeEnd(src: []const u8, tokens: []const TSToken, start_idx: usize, stop_
     while (i < tokens.len) : (i += 1) {
         const txt = tokens[i].text(src);
         if (textEql(txt, "(")) paren += 1 else if (textEql(txt, ")")) {
-            if (paren == 0 and bracket == 0 and brace == 0 and angle == 0) return i;
+            if (paren == 0 and bracket == 0 and brace == 0 and angle == 0) return .{ .index = i, .end = tokens[i].start };
             paren -|= 1;
         } else if (textEql(txt, "[")) bracket += 1 else if (textEql(txt, "]")) {
-            if (bracket == 0 and paren == 0 and brace == 0 and angle == 0) return i;
+            if (bracket == 0 and paren == 0 and brace == 0 and angle == 0) return .{ .index = i, .end = tokens[i].start };
             bracket -|= 1;
         } else if (textEql(txt, "{")) {
             if (i == start_idx or brace > 0 or paren > 0 or bracket > 0 or angle > 0) {
                 brace += 1;
             } else {
-                return i;
+                return .{ .index = i, .end = tokens[i].start };
             }
         } else if (textEql(txt, "}")) {
-            if (brace == 0 and paren == 0 and bracket == 0 and angle == 0) return i;
+            if (brace == 0 and paren == 0 and bracket == 0 and angle == 0) return .{ .index = i, .end = tokens[i].start };
             brace -|= 1;
         } else if (textEql(txt, "<")) {
             angle += 1;
-        } else if (textEql(txt, ">")) {
-            if (angle > 0) angle -= 1;
+        } else if (startsWithGreater(txt) and angle > 0) {
+            if (consumeTypeAngleClosers(txt, tokens[i].start, &angle)) |partial_end| {
+                if (partial_end < tokens[i].end) return .{ .index = i, .end = partial_end };
+            }
         } else if (paren == 0 and bracket == 0 and brace == 0 and angle == 0) {
-            if (textEql(txt, ",") or textEql(txt, ";") or textEql(txt, "=")) return i;
-            if (stop_arrow and textEql(txt, "=>")) return i;
+            if (textEql(txt, ",") or textEql(txt, ";") or textEql(txt, "=")) return .{ .index = i, .end = tokens[i].start };
+            if (stop_arrow and textEql(txt, "=>")) return .{ .index = i, .end = tokens[i].start };
         }
     }
     return null;
 }
 
-fn findTypeAssertionEnd(src: []const u8, tokens: []const TSToken, start_idx: usize) ?usize {
+fn findTypeAssertionEnd(src: []const u8, tokens: []const TSToken, start_idx: usize) ?TypeScanEnd {
     var paren: usize = 0;
     var bracket: usize = 0;
     var brace: usize = 0;
@@ -2291,20 +2723,22 @@ fn findTypeAssertionEnd(src: []const u8, tokens: []const TSToken, start_idx: usi
     while (i < tokens.len) : (i += 1) {
         const txt = tokens[i].text(src);
         if (textEql(txt, "(")) paren += 1 else if (textEql(txt, ")")) {
-            if (paren == 0 and bracket == 0 and brace == 0 and angle == 0) return i;
+            if (paren == 0 and bracket == 0 and brace == 0 and angle == 0) return .{ .index = i, .end = tokens[i].start };
             paren -|= 1;
         } else if (textEql(txt, "[")) bracket += 1 else if (textEql(txt, "]")) {
-            if (bracket == 0 and paren == 0 and brace == 0 and angle == 0) return i;
+            if (bracket == 0 and paren == 0 and brace == 0 and angle == 0) return .{ .index = i, .end = tokens[i].start };
             bracket -|= 1;
         } else if (textEql(txt, "{")) brace += 1 else if (textEql(txt, "}")) {
-            if (brace == 0 and paren == 0 and bracket == 0 and angle == 0) return i;
+            if (brace == 0 and paren == 0 and bracket == 0 and angle == 0) return .{ .index = i, .end = tokens[i].start };
             brace -|= 1;
         } else if (textEql(txt, "<")) {
             angle += 1;
-        } else if (textEql(txt, ">")) {
-            if (angle > 0) angle -= 1;
+        } else if (startsWithGreater(txt) and angle > 0) {
+            if (consumeTypeAngleClosers(txt, tokens[i].start, &angle)) |partial_end| {
+                if (partial_end < tokens[i].end) return .{ .index = i, .end = partial_end };
+            }
         } else if (paren == 0 and bracket == 0 and brace == 0 and angle == 0 and isExpressionDelimiter(txt)) {
-            return i;
+            return .{ .index = i, .end = tokens[i].start };
         }
     }
     return null;
@@ -2333,7 +2767,7 @@ fn isValidTypeParameterList(src: []const u8, tokens: []const TSToken, start: usi
         }
         if (kind == .identifier) {
             if (textEql(txt, "if") or textEql(txt, "else") or textEql(txt, "while") or
-                textEql(txt, "for") or textEql(txt, "return") or textEql(txt, "const") or
+                textEql(txt, "for") or textEql(txt, "return") or
                 textEql(txt, "let") or textEql(txt, "var") or textEql(txt, "function") or
                 textEql(txt, "class") or textEql(txt, "throw") or textEql(txt, "try") or
                 textEql(txt, "catch") or textEql(txt, "finally"))
@@ -2349,6 +2783,8 @@ fn isValidTypeParameterList(src: []const u8, tokens: []const TSToken, start: usi
             if (!textEql(next_txt, "extends") and !textEql(next_txt, "implements") and !textEql(next_txt, "as") and !textEql(next_txt, "satisfies")) {
                 return false;
             }
+        } else if (!typeParameterListCanBeFollowedBy(next_txt)) {
+            return false;
         }
         if (next_kind == .number or next_kind == .string or next_kind == .regexp) {
             return false;
@@ -2357,23 +2793,64 @@ fn isValidTypeParameterList(src: []const u8, tokens: []const TSToken, start: usi
     return true;
 }
 
-fn findTypeAngleEnd(src: []const u8, tokens: []const TSToken, lt_idx: usize) ?usize {
+fn typeParameterListCanBeFollowedBy(txt: []const u8) bool {
+    return textEql(txt, "(") or textEql(txt, "{") or textEql(txt, "[") or
+        textEql(txt, ",") or textEql(txt, "=>") or textEql(txt, "=") or
+        textEql(txt, ":") or textEql(txt, ";") or textEql(txt, ")") or
+        textEql(txt, "]") or textEql(txt, "|") or textEql(txt, "&") or
+        textEql(txt, ".") or textEql(txt, "?") or textEql(txt, "!");
+}
+
+fn findTypeAngleEnd(src: []const u8, tokens: []const TSToken, lt_idx: usize) ?TypeScanEnd {
     var depth: usize = 0;
+    var paren: usize = 0;
+    var bracket: usize = 0;
+    var brace: usize = 0;
     var i = lt_idx;
     while (i < tokens.len) : (i += 1) {
         const txt = tokens[i].text(src);
         if (textEql(txt, "<")) {
             depth += 1;
-        } else if (textEql(txt, ">")) {
-            depth -|= 1;
-            if (depth == 0) {
+        } else if (textEql(txt, "(")) {
+            paren += 1;
+        } else if (textEql(txt, ")")) {
+            if (paren == 0 and bracket == 0 and brace == 0 and depth == 1) return null;
+            paren -|= 1;
+        } else if (textEql(txt, "[")) {
+            bracket += 1;
+        } else if (textEql(txt, "]")) {
+            if (bracket == 0 and paren == 0 and brace == 0 and depth == 1) return null;
+            bracket -|= 1;
+        } else if (textEql(txt, "{")) {
+            brace += 1;
+        } else if (textEql(txt, "}")) {
+            if (brace == 0 and paren == 0 and bracket == 0 and depth == 1) return null;
+            brace -|= 1;
+        } else if (startsWithGreater(txt) and depth > 0) {
+            if (consumeTypeAngleClosers(txt, tokens[i].start, &depth)) |end| {
+                if (paren != 0 or bracket != 0 or brace != 0) return null;
                 if (isValidTypeParameterList(src, tokens, lt_idx, i)) {
-                    return i;
+                    return .{ .index = i, .end = end };
                 }
                 return null;
             }
-        } else if (depth == 1 and (textEql(txt, ";") or textEql(txt, "{") or textEql(txt, "}"))) {
+        } else if (depth == 1 and paren == 0 and bracket == 0 and brace == 0 and textEql(txt, ";")) {
             return null;
+        }
+    }
+    return null;
+}
+
+fn startsWithGreater(txt: []const u8) bool {
+    return txt.len > 0 and txt[0] == '>';
+}
+
+fn consumeTypeAngleClosers(txt: []const u8, token_start: usize, depth: *usize) ?usize {
+    var consumed: usize = 0;
+    while (consumed < txt.len and txt[consumed] == '>' and depth.* > 0) : (consumed += 1) {
+        depth.* -= 1;
+        if (depth.* == 0) {
+            return token_start + consumed + 1;
         }
     }
     return null;
@@ -2448,8 +2925,10 @@ fn braceBelongsToClass(src: []const u8, tokens: []const TSToken, open_idx: usize
     while (i > 0) {
         i -= 1;
         const txt = tokens[i].text(src);
-        if (textEql(txt, "class")) return true;
-        if (textEql(txt, ";") or textEql(txt, "{") or textEql(txt, "}")) return false;
+        if (textEql(txt, "class")) {
+            return (findClassBodyOpen(src, tokens, i) orelse return false) == open_idx;
+        }
+        if (textEql(txt, ";")) return false;
     }
     return false;
 }

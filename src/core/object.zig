@@ -1068,7 +1068,8 @@ pub const ObjectFlags = packed struct(u16) {
     /// identity registry, so destruction can skip the registry lookup for the
     /// common case of objects that were never weakly referenced.
     has_weak_id: bool = false,
-    _padding: u3 = 0,
+    is_borrowed_reference_holder: bool = false,
+    _padding: u2 = 0,
 };
 
 pub const Object = struct {
@@ -1704,6 +1705,7 @@ pub const Object = struct {
     }
 
     fn runtimeBorrowedReferenceHolderIndex(rt: *JSRuntime, object: *Object) ?usize {
+        if (!object.flags.is_borrowed_reference_holder) return null;
         for (rt.borrowed_reference_holders, 0..) |candidate, index| {
             if (candidate == object) return index;
         }
@@ -1721,6 +1723,7 @@ pub const Object = struct {
     }
 
     pub fn pruneBorrowedReferenceHolderIfEmpty(self: *Object, rt: *JSRuntime) void {
+        if (!self.flags.is_borrowed_reference_holder) return;
         if (!self.hasBorrowedReferences()) rt.unregisterBorrowedReferenceHolder(self);
     }
 
@@ -5505,6 +5508,7 @@ pub const Object = struct {
                 const h = gc.headerFromGcNode(node);
                 if (h.kind == .function_bytecode) {
                     unlinkNodeFromList(&tmp_head, &tmp_tail, node);
+                    rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
                     function_bytecode_mod.destroyFromHeader(rt, h);
                 }
                 current = next;
@@ -5534,6 +5538,7 @@ pub const Object = struct {
             if (h.kind == .object) {
                 destroyFromHeader(rt, h);
             } else if (h.kind == .function_bytecode) {
+                rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
                 function_bytecode_mod.destroyFromHeader(rt, h);
             }
             current_garbage = next;
@@ -7264,6 +7269,11 @@ pub const Object = struct {
     }
 
     fn materializeNativeFunctionAutoInit(self: *Object, info: property.AutoInit) ?JSValue {
+        return self.materializeNativeFunctionAutoInitOnce(info) orelse
+            self.materializeNativeFunctionAutoInitOnce(info);
+    }
+
+    fn materializeNativeFunctionAutoInitOnce(self: *Object, info: property.AutoInit) ?JSValue {
         const materialized = function.nativeFunction(info.rt, info.name, info.length) catch return null;
         if (!self.prepareAutoInitNativeFunction(info, materialized, info.native_builtin_id, true)) {
             materialized.free(info.rt);

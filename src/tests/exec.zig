@@ -1035,6 +1035,26 @@ test "forward-ref top-level lexical threads through three closure levels" {
     try std.testing.expectEqual(@as(i32, 7), result.asInt32().?);
 }
 
+test "top-level function declarations use wide closure operands past 255 constants" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(std.testing.allocator);
+    for (0..260) |index| {
+        var line_buf: [64]u8 = undefined;
+        const line = try std.fmt.bufPrint(&line_buf, "function f{d}() {{ return {d}; }}\n", .{ index, index });
+        try source.appendSlice(std.testing.allocator, line);
+    }
+    try source.appendSlice(std.testing.allocator, "f259();");
+
+    const result = try vm_helpers.parseStmtAndRunWithTopLevelChildren(rt, ctx, source.items);
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 259), result.asInt32().?);
+}
+
 test "test262 helpers own SameValue assertions" {
     const run_test262 = @import("../cli/run_test262.zig");
     const same_nan = try run_test262.assertSameValue(core.JSValue.float64(std.math.nan(f64)), core.JSValue.float64(std.math.nan(f64)));

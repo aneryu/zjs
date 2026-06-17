@@ -98,6 +98,7 @@ const LabelFrame = struct {
     allow_continue: bool,
     catch_marker_depth: u32,
     control_frame_depth: usize,
+    break_frame_depth: usize,
     break_fixups: std.ArrayList(usize) = .empty,
     continue_fixups: std.ArrayList(usize) = .empty,
 
@@ -115,6 +116,7 @@ const ControlFrames = struct {
     break_frame_cross_cleanup_drops: std.ArrayList(u8),
     continue_fixups: std.ArrayList(usize),
     continue_frame_lens: std.ArrayList(usize),
+    continue_frame_break_frame_indices: std.ArrayList(usize),
     continue_frame_catch_marker_depths: std.ArrayList(u32),
     continue_frame_cleanup_drops: std.ArrayList(u8),
     label_frames: std.ArrayList(LabelFrame),
@@ -471,6 +473,7 @@ pub const ParseState = struct {
     break_frame_lens: std.ArrayList(usize) = .empty,
     continue_fixups: std.ArrayList(usize) = .empty,
     continue_frame_lens: std.ArrayList(usize) = .empty,
+    continue_frame_break_frame_indices: std.ArrayList(usize) = .empty,
     break_frame_catch_marker_depths: std.ArrayList(u32) = .empty,
     break_frame_cleanup_drops: std.ArrayList(u8) = .empty,
     break_frame_cross_cleanup_drops: std.ArrayList(u8) = .empty,
@@ -543,6 +546,7 @@ pub const ParseState = struct {
         self.break_frame_lens.deinit(self.function.memory.allocator);
         self.continue_fixups.deinit(self.function.memory.allocator);
         self.continue_frame_lens.deinit(self.function.memory.allocator);
+        self.continue_frame_break_frame_indices.deinit(self.function.memory.allocator);
         self.break_frame_catch_marker_depths.deinit(self.function.memory.allocator);
         self.break_frame_cleanup_drops.deinit(self.function.memory.allocator);
         self.break_frame_cross_cleanup_drops.deinit(self.function.memory.allocator);
@@ -958,6 +962,7 @@ pub const ParseState = struct {
             .allow_continue = allow_continue,
             .catch_marker_depth = s.active_catch_marker_depth,
             .control_frame_depth = s.continue_frame_lens.items.len,
+            .break_frame_depth = s.break_frame_lens.items.len,
         });
         return s.label_frames.items.len - 1;
     }
@@ -999,12 +1004,12 @@ pub const ParseState = struct {
         try emitPendingAbruptDropsForLabel(s, frame_index);
         try emitCatchMarkerDropsToDepth(s, s.label_frames.items[frame_index].catch_marker_depth);
         var frame_depth = s.break_frame_cleanup_drops.items.len;
-        while (frame_depth > s.label_frames.items[frame_index].control_frame_depth) {
+        while (frame_depth > s.label_frames.items[frame_index].break_frame_depth) {
             frame_depth -= 1;
             try emitCrossFrameCleanup(s, s.break_frame_cross_cleanup_drops.items[frame_depth]);
         }
-        if (s.label_frames.items[frame_index].allow_continue and s.label_frames.items[frame_index].control_frame_depth > 0) {
-            try emitUnlabelledBreakCleanup(s, s.break_frame_cleanup_drops.items[s.label_frames.items[frame_index].control_frame_depth - 1]);
+        if (s.label_frames.items[frame_index].allow_continue and s.label_frames.items[frame_index].break_frame_depth > 0) {
+            try emitUnlabelledBreakCleanup(s, s.break_frame_cleanup_drops.items[s.label_frames.items[frame_index].break_frame_depth - 1]);
         }
         const off = try emitForwardJumpNoSource(s, opcode.op.goto);
         try s.label_frames.items[frame_index].break_fixups.append(s.function.memory.allocator, off);
@@ -1023,7 +1028,8 @@ pub const ParseState = struct {
         var frame_depth = s.continue_frame_lens.items.len;
         while (frame_depth > s.label_frames.items[frame_index].control_frame_depth) {
             frame_depth -= 1;
-            try emitCrossFrameCleanup(s, s.break_frame_cross_cleanup_drops.items[frame_depth]);
+            const break_frame_index = s.continue_frame_break_frame_indices.items[frame_depth];
+            try emitCrossFrameCleanup(s, s.break_frame_cross_cleanup_drops.items[break_frame_index]);
         }
         if (s.label_frames.items[frame_index].control_frame_depth > 0) {
             try emitCrossFrameCleanup(s, s.continue_frame_cleanup_drops.items[s.label_frames.items[frame_index].control_frame_depth - 1]);
@@ -1058,6 +1064,7 @@ pub const ParseState = struct {
         s.break_frame_cross_cleanup_drops.deinit(allocator);
         s.continue_fixups.deinit(allocator);
         s.continue_frame_lens.deinit(allocator);
+        s.continue_frame_break_frame_indices.deinit(allocator);
         s.continue_frame_catch_marker_depths.deinit(allocator);
         s.continue_frame_cleanup_drops.deinit(allocator);
         for (s.label_frames.items) |*frame| {
@@ -1076,6 +1083,7 @@ pub const ParseState = struct {
             .break_frame_cross_cleanup_drops = s.break_frame_cross_cleanup_drops,
             .continue_fixups = s.continue_fixups,
             .continue_frame_lens = s.continue_frame_lens,
+            .continue_frame_break_frame_indices = s.continue_frame_break_frame_indices,
             .continue_frame_catch_marker_depths = s.continue_frame_catch_marker_depths,
             .continue_frame_cleanup_drops = s.continue_frame_cleanup_drops,
             .label_frames = s.label_frames,
@@ -1091,6 +1099,7 @@ pub const ParseState = struct {
         s.break_frame_cross_cleanup_drops = .empty;
         s.continue_fixups = .empty;
         s.continue_frame_lens = .empty;
+        s.continue_frame_break_frame_indices = .empty;
         s.continue_frame_catch_marker_depths = .empty;
         s.continue_frame_cleanup_drops = .empty;
         s.label_frames = .empty;
@@ -1110,6 +1119,7 @@ pub const ParseState = struct {
         s.break_frame_cross_cleanup_drops = saved.break_frame_cross_cleanup_drops;
         s.continue_fixups = saved.continue_fixups;
         s.continue_frame_lens = saved.continue_frame_lens;
+        s.continue_frame_break_frame_indices = saved.continue_frame_break_frame_indices;
         s.continue_frame_catch_marker_depths = saved.continue_frame_catch_marker_depths;
         s.continue_frame_cleanup_drops = saved.continue_frame_cleanup_drops;
         s.label_frames = saved.label_frames;
@@ -2308,7 +2318,7 @@ pub fn parseExpr(s: *ParseState) Error!void {
 pub fn parseExpr2(s: *ParseState, flags: ParseFlags) Error!void {
     s.features.insert(.expression);
     var operand_flags = flags;
-    try parseAssignExpr2(s, operand_flags);
+    try parseExpr2Operand(s, operand_flags);
     var saw_comma = false;
     while (s.isPunct(',')) {
         saw_comma = true;
@@ -2320,13 +2330,155 @@ pub fn parseExpr2(s: *ParseState, flags: ParseFlags) Error!void {
             try s.emitOp(opcode.op.drop);
         }
         operand_flags.result_needed = flags.result_needed;
-        try parseAssignExpr2(s, operand_flags);
+        try parseExpr2Operand(s, operand_flags);
     }
     if (saw_comma) {
         s.last_anonymous_function_expr = false;
         s.last_was_direct_eval_callee = false;
     }
     s.last_expr_had_comma = saw_comma;
+}
+
+const ReturnExprOperandMode = struct {
+    disabled: bool = false,
+    return_expr_mode: bool = false,
+    return_expr_cond_depth: u32 = 0,
+
+    fn restore(self: ReturnExprOperandMode, s: *ParseState) void {
+        if (!self.disabled) return;
+        s.return_expr_mode = self.return_expr_mode;
+        s.return_expr_cond_depth = self.return_expr_cond_depth;
+    }
+};
+
+fn enterReturnExprOperandMode(s: *ParseState) ReturnExprOperandMode {
+    if (!s.return_expr_mode or s.return_expr_cond_depth != 0) return .{};
+    if (!returnExprOperandHasFollowingTopLevelComma(s)) return .{};
+
+    const saved = ReturnExprOperandMode{
+        .disabled = true,
+        .return_expr_mode = s.return_expr_mode,
+        .return_expr_cond_depth = s.return_expr_cond_depth,
+    };
+    s.return_expr_mode = false;
+    s.return_expr_cond_depth = 0;
+    return saved;
+}
+
+fn parseExpr2Operand(s: *ParseState, flags: ParseFlags) Error!void {
+    const return_operand_mode = enterReturnExprOperandMode(s);
+    defer return_operand_mode.restore(s);
+    try parseAssignExpr2(s, flags);
+}
+
+const ReturnExprCommaScan = struct {
+    paren_depth: usize = 0,
+    bracket_depth: usize = 0,
+    brace_depth: usize = 0,
+
+    fn atTop(self: ReturnExprCommaScan) bool {
+        return self.paren_depth == 0 and self.bracket_depth == 0 and self.brace_depth == 0;
+    }
+};
+
+const ReturnExprCommaScanResult = enum {
+    continue_scan,
+    found_comma,
+    end_of_expr,
+};
+
+fn returnExprOperandHasFollowingTopLevelComma(s: *ParseState) bool {
+    const saved_pos = s.lex.pos;
+    const saved_line = s.lex.line;
+    const saved_col = s.lex.col;
+    const saved_got_lf = s.lex.got_lf;
+    const saved_mark_pos = s.lex.mark_pos;
+    const saved_mark_line = s.lex.mark_line;
+    const saved_mark_col = s.lex.mark_col;
+    defer {
+        s.lex.pos = saved_pos;
+        s.lex.line = saved_line;
+        s.lex.col = saved_col;
+        s.lex.got_lf = saved_got_lf;
+        s.lex.mark_pos = saved_mark_pos;
+        s.lex.mark_line = saved_mark_line;
+        s.lex.mark_col = saved_mark_col;
+    }
+
+    var scan: ReturnExprCommaScan = .{};
+    var previous_token_kind: ?tok.TokenKind = null;
+    switch (scanReturnExprCommaToken(s, &s.token, false, &scan, &previous_token_kind) catch return false) {
+        .found_comma => return true,
+        .end_of_expr => return false,
+        .continue_scan => {},
+    }
+
+    while (true) {
+        var lookahead = s.lex.next() catch return false;
+        defer s.lex.freeToken(&lookahead);
+        const token_had_lf = s.lex.gotLineTerminator();
+        switch (scanReturnExprCommaToken(s, &lookahead, token_had_lf, &scan, &previous_token_kind) catch return false) {
+            .found_comma => return true,
+            .end_of_expr => return false,
+            .continue_scan => {},
+        }
+    }
+}
+
+fn scanReturnExprCommaToken(
+    s: *ParseState,
+    token: *const tok.Token,
+    token_had_lf: bool,
+    scan: *ReturnExprCommaScan,
+    previous_token_kind: *?tok.TokenKind,
+) Error!ReturnExprCommaScanResult {
+    const kind = token.val;
+    if (scan.atTop()) {
+        if (token_had_lf) return .end_of_expr;
+        switch (kind) {
+            @as(tok.TokenKind, @intCast(',')) => return .found_comma,
+            @as(tok.TokenKind, @intCast(';')),
+            @as(tok.TokenKind, @intCast(')')),
+            @as(tok.TokenKind, @intCast(']')),
+            @as(tok.TokenKind, @intCast('}')),
+            tok.TOK_EOF,
+            => return .end_of_expr,
+            else => {},
+        }
+    }
+
+    switch (kind) {
+        @as(tok.TokenKind, @intCast('/')), tok.TOK_DIV_ASSIGN => {
+            if (try skipRegexpInPredeclareScan(s, previous_token_kind.*)) {
+                previous_token_kind.* = tok.TOK_REGEXP;
+                return .continue_scan;
+            }
+        },
+        tok.TOK_TEMPLATE => {
+            try skipTemplateInPredeclareScan(s, token.*);
+            previous_token_kind.* = tok.TOK_TEMPLATE;
+            return .continue_scan;
+        },
+        @as(tok.TokenKind, @intCast('(')) => scan.paren_depth += 1,
+        @as(tok.TokenKind, @intCast('[')) => scan.bracket_depth += 1,
+        @as(tok.TokenKind, @intCast('{')) => scan.brace_depth += 1,
+        @as(tok.TokenKind, @intCast(')')) => {
+            if (scan.paren_depth == 0) return .end_of_expr;
+            scan.paren_depth -= 1;
+        },
+        @as(tok.TokenKind, @intCast(']')) => {
+            if (scan.bracket_depth == 0) return .end_of_expr;
+            scan.bracket_depth -= 1;
+        },
+        @as(tok.TokenKind, @intCast('}')) => {
+            if (scan.brace_depth == 0) return .end_of_expr;
+            scan.brace_depth -= 1;
+        },
+        else => {},
+    }
+
+    previous_token_kind.* = kind;
+    return .continue_scan;
 }
 
 /// `js_parse_assign_expr` (`quickjs.c:27615`).
@@ -3066,7 +3218,7 @@ fn scanAssignmentRhsTokenForDirectEval(
     if (paren_depth.* == 0 and bracket_depth.* == 0 and brace_depth.* == 0 and assignmentRhsScanBoundary(kind)) {
         return .boundary;
     }
-    if ((kind == @as(tok.TokenKind, @intCast('/')) or kind == tok.TOK_DIV_ASSIGN) and expect_operand.*) {
+    if (tokenCanStartSlashRegexp(kind) and expect_operand.*) {
         try skipRegExpLiteralInRhsScan(s, token);
         expect_operand.* = false;
         return .continue_scan;
@@ -3251,7 +3403,7 @@ fn validateSwitchCaseBlockDeclarations(s: *ParseState) Error!void {
                 try s.advance();
                 continue;
             }
-            if (kind == @as(tok.TokenKind, @intCast('/')) or kind == tok.TOK_DIV_ASSIGN) {
+            if (tokenCanStartSlashRegexp(kind)) {
                 if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
                     previous_token_kind = tok.TOK_REGEXP;
                     try s.advance();
@@ -3305,7 +3457,7 @@ fn validateSwitchCaseBlockDeclarations(s: *ParseState) Error!void {
                 previous_token_kind = tok.TOK_TEMPLATE;
                 try s.advance();
             },
-            @as(tok.TokenKind, @intCast('/')), tok.TOK_DIV_ASSIGN => {
+            '/', tok.TOK_DIV_ASSIGN => {
                 if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
                     previous_token_kind = tok.TOK_REGEXP;
                     try s.advance();
@@ -3425,11 +3577,16 @@ fn tokenStartsPrimaryExpression(k: tok.TokenKind) bool {
         k == @as(tok.TokenKind, @intCast('(')) or
         k == @as(tok.TokenKind, @intCast('[')) or
         k == @as(tok.TokenKind, @intCast('{')) or
-        k == @as(tok.TokenKind, @intCast('/'));
+        k == @as(tok.TokenKind, @intCast('/')) or
+        k == tok.TOK_DIV_ASSIGN;
 }
 
 fn tokenStartsYieldExpressionOperand(k: tok.TokenKind) bool {
-    return tokenStartsPrimaryExpression(k) and k != @as(tok.TokenKind, @intCast('/'));
+    return tokenStartsPrimaryExpression(k) and !tokenCanStartSlashRegexp(k);
+}
+
+fn tokenCanStartSlashRegexp(k: tok.TokenKind) bool {
+    return k == @as(tok.TokenKind, @intCast('/')) or k == tok.TOK_DIV_ASSIGN;
 }
 
 fn emitWithGetVarFallback(s: *ParseState, with_atom: Atom, ident: Atom) Error!void {
@@ -3510,7 +3667,9 @@ pub fn parseCondExpr(s: *ParseState, flags: ParseFlags) Error!void {
     try parseCoalesceExpr(s, flags);
     if (s.isPunct('?')) {
         try s.advance();
-        const then_flags = ParseFlags{ .in_accepted = true };
+        var then_flags = forceResultNeeded(flags);
+        then_flags.in_accepted = true;
+        const else_flags = forceResultNeeded(flags);
         // Short-circuit: if false, jump to else branch. The parser emits
         // absolute u32 offsets; `resolve_labels` lowers them to relative
         // goto8/goto16 forms.
@@ -3520,9 +3679,7 @@ pub fn parseCondExpr(s: *ParseState, flags: ParseFlags) Error!void {
             try emitReturnExprBranch(s);
             try patchForwardJump(s, else_jump_offset);
             try expectPunct(s, ':');
-            // The `parse_flags` propagated to the else-branch must keep
-            // `PF_IN_ACCEPTED` per QuickJS (`quickjs.c:27305`).
-            try parseAssignExprWithoutPendingFunctionName(s, flags);
+            try parseAssignExprWithoutPendingFunctionName(s, else_flags);
             try emitReturnExprBranch(s);
             s.return_expr_emitted_return = true;
             s.last_anonymous_function_expr = false;
@@ -3534,9 +3691,7 @@ pub fn parseCondExpr(s: *ParseState, flags: ParseFlags) Error!void {
         const end_jump_offset = try emitForwardJump(s, opcode.op.goto);
         try patchForwardJump(s, else_jump_offset);
         try expectPunct(s, ':');
-        // The `parse_flags` propagated to the else-branch must keep
-        // `PF_IN_ACCEPTED` per QuickJS (`quickjs.c:27305`).
-        try parseAssignExprWithoutPendingFunctionName(s, flags);
+        try parseAssignExprWithoutPendingFunctionName(s, else_flags);
         try patchForwardJump(s, end_jump_offset);
         s.last_anonymous_function_expr = false;
         s.last_was_direct_eval_callee = false;
@@ -6414,6 +6569,7 @@ fn rebaseMovedBytecodeLabels(code: []u8, atoms: []const Atom, old_base: usize, n
 fn pushBreakFrame(s: *ParseState) Error!void {
     try s.break_frame_lens.append(s.function.memory.allocator, s.break_fixups.items.len);
     try s.continue_frame_lens.append(s.function.memory.allocator, s.continue_fixups.items.len);
+    try s.continue_frame_break_frame_indices.append(s.function.memory.allocator, s.break_frame_lens.items.len - 1);
     try s.break_frame_catch_marker_depths.append(s.function.memory.allocator, s.active_catch_marker_depth);
     try s.break_frame_cleanup_drops.append(s.function.memory.allocator, 0);
     try s.break_frame_cross_cleanup_drops.append(s.function.memory.allocator, 0);
@@ -6645,7 +6801,9 @@ fn patchContinueFrame(s: *ParseState) Error!void {
 fn popBreakFrameAndPatch(s: *ParseState) Error!void {
     if (s.break_frame_lens.items.len == 0 or s.continue_frame_lens.items.len == 0) return Error.UnexpectedToken;
     _ = s.continue_frame_lens.pop().?;
+    _ = s.continue_frame_break_frame_indices.pop().?;
     _ = s.continue_frame_catch_marker_depths.pop().?;
+    _ = s.continue_frame_cleanup_drops.pop().?;
     const start = s.break_frame_lens.pop().?;
     _ = s.break_frame_catch_marker_depths.pop().?;
     _ = s.break_frame_cleanup_drops.pop().?;
@@ -6702,7 +6860,7 @@ fn predeclareFunctionBodyVars(s: *ParseState) Error!void {
             tok.TOK_FUNCTION => try skipFunctionInPredeclareScan(s),
             tok.TOK_VAR => try predeclareVarDeclarators(s),
             tok.TOK_TEMPLATE => try skipTemplateInPredeclareScan(s, t),
-            @as(tok.TokenKind, @intCast('/')), tok.TOK_DIV_ASSIGN => {
+            '/', tok.TOK_DIV_ASSIGN => {
                 if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
                     previous_token_kind = tok.TOK_REGEXP;
                     continue;
@@ -6731,7 +6889,7 @@ fn skipFunctionInPredeclareScan(s: *ParseState) Error!void {
             '{' => depth += 1,
             '}' => depth -= 1,
             tok.TOK_TEMPLATE => try skipTemplateInPredeclareScan(s, t),
-            @as(tok.TokenKind, @intCast('/')), tok.TOK_DIV_ASSIGN => {
+            '/', tok.TOK_DIV_ASSIGN => {
                 if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
                     previous_token_kind = tok.TOK_REGEXP;
                     continue;
@@ -6765,7 +6923,7 @@ fn skipTemplateInPredeclareScan(s: *ParseState, first: tok.Token) Error!void {
                     previous_token_kind = tok.TOK_TEMPLATE;
                     continue;
                 },
-                @as(tok.TokenKind, @intCast('/')), tok.TOK_DIV_ASSIGN => {
+                '/', tok.TOK_DIV_ASSIGN => {
                     if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
                         previous_token_kind = tok.TOK_REGEXP;
                         continue;
@@ -6818,7 +6976,7 @@ fn predeclareVarDeclarators(s: *ParseState) Error!void {
                 previous_token_kind = tok.TOK_TEMPLATE;
                 continue;
             },
-            @as(tok.TokenKind, @intCast('/')), tok.TOK_DIV_ASSIGN => {
+            '/', tok.TOK_DIV_ASSIGN => {
                 if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
                     previous_token_kind = tok.TOK_REGEXP;
                     continue;
@@ -7041,7 +7199,7 @@ fn blockDirectUsingDeclarationKind(s: *ParseState) ?UsingStackKind {
             previous_token_kind = tok.TOK_TEMPLATE;
             continue;
         }
-        if (kind == @as(tok.TokenKind, @intCast('/')) or kind == tok.TOK_DIV_ASSIGN) {
+        if (tokenCanStartSlashRegexp(kind)) {
             if (skipRegexpInPredeclareScan(s, previous_token_kind) catch return result) {
                 s.advance() catch return result;
                 previous_token_kind = tok.TOK_REGEXP;
@@ -7093,7 +7251,7 @@ fn programDirectUsingDeclarationKind(s: *ParseState) ?UsingStackKind {
             previous_token_kind = tok.TOK_TEMPLATE;
             continue;
         }
-        if (kind == @as(tok.TokenKind, @intCast('/')) or kind == tok.TOK_DIV_ASSIGN) {
+        if (tokenCanStartSlashRegexp(kind)) {
             if (skipRegexpInPredeclareScan(s, previous_token_kind) catch return result) {
                 s.advance() catch return result;
                 previous_token_kind = tok.TOK_REGEXP;
@@ -7755,6 +7913,11 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
         tok.TOK_VAR, tok.TOK_LET, tok.TOK_CONST => {
             if (tok_kind == tok.TOK_LET and canTreatLetAsExpressionStatement(s)) {
                 try parseLetKeywordExpressionStatement(s);
+                return;
+            }
+            if (s.lex.is_typescript and tok_kind == tok.TOK_CONST and s.peekNextKind() == tok.TOK_ENUM) {
+                try s.advance();
+                try parseEnumDeclaration(s);
                 return;
             }
             if (!decl_mask.other and (tok_kind == tok.TOK_LET or tok_kind == tok.TOK_CONST)) {
@@ -8588,7 +8751,7 @@ fn skipBalancedDelimitedForTryScan(s: *ParseState, open: tok.TokenKind, close: t
             previous_token_kind = tok.TOK_TEMPLATE;
             continue;
         }
-        if (kind == @as(tok.TokenKind, @intCast('/')) or kind == tok.TOK_DIV_ASSIGN) {
+        if (tokenCanStartSlashRegexp(kind)) {
             if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
                 try s.advance();
                 previous_token_kind = tok.TOK_REGEXP;
@@ -9244,11 +9407,12 @@ fn parseVar(s: *ParseState, var_tok: tok.TokenKind, export_decl: bool, parse_fla
             } else {
                 // Hoist `var` to function scope (level 0).
                 const existing_var = s.cur_func().findVar(atom_id);
-                if (existing_var < 0) {
+                if (existing_var < 0 and s.cur_func().findArg(atom_id) < 0) {
                     const saved = s.scope_level;
                     s.scope_level = 0;
                     defer s.scope_level = saved;
                     const var_idx = try s.addScopeVar(atom_id, .normal, false, false);
+                    try s.retrofitForwardLocalFunctionCapture(s.cur_func(), atom_id, @intCast(var_idx));
                     if (atomNameEquals(s, atom_id, "arguments")) {
                         s.cur_func().arguments_var_idx = @intCast(var_idx);
                     }
