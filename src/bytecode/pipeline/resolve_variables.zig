@@ -87,6 +87,27 @@ fn instrSize(op_id: u8) usize {
     return if (total == 0) 1 else total;
 }
 
+fn fclosureEncodingSize(cpool_idx: i32) error{InvalidBytecode}!usize {
+    if (cpool_idx < 0) return error.InvalidBytecode;
+    return if (@as(u32, @intCast(cpool_idx)) <= std.math.maxInt(u8)) 2 else 5;
+}
+
+fn emitFClosure(output: []u8, out_idx: *usize, cpool_idx: i32) error{InvalidBytecode}!void {
+    if (cpool_idx < 0) return error.InvalidBytecode;
+    const idx: u32 = @intCast(cpool_idx);
+    if (idx <= std.math.maxInt(u8)) {
+        if (out_idx.* + 2 > output.len) return error.InvalidBytecode;
+        output[out_idx.*] = opcode.op.fclosure8;
+        output[out_idx.* + 1] = @intCast(idx);
+        out_idx.* += 2;
+        return;
+    }
+    if (out_idx.* + 5 > output.len) return error.InvalidBytecode;
+    output[out_idx.*] = opcode.op.fclosure;
+    std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], idx, .little);
+    out_idx.* += 5;
+}
+
 /// Returns true if the opcode at `op_id` is a temporary
 /// variable-scope opcode that `resolve_variables` needs to lower.
 /// All four are 7-byte `atom_u16` forms.
@@ -926,7 +947,7 @@ pub fn run(ctx: *JSContext) !void {
         for (fd.child_list) |child| {
             if (child.emit_top_level_closure_init) {
                 if (child.parent_cpool_idx < 0 or child.top_level_closure_var_idx < 0) continue;
-                top_level_closure_init_size += 2 + selectVarRefForm(ctx, opcode.op.put_var_ref, @intCast(child.top_level_closure_var_idx)).size;
+                top_level_closure_init_size += try fclosureEncodingSize(child.parent_cpool_idx) + selectVarRefForm(ctx, opcode.op.put_var_ref, @intCast(child.top_level_closure_var_idx)).size;
                 continue;
             }
             if (child.child_decl_emit_inline) continue;
@@ -939,7 +960,7 @@ pub fn run(ctx: *JSContext) !void {
                 if (var_idx_i < 0) continue;
                 break :blk selectLocForm(ctx, if (child.child_decl_init_keep_value) opcode.op.set_loc else opcode.op.put_loc, @intCast(var_idx_i));
             };
-            child_decl_init_size += 2 + form.size;
+            child_decl_init_size += try fclosureEncodingSize(child.parent_cpool_idx) + form.size;
         }
     }
 
@@ -1417,9 +1438,7 @@ pub fn run(ctx: *JSContext) !void {
         for (fd.child_list) |child| {
             if (child.emit_top_level_closure_init) {
                 if (child.parent_cpool_idx < 0 or child.top_level_closure_var_idx < 0) return error.InvalidBytecode;
-                output[out_idx] = opcode.op.fclosure8;
-                output[out_idx + 1] = @intCast(child.parent_cpool_idx);
-                out_idx += 2;
+                try emitFClosure(output, &out_idx, child.parent_cpool_idx);
                 const ref_idx: u16 = @intCast(child.top_level_closure_var_idx);
                 const form = selectVarRefForm(ctx, opcode.op.put_var_ref, ref_idx);
                 output[out_idx] = form.op_id;
@@ -1434,9 +1453,7 @@ pub fn run(ctx: *JSContext) !void {
             if (child.child_decl_emit_inline) continue;
             if (child.func_type != .statement) continue;
             if (child.parent_cpool_idx < 0) return error.InvalidBytecode;
-            output[out_idx] = opcode.op.fclosure8;
-            output[out_idx + 1] = @intCast(child.parent_cpool_idx);
-            out_idx += 2;
+            try emitFClosure(output, &out_idx, child.parent_cpool_idx);
             const arg_idx_i = if (child.child_decl_force_local_init) -1 else fd.findArg(child.func_name);
             const form = if (arg_idx_i >= 0)
                 selectArgForm(ctx, opcode.op.put_arg, @intCast(arg_idx_i))

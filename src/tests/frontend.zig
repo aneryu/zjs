@@ -4632,6 +4632,28 @@ test "prepared call lowering preserves RegExp literal fuse while preparing cache
     try std.testing.expectEqual(@as(usize, 1), countOpcode(literal.function.code, engine.bytecode.opcode.op.call_method));
 }
 
+test "function predeclare scan skips slash-equals regexp literals" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(
+        rt,
+        \\function RegExpBenchmark() {
+        \\  var re0 = /^ba/;
+        \\  var re1 = /(((\w+):\/\/)([^\/:]*)(:(\d+))?)?([^#?]*)(\?([^#]*))?(#(.*))?/;
+        \\  var re8 = /=/;
+        \\  return re0.test("ba") && re1.test("http://example") && re8.test("=");
+        \\}
+        \\RegExpBenchmark();
+    ,
+        .{ .mode = .script, .filename = "regexp-slash-equals-predeclare.js" },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expect(parsed.syntax_error == null);
+}
+
 test "quick parser lowers supported Promise helpers to receiver-preserving property calls" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
