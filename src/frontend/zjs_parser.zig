@@ -9252,7 +9252,7 @@ fn parseVar(s: *ParseState, var_tok: tok.TokenKind, export_decl: bool, parse_fla
             } else {
                 // Hoist `var` to function scope (level 0).
                 const existing_var = s.cur_func().findVar(atom_id);
-                if (existing_var < 0) {
+                if (existing_var < 0 and s.cur_func().findArg(atom_id) < 0) {
                     const saved = s.scope_level;
                     s.scope_level = 0;
                     defer s.scope_level = saved;

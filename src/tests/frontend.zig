@@ -3010,6 +3010,16 @@ test "F6: function declaration with parameters" {
     try expectOpcode(child.byte_code, op.return_undef);
 }
 
+test "F6: var redeclaration of parameter keeps closure bound to arg" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatementWithTopLevelChildren(&env, "function outer(l1){ var l1; function get(){ return l1; } }");
+    defer fn_bc.deinit(env.rt);
+
+    const outer = try expectFunctionConstant(&fn_bc, 0);
+    try std.testing.expect(functionBytecodeHasClosure(env.rt, outer, "l1", .arg));
+}
+
 test "F6: function declaration with rest parameter" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
