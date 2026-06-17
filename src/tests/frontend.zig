@@ -4066,7 +4066,7 @@ test "F10.1c Nested function: bytecode dual-buffering" {
     try std.testing.expect(countOpcode(state.function.code, op.fclosure) + countOpcode(state.function.code, op.fclosure8) > 0);
 
     try std.testing.expectEqual(@as(usize, 1), state.function_def.child_list.len);
-    const child = &state.function_def.child_list[0];
+    const child = state.function_def.child_list[0];
     try std.testing.expect(child.parent_cpool_idx >= 0);
     try expectOpcode(child.byte_code, op.push_i32);
     try expectOpcode(child.byte_code, op.return_undef);
