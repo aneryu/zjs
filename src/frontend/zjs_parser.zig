@@ -2318,7 +2318,7 @@ pub fn parseExpr(s: *ParseState) Error!void {
 pub fn parseExpr2(s: *ParseState, flags: ParseFlags) Error!void {
     s.features.insert(.expression);
     var operand_flags = flags;
-    try parseAssignExpr2(s, operand_flags);
+    try parseExpr2Operand(s, operand_flags);
     var saw_comma = false;
     while (s.isPunct(',')) {
         saw_comma = true;
@@ -2330,13 +2330,155 @@ pub fn parseExpr2(s: *ParseState, flags: ParseFlags) Error!void {
             try s.emitOp(opcode.op.drop);
         }
         operand_flags.result_needed = flags.result_needed;
-        try parseAssignExpr2(s, operand_flags);
+        try parseExpr2Operand(s, operand_flags);
     }
     if (saw_comma) {
         s.last_anonymous_function_expr = false;
         s.last_was_direct_eval_callee = false;
     }
     s.last_expr_had_comma = saw_comma;
+}
+
+const ReturnExprOperandMode = struct {
+    disabled: bool = false,
+    return_expr_mode: bool = false,
+    return_expr_cond_depth: u32 = 0,
+
+    fn restore(self: ReturnExprOperandMode, s: *ParseState) void {
+        if (!self.disabled) return;
+        s.return_expr_mode = self.return_expr_mode;
+        s.return_expr_cond_depth = self.return_expr_cond_depth;
+    }
+};
+
+fn enterReturnExprOperandMode(s: *ParseState) ReturnExprOperandMode {
+    if (!s.return_expr_mode or s.return_expr_cond_depth != 0) return .{};
+    if (!returnExprOperandHasFollowingTopLevelComma(s)) return .{};
+
+    const saved = ReturnExprOperandMode{
+        .disabled = true,
+        .return_expr_mode = s.return_expr_mode,
+        .return_expr_cond_depth = s.return_expr_cond_depth,
+    };
+    s.return_expr_mode = false;
+    s.return_expr_cond_depth = 0;
+    return saved;
+}
+
+fn parseExpr2Operand(s: *ParseState, flags: ParseFlags) Error!void {
+    const return_operand_mode = enterReturnExprOperandMode(s);
+    defer return_operand_mode.restore(s);
+    try parseAssignExpr2(s, flags);
+}
+
+const ReturnExprCommaScan = struct {
+    paren_depth: usize = 0,
+    bracket_depth: usize = 0,
+    brace_depth: usize = 0,
+
+    fn atTop(self: ReturnExprCommaScan) bool {
+        return self.paren_depth == 0 and self.bracket_depth == 0 and self.brace_depth == 0;
+    }
+};
+
+const ReturnExprCommaScanResult = enum {
+    continue_scan,
+    found_comma,
+    end_of_expr,
+};
+
+fn returnExprOperandHasFollowingTopLevelComma(s: *ParseState) bool {
+    const saved_pos = s.lex.pos;
+    const saved_line = s.lex.line;
+    const saved_col = s.lex.col;
+    const saved_got_lf = s.lex.got_lf;
+    const saved_mark_pos = s.lex.mark_pos;
+    const saved_mark_line = s.lex.mark_line;
+    const saved_mark_col = s.lex.mark_col;
+    defer {
+        s.lex.pos = saved_pos;
+        s.lex.line = saved_line;
+        s.lex.col = saved_col;
+        s.lex.got_lf = saved_got_lf;
+        s.lex.mark_pos = saved_mark_pos;
+        s.lex.mark_line = saved_mark_line;
+        s.lex.mark_col = saved_mark_col;
+    }
+
+    var scan: ReturnExprCommaScan = .{};
+    var previous_token_kind: ?tok.TokenKind = null;
+    switch (scanReturnExprCommaToken(s, &s.token, false, &scan, &previous_token_kind) catch return false) {
+        .found_comma => return true,
+        .end_of_expr => return false,
+        .continue_scan => {},
+    }
+
+    while (true) {
+        var lookahead = s.lex.next() catch return false;
+        defer s.lex.freeToken(&lookahead);
+        const token_had_lf = s.lex.gotLineTerminator();
+        switch (scanReturnExprCommaToken(s, &lookahead, token_had_lf, &scan, &previous_token_kind) catch return false) {
+            .found_comma => return true,
+            .end_of_expr => return false,
+            .continue_scan => {},
+        }
+    }
+}
+
+fn scanReturnExprCommaToken(
+    s: *ParseState,
+    token: *const tok.Token,
+    token_had_lf: bool,
+    scan: *ReturnExprCommaScan,
+    previous_token_kind: *?tok.TokenKind,
+) Error!ReturnExprCommaScanResult {
+    const kind = token.val;
+    if (scan.atTop()) {
+        if (token_had_lf) return .end_of_expr;
+        switch (kind) {
+            @as(tok.TokenKind, @intCast(',')) => return .found_comma,
+            @as(tok.TokenKind, @intCast(';')),
+            @as(tok.TokenKind, @intCast(')')),
+            @as(tok.TokenKind, @intCast(']')),
+            @as(tok.TokenKind, @intCast('}')),
+            tok.TOK_EOF,
+            => return .end_of_expr,
+            else => {},
+        }
+    }
+
+    switch (kind) {
+        @as(tok.TokenKind, @intCast('/')), tok.TOK_DIV_ASSIGN => {
+            if (try skipRegexpInPredeclareScan(s, previous_token_kind.*)) {
+                previous_token_kind.* = tok.TOK_REGEXP;
+                return .continue_scan;
+            }
+        },
+        tok.TOK_TEMPLATE => {
+            try skipTemplateInPredeclareScan(s, token.*);
+            previous_token_kind.* = tok.TOK_TEMPLATE;
+            return .continue_scan;
+        },
+        @as(tok.TokenKind, @intCast('(')) => scan.paren_depth += 1,
+        @as(tok.TokenKind, @intCast('[')) => scan.bracket_depth += 1,
+        @as(tok.TokenKind, @intCast('{')) => scan.brace_depth += 1,
+        @as(tok.TokenKind, @intCast(')')) => {
+            if (scan.paren_depth == 0) return .end_of_expr;
+            scan.paren_depth -= 1;
+        },
+        @as(tok.TokenKind, @intCast(']')) => {
+            if (scan.bracket_depth == 0) return .end_of_expr;
+            scan.bracket_depth -= 1;
+        },
+        @as(tok.TokenKind, @intCast('}')) => {
+            if (scan.brace_depth == 0) return .end_of_expr;
+            scan.brace_depth -= 1;
+        },
+        else => {},
+    }
+
+    previous_token_kind.* = kind;
+    return .continue_scan;
 }
 
 /// `js_parse_assign_expr` (`quickjs.c:27615`).

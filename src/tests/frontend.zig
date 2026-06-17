@@ -898,6 +898,20 @@ fn parseFunctionBodyStatement(env: *TestEnv, src: []const u8) !engine.bytecode.B
     return function;
 }
 
+fn returnExprEmittedReturn(env: *TestEnv, src: []const u8) !bool {
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+    state.return_expr_mode = true;
+    state.return_expr_emitted_return = false;
+    try zjs_parser.parseExpr(&state);
+    return state.return_expr_emitted_return;
+}
+
 fn expectParseStatementError(env: *TestEnv, src: []const u8) !void {
     if (parseStatement(env, src)) |fn_bc_result| {
         var fn_bc = fn_bc_result;
@@ -2701,6 +2715,24 @@ test "F5: return statement with value" {
     try std.testing.expectEqual(@as(usize, 6), fn_bc.code.len);
     try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
     try std.testing.expectEqual(op.@"return", fn_bc.code[5]);
+}
+
+test "F5: return conditional branch emission only applies to comma tail operand" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    try std.testing.expect(try returnExprEmittedReturn(&env, "a ? b : c"));
+    try std.testing.expect(!try returnExprEmittedReturn(&env, "a ? b : c, d"));
+    try std.testing.expect(try returnExprEmittedReturn(&env, "a, b ? c : d"));
+}
+
+test "F5: return conditional branch emission preserves tail calls" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseFunctionBodyStatement(&env, "return f() ? g() : h();");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expectEqual(@as(usize, 2), countOpcode(fn_bc.code, op.tail_call));
 }
 
 test "F5: throw statement" {
