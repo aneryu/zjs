@@ -4037,6 +4037,50 @@ test "TS: Function Overload Signatures Are Skipped" {
     try std.testing.expect(bytecode.code.len > 0);
 }
 
+test "TS: Class Method Overload Signatures Are Skipped" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSProgram(&env,
+        \\class S {
+        \\    process(x: number): string;
+        \\    process(x: string): number;
+        \\    process(x: any): any { return x; }
+        \\}
+        \\new S().process(1);
+    );
+    defer bytecode.deinit(env.rt);
+    try std.testing.expect(bytecode.code.len > 0);
+}
+
+test "TS: Generic Arrow Type Parameters Are Skipped" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSProgram(&env,
+        \\const f = <T,>(x: T): T => x;
+        \\const id = <T, U>(a: T, b: U): T => a;
+        \\const a = f(7);
+        \\const b = id(1, "x");
+        \\const c = 1 < 2;
+    );
+    defer bytecode.deinit(env.rt);
+    try std.testing.expect(bytecode.code.len > 0);
+}
+
+test "TS: Inline Object Type Parameter Constraints Are Skipped" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSProgram(&env,
+        \\function foo<U extends { x: number }>(u: U) { return u.x; }
+        \\class C<T extends { id: string }> {
+        \\    value: T;
+        \\    constructor(value: T) { this.value = value; }
+        \\}
+        \\foo({ x: 9 });
+    );
+    defer bytecode.deinit(env.rt);
+    try std.testing.expect(bytecode.code.len > 0);
+}
+
 test "TS: Unsupported Syntax Scan Reports Feature And Position" {
     const decorator = (try frontend.zjs_lexer.findUnsupportedTypeScriptSyntax(std.testing.allocator,
         \\class Before {}
