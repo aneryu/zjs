@@ -94,7 +94,7 @@ pub fn execCall(
 
     if (try builtin_glue.fastHostOutputCall(ctx.runtime, output, func, args)) {
         popOwnedStackRegion(ctx.runtime, stack, region_base);
-        try stack.pushOwned(core.JSValue.undefinedValue());
+        stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
         return .done;
     }
     const is_super_constructor = class_init_ops.isCurrentSuperConstructor(ctx, frame, func);
@@ -170,13 +170,10 @@ pub fn execCall(
         else
             result;
         try class_init_ops.setCurrentArrowLexicalThis(ctx, frame, next_this.dup());
-        try stack.push(next_this);
+        stack.pushAssumeCapacity(next_this);
         return .done;
     }
-    stack.pushOwned(result) catch |err| {
-        result.free(ctx.runtime);
-        return err;
-    };
+    stack.pushOwnedAssumeCapacity(result);
     return .done;
 }
 
@@ -7209,7 +7206,7 @@ pub fn inOp(
         try object_ops.hasValueProperty(ctx, output, global, rhs, object, key, caller_function, caller_frame)
     else
         try object_ops.ordinaryHasValueProperty(ctx, output, global, object, key, has_builtin_object_proto, caller_function, caller_frame);
-    try stack.pushOwned(core.JSValue.boolean(found));
+    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(found));
 }
 
 pub fn instanceofOp(
@@ -7234,7 +7231,7 @@ pub fn instanceofOp(
     if (!has_instance.isUndefined() and !has_instance.isNull()) {
         const result = try callValueOrBytecode(ctx, output, global, rhs, has_instance, &.{lhs}, caller_function, caller_frame);
         defer result.free(ctx.runtime);
-        try stack.pushOwned(core.JSValue.boolean(coercion_ops.valueTruthy(result)));
+        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(coercion_ops.valueTruthy(result)));
         return;
     }
     if (!isCallableValue(rhs)) {
@@ -7242,12 +7239,12 @@ pub fn instanceofOp(
         return error.TypeError;
     }
     if (!lhs.isObject()) {
-        try stack.pushOwned(core.JSValue.boolean(false));
+        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
         return;
     }
     const object = try property_ops.expectObject(lhs);
     if (try constructorNameEqlLocal(ctx.runtime, ctor, "Array")) {
-        try stack.pushOwned(core.JSValue.boolean(object.flags.is_array));
+        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(object.flags.is_array));
         return;
     }
     const proto_value = try object_ops.getValueProperty(ctx, output, global, rhs, core.atom.ids.prototype, caller_function, caller_frame);
@@ -7259,12 +7256,12 @@ pub fn instanceofOp(
     var current = try object_ops.qjsObjectGetPrototypeOfStep(ctx, output, global, object, caller_function, caller_frame);
     while (current) |candidate| {
         if (candidate == proto) {
-            try stack.pushOwned(core.JSValue.boolean(true));
+            stack.pushOwnedAssumeCapacity(core.JSValue.boolean(true));
             return;
         }
         current = try object_ops.qjsObjectGetPrototypeOfStep(ctx, output, global, candidate, caller_function, caller_frame);
     }
-    try stack.pushOwned(core.JSValue.boolean(false));
+    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
 }
 
 pub fn constructorNameEqlLocal(rt: *core.JSRuntime, object: *core.Object, expected: []const u8) !bool {

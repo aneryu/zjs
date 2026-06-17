@@ -8,6 +8,7 @@
 //! the bytecode pipeline has removed temporary opcodes.
 
 const fusion_stats = @import("vm_fusion_stats.zig");
+const builtin = @import("builtin");
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
@@ -335,6 +336,7 @@ pub fn runWithArgsState(
     try call_vm.initFrameVarRefs(ctx, global, entry_function, &frame_storage, var_refs, use_inline_frame_storage);
 
     const resume_state = try gen_async_vm.resumeExecutionState(ctx, entry_stack, entry_function, &frame_storage, entry_generator_state, resume_value);
+    try reserveEntryFrameCapacity(entry_stack, entry_function);
     errdefer {
         closeFrameDestructuringIteratorsForAbruptCompletion(ctx, output, global, entry_stack, &frame_storage);
     }
@@ -374,6 +376,20 @@ pub fn runWithArgsState(
             return err;
         };
     }
+}
+
+fn reserveEntryFrameCapacity(entry_stack: *stack_mod.Stack, entry_function: *const bytecode.Bytecode) !void {
+    const frame_stack_size: usize = if (comptime builtin.mode == .Debug)
+        // Some colocated tests hand-build bytecode without running finalize's
+        // stack-size pass. Keep those Debug-only fixtures checked at entry;
+        // ReleaseFast relies on finalized bytecode's verified stack_size.
+        if (entry_function.stack_size == 0 and entry_function.code.len != 0)
+            entry_function.code.len
+        else
+            entry_function.stack_size
+    else
+        entry_function.stack_size;
+    try entry_stack.reserveFrameCapacity(frame_stack_size);
 }
 
 /// Per-invocation dispatch loop state shared between `runWithArgsState` and

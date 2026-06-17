@@ -289,6 +289,7 @@ pub const Machine = struct {
             stack_mod.Stack.initArenaWindow(&rt.memory, rt.stack_size, window)
         else
             stack_mod.Stack.init(&rt.memory, rt.stack_size);
+        try entry.stack.reserveFrameCapacity(entry.view.stack_size);
         errdefer entry.stack.deinit(rt);
 
         entry.frame = frame_mod.Frame.init(&entry.view);
@@ -574,10 +575,7 @@ pub const Machine = struct {
     pub fn popReturn(self: *Machine, result: core.JSValue) HostError!void {
         self.popTeardown();
         const caller_stack = if (self.depth == 0) self.l0_stack else &self.topEntry().stack;
-        caller_stack.pushOwned(result) catch |err| {
-            result.free(self.ctx.runtime);
-            return err;
-        };
+        caller_stack.pushOwnedAssumeCapacity(result);
     }
 
     /// Unwind inline frames looking for a catch handler for `err`. The top
