@@ -1265,6 +1265,23 @@ test "F4: discarded short-circuit with assignment RHS keeps function stack balan
     }
 }
 
+test "F4: discarded conditional assignment arms keep function stack balanced" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const cases = [_][]const u8{
+        "function f(){ a ? b = 1 : c; }",
+        "function f(){ a ? b : c = 1; }",
+        "function f(){ c ? 0 : p = 1; }",
+        "function f(){ a ? b : c -= 1; }",
+        "function f(){ a ? b : c[d] = b; }",
+    };
+    for (cases) |source| {
+        var fn_bc = try parseStatementWithTopLevelChildren(&env, source);
+        defer fn_bc.deinit(env.rt);
+    }
+}
+
 test "F4: ternary cond ? a : b emits if_false + goto skeleton" {
     var env = try ParserTestEnv.init();
     defer env.deinit();

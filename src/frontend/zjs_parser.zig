@@ -3515,7 +3515,9 @@ pub fn parseCondExpr(s: *ParseState, flags: ParseFlags) Error!void {
     try parseCoalesceExpr(s, flags);
     if (s.isPunct('?')) {
         try s.advance();
-        const then_flags = ParseFlags{ .in_accepted = true };
+        var then_flags = forceResultNeeded(flags);
+        then_flags.in_accepted = true;
+        const else_flags = forceResultNeeded(flags);
         // Short-circuit: if false, jump to else branch. The parser emits
         // absolute u32 offsets; `resolve_labels` lowers them to relative
         // goto8/goto16 forms.
@@ -3525,9 +3527,7 @@ pub fn parseCondExpr(s: *ParseState, flags: ParseFlags) Error!void {
             try emitReturnExprBranch(s);
             try patchForwardJump(s, else_jump_offset);
             try expectPunct(s, ':');
-            // The `parse_flags` propagated to the else-branch must keep
-            // `PF_IN_ACCEPTED` per QuickJS (`quickjs.c:27305`).
-            try parseAssignExprWithoutPendingFunctionName(s, flags);
+            try parseAssignExprWithoutPendingFunctionName(s, else_flags);
             try emitReturnExprBranch(s);
             s.return_expr_emitted_return = true;
             s.last_anonymous_function_expr = false;
@@ -3539,9 +3539,7 @@ pub fn parseCondExpr(s: *ParseState, flags: ParseFlags) Error!void {
         const end_jump_offset = try emitForwardJump(s, opcode.op.goto);
         try patchForwardJump(s, else_jump_offset);
         try expectPunct(s, ':');
-        // The `parse_flags` propagated to the else-branch must keep
-        // `PF_IN_ACCEPTED` per QuickJS (`quickjs.c:27305`).
-        try parseAssignExprWithoutPendingFunctionName(s, flags);
+        try parseAssignExprWithoutPendingFunctionName(s, else_flags);
         try patchForwardJump(s, end_jump_offset);
         s.last_anonymous_function_expr = false;
         s.last_was_direct_eval_callee = false;
