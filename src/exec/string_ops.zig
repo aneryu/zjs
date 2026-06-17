@@ -3599,6 +3599,33 @@ pub const RegExpMatch = struct {
     capture_count: usize = 0,
 };
 
+pub const LazyRegExpLegacyCapture = struct {
+    start: usize,
+    len: usize,
+};
+
+const lazy_legacy_capture_len_bits: u6 = 20;
+const lazy_legacy_capture_len_limit: usize = @as(usize, 1) << lazy_legacy_capture_len_bits;
+const lazy_legacy_capture_len_mask: u64 = lazy_legacy_capture_len_limit - 1;
+const lazy_legacy_capture_start_limit: usize = @as(usize, 1) << (47 - lazy_legacy_capture_len_bits);
+const lazy_legacy_capture_payload_limit: i64 = @as(i64, 1) << 47;
+
+pub fn encodeRegExpLegacyCaptureSlice(start: usize, len: usize) ?core.JSValue {
+    if (start >= lazy_legacy_capture_start_limit or len >= lazy_legacy_capture_len_limit) return null;
+    const payload = (@as(u64, @intCast(start)) << lazy_legacy_capture_len_bits) | @as(u64, @intCast(len));
+    return core.JSValue.shortBigInt(@intCast(payload));
+}
+
+pub fn decodeRegExpLegacyCaptureSlice(value: core.JSValue) ?LazyRegExpLegacyCapture {
+    const payload_i64 = value.asShortBigInt() orelse return null;
+    if (payload_i64 < 0 or payload_i64 >= lazy_legacy_capture_payload_limit) return null;
+    const payload: u64 = @intCast(payload_i64);
+    return .{
+        .start = @intCast(payload >> lazy_legacy_capture_len_bits),
+        .len = @intCast(payload & lazy_legacy_capture_len_mask),
+    };
+}
+
 pub fn defineSplitStringElement(rt: *core.JSRuntime, object: *core.Object, index: u32, bytes: []const u8) !void {
     const value = value_ops.createStringValue(rt, bytes) catch |err| switch (err) {
         error.InvalidUtf8 => try createStringFromByteUnits(rt, bytes),
@@ -3692,17 +3719,9 @@ pub fn createRegExpMatchArrayFromValue(rt: *core.JSRuntime, global: *core.Object
     const matched = try stringSliceValue(rt, input_value, found.index, found.len);
     defer matched.free(rt);
 
-    var legacy_capture_values: [9]?core.JSValue = @splat(null);
-    var last_capture_value: ?core.JSValue = null;
-    defer {
-        for (&legacy_capture_values) |*value_slot| {
-            if (value_slot.*) |value| value.free(rt);
-        }
-        if (last_capture_value) |value| value.free(rt);
-    }
-    try initRegExpMatchArrayDenseElementsFromValue(rt, out, input_value, found, matched, &legacy_capture_values, &last_capture_value);
+    try initRegExpMatchArrayDenseElementsFromValue(rt, out, input_value, found, matched);
 
-    try updateRegExpLegacyStaticsForMatchValues(rt, global, input_value, found, matched, &legacy_capture_values, last_capture_value);
+    try updateRegExpLegacyStaticsForMatch(rt, global, input_value, found);
 
     if (!has_indices and !regExpMatchHasNamedCaptures(found)) {
         try out.defineRegExpMatchMetadataPropertiesAssumingNew(rt, @intCast(found.index), input_value, core.JSValue.undefinedValue());
@@ -3726,8 +3745,6 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
     input_value: core.JSValue,
     found: RegExpMatch,
     matched: core.JSValue,
-    legacy_capture_values: *[9]?core.JSValue,
-    last_capture_value: *?core.JSValue,
 ) !void {
     std.debug.assert(out.flags.is_array);
     std.debug.assert(out.length == 0);
@@ -3755,13 +3772,7 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
             elements[element_index] = core.JSValue.undefinedValue();
         } else {
             const capture_value = try stringSliceValue(rt, input_value, capture.start, capture.len);
-            defer capture_value.free(rt);
-            if (capture_index < legacy_capture_values.len) legacy_capture_values[capture_index] = capture_value.dup();
-            const next_last_capture = capture_value.dup();
-            const old_last_capture = last_capture_value.*;
-            last_capture_value.* = next_last_capture;
-            if (old_last_capture) |old| old.free(rt);
-            elements[element_index] = capture_value.dup();
+            elements[element_index] = capture_value;
         }
         initialized += 1;
     }
@@ -3854,6 +3865,8 @@ pub fn updateRegExpLegacyStaticsForMatchValues(
 }
 
 pub fn updateRegExpLegacyStaticsForMatch(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: RegExpMatch) !void {
+    if (try updateRegExpLegacyStaticsLazyForMatch(rt, global, input_value, found)) return;
+
     const matched = try stringSliceValue(rt, input_value, found.index, found.len);
     defer matched.free(rt);
 
@@ -3878,6 +3891,53 @@ pub fn updateRegExpLegacyStaticsForMatch(rt: *core.JSRuntime, global: *core.Obje
     }
 
     try updateRegExpLegacyStaticsForMatchValues(rt, global, input_value, found, matched, &legacy_capture_values, last_capture_value);
+}
+
+pub fn updateRegExpLegacyStaticsLazyForMatch(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: RegExpMatch) !bool {
+    var encoded_captures: [9]?core.JSValue = @splat(null);
+    var encoded_last_paren: ?core.JSValue = null;
+
+    var capture_index: usize = 0;
+    while (capture_index < found.capture_count) : (capture_index += 1) {
+        const capture = found.captures[capture_index];
+        if (capture.undefined) continue;
+        const encoded = encodeRegExpLegacyCaptureSlice(capture.start, capture.len) orelse return false;
+        if (capture_index < encoded_captures.len) encoded_captures[capture_index] = encoded;
+        encoded_last_paren = encoded;
+    }
+
+    const regexp_ctor = regExpConstructorFromGlobal(rt, global) catch return true;
+    if (regexp_ctor.class_payload_kind != .function) return true;
+    const legacy = try regexp_ctor.ensureRegExpLegacyStatics(rt);
+    const already_lazy = legacy.lazy_no_capture_match;
+
+    try replaceRegExpLegacySlot(rt, regexp_ctor, &legacy.input, input_value);
+    if (!already_lazy) {
+        clearRegExpLegacySlot(rt, &legacy.last_match);
+        clearRegExpLegacySlot(rt, &legacy.left_context);
+        clearRegExpLegacySlot(rt, &legacy.right_context);
+    }
+
+    if (encoded_last_paren) |value| {
+        try replaceRegExpLegacySlot(rt, regexp_ctor, &legacy.last_paren, value);
+    } else {
+        clearRegExpLegacySlot(rt, &legacy.last_paren);
+    }
+
+    var slot_index: usize = 0;
+    while (slot_index < legacy.captures.len) : (slot_index += 1) {
+        if (encoded_captures[slot_index]) |value| {
+            try replaceRegExpLegacySlot(rt, regexp_ctor, &legacy.captures[slot_index], value);
+        } else {
+            clearRegExpLegacySlot(rt, &legacy.captures[slot_index]);
+        }
+    }
+
+    legacy.lazy_no_capture_match = true;
+    legacy.lazy_match_index = found.index;
+    legacy.lazy_match_len = found.len;
+    legacy.lazy_input_len = try stringLengthIndex(rt, input_value);
+    return true;
 }
 
 pub fn createStartOfLineUnicodeMatchArray(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue) !core.JSValue {
