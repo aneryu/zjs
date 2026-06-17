@@ -32,6 +32,7 @@ pub const Shape = struct {
     hash: u32 = 0,
     registry_index: usize = no_registry_index,
     registry_hash_next: ?*Shape = null,
+    registry_hash_prev: ?*?*Shape = null,
     prop_hash_mask: u32 = no_property_hash,
     prop_count: usize = 0,
     deleted_prop_count: usize = 0,
@@ -580,6 +581,7 @@ pub const Registry = struct {
         self.shape_hash_bits = next_bits;
         for (self.shapes) |shape| {
             shape.registry_hash_next = null;
+            shape.registry_hash_prev = null;
             self.insertShapeHash(shape);
         }
         self.memory.free(?*Shape, old_buckets);
@@ -593,14 +595,22 @@ pub const Registry = struct {
     fn insertShapeHash(self: *Registry, shape: *Shape) void {
         std.debug.assert(self.shape_hash_buckets.len != 0);
         const bucket = hashIndex(shape.hash, self.shape_hash_bits);
-        shape.registry_hash_next = self.shape_hash_buckets[bucket];
-        self.shape_hash_buckets[bucket] = shape;
+        const bucket_link = &self.shape_hash_buckets[bucket];
+        shape.registry_hash_next = bucket_link.*;
+        if (shape.registry_hash_next) |next| next.registry_hash_prev = &shape.registry_hash_next;
+        shape.registry_hash_prev = bucket_link;
+        bucket_link.* = shape;
     }
 
     fn removeShapeHash(self: *Registry, shape: *Shape) void {
-        if (!self.removeShapeHashFromBucket(shape, shape.hash)) {
-            self.removeShapeHashEverywhere(shape);
+        if (shape.registry_hash_prev) |prev| {
+            prev.* = shape.registry_hash_next;
+            if (shape.registry_hash_next) |next| next.registry_hash_prev = prev;
+            shape.registry_hash_next = null;
+            shape.registry_hash_prev = null;
+            return;
         }
+        if (!self.removeShapeHashFromBucket(shape, shape.hash)) self.removeShapeHashEverywhere(shape);
     }
 
     fn rehashShape(self: *Registry, shape: *Shape, old_hash: u32) void {
@@ -618,7 +628,9 @@ pub const Registry = struct {
             while (cursor.*) |candidate| {
                 if (candidate == shape) {
                     cursor.* = candidate.registry_hash_next;
+                    if (candidate.registry_hash_next) |next| next.registry_hash_prev = cursor;
                     candidate.registry_hash_next = null;
+                    candidate.registry_hash_prev = null;
                     break;
                 }
                 cursor = &candidate.registry_hash_next;
@@ -633,7 +645,9 @@ pub const Registry = struct {
         while (cursor.*) |candidate| {
             if (candidate == shape) {
                 cursor.* = candidate.registry_hash_next;
+                if (candidate.registry_hash_next) |next| next.registry_hash_prev = cursor;
                 candidate.registry_hash_next = null;
+                candidate.registry_hash_prev = null;
                 return true;
             }
             cursor = &candidate.registry_hash_next;
