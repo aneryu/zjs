@@ -555,27 +555,20 @@ switch (opc) {
         try slot_ops.execPutLoc(ctx, function, global, frame, stack, 3, 0, opc, false);
         pc = frame.pc;
     },
-    op.get_arg0 => {
-        frame.pc = pc;
-        try slot_ops.execGetArg(ctx, frame, stack, 0, 0, opc);
-        pc = frame.pc;
+    // S2b: hot arg GETs inline the leaned body (skip the `arg` dispatcher + the
+    // execGetArg call + frame.pc round-trip). Variadic bound: an arg index past
+    // the actual arg count reads undefined (args may be fewer than declared).
+    // GC-free presized-stack push, so no frame.pc publish needed.
+    op.get_arg0 => array_ops.pushSlotValueAssumeCapacity(stack, if (frame.args.len > 0) frame.args[0] else core.JSValue.undefinedValue()),
+    op.get_arg1 => array_ops.pushSlotValueAssumeCapacity(stack, if (frame.args.len > 1) frame.args[1] else core.JSValue.undefinedValue()),
+    op.get_arg2 => array_ops.pushSlotValueAssumeCapacity(stack, if (frame.args.len > 2) frame.args[2] else core.JSValue.undefinedValue()),
+    op.get_arg3 => array_ops.pushSlotValueAssumeCapacity(stack, if (frame.args.len > 3) frame.args[3] else core.JSValue.undefinedValue()),
+    op.get_arg => {
+        const idx = readInt(u16, code[pc..][0..2]);
+        pc += 2;
+        array_ops.pushSlotValueAssumeCapacity(stack, if (idx < frame.args.len) frame.args[idx] else core.JSValue.undefinedValue());
     },
-    op.get_arg1 => {
-        frame.pc = pc;
-        try slot_ops.execGetArg(ctx, frame, stack, 1, 0, opc);
-        pc = frame.pc;
-    },
-    op.get_arg2 => {
-        frame.pc = pc;
-        try slot_ops.execGetArg(ctx, frame, stack, 2, 0, opc);
-        pc = frame.pc;
-    },
-    op.get_arg3 => {
-        frame.pc = pc;
-        try slot_ops.execGetArg(ctx, frame, stack, 3, 0, opc);
-        pc = frame.pc;
-    },
-    op.get_arg, op.put_arg, op.set_arg, op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3, op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 => {
+    op.put_arg, op.set_arg, op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3, op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 => {
         frame.pc = pc;
         try vm_property_locals.arg(ctx, function, frame, stack, opc);
         pc = frame.pc;
