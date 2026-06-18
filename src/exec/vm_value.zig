@@ -92,27 +92,13 @@ fn pushImmediateInt32MaybeFuse(
     frame: *frame_mod.Frame,
     value: i32,
 ) !void {
-    var current = value;
-    var pc = frame.pc;
-    var consumed = false;
-    while (tryFoldImmediateInt32At(function.code, &pc, &current)) |result| {
-        consumed = true;
-        current = result.asInt32() orelse {
-            frame.pc = pc;
-            try pushImmediateBinaryResultMaybeFuseStackBinary(stack, function, frame, result);
-            return;
-        };
-    }
-    while (tryFoldFollowingImmediateInt32Term(function.code, &pc, &current)) |result| {
-        consumed = true;
-        current = result.asInt32() orelse {
-            frame.pc = pc;
-            try pushImmediateBinaryResultMaybeFuseStackBinary(stack, function, frame, result);
-            return;
-        };
-    }
-    if (consumed) frame.pc = pc;
-    try pushImmediateBinaryResultMaybeFuseStackBinary(stack, function, frame, core.JSValue.int32(current));
+    // The runtime immediate-int fold scan (push-imm push-imm binop → folded
+    // constant) was net-NEGATIVE: profiling showed it was ~16.7% of zlib /
+    // ~8.4% of crypto, and bypassing it measured crypto +8.6% and zlib +15%
+    // (the ahead-scan cost exceeds the dispatch it saved). The stack-binary
+    // fusion (<stack-lhs> imm binop) below is kept; only the imm-imm prescan
+    // is removed. Unfused immediates simply execute as normal opcodes (same result).
+    try pushImmediateBinaryResultMaybeFuseStackBinary(stack, function, frame, core.JSValue.int32(value));
 }
 
 fn tryFoldImmediateInt32At(code: []const u8, pc: *usize, current: *const i32) ?core.JSValue {
