@@ -204,7 +204,7 @@ pub const Machine = struct {
     }
 
     /// Where the new frame's `func | args...` call region comes from.
-    const ArgsSource = union(enum) {
+    pub const ArgsSource = union(enum) {
         /// Region still live on the caller's operand stack; it is popped
         /// (receiver/func freed, args moved) during frame setup, after the
         /// bindings have duplicated them. Layout is `[callable, args...]`, or
@@ -240,13 +240,23 @@ pub const Machine = struct {
     /// Push an inline call frame for `target`. Shared between plain inline
     /// calls (`pushCall`) and tail-call frame reuse (`tailCallReuse`).
     fn pushFrame(self: *Machine, global: *core.Object, target: InlineTarget, source: ArgsSource) HostError!void {
-        const ctx = self.ctx;
-        const rt = ctx.runtime;
-
-        try vm_call.enterInlineCallDepth(ctx, global);
-        errdefer ctx.call_depth -= 1;
-
+        try vm_call.enterInlineCallDepth(self.ctx, global);
+        errdefer self.ctx.call_depth -= 1;
         const entry = try self.acquireSlot(global);
+        try setupInlineEntry(self.ctx, global, entry, target, source);
+        self.depth += 1;
+        self.switched = true;
+    }
+
+    /// Optimized inline-call frame setup, factored out of `pushFrame` so BOTH
+    /// the Machine and the native-recursion path (`callInternal`, S2a) share the
+    /// zero-copy arg move (`initArgumentsMoved`), eval-binding merge, this-boxing
+    /// and arena carve — NOT the dup-heavy `callFunctionBytecodeModeState` path.
+    /// The caller owns depth accounting (enterInlineCallDepth / enterCallDepth)
+    /// and any push/pop bookkeeping; on error every partially-initialized
+    /// resource is released via the errdefers below.
+    pub fn setupInlineEntry(ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: InlineTarget, source: ArgsSource) HostError!void {
+        const rt = ctx.runtime;
         entry.view = bytecode.function.asBytecodeView(target.fb, rt);
         entry.catch_target = null;
         entry.merged_var_ref_names = &.{};
@@ -404,9 +414,6 @@ pub const Machine = struct {
         if (frame_var_refs.len != 0 or entry.view.var_ref_names.len != 0) {
             try vm_call.initFrameVarRefs(ctx, global, &entry.view, &entry.frame, frame_var_refs, true);
         }
-
-        self.depth += 1;
-        self.switched = true;
     }
 
     fn sourceCallableSlot(source: ArgsSource) *core.JSValue {
@@ -554,9 +561,18 @@ pub const Machine = struct {
     /// path (roots, eval snapshot, frame, operand stack, arena watermark,
     /// backtrace, profile scope, call depth).
     fn popTeardown(self: *Machine) void {
-        const ctx = self.ctx;
+        teardownInlineEntry(self.ctx, self.topEntry());
+        self.ctx.call_depth -= 1;
+        self.depth -= 1;
+        self.switched = true;
+    }
+
+    /// Release every resource `setupInlineEntry` acquired for `entry` (roots,
+    /// eval snapshot, frame, operand stack, merged slices, arena watermark,
+    /// backtrace, profile scope). The caller owns depth accounting + push/pop
+    /// bookkeeping. Shared by the Machine (popTeardown) and the recursion path.
+    pub fn teardownInlineEntry(ctx: *core.JSContext, entry: *Entry) void {
         const rt = ctx.runtime;
-        const entry = self.topEntry();
         entry.frame_roots.deinit();
         entry.eval_snapshot.deinit(rt);
         entry.frame.deinit(&rt.memory, rt);
@@ -565,9 +581,6 @@ pub const Machine = struct {
         rt.vm_stack.restore(entry.arena_mark);
         popInlineBacktraceFrame(ctx, entry.backtrace_mode);
         entry.profile_guard.deinit();
-        ctx.call_depth -= 1;
-        self.depth -= 1;
-        self.switched = true;
     }
 
     /// Pop the top inline frame after a completed return, pushing `result`
