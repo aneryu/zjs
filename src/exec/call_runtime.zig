@@ -18,6 +18,7 @@ const inline_calls = @import("inline_calls.zig");
 const module_mod = @import("module.zig");
 const property_ops = @import("property_ops.zig");
 const zjs_vm = @import("zjs_vm.zig");
+const call_internal = @import("call_internal.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 const HostError = exceptions.HostError;
@@ -5006,7 +5007,17 @@ pub fn callFunctionBytecodeModeState(
     else
         stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
-    const result = runWithArgsState(ctx, &nested_stack, &nested, effective_this, args, combined_var_refs, output, global, false, fb_runtime_strict, stop_on_yield, &.{}, &.{}, eval_var_ref_names, eval_var_refs, &.{}, &.{}, &.{}, &.{}, generator_state, resume_value, stop_before_pc, current_function_value, new_target_value, constructor_this_value, false, false, core.JSValue.undefinedValue(), false, false) catch |err| {
+    // Recursive register-resident dispatcher (build-flag gated, WIP): a normal-
+    // kind, non-generator callee runs through `callInternal` (native Zig
+    // recursion) instead of the flattened inline-`Machine` loop. `arena_eligible`
+    // == (fb.func_kind == .normal and generator_state == null), exactly the
+    // frames `dispatchRecursive` supports; everything else stays on
+    // `runWithArgsState`. When the flag is off this folds away at comptime.
+    const dispatch_result = if (call_internal.recursive_dispatch_enabled and arena_eligible)
+        call_internal.callInternal(ctx, &nested_stack, &nested, effective_this, args, combined_var_refs, output, global, eval_var_ref_names, eval_var_refs, current_function_value, new_target_value, constructor_this_value)
+    else
+        runWithArgsState(ctx, &nested_stack, &nested, effective_this, args, combined_var_refs, output, global, false, fb_runtime_strict, stop_on_yield, &.{}, &.{}, eval_var_ref_names, eval_var_refs, &.{}, &.{}, &.{}, &.{}, generator_state, resume_value, stop_before_pc, current_function_value, new_target_value, constructor_this_value, false, false, core.JSValue.undefinedValue(), false, false);
+    const result = dispatch_result catch |err| {
         if (fb.func_kind == .async_generator) {
             return exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, global));
         }

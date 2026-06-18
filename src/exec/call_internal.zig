@@ -8,11 +8,13 @@
 //! native-recursion integration); no per-opcode interrupt poll yet.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 const bytecode = @import("../bytecode/root.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
+const exception_ops = @import("vm_exception_ops.zig");
 const HostError = @import("exceptions.zig").HostError;
 
 const value_vm = @import("vm_value.zig");
@@ -47,6 +49,91 @@ fn relativePc(operand_pc: usize, diff: i32) usize {
     return @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff));
 }
 
+/// Frame-setup wrapper that runs a NORMAL-kind bytecode function through the
+/// recursive `dispatchRecursive`. Mirrors `runWithArgsState`'s setup (lines
+/// 294-339) minus the inline-`Machine` loop and the generator/eval-code state,
+/// which never apply to a normal-kind callee (`resumeExecutionState` /
+/// `completeResumeState` are no-ops when `generator_state == null`, returning an
+/// empty resume state and a null catch target). Nested JS→JS calls recurse
+/// natively because the call opcodes run with `allow_inline=false`, routing back
+/// through `callFunctionBytecodeModeState` → `callInternal`. Gated to
+/// `recursive_dispatch_enabled` from `callFunctionBytecodeModeState`.
+pub fn callInternal(
+    ctx: *core.JSContext,
+    entry_stack: *stack_mod.Stack,
+    entry_function: *const bytecode.Bytecode,
+    initial_this_value: core.JSValue,
+    args: []const core.JSValue,
+    var_refs: []const core.JSValue,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    input_eval_var_ref_names: []const core.Atom,
+    input_eval_var_refs: []const core.JSValue,
+    current_function_value: core.JSValue,
+    new_target_value: core.JSValue,
+    constructor_this_value: core.JSValue,
+) HostError!core.JSValue {
+    const call_depth_guard = try call_vm.enterCallDepth(ctx, global);
+    defer call_depth_guard.deinit();
+    const call_profile_guard = call_vm.enterCallProfile(ctx.runtime);
+    defer call_profile_guard.deinit();
+    try ctx.pushBacktraceFrameLazyName(entry_function.name, entry_function.filename, entry_function.line_num, entry_function.col_num, entry_function, exception_ops.resolveBacktraceLocation, current_function_value);
+    defer ctx.popBacktraceFrame();
+
+    // Frame storage (locals/args/var_refs) is carved from the VM stack arena;
+    // reclaim the watermark after the frame has released its values.
+    const frame_arena_mark = ctx.runtime.vm_stack.mark();
+    defer ctx.runtime.vm_stack.restore(frame_arena_mark);
+
+    var frame_storage = frame_mod.Frame.init(entry_function);
+    ctx.borrowBacktracePc(&frame_storage.pc);
+    defer frame_storage.deinit(&ctx.runtime.memory, ctx.runtime);
+    var frame_eval_var_refs = try frame_storage.initCallBindings(ctx.runtime, .{
+        .initial_this_value = initial_this_value,
+        .current_function_value = current_function_value,
+        .new_target_value = new_target_value,
+        .constructor_this_value = constructor_this_value,
+        .eval_local_names = &.{},
+        .eval_local_slots = &.{},
+        .input_eval_var_ref_names = input_eval_var_ref_names,
+        .input_eval_var_refs = input_eval_var_refs,
+        .inherited_eval_local_names = &.{},
+        .inherited_eval_local_slots = &.{},
+        .inherited_eval_var_ref_names = &.{},
+        .inherited_eval_var_refs = &.{},
+    });
+    defer frame_eval_var_refs.deinit(ctx.runtime);
+
+    var frame_roots = frame_mod.FrameRootScope{};
+    frame_roots.init(ctx.runtime, entry_stack, &frame_storage, &frame_eval_var_refs);
+    defer frame_roots.deinit();
+
+    const use_inline_frame_storage = !entry_function.flags.is_generator and !entry_function.flags.is_async;
+    const frame_arena: ?*core.VmStackArena = if (use_inline_frame_storage) &ctx.runtime.vm_stack else null;
+    try call_vm.initFrameLocals(ctx, entry_function, &frame_storage, &.{}, &.{}, use_inline_frame_storage);
+    try frame_storage.initArguments(&ctx.runtime.memory, frame_arena, args, use_inline_frame_storage, frame_mod.argumentsNeedsOriginalSnapshot(entry_function));
+    try call_vm.initFrameVarRefs(ctx, global, entry_function, &frame_storage, var_refs, use_inline_frame_storage);
+
+    try reserveEntryFrameCapacity(entry_stack, entry_function);
+    errdefer call_runtime.closeFrameDestructuringIteratorsForAbruptCompletion(ctx, output, global, entry_stack, &frame_storage);
+
+    return dispatchRecursive(ctx, entry_function, global, &frame_storage, entry_stack, output);
+}
+
+fn reserveEntryFrameCapacity(entry_stack: *stack_mod.Stack, entry_function: *const bytecode.Bytecode) !void {
+    const frame_stack_size: usize = if (comptime builtin.mode == .Debug)
+        // Some colocated tests hand-build bytecode without finalize's stack-size
+        // pass; keep those Debug-only fixtures checked at entry. ReleaseFast
+        // relies on finalized bytecode's verified stack_size.
+        if (entry_function.stack_size == 0 and entry_function.code.len != 0)
+            entry_function.code.len
+        else
+            entry_function.stack_size
+    else
+        entry_function.stack_size;
+    try entry_stack.reserveFrameCapacity(frame_stack_size);
+}
+
 pub fn dispatchRecursive(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
@@ -59,10 +146,13 @@ pub fn dispatchRecursive(
     var pc: usize = frame.pc;
     var catch_target_storage: ?usize = null;
     const catch_target: *?usize = &catch_target_storage;
+    // Loops are made interruptible by polling on backward jumps (mirroring
+    // QuickJS's backward-branch poll); the straight-line path stays poll-free.
+    var interrupt_poller = control_vm.InterruptPoller.init(ctx.runtime);
     while (true) {
         if (pc >= code.len) {
             frame.pc = pc;
-            return stack.peek() orelse core.JSValue.undefinedValue();
+            return control_vm.finishFunctionReturn(ctx, frame, stack.peek() orelse core.JSValue.undefinedValue());
         }
         const opc = code[pc];
         pc += 1;
@@ -462,16 +552,19 @@ switch (opc) {
         const operand_pc = pc;
         const diff = readInt(i32, code[pc..][0..4]);
         pc = relativePc(operand_pc, diff);
+        if (diff < 0) try interrupt_poller.poll(ctx.runtime);
     },
     op.goto16 => {
         const operand_pc = pc;
         const diff: i32 = readInt(i16, code[pc..][0..2]);
         pc = relativePc(operand_pc, diff);
+        if (diff < 0) try interrupt_poller.poll(ctx.runtime);
     },
     op.goto8 => {
         const operand_pc = pc;
         const diff: i32 = @as(i8, @bitCast(code[pc]));
         pc = relativePc(operand_pc, diff);
+        if (diff < 0) try interrupt_poller.poll(ctx.runtime);
     },
     op.if_false, op.if_true => {
         const operand_pc = pc;
@@ -481,7 +574,10 @@ switch (opc) {
         defer value.free(ctx.runtime);
         const truthy = value.asBool() orelse value_ops.isTruthy(value);
         const branch_if_true = (opc == op.if_true);
-        if (truthy == branch_if_true) pc = relativePc(operand_pc, diff);
+        if (truthy == branch_if_true) {
+            pc = relativePc(operand_pc, diff);
+            if (diff < 0) try interrupt_poller.poll(ctx.runtime);
+        }
     },
     op.if_false8, op.if_true8 => {
         const operand_pc = pc;
@@ -491,7 +587,10 @@ switch (opc) {
         defer value.free(ctx.runtime);
         const truthy = value.asBool() orelse value_ops.isTruthy(value);
         const branch_if_true = (opc == op.if_true8);
-        if (truthy == branch_if_true) pc = relativePc(operand_pc, diff);
+        if (truthy == branch_if_true) {
+            pc = relativePc(operand_pc, diff);
+            if (diff < 0) try interrupt_poller.poll(ctx.runtime);
+        }
     },
     op.gosub => {
         const operand_pc = pc;
@@ -600,25 +699,28 @@ switch (opc) {
     },
     op.call_method => {
         frame.pc = pc;
-        switch (try call_vm.callMethod(ctx, output, global, stack, function, frame, catch_target)) {
+        // allow_inline=false: a plain-bytecode method callee runs via the full
+        // (recursing) call path instead of the inline-frame fast path, so the
+        // recursion happens natively through callInternal.
+        switch (try call_vm.callMethod(ctx, output, global, stack, function, frame, catch_target, false)) {
             .done => {},
             .continue_loop => {
                 pc = frame.pc;
                 continue;
             },
-            .inline_call => @panic("dispatchRecursive: call_method inline_call needs native-recursion integration"),
+            .inline_call => unreachable,
         }
         pc = frame.pc;
     },
     op.call_prepared => {
         frame.pc = pc;
-        switch (try call_vm.callPrepared(ctx, output, global, stack, function, frame, catch_target)) {
+        switch (try call_vm.callPrepared(ctx, output, global, stack, function, frame, catch_target, false)) {
             .done => {},
             .continue_loop => {
                 pc = frame.pc;
                 continue;
             },
-            .inline_call => @panic("dispatchRecursive: call_prepared inline_call needs native-recursion integration"),
+            .inline_call => unreachable,
         }
         pc = frame.pc;
     },
@@ -674,7 +776,8 @@ switch (opc) {
                 pc = frame.pc;
                 continue;
             },
-            .tail_inline => @panic("dispatchRecursive: eval tail_inline needs native-recursion integration"),
+            // allow_tail_inline=false (passed below) suppresses the tail-inline path.
+            .tail_inline => unreachable,
         }
         pc = frame.pc;
     },
@@ -843,8 +946,25 @@ switch (opc) {
         }
     },
 
-    // ---- with-statement opcodes: never in a normal-kind frame ----
-    op.with_get_var, op.with_delete_var, op.with_make_ref, op.with_get_ref, op.with_get_ref_undef, op.with_put_var => @panic("dispatchRecursive: with-statement opcode in normal frame"),
+    // ---- with-statement opcodes (a normal function body may contain `with`) ----
+    op.with_get_var, op.with_delete_var, op.with_make_ref, op.with_get_ref, op.with_get_ref_undef => {
+        frame.pc = pc;
+        const step = try vm_property_ref.withGetOrDelete(ctx, output, global, stack, function, frame, catch_target, opc);
+        pc = frame.pc;
+        switch (step) {
+            .done => {},
+            .continue_loop => continue,
+        }
+    },
+    op.with_put_var => {
+        frame.pc = pc;
+        const step = try vm_property_ref.withPut(ctx, output, global, stack, function, frame, catch_target);
+        pc = frame.pc;
+        switch (step) {
+            .done => {},
+            .continue_loop => continue,
+        }
+    },
 
     // ===================================================================
     // Object / array literals, super, this, iterators (DELEGATE)
@@ -1089,6 +1209,7 @@ switch (opc) {
 
 comptime {
     if (recursive_dispatch_enabled) {
+        _ = &callInternal;
         _ = &dispatchRecursive;
     }
 }

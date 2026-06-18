@@ -974,7 +974,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 .done => {},
                 .continue_loop => continue,
             },
-            op.call_prepared => switch (try call_vm.callPrepared(ctx, output, global, stack, function, frame, catch_target)) {
+            op.call_prepared => switch (try call_vm.callPrepared(ctx, output, global, stack, function, frame, catch_target, true)) {
                 .done => {},
                 .continue_loop => continue,
                 // Prepared property call to a plain bytecode function: run it as
@@ -988,7 +988,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     continue;
                 },
             },
-            op.call_method => switch (try call_vm.callMethod(ctx, output, global, stack, function, frame, catch_target)) {
+            op.call_method => switch (try call_vm.callMethod(ctx, output, global, stack, function, frame, catch_target, true)) {
                 .done => {},
                 .continue_loop => continue,
                 // Method call to a plain bytecode function: run it as an inline

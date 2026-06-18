@@ -677,6 +677,7 @@ pub fn callPrepared(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
+    allow_inline: bool,
 ) !CallStep {
     if (frame.pc + 2 > function.code.len) return error.InvalidBytecode;
     const argc = readInt(u16, function.code[frame.pc..][0..2]);
@@ -711,13 +712,15 @@ pub fn callPrepared(
             // within budget and keeps it rooted until the dispatch loop's
             // pushCall duplicates it. Ownership transfers to the stack
             // (rooted_func_active = false); the .prepared push consumes it.
-            if (inline_calls.resolveInlineTarget(global, receiver, rooted_func)) |inline_target| {
-                stack.pushOwned(rooted_func) catch |err| {
-                    discardPreparedCallInputs(ctx.runtime, stack, argc) catch {};
-                    return err;
-                };
-                rooted_func_active = false;
-                return .{ .inline_call = .{ .target = inline_target, .region_base = receiver_index, .argc = argc, .layout = .prepared } };
+            if (allow_inline) {
+                if (inline_calls.resolveInlineTarget(global, receiver, rooted_func)) |inline_target| {
+                    stack.pushOwned(rooted_func) catch |err| {
+                        discardPreparedCallInputs(ctx.runtime, stack, argc) catch {};
+                        return err;
+                    };
+                    rooted_func_active = false;
+                    return .{ .inline_call = .{ .target = inline_target, .region_base = receiver_index, .argc = argc, .layout = .prepared } };
+                }
             }
             const fast_result = fastNativeMethodCall(ctx, output, global, receiver, rooted_func, args, function, frame) catch |err| {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
@@ -753,6 +756,7 @@ pub fn callMethod(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
+    allow_inline: bool,
 ) !CallStep {
     const argc = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
@@ -768,7 +772,7 @@ pub fn callMethod(
     // common case — are not inline-eligible and fall through to the fast native
     // dispatch below. Class constructors (super() targets) are rejected by
     // `resolveInlineTarget`, so this never shadows the super-constructor path.
-    {
+    if (allow_inline) {
         const total = @as(usize, argc) + 2;
         if (stack.values.len >= total) {
             const region_base = stack.values.len - total;
