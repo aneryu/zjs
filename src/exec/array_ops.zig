@@ -160,6 +160,17 @@ pub fn pushSlotValue(stack: *stack_mod.Stack, slot: core.JSValue) !void {
     try stack.push(slotValueBorrow(slot));
 }
 
+/// `pushSlotValue` for callers that run inside the bytecode dispatch loop,
+/// where the operand stack is pre-sized to `stack_size + 1`
+/// (`reserveEntryFrameCapacity` / `reserveFrameCapacity`) and the verified
+/// `stack_size` bounds the depth — so the push can skip the `reserveAdditional`
+/// bounds math, mirroring QuickJS's bare `*sp++`. Soundness is identical to the
+/// landed stack-presize win.
+pub fn pushSlotValueAssumeCapacity(stack: *stack_mod.Stack, slot: core.JSValue) void {
+    if (!slot.requiresRefCount()) return stack.pushOwnedAssumeCapacity(slot);
+    stack.pushAssumeCapacity(slotValueBorrow(slot));
+}
+
 pub fn pushFunctionClosure(
     ctx: *core.JSContext,
     frame: *frame_mod.Frame,
