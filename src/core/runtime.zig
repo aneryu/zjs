@@ -171,6 +171,13 @@ pub const GCPollMode = enum {
 
 pub const ValueRootSlice = union(enum) {
     mutable: *const []JSValue,
+    /// A register-resident operand window: `base` is the fixed operand-stack
+    /// base for a `callInternal` frame, and `live_len` points at the frame's
+    /// running operand depth (`cur_sp - base`). The GC traces `base[0..live_len.*]`,
+    /// reading the depth through the pointer so a register-resident `sp` stays
+    /// authoritative. Mirrors QuickJS scanning `[stack_buf, cur_sp)` of a frame.
+    /// Used by the recursive-rewrite Stage 2 register-sp; unused before then.
+    windowed: struct { base: [*]JSValue, live_len: *const usize },
 };
 
 pub const ValueRootBuffer = struct {
@@ -1148,6 +1155,7 @@ pub const JSRuntime = struct {
             for (current.slices) |root| {
                 switch (root) {
                     .mutable => |values| try visitor.values(values.*),
+                    .windowed => |w| try visitor.values(w.base[0..w.live_len.*]),
                 }
             }
             frame = current.previous;
