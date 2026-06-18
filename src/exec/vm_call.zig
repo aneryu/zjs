@@ -1585,6 +1585,20 @@ fn maxNativeJsCallDepth(ctx: *const core.JSContext) usize {
     return @max(@as(usize, 16), ctx.stack_limit / 16384);
 }
 
+/// Headroom (in native frames) before the recursive dispatcher must stop
+/// growing the C stack and hand the deep sub-tree to the heap-frame Machine
+/// path. The hard cap (`maxNativeJsCallDepth`, enforced by `enterCallDepth`)
+/// still guarantees no native overflow; this only decides WHEN to fall back.
+const native_depth_fallback_margin: usize = 8;
+
+/// True when native recursion is close enough to the cap that the recursive
+/// dispatcher should route the next call through the heap-frame `runWithArgsState`
+/// path (which absorbs the remaining depth on the Machine at logical depth)
+/// instead of recursing. See ARCH-RECURSIVE-REWRITE.md "S2a-v3".
+pub fn nativeDepthNearCap(ctx: *const core.JSContext) bool {
+    return ctx.native_call_depth + native_depth_fallback_margin >= maxNativeJsCallDepth(ctx);
+}
+
 fn maxLogicalJsCallDepth(ctx: *const core.JSContext) usize {
     return ctx.stack_limit;
 }

@@ -295,6 +295,11 @@ pub fn dispatchRecursive(
     // Loops are made interruptible by polling on backward jumps (mirroring
     // QuickJS's backward-branch poll); the straight-line path stays poll-free.
     var interrupt_poller = control_vm.InterruptPoller.init(ctx.runtime);
+    // S2a-v3 heap fallback: this frame's native depth is fixed for its lifetime
+    // (sub-calls increment then restore it), so decide ONCE whether to inline
+    // (native recurse) or hand calls to the slow heap path. Near the native cap,
+    // a call goes slow → callFunctionBytecodeModeState routes it to the Machine.
+    const allow_inline_calls = !call_vm.nativeDepthNearCap(ctx);
     while (true) {
         if (pc >= code.len) {
             frame.pc = pc;
@@ -810,7 +815,7 @@ switch (opc) {
         // S2a: a plain-bytecode callee runs as a NATIVE recursion via
         // recurseInlineCall (reusing the Machine's zero-copy setup), not the
         // dup-heavy slow path.
-        switch (try call_runtime.execCall(ctx, stack, function, frame, catch_target, argc, output, global, true)) {
+        switch (try call_runtime.execCall(ctx, stack, function, frame, catch_target, argc, output, global, allow_inline_calls)) {
             .done => {},
             .continue_loop => {
                 pc = frame.pc;
@@ -828,7 +833,7 @@ switch (opc) {
     },
     op.tail_call => {
         frame.pc = pc;
-        switch (try call_vm.tailCall(ctx, output, global, stack, function, frame, catch_target, true)) {
+        switch (try call_vm.tailCall(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
             .handled => {
                 pc = frame.pc;
                 continue;
@@ -853,7 +858,7 @@ switch (opc) {
     },
     op.tail_call_method => {
         frame.pc = pc;
-        switch (try call_vm.tailCallMethod(ctx, output, global, stack, function, frame, catch_target, true)) {
+        switch (try call_vm.tailCallMethod(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
             .handled => {
                 pc = frame.pc;
                 continue;
@@ -875,7 +880,7 @@ switch (opc) {
     },
     op.call_method => {
         frame.pc = pc;
-        switch (try call_vm.callMethod(ctx, output, global, stack, function, frame, catch_target, true)) {
+        switch (try call_vm.callMethod(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
             .done => {},
             .continue_loop => {
                 pc = frame.pc;
@@ -893,7 +898,7 @@ switch (opc) {
     },
     op.call_prepared => {
         frame.pc = pc;
-        switch (try call_vm.callPrepared(ctx, output, global, stack, function, frame, catch_target, true)) {
+        switch (try call_vm.callPrepared(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
             .done => {},
             .continue_loop => {
                 pc = frame.pc;
@@ -955,14 +960,26 @@ switch (opc) {
     },
     op.eval => {
         frame.pc = pc;
-        switch (try eval_module_vm.directEval(ctx, stack, function, frame, catch_target, output, global, eval_class_field_initializer_flag, eval_parameter_initializer_flag, false)) {
+        // A non-%eval% callee (the identifier `eval` shadowed by a normal
+        // function) in tail position yields `.tail_inline` — handle it like a
+        // tail call so eval-named tail recursion (test262 tco-non-eval-*) TCOs
+        // via the trampoline instead of growing the native stack.
+        switch (try eval_module_vm.directEval(ctx, stack, function, frame, catch_target, output, global, eval_class_field_initializer_flag, eval_parameter_initializer_flag, allow_inline_calls)) {
             .done => {},
             .continue_loop => {
                 pc = frame.pc;
                 continue;
             },
-            // allow_tail_inline=false (passed below) suppresses the tail-inline path.
-            .tail_inline => unreachable,
+            .tail_inline => |request| {
+                if (allow_tail_signal) return .{ .tail = request };
+                switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
+                    .value => |v| return .{ .returned = v },
+                    .caught => {
+                        pc = frame.pc;
+                        continue;
+                    },
+                }
+            },
         }
         pc = frame.pc;
     },
