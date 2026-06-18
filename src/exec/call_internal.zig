@@ -312,41 +312,45 @@ switch (opc) {
     // ===================================================================
     // Pushes that decode an immediate operand (INLINE on C-local pc)
     // ===================================================================
+    // Immediate pushes use assumeCapacity: every push is counted in the
+    // verifier's stack_size and the frame stack is presized to stack_size+1
+    // (reserveEntryFrameCapacity), so the bounds check is redundant — mirrors
+    // qjs's bare `*sp++` and the get_loc inline above.
     op.push_i32 => {
         const v = readInt(i32, code[pc..][0..4]);
         pc += 4;
-        try stack.pushOwned(core.JSValue.int32(v));
+        stack.pushOwnedAssumeCapacity(core.JSValue.int32(v));
     },
     op.push_i16 => {
         const v: i32 = readInt(i16, code[pc..][0..2]);
         pc += 2;
-        try stack.pushOwned(core.JSValue.int32(v));
+        stack.pushOwnedAssumeCapacity(core.JSValue.int32(v));
     },
     op.push_i8 => {
         const v: i32 = @as(i8, @bitCast(code[pc]));
         pc += 1;
-        try stack.pushOwned(core.JSValue.int32(v));
+        stack.pushOwnedAssumeCapacity(core.JSValue.int32(v));
     },
     op.push_bigint_i32 => {
         const v = readInt(i32, code[pc..][0..4]);
         pc += 4;
-        try stack.pushOwned(core.JSValue.shortBigInt(v));
+        stack.pushOwnedAssumeCapacity(core.JSValue.shortBigInt(v));
     },
 
     // ---- Small-int / literal pushes (no operand; plain unfused push) ----
-    op.push_minus1 => try stack.pushOwned(core.JSValue.int32(-1)),
-    op.push_0 => try stack.pushOwned(core.JSValue.int32(0)),
-    op.push_1 => try stack.pushOwned(core.JSValue.int32(1)),
-    op.push_2 => try stack.pushOwned(core.JSValue.int32(2)),
-    op.push_3 => try stack.pushOwned(core.JSValue.int32(3)),
-    op.push_4 => try stack.pushOwned(core.JSValue.int32(4)),
-    op.push_5 => try stack.pushOwned(core.JSValue.int32(5)),
-    op.push_6 => try stack.pushOwned(core.JSValue.int32(6)),
-    op.push_7 => try stack.pushOwned(core.JSValue.int32(7)),
-    op.@"undefined" => try stack.pushOwned(core.JSValue.undefinedValue()),
-    op.@"null" => try stack.pushOwned(core.JSValue.nullValue()),
-    op.push_false => try stack.pushOwned(core.JSValue.boolean(false)),
-    op.push_true => try stack.pushOwned(core.JSValue.boolean(true)),
+    op.push_minus1 => stack.pushOwnedAssumeCapacity(core.JSValue.int32(-1)),
+    op.push_0 => stack.pushOwnedAssumeCapacity(core.JSValue.int32(0)),
+    op.push_1 => stack.pushOwnedAssumeCapacity(core.JSValue.int32(1)),
+    op.push_2 => stack.pushOwnedAssumeCapacity(core.JSValue.int32(2)),
+    op.push_3 => stack.pushOwnedAssumeCapacity(core.JSValue.int32(3)),
+    op.push_4 => stack.pushOwnedAssumeCapacity(core.JSValue.int32(4)),
+    op.push_5 => stack.pushOwnedAssumeCapacity(core.JSValue.int32(5)),
+    op.push_6 => stack.pushOwnedAssumeCapacity(core.JSValue.int32(6)),
+    op.push_7 => stack.pushOwnedAssumeCapacity(core.JSValue.int32(7)),
+    op.@"undefined" => stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue()),
+    op.@"null" => stack.pushOwnedAssumeCapacity(core.JSValue.nullValue()),
+    op.push_false => stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false)),
+    op.push_true => stack.pushOwnedAssumeCapacity(core.JSValue.boolean(true)),
 
     // ---- Constant-table / atom pushes (DELEGATE: operand decode + fusion) ----
     op.push_const => {
@@ -401,16 +405,25 @@ switch (opc) {
     // Stack manipulation (DELEGATE; pure-stack, no operand)
     // ===================================================================
     op.drop => {
-        frame.pc = pc;
-        switch (try value_vm.drop(ctx.runtime, stack)) {
-            .value => {},
-            .catch_target => |target| {
-                catch_target.* = target;
-                pc = frame.pc;
-                continue;
-            },
+        // Fast path: a plain (non catch-marker) top is popped + freed inline
+        // (free is a no-op for ints). Catch markers carry the try-region target
+        // and delegate to the full handler.
+        const top = stack.values[stack.values.len - 1];
+        if (top.isCatchOffset()) {
+            frame.pc = pc;
+            switch (try value_vm.drop(ctx.runtime, stack)) {
+                .value => {},
+                .catch_target => |target| {
+                    catch_target.* = target;
+                    pc = frame.pc;
+                    continue;
+                },
+            }
+            pc = frame.pc;
+        } else {
+            stack.values.len -= 1;
+            top.free(ctx.runtime);
         }
-        pc = frame.pc;
     },
     op.nip_catch => {
         frame.pc = pc;
@@ -650,20 +663,41 @@ switch (opc) {
     },
     op.lnot => try value_vm.logicalNot(ctx.runtime, stack),
     op.post_inc, op.post_dec => {
-        frame.pc = pc;
-        switch (try arith_vm.postUpdateVm(ctx, stack, frame, catch_target, opc, output, global)) {
-            .done => {},
-            .continue_loop => {},
+        // Int32 fast path: leave the old value on the stack and push old±1 on
+        // top (mirrors postUpdate's int branch). Overflow folds to float via
+        // fastInt32Add. GC-free. Non-int delegates.
+        const top = stack.values[stack.values.len - 1];
+        if (top.asInt32()) |oi| {
+            const updated = if (opc == op.post_inc) arith_vm.fastInt32Add(oi, 1) else arith_vm.fastInt32Sub(oi, 1);
+            stack.pushOwnedAssumeCapacity(updated);
+        } else {
+            frame.pc = pc;
+            switch (try arith_vm.postUpdateVm(ctx, stack, frame, catch_target, opc, output, global)) {
+                .done => {},
+                .continue_loop => {},
+            }
+            pc = frame.pc;
         }
-        pc = frame.pc;
     },
     op.inc_loc, op.dec_loc => {
-        frame.pc = pc;
-        switch (try arith_vm.updateLocalVm(ctx, stack, function, global, frame, catch_target, opc, output, false)) {
-            .done => {},
-            .continue_loop => {},
+        // Int32 fast path: a local holding an int32 is a plain slot (NOT a
+        // var-ref cell — a cell is an object), so update it in place with no
+        // dup/free and no global-lexical sync (dispatchRecursive runs only
+        // normal-kind frames, which have no top-level global-lexical locals).
+        // Overflow folds to a float via fastInt32Add. Anything else (cell,
+        // bigint, coercible object) delegates to the full handler.
+        const idx = code[pc];
+        if (frame.locals[idx].asInt32()) |iv| {
+            pc += 1;
+            frame.locals[idx] = if (opc == op.inc_loc) arith_vm.fastInt32Add(iv, 1) else arith_vm.fastInt32Sub(iv, 1);
+        } else {
+            frame.pc = pc;
+            switch (try arith_vm.updateLocalVm(ctx, stack, function, global, frame, catch_target, opc, output, false)) {
+                .done => {},
+                .continue_loop => {},
+            }
+            pc = frame.pc;
         }
-        pc = frame.pc;
     },
     op.add_loc => {
         frame.pc = pc;
