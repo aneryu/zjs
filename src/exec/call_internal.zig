@@ -19,6 +19,7 @@ const HostError = @import("exceptions.zig").HostError;
 
 const value_vm = @import("vm_value.zig");
 const inline_calls = @import("inline_calls.zig");
+const array_ops = @import("array_ops.zig");
 const forof_ops = @import("forof_ops.zig");
 const call_vm = @import("vm_call.zig");
 const regexp_vm = @import("vm_regexp.zig");
@@ -510,7 +511,26 @@ switch (opc) {
     // ===================================================================
     // Locals / args / var-refs (all DELEGATE; operand decode in handler)
     // ===================================================================
-    op.get_loc, op.put_loc, op.set_loc, op.get_loc8, op.put_loc8, op.set_loc8, op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3, op.set_loc0, op.set_loc1, op.set_loc2, op.set_loc3, op.get_loc0_loc1 => {
+    // S2b: hot local GETs inline the leaned body directly — skip the `loc`
+    // dispatcher (its per-op switch + the comptime-gated fusion scans) AND the
+    // execGetLoc call AND the frame.pc round-trip. GC-free (presized-stack
+    // assumeCapacity push + a verifier-trusted frame.locals[idx] read, no bounds
+    // check), so no frame.pc publish is needed. This is the #1 crypto opcode.
+    op.get_loc0 => array_ops.pushSlotValueAssumeCapacity(stack, frame.locals[0]),
+    op.get_loc1 => array_ops.pushSlotValueAssumeCapacity(stack, frame.locals[1]),
+    op.get_loc2 => array_ops.pushSlotValueAssumeCapacity(stack, frame.locals[2]),
+    op.get_loc3 => array_ops.pushSlotValueAssumeCapacity(stack, frame.locals[3]),
+    op.get_loc8 => {
+        const idx = code[pc];
+        pc += 1;
+        array_ops.pushSlotValueAssumeCapacity(stack, frame.locals[idx]);
+    },
+    op.get_loc => {
+        const idx = readInt(u16, code[pc..][0..2]);
+        pc += 2;
+        array_ops.pushSlotValueAssumeCapacity(stack, frame.locals[idx]);
+    },
+    op.put_loc, op.set_loc, op.put_loc8, op.set_loc8, op.set_loc0, op.set_loc1, op.set_loc2, op.set_loc3, op.get_loc0_loc1 => {
         frame.pc = pc;
         try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
         pc = frame.pc;
