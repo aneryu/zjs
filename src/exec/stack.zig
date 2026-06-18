@@ -94,16 +94,26 @@ pub const Stack = struct {
     pub fn reserveAdditional(self: *Stack, additional: usize) !void {
         if (additional > self.limit - self.values.len) return error.StackOverflow;
         const needed = self.values.len + additional;
+        try self.reserveCapacityUpTo(needed, self.limit);
+    }
+
+    pub fn reserveFrameCapacity(self: *Stack, frame_stack_size: usize) !void {
+        if (frame_stack_size > self.limit) return error.StackOverflow;
+        try self.reserveCapacityUpTo(frame_stack_size + 1, frame_stack_size + 1);
+    }
+
+    fn reserveCapacityUpTo(self: *Stack, needed: usize, max_capacity: usize) !void {
         if (needed <= self.capacity) return;
 
         var next_capacity = if (self.capacity == 0) @as(usize, 8) else self.capacity;
         while (next_capacity < needed) {
             next_capacity *= 2;
-            if (next_capacity > self.limit) {
-                next_capacity = self.limit;
+            if (next_capacity > max_capacity) {
+                next_capacity = max_capacity;
                 break;
             }
         }
+        if (next_capacity < needed) return error.StackOverflow;
 
         const next = try self.memory.alloc(JSValue, next_capacity);
         errdefer self.memory.free(JSValue, next);

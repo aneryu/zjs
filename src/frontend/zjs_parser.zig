@@ -927,7 +927,7 @@ pub const ParseState = struct {
         source_start: usize,
         source_end: usize,
     ) Error!void {
-        for (self.cur_func().child_list) |*child| {
+        for (self.cur_func().child_list) |child| {
             if (child.parent_cpool_idx != cpool_idx) continue;
             try self.setFunctionSourceRange(child, source_start, source_end);
             return;
@@ -1840,7 +1840,7 @@ pub const ParseState = struct {
     /// function tree after parsing, where such chains are built unconditionally.
     fn functionDefUsesAtomTransitive(fd: *const function_def_mod.FunctionDef, atom_id: Atom) bool {
         if (functionDefUsesAtom(fd, atom_id)) return true;
-        for (fd.child_list) |*child| {
+        for (fd.child_list) |child| {
             if (child.findVar(atom_id) >= 0 or child.findArg(atom_id) >= 0) continue;
             if (functionDefUsesAtomTransitive(child, atom_id)) return true;
         }
@@ -1861,7 +1861,7 @@ pub const ParseState = struct {
         is_const: bool,
         var_kind: function_def_mod.VarKind,
     ) Error!void {
-        for (fd.child_list) |*child| {
+        for (fd.child_list) |child| {
             if (child.findVar(atom_id) >= 0 or child.findArg(atom_id) >= 0) continue;
             if (!functionDefUsesAtomTransitive(child, atom_id)) continue;
             const child_ref_idx: u16 = if (findClosureVarIndex(child, atom_id)) |existing| blk: {
@@ -1910,7 +1910,7 @@ pub const ParseState = struct {
         is_const: bool,
         var_kind: function_def_mod.VarKind,
     ) Error!void {
-        for (parent_fd.child_list) |*child| {
+        for (parent_fd.child_list) |child| {
             if (!functionDefUsesAtomTransitive(child, atom_id)) continue;
             if (child.findVar(atom_id) >= 0 or child.findArg(atom_id) >= 0) continue;
             const child_ref_idx: u16 = if (findClosureVarIndex(child, atom_id)) |existing|
@@ -1935,7 +1935,7 @@ pub const ParseState = struct {
         local_idx: u16,
     ) Error!void {
         const local = parent_fd.vars[local_idx];
-        for (parent_fd.child_list) |*child| {
+        for (parent_fd.child_list) |child| {
             if (!functionDefUsesAtomTransitive(child, atom_id)) continue;
             if (child.findVar(atom_id) >= 0 or child.findArg(atom_id) >= 0) continue;
             if (!scopeChainContains(parent_fd, child.parent_scope_level, local.scope_level)) continue;
@@ -11574,9 +11574,8 @@ fn parseFunctionParamsAndBody(s: *ParseState, func_kind: ParseFunctionKind, sour
         const child_decl_annex_b_var_idx = child_ptr.child_decl_annex_b_var_idx;
         child_ptr.parent_cpool_idx = child_cpool_idx;
         try attachVisibleClassPrivateBoundNamesToFunction(s, child_ptr);
-        try parent_fd.addChild(child_ptr.*);
+        try parent_fd.addChild(child_ptr);
         child_moved = true;
-        s.function.memory.destroy(function_def_mod.FunctionDef, child_ptr);
         s.last_function_child_index = @intCast(parent_fd.child_list.len - 1);
         if (!s.pending_function_is_decl) {
             try s.emitFClosure8(@intCast(child_cpool_idx));
@@ -11962,9 +11961,8 @@ fn parseArrowFunction(s: *ParseState, func_kind: ParseFunctionKind, source_start
         const child_cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
         child_ptr.parent_cpool_idx = child_cpool_idx;
         try attachVisibleClassPrivateBoundNamesToFunction(s, child_ptr);
-        try parent_fd.addChild(child_ptr.*);
+        try parent_fd.addChild(child_ptr);
         child_moved = true;
-        s.function.memory.destroy(function_def_mod.FunctionDef, child_ptr);
         s.last_function_child_index = @intCast(parent_fd.child_list.len - 1);
         try s.emitFClosure8(@intCast(child_cpool_idx));
         s.last_anonymous_function_expr = true;
@@ -14273,7 +14271,7 @@ fn emitInstancePublicFieldInitializer(s: *ParseState, atom_id: Atom, has_initial
     const child_index = try ensureClassFieldsInitFunction(s);
     const parent_fd = s.cur_func();
     if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
-    const init_fd = &parent_fd.child_list[child_index];
+    const init_fd = parent_fd.child_list[child_index];
 
     const saved_emit_to_function_def = s.emit_to_function_def;
     const saved_scope_level = s.scope_level;
@@ -14365,9 +14363,8 @@ fn ensureClassFieldsInitFunction(s: *ParseState) Error!usize {
     _ = child_fd.appendScope(-1) catch return error.OutOfMemory;
     const cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
     child_fd.parent_cpool_idx = cpool_idx;
-    try parent_fd.addChild(child_fd.*);
+    try parent_fd.addChild(child_fd);
     child_moved = true;
-    s.function.memory.destroy(function_def_mod.FunctionDef, child_fd);
     const child_index: u16 = @intCast(parent_fd.child_list.len - 1);
     s.class_fields_init_child_index = child_index;
     return child_index;
@@ -14377,7 +14374,7 @@ fn finishClassFieldsInitFunction(s: *ParseState) Error!void {
     const child_index = s.class_fields_init_child_index orelse return;
     const parent_fd = s.cur_func();
     if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
-    const init_fd = &parent_fd.child_list[child_index];
+    const init_fd = parent_fd.child_list[child_index];
     const code = init_fd.byte_code;
     const needs_return = code.len == 0 or switch (code[code.len - 1]) {
         opcode.op.@"return", opcode.op.return_undef, opcode.op.return_async, opcode.op.throw => false,
@@ -14396,7 +14393,7 @@ fn attachClassFieldsInitToConstructor(
     if (init_child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
     const init_cpool_idx = parent_fd.child_list[init_child_index].parent_cpool_idx;
     if (init_cpool_idx < 0) return Error.UnexpectedToken;
-    for (parent_fd.child_list) |*child| {
+    for (parent_fd.child_list) |child| {
         if (child.parent_cpool_idx != @as(i32, @intCast(constructor_cpool_idx))) continue;
         child.class_fields_init_cpool_idx = init_cpool_idx;
         return;
@@ -14414,7 +14411,7 @@ fn attachClassPublicInstanceFieldsToConstructor(
     field_start: usize,
 ) Error!void {
     if (field_start >= s.class_public_instance_fields.items.len) return;
-    for (s.cur_func().child_list) |*child| {
+    for (s.cur_func().child_list) |child| {
         if (child.parent_cpool_idx != @as(i32, @intCast(cpool_idx))) continue;
         for (s.class_public_instance_fields.items[field_start..]) |atom_id| {
             try child.appendClassInstanceField(atom_id);
@@ -14430,7 +14427,7 @@ fn attachClassDeclaredPrivateNamesToConstructor(
     element_start: usize,
 ) Error!void {
     if (element_start >= s.class_private_elements.items.len) return;
-    for (s.cur_func().child_list) |*child| {
+    for (s.cur_func().child_list) |child| {
         if (child.parent_cpool_idx != @as(i32, @intCast(cpool_idx))) continue;
         for (s.class_private_elements.items[element_start..]) |entry| {
             try child.appendClassPrivateName(entry.atom);
@@ -14573,7 +14570,7 @@ fn parseClassElementFunction(s: *ParseState, kind: ParseFunctionKind, source_sta
 fn attachClassPrivateBoundNamesToLastFunction(s: *ParseState) Error!void {
     const child_index = s.last_function_child_index orelse return;
     if (child_index >= s.cur_func().child_list.len) return;
-    const child = &s.cur_func().child_list[child_index];
+    const child = s.cur_func().child_list[child_index];
     try attachVisibleClassPrivateBoundNamesToFunction(s, child);
 }
 
@@ -14586,7 +14583,7 @@ fn attachVisibleClassPrivateBoundNamesToFunction(s: *ParseState, child: *functio
 fn attachClassPrivateBoundNamesToChildren(s: *ParseState, child_start: usize) Error!void {
     var child_index = child_start;
     while (child_index < s.cur_func().child_list.len) : (child_index += 1) {
-        const child = &s.cur_func().child_list[child_index];
+        const child = s.cur_func().child_list[child_index];
         for (s.class_private_bound_names.items) |atom_id| {
             try child.appendPrivateBoundName(atom_id);
         }
@@ -14693,7 +14690,7 @@ fn emitInstanceComputedPublicFieldInitializer(s: *ParseState, key_atom: Atom, ha
     const child_index = try ensureClassFieldsInitFunction(s);
     const parent_fd = s.cur_func();
     if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
-    const init_fd = &parent_fd.child_list[child_index];
+    const init_fd = parent_fd.child_list[child_index];
 
     const saved_emit_to_function_def = s.emit_to_function_def;
     const saved_scope_level = s.scope_level;
@@ -15238,9 +15235,8 @@ fn appendDefaultClassConstructor(s: *ParseState, name_atom: Atom) Error!u16 {
     }
     const cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
     child_fd.parent_cpool_idx = cpool_idx;
-    try parent_fd.addChild(child_fd.*);
+    try parent_fd.addChild(child_fd);
     child_moved = true;
-    s.function.memory.destroy(function_def_mod.FunctionDef, child_fd);
     return cpool_idx;
 }
 
@@ -15458,7 +15454,7 @@ fn ensureModuleDefaultExportBinding(s: *ParseState) Error!u16 {
 fn hoistLastAnonymousDefaultFunctionExport(s: *ParseState, default_ref_idx: u16) Error!void {
     const child_idx = s.last_function_child_index orelse return Error.UnexpectedToken;
     if (child_idx >= s.cur_func().child_list.len) return Error.UnexpectedToken;
-    const child = &s.cur_func().child_list[child_idx];
+    const child = s.cur_func().child_list[child_idx];
     s.function.atoms.replace(&child.func_name, atom_default);
     child.emit_top_level_closure_init = true;
     child.top_level_closure_var_idx = default_ref_idx;

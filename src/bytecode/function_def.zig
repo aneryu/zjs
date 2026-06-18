@@ -334,7 +334,7 @@ pub const FunctionDef = struct {
     source_text: ?[]const u8 = null,
 
     // Child functions (nested functions)
-    child_list: []FunctionDef = &.{},
+    child_list: []*FunctionDef = &.{},
     child_list_capacity: usize = 0,
     emit_top_level_closure_init: bool = false,
     top_level_closure_var_idx: i32 = -1,
@@ -414,21 +414,13 @@ pub const FunctionDef = struct {
 
     /// Append a child FunctionDef to `child_list`. Mirrors
     /// `list_add_tail(&fd->link, &parent->child_list)` in
-    /// `js_new_function_def` (`quickjs.c:31487`). The child is
-    /// moved into the parent's child_list; the caller should not
-    /// access the child directly after this call.
-    pub fn addChild(self: *FunctionDef, child: FunctionDef) !void {
-        const tail = try growSliceBy(FunctionDef, self.memory, &self.child_list, &self.child_list_capacity, 1);
+    /// `js_new_function_def` (`quickjs.c:31487`). The parent takes
+    /// ownership of the child pointer.
+    pub fn addChild(self: *FunctionDef, child: *FunctionDef) !void {
+        const tail = try growSliceBy(*FunctionDef, self.memory, &self.child_list, &self.child_list_capacity, 1);
+        child.parent = self;
+        child.discard_next = null;
         tail[0] = child;
-        tail[0].discard_next = null;
-        self.refreshChildParentPointers();
-    }
-
-    fn refreshChildParentPointers(self: *FunctionDef) void {
-        for (self.child_list) |*child| {
-            child.parent = self;
-            child.refreshChildParentPointers();
-        }
     }
 
     /// Mirror `add_scope_var` (`quickjs.c:23577`): add a var and
@@ -633,7 +625,10 @@ pub const FunctionDef = struct {
         const old_child_list_capacity = self.child_list_capacity;
         self.child_list = &.{};
         self.child_list_capacity = 0;
-        for (old_child_list) |*child| child.deinit(rt);
+        for (old_child_list) |child| {
+            child.deinit(rt);
+            self.memory.destroy(FunctionDef, child);
+        }
 
         self.vars_htab = &.{};
         self.discard_next = null;
@@ -650,6 +645,6 @@ pub const FunctionDef = struct {
         self.child_decl_skip_init = false;
         self.child_decl_force_local_init = false;
         self.child_decl_emit_global_inline = false;
-        if (old_child_list_capacity != 0) self.memory.free(FunctionDef, old_child_list.ptr[0..old_child_list_capacity]);
+        if (old_child_list_capacity != 0) self.memory.free(*FunctionDef, old_child_list.ptr[0..old_child_list_capacity]);
     }
 };

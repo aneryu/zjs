@@ -1572,6 +1572,9 @@ pub fn qjsRegExpSymbolReplaceGeneric(
             if (try replaceGlobalSimpleCaptureSequence(ctx, output, global, rx, regexp_object, string_value, replacement_string, flags_string, caller_function, caller_frame)) |fast| return fast;
         }
     }
+    if (!functional_replace and !stringValueContainsUnitByte(replacement_string, '$') and try regExpExecPropertyIsDefault(ctx, output, global, rx, caller_function, caller_frame)) {
+        return qjsRegExpSymbolReplaceLiteral(ctx, output, global, rx, string_value, replacement_string, is_global, full_unicode, caller_function, caller_frame);
+    }
 
     var matches = std.ArrayList(ReplaceMatch).empty;
     defer matches.deinit(ctx.runtime.memory.allocator);
@@ -1601,6 +1604,9 @@ pub fn qjsRegExpSymbolReplaceGeneric(
     }
     if (matches.items.len == 0) return string_value.dup();
 
+    const replacement_is_empty = !functional_replace and (try stringLengthIndex(ctx.runtime, replacement_string) == 0);
+    const replacement_is_literal = !functional_replace and !replacement_is_empty and !stringValueContainsUnitByte(replacement_string, '$');
+
     var source_units = std.ArrayList(u16).empty;
     defer source_units.deinit(ctx.runtime.memory.allocator);
     try appendStringValueUnits(ctx.runtime, &source_units, string_value);
@@ -1616,14 +1622,113 @@ pub fn qjsRegExpSymbolReplaceGeneric(
 
         const replacement = if (functional_replace)
             try callReplaceFunction(ctx, output, global, replace_value, match, string_value, caller_function, caller_frame)
+        else if (replacement_is_empty and match.groups.isUndefined())
+            core.JSValue.undefinedValue()
+        else if (replacement_is_literal and match.groups.isUndefined())
+            replacement_string.dup()
         else
             try getSubstitutionString(ctx, output, global, match, string_value, replacement_string, caller_function, caller_frame);
         defer replacement.free(ctx.runtime);
-        try appendStringValueUnits(ctx.runtime, &out, replacement);
+        if (!replacement_is_empty) try appendStringValueUnits(ctx.runtime, &out, replacement);
         next_source_position = @min(source_units.items.len, position + matched_len);
     }
     try out.appendSlice(ctx.runtime.memory.allocator, source_units.items[next_source_position..]);
     return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
+}
+
+const ReplaceLiteralMatch = struct {
+    result: core.JSValue,
+    matched: core.JSValue,
+    index: usize,
+};
+
+pub fn qjsRegExpSymbolReplaceLiteral(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    rx: core.JSValue,
+    string_value: core.JSValue,
+    replacement_string: core.JSValue,
+    is_global: bool,
+    full_unicode: bool,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    var source_units = std.ArrayList(u16).empty;
+    defer source_units.deinit(ctx.runtime.memory.allocator);
+    try appendStringValueUnits(ctx.runtime, &source_units, string_value);
+
+    var replacement_units = std.ArrayList(u16).empty;
+    defer replacement_units.deinit(ctx.runtime.memory.allocator);
+    try appendStringValueUnits(ctx.runtime, &replacement_units, replacement_string);
+
+    var out = std.ArrayList(u16).empty;
+    defer out.deinit(ctx.runtime.memory.allocator);
+    var next_source_position: usize = 0;
+    var matched_any = false;
+
+    while (true) {
+        const result = try qjsRegExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
+        if (result.isNull()) {
+            result.free(ctx.runtime);
+            break;
+        }
+        if (!result.isObject()) {
+            result.free(ctx.runtime);
+            return error.TypeError;
+        }
+
+        const match = try captureReplaceLiteralMatch(ctx, output, global, result, string_value, caller_function, caller_frame);
+        defer {
+            match.result.free(ctx.runtime);
+            match.matched.free(ctx.runtime);
+        }
+
+        matched_any = true;
+        const matched_len = try stringLengthIndex(ctx.runtime, match.matched);
+        const position = @min(match.index, source_units.items.len);
+        if (position >= next_source_position) {
+            try out.appendSlice(ctx.runtime.memory.allocator, source_units.items[next_source_position..position]);
+            try out.appendSlice(ctx.runtime.memory.allocator, replacement_units.items);
+            next_source_position = @min(source_units.items.len, position + matched_len);
+        }
+
+        if (!is_global) break;
+        if (isEmptyStringValue(ctx.runtime, match.matched)) {
+            const last_index = try getValueProperty(ctx, output, global, rx, core.atom.ids.lastIndex, caller_function, caller_frame);
+            defer last_index.free(ctx.runtime);
+            const next = try advanceStringIndexNumber(ctx, output, global, string_value, last_index, full_unicode);
+            try setValuePropertyStrict(ctx, output, global, rx, core.atom.ids.lastIndex, next, caller_function, caller_frame);
+        }
+    }
+
+    if (!matched_any) return string_value.dup();
+    try out.appendSlice(ctx.runtime.memory.allocator, source_units.items[next_source_position..]);
+    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
+}
+
+pub fn captureReplaceLiteralMatch(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    result: core.JSValue,
+    string_value: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !ReplaceLiteralMatch {
+    errdefer result.free(ctx.runtime);
+    const matched_value = try getValueProperty(ctx, output, global, result, core.atom.atomFromUInt32(0), caller_function, caller_frame);
+    errdefer matched_value.free(ctx.runtime);
+    const matched = try toStringForAnnexB(ctx, output, global, matched_value, caller_function, caller_frame);
+    matched_value.free(ctx.runtime);
+    errdefer matched.free(ctx.runtime);
+
+    const index_atom = core.atom.predefinedId("index", .string) orelse return error.TypeError;
+    const index_value = try getValueProperty(ctx, output, global, result, index_atom, caller_function, caller_frame);
+    defer index_value.free(ctx.runtime);
+    const string_len = try stringLengthIndex(ctx.runtime, string_value);
+    const index = @min(try toLengthIndex(ctx, output, global, index_value), string_len);
+    return .{ .result = result, .matched = matched, .index = index };
 }
 
 pub fn replaceSingleUnitGlobalSimpleClassEscape(
@@ -3599,6 +3704,33 @@ pub const RegExpMatch = struct {
     capture_count: usize = 0,
 };
 
+pub const LazyRegExpLegacyCapture = struct {
+    start: usize,
+    len: usize,
+};
+
+const lazy_legacy_capture_len_bits: u6 = 20;
+const lazy_legacy_capture_len_limit: usize = @as(usize, 1) << lazy_legacy_capture_len_bits;
+const lazy_legacy_capture_len_mask: u64 = lazy_legacy_capture_len_limit - 1;
+const lazy_legacy_capture_start_limit: usize = @as(usize, 1) << (47 - lazy_legacy_capture_len_bits);
+const lazy_legacy_capture_payload_limit: i64 = @as(i64, 1) << 47;
+
+pub fn encodeRegExpLegacyCaptureSlice(start: usize, len: usize) ?core.JSValue {
+    if (start >= lazy_legacy_capture_start_limit or len >= lazy_legacy_capture_len_limit) return null;
+    const payload = (@as(u64, @intCast(start)) << lazy_legacy_capture_len_bits) | @as(u64, @intCast(len));
+    return core.JSValue.shortBigInt(@intCast(payload));
+}
+
+pub fn decodeRegExpLegacyCaptureSlice(value: core.JSValue) ?LazyRegExpLegacyCapture {
+    const payload_i64 = value.asShortBigInt() orelse return null;
+    if (payload_i64 < 0 or payload_i64 >= lazy_legacy_capture_payload_limit) return null;
+    const payload: u64 = @intCast(payload_i64);
+    return .{
+        .start = @intCast(payload >> lazy_legacy_capture_len_bits),
+        .len = @intCast(payload & lazy_legacy_capture_len_mask),
+    };
+}
+
 pub fn defineSplitStringElement(rt: *core.JSRuntime, object: *core.Object, index: u32, bytes: []const u8) !void {
     const value = value_ops.createStringValue(rt, bytes) catch |err| switch (err) {
         error.InvalidUtf8 => try createStringFromByteUnits(rt, bytes),
@@ -3692,17 +3824,9 @@ pub fn createRegExpMatchArrayFromValue(rt: *core.JSRuntime, global: *core.Object
     const matched = try stringSliceValue(rt, input_value, found.index, found.len);
     defer matched.free(rt);
 
-    var legacy_capture_values: [9]?core.JSValue = @splat(null);
-    var last_capture_value: ?core.JSValue = null;
-    defer {
-        for (&legacy_capture_values) |*value_slot| {
-            if (value_slot.*) |value| value.free(rt);
-        }
-        if (last_capture_value) |value| value.free(rt);
-    }
-    try initRegExpMatchArrayDenseElementsFromValue(rt, out, input_value, found, matched, &legacy_capture_values, &last_capture_value);
+    try initRegExpMatchArrayDenseElementsFromValue(rt, out, input_value, found, matched);
 
-    try updateRegExpLegacyStaticsForMatchValues(rt, global, input_value, found, matched, &legacy_capture_values, last_capture_value);
+    try updateRegExpLegacyStaticsForMatch(rt, global, input_value, found);
 
     if (!has_indices and !regExpMatchHasNamedCaptures(found)) {
         try out.defineRegExpMatchMetadataPropertiesAssumingNew(rt, @intCast(found.index), input_value, core.JSValue.undefinedValue());
@@ -3726,8 +3850,6 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
     input_value: core.JSValue,
     found: RegExpMatch,
     matched: core.JSValue,
-    legacy_capture_values: *[9]?core.JSValue,
-    last_capture_value: *?core.JSValue,
 ) !void {
     std.debug.assert(out.flags.is_array);
     std.debug.assert(out.length == 0);
@@ -3755,13 +3877,7 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
             elements[element_index] = core.JSValue.undefinedValue();
         } else {
             const capture_value = try stringSliceValue(rt, input_value, capture.start, capture.len);
-            defer capture_value.free(rt);
-            if (capture_index < legacy_capture_values.len) legacy_capture_values[capture_index] = capture_value.dup();
-            const next_last_capture = capture_value.dup();
-            const old_last_capture = last_capture_value.*;
-            last_capture_value.* = next_last_capture;
-            if (old_last_capture) |old| old.free(rt);
-            elements[element_index] = capture_value.dup();
+            elements[element_index] = capture_value;
         }
         initialized += 1;
     }
@@ -3854,6 +3970,8 @@ pub fn updateRegExpLegacyStaticsForMatchValues(
 }
 
 pub fn updateRegExpLegacyStaticsForMatch(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: RegExpMatch) !void {
+    if (try updateRegExpLegacyStaticsLazyForMatch(rt, global, input_value, found)) return;
+
     const matched = try stringSliceValue(rt, input_value, found.index, found.len);
     defer matched.free(rt);
 
@@ -3878,6 +3996,53 @@ pub fn updateRegExpLegacyStaticsForMatch(rt: *core.JSRuntime, global: *core.Obje
     }
 
     try updateRegExpLegacyStaticsForMatchValues(rt, global, input_value, found, matched, &legacy_capture_values, last_capture_value);
+}
+
+pub fn updateRegExpLegacyStaticsLazyForMatch(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: RegExpMatch) !bool {
+    var encoded_captures: [9]?core.JSValue = @splat(null);
+    var encoded_last_paren: ?core.JSValue = null;
+
+    var capture_index: usize = 0;
+    while (capture_index < found.capture_count) : (capture_index += 1) {
+        const capture = found.captures[capture_index];
+        if (capture.undefined) continue;
+        const encoded = encodeRegExpLegacyCaptureSlice(capture.start, capture.len) orelse return false;
+        if (capture_index < encoded_captures.len) encoded_captures[capture_index] = encoded;
+        encoded_last_paren = encoded;
+    }
+
+    const regexp_ctor = regExpConstructorFromGlobal(rt, global) catch return true;
+    if (regexp_ctor.class_payload_kind != .function) return true;
+    const legacy = try regexp_ctor.ensureRegExpLegacyStatics(rt);
+    const already_lazy = legacy.lazy_no_capture_match;
+
+    try replaceRegExpLegacySlot(rt, regexp_ctor, &legacy.input, input_value);
+    if (!already_lazy) {
+        clearRegExpLegacySlot(rt, &legacy.last_match);
+        clearRegExpLegacySlot(rt, &legacy.left_context);
+        clearRegExpLegacySlot(rt, &legacy.right_context);
+    }
+
+    if (encoded_last_paren) |value| {
+        try replaceRegExpLegacySlot(rt, regexp_ctor, &legacy.last_paren, value);
+    } else {
+        clearRegExpLegacySlot(rt, &legacy.last_paren);
+    }
+
+    var slot_index: usize = 0;
+    while (slot_index < legacy.captures.len) : (slot_index += 1) {
+        if (encoded_captures[slot_index]) |value| {
+            try replaceRegExpLegacySlot(rt, regexp_ctor, &legacy.captures[slot_index], value);
+        } else {
+            clearRegExpLegacySlot(rt, &legacy.captures[slot_index]);
+        }
+    }
+
+    legacy.lazy_no_capture_match = true;
+    legacy.lazy_match_index = found.index;
+    legacy.lazy_match_len = found.len;
+    legacy.lazy_input_len = try stringLengthIndex(rt, input_value);
+    return true;
 }
 
 pub fn createStartOfLineUnicodeMatchArray(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue) !core.JSValue {

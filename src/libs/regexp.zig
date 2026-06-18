@@ -2862,6 +2862,8 @@ const RangeSet = struct {
 
     fn regexpCanonicalize(self: *RangeSet, is_unicode: bool) !void {
         try self.normalize();
+        if (try self.regexpCanonicalizeAscii(is_unicode)) return;
+
         const bit_count: usize = @as(usize, max_code_point) + 1;
         var present = try self.allocator.alloc(bool, bit_count);
         defer self.allocator.free(present);
@@ -2890,6 +2892,39 @@ const RangeSet = struct {
 
         self.ranges.deinit(self.allocator);
         self.ranges = canonical;
+    }
+
+    fn regexpCanonicalizeAscii(self: *RangeSet, is_unicode: bool) !bool {
+        for (self.ranges.items) |range| {
+            if (range.hi > 128) return false;
+        }
+
+        var present = [_]bool{false} ** 128;
+        for (self.ranges.items) |range| {
+            var cp = range.lo;
+            while (cp < range.hi) : (cp += 1) {
+                const folded = unicode.regexpCanonicalize(cp, is_unicode);
+                std.debug.assert(folded < present.len);
+                present[@intCast(folded)] = true;
+            }
+        }
+
+        var canonical = std.ArrayList(Range).empty;
+        errdefer canonical.deinit(self.allocator);
+        var cp: usize = 0;
+        while (cp < present.len) {
+            if (!present[cp]) {
+                cp += 1;
+                continue;
+            }
+            const start = cp;
+            while (cp < present.len and present[cp]) : (cp += 1) {}
+            try canonical.append(self.allocator, .{ .lo = @intCast(start), .hi = @intCast(cp) });
+        }
+
+        self.ranges.deinit(self.allocator);
+        self.ranges = canonical;
+        return true;
     }
 
     fn invert(self: *RangeSet) !void {

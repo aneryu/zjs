@@ -1013,7 +1013,7 @@ fn immediateInt32Operand(code: []const u8, pc: usize) ?ImmediateInt32 {
     };
 }
 
-fn fastBinaryInt32(binop: u8, lhs: i32, rhs: i32) ?core.JSValue {
+pub fn fastBinaryInt32(binop: u8, lhs: i32, rhs: i32) ?core.JSValue {
     return switch (binop) {
         op.add => fastInt32Add(lhs, rhs),
         op.sub => fastInt32Sub(lhs, rhs),
@@ -1030,13 +1030,13 @@ fn fastBinaryInt32(binop: u8, lhs: i32, rhs: i32) ?core.JSValue {
     };
 }
 
-fn fastInt32Add(lhs: i32, rhs: i32) core.JSValue {
+pub fn fastInt32Add(lhs: i32, rhs: i32) core.JSValue {
     const result = @addWithOverflow(lhs, rhs);
     if (result[1] == 0) return core.JSValue.int32(result[0]);
     return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) + @as(f64, @floatFromInt(rhs)));
 }
 
-fn fastInt32Sub(lhs: i32, rhs: i32) core.JSValue {
+pub fn fastInt32Sub(lhs: i32, rhs: i32) core.JSValue {
     const result = @subWithOverflow(lhs, rhs);
     if (result[1] == 0) return core.JSValue.int32(result[0]);
     return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) - @as(f64, @floatFromInt(rhs)));

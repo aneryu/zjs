@@ -20,6 +20,7 @@ const globalLexicalHas = call_runtime.globalLexicalHas;
 const handleCatchableRuntimeError = call_runtime.handleCatchableRuntimeError;
 const isFunctionLikeClass = call_runtime.isFunctionLikeClass;
 const pushSlotValue = array_ops.pushSlotValue;
+const pushSlotValueAssumeCapacity = array_ops.pushSlotValueAssumeCapacity;
 const sameObjectIdentity = object_ops.sameObjectIdentity;
 const setGlobalLexicalValue = call_runtime.setGlobalLexicalValue;
 const throwTdzReference = exception_ops.throwTdzReference;
@@ -41,8 +42,13 @@ pub fn execGetLoc(
     frame.pc += consume;
     _ = ctx;
     _ = opc;
-    if (idx >= frame.locals.len) return error.InvalidBytecode;
-    try pushSlotValue(stack, frame.locals[idx]);
+    // No runtime bounds check: `resolve_variables` only emits get_loc with
+    // idx < var_count, and `frame.locals` is sized to exactly var_count
+    // (vm_call.initFrameLocals). idx < var_count == frame.locals.len holds for
+    // every dispatched frame — the same trusted-compiler model as QuickJS's
+    // bare `var_buf[idx]`. The stack is pre-sized (reserveEntryFrameCapacity),
+    // so the push skips reserveAdditional, mirroring qjs's `*sp++`.
+    pushSlotValueAssumeCapacity(stack, frame.locals[idx]);
 }
 
 pub fn execPutLoc(
@@ -58,7 +64,7 @@ pub fn execPutLoc(
 ) !void {
     frame.pc += consume;
     _ = opc;
-    if (idx >= frame.locals.len) return error.InvalidBytecode;
+    // idx < var_count == frame.locals.len by construction (see execGetLoc).
     const value = try stack.pop();
     try setSlotValue(ctx, &frame.locals[idx], value);
     if (idx < frame.locals_uninit.len and idx < function.var_is_lexical.len and function.var_is_lexical[idx]) {
@@ -80,7 +86,7 @@ pub fn execSetLoc(
 ) !void {
     frame.pc += consume;
     _ = opc;
-    if (idx >= frame.locals.len) return error.InvalidBytecode;
+    // idx < var_count == frame.locals.len by construction (see execGetLoc).
     const value = stack.peek() orelse return error.StackUnderflow;
     defer value.free(ctx.runtime);
     try setSlotValue(ctx, &frame.locals[idx], value.dup());

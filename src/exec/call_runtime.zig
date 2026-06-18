@@ -18,6 +18,9 @@ const inline_calls = @import("inline_calls.zig");
 const module_mod = @import("module.zig");
 const property_ops = @import("property_ops.zig");
 const zjs_vm = @import("zjs_vm.zig");
+const call_internal = @import("call_internal.zig");
+const tailcall_dispatch = @import("tailcall_dispatch.zig");
+const call_vm = @import("vm_call.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 const HostError = exceptions.HostError;
@@ -94,7 +97,7 @@ pub fn execCall(
 
     if (try builtin_glue.fastHostOutputCall(ctx.runtime, output, func, args)) {
         popOwnedStackRegion(ctx.runtime, stack, region_base);
-        try stack.pushOwned(core.JSValue.undefinedValue());
+        stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
         return .done;
     }
     const is_super_constructor = class_init_ops.isCurrentSuperConstructor(ctx, frame, func);
@@ -170,13 +173,10 @@ pub fn execCall(
         else
             result;
         try class_init_ops.setCurrentArrowLexicalThis(ctx, frame, next_this.dup());
-        try stack.push(next_this);
+        stack.pushAssumeCapacity(next_this);
         return .done;
     }
-    stack.pushOwned(result) catch |err| {
-        result.free(ctx.runtime);
-        return err;
-    };
+    stack.pushOwnedAssumeCapacity(result);
     return .done;
 }
 
@@ -5009,7 +5009,24 @@ pub fn callFunctionBytecodeModeState(
     else
         stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
-    const result = runWithArgsState(ctx, &nested_stack, &nested, effective_this, args, combined_var_refs, output, global, false, fb_runtime_strict, stop_on_yield, &.{}, &.{}, eval_var_ref_names, eval_var_refs, &.{}, &.{}, &.{}, &.{}, generator_state, resume_value, stop_before_pc, current_function_value, new_target_value, constructor_this_value, false, false, core.JSValue.undefinedValue(), false, false) catch |err| {
+    // Recursive register-resident dispatcher (build-flag gated, WIP): a normal-
+    // kind, non-generator callee runs through `callInternal` (native Zig
+    // recursion) instead of the flattened inline-`Machine` loop. `arena_eligible`
+    // == (fb.func_kind == .normal and generator_state == null), exactly the
+    // frames `dispatchRecursive` supports; everything else stays on
+    // `runWithArgsState`. When the flag is off this folds away at comptime.
+    // S2a-v3 HEAP FALLBACK: when native recursion is near its cap, run the deep
+    // callee via the Machine (runWithArgsState) so non-tail recursion reaches the
+    // same logical depth as flag-off (this single frame costs one native level;
+    // its Machine absorbs the deep sub-tree). nativeDepthNearCap folds to false
+    // at comptime when the flag is off.
+    const dispatch_result = if (tailcall_dispatch.tailcall_dispatch_enabled and arena_eligible and !call_vm.nativeDepthNearCap(ctx))
+        tailcall_dispatch.callInternalTC(ctx, &nested_stack, &nested, effective_this, args, combined_var_refs, output, global, eval_var_ref_names, eval_var_refs, current_function_value, new_target_value, constructor_this_value)
+    else if (call_internal.recursive_dispatch_enabled and arena_eligible and !call_vm.nativeDepthNearCap(ctx))
+        call_internal.callInternal(ctx, &nested_stack, &nested, effective_this, args, combined_var_refs, output, global, eval_var_ref_names, eval_var_refs, current_function_value, new_target_value, constructor_this_value)
+    else
+        runWithArgsState(ctx, &nested_stack, &nested, effective_this, args, combined_var_refs, output, global, false, fb_runtime_strict, stop_on_yield, &.{}, &.{}, eval_var_ref_names, eval_var_refs, &.{}, &.{}, &.{}, &.{}, generator_state, resume_value, stop_before_pc, current_function_value, new_target_value, constructor_this_value, false, false, core.JSValue.undefinedValue(), false, false);
+    const result = dispatch_result catch |err| {
         if (fb.func_kind == .async_generator) {
             return exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, global));
         }
@@ -7209,7 +7226,7 @@ pub fn inOp(
         try object_ops.hasValueProperty(ctx, output, global, rhs, object, key, caller_function, caller_frame)
     else
         try object_ops.ordinaryHasValueProperty(ctx, output, global, object, key, has_builtin_object_proto, caller_function, caller_frame);
-    try stack.pushOwned(core.JSValue.boolean(found));
+    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(found));
 }
 
 pub fn instanceofOp(
@@ -7234,7 +7251,7 @@ pub fn instanceofOp(
     if (!has_instance.isUndefined() and !has_instance.isNull()) {
         const result = try callValueOrBytecode(ctx, output, global, rhs, has_instance, &.{lhs}, caller_function, caller_frame);
         defer result.free(ctx.runtime);
-        try stack.pushOwned(core.JSValue.boolean(coercion_ops.valueTruthy(result)));
+        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(coercion_ops.valueTruthy(result)));
         return;
     }
     if (!isCallableValue(rhs)) {
@@ -7242,12 +7259,12 @@ pub fn instanceofOp(
         return error.TypeError;
     }
     if (!lhs.isObject()) {
-        try stack.pushOwned(core.JSValue.boolean(false));
+        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
         return;
     }
     const object = try property_ops.expectObject(lhs);
     if (try constructorNameEqlLocal(ctx.runtime, ctor, "Array")) {
-        try stack.pushOwned(core.JSValue.boolean(object.flags.is_array));
+        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(object.flags.is_array));
         return;
     }
     const proto_value = try object_ops.getValueProperty(ctx, output, global, rhs, core.atom.ids.prototype, caller_function, caller_frame);
@@ -7259,12 +7276,12 @@ pub fn instanceofOp(
     var current = try object_ops.qjsObjectGetPrototypeOfStep(ctx, output, global, object, caller_function, caller_frame);
     while (current) |candidate| {
         if (candidate == proto) {
-            try stack.pushOwned(core.JSValue.boolean(true));
+            stack.pushOwnedAssumeCapacity(core.JSValue.boolean(true));
             return;
         }
         current = try object_ops.qjsObjectGetPrototypeOfStep(ctx, output, global, candidate, caller_function, caller_frame);
     }
-    try stack.pushOwned(core.JSValue.boolean(false));
+    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
 }
 
 pub fn constructorNameEqlLocal(rt: *core.JSRuntime, object: *core.Object, expected: []const u8) !bool {

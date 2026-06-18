@@ -67,6 +67,7 @@ const constructorPrototypeFromGlobal = object_ops.constructorPrototypeFromGlobal
 const createRegExpMatchArrayFromValue = string_ops.createRegExpMatchArrayFromValue;
 const createRegExpMatchArrayNoCapturesFromValue = string_ops.createRegExpMatchArrayNoCapturesFromValue;
 const defineSplitValueElement = string_ops.defineSplitValueElement;
+const decodeRegExpLegacyCaptureSlice = string_ops.decodeRegExpLegacyCaptureSlice;
 const fastToLengthIndex = coercion_ops.fastToLengthIndex;
 const findStringClassEscapeMatch = string_ops.findStringClassEscapeMatch;
 const getValueProperty = object_ops.getValueProperty;
@@ -353,7 +354,6 @@ pub fn qjsRegExpTestMethod(
     defer result.free(ctx.runtime);
     return core.JSValue.boolean(!result.isNull());
 }
-
 
 pub const RegExpBorrowedSourceFlags = struct {
     source: []const u8,
@@ -823,12 +823,12 @@ pub fn qjsRegExpLegacyAccessor(
         },
         .get_input => return regExpLegacySlotValue(ctx.runtime, legacy.input),
         .get_last_match => return regExpLegacyNoCaptureSliceValue(ctx.runtime, legacy, .match) orelse regExpLegacySlotValue(ctx.runtime, legacy.last_match),
-        .get_last_paren => return regExpLegacySlotValue(ctx.runtime, legacy.last_paren),
+        .get_last_paren => return regExpLegacyCaptureSliceValue(ctx.runtime, legacy, legacy.last_paren) orelse regExpLegacySlotValue(ctx.runtime, legacy.last_paren),
         .get_left_context => return regExpLegacyNoCaptureSliceValue(ctx.runtime, legacy, .left) orelse regExpLegacySlotValue(ctx.runtime, legacy.left_context),
         .get_right_context => return regExpLegacyNoCaptureSliceValue(ctx.runtime, legacy, .right) orelse regExpLegacySlotValue(ctx.runtime, legacy.right_context),
         else => {
             const capture_index = core.host_function.builtin_method_id_lookup.regexp.legacyCaptureIndex(method) orelse return error.TypeError;
-            return regExpLegacySlotValue(ctx.runtime, legacy.captures[capture_index]);
+            return regExpLegacyCaptureSliceValue(ctx.runtime, legacy, legacy.captures[capture_index]) orelse regExpLegacySlotValue(ctx.runtime, legacy.captures[capture_index]);
         },
     }
 }
@@ -876,7 +876,26 @@ pub fn materializeRegExpLegacyNoCaptureSlots(rt: *core.JSRuntime, owner: *core.O
         defer right.free(rt);
         try replaceRegExpLegacySlot(rt, owner, &legacy.right_context, right);
     }
+
+    if (regExpLegacyCaptureSliceValue(rt, legacy, legacy.last_paren)) |last_paren| {
+        defer last_paren.free(rt);
+        try replaceRegExpLegacySlot(rt, owner, &legacy.last_paren, last_paren);
+    }
+    for (&legacy.captures) |*capture_slot| {
+        if (regExpLegacyCaptureSliceValue(rt, legacy, capture_slot.*)) |capture| {
+            defer capture.free(rt);
+            try replaceRegExpLegacySlot(rt, owner, capture_slot, capture);
+        }
+    }
     legacy.lazy_no_capture_match = false;
+}
+
+pub fn regExpLegacyCaptureSliceValue(rt: *core.JSRuntime, legacy: anytype, slot: ?core.JSValue) ?core.JSValue {
+    if (!legacy.lazy_no_capture_match) return null;
+    const input = legacy.input orelse return null;
+    const encoded = slot orelse return null;
+    const slice = decodeRegExpLegacyCaptureSlice(encoded) orelse return null;
+    return stringSliceValue(rt, input, slice.start, slice.len) catch null;
 }
 
 pub fn clearRegExpLegacySlot(rt: *core.JSRuntime, slot: *?core.JSValue) void {
@@ -3105,9 +3124,9 @@ pub fn updateRegExpLegacyStaticsNoCaptures(rt: *core.JSRuntime, global: *core.Ob
         clearRegExpLegacySlot(rt, &legacy.last_match);
         clearRegExpLegacySlot(rt, &legacy.left_context);
         clearRegExpLegacySlot(rt, &legacy.right_context);
-        clearRegExpLegacySlot(rt, &legacy.last_paren);
-        for (&legacy.captures) |*capture| clearRegExpLegacySlot(rt, capture);
     }
+    clearRegExpLegacySlot(rt, &legacy.last_paren);
+    for (&legacy.captures) |*capture| clearRegExpLegacySlot(rt, capture);
 
     legacy.lazy_no_capture_match = true;
     legacy.lazy_match_index = found.index;
