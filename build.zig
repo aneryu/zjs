@@ -476,6 +476,7 @@ pub fn build(b: *std.Build) void {
     test_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     test_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     test_options.addOption(bool, "zjs_recursive_dispatch", zjs_recursive_dispatch);
+    test_options.addOption(bool, "zjs_tailcall_dispatch", zjs_tailcall_dispatch);
     test_options.addOptionPath("runtime_plugin_fixture_path", runtime_plugin_fixture.getEmittedBin());
     test_options.addOptionPath("runtime_empty_plugin_fixture_path", runtime_empty_plugin_fixture.getEmittedBin());
     test_options.addOption([]const u8, "zjs_executable_path", b.getInstallPath(.bin, "zjs"));
