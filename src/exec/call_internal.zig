@@ -18,6 +18,8 @@ const exception_ops = @import("vm_exception_ops.zig");
 const HostError = @import("exceptions.zig").HostError;
 
 const value_vm = @import("vm_value.zig");
+const inline_calls = @import("inline_calls.zig");
+const forof_ops = @import("forof_ops.zig");
 const call_vm = @import("vm_call.zig");
 const regexp_vm = @import("vm_regexp.zig");
 const class_vm = @import("object_ops.zig");
@@ -132,6 +134,91 @@ fn reserveEntryFrameCapacity(entry_stack: *stack_mod.Stack, entry_function: *con
     else
         entry_function.stack_size;
     try entry_stack.reserveFrameCapacity(frame_stack_size);
+}
+
+/// Result of running an inline-eligible callee via native recursion.
+pub const RecurseOutcome = union(enum) {
+    /// The callee returned `value` (owned by the caller). A regular call pushes
+    /// it onto the operand stack; a tail call returns it as its own result.
+    value: core.JSValue,
+    /// The callee threw and THIS (caller) frame caught it — `frame.pc` is the
+    /// catch target. The caller continues its dispatch loop.
+    caught,
+};
+
+/// Run an inline-eligible bytecode call (`request`, resolved by
+/// `resolveInlineTarget`) as a NATIVE Zig recursion into `dispatchRecursive`,
+/// reusing the Machine's zero-copy frame setup (`setupInlineEntry`) — this is
+/// the S2a pivot replacing `machine.pushCall`. Native depth is bounded by
+/// `enterCallDepth` (catchable RangeError before stack overflow). On a callee
+/// error, the error is routed through the CURRENT frame's catch handler
+/// (mirroring `Machine.unwindForError` one level): caught → `.caught`,
+/// otherwise the error propagates (the caller frame's own recursion catch / the
+/// top-level handles it). NOTE (S2a-v1): no TCO trampoline yet — a tail call
+/// recurses like a regular call (deep tail recursion is bounded by the native
+/// depth cap, same limitation as S1; the trampoline is S2a-v2).
+pub fn recurseInlineCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    caller_stack: *stack_mod.Stack,
+    caller_frame: *frame_mod.Frame,
+    caller_catch_target: *?usize,
+    request: call_runtime.InlineCallRequest,
+) HostError!RecurseOutcome {
+    const source: inline_calls.Machine.ArgsSource = switch (request.layout) {
+        .plain, .method => .{ .stack_region = .{
+            .stack = caller_stack,
+            .region_base = request.region_base,
+            .argc = request.argc,
+            .has_receiver = request.layout == .method,
+        } },
+        .prepared => .{ .prepared = .{
+            .stack = caller_stack,
+            .region_base = request.region_base,
+            .argc = request.argc,
+        } },
+    };
+
+    const depth_guard = call_vm.enterCallDepth(ctx, global) catch |err| {
+        return routeCalleeError(ctx, output, global, caller_stack, caller_frame, caller_catch_target, err);
+    };
+    defer depth_guard.deinit();
+
+    var entry: inline_calls.Entry = undefined;
+    inline_calls.Machine.setupInlineEntry(ctx, global, &entry, request.target, source) catch |err| {
+        return routeCalleeError(ctx, output, global, caller_stack, caller_frame, caller_catch_target, err);
+    };
+    // setupInlineEntry has consumed (popped + freed) the call region from
+    // caller_stack; `entry` owns the new frame/stack carved from the arena.
+
+    const result = dispatchRecursive(ctx, &entry.view, global, &entry.frame, &entry.stack, output) catch |err| {
+        call_runtime.closeFrameDestructuringIteratorsForAbruptCompletion(ctx, output, global, &entry.stack, &entry.frame);
+        inline_calls.Machine.teardownInlineEntry(ctx, &entry);
+        return routeCalleeError(ctx, output, global, caller_stack, caller_frame, caller_catch_target, err);
+    };
+    inline_calls.Machine.teardownInlineEntry(ctx, &entry);
+    return .{ .value = result };
+}
+
+/// Shared error-unwind for `recurseInlineCall`: close any pending for-of
+/// iterator on the caller stack, then try the caller frame's catch handler.
+/// Returns `.caught` when handled (caller resumes at `frame.pc`), else the
+/// error propagates. Mirrors the `catch` legs of the dispatch-loop call arms.
+fn routeCalleeError(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    caller_stack: *stack_mod.Stack,
+    caller_frame: *frame_mod.Frame,
+    caller_catch_target: *?usize,
+    err: HostError,
+) HostError!RecurseOutcome {
+    try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, caller_stack);
+    if (try call_runtime.handleCatchableRuntimeError(ctx, caller_stack, caller_frame, caller_catch_target, global, err)) {
+        return .caught;
+    }
+    return err;
 }
 
 pub fn dispatchRecursive(
@@ -661,19 +748,28 @@ switch (opc) {
             else => unreachable,
         };
         frame.pc = pc;
-        switch (try call_runtime.execCall(ctx, stack, function, frame, catch_target, argc, output, global, false)) {
+        // S2a: a plain-bytecode callee runs as a NATIVE recursion via
+        // recurseInlineCall (reusing the Machine's zero-copy setup), not the
+        // dup-heavy slow path.
+        switch (try call_runtime.execCall(ctx, stack, function, frame, catch_target, argc, output, global, true)) {
             .done => {},
             .continue_loop => {
                 pc = frame.pc;
                 continue;
             },
-            .inline_call => unreachable,
+            .inline_call => |request| switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
+                .value => |v| stack.pushOwnedAssumeCapacity(v),
+                .caught => {
+                    pc = frame.pc;
+                    continue;
+                },
+            },
         }
         pc = frame.pc;
     },
     op.tail_call => {
         frame.pc = pc;
-        switch (try call_vm.tailCall(ctx, output, global, stack, function, frame, catch_target, false)) {
+        switch (try call_vm.tailCall(ctx, output, global, stack, function, frame, catch_target, true)) {
             .handled => {
                 pc = frame.pc;
                 continue;
@@ -681,12 +777,20 @@ switch (opc) {
             .return_value => |value| {
                 return value;
             },
-            .tail_inline => unreachable,
+            // No TCO trampoline yet (S2a-v1): a tail call recurses, then this
+            // frame returns the callee's result (matching .return_value).
+            .tail_inline => |request| switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
+                .value => |v| return v,
+                .caught => {
+                    pc = frame.pc;
+                    continue;
+                },
+            },
         }
     },
     op.tail_call_method => {
         frame.pc = pc;
-        switch (try call_vm.tailCallMethod(ctx, output, global, stack, function, frame, catch_target, false)) {
+        switch (try call_vm.tailCallMethod(ctx, output, global, stack, function, frame, catch_target, true)) {
             .handled => {
                 pc = frame.pc;
                 continue;
@@ -694,33 +798,48 @@ switch (opc) {
             .return_value => |value| {
                 return value;
             },
-            .tail_inline => unreachable,
+            .tail_inline => |request| switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
+                .value => |v| return v,
+                .caught => {
+                    pc = frame.pc;
+                    continue;
+                },
+            },
         }
     },
     op.call_method => {
         frame.pc = pc;
-        // allow_inline=false: a plain-bytecode method callee runs via the full
-        // (recursing) call path instead of the inline-frame fast path, so the
-        // recursion happens natively through callInternal.
-        switch (try call_vm.callMethod(ctx, output, global, stack, function, frame, catch_target, false)) {
+        switch (try call_vm.callMethod(ctx, output, global, stack, function, frame, catch_target, true)) {
             .done => {},
             .continue_loop => {
                 pc = frame.pc;
                 continue;
             },
-            .inline_call => unreachable,
+            .inline_call => |request| switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
+                .value => |v| stack.pushOwnedAssumeCapacity(v),
+                .caught => {
+                    pc = frame.pc;
+                    continue;
+                },
+            },
         }
         pc = frame.pc;
     },
     op.call_prepared => {
         frame.pc = pc;
-        switch (try call_vm.callPrepared(ctx, output, global, stack, function, frame, catch_target, false)) {
+        switch (try call_vm.callPrepared(ctx, output, global, stack, function, frame, catch_target, true)) {
             .done => {},
             .continue_loop => {
                 pc = frame.pc;
                 continue;
             },
-            .inline_call => unreachable,
+            .inline_call => |request| switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
+                .value => |v| stack.pushOwnedAssumeCapacity(v),
+                .caught => {
+                    pc = frame.pc;
+                    continue;
+                },
+            },
         }
         pc = frame.pc;
     },
