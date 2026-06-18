@@ -119,7 +119,14 @@ pub fn callInternal(
     try reserveEntryFrameCapacity(entry_stack, entry_function);
     errdefer call_runtime.closeFrameDestructuringIteratorsForAbruptCompletion(ctx, output, global, entry_stack, &frame_storage);
 
-    return dispatchRecursive(ctx, entry_function, global, &frame_storage, entry_stack, output);
+    // Slow-path entry: not a trampoline, so pass allow_tail_signal=false (a tail
+    // call recurses through recurseInlineCall, which IS a trampoline — so the
+    // callee's own tail chain is still TCO'd; only this single frame adds one
+    // native level). dispatchRecursive therefore never yields `.tail` here.
+    return switch (try dispatchRecursive(ctx, entry_function, global, &frame_storage, entry_stack, output, false)) {
+        .returned => |value| value,
+        .tail => unreachable,
+    };
 }
 
 fn reserveEntryFrameCapacity(entry_stack: *stack_mod.Stack, entry_function: *const bytecode.Bytecode) !void {
@@ -144,6 +151,19 @@ pub const RecurseOutcome = union(enum) {
     /// The callee threw and THIS (caller) frame caught it — `frame.pc` is the
     /// catch target. The caller continues its dispatch loop.
     caught,
+};
+
+/// What a single `dispatchRecursive` frame produced. Returned to the caller's
+/// trampoline (`recurseInlineCall`) so a proper tail call can REUSE the native
+/// frame (constant stack depth) instead of recursing — the TCO trampoline.
+pub const Outcome = union(enum) {
+    /// The frame ran to a `return` / fall-off; `value` is owned by the caller.
+    returned: core.JSValue,
+    /// The frame hit a proper tail call; the trampoline tears this frame down
+    /// and re-enters with `request`'s target (the call region is still live on
+    /// the just-finished frame's operand stack). Only produced when the caller
+    /// passed `allow_tail_signal = true`.
+    tail: call_runtime.InlineCallRequest,
 };
 
 /// Run an inline-eligible bytecode call (`request`, resolved by
@@ -191,14 +211,47 @@ pub fn recurseInlineCall(
     };
     // setupInlineEntry has consumed (popped + freed) the call region from
     // caller_stack; `entry` owns the new frame/stack carved from the arena.
-
-    const result = dispatchRecursive(ctx, &entry.view, global, &entry.frame, &entry.stack, output) catch |err| {
-        call_runtime.closeFrameDestructuringIteratorsForAbruptCompletion(ctx, output, global, &entry.stack, &entry.frame);
-        inline_calls.Machine.teardownInlineEntry(ctx, &entry);
-        return routeCalleeError(ctx, output, global, caller_stack, caller_frame, caller_catch_target, err);
-    };
-    inline_calls.Machine.teardownInlineEntry(ctx, &entry);
-    return .{ .value = result };
+    // TCO TRAMPOLINE: a proper tail call from the running frame replaces `entry`
+    // in place (reusing the native frame + the held depth slot = constant native
+    // stack depth), instead of recursing — so 100k strict tail calls don't blow
+    // the C stack. Mirrors inline_calls.Machine.tailCallReuse.
+    while (true) {
+        const outcome = dispatchRecursive(ctx, &entry.view, global, &entry.frame, &entry.stack, output, true) catch |err| {
+            call_runtime.closeFrameDestructuringIteratorsForAbruptCompletion(ctx, output, global, &entry.stack, &entry.frame);
+            inline_calls.Machine.teardownInlineEntry(ctx, &entry);
+            return routeCalleeError(ctx, output, global, caller_stack, caller_frame, caller_catch_target, err);
+        };
+        switch (outcome) {
+            .returned => |result| {
+                inline_calls.Machine.teardownInlineEntry(ctx, &entry);
+                return .{ .value = result };
+            },
+            .tail => |tail_req| {
+                // Tail call region [callable,args] (or [recv,callable,args] for a
+                // method tail call) is still live on the just-finished frame's
+                // operand stack. Move it out before tearing the frame down, then
+                // re-enter with the tail target.
+                const has_receiver = tail_req.layout == .method;
+                const total = @as(usize, tail_req.argc) + 1 + @as(usize, @intFromBool(has_receiver));
+                var inline_buf: [10]core.JSValue = undefined;
+                const moved: []core.JSValue = if (total <= inline_buf.len)
+                    inline_buf[0..total]
+                else
+                    try ctx.runtime.memory.alloc(core.JSValue, total);
+                defer if (total > inline_buf.len) ctx.runtime.memory.free(core.JSValue, moved);
+                @memcpy(moved, entry.stack.values[tail_req.region_base..][0..total]);
+                entry.stack.values = entry.stack.values.ptr[0..tail_req.region_base];
+                // `moved` now owns the region; free whatever setupInlineEntry does
+                // not transfer (transferred slots are nulled to undefined).
+                defer for (moved) |v| v.free(ctx.runtime);
+                inline_calls.Machine.teardownInlineEntry(ctx, &entry);
+                inline_calls.Machine.setupInlineEntry(ctx, global, &entry, tail_req.target, .{ .moved = .{ .values = moved, .has_receiver = has_receiver } }) catch |err| {
+                    return routeCalleeError(ctx, output, global, caller_stack, caller_frame, caller_catch_target, err);
+                };
+                // loop: re-run dispatchRecursive on the reused frame.
+            },
+        }
+    }
 }
 
 /// Shared error-unwind for `recurseInlineCall`: close any pending for-of
@@ -228,7 +281,13 @@ pub fn dispatchRecursive(
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     output: ?*std.Io.Writer,
-) HostError!core.JSValue {
+    // When true (the recurseInlineCall trampoline), a proper tail call returns
+    // `.tail` so the trampoline reuses the native frame (TCO). When false (the
+    // callInternal slow-path entry, which is not a trampoline), a tail call
+    // recurses like a regular call (one extra native frame, then the callee's
+    // own trampoline TCOs its tail calls).
+    allow_tail_signal: bool,
+) HostError!Outcome {
     const code = function.code;
     var pc: usize = frame.pc;
     var catch_target_storage: ?usize = null;
@@ -239,7 +298,7 @@ pub fn dispatchRecursive(
     while (true) {
         if (pc >= code.len) {
             frame.pc = pc;
-            return control_vm.finishFunctionReturn(ctx, frame, stack.peek() orelse core.JSValue.undefinedValue());
+            return .{ .returned = try control_vm.finishFunctionReturn(ctx, frame, stack.peek() orelse core.JSValue.undefinedValue()) };
         }
         const opc = code[pc];
         pc += 1;
@@ -701,11 +760,11 @@ switch (opc) {
     // ---- Return ----
     op.@"return" => {
         frame.pc = pc;
-        return control_vm.returnTop(ctx, stack, frame, null);
+        return .{ .returned = try control_vm.returnTop(ctx, stack, frame, null) };
     },
     op.return_undef => {
         frame.pc = pc;
-        return control_vm.returnUndefined(ctx, frame, null);
+        return .{ .returned = try control_vm.returnUndefined(ctx, frame, null) };
     },
 
     // ---- Throw / catch ----
@@ -775,16 +834,20 @@ switch (opc) {
                 continue;
             },
             .return_value => |value| {
-                return value;
+                return .{ .returned = value };
             },
-            // No TCO trampoline yet (S2a-v1): a tail call recurses, then this
-            // frame returns the callee's result (matching .return_value).
-            .tail_inline => |request| switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
-                .value => |v| return v,
-                .caught => {
-                    pc = frame.pc;
-                    continue;
-                },
+            // Proper tail call. Under a trampoline (allow_tail_signal) signal it
+            // up so the native frame is reused (constant depth). Otherwise (the
+            // callInternal slow-path entry) recurse and return the callee value.
+            .tail_inline => |request| {
+                if (allow_tail_signal) return .{ .tail = request };
+                switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
+                    .value => |v| return .{ .returned = v },
+                    .caught => {
+                        pc = frame.pc;
+                        continue;
+                    },
+                }
             },
         }
     },
@@ -796,14 +859,17 @@ switch (opc) {
                 continue;
             },
             .return_value => |value| {
-                return value;
+                return .{ .returned = value };
             },
-            .tail_inline => |request| switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
-                .value => |v| return v,
-                .caught => {
-                    pc = frame.pc;
-                    continue;
-                },
+            .tail_inline => |request| {
+                if (allow_tail_signal) return .{ .tail = request };
+                switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
+                    .value => |v| return .{ .returned = v },
+                    .caught => {
+                        pc = frame.pc;
+                        continue;
+                    },
+                }
             },
         }
     },
