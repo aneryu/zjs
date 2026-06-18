@@ -1013,7 +1013,7 @@ fn immediateInt32Operand(code: []const u8, pc: usize) ?ImmediateInt32 {
     };
 }
 
-fn fastBinaryInt32(binop: u8, lhs: i32, rhs: i32) ?core.JSValue {
+pub fn fastBinaryInt32(binop: u8, lhs: i32, rhs: i32) ?core.JSValue {
     return switch (binop) {
         op.add => fastInt32Add(lhs, rhs),
         op.sub => fastInt32Sub(lhs, rhs),

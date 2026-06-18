@@ -25,6 +25,13 @@ pub fn build(b: *std.Build) void {
     // Machine. Default OFF and comptime-gated while the rewrite is built up
     // incrementally — the default build keeps the proven flattened dispatchLoop.
     const zjs_recursive_dispatch = b.option(bool, "zjs_recursive_dispatch", "Use the recursive register-resident callInternal dispatcher (WIP)") orelse false;
+    // Tail-call threaded dispatcher (scratch/perf/TAILCALL-REWRITE.md): each hot
+    // opcode is its own small function; dispatch is `@call(.always_tail)` through
+    // a 256-entry table = a real computed-goto `br`. Proven to match qjs per-opcode
+    // (see the prototype). Default OFF + comptime-gated; when ON the engine module
+    // is built with `-fomit-frame-pointer` (tail-call handlers never `ret`, so the
+    // frame setup LLVM emits is pure overhead — removing it ~doubled the IPC).
+    const zjs_tailcall_dispatch = b.option(bool, "zjs_tailcall_dispatch", "Use the tail-call threaded dispatcher (WIP)") orelse false;
     const engine_options = b.addOptions();
     engine_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
     engine_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
@@ -32,12 +39,17 @@ pub fn build(b: *std.Build) void {
     engine_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     engine_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     engine_options.addOption(bool, "zjs_recursive_dispatch", zjs_recursive_dispatch);
+    engine_options.addOption(bool, "zjs_tailcall_dispatch", zjs_tailcall_dispatch);
+    // Omit the frame pointer ONLY when the tail-call dispatcher is on (the
+    // default build keeps frame pointers + the user's gate baselines unchanged).
+    const omit_fp: ?bool = if (zjs_tailcall_dispatch) true else null;
 
     const engine_mod = b.addModule("quickjs_zig_engine", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+        .omit_frame_pointer = omit_fp,
     });
     engine_mod.addOptions("build_options", engine_options);
 
@@ -47,6 +59,7 @@ pub fn build(b: *std.Build) void {
     plugin_fixture_options.addOption(bool, "zjs_enable_fusions", zjs_enable_fusions);
     plugin_fixture_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     plugin_fixture_options.addOption(bool, "zjs_recursive_dispatch", zjs_recursive_dispatch);
+    plugin_fixture_options.addOption(bool, "zjs_tailcall_dispatch", zjs_tailcall_dispatch);
     plugin_fixture_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     const plugin_fixture_zjs_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
@@ -89,6 +102,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseFast,
         .link_libc = true,
+        .omit_frame_pointer = omit_fp,
     });
     internal_fast_mod.addOptions("build_options", engine_options);
     const zjs_cli_mod = b.createModule(.{

@@ -9,6 +9,7 @@ pub const subsystem_name = "exec";
 
 pub const zjs_vm = @import("zjs_vm.zig");
 pub const call_internal = @import("call_internal.zig");
+pub const tailcall_dispatch = @import("tailcall_dispatch.zig");
 pub const frame = @import("frame.zig");
 pub const stack = @import("stack.zig");
 pub const call = @import("call.zig");

@@ -259,7 +259,7 @@ pub fn recurseInlineCall(
 /// iterator on the caller stack, then try the caller frame's catch handler.
 /// Returns `.caught` when handled (caller resumes at `frame.pc`), else the
 /// error propagates. Mirrors the `catch` legs of the dispatch-loop call arms.
-fn routeCalleeError(
+pub fn routeCalleeError(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
