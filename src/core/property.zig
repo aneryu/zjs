@@ -118,7 +118,7 @@ pub const AutoInit = struct {
 pub const Slot = union(enum) {
     data: JSValue,
     accessor: Accessor,
-    auto_init: AutoInit,
+    auto_init: u32,
     deleted,
 
     pub fn destroy(self: Slot, rt: anytype) void {
@@ -128,8 +128,8 @@ pub const Slot = union(enum) {
                 entry.getter.free(rt);
                 entry.setter.free(rt);
             },
-            // `auto_init` is metadata-only (name is static lifetime,
-            // length is an int, rt is a borrowed pointer). Nothing to free.
+            // Auto-init metadata is owned by JSRuntime.auto_init_table and
+            // released when the runtime is torn down.
             .auto_init => {},
             .deleted => {},
         }
@@ -142,11 +142,20 @@ pub const Slot = union(enum) {
                 .getter = entry.getter.dup(),
                 .setter = entry.setter.dup(),
             } },
-            .auto_init => |info| .{ .auto_init = info },
+            .auto_init => |id| .{ .auto_init = id },
             .deleted => .deleted,
         };
     }
 };
+
+pub fn internAutoInit(rt: *JSRuntime, info: AutoInit) !u32 {
+    try rt.auto_init_table.append(rt.memory.allocator, info);
+    return @intCast(rt.auto_init_table.items.len - 1);
+}
+
+pub fn autoInitAt(rt: *JSRuntime, id: u32) *AutoInit {
+    return &rt.auto_init_table.items[id];
+}
 
 /// Per-object property storage. Holds only the value side of a
 /// property (QuickJS `JSProperty` model); the key atom and the

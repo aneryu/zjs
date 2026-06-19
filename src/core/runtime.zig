@@ -603,6 +603,7 @@ pub const JSRuntime = struct {
     classes: class.Table,
     shapes: shape.Registry,
     modules: module.Registry,
+    auto_init_table: std.ArrayListUnmanaged(property.AutoInit) = .empty,
     materialize_builtin_namespace_cb: ?*const fn (rt: *JSRuntime, global: *Object, kind: property.AutoInitKind) anyerror!?JSValue = null,
     materialize_context_global_cb: ?*const fn (ctx: *context_mod.JSContext) anyerror!*Object = null,
     /// Bootstrap install seam: builds the standard global object. Seeded from the
@@ -780,6 +781,7 @@ pub const JSRuntime = struct {
         }
         rt.shapes = shape.Registry.init(&rt.memory, &rt.atoms);
         rt.modules = module.Registry.init(&rt.memory, &rt.atoms);
+        rt.auto_init_table = .empty;
         rt.materialize_builtin_namespace_cb = null;
         rt.materialize_context_global_cb = null;
         rt.install_standard_globals_cb = default_standard_globals_installer;
@@ -949,6 +951,7 @@ pub const JSRuntime = struct {
         self.borrowed_weak_cleanup_identity_set.deinit(self.memory.allocator);
         self.weak_object_ids.deinit(self.memory.allocator);
         self.weak_id_objects.deinit(self.memory.allocator);
+        self.auto_init_table.deinit(self.memory.allocator);
         self.shapes.deinit();
         self.classes.deinit();
         self.atoms.deinit();

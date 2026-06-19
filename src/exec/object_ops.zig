@@ -1024,7 +1024,7 @@ pub fn qjsRegExpPrototypeMethodIsDefault(object: *core.Object, atom_id: core.Ato
         if (prop_flags.accessor) return false;
         return switch (proto.properties[property_index].slot) {
             .data => |method| qjsRegExpNativeBuiltinMatches(method, expected_id),
-            .auto_init => |info| qjsRegExpAutoInitBuiltinMatches(info, expected_id),
+            .auto_init => |id| qjsRegExpAutoInitBuiltinMatches(core.property.autoInitAt(proto.owner_runtime, id).*, expected_id),
             .accessor, .deleted => false,
         };
     }

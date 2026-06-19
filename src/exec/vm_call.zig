@@ -923,7 +923,7 @@ fn preparePropertyCallTarget(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
 ) !PreparedPropertyTarget {
-    if (cachedPreparedNativeCallTarget(function, site, receiver)) |native| {
+    if (cachedPreparedNativeCallTarget(ctx.runtime, function, site, receiver)) |native| {
         return .{ .native = native };
     }
     if (autoInitNativeTargetForReceiver(ctx.runtime, global, receiver, site.atom_id)) |lookup| {
@@ -941,13 +941,14 @@ fn autoInitNativeTargetForReceiver(
     atom_id: core.Atom,
 ) ?PreparedNativeLookup {
     if (objectFromValue(receiver)) |object| {
-        return autoInitNativeTargetInObjectChain(receiver, object, atom_id);
+        return autoInitNativeTargetInObjectChain(rt, receiver, object, atom_id);
     }
     const prototype = primitivePrototypeForCall(rt, global, receiver) orelse return null;
-    return autoInitNativeTargetInObjectChain(receiver, prototype, atom_id);
+    return autoInitNativeTargetInObjectChain(rt, receiver, prototype, atom_id);
 }
 
 fn autoInitNativeTargetInObjectChain(
+    rt: *core.JSRuntime,
     receiver: core.JSValue,
     start: *core.Object,
     atom_id: core.Atom,
@@ -956,7 +957,7 @@ fn autoInitNativeTargetInObjectChain(
     while (cursor) |object| {
         if (object.proxyTarget() != null or object.exotic != null) return null;
         if (object.findProperty(atom_id)) |index| {
-            const target = preparedNativeTargetFromAutoInitEntry(receiver, object, index, atom_id) orelse return null;
+            const target = preparedNativeTargetFromAutoInitEntry(rt, receiver, object, index, atom_id) orelse return null;
             return .{ .target = target, .holder = object, .index = index };
         }
         cursor = object.getPrototype();
@@ -965,6 +966,7 @@ fn autoInitNativeTargetInObjectChain(
 }
 
 fn cachedPreparedNativeCallTarget(
+    rt: *core.JSRuntime,
     function: *const bytecode.Bytecode,
     site: bytecode.function.CallSite,
     receiver: core.JSValue,
@@ -975,13 +977,13 @@ fn cachedPreparedNativeCallTarget(
 
     switch (slot.lookupOwnDataResult(object, site.atom_id)) {
         .hit => |index| {
-            if (preparedNativeTargetFromAutoInitEntry(receiver, object, index, site.atom_id)) |target| return target;
+            if (preparedNativeTargetFromAutoInitEntry(rt, receiver, object, index, site.atom_id)) |target| return target;
         },
         .miss, .invalidated => {},
     }
     switch (slot.lookupProtoDataResult(object, site.atom_id)) {
         .hit => |hit| {
-            if (preparedNativeTargetFromAutoInitEntry(receiver, hit.holder, hit.slot_index, site.atom_id)) |target| return target;
+            if (preparedNativeTargetFromAutoInitEntry(rt, receiver, hit.holder, hit.slot_index, site.atom_id)) |target| return target;
         },
         .miss, .invalidated => {},
     }
@@ -989,6 +991,7 @@ fn cachedPreparedNativeCallTarget(
 }
 
 fn preparedNativeTargetFromAutoInitEntry(
+    rt: *core.JSRuntime,
     receiver: core.JSValue,
     holder: *core.Object,
     index: usize,
@@ -1000,7 +1003,8 @@ fn preparedNativeTargetFromAutoInitEntry(
     const prop_flags = core.property.Flags.fromBits(prop.flags);
     if (prop_flags.deleted or prop_flags.accessor or prop.atom_id != atom_id) return null;
     return switch (holder.properties[index].slot) {
-        .auto_init => |info| {
+        .auto_init => |id| {
+            const info = core.property.autoInitAt(rt, id).*;
             const native_ref = core.function.decodeNativeBuiltinId(info.native_builtin_id) orelse return null;
             if (!nativeBuiltinSupportedWithoutFunctionObject(receiver, native_ref, info)) return null;
             return .{ .native_ref = native_ref, .auto_init = info };

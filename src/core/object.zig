@@ -1078,6 +1078,7 @@ pub const Object = struct {
     class_id: class.ClassId,
     class_payload: class.Payload = .none,
     class_payload_kind: class.PayloadKind = .none,
+    owner_runtime: *JSRuntime,
     shape_ref: *shape.Shape,
     prototype: ?*Object = null,
     flags: ObjectFlags = .{},
@@ -1296,6 +1297,7 @@ pub const Object = struct {
             .class_id = class_id,
             .class_payload = class_payload,
             .class_payload_kind = class_payload_kind,
+            .owner_runtime = rt,
             .flags = .{ .reserved_class_payload_finalizer_slot = reserved_class_payload_finalizer_slot },
             .shape_ref = shape_ref,
             .prototype = prototype,
@@ -1765,7 +1767,8 @@ pub const Object = struct {
         if (self.functionRealmGlobalPtr() != null) return true;
         for (self.properties) |entry| {
             switch (entry.slot) {
-                .auto_init => |info| {
+                .auto_init => |id| {
+                    const info = property.autoInitAt(self.owner_runtime, id).*;
                     if (info.host_function_realm_global != 0) return true;
                 },
                 else => {},
@@ -1791,7 +1794,8 @@ pub const Object = struct {
             }
             for (self.properties) |entry| {
                 switch (entry.slot) {
-                    .auto_init => |info| {
+                    .auto_init => |id| {
+                        const info = property.autoInitAt(rt, id).*;
                         if (info.host_function_realm_global != 0 and rt.borrowedWeakCleanupRealmIdentityMatches(info.host_function_realm_global)) return true;
                     },
                     else => {},
@@ -1925,7 +1929,8 @@ pub const Object = struct {
     fn clearAutoInitRealmGlobals(self: *Object, rt: *JSRuntime, matcher: BorrowedIdentityMatcher) void {
         for (self.properties) |*entry| {
             switch (entry.slot) {
-                .auto_init => |*info| {
+                .auto_init => |id| {
+                    const info = property.autoInitAt(rt, id);
                     if (matcher.matches(rt, info.host_function_realm_global)) info.host_function_realm_global = 0;
                 },
                 else => {},
@@ -7058,13 +7063,14 @@ pub const Object = struct {
             // materialization the slot is `.data` or `.accessor` and
             // re-reads are ordinary fast-path loads.
             if (entry.slot == .auto_init) {
+                const info = property.autoInitAt(self.owner_runtime, entry.slot.auto_init).*;
                 // `materializeAutoInit` returns a fresh ref for
                 // `getProperty` semantics. On success the slot is promoted
                 // and `fromSlot` dups the stored value(s). On OOM the
                 // placeholder stays `.auto_init`, so expose a conservative
                 // fallback descriptor directly instead of passing the
                 // placeholder to `fromSlot`.
-                const transient = materializeAutoInit(@constCast(self), index, entry.slot.auto_init);
+                const transient = materializeAutoInit(@constCast(self), index, info);
                 const after_materialize = self.properties[index];
                 if (after_materialize.slot == .auto_init) {
                     if (entry_flags.accessor) {
@@ -7082,7 +7088,7 @@ pub const Object = struct {
                         entry_flags.configurable,
                     );
                 }
-                transient.free(entry.slot.auto_init.rt);
+                transient.free(info.rt);
                 return descriptor.Descriptor.fromSlot(self.propFlagsAt(index), after_materialize.slot);
             }
             return descriptor.Descriptor.fromSlot(entry_flags, entry.slot);
@@ -7124,7 +7130,7 @@ pub const Object = struct {
                 // gives us a writable handle without changing every
                 // caller. Matches QuickJS's `JS_AutoInitProperty` which
                 // also mutates the property record in place on read.
-                .auto_init => |info| materializeAutoInit(@constCast(self), index, info),
+                .auto_init => |id| materializeAutoInit(@constCast(self), index, property.autoInitAt(self.owner_runtime, id).*),
                 .deleted => JSValue.undefinedValue(),
             };
         }
@@ -7248,7 +7254,7 @@ pub const Object = struct {
         if (index >= self.properties.len) return error.IncompatibleDescriptor;
         const entry = self.properties[index];
         if (entry.slot != .auto_init) return;
-        const info = entry.slot.auto_init;
+        const info = property.autoInitAt(self.owner_runtime, entry.slot.auto_init).*;
         const transient = materializeAutoInit(self, index, info);
         transient.free(info.rt);
         if (self.properties[index].slot == .auto_init) return error.OutOfMemory;
@@ -7960,17 +7966,17 @@ pub const Object = struct {
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
         // Inlined to skip `entryFromDescriptor`'s value-dup / accessor-
         // dup work: the placeholder has no JSValue to retain, just the
-        // (name, length, rt) triple stored in the slot's `auto_init`
-        // payload. The atom is still retained the same way `addProperty`
-        // would, via `rt.shapes.addProperty` -> `atoms.dup`.
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+        // (name, length, rt) triple stored in the runtime auto-init table.
+        // The atom is still retained the same way `addProperty` would, via
+        // `rt.shapes.addProperty` -> `atoms.dup`.
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
             .name = name,
             .length = length,
             .rt = rt,
             .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
             .native_builtin_id = native_builtin_id,
             .shared_native_cache_slot = shared_native_cache_slot,
-        } });
+        }) });
     }
 
     pub fn defineAutoInitNonIndexPropertyWithRealmNativeAndCache(
@@ -7995,14 +8001,14 @@ pub const Object = struct {
         else
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
             .name = name,
             .length = length,
             .rt = rt,
             .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
             .native_builtin_id = native_builtin_id,
             .shared_native_cache_slot = shared_native_cache_slot,
-        } });
+        }) });
     }
 
     pub fn defineNativeAccessorAutoInitPropertyWithRealmAndNative(
@@ -8026,14 +8032,14 @@ pub const Object = struct {
         else
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
             .name = getter_name,
             .length = getter_length,
             .rt = rt,
             .kind = .native_accessor,
             .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
             .native_builtin_id = getter_native_builtin_id,
-        } });
+        }) });
     }
 
     pub fn defineNativeAccessorAutoInitPairPropertyWithRealmAndNative(
@@ -8061,7 +8067,7 @@ pub const Object = struct {
         else
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
             .name = getter_name,
             .length = getter_length,
             .rt = rt,
@@ -8070,7 +8076,7 @@ pub const Object = struct {
             .external_host_function_id = @intCast(setter_native_builtin_id),
             .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
             .native_builtin_id = getter_native_builtin_id,
-        } });
+        }) });
     }
 
     pub fn replaceAutoInitPropertyWithRealmNativeAndCache(
@@ -8095,14 +8101,14 @@ pub const Object = struct {
                 try self.ensureUniqueShapeForMutation(rt);
                 rt.shapes.updatePropertyFlags(self.shape_ref, index, flags.bits());
             }
-            self.properties[index].slot = .{ .auto_init = .{
+            self.properties[index].slot = .{ .auto_init = try property.internAutoInit(rt, .{
                 .name = name,
                 .length = length,
                 .rt = rt,
                 .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
                 .native_builtin_id = native_builtin_id,
                 .shared_native_cache_slot = shared_native_cache_slot,
-            } };
+            }) };
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
         }
@@ -8121,13 +8127,13 @@ pub const Object = struct {
         std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
             .name = "navigator",
             .length = 0,
             .rt = rt,
             .kind = .navigator,
             .host_function_realm_global = @intFromPtr(realm_global),
-        } });
+        }) });
     }
 
     pub fn defineConsoleAutoInitProperty(
@@ -8143,14 +8149,14 @@ pub const Object = struct {
         std.debug.assert(self.exotic == null);
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
             .name = "console",
             .length = 0,
             .rt = rt,
             .kind = .console,
             .host_function_kind = host_function_kind,
             .external_host_function_id = external_host_function_id,
-        } });
+        }) });
     }
 
     pub fn definePerformanceAutoInitProperty(
@@ -8165,13 +8171,13 @@ pub const Object = struct {
         std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
             .name = "performance",
             .length = 0,
             .rt = rt,
             .kind = .performance,
             .host_function_realm_global = @intFromPtr(realm_global),
-        } });
+        }) });
     }
 
     pub fn defineBuiltinNamespaceAutoInitProperty(
@@ -8192,13 +8198,13 @@ pub const Object = struct {
         std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
             .name = name,
             .length = 0,
             .rt = rt,
             .kind = kind,
             .host_function_realm_global = @intFromPtr(realm_global),
-        } });
+        }) });
     }
 
     pub fn defineArrayUnscopablesAutoInitProperty(
@@ -8209,12 +8215,12 @@ pub const Object = struct {
     ) !void {
         std.debug.assert(self.exotic == null);
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
             .name = "[Symbol.unscopables]",
             .length = 0,
             .rt = rt,
             .kind = .array_unscopables,
-        } });
+        }) });
     }
 
     pub fn defineNumberConstantAutoInitProperty(
@@ -8229,12 +8235,12 @@ pub const Object = struct {
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
             .name = name,
             .length = 0,
             .rt = rt,
             .kind = .number_constant,
-        } });
+        }) });
     }
 
     pub fn defineInt32ConstantAutoInitProperty(
@@ -8250,12 +8256,12 @@ pub const Object = struct {
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
             .name = name,
             .length = constant_value,
             .rt = rt,
             .kind = .int32_constant,
-        } });
+        }) });
     }
 
     pub fn defineStringConstantAutoInitProperty(
@@ -8270,12 +8276,12 @@ pub const Object = struct {
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
             .name = bytes,
             .length = 0,
             .rt = rt,
             .kind = .string_constant,
-        } });
+        }) });
     }
 
     pub fn defineEmptyArrayAutoInitProperty(
@@ -8298,25 +8304,25 @@ pub const Object = struct {
             try self.ensureUniqueShapeForMutation(rt);
             const entry = &self.properties[index];
             const old_slot = entry.slot;
-            entry.slot = .{ .auto_init = .{
+            entry.slot = .{ .auto_init = try property.internAutoInit(rt, .{
                 .name = "empty array",
                 .length = 0,
                 .rt = rt,
                 .kind = .empty_array,
                 .host_function_realm_global = @intFromPtr(realm_global),
-            } };
+            }) };
             rt.shapes.updatePropertyFlags(self.shape_ref, index, flags.bits());
             destroyPropertySlot(rt, atom_id, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
         }
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
             .name = "empty array",
             .length = 0,
             .rt = rt,
             .kind = .empty_array,
             .host_function_realm_global = @intFromPtr(realm_global),
-        } });
+        }) });
     }
 
     pub fn defineHostAutoInitProperty(
@@ -8367,7 +8373,7 @@ pub const Object = struct {
         else
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
             .name = name,
             .length = length,
             .rt = rt,
@@ -8375,7 +8381,7 @@ pub const Object = struct {
             .external_host_function_id = external_host_function_id,
             .host_function_prototype = host_function_prototype,
             .host_function_realm_global = if (host_function_realm_global) |realm| @intFromPtr(realm) else 0,
-        } });
+        }) });
     }
 
     pub fn writeDenseArrayIndex(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {

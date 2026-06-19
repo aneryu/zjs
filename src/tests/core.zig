@@ -4160,12 +4160,12 @@ test "destroyed realm global clears borrowed realm pointers and auto init metada
     );
 
     try std.testing.expectEqual(global, holder.functionRealmGlobalPtr().?);
-    try std.testing.expectEqual(@intFromPtr(global), holder.properties[0].slot.auto_init.host_function_realm_global);
+    try std.testing.expectEqual(@intFromPtr(global), core.property.autoInitAt(rt, holder.properties[0].slot.auto_init).host_function_realm_global);
 
     global.value().free(rt);
 
     try std.testing.expectEqual(@as(?*core.Object, null), holder.functionRealmGlobalPtr());
-    try std.testing.expectEqual(@as(usize, 0), holder.properties[0].slot.auto_init.host_function_realm_global);
+    try std.testing.expectEqual(@as(usize, 0), core.property.autoInitAt(rt, holder.properties[0].slot.auto_init).host_function_realm_global);
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
 
     const lazy = holder.getProperty(lazy_key);
@@ -4217,7 +4217,7 @@ test "replaced realm auto-init unregisters empty borrowed holder" {
         0,
     );
     try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
-    try std.testing.expectEqual(@intFromPtr(global), holder.properties[0].slot.auto_init.host_function_realm_global);
+    try std.testing.expectEqual(@intFromPtr(global), core.property.autoInitAt(rt, holder.properties[0].slot.auto_init).host_function_realm_global);
 
     try holder.replaceAutoInitPropertyWithRealmNativeAndCache(
         rt,
@@ -4230,7 +4230,7 @@ test "replaced realm auto-init unregisters empty borrowed holder" {
         0,
     );
 
-    try std.testing.expectEqual(@as(usize, 0), holder.properties[0].slot.auto_init.host_function_realm_global);
+    try std.testing.expectEqual(@as(usize, 0), core.property.autoInitAt(rt, holder.properties[0].slot.auto_init).host_function_realm_global);
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
 }
 
@@ -4341,13 +4341,13 @@ test "specialized auto-init realm metadata registers borrowed holders" {
         replace_holder,
     };
     for (holders) |holder| {
-        try std.testing.expectEqual(@intFromPtr(global), holder.properties[0].slot.auto_init.host_function_realm_global);
+        try std.testing.expectEqual(@intFromPtr(global), core.property.autoInitAt(rt, holder.properties[0].slot.auto_init).host_function_realm_global);
     }
 
     global.value().free(rt);
 
     for (holders) |holder| {
-        try std.testing.expectEqual(@as(usize, 0), holder.properties[0].slot.auto_init.host_function_realm_global);
+        try std.testing.expectEqual(@as(usize, 0), core.property.autoInitAt(rt, holder.properties[0].slot.auto_init).host_function_realm_global);
     }
 }
 

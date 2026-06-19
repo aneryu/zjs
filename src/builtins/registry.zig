@@ -1004,10 +1004,10 @@ fn installTypedArrayIntrinsicExtras(rt: *core.JSRuntime, global: *core.Object, c
     const iterator_atom = core.atom.predefinedId("Symbol.iterator", .symbol).?;
     try replaceSharedLazyNativeMethod(rt, proto, global, values_atom, "values", 0, 0, shared_lazy_typed_array_values_slot);
     try defineSharedLazyNativeMethod(rt, proto, global, iterator_atom, "values", 0, 0, shared_lazy_typed_array_values_slot);
-    if (!tagAutoInitArrayIteratorKindByAtom(proto, values_atom, 2)) return error.InvalidBuiltinRegistry;
-    if (!tagAutoInitArrayIteratorKindByAtom(proto, iterator_atom, 2)) return error.InvalidBuiltinRegistry;
-    if (!tagAutoInitTypedArrayBuiltinByAtom(proto, values_atom, .prototype_method)) return error.InvalidBuiltinRegistry;
-    if (!tagAutoInitTypedArrayBuiltinByAtom(proto, iterator_atom, .prototype_method)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitArrayIteratorKindByAtom(rt, proto, values_atom, 2)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitArrayIteratorKindByAtom(rt, proto, iterator_atom, 2)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitTypedArrayBuiltinByAtom(rt, proto, values_atom, .prototype_method)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitTypedArrayBuiltinByAtom(rt, proto, iterator_atom, .prototype_method)) return error.InvalidBuiltinRegistry;
     try tagArrayIteratorMethod(rt, proto, "keys", 1);
     try tagArrayIteratorMethod(rt, proto, "values", 2);
     try tagArrayIteratorMethod(rt, proto, "entries", 3);
@@ -1023,7 +1023,7 @@ fn tagTypedArrayStaticMethods(rt: *core.JSRuntime, ctor: *core.Object) !void {
     for (tags) |tag| {
         const key = try rt.internAtom(tag.name);
         defer rt.atoms.free(key);
-        if (tagAutoInitTypedArrayBuiltinByAtom(ctor, key, tag.marker)) continue;
+        if (tagAutoInitTypedArrayBuiltinByAtom(rt, ctor, key, tag.marker)) continue;
         const value = ctor.getProperty(key);
         defer value.free(rt);
         if (!value.isObject()) continue;
@@ -1230,7 +1230,7 @@ fn bindNativeRecordByName(
     const key = try temporaryStringAtom(rt, name);
     defer freeTemporaryStringAtom(rt, key);
     const native_id = core.function.nativeBuiltinId(domain, id);
-    if (bindAutoInitNativeRecordByAtom(object, key, native_id)) return;
+    if (bindAutoInitNativeRecordByAtom(rt, object, key, native_id)) return;
     const value = object.getProperty(key);
     defer value.free(rt);
     if (!value.isObject()) return;
@@ -1238,12 +1238,13 @@ fn bindNativeRecordByName(
     function_object.nativeFunctionIdSlot().* = native_id;
 }
 
-fn bindAutoInitNativeRecordByAtom(object: *core.Object, atom_id: core.Atom, native_id: i32) bool {
+fn bindAutoInitNativeRecordByAtom(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, native_id: i32) bool {
     if (object.exotic != null) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
         switch (entry.slot) {
-            .auto_init => |*info| {
+            .auto_init => |id| {
+                const info = core.property.autoInitAt(rt, id);
                 info.native_builtin_id = native_id;
                 return true;
             },
@@ -1253,12 +1254,12 @@ fn bindAutoInitNativeRecordByAtom(object: *core.Object, atom_id: core.Atom, nati
     return false;
 }
 
-fn tagAutoInitArrayBuiltinByAtom(object: *core.Object, atom_id: core.Atom, marker: core.property.ArrayBuiltinMarker) bool {
+fn tagAutoInitArrayBuiltinByAtom(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, marker: core.property.ArrayBuiltinMarker) bool {
     if (object.exotic != null) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
         switch (entry.slot) {
-            .auto_init => |*info| return setAutoInitArrayBuiltinMarker(info, marker),
+            .auto_init => |id| return setAutoInitArrayBuiltinMarker(core.property.autoInitAt(rt, id), marker),
             .data => |value| {
                 if (!value.isObject()) return false;
                 return expectObject(value).addArrayBuiltinMarker(marker);
@@ -1275,12 +1276,12 @@ fn setAutoInitArrayBuiltinMarker(info: *core.property.AutoInit, marker: core.pro
     return true;
 }
 
-fn tagAutoInitTypedArrayBuiltinByAtom(object: *core.Object, atom_id: core.Atom, marker: core.property.TypedArrayBuiltinMarker) bool {
+fn tagAutoInitTypedArrayBuiltinByAtom(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, marker: core.property.TypedArrayBuiltinMarker) bool {
     if (object.exotic != null) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
         switch (entry.slot) {
-            .auto_init => |*info| return setAutoInitTypedArrayBuiltinMarker(info, marker),
+            .auto_init => |id| return setAutoInitTypedArrayBuiltinMarker(core.property.autoInitAt(rt, id), marker),
             .data => |value| {
                 if (!value.isObject()) return false;
                 return expectObject(value).addTypedArrayBuiltinMarker(marker);
@@ -1297,12 +1298,12 @@ fn setAutoInitTypedArrayBuiltinMarker(info: *core.property.AutoInit, marker: cor
     return true;
 }
 
-fn tagAutoInitArrayIteratorKindByAtom(object: *core.Object, atom_id: core.Atom, kind: u8) bool {
+fn tagAutoInitArrayIteratorKindByAtom(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, kind: u8) bool {
     if (object.exotic != null) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
         switch (entry.slot) {
-            .auto_init => |*info| return setAutoInitArrayIteratorKind(info, kind),
+            .auto_init => |id| return setAutoInitArrayIteratorKind(core.property.autoInitAt(rt, id), kind),
             .data => |value| {
                 if (!value.isObject()) return false;
                 return expectObject(value).addArrayIteratorKind(kind);
@@ -1319,12 +1320,13 @@ fn setAutoInitArrayIteratorKind(info: *core.property.AutoInit, kind: u8) bool {
     return true;
 }
 
-fn tagAutoInitIteratorIdentityByAtom(object: *core.Object, atom_id: core.Atom) bool {
+fn tagAutoInitIteratorIdentityByAtom(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) bool {
     if (object.exotic != null) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
         switch (entry.slot) {
-            .auto_init => |*info| {
+            .auto_init => |id| {
+                const info = core.property.autoInitAt(rt, id);
                 info.iterator_identity = true;
                 return true;
             },
@@ -1338,12 +1340,12 @@ fn tagAutoInitIteratorIdentityByAtom(object: *core.Object, atom_id: core.Atom) b
     return false;
 }
 
-fn tagAutoInitCollectionOwnerByAtom(object: *core.Object, atom_id: core.Atom, owner_class: core.ClassId) bool {
+fn tagAutoInitCollectionOwnerByAtom(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, owner_class: core.ClassId) bool {
     if (object.exotic != null) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
         switch (entry.slot) {
-            .auto_init => |*info| return setAutoInitCollectionOwner(info, owner_class),
+            .auto_init => |id| return setAutoInitCollectionOwner(core.property.autoInitAt(rt, id), owner_class),
             .data => |value| {
                 if (!value.isObject()) return false;
                 return expectObject(value).addCollectionMethodOwnerClass(owner_class);
@@ -1360,12 +1362,12 @@ fn setAutoInitCollectionOwner(info: *core.property.AutoInit, owner_class: core.C
     return true;
 }
 
-fn tagAutoInitDisposableStackMethodByAtom(object: *core.Object, atom_id: core.Atom, method_id: u8) bool {
+fn tagAutoInitDisposableStackMethodByAtom(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, method_id: u8) bool {
     if (object.exotic != null) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
         switch (entry.slot) {
-            .auto_init => |*info| return setAutoInitDisposableStackMethod(info, method_id),
+            .auto_init => |id| return setAutoInitDisposableStackMethod(core.property.autoInitAt(rt, id), method_id),
             .data => |value| {
                 if (!value.isObject()) return false;
                 return expectObject(value).addDisposableStackMethod(method_id);
@@ -1382,12 +1384,12 @@ fn setAutoInitDisposableStackMethod(info: *core.property.AutoInit, method_id: u8
     return true;
 }
 
-fn tagAutoInitAsyncDisposableStackMethodByAtom(object: *core.Object, atom_id: core.Atom, method_id: u8) bool {
+fn tagAutoInitAsyncDisposableStackMethodByAtom(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, method_id: u8) bool {
     if (object.exotic != null) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
         switch (entry.slot) {
-            .auto_init => |*info| return setAutoInitAsyncDisposableStackMethod(info, method_id),
+            .auto_init => |id| return setAutoInitAsyncDisposableStackMethod(core.property.autoInitAt(rt, id), method_id),
             .data => |value| {
                 if (!value.isObject()) return false;
                 return expectObject(value).addAsyncDisposableStackMethod(method_id);
@@ -1467,11 +1469,11 @@ fn tagTypedArrayPrototypeMethods(rt: *core.JSRuntime, proto: *core.Object) !void
     for (names) |name| {
         const key = try temporaryStringAtom(rt, name);
         defer freeTemporaryStringAtom(rt, key);
-        const typed_array_marker_deferred = tagAutoInitTypedArrayBuiltinByAtom(proto, key, .prototype_method);
+        const typed_array_marker_deferred = tagAutoInitTypedArrayBuiltinByAtom(rt, proto, key, .prototype_method);
         const array_marker_deferred = if (std.mem.eql(u8, name, "toString"))
-            tagAutoInitArrayBuiltinByAtom(proto, key, .to_string)
+            tagAutoInitArrayBuiltinByAtom(rt, proto, key, .to_string)
         else if (std.mem.eql(u8, name, "toLocaleString"))
-            tagAutoInitArrayBuiltinByAtom(proto, key, .to_locale_string)
+            tagAutoInitArrayBuiltinByAtom(rt, proto, key, .to_locale_string)
         else
             true;
         if (typed_array_marker_deferred and array_marker_deferred) continue;
@@ -2126,7 +2128,7 @@ fn installArrayPrototypeSymbols(rt: *core.JSRuntime, global: *core.Object, ctor:
 
     const species_atom = core.atom.predefinedId("Symbol.species", .symbol).?;
     try defineLazyNativeGetterAtom(rt, ctor, species_atom, "get [Symbol.species]", core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.species_getter)), accessor_flags);
-    if (!tagAutoInitArrayBuiltinByAtom(ctor, species_atom, .species_getter)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitArrayBuiltinByAtom(rt, ctor, species_atom, .species_getter)) return error.InvalidBuiltinRegistry;
 
     const iterator_atom = core.atom.predefinedId("Symbol.iterator", .symbol).?;
     const values_atom = core.atom.predefinedId("values", .string).?;
@@ -2136,8 +2138,8 @@ fn installArrayPrototypeSymbols(rt: *core.JSRuntime, global: *core.Object, ctor:
     try replaceSharedLazyNativeMethod(rt, proto, global, to_string_atom, "toString", 0, to_string_native_id, shared_lazy_array_to_string_slot);
     try replaceSharedLazyNativeMethod(rt, proto, global, values_atom, "values", 0, values_native_id, shared_lazy_array_values_slot);
     try defineSharedLazyNativeMethod(rt, proto, global, iterator_atom, "values", 0, values_native_id, shared_lazy_array_values_slot);
-    if (!tagAutoInitArrayIteratorKindByAtom(proto, values_atom, 2)) return error.InvalidBuiltinRegistry;
-    if (!tagAutoInitArrayIteratorKindByAtom(proto, iterator_atom, 2)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitArrayIteratorKindByAtom(rt, proto, values_atom, 2)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitArrayIteratorKindByAtom(rt, proto, iterator_atom, 2)) return error.InvalidBuiltinRegistry;
 
     const unscopables_atom = core.atom.predefinedId("Symbol.unscopables", .symbol).?;
     try proto.defineArrayUnscopablesAutoInitProperty(
@@ -2313,7 +2315,7 @@ fn installIteratorExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.
     const iterator_atom = core.atom.predefinedId("Symbol.iterator", .symbol).?;
     const iterator_flags = core.property.Flags.data(method_flags.writable, method_flags.enumerable, method_flags.configurable);
     try proto.defineAutoInitProperty(rt, iterator_atom, "[Symbol.iterator]", 0, iterator_flags);
-    if (!tagAutoInitIteratorIdentityByAtom(proto, iterator_atom)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitIteratorIdentityByAtom(rt, proto, iterator_atom)) return error.InvalidBuiltinRegistry;
 
     try proto.defineAutoInitPropertyWithRealmAndNative(
         rt,
@@ -2373,11 +2375,11 @@ fn installObjectPrototypeExtras(rt: *core.JSRuntime, ctor: *core.Object) !void {
 fn tagArrayPrototypeMethods(rt: *core.JSRuntime, ctor: *core.Object) !void {
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
     const key = core.atom.predefinedId("toString", .string).?;
-    if (!tagAutoInitArrayBuiltinByAtom(proto, key, .to_string)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitArrayBuiltinByAtom(rt, proto, key, .to_string)) return error.InvalidBuiltinRegistry;
     const locale_key = core.atom.predefinedId("toLocaleString", .string).?;
-    if (!tagAutoInitArrayBuiltinByAtom(proto, locale_key, .to_locale_string)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitArrayBuiltinByAtom(rt, proto, locale_key, .to_locale_string)) return error.InvalidBuiltinRegistry;
     const concat_key = core.atom.predefinedId("concat", .string).?;
-    if (!tagAutoInitArrayBuiltinByAtom(proto, concat_key, .concat)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitArrayBuiltinByAtom(rt, proto, concat_key, .concat)) return error.InvalidBuiltinRegistry;
     try tagArrayIteratorMethod(rt, proto, "keys", 1);
     try tagArrayIteratorMethod(rt, proto, "values", 2);
     try tagArrayIteratorMethod(rt, proto, "entries", 3);
@@ -2399,7 +2401,7 @@ fn bindBufferPrototypeNativeRecords(rt: *core.JSRuntime, ctor: *core.Object, kin
             else => null,
         };
         if (id) |native_id| {
-            if (bindAutoInitNativeRecordByAtom(proto, key, core.function.nativeBuiltinId(.buffer, native_id))) continue;
+            if (bindAutoInitNativeRecordByAtom(rt, proto, key, core.function.nativeBuiltinId(.buffer, native_id))) continue;
         }
         const value = proto.getProperty(key);
         defer value.free(rt);
@@ -2412,7 +2414,7 @@ fn bindBufferPrototypeNativeRecords(rt: *core.JSRuntime, ctor: *core.Object, kin
 fn tagArrayIteratorMethod(rt: *core.JSRuntime, proto: *core.Object, name: []const u8, kind: u8) !void {
     const key = try temporaryStringAtom(rt, name);
     defer freeTemporaryStringAtom(rt, key);
-    if (tagAutoInitArrayIteratorKindByAtom(proto, key, kind)) return;
+    if (tagAutoInitArrayIteratorKindByAtom(rt, proto, key, kind)) return;
     const value = proto.getProperty(key);
     defer value.free(rt);
     if (!value.isObject()) return;
@@ -2656,7 +2658,7 @@ fn installCollectionPrototypeSymbols(rt: *core.JSRuntime, global: *core.Object, 
         const size_atom = core.atom.predefinedId("size", .string).?;
         const native_id = core.function.nativeBuiltinId(.collection, @intFromEnum(collection_builtin.PrototypeMethod.size_getter));
         try defineLazyNativeGetterAtom(rt, proto, size_atom, "get size", native_id, Flags{ .writable = false, .enumerable = false, .configurable = true });
-        if (!tagAutoInitCollectionOwnerByAtom(proto, size_atom, owner_class)) return error.InvalidBuiltinRegistry;
+        if (!tagAutoInitCollectionOwnerByAtom(rt, proto, size_atom, owner_class)) return error.InvalidBuiltinRegistry;
     }
 
     if (std.mem.eql(u8, name, "Map")) {
@@ -2665,8 +2667,8 @@ fn installCollectionPrototypeSymbols(rt: *core.JSRuntime, global: *core.Object, 
         const entries_native_id = core.function.nativeBuiltinId(.collection, @intFromEnum(collection_builtin.PrototypeMethod.entries));
         try replaceSharedLazyNativeMethod(rt, proto, global, entries_atom, "entries", 0, entries_native_id, shared_lazy_map_entries_slot);
         try defineSharedLazyNativeMethod(rt, proto, global, iterator_atom, "entries", 0, entries_native_id, shared_lazy_map_entries_slot);
-        if (!tagAutoInitCollectionOwnerByAtom(proto, entries_atom, core.class.ids.map)) return error.InvalidBuiltinRegistry;
-        if (!tagAutoInitCollectionOwnerByAtom(proto, iterator_atom, core.class.ids.map)) return error.InvalidBuiltinRegistry;
+        if (!tagAutoInitCollectionOwnerByAtom(rt, proto, entries_atom, core.class.ids.map)) return error.InvalidBuiltinRegistry;
+        if (!tagAutoInitCollectionOwnerByAtom(rt, proto, iterator_atom, core.class.ids.map)) return error.InvalidBuiltinRegistry;
     } else if (std.mem.eql(u8, name, "Set")) {
         const values_atom = core.atom.predefinedId("values", .string).?;
         const keys_atom = core.atom.predefinedId("keys", .string).?;
@@ -2675,9 +2677,9 @@ fn installCollectionPrototypeSymbols(rt: *core.JSRuntime, global: *core.Object, 
         try replaceSharedLazyNativeMethod(rt, proto, global, values_atom, "values", 0, values_native_id, shared_lazy_set_values_slot);
         try replaceSharedLazyNativeMethod(rt, proto, global, keys_atom, "values", 0, values_native_id, shared_lazy_set_values_slot);
         try defineSharedLazyNativeMethod(rt, proto, global, iterator_atom, "values", 0, values_native_id, shared_lazy_set_values_slot);
-        if (!tagAutoInitCollectionOwnerByAtom(proto, values_atom, core.class.ids.set)) return error.InvalidBuiltinRegistry;
-        if (!tagAutoInitCollectionOwnerByAtom(proto, keys_atom, core.class.ids.set)) return error.InvalidBuiltinRegistry;
-        if (!tagAutoInitCollectionOwnerByAtom(proto, iterator_atom, core.class.ids.set)) return error.InvalidBuiltinRegistry;
+        if (!tagAutoInitCollectionOwnerByAtom(rt, proto, values_atom, core.class.ids.set)) return error.InvalidBuiltinRegistry;
+        if (!tagAutoInitCollectionOwnerByAtom(rt, proto, keys_atom, core.class.ids.set)) return error.InvalidBuiltinRegistry;
+        if (!tagAutoInitCollectionOwnerByAtom(rt, proto, iterator_atom, core.class.ids.set)) return error.InvalidBuiltinRegistry;
     }
 
     try defineStringConstantAtomAssumingNew(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, collectionTag(name) orelse return error.InvalidBuiltinRegistry, Flags{ .writable = false, .enumerable = false, .configurable = true });
@@ -2706,7 +2708,7 @@ fn installDisposableStackExtras(rt: *core.JSRuntime, global: *core.Object, ctor:
     for (method_tags) |tag| {
         const key = try temporaryStringAtom(rt, tag.name);
         defer freeTemporaryStringAtom(rt, key);
-        if (tagAutoInitDisposableStackMethodByAtom(proto, key, tag.id)) continue;
+        if (tagAutoInitDisposableStackMethodByAtom(rt, proto, key, tag.id)) continue;
         const value = proto.getProperty(key);
         defer value.free(rt);
         if (!value.isObject()) return error.InvalidBuiltinRegistry;
@@ -2716,13 +2718,13 @@ fn installDisposableStackExtras(rt: *core.JSRuntime, global: *core.Object, ctor:
     const disposed_key = try temporaryStringAtom(rt, "disposed");
     defer freeTemporaryStringAtom(rt, disposed_key);
     try defineLazyNativeGetterAtom(rt, proto, disposed_key, "get disposed", 0, Flags{ .writable = false, .enumerable = false, .configurable = true });
-    if (!tagAutoInitDisposableStackMethodByAtom(proto, disposed_key, 6)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitDisposableStackMethodByAtom(rt, proto, disposed_key, 6)) return error.InvalidBuiltinRegistry;
 
     const dispose_atom = core.atom.predefinedId("dispose", .string).?;
     try replaceSharedLazyNativeMethod(rt, proto, global, dispose_atom, "dispose", 0, 0, shared_lazy_disposable_stack_dispose_slot);
     try defineSharedLazyNativeMethod(rt, proto, global, core.atom.ids.Symbol_dispose, "dispose", 0, 0, shared_lazy_disposable_stack_dispose_slot);
-    if (!tagAutoInitDisposableStackMethodByAtom(proto, dispose_atom, 4)) return error.InvalidBuiltinRegistry;
-    if (!tagAutoInitDisposableStackMethodByAtom(proto, core.atom.ids.Symbol_dispose, 4)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitDisposableStackMethodByAtom(rt, proto, dispose_atom, 4)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitDisposableStackMethodByAtom(rt, proto, core.atom.ids.Symbol_dispose, 4)) return error.InvalidBuiltinRegistry;
 
     try defineStringConstantAtomAssumingNew(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, "DisposableStack", Flags{ .writable = false, .enumerable = false, .configurable = true });
 }
@@ -2741,7 +2743,7 @@ fn installAsyncDisposableStackExtras(rt: *core.JSRuntime, global: *core.Object, 
     for (method_tags) |tag| {
         const key = try temporaryStringAtom(rt, tag.name);
         defer freeTemporaryStringAtom(rt, key);
-        if (tagAutoInitAsyncDisposableStackMethodByAtom(proto, key, tag.id)) continue;
+        if (tagAutoInitAsyncDisposableStackMethodByAtom(rt, proto, key, tag.id)) continue;
         const value = proto.getProperty(key);
         defer value.free(rt);
         if (!value.isObject()) return error.InvalidBuiltinRegistry;
@@ -2751,14 +2753,14 @@ fn installAsyncDisposableStackExtras(rt: *core.JSRuntime, global: *core.Object, 
     const disposed_key = try temporaryStringAtom(rt, "disposed");
     defer freeTemporaryStringAtom(rt, disposed_key);
     try defineLazyNativeGetterAtom(rt, proto, disposed_key, "get disposed", 0, Flags{ .writable = false, .enumerable = false, .configurable = true });
-    if (!tagAutoInitAsyncDisposableStackMethodByAtom(proto, disposed_key, 6)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitAsyncDisposableStackMethodByAtom(rt, proto, disposed_key, 6)) return error.InvalidBuiltinRegistry;
 
     const dispose_async_key = try temporaryStringAtom(rt, "disposeAsync");
     defer freeTemporaryStringAtom(rt, dispose_async_key);
     try replaceSharedLazyNativeMethod(rt, proto, global, dispose_async_key, "disposeAsync", 0, 0, shared_lazy_async_disposable_stack_dispose_slot);
     try defineSharedLazyNativeMethod(rt, proto, global, core.atom.ids.Symbol_asyncDispose, "disposeAsync", 0, 0, shared_lazy_async_disposable_stack_dispose_slot);
-    if (!tagAutoInitAsyncDisposableStackMethodByAtom(proto, dispose_async_key, 4)) return error.InvalidBuiltinRegistry;
-    if (!tagAutoInitAsyncDisposableStackMethodByAtom(proto, core.atom.ids.Symbol_asyncDispose, 4)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitAsyncDisposableStackMethodByAtom(rt, proto, dispose_async_key, 4)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitAsyncDisposableStackMethodByAtom(rt, proto, core.atom.ids.Symbol_asyncDispose, 4)) return error.InvalidBuiltinRegistry;
 
     try defineStringConstantAtomAssumingNew(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, "AsyncDisposableStack", Flags{ .writable = false, .enumerable = false, .configurable = true });
 }
@@ -2802,10 +2804,10 @@ fn tagCollectionPrototypeMethods(rt: *core.JSRuntime, name: []const u8, ctor: *c
         const method_key = try temporaryStringAtom(rt, method.name);
         defer freeTemporaryStringAtom(rt, method_key);
         const native_deferred = if (collection_builtin.prototypeMethodId(method.name)) |id|
-            bindAutoInitNativeRecordByAtom(proto, method_key, core.function.nativeBuiltinId(.collection, id))
+            bindAutoInitNativeRecordByAtom(rt, proto, method_key, core.function.nativeBuiltinId(.collection, id))
         else
             true;
-        const marker_deferred = tagAutoInitCollectionOwnerByAtom(proto, method_key, class_id);
+        const marker_deferred = tagAutoInitCollectionOwnerByAtom(rt, proto, method_key, class_id);
         if (native_deferred and marker_deferred) continue;
         const method_value = proto.getProperty(method_key);
         defer method_value.free(rt);
