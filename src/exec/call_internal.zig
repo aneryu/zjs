@@ -72,31 +72,32 @@ inline fn assertStackWindowSynced(stack: *const stack_mod.Stack, sp_len: usize) 
     if (std.debug.runtime_safety) std.debug.assert(sp_len == stack.values.len);
 }
 
+// Pure publish model (faithful to qjs's `sf->cur_sp = sp`): the operand-stack GC
+// root stays `.mutable = &stack.values` for the whole frame (set by
+// FrameRootScope.init), and `sp_len` is a register C-local whose address is NEVER
+// stored into the root — there is no windowed root, so `&sp_len` never escapes and
+// LLVM keeps it in a register on the hot path. A cold arm that can allocate or
+// recurse calls this on ENTRY to publish the live length, so the GC and the callee
+// observe the correct operand slice.
 inline fn enterStackBoundary(
-    frame_roots: *frame_mod.FrameRootScope,
     stack: *stack_mod.Stack,
     base: [*]core.JSValue,
     sp_len: usize,
-    root_windowed: *bool,
 ) void {
     publishStackWindow(stack, base, sp_len);
-    frame_roots.useMutableOperandStack(stack);
-    root_windowed.* = false;
     assertStackWindowSynced(stack, sp_len);
 }
 
+// On LEAVING a cold-arm boundary, reload `base`+`sp_len` from `stack.values`: the
+// cold op may have grown/reallocated the operand stack (new buffer and/or length).
 inline fn leaveStackBoundary(
-    frame_roots: *frame_mod.FrameRootScope,
     stack: *stack_mod.Stack,
     base: *[*]core.JSValue,
     sp_len: *usize,
-    root_windowed: *bool,
 ) void {
     base.* = stack.values.ptr;
     sp_len.* = stack.values.len;
     assertStackWindowSynced(stack, sp_len.*);
-    frame_roots.useWindowedOperandStack(stack, sp_len);
-    root_windowed.* = true;
 }
 
 inline fn pushOwnedWindow(stack: *const stack_mod.Stack, base: [*]core.JSValue, sp_len: *usize, value: core.JSValue) void {
@@ -118,94 +119,6 @@ inline fn popWindow(base: [*]core.JSValue, sp_len: *usize) !core.JSValue {
     if (sp_len.* == 0) return error.StackUnderflow;
     sp_len.* -= 1;
     return base[sp_len.*];
-}
-
-inline fn opcodeRunsWithWindowedStack(opc: u8) bool {
-    return switch (opc) {
-        op.push_i32,
-        op.push_i16,
-        op.push_i8,
-        op.push_bigint_i32,
-        op.push_minus1,
-        op.push_0,
-        op.push_1,
-        op.push_2,
-        op.push_3,
-        op.push_4,
-        op.push_5,
-        op.push_6,
-        op.push_7,
-        op.undefined,
-        op.null,
-        op.push_false,
-        op.push_true,
-        op.drop,
-        op.get_loc0,
-        op.get_loc1,
-        op.get_loc2,
-        op.get_loc3,
-        op.get_loc8,
-        op.get_loc,
-        op.put_loc,
-        op.set_loc,
-        op.put_loc8,
-        op.set_loc8,
-        op.set_loc0,
-        op.set_loc1,
-        op.set_loc2,
-        op.set_loc3,
-        op.put_loc0,
-        op.put_loc1,
-        op.put_loc2,
-        op.put_loc3,
-        op.get_arg0,
-        op.get_arg1,
-        op.get_arg2,
-        op.get_arg3,
-        op.get_arg,
-        op.add,
-        op.sub,
-        op.mul,
-        op.div,
-        op.mod,
-        op.pow,
-        op.shl,
-        op.sar,
-        op.shr,
-        op.@"and",
-        op.@"or",
-        op.xor,
-        op.lt,
-        op.lte,
-        op.gt,
-        op.gte,
-        op.eq,
-        op.neq,
-        op.strict_eq,
-        op.strict_neq,
-        op.post_inc,
-        op.post_dec,
-        op.inc_loc,
-        op.dec_loc,
-        op.goto,
-        op.goto16,
-        op.goto8,
-        op.if_false,
-        op.if_true,
-        op.if_false8,
-        op.if_true8,
-        op.gosub,
-        op.ret,
-        op.nop,
-        op.get_field,
-        op.get_field2,
-        op.put_field,
-        op.get_array_el,
-        op.get_array_el2,
-        op.put_array_el,
-        => true,
-        else => false,
-    };
 }
 
 inline fn tryFastPutLoc(
@@ -438,7 +351,7 @@ pub fn callInternal(
     // call recurses through recurseInlineCall, which IS a trampoline — so the
     // callee's own tail chain is still TCO'd; only this single frame adds one
     // native level). dispatchRecursive therefore never yields `.tail` here.
-    return switch (try dispatchRecursive(ctx, entry_function, global, &frame_storage, &frame_roots, entry_stack, output, false)) {
+    return switch (try dispatchRecursive(ctx, entry_function, global, &frame_storage, entry_stack, output, false)) {
         .returned => |value| value,
         .tail => unreachable,
     };
@@ -531,7 +444,7 @@ pub fn recurseInlineCall(
     // stack depth), instead of recursing — so 100k strict tail calls don't blow
     // the C stack. Mirrors inline_calls.Machine.tailCallReuse.
     while (true) {
-        const outcome = dispatchRecursive(ctx, &entry.view, global, &entry.frame, &entry.frame_roots, &entry.stack, output, true) catch |err| {
+        const outcome = dispatchRecursive(ctx, &entry.view, global, &entry.frame, &entry.stack, output, true) catch |err| {
             call_runtime.closeFrameDestructuringIteratorsForAbruptCompletion(ctx, output, global, &entry.stack, &entry.frame);
             inline_calls.Machine.teardownInlineEntry(ctx, &entry);
             return routeCalleeError(ctx, output, global, caller_stack, caller_frame, caller_catch_target, err);
@@ -594,7 +507,6 @@ pub fn dispatchRecursive(
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
-    frame_roots: *frame_mod.FrameRootScope,
     stack: *stack_mod.Stack,
     output: ?*std.Io.Writer,
     // When true (the recurseInlineCall trampoline), a proper tail call returns
@@ -618,12 +530,11 @@ pub fn dispatchRecursive(
     const allow_inline_calls = !call_vm.nativeDepthNearCap(ctx);
     var sp_len: usize = stack.values.len;
     var base: [*]core.JSValue = stack.values.ptr;
-    var stack_root_windowed = true;
-    frame_roots.useWindowedOperandStack(stack, &sp_len);
-    defer {
-        if (stack_root_windowed) publishStackWindow(stack, base, sp_len);
-        frame_roots.useMutableOperandStack(stack);
-    }
+    // The operand-stack GC root stays `.mutable = &stack.values` for this whole
+    // frame (set by FrameRootScope.init). We publish the live `sp_len` at every
+    // cold-arm boundary, and once more here on any exit path, so `stack.values`
+    // is in sync whenever the GC or the caller can observe the operand stack.
+    defer publishStackWindow(stack, base, sp_len);
     while (true) {
         if (pc >= code.len) {
             frame.pc = pc;
@@ -635,11 +546,6 @@ pub fn dispatchRecursive(
         }
         const opc = code[pc];
         pc += 1;
-        const windowed_opcode = opcodeRunsWithWindowedStack(opc);
-        if (!windowed_opcode) enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-        defer {
-            if (!windowed_opcode) leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
-        }
         switch (opc) {
             // ===================================================================
             // Pushes that decode an immediate operand (INLINE on C-local pc)
@@ -686,16 +592,22 @@ pub fn dispatchRecursive(
 
             // ---- Constant-table / atom pushes (DELEGATE: operand decode + fusion) ----
             op.push_const => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.pushConst(ctx, stack, function, frame, opc);
                 pc = frame.pc;
             },
             op.push_const8 => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.pushConst8(ctx, stack, function, frame, opc);
                 pc = frame.pc;
             },
             op.push_atom_value => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.pushAtomValueVm(ctx, stack, function, frame, .{
                     .global_env = .{
@@ -709,21 +621,29 @@ pub fn dispatchRecursive(
                 pc = frame.pc;
             },
             op.push_empty_string => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.pushEmptyString(ctx, stack);
                 pc = frame.pc;
             },
             op.private_symbol => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.pushPrivateSymbol(ctx, stack, function, frame);
                 pc = frame.pc;
             },
             op.regexp => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try regexp_vm.pushLiteral(ctx, stack, class_vm.constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"));
                 pc = frame.pc;
             },
             op.fclosure, op.fclosure8 => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try call_vm.closure(ctx, output, global, stack, function, frame, catch_target, opc, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs);
                 pc = frame.pc;
@@ -743,8 +663,8 @@ pub fn dispatchRecursive(
                 if (sp_len == 0) return error.StackUnderflow;
                 const top = base[sp_len - 1];
                 if (top.isCatchOffset()) {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     frame.pc = pc;
                     switch (try value_vm.drop(ctx.runtime, stack)) {
                         .value => {},
@@ -761,96 +681,134 @@ pub fn dispatchRecursive(
                 }
             },
             op.nip_catch => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.nipCatch(ctx.runtime, stack);
                 pc = frame.pc;
             },
             op.nip => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.nip(ctx, stack);
                 pc = frame.pc;
             },
             op.nip1 => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.nip1(ctx, stack);
                 pc = frame.pc;
             },
             op.dup => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.dup(ctx, stack, opc);
                 pc = frame.pc;
             },
             op.dup1 => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.dup1(ctx, stack);
                 pc = frame.pc;
             },
             op.dup2 => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.dup2(ctx, stack);
                 pc = frame.pc;
             },
             op.dup3 => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.dup3(ctx, stack);
                 pc = frame.pc;
             },
             op.swap => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.swap(ctx, stack);
                 pc = frame.pc;
             },
             op.swap2 => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.swap2(ctx, stack);
                 pc = frame.pc;
             },
             op.insert2 => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.insert2(ctx, stack);
                 pc = frame.pc;
             },
             op.insert3 => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.insert3(ctx, stack);
                 pc = frame.pc;
             },
             op.insert4 => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.insert4(ctx, stack);
                 pc = frame.pc;
             },
             op.perm3 => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.perm3(ctx, stack);
                 pc = frame.pc;
             },
             op.perm4 => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.perm4(ctx, stack);
                 pc = frame.pc;
             },
             op.perm5 => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.perm5(ctx, stack);
                 pc = frame.pc;
             },
             op.rot3l => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.rot3l(ctx, stack);
                 pc = frame.pc;
             },
             op.rot3r => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.rot3r(ctx, stack);
                 pc = frame.pc;
             },
             op.rot4l => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.rot4l(ctx, stack);
                 pc = frame.pc;
             },
             op.rot5l => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try value_vm.rot5l(ctx, stack);
                 pc = frame.pc;
@@ -883,8 +841,8 @@ pub fn dispatchRecursive(
                 if (tryFastPutLoc(ctx, function, frame, base, &sp_len, idx)) {
                     pc += 2;
                 } else {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     frame.pc = pc;
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     pc = frame.pc;
@@ -895,8 +853,8 @@ pub fn dispatchRecursive(
                 if (tryFastSetLoc(ctx, function, frame, base, &sp_len, idx)) {
                     pc += 2;
                 } else {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     frame.pc = pc;
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     pc = frame.pc;
@@ -907,8 +865,8 @@ pub fn dispatchRecursive(
                 if (tryFastPutLoc(ctx, function, frame, base, &sp_len, idx)) {
                     pc += 1;
                 } else {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     frame.pc = pc;
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     pc = frame.pc;
@@ -919,8 +877,8 @@ pub fn dispatchRecursive(
                 if (tryFastSetLoc(ctx, function, frame, base, &sp_len, idx)) {
                     pc += 1;
                 } else {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     frame.pc = pc;
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     pc = frame.pc;
@@ -928,8 +886,8 @@ pub fn dispatchRecursive(
             },
             op.set_loc0 => {
                 if (!tryFastSetLoc(ctx, function, frame, base, &sp_len, 0)) {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     frame.pc = pc;
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     pc = frame.pc;
@@ -937,8 +895,8 @@ pub fn dispatchRecursive(
             },
             op.set_loc1 => {
                 if (!tryFastSetLoc(ctx, function, frame, base, &sp_len, 1)) {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     frame.pc = pc;
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     pc = frame.pc;
@@ -946,8 +904,8 @@ pub fn dispatchRecursive(
             },
             op.set_loc2 => {
                 if (!tryFastSetLoc(ctx, function, frame, base, &sp_len, 2)) {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     frame.pc = pc;
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     pc = frame.pc;
@@ -955,22 +913,24 @@ pub fn dispatchRecursive(
             },
             op.set_loc3 => {
                 if (!tryFastSetLoc(ctx, function, frame, base, &sp_len, 3)) {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     frame.pc = pc;
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     pc = frame.pc;
                 }
             },
             op.get_loc0_loc1 => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                 pc = frame.pc;
             },
             op.put_loc0 => {
                 if (!tryFastPutLoc(ctx, function, frame, base, &sp_len, 0)) {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     frame.pc = pc;
                     try slot_ops.execPutLoc(ctx, function, global, frame, stack, 0, 0, opc, false);
                     pc = frame.pc;
@@ -978,8 +938,8 @@ pub fn dispatchRecursive(
             },
             op.put_loc1 => {
                 if (!tryFastPutLoc(ctx, function, frame, base, &sp_len, 1)) {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     frame.pc = pc;
                     try slot_ops.execPutLoc(ctx, function, global, frame, stack, 1, 0, opc, false);
                     pc = frame.pc;
@@ -987,8 +947,8 @@ pub fn dispatchRecursive(
             },
             op.put_loc2 => {
                 if (!tryFastPutLoc(ctx, function, frame, base, &sp_len, 2)) {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     frame.pc = pc;
                     try slot_ops.execPutLoc(ctx, function, global, frame, stack, 2, 0, opc, false);
                     pc = frame.pc;
@@ -996,8 +956,8 @@ pub fn dispatchRecursive(
             },
             op.put_loc3 => {
                 if (!tryFastPutLoc(ctx, function, frame, base, &sp_len, 3)) {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     frame.pc = pc;
                     try slot_ops.execPutLoc(ctx, function, global, frame, stack, 3, 0, opc, false);
                     pc = frame.pc;
@@ -1017,11 +977,15 @@ pub fn dispatchRecursive(
                 pushSlotWindow(stack, base, &sp_len, if (idx < frame.args.len) frame.args[idx] else core.JSValue.undefinedValue());
             },
             op.put_arg, op.set_arg, op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3, op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try vm_property_locals.arg(ctx, function, frame, stack, opc);
                 pc = frame.pc;
             },
             op.get_var_ref, op.get_var_ref_check, op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init, op.set_var_ref, op.get_var_ref0, op.get_var_ref1, op.get_var_ref2, op.get_var_ref3, op.put_var_ref0, op.put_var_ref1, op.put_var_ref2, op.put_var_ref3, op.set_var_ref0, op.set_var_ref1, op.set_var_ref2, op.set_var_ref3 => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try vm_property_locals.varRefVm(ctx, function, global, frame, stack, opc, catch_target, false, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                 pc = frame.pc;
@@ -1031,6 +995,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.set_loc_uninitialized, op.get_loc_check, op.put_loc_check, op.put_loc_check_init => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                 pc = frame.pc;
@@ -1040,16 +1006,22 @@ pub fn dispatchRecursive(
                 }
             },
             op.close_loc => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try vm_property_locals.closeLoc(ctx, function, frame);
                 pc = frame.pc;
             },
             op.make_loc_ref, op.make_arg_ref, op.make_var_ref_ref => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try vm_property_ref.makeSlotRef(ctx, stack, function, frame, opc);
                 pc = frame.pc;
             },
             op.make_var_ref => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try vm_property_ref.makeVarRefVm(ctx, output, global, stack, function, frame, catch_target, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs);
                 pc = frame.pc;
@@ -1065,8 +1037,8 @@ pub fn dispatchRecursive(
             op.add, op.sub, op.mul, op.div, op.mod, op.pow, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor => {
                 if (opc != op.pow and arith_vm.tryInt32BinaryWindow(base, &sp_len, opc)) continue;
                 {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     frame.pc = pc;
                     switch (try arith_vm.binaryVm(ctx, stack, frame, catch_target, opc, output, global)) {
                         .done => {},
@@ -1078,8 +1050,8 @@ pub fn dispatchRecursive(
             op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq => {
                 if (arith_vm.tryInt32CompareWindow(base, &sp_len, opc)) continue;
                 {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     frame.pc = pc;
                     switch (try arith_vm.compareVm(ctx, stack, frame, catch_target, opc, output, global)) {
                         .done => {},
@@ -1089,6 +1061,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.neg, op.plus, op.inc, op.dec => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try arith_vm.unaryVm(ctx, stack, frame, catch_target, opc, output, global)) {
                     .done => {},
@@ -1097,6 +1071,8 @@ pub fn dispatchRecursive(
                 pc = frame.pc;
             },
             op.not => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try arith_vm.bitNotVm(ctx, stack, frame, catch_target, output, global)) {
                     .done => {},
@@ -1104,7 +1080,11 @@ pub fn dispatchRecursive(
                 }
                 pc = frame.pc;
             },
-            op.lnot => try value_vm.logicalNot(ctx.runtime, stack),
+            op.lnot => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
+                try value_vm.logicalNot(ctx.runtime, stack);
+            },
             op.post_inc, op.post_dec => {
                 // Int32 fast path: leave the old value on the stack and push old±1 on
                 // top (mirrors postUpdate's int branch). Overflow folds to float via
@@ -1115,8 +1095,8 @@ pub fn dispatchRecursive(
                     const updated = if (opc == op.post_inc) arith_vm.fastInt32Add(oi, 1) else arith_vm.fastInt32Sub(oi, 1);
                     pushOwnedWindow(stack, base, &sp_len, updated);
                 } else {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     frame.pc = pc;
                     switch (try arith_vm.postUpdateVm(ctx, stack, frame, catch_target, opc, output, global)) {
                         .done => {},
@@ -1137,8 +1117,8 @@ pub fn dispatchRecursive(
                     pc += 1;
                     frame.locals[idx] = if (opc == op.inc_loc) arith_vm.fastInt32Add(iv, 1) else arith_vm.fastInt32Sub(iv, 1);
                 } else {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     frame.pc = pc;
                     switch (try arith_vm.updateLocalVm(ctx, stack, function, global, frame, catch_target, opc, output, false)) {
                         .done => {},
@@ -1148,6 +1128,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.add_loc => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try arith_vm.addLocalVm(ctx, stack, function, global, frame, catch_target, output, false)) {
                     .done => {},
@@ -1155,13 +1137,39 @@ pub fn dispatchRecursive(
                 }
                 pc = frame.pc;
             },
-            op.typeof => try value_vm.typeOf(ctx, stack),
-            op.typeof_is_undefined => try value_vm.typeOfIsUndefined(ctx.runtime, stack),
-            op.typeof_is_function => try value_vm.typeOfIsFunction(ctx.runtime, stack),
-            op.is_undefined_or_null => try value_vm.isUndefinedOrNull(ctx.runtime, stack),
-            op.is_undefined => try value_vm.isUndefined(ctx.runtime, stack),
-            op.is_null => try value_vm.isNull(ctx.runtime, stack),
+            op.typeof => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
+                try value_vm.typeOf(ctx, stack);
+            },
+            op.typeof_is_undefined => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
+                try value_vm.typeOfIsUndefined(ctx.runtime, stack);
+            },
+            op.typeof_is_function => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
+                try value_vm.typeOfIsFunction(ctx.runtime, stack);
+            },
+            op.is_undefined_or_null => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
+                try value_vm.isUndefinedOrNull(ctx.runtime, stack);
+            },
+            op.is_undefined => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
+                try value_vm.isUndefined(ctx.runtime, stack);
+            },
+            op.is_null => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
+                try value_vm.isNull(ctx.runtime, stack);
+            },
             op.in, op.instanceof => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try vm_property_field.inOrInstanceof(ctx, output, global, stack, function, frame, catch_target, opc)) {
                     .done => {},
@@ -1170,6 +1178,8 @@ pub fn dispatchRecursive(
                 pc = frame.pc;
             },
             op.private_in => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try class_vm.privateInVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
@@ -1178,6 +1188,8 @@ pub fn dispatchRecursive(
                 pc = frame.pc;
             },
             op.delete => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try vm_property_ref.deletePropertyVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
@@ -1186,6 +1198,8 @@ pub fn dispatchRecursive(
                 pc = frame.pc;
             },
             op.delete_var => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try vm_property_ref.deleteVar(ctx, global, stack, function, frame, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs);
                 pc = frame.pc;
@@ -1199,8 +1213,8 @@ pub fn dispatchRecursive(
                 const diff = readInt(i32, code[pc..][0..4]);
                 pc = relativePc(operand_pc, diff);
                 if (diff < 0) {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     try interrupt_poller.poll(ctx.runtime);
                 }
             },
@@ -1209,8 +1223,8 @@ pub fn dispatchRecursive(
                 const diff: i32 = readInt(i16, code[pc..][0..2]);
                 pc = relativePc(operand_pc, diff);
                 if (diff < 0) {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     try interrupt_poller.poll(ctx.runtime);
                 }
             },
@@ -1219,8 +1233,8 @@ pub fn dispatchRecursive(
                 const diff: i32 = @as(i8, @bitCast(code[pc]));
                 pc = relativePc(operand_pc, diff);
                 if (diff < 0) {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     try interrupt_poller.poll(ctx.runtime);
                 }
             },
@@ -1235,8 +1249,8 @@ pub fn dispatchRecursive(
                 if (truthy == branch_if_true) {
                     pc = relativePc(operand_pc, diff);
                     if (diff < 0) {
-                        enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                        defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                        enterStackBoundary(stack, base, sp_len);
+                        defer leaveStackBoundary(stack, &base, &sp_len);
                         try interrupt_poller.poll(ctx.runtime);
                     }
                 }
@@ -1252,8 +1266,8 @@ pub fn dispatchRecursive(
                 if (truthy == branch_if_true) {
                     pc = relativePc(operand_pc, diff);
                     if (diff < 0) {
-                        enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                        defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                        enterStackBoundary(stack, base, sp_len);
+                        defer leaveStackBoundary(stack, &base, &sp_len);
                         try interrupt_poller.poll(ctx.runtime);
                     }
                 }
@@ -1279,16 +1293,22 @@ pub fn dispatchRecursive(
 
             // ---- Return ----
             op.@"return" => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 return .{ .returned = try control_vm.returnTop(ctx, stack, frame, null) };
             },
             op.return_undef => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 return .{ .returned = try control_vm.returnUndefined(ctx, frame, null) };
             },
 
             // ---- Throw / catch ----
             op.throw => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try control_vm.throwTop(ctx, output, global, stack, frame, catch_target)) {
                     .handled => {},
@@ -1297,6 +1317,8 @@ pub fn dispatchRecursive(
                 continue;
             },
             op.throw_error => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try control_vm.throwErrorVm(ctx, stack, function, frame, catch_target, global)) {
                     .handled => {},
@@ -1305,6 +1327,8 @@ pub fn dispatchRecursive(
                 continue;
             },
             op.@"catch" => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try control_vm.catchTarget(function, frame, stack, catch_target);
                 pc = frame.pc;
@@ -1326,6 +1350,8 @@ pub fn dispatchRecursive(
                     op.call3 => 3,
                     else => unreachable,
                 };
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 // S2a: a plain-bytecode callee runs as a NATIVE recursion via
                 // recurseInlineCall (reusing the Machine's zero-copy setup), not the
@@ -1347,6 +1373,8 @@ pub fn dispatchRecursive(
                 pc = frame.pc;
             },
             op.tail_call => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try call_vm.tailCall(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
                     .handled => {
@@ -1372,6 +1400,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.tail_call_method => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try call_vm.tailCallMethod(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
                     .handled => {
@@ -1394,6 +1424,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.call_method => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try call_vm.callMethod(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
                     .done => {},
@@ -1412,6 +1444,8 @@ pub fn dispatchRecursive(
                 pc = frame.pc;
             },
             op.call_prepared => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try call_vm.callPrepared(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
                     .done => {},
@@ -1430,6 +1464,8 @@ pub fn dispatchRecursive(
                 pc = frame.pc;
             },
             op.prepare_call_prop_atom => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try call_vm.prepareCallPropAtom(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
@@ -1441,6 +1477,8 @@ pub fn dispatchRecursive(
                 pc = frame.pc;
             },
             op.call_constructor => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try call_vm.constructor(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
@@ -1452,6 +1490,8 @@ pub fn dispatchRecursive(
                 pc = frame.pc;
             },
             op.apply => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try call_vm.apply(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
@@ -1463,6 +1503,8 @@ pub fn dispatchRecursive(
                 pc = frame.pc;
             },
             op.apply_eval => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try eval_module_vm.applyEval(ctx, stack, function, frame, catch_target, output, global, eval_class_field_initializer_flag, eval_parameter_initializer_flag)) {
                     .done => {},
@@ -1474,6 +1516,8 @@ pub fn dispatchRecursive(
                 pc = frame.pc;
             },
             op.eval => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 // A non-%eval% callee (the identifier `eval` shadowed by a normal
                 // function) in tail position yields `.tail_inline` — handle it like a
@@ -1499,6 +1543,8 @@ pub fn dispatchRecursive(
                 pc = frame.pc;
             },
             op.import => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try eval_module_vm.dynamicImport(ctx, output, global, stack, function, frame);
                 pc = frame.pc;
@@ -1506,6 +1552,8 @@ pub fn dispatchRecursive(
 
             // ---- ctor / brand helpers (DELEGATE) ----
             op.check_ctor => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try call_vm.checkCtorVm(ctx, stack, frame, catch_target, global)) {
                     .done => {},
@@ -1514,6 +1562,8 @@ pub fn dispatchRecursive(
                 pc = frame.pc;
             },
             op.check_ctor_return => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try call_vm.checkCtorReturnVm(ctx, stack, frame, catch_target, global)) {
                     .done => {},
@@ -1522,6 +1572,8 @@ pub fn dispatchRecursive(
                 pc = frame.pc;
             },
             op.init_ctor => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try call_vm.initCtorVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
@@ -1530,6 +1582,8 @@ pub fn dispatchRecursive(
                 pc = frame.pc;
             },
             op.check_brand => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try class_vm.checkBrandVm(ctx, stack, frame, catch_target, global)) {
                     .done => {},
@@ -1538,6 +1592,8 @@ pub fn dispatchRecursive(
                 pc = frame.pc;
             },
             op.add_brand => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 switch (try class_vm.addBrandVm(ctx, stack, frame, catch_target, global)) {
                     .done => {},
@@ -1550,6 +1606,8 @@ pub fn dispatchRecursive(
             // Variables / globals / property access (DELEGATE)
             // ===================================================================
             op.get_var, op.get_var_undef => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try vm_property_globals.getVar(ctx, output, global, stack, function, frame, catch_target, opc, false, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs, core.JSValue.undefinedValue());
                 pc = frame.pc;
@@ -1559,6 +1617,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.put_var => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try vm_property_globals.putVar(ctx, output, global, stack, function, frame, catch_target, function.flags.is_strict or function.flags.runtime_strict, false, false, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs, core.JSValue.undefinedValue());
                 pc = frame.pc;
@@ -1568,6 +1628,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.check_define_var, op.define_var, op.define_func, op.put_var_init => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try vm_property_globals.globalDefinition(ctx, global, stack, function, frame, catch_target, opc, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs, false, false);
                 pc = frame.pc;
@@ -1587,8 +1649,8 @@ pub fn dispatchRecursive(
                 if (handled) {
                     pc += 4;
                 } else {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     frame.pc = pc;
                     const step = try vm_property_field.field(ctx, output, global, stack, function, frame, catch_target, opc, false);
                     pc = frame.pc;
@@ -1606,8 +1668,8 @@ pub fn dispatchRecursive(
                     else => unreachable,
                 };
                 if (!handled) {
-                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
-                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    enterStackBoundary(stack, base, sp_len);
+                    defer leaveStackBoundary(stack, &base, &sp_len);
                     frame.pc = pc;
                     const step = try vm_property_field.arrayElement(ctx, output, global, stack, function, frame, catch_target, opc);
                     pc = frame.pc;
@@ -1618,6 +1680,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.to_propkey => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try vm_property_field.toPropKeyVm(ctx, output, global, stack, function, frame, catch_target);
                 pc = frame.pc;
@@ -1627,6 +1691,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.to_propkey2 => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try vm_property_field.toPropKey2Vm(ctx, output, global, stack, function, frame, catch_target);
                 pc = frame.pc;
@@ -1636,11 +1702,15 @@ pub fn dispatchRecursive(
                 }
             },
             op.set_name, op.set_name_computed => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try vm_property_field.setName(ctx, output, global, stack, function, frame, opc);
                 pc = frame.pc;
             },
             op.get_ref_value => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try vm_property_ref.getRefValueVm(ctx, output, global, stack, function, frame, catch_target);
                 pc = frame.pc;
@@ -1650,6 +1720,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.put_ref_value => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try vm_property_ref.putRefValueVm(ctx, output, global, stack, function, frame, catch_target);
                 pc = frame.pc;
@@ -1659,6 +1731,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.get_private_field => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try vm_property_private.getPrivateFieldVm(ctx, output, global, stack, function, frame, catch_target);
                 pc = frame.pc;
@@ -1668,6 +1742,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.put_private_field => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try vm_property_private.putPrivateFieldVm(ctx, output, global, stack, function, frame, catch_target);
                 pc = frame.pc;
@@ -1677,6 +1753,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.define_private_field => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try vm_property_private.definePrivateFieldVm(ctx, output, global, stack, function, frame, catch_target);
                 pc = frame.pc;
@@ -1688,6 +1766,8 @@ pub fn dispatchRecursive(
 
             // ---- with-statement opcodes (a normal function body may contain `with`) ----
             op.with_get_var, op.with_delete_var, op.with_make_ref, op.with_get_ref, op.with_get_ref_undef => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try vm_property_ref.withGetOrDelete(ctx, output, global, stack, function, frame, catch_target, opc);
                 pc = frame.pc;
@@ -1697,6 +1777,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.with_put_var => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try vm_property_ref.withPut(ctx, output, global, stack, function, frame, catch_target);
                 pc = frame.pc;
@@ -1712,16 +1794,22 @@ pub fn dispatchRecursive(
             //  get_length appeared in two draft categories — merged here once)
             // ===================================================================
             op.object => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try literal_vm.object(ctx, stack, global);
                 pc = frame.pc;
             },
             op.array_from => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try literal_vm.arrayFrom(ctx, stack, function, frame, global);
                 pc = frame.pc;
             },
             op.append => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try literal_vm.appendSpreadValuesVm(ctx, output, global, stack, opc, frame, catch_target);
                 pc = frame.pc;
@@ -1731,11 +1819,15 @@ pub fn dispatchRecursive(
                 }
             },
             op.rest => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try literal_vm.rest(ctx, stack, function, frame);
                 pc = frame.pc;
             },
             op.define_field => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try literal_vm.defineField(ctx, output, global, stack, function, frame, catch_target);
                 pc = frame.pc;
@@ -1745,6 +1837,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.define_array_el => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try literal_vm.defineArrayEl(ctx, output, global, stack, function, frame, catch_target);
                 pc = frame.pc;
@@ -1754,11 +1848,15 @@ pub fn dispatchRecursive(
                 }
             },
             op.set_proto => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try literal_vm.setProto(ctx, stack);
                 pc = frame.pc;
             },
             op.set_home_object => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try class_vm.setHomeObject(ctx, stack);
                 pc = frame.pc;
@@ -1766,6 +1864,8 @@ pub fn dispatchRecursive(
             op.copy_data_properties => {
                 const mask = code[pc];
                 pc += 1;
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try literal_vm.copyDataProperties(ctx, output, global, stack, mask, function, frame, catch_target);
                 pc = frame.pc;
@@ -1775,6 +1875,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.define_method => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try class_vm.defineMethod(ctx, global, stack, function, frame, catch_target);
                 pc = frame.pc;
@@ -1784,6 +1886,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.define_method_computed => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try class_vm.defineMethodComputed(ctx, output, global, stack, function, frame, catch_target);
                 pc = frame.pc;
@@ -1793,6 +1897,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.define_class, op.define_class_computed => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try class_vm.defineClass(ctx, output, global, stack, function, frame, catch_target, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs, opc == op.define_class_computed);
                 pc = frame.pc;
@@ -1802,16 +1908,22 @@ pub fn dispatchRecursive(
                 }
             },
             op.special_object => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try literal_vm.specialObject(ctx, stack, function, frame, global, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs);
                 pc = frame.pc;
             },
             op.get_super => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try class_vm.getSuper(ctx, stack, frame);
                 pc = frame.pc;
             },
             op.get_super_value => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try class_vm.getSuperValue(ctx, output, global, stack, function, frame, catch_target);
                 pc = frame.pc;
@@ -1821,6 +1933,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.put_super_value => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try class_vm.putSuperValue(ctx, output, global, stack, function, frame, catch_target);
                 pc = frame.pc;
@@ -1830,6 +1944,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.get_length => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try literal_vm.getLength(ctx, output, global, stack, function, frame, catch_target);
                 pc = frame.pc;
@@ -1839,6 +1955,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.to_object => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try value_vm.toObjectVm(ctx, stack, frame, catch_target, global);
                 pc = frame.pc;
@@ -1848,6 +1966,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.push_this => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try value_vm.pushThisVm(ctx, stack, frame, catch_target, global);
                 pc = frame.pc;
@@ -1857,6 +1977,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.for_of_start, op.for_await_of_start => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try iter_vm.forOfStartVm(ctx, output, global, stack, function, frame, catch_target, opc == op.for_await_of_start);
                 pc = frame.pc;
@@ -1866,6 +1988,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.for_in_start => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try iter_vm.forInStartVm(ctx, output, global, stack, frame, catch_target);
                 pc = frame.pc;
@@ -1875,6 +1999,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.iterator_next => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try iter_vm.iteratorNextVm(ctx, output, global, stack, function, frame, catch_target);
                 pc = frame.pc;
@@ -1884,6 +2010,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.iterator_check_object => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try iter_vm.iteratorCheckObjectVm(ctx, stack, frame, catch_target, global);
                 pc = frame.pc;
@@ -1893,6 +2021,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.iterator_get_value_done => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try iter_vm.iteratorGetValueDoneVm(ctx, output, global, stack, function, frame, catch_target);
                 pc = frame.pc;
@@ -1902,6 +2032,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.iterator_call => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try iter_vm.iteratorCallVm(ctx, output, global, stack, function, frame, catch_target);
                 pc = frame.pc;
@@ -1911,6 +2043,8 @@ pub fn dispatchRecursive(
                 }
             },
             op.for_of_next => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try iter_vm.forOfNextVm(ctx, output, global, stack, function, frame, catch_target);
                 pc = frame.pc;
@@ -1920,11 +2054,15 @@ pub fn dispatchRecursive(
                 }
             },
             op.for_in_next => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 try iter_vm.forInNext(ctx, output, global, stack);
                 pc = frame.pc;
             },
             op.iterator_close => {
+                enterStackBoundary(stack, base, sp_len);
+                defer leaveStackBoundary(stack, &base, &sp_len);
                 frame.pc = pc;
                 const step = try iter_vm.iteratorCloseVm(ctx, output, global, stack, frame, catch_target);
                 pc = frame.pc;
