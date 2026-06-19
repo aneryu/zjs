@@ -64,22 +64,167 @@ inline fn plainLocalSlotFastPath(
     return true;
 }
 
+inline fn publishStackWindow(stack: *stack_mod.Stack, base: [*]core.JSValue, sp_len: usize) void {
+    stack.values = base[0..sp_len];
+}
+
+inline fn assertStackWindowSynced(stack: *const stack_mod.Stack, sp_len: usize) void {
+    if (std.debug.runtime_safety) std.debug.assert(sp_len == stack.values.len);
+}
+
+inline fn enterStackBoundary(
+    frame_roots: *frame_mod.FrameRootScope,
+    stack: *stack_mod.Stack,
+    base: [*]core.JSValue,
+    sp_len: usize,
+    root_windowed: *bool,
+) void {
+    publishStackWindow(stack, base, sp_len);
+    frame_roots.useMutableOperandStack(stack);
+    root_windowed.* = false;
+    assertStackWindowSynced(stack, sp_len);
+}
+
+inline fn leaveStackBoundary(
+    frame_roots: *frame_mod.FrameRootScope,
+    stack: *stack_mod.Stack,
+    base: *[*]core.JSValue,
+    sp_len: *usize,
+    root_windowed: *bool,
+) void {
+    base.* = stack.values.ptr;
+    sp_len.* = stack.values.len;
+    assertStackWindowSynced(stack, sp_len.*);
+    frame_roots.useWindowedOperandStack(stack, sp_len);
+    root_windowed.* = true;
+}
+
+inline fn pushOwnedWindow(stack: *const stack_mod.Stack, base: [*]core.JSValue, sp_len: *usize, value: core.JSValue) void {
+    std.debug.assert(sp_len.* < stack.capacity);
+    base[sp_len.*] = value;
+    sp_len.* += 1;
+}
+
+inline fn pushBorrowedWindow(stack: *const stack_mod.Stack, base: [*]core.JSValue, sp_len: *usize, value: core.JSValue) void {
+    pushOwnedWindow(stack, base, sp_len, if (value.requiresRefCount()) value.dup() else value);
+}
+
+inline fn pushSlotWindow(stack: *const stack_mod.Stack, base: [*]core.JSValue, sp_len: *usize, slot: core.JSValue) void {
+    if (!slot.requiresRefCount()) return pushOwnedWindow(stack, base, sp_len, slot);
+    pushBorrowedWindow(stack, base, sp_len, slot_ops.slotValueBorrow(slot));
+}
+
+inline fn popWindow(base: [*]core.JSValue, sp_len: *usize) !core.JSValue {
+    if (sp_len.* == 0) return error.StackUnderflow;
+    sp_len.* -= 1;
+    return base[sp_len.*];
+}
+
+inline fn opcodeRunsWithWindowedStack(opc: u8) bool {
+    return switch (opc) {
+        op.push_i32,
+        op.push_i16,
+        op.push_i8,
+        op.push_bigint_i32,
+        op.push_minus1,
+        op.push_0,
+        op.push_1,
+        op.push_2,
+        op.push_3,
+        op.push_4,
+        op.push_5,
+        op.push_6,
+        op.push_7,
+        op.undefined,
+        op.null,
+        op.push_false,
+        op.push_true,
+        op.drop,
+        op.get_loc0,
+        op.get_loc1,
+        op.get_loc2,
+        op.get_loc3,
+        op.get_loc8,
+        op.get_loc,
+        op.put_loc,
+        op.set_loc,
+        op.put_loc8,
+        op.set_loc8,
+        op.set_loc0,
+        op.set_loc1,
+        op.set_loc2,
+        op.set_loc3,
+        op.put_loc0,
+        op.put_loc1,
+        op.put_loc2,
+        op.put_loc3,
+        op.get_arg0,
+        op.get_arg1,
+        op.get_arg2,
+        op.get_arg3,
+        op.get_arg,
+        op.add,
+        op.sub,
+        op.mul,
+        op.div,
+        op.mod,
+        op.pow,
+        op.shl,
+        op.sar,
+        op.shr,
+        op.@"and",
+        op.@"or",
+        op.xor,
+        op.lt,
+        op.lte,
+        op.gt,
+        op.gte,
+        op.eq,
+        op.neq,
+        op.strict_eq,
+        op.strict_neq,
+        op.post_inc,
+        op.post_dec,
+        op.inc_loc,
+        op.dec_loc,
+        op.goto,
+        op.goto16,
+        op.goto8,
+        op.if_false,
+        op.if_true,
+        op.if_false8,
+        op.if_true8,
+        op.gosub,
+        op.ret,
+        op.nop,
+        op.get_field,
+        op.get_field2,
+        op.put_field,
+        op.get_array_el,
+        op.get_array_el2,
+        op.put_array_el,
+        => true,
+        else => false,
+    };
+}
+
 inline fn tryFastPutLoc(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
+    base: [*]core.JSValue,
+    sp_len: *usize,
     idx: usize,
 ) bool {
-    if (stack.values.len == 0) return false;
-    const value = stack.values[stack.values.len - 1];
+    if (sp_len.* == 0) return false;
+    const value = base[sp_len.* - 1];
     const old_value = frame.locals[idx];
     if (!plainLocalSlotFastPath(function, idx, old_value, value)) return false;
 
     // Move the owned stack slot into the local, matching execPutLoc -> setSlotValue
     // for a plain local slot. The stack slot is consumed by shrinking the slice.
     frame.locals[idx] = value;
-    stack.values = stack.values.ptr[0 .. stack.values.len - 1];
+    sp_len.* -= 1;
     old_value.free(ctx.runtime);
     return true;
 }
@@ -88,11 +233,12 @@ inline fn tryFastSetLoc(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
+    base: [*]core.JSValue,
+    sp_len: *const usize,
     idx: usize,
 ) bool {
-    if (stack.values.len == 0) return false;
-    const value = stack.values[stack.values.len - 1];
+    if (sp_len.* == 0) return false;
+    const value = base[sp_len.* - 1];
     const old_value = frame.locals[idx];
     if (!plainLocalSlotFastPath(function, idx, old_value, value)) return false;
 
@@ -104,13 +250,16 @@ inline fn tryFastSetLoc(
 inline fn tryFastGetField(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
+    base: [*]core.JSValue,
+    sp_len: *const usize,
     atom_id: core.Atom,
 ) bool {
-    if (stack.values.len == 0) return false;
-    const top_index = stack.values.len - 1;
-    const receiver = stack.values[top_index];
+    _ = stack;
+    if (sp_len.* == 0) return false;
+    const top_index = sp_len.* - 1;
+    const receiver = base[top_index];
     const value = vm_property_field.qjsGetFieldFast(ctx.runtime, receiver, atom_id) orelse return false;
-    stack.values[top_index] = if (value.requiresRefCount()) value.dup() else value;
+    base[top_index] = if (value.requiresRefCount()) value.dup() else value;
     receiver.free(ctx.runtime);
     return true;
 }
@@ -118,28 +267,31 @@ inline fn tryFastGetField(
 inline fn tryFastGetField2(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
+    base: [*]core.JSValue,
+    sp_len: *usize,
     atom_id: core.Atom,
 ) bool {
-    if (stack.values.len == 0) return false;
-    const receiver = stack.values[stack.values.len - 1];
+    if (sp_len.* == 0) return false;
+    const receiver = base[sp_len.* - 1];
     const value = vm_property_field.qjsGetFieldFast(ctx.runtime, receiver, atom_id) orelse return false;
-    stack.pushAssumeCapacity(value);
+    pushBorrowedWindow(stack, base, sp_len, value);
     return true;
 }
 
 inline fn tryFastPutField(
     ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
+    base: [*]core.JSValue,
+    sp_len: *usize,
     atom_id: core.Atom,
 ) bool {
-    if (stack.values.len < 2) return false;
-    const value_index = stack.values.len - 1;
-    const obj_index = stack.values.len - 2;
-    const value = stack.values[value_index];
-    const obj = stack.values[obj_index];
+    if (sp_len.* < 2) return false;
+    const value_index = sp_len.* - 1;
+    const obj_index = sp_len.* - 2;
+    const value = base[value_index];
+    const obj = base[obj_index];
     if (!vm_property_field.qjsPutFieldFast(ctx.runtime, obj, atom_id, value)) return false;
 
-    stack.values = stack.values.ptr[0..obj_index];
+    sp_len.* = obj_index;
     obj.free(ctx.runtime);
     value.free(ctx.runtime);
     return true;
@@ -148,16 +300,18 @@ inline fn tryFastPutField(
 inline fn tryFastGetArrayEl(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
+    base: [*]core.JSValue,
+    sp_len: *usize,
 ) bool {
-    if (stack.values.len < 2) return false;
-    const key_index = stack.values.len - 1;
-    const obj_index = stack.values.len - 2;
-    const key = stack.values[key_index];
-    const obj = stack.values[obj_index];
+    if (sp_len.* < 2) return false;
+    const key_index = sp_len.* - 1;
+    const obj_index = sp_len.* - 2;
+    const key = base[key_index];
+    const obj = base[obj_index];
     const value = vm_property_field.fastDenseArrayElementValue(obj, key) orelse return false;
 
-    stack.values = stack.values.ptr[0..obj_index];
-    stack.pushOwnedAssumeCapacity(value);
+    sp_len.* = obj_index;
+    pushOwnedWindow(stack, base, sp_len, value);
     obj.free(ctx.runtime);
     key.free(ctx.runtime);
     return true;
@@ -165,15 +319,16 @@ inline fn tryFastGetArrayEl(
 
 inline fn tryFastGetArrayEl2(
     ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
+    base: [*]core.JSValue,
+    sp_len: *const usize,
 ) bool {
-    if (stack.values.len < 2) return false;
-    const key_index = stack.values.len - 1;
-    const key = stack.values[key_index];
-    const obj = stack.values[stack.values.len - 2];
+    if (sp_len.* < 2) return false;
+    const key_index = sp_len.* - 1;
+    const key = base[key_index];
+    const obj = base[sp_len.* - 2];
     const value = vm_property_field.fastDenseArrayElementValue(obj, key) orelse return false;
 
-    stack.values[key_index] = value;
+    base[key_index] = value;
     key.free(ctx.runtime);
     return true;
 }
@@ -189,21 +344,22 @@ inline fn denseArrayExistingIntIndexForPut(obj: core.JSValue, key: core.JSValue)
 
 inline fn tryFastPutArrayEl(
     ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
+    base: [*]core.JSValue,
+    sp_len: *usize,
 ) bool {
-    if (stack.values.len < 3) return false;
-    const value_index = stack.values.len - 1;
-    const key_index = stack.values.len - 2;
-    const obj_index = stack.values.len - 3;
-    const value = stack.values[value_index];
-    const key = stack.values[key_index];
-    const obj = stack.values[obj_index];
+    if (sp_len.* < 3) return false;
+    const value_index = sp_len.* - 1;
+    const key_index = sp_len.* - 2;
+    const obj_index = sp_len.* - 3;
+    const value = base[value_index];
+    const key = base[key_index];
+    const obj = base[obj_index];
     if (!denseArrayExistingIntIndexForPut(obj, key)) return false;
 
     const wrote = array_ops.putDenseArrayElementFast(ctx.runtime, obj, key, value) catch unreachable;
     if (!wrote) return false;
 
-    stack.values = stack.values.ptr[0..obj_index];
+    sp_len.* = obj_index;
     obj.free(ctx.runtime);
     key.free(ctx.runtime);
     value.free(ctx.runtime);
@@ -282,7 +438,7 @@ pub fn callInternal(
     // call recurses through recurseInlineCall, which IS a trampoline — so the
     // callee's own tail chain is still TCO'd; only this single frame adds one
     // native level). dispatchRecursive therefore never yields `.tail` here.
-    return switch (try dispatchRecursive(ctx, entry_function, global, &frame_storage, entry_stack, output, false)) {
+    return switch (try dispatchRecursive(ctx, entry_function, global, &frame_storage, &frame_roots, entry_stack, output, false)) {
         .returned => |value| value,
         .tail => unreachable,
     };
@@ -375,7 +531,7 @@ pub fn recurseInlineCall(
     // stack depth), instead of recursing — so 100k strict tail calls don't blow
     // the C stack. Mirrors inline_calls.Machine.tailCallReuse.
     while (true) {
-        const outcome = dispatchRecursive(ctx, &entry.view, global, &entry.frame, &entry.stack, output, true) catch |err| {
+        const outcome = dispatchRecursive(ctx, &entry.view, global, &entry.frame, &entry.frame_roots, &entry.stack, output, true) catch |err| {
             call_runtime.closeFrameDestructuringIteratorsForAbruptCompletion(ctx, output, global, &entry.stack, &entry.frame);
             inline_calls.Machine.teardownInlineEntry(ctx, &entry);
             return routeCalleeError(ctx, output, global, caller_stack, caller_frame, caller_catch_target, err);
@@ -438,6 +594,7 @@ pub fn dispatchRecursive(
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
+    frame_roots: *frame_mod.FrameRootScope,
     stack: *stack_mod.Stack,
     output: ?*std.Io.Writer,
     // When true (the recurseInlineCall trampoline), a proper tail call returns
@@ -459,1254 +616,1336 @@ pub fn dispatchRecursive(
     // (native recurse) or hand calls to the slow heap path. Near the native cap,
     // a call goes slow → callFunctionBytecodeModeState routes it to the Machine.
     const allow_inline_calls = !call_vm.nativeDepthNearCap(ctx);
+    var sp_len: usize = stack.values.len;
+    var base: [*]core.JSValue = stack.values.ptr;
+    var stack_root_windowed = true;
+    frame_roots.useWindowedOperandStack(stack, &sp_len);
+    defer {
+        if (stack_root_windowed) publishStackWindow(stack, base, sp_len);
+        frame_roots.useMutableOperandStack(stack);
+    }
     while (true) {
         if (pc >= code.len) {
             frame.pc = pc;
-            return .{ .returned = try control_vm.finishFunctionReturn(ctx, frame, stack.peek() orelse core.JSValue.undefinedValue()) };
+            const value = if (sp_len == 0)
+                core.JSValue.undefinedValue()
+            else
+                (if (base[sp_len - 1].requiresRefCount()) base[sp_len - 1].dup() else base[sp_len - 1]);
+            return .{ .returned = try control_vm.finishFunctionReturn(ctx, frame, value) };
         }
         const opc = code[pc];
         pc += 1;
-switch (opc) {
-    // ===================================================================
-    // Pushes that decode an immediate operand (INLINE on C-local pc)
-    // ===================================================================
-    // Immediate pushes use assumeCapacity: every push is counted in the
-    // verifier's stack_size and the frame stack is presized to stack_size+1
-    // (reserveEntryFrameCapacity), so the bounds check is redundant — mirrors
-    // qjs's bare `*sp++` and the get_loc inline above.
-    op.push_i32 => {
-        const v = readInt(i32, code[pc..][0..4]);
-        pc += 4;
-        stack.pushOwnedAssumeCapacity(core.JSValue.int32(v));
-    },
-    op.push_i16 => {
-        const v: i32 = readInt(i16, code[pc..][0..2]);
-        pc += 2;
-        stack.pushOwnedAssumeCapacity(core.JSValue.int32(v));
-    },
-    op.push_i8 => {
-        const v: i32 = @as(i8, @bitCast(code[pc]));
-        pc += 1;
-        stack.pushOwnedAssumeCapacity(core.JSValue.int32(v));
-    },
-    op.push_bigint_i32 => {
-        const v = readInt(i32, code[pc..][0..4]);
-        pc += 4;
-        stack.pushOwnedAssumeCapacity(core.JSValue.shortBigInt(v));
-    },
-
-    // ---- Small-int / literal pushes (no operand; plain unfused push) ----
-    op.push_minus1 => stack.pushOwnedAssumeCapacity(core.JSValue.int32(-1)),
-    op.push_0 => stack.pushOwnedAssumeCapacity(core.JSValue.int32(0)),
-    op.push_1 => stack.pushOwnedAssumeCapacity(core.JSValue.int32(1)),
-    op.push_2 => stack.pushOwnedAssumeCapacity(core.JSValue.int32(2)),
-    op.push_3 => stack.pushOwnedAssumeCapacity(core.JSValue.int32(3)),
-    op.push_4 => stack.pushOwnedAssumeCapacity(core.JSValue.int32(4)),
-    op.push_5 => stack.pushOwnedAssumeCapacity(core.JSValue.int32(5)),
-    op.push_6 => stack.pushOwnedAssumeCapacity(core.JSValue.int32(6)),
-    op.push_7 => stack.pushOwnedAssumeCapacity(core.JSValue.int32(7)),
-    op.@"undefined" => stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue()),
-    op.@"null" => stack.pushOwnedAssumeCapacity(core.JSValue.nullValue()),
-    op.push_false => stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false)),
-    op.push_true => stack.pushOwnedAssumeCapacity(core.JSValue.boolean(true)),
-
-    // ---- Constant-table / atom pushes (DELEGATE: operand decode + fusion) ----
-    op.push_const => {
-        frame.pc = pc;
-        try value_vm.pushConst(ctx, stack, function, frame, opc);
-        pc = frame.pc;
-    },
-    op.push_const8 => {
-        frame.pc = pc;
-        try value_vm.pushConst8(ctx, stack, function, frame, opc);
-        pc = frame.pc;
-    },
-    op.push_atom_value => {
-        frame.pc = pc;
-        try value_vm.pushAtomValueVm(ctx, stack, function, frame, .{
-            .global_env = .{
-                .global = global,
-                .eval_local_names = &.{},
-                .eval_var_ref_names = frame.eval_var_ref_names,
-                .eval_with_object = core.JSValue.undefinedValue(),
+        const windowed_opcode = opcodeRunsWithWindowedStack(opc);
+        if (!windowed_opcode) enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+        defer {
+            if (!windowed_opcode) leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+        }
+        switch (opc) {
+            // ===================================================================
+            // Pushes that decode an immediate operand (INLINE on C-local pc)
+            // ===================================================================
+            // Immediate pushes use assumeCapacity: every push is counted in the
+            // verifier's stack_size and the frame stack is presized to stack_size+1
+            // (reserveEntryFrameCapacity), so the bounds check is redundant — mirrors
+            // qjs's bare `*sp++` and the get_loc inline above.
+            op.push_i32 => {
+                const v = readInt(i32, code[pc..][0..4]);
+                pc += 4;
+                pushOwnedWindow(stack, base, &sp_len, core.JSValue.int32(v));
             },
-            .regexp_prototype = class_vm.constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"),
-        });
-        pc = frame.pc;
-    },
-    op.push_empty_string => {
-        frame.pc = pc;
-        try value_vm.pushEmptyString(ctx, stack);
-        pc = frame.pc;
-    },
-    op.private_symbol => {
-        frame.pc = pc;
-        try value_vm.pushPrivateSymbol(ctx, stack, function, frame);
-        pc = frame.pc;
-    },
-    op.regexp => {
-        frame.pc = pc;
-        try regexp_vm.pushLiteral(ctx, stack, class_vm.constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"));
-        pc = frame.pc;
-    },
-    op.fclosure, op.fclosure8 => {
-        frame.pc = pc;
-        const step = try call_vm.closure(ctx, output, global, stack, function, frame, catch_target, opc, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-
-    // ===================================================================
-    // Stack manipulation (DELEGATE; pure-stack, no operand)
-    // ===================================================================
-    op.drop => {
-        // Fast path: a plain (non catch-marker) top is popped + freed inline
-        // (free is a no-op for ints). Catch markers carry the try-region target
-        // and delegate to the full handler.
-        const top = stack.values[stack.values.len - 1];
-        if (top.isCatchOffset()) {
-            frame.pc = pc;
-            switch (try value_vm.drop(ctx.runtime, stack)) {
-                .value => {},
-                .catch_target => |target| {
-                    catch_target.* = target;
-                    pc = frame.pc;
-                    continue;
-                },
-            }
-            pc = frame.pc;
-        } else {
-            stack.values.len -= 1;
-            top.free(ctx.runtime);
-        }
-    },
-    op.nip_catch => {
-        frame.pc = pc;
-        try value_vm.nipCatch(ctx.runtime, stack);
-        pc = frame.pc;
-    },
-    op.nip => {
-        frame.pc = pc;
-        try value_vm.nip(ctx, stack);
-        pc = frame.pc;
-    },
-    op.nip1 => {
-        frame.pc = pc;
-        try value_vm.nip1(ctx, stack);
-        pc = frame.pc;
-    },
-    op.dup => {
-        frame.pc = pc;
-        try value_vm.dup(ctx, stack, opc);
-        pc = frame.pc;
-    },
-    op.dup1 => {
-        frame.pc = pc;
-        try value_vm.dup1(ctx, stack);
-        pc = frame.pc;
-    },
-    op.dup2 => {
-        frame.pc = pc;
-        try value_vm.dup2(ctx, stack);
-        pc = frame.pc;
-    },
-    op.dup3 => {
-        frame.pc = pc;
-        try value_vm.dup3(ctx, stack);
-        pc = frame.pc;
-    },
-    op.swap => {
-        frame.pc = pc;
-        try value_vm.swap(ctx, stack);
-        pc = frame.pc;
-    },
-    op.swap2 => {
-        frame.pc = pc;
-        try value_vm.swap2(ctx, stack);
-        pc = frame.pc;
-    },
-    op.insert2 => {
-        frame.pc = pc;
-        try value_vm.insert2(ctx, stack);
-        pc = frame.pc;
-    },
-    op.insert3 => {
-        frame.pc = pc;
-        try value_vm.insert3(ctx, stack);
-        pc = frame.pc;
-    },
-    op.insert4 => {
-        frame.pc = pc;
-        try value_vm.insert4(ctx, stack);
-        pc = frame.pc;
-    },
-    op.perm3 => {
-        frame.pc = pc;
-        try value_vm.perm3(ctx, stack);
-        pc = frame.pc;
-    },
-    op.perm4 => {
-        frame.pc = pc;
-        try value_vm.perm4(ctx, stack);
-        pc = frame.pc;
-    },
-    op.perm5 => {
-        frame.pc = pc;
-        try value_vm.perm5(ctx, stack);
-        pc = frame.pc;
-    },
-    op.rot3l => {
-        frame.pc = pc;
-        try value_vm.rot3l(ctx, stack);
-        pc = frame.pc;
-    },
-    op.rot3r => {
-        frame.pc = pc;
-        try value_vm.rot3r(ctx, stack);
-        pc = frame.pc;
-    },
-    op.rot4l => {
-        frame.pc = pc;
-        try value_vm.rot4l(ctx, stack);
-        pc = frame.pc;
-    },
-    op.rot5l => {
-        frame.pc = pc;
-        try value_vm.rot5l(ctx, stack);
-        pc = frame.pc;
-    },
-
-    // ===================================================================
-    // Locals / args / var-refs (all DELEGATE; operand decode in handler)
-    // ===================================================================
-    // S2b: hot local GETs inline the leaned body directly — skip the `loc`
-    // dispatcher (its per-op switch + the comptime-gated fusion scans) AND the
-    // execGetLoc call AND the frame.pc round-trip. GC-free (presized-stack
-    // assumeCapacity push + a verifier-trusted frame.locals[idx] read, no bounds
-    // check), so no frame.pc publish is needed. This is the #1 crypto opcode.
-    op.get_loc0 => array_ops.pushSlotValueAssumeCapacity(stack, frame.locals[0]),
-    op.get_loc1 => array_ops.pushSlotValueAssumeCapacity(stack, frame.locals[1]),
-    op.get_loc2 => array_ops.pushSlotValueAssumeCapacity(stack, frame.locals[2]),
-    op.get_loc3 => array_ops.pushSlotValueAssumeCapacity(stack, frame.locals[3]),
-    op.get_loc8 => {
-        const idx = code[pc];
-        pc += 1;
-        array_ops.pushSlotValueAssumeCapacity(stack, frame.locals[idx]);
-    },
-    op.get_loc => {
-        const idx = readInt(u16, code[pc..][0..2]);
-        pc += 2;
-        array_ops.pushSlotValueAssumeCapacity(stack, frame.locals[idx]);
-    },
-    op.put_loc => {
-        const idx = readInt(u16, code[pc..][0..2]);
-        if (tryFastPutLoc(ctx, function, frame, stack, idx)) {
-            pc += 2;
-        } else {
-            frame.pc = pc;
-            try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
-            pc = frame.pc;
-        }
-    },
-    op.set_loc => {
-        const idx = readInt(u16, code[pc..][0..2]);
-        if (tryFastSetLoc(ctx, function, frame, stack, idx)) {
-            pc += 2;
-        } else {
-            frame.pc = pc;
-            try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
-            pc = frame.pc;
-        }
-    },
-    op.put_loc8 => {
-        const idx = code[pc];
-        if (tryFastPutLoc(ctx, function, frame, stack, idx)) {
-            pc += 1;
-        } else {
-            frame.pc = pc;
-            try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
-            pc = frame.pc;
-        }
-    },
-    op.set_loc8 => {
-        const idx = code[pc];
-        if (tryFastSetLoc(ctx, function, frame, stack, idx)) {
-            pc += 1;
-        } else {
-            frame.pc = pc;
-            try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
-            pc = frame.pc;
-        }
-    },
-    op.set_loc0 => {
-        if (!tryFastSetLoc(ctx, function, frame, stack, 0)) {
-            frame.pc = pc;
-            try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
-            pc = frame.pc;
-        }
-    },
-    op.set_loc1 => {
-        if (!tryFastSetLoc(ctx, function, frame, stack, 1)) {
-            frame.pc = pc;
-            try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
-            pc = frame.pc;
-        }
-    },
-    op.set_loc2 => {
-        if (!tryFastSetLoc(ctx, function, frame, stack, 2)) {
-            frame.pc = pc;
-            try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
-            pc = frame.pc;
-        }
-    },
-    op.set_loc3 => {
-        if (!tryFastSetLoc(ctx, function, frame, stack, 3)) {
-            frame.pc = pc;
-            try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
-            pc = frame.pc;
-        }
-    },
-    op.get_loc0_loc1 => {
-        frame.pc = pc;
-        try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
-        pc = frame.pc;
-    },
-    op.put_loc0 => {
-        if (!tryFastPutLoc(ctx, function, frame, stack, 0)) {
-            frame.pc = pc;
-            try slot_ops.execPutLoc(ctx, function, global, frame, stack, 0, 0, opc, false);
-            pc = frame.pc;
-        }
-    },
-    op.put_loc1 => {
-        if (!tryFastPutLoc(ctx, function, frame, stack, 1)) {
-            frame.pc = pc;
-            try slot_ops.execPutLoc(ctx, function, global, frame, stack, 1, 0, opc, false);
-            pc = frame.pc;
-        }
-    },
-    op.put_loc2 => {
-        if (!tryFastPutLoc(ctx, function, frame, stack, 2)) {
-            frame.pc = pc;
-            try slot_ops.execPutLoc(ctx, function, global, frame, stack, 2, 0, opc, false);
-            pc = frame.pc;
-        }
-    },
-    op.put_loc3 => {
-        if (!tryFastPutLoc(ctx, function, frame, stack, 3)) {
-            frame.pc = pc;
-            try slot_ops.execPutLoc(ctx, function, global, frame, stack, 3, 0, opc, false);
-            pc = frame.pc;
-        }
-    },
-    // S2b: hot arg GETs inline the leaned body (skip the `arg` dispatcher + the
-    // execGetArg call + frame.pc round-trip). Variadic bound: an arg index past
-    // the actual arg count reads undefined (args may be fewer than declared).
-    // GC-free presized-stack push, so no frame.pc publish needed.
-    op.get_arg0 => array_ops.pushSlotValueAssumeCapacity(stack, if (frame.args.len > 0) frame.args[0] else core.JSValue.undefinedValue()),
-    op.get_arg1 => array_ops.pushSlotValueAssumeCapacity(stack, if (frame.args.len > 1) frame.args[1] else core.JSValue.undefinedValue()),
-    op.get_arg2 => array_ops.pushSlotValueAssumeCapacity(stack, if (frame.args.len > 2) frame.args[2] else core.JSValue.undefinedValue()),
-    op.get_arg3 => array_ops.pushSlotValueAssumeCapacity(stack, if (frame.args.len > 3) frame.args[3] else core.JSValue.undefinedValue()),
-    op.get_arg => {
-        const idx = readInt(u16, code[pc..][0..2]);
-        pc += 2;
-        array_ops.pushSlotValueAssumeCapacity(stack, if (idx < frame.args.len) frame.args[idx] else core.JSValue.undefinedValue());
-    },
-    op.put_arg, op.set_arg, op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3, op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 => {
-        frame.pc = pc;
-        try vm_property_locals.arg(ctx, function, frame, stack, opc);
-        pc = frame.pc;
-    },
-    op.get_var_ref, op.get_var_ref_check, op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init, op.set_var_ref, op.get_var_ref0, op.get_var_ref1, op.get_var_ref2, op.get_var_ref3, op.put_var_ref0, op.put_var_ref1, op.put_var_ref2, op.put_var_ref3, op.set_var_ref0, op.set_var_ref1, op.set_var_ref2, op.set_var_ref3 => {
-        frame.pc = pc;
-        const step = try vm_property_locals.varRefVm(ctx, function, global, frame, stack, opc, catch_target, false, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.set_loc_uninitialized, op.get_loc_check, op.put_loc_check, op.put_loc_check_init => {
-        frame.pc = pc;
-        const step = try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.close_loc => {
-        frame.pc = pc;
-        try vm_property_locals.closeLoc(ctx, function, frame);
-        pc = frame.pc;
-    },
-    op.make_loc_ref, op.make_arg_ref, op.make_var_ref_ref => {
-        frame.pc = pc;
-        try vm_property_ref.makeSlotRef(ctx, stack, function, frame, opc);
-        pc = frame.pc;
-    },
-    op.make_var_ref => {
-        frame.pc = pc;
-        const step = try vm_property_ref.makeVarRefVm(ctx, output, global, stack, function, frame, catch_target, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-
-    // ===================================================================
-    // Arithmetic / compare / logic (int32 fast path INLINE; slow DELEGATE)
-    // ===================================================================
-    op.add, op.sub, op.mul, op.div, op.mod, op.pow, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor => {
-        if (opc != op.pow and arith_vm.tryInt32Binary(stack, opc)) continue;
-        frame.pc = pc;
-        switch (try arith_vm.binaryVm(ctx, stack, frame, catch_target, opc, output, global)) {
-            .done => {},
-            .continue_loop => {},
-        }
-        pc = frame.pc;
-    },
-    op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq => {
-        if (arith_vm.tryInt32Compare(stack, opc)) continue;
-        frame.pc = pc;
-        switch (try arith_vm.compareVm(ctx, stack, frame, catch_target, opc, output, global)) {
-            .done => {},
-            .continue_loop => {},
-        }
-        pc = frame.pc;
-    },
-    op.neg, op.plus, op.inc, op.dec => {
-        frame.pc = pc;
-        switch (try arith_vm.unaryVm(ctx, stack, frame, catch_target, opc, output, global)) {
-            .done => {},
-            .continue_loop => {},
-        }
-        pc = frame.pc;
-    },
-    op.not => {
-        frame.pc = pc;
-        switch (try arith_vm.bitNotVm(ctx, stack, frame, catch_target, output, global)) {
-            .done => {},
-            .continue_loop => {},
-        }
-        pc = frame.pc;
-    },
-    op.lnot => try value_vm.logicalNot(ctx.runtime, stack),
-    op.post_inc, op.post_dec => {
-        // Int32 fast path: leave the old value on the stack and push old±1 on
-        // top (mirrors postUpdate's int branch). Overflow folds to float via
-        // fastInt32Add. GC-free. Non-int delegates.
-        const top = stack.values[stack.values.len - 1];
-        if (top.asInt32()) |oi| {
-            const updated = if (opc == op.post_inc) arith_vm.fastInt32Add(oi, 1) else arith_vm.fastInt32Sub(oi, 1);
-            stack.pushOwnedAssumeCapacity(updated);
-        } else {
-            frame.pc = pc;
-            switch (try arith_vm.postUpdateVm(ctx, stack, frame, catch_target, opc, output, global)) {
-                .done => {},
-                .continue_loop => {},
-            }
-            pc = frame.pc;
-        }
-    },
-    op.inc_loc, op.dec_loc => {
-        // Int32 fast path: a local holding an int32 is a plain slot (NOT a
-        // var-ref cell — a cell is an object), so update it in place with no
-        // dup/free and no global-lexical sync (dispatchRecursive runs only
-        // normal-kind frames, which have no top-level global-lexical locals).
-        // Overflow folds to a float via fastInt32Add. Anything else (cell,
-        // bigint, coercible object) delegates to the full handler.
-        const idx = code[pc];
-        if (frame.locals[idx].asInt32()) |iv| {
-            pc += 1;
-            frame.locals[idx] = if (opc == op.inc_loc) arith_vm.fastInt32Add(iv, 1) else arith_vm.fastInt32Sub(iv, 1);
-        } else {
-            frame.pc = pc;
-            switch (try arith_vm.updateLocalVm(ctx, stack, function, global, frame, catch_target, opc, output, false)) {
-                .done => {},
-                .continue_loop => {},
-            }
-            pc = frame.pc;
-        }
-    },
-    op.add_loc => {
-        frame.pc = pc;
-        switch (try arith_vm.addLocalVm(ctx, stack, function, global, frame, catch_target, output, false)) {
-            .done => {},
-            .continue_loop => {},
-        }
-        pc = frame.pc;
-    },
-    op.typeof => try value_vm.typeOf(ctx, stack),
-    op.typeof_is_undefined => try value_vm.typeOfIsUndefined(ctx.runtime, stack),
-    op.typeof_is_function => try value_vm.typeOfIsFunction(ctx.runtime, stack),
-    op.is_undefined_or_null => try value_vm.isUndefinedOrNull(ctx.runtime, stack),
-    op.is_undefined => try value_vm.isUndefined(ctx.runtime, stack),
-    op.is_null => try value_vm.isNull(ctx.runtime, stack),
-    op.in, op.instanceof => {
-        frame.pc = pc;
-        switch (try vm_property_field.inOrInstanceof(ctx, output, global, stack, function, frame, catch_target, opc)) {
-            .done => {},
-            .continue_loop => {},
-        }
-        pc = frame.pc;
-    },
-    op.private_in => {
-        frame.pc = pc;
-        switch (try class_vm.privateInVm(ctx, output, global, stack, function, frame, catch_target)) {
-            .done => {},
-            .continue_loop => {},
-        }
-        pc = frame.pc;
-    },
-    op.delete => {
-        frame.pc = pc;
-        switch (try vm_property_ref.deletePropertyVm(ctx, output, global, stack, function, frame, catch_target)) {
-            .done => {},
-            .continue_loop => {},
-        }
-        pc = frame.pc;
-    },
-    op.delete_var => {
-        frame.pc = pc;
-        try vm_property_ref.deleteVar(ctx, global, stack, function, frame, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs);
-        pc = frame.pc;
-    },
-
-    // ===================================================================
-    // Control flow (jumps/branches INLINE on C-local pc; throw DELEGATE)
-    // ===================================================================
-    op.goto => {
-        const operand_pc = pc;
-        const diff = readInt(i32, code[pc..][0..4]);
-        pc = relativePc(operand_pc, diff);
-        if (diff < 0) try interrupt_poller.poll(ctx.runtime);
-    },
-    op.goto16 => {
-        const operand_pc = pc;
-        const diff: i32 = readInt(i16, code[pc..][0..2]);
-        pc = relativePc(operand_pc, diff);
-        if (diff < 0) try interrupt_poller.poll(ctx.runtime);
-    },
-    op.goto8 => {
-        const operand_pc = pc;
-        const diff: i32 = @as(i8, @bitCast(code[pc]));
-        pc = relativePc(operand_pc, diff);
-        if (diff < 0) try interrupt_poller.poll(ctx.runtime);
-    },
-    op.if_false, op.if_true => {
-        const operand_pc = pc;
-        const diff = readInt(i32, code[pc..][0..4]);
-        pc += 4;
-        const value = try stack.pop();
-        defer value.free(ctx.runtime);
-        const truthy = value.asBool() orelse value_ops.isTruthy(value);
-        const branch_if_true = (opc == op.if_true);
-        if (truthy == branch_if_true) {
-            pc = relativePc(operand_pc, diff);
-            if (diff < 0) try interrupt_poller.poll(ctx.runtime);
-        }
-    },
-    op.if_false8, op.if_true8 => {
-        const operand_pc = pc;
-        const diff: i32 = @as(i8, @bitCast(code[pc]));
-        pc += 1;
-        const value = try stack.pop();
-        defer value.free(ctx.runtime);
-        const truthy = value.asBool() orelse value_ops.isTruthy(value);
-        const branch_if_true = (opc == op.if_true8);
-        if (truthy == branch_if_true) {
-            pc = relativePc(operand_pc, diff);
-            if (diff < 0) try interrupt_poller.poll(ctx.runtime);
-        }
-    },
-    op.gosub => {
-        const operand_pc = pc;
-        const diff = readInt(i32, code[pc..][0..4]);
-        const return_pc = pc + 4;
-        if (return_pc > @as(usize, @intCast(std.math.maxInt(i32)))) return error.InvalidBytecode;
-        try stack.pushOwned(core.JSValue.int32(@intCast(return_pc)));
-        pc = relativePc(operand_pc, diff);
-    },
-    op.ret => {
-        const target = try stack.pop();
-        defer target.free(ctx.runtime);
-        const pc_i32 = target.asInt32() orelse return error.InvalidBytecode;
-        if (pc_i32 < 0) return error.InvalidBytecode;
-        const target_pc: usize = @intCast(pc_i32);
-        if (target_pc >= code.len) return error.InvalidBytecode;
-        pc = target_pc;
-    },
-    op.nop => control_vm.nop(),
-
-    // ---- Return ----
-    op.@"return" => {
-        frame.pc = pc;
-        return .{ .returned = try control_vm.returnTop(ctx, stack, frame, null) };
-    },
-    op.return_undef => {
-        frame.pc = pc;
-        return .{ .returned = try control_vm.returnUndefined(ctx, frame, null) };
-    },
-
-    // ---- Throw / catch ----
-    op.throw => {
-        frame.pc = pc;
-        switch (try control_vm.throwTop(ctx, output, global, stack, frame, catch_target)) {
-            .handled => {},
-        }
-        pc = frame.pc;
-        continue;
-    },
-    op.throw_error => {
-        frame.pc = pc;
-        switch (try control_vm.throwErrorVm(ctx, stack, function, frame, catch_target, global)) {
-            .handled => {},
-        }
-        pc = frame.pc;
-        continue;
-    },
-    op.@"catch" => {
-        frame.pc = pc;
-        try control_vm.catchTarget(function, frame, stack, catch_target);
-        pc = frame.pc;
-    },
-
-    // ===================================================================
-    // Calls (DELEGATE to the out-of-line recursive call resolution)
-    // ===================================================================
-    op.call, op.call0, op.call1, op.call2, op.call3 => {
-        const argc: u16 = switch (opc) {
-            op.call => blk: {
-                const v = readInt(u16, code[pc..][0..2]);
+            op.push_i16 => {
+                const v: i32 = readInt(i16, code[pc..][0..2]);
                 pc += 2;
-                break :blk v;
+                pushOwnedWindow(stack, base, &sp_len, core.JSValue.int32(v));
             },
-            op.call0 => 0,
-            op.call1 => 1,
-            op.call2 => 2,
-            op.call3 => 3,
-            else => unreachable,
-        };
-        frame.pc = pc;
-        // S2a: a plain-bytecode callee runs as a NATIVE recursion via
-        // recurseInlineCall (reusing the Machine's zero-copy setup), not the
-        // dup-heavy slow path.
-        switch (try call_runtime.execCall(ctx, stack, function, frame, catch_target, argc, output, global, allow_inline_calls)) {
-            .done => {},
-            .continue_loop => {
+            op.push_i8 => {
+                const v: i32 = @as(i8, @bitCast(code[pc]));
+                pc += 1;
+                pushOwnedWindow(stack, base, &sp_len, core.JSValue.int32(v));
+            },
+            op.push_bigint_i32 => {
+                const v = readInt(i32, code[pc..][0..4]);
+                pc += 4;
+                pushOwnedWindow(stack, base, &sp_len, core.JSValue.shortBigInt(v));
+            },
+
+            // ---- Small-int / literal pushes (no operand; plain unfused push) ----
+            op.push_minus1 => pushOwnedWindow(stack, base, &sp_len, core.JSValue.int32(-1)),
+            op.push_0 => pushOwnedWindow(stack, base, &sp_len, core.JSValue.int32(0)),
+            op.push_1 => pushOwnedWindow(stack, base, &sp_len, core.JSValue.int32(1)),
+            op.push_2 => pushOwnedWindow(stack, base, &sp_len, core.JSValue.int32(2)),
+            op.push_3 => pushOwnedWindow(stack, base, &sp_len, core.JSValue.int32(3)),
+            op.push_4 => pushOwnedWindow(stack, base, &sp_len, core.JSValue.int32(4)),
+            op.push_5 => pushOwnedWindow(stack, base, &sp_len, core.JSValue.int32(5)),
+            op.push_6 => pushOwnedWindow(stack, base, &sp_len, core.JSValue.int32(6)),
+            op.push_7 => pushOwnedWindow(stack, base, &sp_len, core.JSValue.int32(7)),
+            op.undefined => pushOwnedWindow(stack, base, &sp_len, core.JSValue.undefinedValue()),
+            op.null => pushOwnedWindow(stack, base, &sp_len, core.JSValue.nullValue()),
+            op.push_false => pushOwnedWindow(stack, base, &sp_len, core.JSValue.boolean(false)),
+            op.push_true => pushOwnedWindow(stack, base, &sp_len, core.JSValue.boolean(true)),
+
+            // ---- Constant-table / atom pushes (DELEGATE: operand decode + fusion) ----
+            op.push_const => {
+                frame.pc = pc;
+                try value_vm.pushConst(ctx, stack, function, frame, opc);
                 pc = frame.pc;
-                continue;
             },
-            .inline_call => |request| switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
-                .value => |v| stack.pushOwnedAssumeCapacity(v),
-                .caught => {
+            op.push_const8 => {
+                frame.pc = pc;
+                try value_vm.pushConst8(ctx, stack, function, frame, opc);
+                pc = frame.pc;
+            },
+            op.push_atom_value => {
+                frame.pc = pc;
+                try value_vm.pushAtomValueVm(ctx, stack, function, frame, .{
+                    .global_env = .{
+                        .global = global,
+                        .eval_local_names = &.{},
+                        .eval_var_ref_names = frame.eval_var_ref_names,
+                        .eval_with_object = core.JSValue.undefinedValue(),
+                    },
+                    .regexp_prototype = class_vm.constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"),
+                });
+                pc = frame.pc;
+            },
+            op.push_empty_string => {
+                frame.pc = pc;
+                try value_vm.pushEmptyString(ctx, stack);
+                pc = frame.pc;
+            },
+            op.private_symbol => {
+                frame.pc = pc;
+                try value_vm.pushPrivateSymbol(ctx, stack, function, frame);
+                pc = frame.pc;
+            },
+            op.regexp => {
+                frame.pc = pc;
+                try regexp_vm.pushLiteral(ctx, stack, class_vm.constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"));
+                pc = frame.pc;
+            },
+            op.fclosure, op.fclosure8 => {
+                frame.pc = pc;
+                const step = try call_vm.closure(ctx, output, global, stack, function, frame, catch_target, opc, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+
+            // ===================================================================
+            // Stack manipulation (DELEGATE; pure-stack, no operand)
+            // ===================================================================
+            op.drop => {
+                // Fast path: a plain (non catch-marker) top is popped + freed inline
+                // (free is a no-op for ints). Catch markers carry the try-region target
+                // and delegate to the full handler.
+                if (sp_len == 0) return error.StackUnderflow;
+                const top = base[sp_len - 1];
+                if (top.isCatchOffset()) {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    frame.pc = pc;
+                    switch (try value_vm.drop(ctx.runtime, stack)) {
+                        .value => {},
+                        .catch_target => |target| {
+                            catch_target.* = target;
+                            pc = frame.pc;
+                            continue;
+                        },
+                    }
                     pc = frame.pc;
-                    continue;
-                },
+                } else {
+                    sp_len -= 1;
+                    top.free(ctx.runtime);
+                }
             },
-        }
-        pc = frame.pc;
-    },
-    op.tail_call => {
-        frame.pc = pc;
-        switch (try call_vm.tailCall(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
-            .handled => {
+            op.nip_catch => {
+                frame.pc = pc;
+                try value_vm.nipCatch(ctx.runtime, stack);
+                pc = frame.pc;
+            },
+            op.nip => {
+                frame.pc = pc;
+                try value_vm.nip(ctx, stack);
+                pc = frame.pc;
+            },
+            op.nip1 => {
+                frame.pc = pc;
+                try value_vm.nip1(ctx, stack);
+                pc = frame.pc;
+            },
+            op.dup => {
+                frame.pc = pc;
+                try value_vm.dup(ctx, stack, opc);
+                pc = frame.pc;
+            },
+            op.dup1 => {
+                frame.pc = pc;
+                try value_vm.dup1(ctx, stack);
+                pc = frame.pc;
+            },
+            op.dup2 => {
+                frame.pc = pc;
+                try value_vm.dup2(ctx, stack);
+                pc = frame.pc;
+            },
+            op.dup3 => {
+                frame.pc = pc;
+                try value_vm.dup3(ctx, stack);
+                pc = frame.pc;
+            },
+            op.swap => {
+                frame.pc = pc;
+                try value_vm.swap(ctx, stack);
+                pc = frame.pc;
+            },
+            op.swap2 => {
+                frame.pc = pc;
+                try value_vm.swap2(ctx, stack);
+                pc = frame.pc;
+            },
+            op.insert2 => {
+                frame.pc = pc;
+                try value_vm.insert2(ctx, stack);
+                pc = frame.pc;
+            },
+            op.insert3 => {
+                frame.pc = pc;
+                try value_vm.insert3(ctx, stack);
+                pc = frame.pc;
+            },
+            op.insert4 => {
+                frame.pc = pc;
+                try value_vm.insert4(ctx, stack);
+                pc = frame.pc;
+            },
+            op.perm3 => {
+                frame.pc = pc;
+                try value_vm.perm3(ctx, stack);
+                pc = frame.pc;
+            },
+            op.perm4 => {
+                frame.pc = pc;
+                try value_vm.perm4(ctx, stack);
+                pc = frame.pc;
+            },
+            op.perm5 => {
+                frame.pc = pc;
+                try value_vm.perm5(ctx, stack);
+                pc = frame.pc;
+            },
+            op.rot3l => {
+                frame.pc = pc;
+                try value_vm.rot3l(ctx, stack);
+                pc = frame.pc;
+            },
+            op.rot3r => {
+                frame.pc = pc;
+                try value_vm.rot3r(ctx, stack);
+                pc = frame.pc;
+            },
+            op.rot4l => {
+                frame.pc = pc;
+                try value_vm.rot4l(ctx, stack);
+                pc = frame.pc;
+            },
+            op.rot5l => {
+                frame.pc = pc;
+                try value_vm.rot5l(ctx, stack);
+                pc = frame.pc;
+            },
+
+            // ===================================================================
+            // Locals / args / var-refs (all DELEGATE; operand decode in handler)
+            // ===================================================================
+            // S2b: hot local GETs inline the leaned body directly — skip the `loc`
+            // dispatcher (its per-op switch + the comptime-gated fusion scans) AND the
+            // execGetLoc call AND the frame.pc round-trip. GC-free (presized-stack
+            // assumeCapacity push + a verifier-trusted frame.locals[idx] read, no bounds
+            // check), so no frame.pc publish is needed. This is the #1 crypto opcode.
+            op.get_loc0 => pushSlotWindow(stack, base, &sp_len, frame.locals[0]),
+            op.get_loc1 => pushSlotWindow(stack, base, &sp_len, frame.locals[1]),
+            op.get_loc2 => pushSlotWindow(stack, base, &sp_len, frame.locals[2]),
+            op.get_loc3 => pushSlotWindow(stack, base, &sp_len, frame.locals[3]),
+            op.get_loc8 => {
+                const idx = code[pc];
+                pc += 1;
+                pushSlotWindow(stack, base, &sp_len, frame.locals[idx]);
+            },
+            op.get_loc => {
+                const idx = readInt(u16, code[pc..][0..2]);
+                pc += 2;
+                pushSlotWindow(stack, base, &sp_len, frame.locals[idx]);
+            },
+            op.put_loc => {
+                const idx = readInt(u16, code[pc..][0..2]);
+                if (tryFastPutLoc(ctx, function, frame, base, &sp_len, idx)) {
+                    pc += 2;
+                } else {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    frame.pc = pc;
+                    try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
+                    pc = frame.pc;
+                }
+            },
+            op.set_loc => {
+                const idx = readInt(u16, code[pc..][0..2]);
+                if (tryFastSetLoc(ctx, function, frame, base, &sp_len, idx)) {
+                    pc += 2;
+                } else {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    frame.pc = pc;
+                    try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
+                    pc = frame.pc;
+                }
+            },
+            op.put_loc8 => {
+                const idx = code[pc];
+                if (tryFastPutLoc(ctx, function, frame, base, &sp_len, idx)) {
+                    pc += 1;
+                } else {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    frame.pc = pc;
+                    try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
+                    pc = frame.pc;
+                }
+            },
+            op.set_loc8 => {
+                const idx = code[pc];
+                if (tryFastSetLoc(ctx, function, frame, base, &sp_len, idx)) {
+                    pc += 1;
+                } else {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    frame.pc = pc;
+                    try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
+                    pc = frame.pc;
+                }
+            },
+            op.set_loc0 => {
+                if (!tryFastSetLoc(ctx, function, frame, base, &sp_len, 0)) {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    frame.pc = pc;
+                    try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
+                    pc = frame.pc;
+                }
+            },
+            op.set_loc1 => {
+                if (!tryFastSetLoc(ctx, function, frame, base, &sp_len, 1)) {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    frame.pc = pc;
+                    try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
+                    pc = frame.pc;
+                }
+            },
+            op.set_loc2 => {
+                if (!tryFastSetLoc(ctx, function, frame, base, &sp_len, 2)) {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    frame.pc = pc;
+                    try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
+                    pc = frame.pc;
+                }
+            },
+            op.set_loc3 => {
+                if (!tryFastSetLoc(ctx, function, frame, base, &sp_len, 3)) {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    frame.pc = pc;
+                    try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
+                    pc = frame.pc;
+                }
+            },
+            op.get_loc0_loc1 => {
+                frame.pc = pc;
+                try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
+                pc = frame.pc;
+            },
+            op.put_loc0 => {
+                if (!tryFastPutLoc(ctx, function, frame, base, &sp_len, 0)) {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    frame.pc = pc;
+                    try slot_ops.execPutLoc(ctx, function, global, frame, stack, 0, 0, opc, false);
+                    pc = frame.pc;
+                }
+            },
+            op.put_loc1 => {
+                if (!tryFastPutLoc(ctx, function, frame, base, &sp_len, 1)) {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    frame.pc = pc;
+                    try slot_ops.execPutLoc(ctx, function, global, frame, stack, 1, 0, opc, false);
+                    pc = frame.pc;
+                }
+            },
+            op.put_loc2 => {
+                if (!tryFastPutLoc(ctx, function, frame, base, &sp_len, 2)) {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    frame.pc = pc;
+                    try slot_ops.execPutLoc(ctx, function, global, frame, stack, 2, 0, opc, false);
+                    pc = frame.pc;
+                }
+            },
+            op.put_loc3 => {
+                if (!tryFastPutLoc(ctx, function, frame, base, &sp_len, 3)) {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    frame.pc = pc;
+                    try slot_ops.execPutLoc(ctx, function, global, frame, stack, 3, 0, opc, false);
+                    pc = frame.pc;
+                }
+            },
+            // S2b: hot arg GETs inline the leaned body (skip the `arg` dispatcher + the
+            // execGetArg call + frame.pc round-trip). Variadic bound: an arg index past
+            // the actual arg count reads undefined (args may be fewer than declared).
+            // GC-free presized-stack push, so no frame.pc publish needed.
+            op.get_arg0 => pushSlotWindow(stack, base, &sp_len, if (frame.args.len > 0) frame.args[0] else core.JSValue.undefinedValue()),
+            op.get_arg1 => pushSlotWindow(stack, base, &sp_len, if (frame.args.len > 1) frame.args[1] else core.JSValue.undefinedValue()),
+            op.get_arg2 => pushSlotWindow(stack, base, &sp_len, if (frame.args.len > 2) frame.args[2] else core.JSValue.undefinedValue()),
+            op.get_arg3 => pushSlotWindow(stack, base, &sp_len, if (frame.args.len > 3) frame.args[3] else core.JSValue.undefinedValue()),
+            op.get_arg => {
+                const idx = readInt(u16, code[pc..][0..2]);
+                pc += 2;
+                pushSlotWindow(stack, base, &sp_len, if (idx < frame.args.len) frame.args[idx] else core.JSValue.undefinedValue());
+            },
+            op.put_arg, op.set_arg, op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3, op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 => {
+                frame.pc = pc;
+                try vm_property_locals.arg(ctx, function, frame, stack, opc);
+                pc = frame.pc;
+            },
+            op.get_var_ref, op.get_var_ref_check, op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init, op.set_var_ref, op.get_var_ref0, op.get_var_ref1, op.get_var_ref2, op.get_var_ref3, op.put_var_ref0, op.put_var_ref1, op.put_var_ref2, op.put_var_ref3, op.set_var_ref0, op.set_var_ref1, op.set_var_ref2, op.set_var_ref3 => {
+                frame.pc = pc;
+                const step = try vm_property_locals.varRefVm(ctx, function, global, frame, stack, opc, catch_target, false, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.set_loc_uninitialized, op.get_loc_check, op.put_loc_check, op.put_loc_check_init => {
+                frame.pc = pc;
+                const step = try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.close_loc => {
+                frame.pc = pc;
+                try vm_property_locals.closeLoc(ctx, function, frame);
+                pc = frame.pc;
+            },
+            op.make_loc_ref, op.make_arg_ref, op.make_var_ref_ref => {
+                frame.pc = pc;
+                try vm_property_ref.makeSlotRef(ctx, stack, function, frame, opc);
+                pc = frame.pc;
+            },
+            op.make_var_ref => {
+                frame.pc = pc;
+                const step = try vm_property_ref.makeVarRefVm(ctx, output, global, stack, function, frame, catch_target, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+
+            // ===================================================================
+            // Arithmetic / compare / logic (int32 fast path INLINE; slow DELEGATE)
+            // ===================================================================
+            op.add, op.sub, op.mul, op.div, op.mod, op.pow, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor => {
+                if (opc != op.pow and arith_vm.tryInt32BinaryWindow(base, &sp_len, opc)) continue;
+                {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    frame.pc = pc;
+                    switch (try arith_vm.binaryVm(ctx, stack, frame, catch_target, opc, output, global)) {
+                        .done => {},
+                        .continue_loop => {},
+                    }
+                    pc = frame.pc;
+                }
+            },
+            op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq => {
+                if (arith_vm.tryInt32CompareWindow(base, &sp_len, opc)) continue;
+                {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    frame.pc = pc;
+                    switch (try arith_vm.compareVm(ctx, stack, frame, catch_target, opc, output, global)) {
+                        .done => {},
+                        .continue_loop => {},
+                    }
+                    pc = frame.pc;
+                }
+            },
+            op.neg, op.plus, op.inc, op.dec => {
+                frame.pc = pc;
+                switch (try arith_vm.unaryVm(ctx, stack, frame, catch_target, opc, output, global)) {
+                    .done => {},
+                    .continue_loop => {},
+                }
+                pc = frame.pc;
+            },
+            op.not => {
+                frame.pc = pc;
+                switch (try arith_vm.bitNotVm(ctx, stack, frame, catch_target, output, global)) {
+                    .done => {},
+                    .continue_loop => {},
+                }
+                pc = frame.pc;
+            },
+            op.lnot => try value_vm.logicalNot(ctx.runtime, stack),
+            op.post_inc, op.post_dec => {
+                // Int32 fast path: leave the old value on the stack and push old±1 on
+                // top (mirrors postUpdate's int branch). Overflow folds to float via
+                // fastInt32Add. GC-free. Non-int delegates.
+                if (sp_len == 0) return error.StackUnderflow;
+                const top = base[sp_len - 1];
+                if (top.asInt32()) |oi| {
+                    const updated = if (opc == op.post_inc) arith_vm.fastInt32Add(oi, 1) else arith_vm.fastInt32Sub(oi, 1);
+                    pushOwnedWindow(stack, base, &sp_len, updated);
+                } else {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    frame.pc = pc;
+                    switch (try arith_vm.postUpdateVm(ctx, stack, frame, catch_target, opc, output, global)) {
+                        .done => {},
+                        .continue_loop => {},
+                    }
+                    pc = frame.pc;
+                }
+            },
+            op.inc_loc, op.dec_loc => {
+                // Int32 fast path: a local holding an int32 is a plain slot (NOT a
+                // var-ref cell — a cell is an object), so update it in place with no
+                // dup/free and no global-lexical sync (dispatchRecursive runs only
+                // normal-kind frames, which have no top-level global-lexical locals).
+                // Overflow folds to a float via fastInt32Add. Anything else (cell,
+                // bigint, coercible object) delegates to the full handler.
+                const idx = code[pc];
+                if (frame.locals[idx].asInt32()) |iv| {
+                    pc += 1;
+                    frame.locals[idx] = if (opc == op.inc_loc) arith_vm.fastInt32Add(iv, 1) else arith_vm.fastInt32Sub(iv, 1);
+                } else {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    frame.pc = pc;
+                    switch (try arith_vm.updateLocalVm(ctx, stack, function, global, frame, catch_target, opc, output, false)) {
+                        .done => {},
+                        .continue_loop => {},
+                    }
+                    pc = frame.pc;
+                }
+            },
+            op.add_loc => {
+                frame.pc = pc;
+                switch (try arith_vm.addLocalVm(ctx, stack, function, global, frame, catch_target, output, false)) {
+                    .done => {},
+                    .continue_loop => {},
+                }
+                pc = frame.pc;
+            },
+            op.typeof => try value_vm.typeOf(ctx, stack),
+            op.typeof_is_undefined => try value_vm.typeOfIsUndefined(ctx.runtime, stack),
+            op.typeof_is_function => try value_vm.typeOfIsFunction(ctx.runtime, stack),
+            op.is_undefined_or_null => try value_vm.isUndefinedOrNull(ctx.runtime, stack),
+            op.is_undefined => try value_vm.isUndefined(ctx.runtime, stack),
+            op.is_null => try value_vm.isNull(ctx.runtime, stack),
+            op.in, op.instanceof => {
+                frame.pc = pc;
+                switch (try vm_property_field.inOrInstanceof(ctx, output, global, stack, function, frame, catch_target, opc)) {
+                    .done => {},
+                    .continue_loop => {},
+                }
+                pc = frame.pc;
+            },
+            op.private_in => {
+                frame.pc = pc;
+                switch (try class_vm.privateInVm(ctx, output, global, stack, function, frame, catch_target)) {
+                    .done => {},
+                    .continue_loop => {},
+                }
+                pc = frame.pc;
+            },
+            op.delete => {
+                frame.pc = pc;
+                switch (try vm_property_ref.deletePropertyVm(ctx, output, global, stack, function, frame, catch_target)) {
+                    .done => {},
+                    .continue_loop => {},
+                }
+                pc = frame.pc;
+            },
+            op.delete_var => {
+                frame.pc = pc;
+                try vm_property_ref.deleteVar(ctx, global, stack, function, frame, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs);
+                pc = frame.pc;
+            },
+
+            // ===================================================================
+            // Control flow (jumps/branches INLINE on C-local pc; throw DELEGATE)
+            // ===================================================================
+            op.goto => {
+                const operand_pc = pc;
+                const diff = readInt(i32, code[pc..][0..4]);
+                pc = relativePc(operand_pc, diff);
+                if (diff < 0) {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    try interrupt_poller.poll(ctx.runtime);
+                }
+            },
+            op.goto16 => {
+                const operand_pc = pc;
+                const diff: i32 = readInt(i16, code[pc..][0..2]);
+                pc = relativePc(operand_pc, diff);
+                if (diff < 0) {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    try interrupt_poller.poll(ctx.runtime);
+                }
+            },
+            op.goto8 => {
+                const operand_pc = pc;
+                const diff: i32 = @as(i8, @bitCast(code[pc]));
+                pc = relativePc(operand_pc, diff);
+                if (diff < 0) {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    try interrupt_poller.poll(ctx.runtime);
+                }
+            },
+            op.if_false, op.if_true => {
+                const operand_pc = pc;
+                const diff = readInt(i32, code[pc..][0..4]);
+                pc += 4;
+                const value = try popWindow(base, &sp_len);
+                defer value.free(ctx.runtime);
+                const truthy = value.asBool() orelse value_ops.isTruthy(value);
+                const branch_if_true = (opc == op.if_true);
+                if (truthy == branch_if_true) {
+                    pc = relativePc(operand_pc, diff);
+                    if (diff < 0) {
+                        enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                        defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                        try interrupt_poller.poll(ctx.runtime);
+                    }
+                }
+            },
+            op.if_false8, op.if_true8 => {
+                const operand_pc = pc;
+                const diff: i32 = @as(i8, @bitCast(code[pc]));
+                pc += 1;
+                const value = try popWindow(base, &sp_len);
+                defer value.free(ctx.runtime);
+                const truthy = value.asBool() orelse value_ops.isTruthy(value);
+                const branch_if_true = (opc == op.if_true8);
+                if (truthy == branch_if_true) {
+                    pc = relativePc(operand_pc, diff);
+                    if (diff < 0) {
+                        enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                        defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                        try interrupt_poller.poll(ctx.runtime);
+                    }
+                }
+            },
+            op.gosub => {
+                const operand_pc = pc;
+                const diff = readInt(i32, code[pc..][0..4]);
+                const return_pc = pc + 4;
+                if (return_pc > @as(usize, @intCast(std.math.maxInt(i32)))) return error.InvalidBytecode;
+                pushOwnedWindow(stack, base, &sp_len, core.JSValue.int32(@intCast(return_pc)));
+                pc = relativePc(operand_pc, diff);
+            },
+            op.ret => {
+                const target = try popWindow(base, &sp_len);
+                defer target.free(ctx.runtime);
+                const pc_i32 = target.asInt32() orelse return error.InvalidBytecode;
+                if (pc_i32 < 0) return error.InvalidBytecode;
+                const target_pc: usize = @intCast(pc_i32);
+                if (target_pc >= code.len) return error.InvalidBytecode;
+                pc = target_pc;
+            },
+            op.nop => control_vm.nop(),
+
+            // ---- Return ----
+            op.@"return" => {
+                frame.pc = pc;
+                return .{ .returned = try control_vm.returnTop(ctx, stack, frame, null) };
+            },
+            op.return_undef => {
+                frame.pc = pc;
+                return .{ .returned = try control_vm.returnUndefined(ctx, frame, null) };
+            },
+
+            // ---- Throw / catch ----
+            op.throw => {
+                frame.pc = pc;
+                switch (try control_vm.throwTop(ctx, output, global, stack, frame, catch_target)) {
+                    .handled => {},
+                }
                 pc = frame.pc;
                 continue;
             },
-            .return_value => |value| {
-                return .{ .returned = value };
+            op.throw_error => {
+                frame.pc = pc;
+                switch (try control_vm.throwErrorVm(ctx, stack, function, frame, catch_target, global)) {
+                    .handled => {},
+                }
+                pc = frame.pc;
+                continue;
             },
-            // Proper tail call. Under a trampoline (allow_tail_signal) signal it
-            // up so the native frame is reused (constant depth). Otherwise (the
-            // callInternal slow-path entry) recurse and return the callee value.
-            .tail_inline => |request| {
-                if (allow_tail_signal) return .{ .tail = request };
-                switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
-                    .value => |v| return .{ .returned = v },
-                    .caught => {
+            op.@"catch" => {
+                frame.pc = pc;
+                try control_vm.catchTarget(function, frame, stack, catch_target);
+                pc = frame.pc;
+            },
+
+            // ===================================================================
+            // Calls (DELEGATE to the out-of-line recursive call resolution)
+            // ===================================================================
+            op.call, op.call0, op.call1, op.call2, op.call3 => {
+                const argc: u16 = switch (opc) {
+                    op.call => blk: {
+                        const v = readInt(u16, code[pc..][0..2]);
+                        pc += 2;
+                        break :blk v;
+                    },
+                    op.call0 => 0,
+                    op.call1 => 1,
+                    op.call2 => 2,
+                    op.call3 => 3,
+                    else => unreachable,
+                };
+                frame.pc = pc;
+                // S2a: a plain-bytecode callee runs as a NATIVE recursion via
+                // recurseInlineCall (reusing the Machine's zero-copy setup), not the
+                // dup-heavy slow path.
+                switch (try call_runtime.execCall(ctx, stack, function, frame, catch_target, argc, output, global, allow_inline_calls)) {
+                    .done => {},
+                    .continue_loop => {
+                        pc = frame.pc;
+                        continue;
+                    },
+                    .inline_call => |request| switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
+                        .value => |v| stack.pushOwnedAssumeCapacity(v),
+                        .caught => {
+                            pc = frame.pc;
+                            continue;
+                        },
+                    },
+                }
+                pc = frame.pc;
+            },
+            op.tail_call => {
+                frame.pc = pc;
+                switch (try call_vm.tailCall(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
+                    .handled => {
+                        pc = frame.pc;
+                        continue;
+                    },
+                    .return_value => |value| {
+                        return .{ .returned = value };
+                    },
+                    // Proper tail call. Under a trampoline (allow_tail_signal) signal it
+                    // up so the native frame is reused (constant depth). Otherwise (the
+                    // callInternal slow-path entry) recurse and return the callee value.
+                    .tail_inline => |request| {
+                        if (allow_tail_signal) return .{ .tail = request };
+                        switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
+                            .value => |v| return .{ .returned = v },
+                            .caught => {
+                                pc = frame.pc;
+                                continue;
+                            },
+                        }
+                    },
+                }
+            },
+            op.tail_call_method => {
+                frame.pc = pc;
+                switch (try call_vm.tailCallMethod(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
+                    .handled => {
+                        pc = frame.pc;
+                        continue;
+                    },
+                    .return_value => |value| {
+                        return .{ .returned = value };
+                    },
+                    .tail_inline => |request| {
+                        if (allow_tail_signal) return .{ .tail = request };
+                        switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
+                            .value => |v| return .{ .returned = v },
+                            .caught => {
+                                pc = frame.pc;
+                                continue;
+                            },
+                        }
+                    },
+                }
+            },
+            op.call_method => {
+                frame.pc = pc;
+                switch (try call_vm.callMethod(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
+                    .done => {},
+                    .continue_loop => {
+                        pc = frame.pc;
+                        continue;
+                    },
+                    .inline_call => |request| switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
+                        .value => |v| stack.pushOwnedAssumeCapacity(v),
+                        .caught => {
+                            pc = frame.pc;
+                            continue;
+                        },
+                    },
+                }
+                pc = frame.pc;
+            },
+            op.call_prepared => {
+                frame.pc = pc;
+                switch (try call_vm.callPrepared(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
+                    .done => {},
+                    .continue_loop => {
+                        pc = frame.pc;
+                        continue;
+                    },
+                    .inline_call => |request| switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
+                        .value => |v| stack.pushOwnedAssumeCapacity(v),
+                        .caught => {
+                            pc = frame.pc;
+                            continue;
+                        },
+                    },
+                }
+                pc = frame.pc;
+            },
+            op.prepare_call_prop_atom => {
+                frame.pc = pc;
+                switch (try call_vm.prepareCallPropAtom(ctx, output, global, stack, function, frame, catch_target)) {
+                    .done => {},
+                    .continue_loop => {
                         pc = frame.pc;
                         continue;
                     },
                 }
-            },
-        }
-    },
-    op.tail_call_method => {
-        frame.pc = pc;
-        switch (try call_vm.tailCallMethod(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
-            .handled => {
                 pc = frame.pc;
-                continue;
             },
-            .return_value => |value| {
-                return .{ .returned = value };
-            },
-            .tail_inline => |request| {
-                if (allow_tail_signal) return .{ .tail = request };
-                switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
-                    .value => |v| return .{ .returned = v },
-                    .caught => {
+            op.call_constructor => {
+                frame.pc = pc;
+                switch (try call_vm.constructor(ctx, output, global, stack, function, frame, catch_target)) {
+                    .done => {},
+                    .continue_loop => {
                         pc = frame.pc;
                         continue;
                     },
                 }
-            },
-        }
-    },
-    op.call_method => {
-        frame.pc = pc;
-        switch (try call_vm.callMethod(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
-            .done => {},
-            .continue_loop => {
                 pc = frame.pc;
-                continue;
             },
-            .inline_call => |request| switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
-                .value => |v| stack.pushOwnedAssumeCapacity(v),
-                .caught => {
-                    pc = frame.pc;
-                    continue;
-                },
-            },
-        }
-        pc = frame.pc;
-    },
-    op.call_prepared => {
-        frame.pc = pc;
-        switch (try call_vm.callPrepared(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
-            .done => {},
-            .continue_loop => {
-                pc = frame.pc;
-                continue;
-            },
-            .inline_call => |request| switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
-                .value => |v| stack.pushOwnedAssumeCapacity(v),
-                .caught => {
-                    pc = frame.pc;
-                    continue;
-                },
-            },
-        }
-        pc = frame.pc;
-    },
-    op.prepare_call_prop_atom => {
-        frame.pc = pc;
-        switch (try call_vm.prepareCallPropAtom(ctx, output, global, stack, function, frame, catch_target)) {
-            .done => {},
-            .continue_loop => {
-                pc = frame.pc;
-                continue;
-            },
-        }
-        pc = frame.pc;
-    },
-    op.call_constructor => {
-        frame.pc = pc;
-        switch (try call_vm.constructor(ctx, output, global, stack, function, frame, catch_target)) {
-            .done => {},
-            .continue_loop => {
-                pc = frame.pc;
-                continue;
-            },
-        }
-        pc = frame.pc;
-    },
-    op.apply => {
-        frame.pc = pc;
-        switch (try call_vm.apply(ctx, output, global, stack, function, frame, catch_target)) {
-            .done => {},
-            .continue_loop => {
-                pc = frame.pc;
-                continue;
-            },
-        }
-        pc = frame.pc;
-    },
-    op.apply_eval => {
-        frame.pc = pc;
-        switch (try eval_module_vm.applyEval(ctx, stack, function, frame, catch_target, output, global, eval_class_field_initializer_flag, eval_parameter_initializer_flag)) {
-            .done => {},
-            .continue_loop => {
-                pc = frame.pc;
-                continue;
-            },
-        }
-        pc = frame.pc;
-    },
-    op.eval => {
-        frame.pc = pc;
-        // A non-%eval% callee (the identifier `eval` shadowed by a normal
-        // function) in tail position yields `.tail_inline` — handle it like a
-        // tail call so eval-named tail recursion (test262 tco-non-eval-*) TCOs
-        // via the trampoline instead of growing the native stack.
-        switch (try eval_module_vm.directEval(ctx, stack, function, frame, catch_target, output, global, eval_class_field_initializer_flag, eval_parameter_initializer_flag, allow_inline_calls)) {
-            .done => {},
-            .continue_loop => {
-                pc = frame.pc;
-                continue;
-            },
-            .tail_inline => |request| {
-                if (allow_tail_signal) return .{ .tail = request };
-                switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
-                    .value => |v| return .{ .returned = v },
-                    .caught => {
+            op.apply => {
+                frame.pc = pc;
+                switch (try call_vm.apply(ctx, output, global, stack, function, frame, catch_target)) {
+                    .done => {},
+                    .continue_loop => {
                         pc = frame.pc;
                         continue;
                     },
                 }
+                pc = frame.pc;
             },
-        }
-        pc = frame.pc;
-    },
-    op.import => {
-        frame.pc = pc;
-        try eval_module_vm.dynamicImport(ctx, output, global, stack, function, frame);
-        pc = frame.pc;
-    },
+            op.apply_eval => {
+                frame.pc = pc;
+                switch (try eval_module_vm.applyEval(ctx, stack, function, frame, catch_target, output, global, eval_class_field_initializer_flag, eval_parameter_initializer_flag)) {
+                    .done => {},
+                    .continue_loop => {
+                        pc = frame.pc;
+                        continue;
+                    },
+                }
+                pc = frame.pc;
+            },
+            op.eval => {
+                frame.pc = pc;
+                // A non-%eval% callee (the identifier `eval` shadowed by a normal
+                // function) in tail position yields `.tail_inline` — handle it like a
+                // tail call so eval-named tail recursion (test262 tco-non-eval-*) TCOs
+                // via the trampoline instead of growing the native stack.
+                switch (try eval_module_vm.directEval(ctx, stack, function, frame, catch_target, output, global, eval_class_field_initializer_flag, eval_parameter_initializer_flag, allow_inline_calls)) {
+                    .done => {},
+                    .continue_loop => {
+                        pc = frame.pc;
+                        continue;
+                    },
+                    .tail_inline => |request| {
+                        if (allow_tail_signal) return .{ .tail = request };
+                        switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
+                            .value => |v| return .{ .returned = v },
+                            .caught => {
+                                pc = frame.pc;
+                                continue;
+                            },
+                        }
+                    },
+                }
+                pc = frame.pc;
+            },
+            op.import => {
+                frame.pc = pc;
+                try eval_module_vm.dynamicImport(ctx, output, global, stack, function, frame);
+                pc = frame.pc;
+            },
 
-    // ---- ctor / brand helpers (DELEGATE) ----
-    op.check_ctor => {
-        frame.pc = pc;
-        switch (try call_vm.checkCtorVm(ctx, stack, frame, catch_target, global)) {
-            .done => {},
-            .continue_loop => {},
-        }
-        pc = frame.pc;
-    },
-    op.check_ctor_return => {
-        frame.pc = pc;
-        switch (try call_vm.checkCtorReturnVm(ctx, stack, frame, catch_target, global)) {
-            .done => {},
-            .continue_loop => {},
-        }
-        pc = frame.pc;
-    },
-    op.init_ctor => {
-        frame.pc = pc;
-        switch (try call_vm.initCtorVm(ctx, output, global, stack, function, frame, catch_target)) {
-            .done => {},
-            .continue_loop => {},
-        }
-        pc = frame.pc;
-    },
-    op.check_brand => {
-        frame.pc = pc;
-        switch (try class_vm.checkBrandVm(ctx, stack, frame, catch_target, global)) {
-            .done => {},
-            .continue_loop => {},
-        }
-        pc = frame.pc;
-    },
-    op.add_brand => {
-        frame.pc = pc;
-        switch (try class_vm.addBrandVm(ctx, stack, frame, catch_target, global)) {
-            .done => {},
-            .continue_loop => {},
-        }
-        pc = frame.pc;
-    },
+            // ---- ctor / brand helpers (DELEGATE) ----
+            op.check_ctor => {
+                frame.pc = pc;
+                switch (try call_vm.checkCtorVm(ctx, stack, frame, catch_target, global)) {
+                    .done => {},
+                    .continue_loop => {},
+                }
+                pc = frame.pc;
+            },
+            op.check_ctor_return => {
+                frame.pc = pc;
+                switch (try call_vm.checkCtorReturnVm(ctx, stack, frame, catch_target, global)) {
+                    .done => {},
+                    .continue_loop => {},
+                }
+                pc = frame.pc;
+            },
+            op.init_ctor => {
+                frame.pc = pc;
+                switch (try call_vm.initCtorVm(ctx, output, global, stack, function, frame, catch_target)) {
+                    .done => {},
+                    .continue_loop => {},
+                }
+                pc = frame.pc;
+            },
+            op.check_brand => {
+                frame.pc = pc;
+                switch (try class_vm.checkBrandVm(ctx, stack, frame, catch_target, global)) {
+                    .done => {},
+                    .continue_loop => {},
+                }
+                pc = frame.pc;
+            },
+            op.add_brand => {
+                frame.pc = pc;
+                switch (try class_vm.addBrandVm(ctx, stack, frame, catch_target, global)) {
+                    .done => {},
+                    .continue_loop => {},
+                }
+                pc = frame.pc;
+            },
 
-    // ===================================================================
-    // Variables / globals / property access (DELEGATE)
-    // ===================================================================
-    op.get_var, op.get_var_undef => {
-        frame.pc = pc;
-        const step = try vm_property_globals.getVar(ctx, output, global, stack, function, frame, catch_target, opc, false, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs, core.JSValue.undefinedValue());
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.put_var => {
-        frame.pc = pc;
-        const step = try vm_property_globals.putVar(ctx, output, global, stack, function, frame, catch_target, function.flags.is_strict or function.flags.runtime_strict, false, false, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs, core.JSValue.undefinedValue());
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.check_define_var, op.define_var, op.define_func, op.put_var_init => {
-        frame.pc = pc;
-        const step = try vm_property_globals.globalDefinition(ctx, global, stack, function, frame, catch_target, opc, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs, false, false);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.get_field, op.get_field2, op.put_field => {
-        const atom_id = readInt(u32, code[pc..][0..4]);
-        const handled = switch (opc) {
-            op.get_field => tryFastGetField(ctx, stack, atom_id),
-            op.get_field2 => tryFastGetField2(ctx, stack, atom_id),
-            op.put_field => tryFastPutField(ctx, stack, atom_id),
-            else => unreachable,
-        };
-        if (handled) {
-            pc += 4;
-        } else {
-            frame.pc = pc;
-            const step = try vm_property_field.field(ctx, output, global, stack, function, frame, catch_target, opc, false);
-            pc = frame.pc;
-            switch (step) {
-                .done => {},
-                .continue_loop => continue,
-            }
-        }
-    },
-    op.get_array_el, op.get_array_el2, op.put_array_el => {
-        const handled = switch (opc) {
-            op.get_array_el => tryFastGetArrayEl(ctx, stack),
-            op.get_array_el2 => tryFastGetArrayEl2(ctx, stack),
-            op.put_array_el => tryFastPutArrayEl(ctx, stack),
-            else => unreachable,
-        };
-        if (!handled) {
-            frame.pc = pc;
-            const step = try vm_property_field.arrayElement(ctx, output, global, stack, function, frame, catch_target, opc);
-            pc = frame.pc;
-            switch (step) {
-                .done => {},
-                .continue_loop => continue,
-            }
-        }
-    },
-    op.to_propkey => {
-        frame.pc = pc;
-        const step = try vm_property_field.toPropKeyVm(ctx, output, global, stack, function, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.to_propkey2 => {
-        frame.pc = pc;
-        const step = try vm_property_field.toPropKey2Vm(ctx, output, global, stack, function, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.set_name, op.set_name_computed => {
-        frame.pc = pc;
-        try vm_property_field.setName(ctx, output, global, stack, function, frame, opc);
-        pc = frame.pc;
-    },
-    op.get_ref_value => {
-        frame.pc = pc;
-        const step = try vm_property_ref.getRefValueVm(ctx, output, global, stack, function, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.put_ref_value => {
-        frame.pc = pc;
-        const step = try vm_property_ref.putRefValueVm(ctx, output, global, stack, function, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.get_private_field => {
-        frame.pc = pc;
-        const step = try vm_property_private.getPrivateFieldVm(ctx, output, global, stack, function, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.put_private_field => {
-        frame.pc = pc;
-        const step = try vm_property_private.putPrivateFieldVm(ctx, output, global, stack, function, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.define_private_field => {
-        frame.pc = pc;
-        const step = try vm_property_private.definePrivateFieldVm(ctx, output, global, stack, function, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
+            // ===================================================================
+            // Variables / globals / property access (DELEGATE)
+            // ===================================================================
+            op.get_var, op.get_var_undef => {
+                frame.pc = pc;
+                const step = try vm_property_globals.getVar(ctx, output, global, stack, function, frame, catch_target, opc, false, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs, core.JSValue.undefinedValue());
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.put_var => {
+                frame.pc = pc;
+                const step = try vm_property_globals.putVar(ctx, output, global, stack, function, frame, catch_target, function.flags.is_strict or function.flags.runtime_strict, false, false, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs, core.JSValue.undefinedValue());
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.check_define_var, op.define_var, op.define_func, op.put_var_init => {
+                frame.pc = pc;
+                const step = try vm_property_globals.globalDefinition(ctx, global, stack, function, frame, catch_target, opc, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs, false, false);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.get_field, op.get_field2, op.put_field => {
+                const atom_id = readInt(u32, code[pc..][0..4]);
+                const handled = switch (opc) {
+                    op.get_field => tryFastGetField(ctx, stack, base, &sp_len, atom_id),
+                    op.get_field2 => tryFastGetField2(ctx, stack, base, &sp_len, atom_id),
+                    op.put_field => tryFastPutField(ctx, base, &sp_len, atom_id),
+                    else => unreachable,
+                };
+                if (handled) {
+                    pc += 4;
+                } else {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    frame.pc = pc;
+                    const step = try vm_property_field.field(ctx, output, global, stack, function, frame, catch_target, opc, false);
+                    pc = frame.pc;
+                    switch (step) {
+                        .done => {},
+                        .continue_loop => continue,
+                    }
+                }
+            },
+            op.get_array_el, op.get_array_el2, op.put_array_el => {
+                const handled = switch (opc) {
+                    op.get_array_el => tryFastGetArrayEl(ctx, stack, base, &sp_len),
+                    op.get_array_el2 => tryFastGetArrayEl2(ctx, base, &sp_len),
+                    op.put_array_el => tryFastPutArrayEl(ctx, base, &sp_len),
+                    else => unreachable,
+                };
+                if (!handled) {
+                    enterStackBoundary(frame_roots, stack, base, sp_len, &stack_root_windowed);
+                    defer leaveStackBoundary(frame_roots, stack, &base, &sp_len, &stack_root_windowed);
+                    frame.pc = pc;
+                    const step = try vm_property_field.arrayElement(ctx, output, global, stack, function, frame, catch_target, opc);
+                    pc = frame.pc;
+                    switch (step) {
+                        .done => {},
+                        .continue_loop => continue,
+                    }
+                }
+            },
+            op.to_propkey => {
+                frame.pc = pc;
+                const step = try vm_property_field.toPropKeyVm(ctx, output, global, stack, function, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.to_propkey2 => {
+                frame.pc = pc;
+                const step = try vm_property_field.toPropKey2Vm(ctx, output, global, stack, function, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.set_name, op.set_name_computed => {
+                frame.pc = pc;
+                try vm_property_field.setName(ctx, output, global, stack, function, frame, opc);
+                pc = frame.pc;
+            },
+            op.get_ref_value => {
+                frame.pc = pc;
+                const step = try vm_property_ref.getRefValueVm(ctx, output, global, stack, function, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.put_ref_value => {
+                frame.pc = pc;
+                const step = try vm_property_ref.putRefValueVm(ctx, output, global, stack, function, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.get_private_field => {
+                frame.pc = pc;
+                const step = try vm_property_private.getPrivateFieldVm(ctx, output, global, stack, function, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.put_private_field => {
+                frame.pc = pc;
+                const step = try vm_property_private.putPrivateFieldVm(ctx, output, global, stack, function, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.define_private_field => {
+                frame.pc = pc;
+                const step = try vm_property_private.definePrivateFieldVm(ctx, output, global, stack, function, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
 
-    // ---- with-statement opcodes (a normal function body may contain `with`) ----
-    op.with_get_var, op.with_delete_var, op.with_make_ref, op.with_get_ref, op.with_get_ref_undef => {
-        frame.pc = pc;
-        const step = try vm_property_ref.withGetOrDelete(ctx, output, global, stack, function, frame, catch_target, opc);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.with_put_var => {
-        frame.pc = pc;
-        const step = try vm_property_ref.withPut(ctx, output, global, stack, function, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
+            // ---- with-statement opcodes (a normal function body may contain `with`) ----
+            op.with_get_var, op.with_delete_var, op.with_make_ref, op.with_get_ref, op.with_get_ref_undef => {
+                frame.pc = pc;
+                const step = try vm_property_ref.withGetOrDelete(ctx, output, global, stack, function, frame, catch_target, opc);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.with_put_var => {
+                frame.pc = pc;
+                const step = try vm_property_ref.withPut(ctx, output, global, stack, function, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
 
-    // ===================================================================
-    // Object / array literals, super, this, iterators (DELEGATE)
-    // (define_field / get_super / get_super_value / put_super_value /
-    //  get_length appeared in two draft categories — merged here once)
-    // ===================================================================
-    op.object => {
-        frame.pc = pc;
-        try literal_vm.object(ctx, stack, global);
-        pc = frame.pc;
-    },
-    op.array_from => {
-        frame.pc = pc;
-        try literal_vm.arrayFrom(ctx, stack, function, frame, global);
-        pc = frame.pc;
-    },
-    op.append => {
-        frame.pc = pc;
-        const step = try literal_vm.appendSpreadValuesVm(ctx, output, global, stack, opc, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.rest => {
-        frame.pc = pc;
-        try literal_vm.rest(ctx, stack, function, frame);
-        pc = frame.pc;
-    },
-    op.define_field => {
-        frame.pc = pc;
-        const step = try literal_vm.defineField(ctx, output, global, stack, function, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.define_array_el => {
-        frame.pc = pc;
-        const step = try literal_vm.defineArrayEl(ctx, output, global, stack, function, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.set_proto => {
-        frame.pc = pc;
-        try literal_vm.setProto(ctx, stack);
-        pc = frame.pc;
-    },
-    op.set_home_object => {
-        frame.pc = pc;
-        try class_vm.setHomeObject(ctx, stack);
-        pc = frame.pc;
-    },
-    op.copy_data_properties => {
-        const mask = code[pc];
-        pc += 1;
-        frame.pc = pc;
-        const step = try literal_vm.copyDataProperties(ctx, output, global, stack, mask, function, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.define_method => {
-        frame.pc = pc;
-        const step = try class_vm.defineMethod(ctx, global, stack, function, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.define_method_computed => {
-        frame.pc = pc;
-        const step = try class_vm.defineMethodComputed(ctx, output, global, stack, function, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.define_class, op.define_class_computed => {
-        frame.pc = pc;
-        const step = try class_vm.defineClass(ctx, output, global, stack, function, frame, catch_target, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs, opc == op.define_class_computed);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.special_object => {
-        frame.pc = pc;
-        try literal_vm.specialObject(ctx, stack, function, frame, global, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs);
-        pc = frame.pc;
-    },
-    op.get_super => {
-        frame.pc = pc;
-        try class_vm.getSuper(ctx, stack, frame);
-        pc = frame.pc;
-    },
-    op.get_super_value => {
-        frame.pc = pc;
-        const step = try class_vm.getSuperValue(ctx, output, global, stack, function, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.put_super_value => {
-        frame.pc = pc;
-        const step = try class_vm.putSuperValue(ctx, output, global, stack, function, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.get_length => {
-        frame.pc = pc;
-        const step = try literal_vm.getLength(ctx, output, global, stack, function, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.to_object => {
-        frame.pc = pc;
-        const step = try value_vm.toObjectVm(ctx, stack, frame, catch_target, global);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.push_this => {
-        frame.pc = pc;
-        const step = try value_vm.pushThisVm(ctx, stack, frame, catch_target, global);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.for_of_start, op.for_await_of_start => {
-        frame.pc = pc;
-        const step = try iter_vm.forOfStartVm(ctx, output, global, stack, function, frame, catch_target, opc == op.for_await_of_start);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.for_in_start => {
-        frame.pc = pc;
-        const step = try iter_vm.forInStartVm(ctx, output, global, stack, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.iterator_next => {
-        frame.pc = pc;
-        const step = try iter_vm.iteratorNextVm(ctx, output, global, stack, function, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.iterator_check_object => {
-        frame.pc = pc;
-        const step = try iter_vm.iteratorCheckObjectVm(ctx, stack, frame, catch_target, global);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.iterator_get_value_done => {
-        frame.pc = pc;
-        const step = try iter_vm.iteratorGetValueDoneVm(ctx, output, global, stack, function, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.iterator_call => {
-        frame.pc = pc;
-        const step = try iter_vm.iteratorCallVm(ctx, output, global, stack, function, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.for_of_next => {
-        frame.pc = pc;
-        const step = try iter_vm.forOfNextVm(ctx, output, global, stack, function, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
-    op.for_in_next => {
-        frame.pc = pc;
-        try iter_vm.forInNext(ctx, output, global, stack);
-        pc = frame.pc;
-    },
-    op.iterator_close => {
-        frame.pc = pc;
-        const step = try iter_vm.iteratorCloseVm(ctx, output, global, stack, frame, catch_target);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
-        }
-    },
+            // ===================================================================
+            // Object / array literals, super, this, iterators (DELEGATE)
+            // (define_field / get_super / get_super_value / put_super_value /
+            //  get_length appeared in two draft categories — merged here once)
+            // ===================================================================
+            op.object => {
+                frame.pc = pc;
+                try literal_vm.object(ctx, stack, global);
+                pc = frame.pc;
+            },
+            op.array_from => {
+                frame.pc = pc;
+                try literal_vm.arrayFrom(ctx, stack, function, frame, global);
+                pc = frame.pc;
+            },
+            op.append => {
+                frame.pc = pc;
+                const step = try literal_vm.appendSpreadValuesVm(ctx, output, global, stack, opc, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.rest => {
+                frame.pc = pc;
+                try literal_vm.rest(ctx, stack, function, frame);
+                pc = frame.pc;
+            },
+            op.define_field => {
+                frame.pc = pc;
+                const step = try literal_vm.defineField(ctx, output, global, stack, function, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.define_array_el => {
+                frame.pc = pc;
+                const step = try literal_vm.defineArrayEl(ctx, output, global, stack, function, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.set_proto => {
+                frame.pc = pc;
+                try literal_vm.setProto(ctx, stack);
+                pc = frame.pc;
+            },
+            op.set_home_object => {
+                frame.pc = pc;
+                try class_vm.setHomeObject(ctx, stack);
+                pc = frame.pc;
+            },
+            op.copy_data_properties => {
+                const mask = code[pc];
+                pc += 1;
+                frame.pc = pc;
+                const step = try literal_vm.copyDataProperties(ctx, output, global, stack, mask, function, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.define_method => {
+                frame.pc = pc;
+                const step = try class_vm.defineMethod(ctx, global, stack, function, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.define_method_computed => {
+                frame.pc = pc;
+                const step = try class_vm.defineMethodComputed(ctx, output, global, stack, function, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.define_class, op.define_class_computed => {
+                frame.pc = pc;
+                const step = try class_vm.defineClass(ctx, output, global, stack, function, frame, catch_target, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs, opc == op.define_class_computed);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.special_object => {
+                frame.pc = pc;
+                try literal_vm.specialObject(ctx, stack, function, frame, global, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs);
+                pc = frame.pc;
+            },
+            op.get_super => {
+                frame.pc = pc;
+                try class_vm.getSuper(ctx, stack, frame);
+                pc = frame.pc;
+            },
+            op.get_super_value => {
+                frame.pc = pc;
+                const step = try class_vm.getSuperValue(ctx, output, global, stack, function, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.put_super_value => {
+                frame.pc = pc;
+                const step = try class_vm.putSuperValue(ctx, output, global, stack, function, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.get_length => {
+                frame.pc = pc;
+                const step = try literal_vm.getLength(ctx, output, global, stack, function, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.to_object => {
+                frame.pc = pc;
+                const step = try value_vm.toObjectVm(ctx, stack, frame, catch_target, global);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.push_this => {
+                frame.pc = pc;
+                const step = try value_vm.pushThisVm(ctx, stack, frame, catch_target, global);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.for_of_start, op.for_await_of_start => {
+                frame.pc = pc;
+                const step = try iter_vm.forOfStartVm(ctx, output, global, stack, function, frame, catch_target, opc == op.for_await_of_start);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.for_in_start => {
+                frame.pc = pc;
+                const step = try iter_vm.forInStartVm(ctx, output, global, stack, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.iterator_next => {
+                frame.pc = pc;
+                const step = try iter_vm.iteratorNextVm(ctx, output, global, stack, function, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.iterator_check_object => {
+                frame.pc = pc;
+                const step = try iter_vm.iteratorCheckObjectVm(ctx, stack, frame, catch_target, global);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.iterator_get_value_done => {
+                frame.pc = pc;
+                const step = try iter_vm.iteratorGetValueDoneVm(ctx, output, global, stack, function, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.iterator_call => {
+                frame.pc = pc;
+                const step = try iter_vm.iteratorCallVm(ctx, output, global, stack, function, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.for_of_next => {
+                frame.pc = pc;
+                const step = try iter_vm.forOfNextVm(ctx, output, global, stack, function, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
+            op.for_in_next => {
+                frame.pc = pc;
+                try iter_vm.forInNext(ctx, output, global, stack);
+                pc = frame.pc;
+            },
+            op.iterator_close => {
+                frame.pc = pc;
+                const step = try iter_vm.iteratorCloseVm(ctx, output, global, stack, frame, catch_target);
+                pc = frame.pc;
+                switch (step) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
+            },
 
-    // ===================================================================
-    // Generator / async opcodes: a normal-kind frame never executes these
-    // ===================================================================
-    op.initial_yield, op.yield, op.yield_star, op.async_yield_star, op.await, op.return_async => @panic("dispatchRecursive: generator opcode in normal frame"),
+            // ===================================================================
+            // Generator / async opcodes: a normal-kind frame never executes these
+            // ===================================================================
+            op.initial_yield, op.yield, op.yield_star, op.async_yield_star, op.await, op.return_async => @panic("dispatchRecursive: generator opcode in normal frame"),
 
-    // ===================================================================
-    // Invalid / unknown
-    // ===================================================================
-    op.invalid => return error.InvalidBytecode,
-    else => return error.InvalidBytecode,
-}    }
+            // ===================================================================
+            // Invalid / unknown
+            // ===================================================================
+            op.invalid => return error.InvalidBytecode,
+            else => return error.InvalidBytecode,
+        }
+    }
 }
 
 comptime {
