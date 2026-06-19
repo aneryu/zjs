@@ -66,12 +66,10 @@ const storeStringSliceConstLocal = property_vm.storeStringSliceConstLocal;
 const stringFromCharCodeInt32Arg = property_vm.stringFromCharCodeInt32Arg;
 const varRefReadableBorrowed = property_vm.varRefReadableBorrowed;
 
-const dataPropertyValueForFastPath = property_ic.dataPropertyValueForFastPath;
 const functionOwnDataPropertyValueForFastPath = property_ic.functionOwnDataPropertyValueForFastPath;
 const functionOwnNativeBuiltinRefForFastPath = property_ic.functionOwnNativeBuiltinRefForFastPath;
 const globalOwnDataPropertyValue = property_ic.globalOwnDataPropertyValue;
 const ordinaryDataPropertyValueOrUndefinedForFastPath = property_ic.ordinaryDataPropertyValueOrUndefinedForFastPath;
-const setObjectDataPropertyForPutFieldFastPath = property_ic.setObjectDataPropertyForPutFieldFastPath;
 const ownDataPropertyValueMaterializedForFastPath = property_ic.ownDataPropertyValueMaterializedForFastPath;
 const op = bytecode.opcode.op;
 
@@ -277,11 +275,10 @@ pub fn field(
     frame.pc += 4;
     switch (opc) {
         op.get_field => {
-            const site_pc = frame.pc - 5;
             if (stack.values.len == 0) return error.StackUnderflow;
             const top_index = stack.values.len - 1;
             const receiver = stack.values[top_index];
-            if (dataPropertyValueForFastPath(function, site_pc, ctx.runtime, receiver, atom_id)) |value| {
+            if (qjsGetFieldFast(ctx.runtime, receiver, atom_id)) |value| {
                 replaceTopBorrowed(ctx.runtime, stack, top_index, receiver, value);
                 return .done;
             }
@@ -322,7 +319,7 @@ pub fn field(
             if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseStringFromCharCodeInt32CallFromField2, try tryFuseStringFromCharCodeInt32CallFromField2(ctx, function, frame, stack, obj, atom_id, site_pc))) return .done;
             if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseStringSliceConstLocalStoreFromField2, try tryFuseStringSliceConstLocalStoreFromField2(ctx, function, global, frame, stack, obj, atom_id, sync_global_lexical_locals))) return .done;
             if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseArrayPushCallFromField2, try tryFuseArrayPushCallFromField2(ctx, function, global, frame, stack, obj, atom_id, sync_global_lexical_locals))) return .done;
-            if (dataPropertyValueForFastPath(function, site_pc, ctx.runtime, obj, atom_id)) |value| {
+            if (qjsGetFieldFast(ctx.runtime, obj, atom_id)) |value| {
                 try stack.push(value);
                 return .done;
             }
@@ -354,13 +351,12 @@ pub fn field(
             try stack.pushOwned(value);
         },
         op.put_field => {
-            const site_pc = frame.pc - 5;
             const value = try stack.pop();
             defer value.free(ctx.runtime);
             const obj = try stack.pop();
             defer obj.free(ctx.runtime);
             if (setArrayLengthForPutFieldFastPath(ctx.runtime, obj, atom_id, value)) return .done;
-            if (try setObjectDataPropertyForPutFieldFastPath(ctx.runtime, function, site_pc, obj, atom_id, value)) return .done;
+            if (qjsPutFieldFast(ctx.runtime, obj, atom_id, value)) return .done;
             const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
                 try forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(ctx, output, global, stack, frame);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
@@ -371,6 +367,60 @@ pub fn field(
         else => unreachable,
     }
     return .done;
+}
+
+fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.JSValue {
+    if (rt.atoms.kind(atom_id) == .private) return null;
+    var object = objectFromValue(receiver) orelse return null;
+    while (true) {
+        if (qjsFieldObjectNeedsSlow(rt, object, atom_id)) return null;
+        if (object.findProperty(atom_id)) |index| {
+            if (object.propFlagsAt(index).accessor) return null;
+            return switch (object.properties[index].slot) {
+                .data => |stored| stored,
+                .auto_init, .accessor, .deleted => null,
+            };
+        }
+        object = object.getPrototype() orelse return core.JSValue.undefinedValue();
+    }
+}
+
+fn qjsPutFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) bool {
+    if (rt.atoms.kind(atom_id) == .private) return false;
+    const object = objectFromValue(receiver) orelse return false;
+    if (qjsPutFieldObjectNeedsSlow(object, atom_id)) return false;
+    const index = object.findProperty(atom_id) orelse return false;
+    const flags = object.propFlagsAt(index);
+    if (!flags.writable or flags.accessor) return false;
+    const entry = &object.properties[index];
+    switch (entry.slot) {
+        .data => |old_value| {
+            const next_value = core.object.dupPropertyDataValue(&rt.atoms, atom_id, value);
+            entry.slot = .{ .data = next_value };
+            core.object.destroyPropertySlot(rt, atom_id, .{ .data = old_value });
+            object.pruneBorrowedReferenceHolderIfEmpty(rt);
+            return true;
+        },
+        .auto_init, .accessor, .deleted => return false,
+    }
+}
+
+fn qjsFieldObjectNeedsSlow(rt: *core.JSRuntime, object: *const core.Object, atom_id: core.Atom) bool {
+    if (object.flags.is_proxy or object.proxyTarget() != null or object.exotic != null) return true;
+    if (object.flags.is_array and (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null)) return true;
+    if (core.object.isTypedArrayObject(object)) return true;
+    if (object.class_id == core.class.ids.regexp and atom_id == core.atom.ids.lastIndex and object.regexpLastIndex() != null) return true;
+    if (object.class_id == core.class.ids.module_ns or object.class_id == core.class.ids.mapped_arguments) return true;
+    return false;
+}
+
+fn qjsPutFieldObjectNeedsSlow(object: *const core.Object, atom_id: core.Atom) bool {
+    if (object.flags.is_proxy or object.proxyTarget() != null or object.exotic != null) return true;
+    if (object.flags.is_array) return true;
+    if (core.object.isTypedArrayObject(object)) return true;
+    if (object.class_id == core.class.ids.regexp and atom_id == core.atom.ids.lastIndex and object.regexpLastIndex() != null) return true;
+    if (object.class_id == core.class.ids.module_ns or object.class_id == core.class.ids.mapped_arguments) return true;
+    return false;
 }
 
 inline fn replaceTopBorrowed(
