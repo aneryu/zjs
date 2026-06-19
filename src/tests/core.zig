@@ -1516,7 +1516,7 @@ test "cached iterator next clear defers value finalizer reentry" {
         .payload_finalizer = reentrantCachedIteratorNextFinalizer,
     });
 
-    const object = try core.Object.create(rt, core.class.ids.object, null);
+    const object = try core.Object.create(rt, core.class.ids.iterator, null);
     defer object.value().free(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
     object.cachedIteratorNextSlot().* = value.value().dup();

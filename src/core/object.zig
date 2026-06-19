@@ -192,8 +192,6 @@ pub const OrdinaryPayload = struct {
     promise_already_resolved: bool = false,
     promise_combinator_remaining: i32 = 0,
     realm_global_ptr: ?*Object = null,
-    global_lexicals: ?*Object = null,
-    shared_lazy_native_functions: ?*[runtime_mod.shared_lazy_native_function_slots]?JSValue = null,
 
     pub fn destroy(self: *OrdinaryPayload, rt: *JSRuntime) void {
         destroyAtomSlice(rt, &self.private_remap_from);
@@ -213,21 +211,6 @@ pub const OrdinaryPayload = struct {
         destroyOptionalValue(rt, &self.typed_array_array_buffer_prototype);
         destroyOptionalValue(rt, &self.error_stack);
         destroyOptionalValue(rt, &self.error_stack_sites);
-        const global_lexicals = self.global_lexicals;
-        self.global_lexicals = null;
-        if (global_lexicals) |env| {
-            if (rt.gc.phase != .deinit) env.value().free(rt);
-        }
-        const shared_lazy_native_functions = self.shared_lazy_native_functions;
-        self.shared_lazy_native_functions = null;
-        if (shared_lazy_native_functions) |cache| {
-            for (cache) |*slot| {
-                const cached = slot.*;
-                slot.* = null;
-                if (cached) |stored| stored.free(rt);
-            }
-            rt.memory.destroy([runtime_mod.shared_lazy_native_function_slots]?JSValue, cache);
-        }
         self.* = .{};
     }
 };
@@ -236,7 +219,6 @@ pub const IteratorPayload = struct {
     target: ?JSValue = null,
     data: ?JSValue = null,
     next: ?JSValue = null,
-    cached_next: ?JSValue = null,
     callback: ?JSValue = null,
     inner_next: ?JSValue = null,
     zip_nexts: ?JSValue = null,
@@ -255,7 +237,6 @@ pub const IteratorPayload = struct {
         destroyOptionalValue(rt, &self.target);
         destroyOptionalValue(rt, &self.data);
         destroyOptionalValue(rt, &self.next);
-        destroyOptionalValue(rt, &self.cached_next);
         destroyOptionalValue(rt, &self.callback);
         destroyOptionalValue(rt, &self.inner_next);
         destroyOptionalValue(rt, &self.zip_nexts);
@@ -709,11 +690,28 @@ pub const RealmPayload = struct {
     cached_function_proto: ?*Object = null,
     cached_promise_proto: ?*Object = null,
     cached_values: [realm_value_slot_count]?JSValue = @splat(null),
+    global_lexicals: ?*Object = null,
+    shared_lazy_native_functions: ?*[runtime_mod.shared_lazy_native_function_slots]?JSValue = null,
 
     pub fn destroy(self: *RealmPayload, rt: *JSRuntime) void {
         destroyOptionalObjectRef(rt, &self.cached_function_proto);
         destroyOptionalObjectRef(rt, &self.cached_promise_proto);
         destroyOptionalValueSlots(rt, &self.cached_values);
+        const global_lexicals = self.global_lexicals;
+        self.global_lexicals = null;
+        if (global_lexicals) |env| {
+            if (rt.gc.phase != .deinit) env.value().free(rt);
+        }
+        const shared_lazy_native_functions = self.shared_lazy_native_functions;
+        self.shared_lazy_native_functions = null;
+        if (shared_lazy_native_functions) |cache| {
+            for (cache) |*slot| {
+                const cached = slot.*;
+                slot.* = null;
+                if (cached) |stored| stored.free(rt);
+            }
+            rt.memory.destroy([runtime_mod.shared_lazy_native_function_slots]?JSValue, cache);
+        }
         self.* = .{};
     }
 };
@@ -1098,6 +1096,7 @@ pub const Object = struct {
     shape_ref: *shape.Shape,
     prototype: ?*Object = null,
     flags: ObjectFlags = .{},
+    cached_iterator_next: ?JSValue = null,
     length: u32 = 0,
     properties: []property.Entry = &.{},
 
@@ -1383,26 +1382,21 @@ pub const Object = struct {
     }
 
     pub fn cachedIteratorNextSlot(self: *Object) *?JSValue {
-        if (self.iteratorPayload()) |payload| return &payload.cached_next;
-        std.debug.assert(self.class_payload_kind == .iterator);
-        unreachable;
+        return &self.cached_iterator_next;
     }
 
     pub fn cachedIteratorNext(self: *const Object) ?JSValue {
-        if (self.iteratorPayloadConst()) |payload| return payload.cached_next;
-        return null;
+        return self.cached_iterator_next;
     }
 
     pub fn clearCachedIteratorNext(self: *Object, rt: *JSRuntime) void {
-        if (self.iteratorPayload()) |payload| {
-            const old_cached = payload.cached_next;
-            payload.cached_next = null;
-            if (old_cached) |stored| stored.free(rt);
-        }
+        const old_cached = self.cached_iterator_next;
+        self.cached_iterator_next = null;
+        if (old_cached) |stored| stored.free(rt);
     }
 
     pub fn ensureSharedLazyNativeFunctionCache(self: *Object, rt: *JSRuntime) !void {
-        const payload = try self.ensureOrdinaryPayload(rt);
+        const payload = try self.ensureRealmPayload(rt);
         if (payload.shared_lazy_native_functions != null) return;
         const cache = try rt.memory.create([runtime_mod.shared_lazy_native_function_slots]?JSValue);
         cache.* = @splat(null);
@@ -1420,11 +1414,11 @@ pub const Object = struct {
     }
 
     pub fn globalLexicals(self: *const Object) ?*Object {
-        return if (self.ordinaryPayloadConst()) |payload| payload.global_lexicals else null;
+        return if (self.realmPayloadConst()) |payload| payload.global_lexicals else null;
     }
 
     pub fn setGlobalLexicals(self: *Object, rt: *JSRuntime, v: ?*Object) !void {
-        (try self.ensureOrdinaryPayload(rt)).global_lexicals = v;
+        (try self.ensureRealmPayload(rt)).global_lexicals = v;
     }
 
     pub fn ensureRealmPayload(self: *Object, rt: *JSRuntime) !*RealmPayload {
@@ -1510,7 +1504,7 @@ pub const Object = struct {
 
     fn sharedLazyNativeFunctionSlot(self: *Object, slot: u8) ?*?JSValue {
         if (slot == 0 or slot > runtime_mod.shared_lazy_native_function_slots) return null;
-        const payload = self.ordinaryPayload() orelse return null;
+        const payload = self.realmPayload() orelse return null;
         const cache = payload.shared_lazy_native_functions orelse return null;
         return &cache[slot - 1];
     }
@@ -1587,6 +1581,11 @@ pub const Object = struct {
         if (self.exotic) |ex| {
             self.exotic = null;
             rt.memory.destroy(ExoticMethods, ex);
+        }
+        const cached_iterator_next = self.cached_iterator_next;
+        self.cached_iterator_next = null;
+        if (cached_iterator_next) |stored| {
+            if (rt.gc.phase != .deinit) stored.free(rt);
         }
         const old_prototype = self.prototype;
         self.prototype = null;
@@ -1944,7 +1943,7 @@ pub const Object = struct {
         }
     }
 
-    pub const post_a_object_size_baseline: usize = 224;
+    pub const post_a_object_size_baseline: usize = 256;
     comptime {
         std.debug.assert(@sizeOf(Object) <= post_a_object_size_baseline / 2);
     }
@@ -5791,7 +5790,7 @@ pub const Object = struct {
         };
 
         try Helper.callVisitObject(visitor, &self.prototype);
-        if (self.ordinaryPayload()) |payload| {
+        if (self.realmPayload()) |payload| {
             try Helper.callVisitObject(visitor, &payload.global_lexicals);
             if (payload.shared_lazy_native_functions) |cache| {
                 for (cache) |*maybe_cached| {
@@ -5799,7 +5798,7 @@ pub const Object = struct {
                 }
             }
         }
-        if (self.iteratorPayload()) |payload| try Helper.traceOptValue(visitor, &payload.cached_next);
+        try Helper.traceOptValue(visitor, &self.cached_iterator_next);
         // Property key atoms (including symbol keys) live in the shape;
         // visit them from there. Visitors only read symbol atoms (set
         // insertion / no-op), so revisiting a shared shape from several
@@ -6779,12 +6778,14 @@ pub const Object = struct {
         function_bytecode: *const FunctionBytecode,
     ) ObjectGraphError!usize {
         var count: usize = 0;
-        if (self.iteratorPayloadConst()) |payload| count += countOptionalFunctionBytecodeRef(payload.cached_next, function_bytecode);
+        count += countOptionalFunctionBytecodeRef(self.cached_iterator_next, function_bytecode);
         for (self.properties) |entry| count += countSlotFunctionBytecodeRefs(entry.slot, function_bytecode);
-        if (self.ordinaryPayloadConst()) |payload| {
+        if (self.realmPayloadConst()) |payload| {
             if (payload.shared_lazy_native_functions) |cache| {
                 for (cache) |maybe_cached| count += countOptionalFunctionBytecodeRef(maybe_cached, function_bytecode);
             }
+        }
+        if (self.ordinaryPayloadConst()) |payload| {
             count += countOptionalFunctionBytecodeRef(payload.callsite_file, function_bytecode);
             count += countOptionalFunctionBytecodeRef(payload.callsite_function, function_bytecode);
             count += countOptionalFunctionBytecodeRef(payload.promise_reaction_on_fulfilled, function_bytecode);

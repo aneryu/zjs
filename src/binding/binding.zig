@@ -1241,7 +1241,7 @@ test "JSObject trace hook marks typed payload slots" {
     const binding = try ObjectType.binding(ctx);
 
     var payload = Payload{ .value_slot = core.JSValue.int32(123) };
-    var class_payload = core.class.Payload{ .external = @ptrCast(&payload) };
+    var class_payload: core.class.Payload = @ptrCast(&payload);
 
     const State = struct {
         value_slot: *core.JSValue,
