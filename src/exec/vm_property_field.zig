@@ -381,7 +381,14 @@ fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.At
                 .auto_init, .accessor, .deleted => null,
             };
         }
-        object = object.getPrototype() orelse return core.JSValue.undefinedValue();
+        // End of the explicit self.prototype chain. We must NOT synthesize `undefined`
+        // here: zjs resolves built-in prototype methods/constructor for arrays and other
+        // class objects via a by-class-name global fallback (object_ops.getValueProperty),
+        // and some objects (rest-parameter arrays, regexp-split results) legitimately have
+        // a null self.prototype while still resolving those members through that fallback.
+        // Returning null defers to the slow path, which both does the global fallback and
+        // returns a genuine `undefined` for truly-absent properties.
+        object = object.getPrototype() orelse return null;
     }
 }
 
