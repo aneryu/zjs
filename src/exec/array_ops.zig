@@ -5434,7 +5434,7 @@ pub fn qjsArrayJoinCall(
         if (!item.isUndefined() and !item.isNull()) {
             const string_item = try toStringForAnnexB(ctx, output, global, item, caller_function, caller_frame);
             defer string_item.free(ctx.runtime);
-            try value_ops.appendRawString(ctx.runtime, &bytes, string_item);
+            try value_ops.appendValueString(ctx.runtime, &bytes, string_item);
         }
     }
     return try value_ops.createStringValue(ctx.runtime, bytes.items);
