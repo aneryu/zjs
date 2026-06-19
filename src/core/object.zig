@@ -1120,7 +1120,14 @@ pub const Object = struct {
             }
         }
         const proto_id = if (prototype) |proto| @intFromPtr(proto) else null;
-        const shape_ref = try rt.shapes.createObjectRootWithPropertyCapacity(proto_id, own_property_capacity);
+        // qjs shape model (faithful): start from the SHARED, transition-cacheable
+        // empty root shape (qjs hash-consed shapes) so objects adding the same
+        // properties converge on one shared shape via cached transitions, instead
+        // of each getting a fresh unique shape mutated in place (the old
+        // createObjectRootWithPropertyCapacity → ~1:1 shapes + per-object
+        // appendProperty/rehashShape). The property VALUE array is still
+        // pre-reserved below; only the SHAPE is shared.
+        const shape_ref = try rt.shapes.createObjectRoot(proto_id);
         var shape_owned = true;
         errdefer if (shape_owned) rt.shapes.release(shape_ref);
         var property_storage: []property.Entry = &.{};
