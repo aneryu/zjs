@@ -339,7 +339,7 @@ pub const BlockHeader = extern struct {
         std.debug.assert(@sizeOf(BlockHeader) == 8);
     }
 
-    pub fn retain(self: *BlockHeader) void {
+    pub inline fn retain(self: *BlockHeader) void {
         std.debug.assert(self.rc > 0);
         self.rc += 1;
     }
@@ -1409,25 +1409,30 @@ pub inline fn headerFromGcNode(node: *GcNode) *BlockHeader {
 }
 
 /// 9.1 统一的非原子 retain/release/dup/free 路径
-pub fn retain(header: *Header) void {
+pub inline fn retain(header: *Header) void {
     header.retain();
 }
 
-pub fn release(rt: anytype, header: *Header) void {
+pub inline fn release(rt: anytype, header: *Header) void {
+    comptime {
+        @setEvalBranchQuota(10_000);
+    }
     std.debug.assert(header.rc > 0);
     header.rc -= 1;
     rt.gc.stats.rc_dec += 1;
 
-    if (header.rc == 0) {
-        if (rt.gc.phase == .deinit and header.kind == .object) return;
-        rt.gc.unlinkObjectWithBytes(header, Registry.heapByteSizeFromHeader(rt, header));
+    if (header.rc == 0) releaseAndDestroy(rt, header);
+}
 
-        // 10.1 静态 kind switch 派发销毁
-        switch (header.kind) {
-            .string => string.String.destroyFromHeader(rt, header),
-            .object => object.Object.destroyFromHeader(rt, header),
-            .big_int => bigint.BigInt.destroyFromHeader(rt, header),
-            .function_bytecode => function_bytecode_mod.destroyFromHeader(rt, header),
-        }
+noinline fn releaseAndDestroy(rt: anytype, header: *Header) void {
+    if (rt.gc.phase == .deinit and header.kind == .object) return;
+    rt.gc.unlinkObjectWithBytes(header, Registry.heapByteSizeFromHeader(rt, header));
+
+    // 10.1 静态 kind switch 派发销毁
+    switch (header.kind) {
+        .string => string.String.destroyFromHeader(rt, header),
+        .object => object.Object.destroyFromHeader(rt, header),
+        .big_int => bigint.BigInt.destroyFromHeader(rt, header),
+        .function_bytecode => function_bytecode_mod.destroyFromHeader(rt, header),
     }
 }
