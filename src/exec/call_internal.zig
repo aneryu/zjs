@@ -101,6 +101,50 @@ inline fn tryFastSetLoc(
     return true;
 }
 
+inline fn tryFastGetField(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    atom_id: core.Atom,
+) bool {
+    if (stack.values.len == 0) return false;
+    const top_index = stack.values.len - 1;
+    const receiver = stack.values[top_index];
+    const value = vm_property_field.qjsGetFieldFast(ctx.runtime, receiver, atom_id) orelse return false;
+    stack.values[top_index] = if (value.requiresRefCount()) value.dup() else value;
+    receiver.free(ctx.runtime);
+    return true;
+}
+
+inline fn tryFastGetField2(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    atom_id: core.Atom,
+) bool {
+    if (stack.values.len == 0) return false;
+    const receiver = stack.values[stack.values.len - 1];
+    const value = vm_property_field.qjsGetFieldFast(ctx.runtime, receiver, atom_id) orelse return false;
+    stack.pushAssumeCapacity(value);
+    return true;
+}
+
+inline fn tryFastPutField(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    atom_id: core.Atom,
+) bool {
+    if (stack.values.len < 2) return false;
+    const value_index = stack.values.len - 1;
+    const obj_index = stack.values.len - 2;
+    const value = stack.values[value_index];
+    const obj = stack.values[obj_index];
+    if (!vm_property_field.qjsPutFieldFast(ctx.runtime, obj, atom_id, value)) return false;
+
+    stack.values = stack.values.ptr[0..obj_index];
+    obj.free(ctx.runtime);
+    value.free(ctx.runtime);
+    return true;
+}
+
 /// Frame-setup wrapper that runs a NORMAL-kind bytecode function through the
 /// recursive `dispatchRecursive`. Mirrors `runWithArgsState`'s setup (lines
 /// 294-339) minus the inline-`Machine` loop and the generator/eval-code state,
@@ -1234,12 +1278,23 @@ switch (opc) {
         }
     },
     op.get_field, op.get_field2, op.put_field => {
-        frame.pc = pc;
-        const step = try vm_property_field.field(ctx, output, global, stack, function, frame, catch_target, opc, false);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
+        const atom_id = readInt(u32, code[pc..][0..4]);
+        const handled = switch (opc) {
+            op.get_field => tryFastGetField(ctx, stack, atom_id),
+            op.get_field2 => tryFastGetField2(ctx, stack, atom_id),
+            op.put_field => tryFastPutField(ctx, stack, atom_id),
+            else => unreachable,
+        };
+        if (handled) {
+            pc += 4;
+        } else {
+            frame.pc = pc;
+            const step = try vm_property_field.field(ctx, output, global, stack, function, frame, catch_target, opc, false);
+            pc = frame.pc;
+            switch (step) {
+                .done => {},
+                .continue_loop => continue,
+            }
         }
     },
     op.get_array_el, op.get_array_el2, op.put_array_el => {

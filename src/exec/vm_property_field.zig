@@ -369,7 +369,7 @@ pub inline fn field(
     return .done;
 }
 
-inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.JSValue {
+pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.JSValue {
     if (rt.atoms.kind(atom_id) == .private) return null;
     var object = objectFromValue(receiver) orelse return null;
     while (true) {
@@ -390,7 +390,7 @@ inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: 
     }
 }
 
-inline fn qjsPutFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) bool {
+pub inline fn qjsPutFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) bool {
     if (rt.atoms.kind(atom_id) == .private) return false;
     const object = objectFromValue(receiver) orelse return false;
     if (qjsPutFieldObjectNeedsSlow(object, atom_id)) return false;
