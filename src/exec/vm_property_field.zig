@@ -473,6 +473,8 @@ fn setArrayLengthForPutFieldFastPath(
             if (index >= new_len) return false;
         }
         object.truncateArrayElements(rt, new_len);
+    } else if (new_len > object.length) {
+        return false;
     }
     object.length = new_len;
     return true;

@@ -5799,8 +5799,6 @@ fn parseArrayLiteral(s: *ParseState, flags: ParseFlags) Error!void {
             // object-style sparse array shape: `array_from <dense-prefix>`
             // followed by `define_field "<index>"` for present elements.
             if (spread_active) {
-                try s.emitOp(opcode.op.undefined);
-                try s.emitOp(opcode.op.define_array_el);
                 try s.emitOp(opcode.op.inc);
             } else {
                 if (!sparse_active) {
@@ -5852,7 +5850,8 @@ fn parseArrayLiteral(s: *ParseState, flags: ParseFlags) Error!void {
     }
     try expectPunct(s, ']');
     if (spread_active) {
-        try s.emitOp(opcode.op.drop); // drop the running index
+        try s.emitOp(opcode.op.dup1);
+        try s.emitOpAtom(opcode.op.put_field, atom_module.ids.length);
     } else if (!sparse_active) {
         try s.emitOpU16(opcode.op.array_from, count);
     } else {

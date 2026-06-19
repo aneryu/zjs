@@ -212,6 +212,7 @@ pub fn defineField(
     if (target.flags.is_array and effective_atom == core.atom.ids.length) {
         if (value.asInt32()) |length| {
             const new_len: u32 = @intCast(@max(length, 0));
+            if (new_len > target.length) try target.convertDenseArrayElementsToSparseProperties(ctx.runtime);
             target.truncateArrayElements(ctx.runtime, new_len);
             target.length = new_len;
             return .done;

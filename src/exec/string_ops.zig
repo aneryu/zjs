@@ -852,7 +852,7 @@ pub fn qjsStringFromCodePointDenseArray(rt: *core.JSRuntime, array: *core.Object
         var unit_count: usize = 0;
         var index: usize = 0;
         while (index < length) : (index += 1) {
-            const value = array.arrayElements()[index] orelse return null;
+            const value = array.arrayElements()[index];
             const number = value_ops.numberValue(value) orelse return null;
             const code_point = validStringCodePoint(number) orelse return error.RangeError;
             if (code_point <= 0xffff) {
@@ -3857,13 +3857,11 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
     std.debug.assert(out.arrayElementsCapacity() == 0);
 
     const element_count = found.capture_count + 1;
-    const elements = try rt.memory.alloc(?core.JSValue, element_count);
+    const elements = try rt.memory.alloc(core.JSValue, element_count);
     var initialized: usize = 0;
     errdefer {
-        for (elements[0..initialized]) |slot| {
-            if (slot) |value| value.free(rt);
-        }
-        rt.memory.free(?core.JSValue, elements);
+        for (elements[0..initialized]) |value| value.free(rt);
+        rt.memory.free(core.JSValue, elements);
     }
 
     elements[0] = matched.dup();

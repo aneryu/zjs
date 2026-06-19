@@ -1880,13 +1880,13 @@ pub fn qjsDenseArrayMapSimpleNumericArg0(
 
     var index: usize = 0;
     while (index < length) : (index += 1) {
-        const item = elements[index] orelse return null;
+        const item = elements[index];
         if (!item.isNumber()) return null;
     }
 
     index = 0;
     while (index < length) : (index += 1) {
-        const item = elements[index].?;
+        const item = elements[index];
         const mapped = try simpleNumericBinary(rt, simple.binop, item, core.JSValue.int32(simple.rhs));
         defer mapped.free(rt);
         try out.defineDenseArrayDataPropertyUnchecked(rt, @intCast(index), mapped);
@@ -1911,7 +1911,7 @@ pub fn qjsArrayMapSimpleNumericArg0DefaultSpeciesFastCall(
     if (length > elements.len) return null;
     var index: usize = 0;
     while (index < length) : (index += 1) {
-        const item = elements[index] orelse return null;
+        const item = elements[index];
         if (!item.isNumber()) return null;
     }
 
@@ -2949,20 +2949,10 @@ fn qjsFastDenseArrayPop(object: *core.Object) ?core.JSValue {
 
     const element_index: usize = @intCast(index);
     const elements = object.arrayElementsSlot();
-    if (element_index >= elements.*.len) {
-        if (!arrayPrototypeChainHasNoIndexedProperties(object)) return null;
-        object.length = index;
-        return core.JSValue.undefinedValue();
-    }
+    if (element_index >= elements.*.len) return null;
 
-    const value = elements.*[element_index] orelse {
-        if (!arrayPrototypeChainHasNoIndexedProperties(object)) return null;
-        elements.* = elements.*.ptr[0..element_index];
-        object.length = index;
-        return core.JSValue.undefinedValue();
-    };
+    const value = elements.*[element_index];
 
-    elements.*[element_index] = null;
     elements.* = elements.*.ptr[0..element_index];
     object.length = index;
     return value;
@@ -5476,7 +5466,7 @@ pub fn qjsFastDensePrimitiveArrayJoin(
     defer bytes.deinit(rt.memory.allocator);
     var index: usize = 0;
     while (index < length) : (index += 1) {
-        const item = elements[index] orelse return null;
+        const item = elements[index];
         if (!qjsCanFastJoinPrimitive(item)) return null;
         if (index != 0) try bytes.appendSlice(rt.memory.allocator, separator.items);
         if (!item.isUndefined() and !item.isNull()) try value_ops.appendValueString(rt, &bytes, item);

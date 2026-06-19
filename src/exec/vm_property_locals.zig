@@ -3720,7 +3720,7 @@ fn invariantInt32LoadValue(rt: *core.JSRuntime, receiver: core.JSValue, code: []
     if (index >= @as(usize, @intCast(object.length))) return null;
     const elements = object.arrayElements();
     if (index >= elements.len) return null;
-    const element = elements[index] orelse return null;
+    const element = elements[index];
     return .{ .value = element.asInt32() orelse return null, .next_pc = pc + 2 };
 }
 
@@ -3735,8 +3735,7 @@ fn denseArrayInt32RangeDelta(object: *core.Object, start: usize, limit: usize) ?
     var total: i128 = 0;
     var min_delta: i128 = 0;
     var max_delta: i128 = 0;
-    for (elements[start..limit]) |maybe_element| {
-        const value = maybe_element orelse return null;
+    for (elements[start..limit]) |value| {
         total += value.asInt32() orelse return null;
         min_delta = @min(min_delta, total);
         max_delta = @max(max_delta, total);
