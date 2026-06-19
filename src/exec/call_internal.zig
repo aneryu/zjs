@@ -52,6 +52,55 @@ fn relativePc(operand_pc: usize, diff: i32) usize {
     return @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff));
 }
 
+inline fn plainLocalSlotFastPath(
+    function: *const bytecode.Bytecode,
+    idx: usize,
+    old_value: core.JSValue,
+    value: core.JSValue,
+) bool {
+    if (idx < function.var_is_lexical.len and function.var_is_lexical[idx]) return false;
+    if (slot_ops.varRefCellFromValue(old_value) != null) return false;
+    if (slot_ops.varRefCellFromValue(value) != null) return false;
+    return true;
+}
+
+inline fn tryFastPutLoc(
+    ctx: *core.JSContext,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    stack: *stack_mod.Stack,
+    idx: usize,
+) bool {
+    if (stack.values.len == 0) return false;
+    const value = stack.values[stack.values.len - 1];
+    const old_value = frame.locals[idx];
+    if (!plainLocalSlotFastPath(function, idx, old_value, value)) return false;
+
+    // Move the owned stack slot into the local, matching execPutLoc -> setSlotValue
+    // for a plain local slot. The stack slot is consumed by shrinking the slice.
+    frame.locals[idx] = value;
+    stack.values = stack.values.ptr[0 .. stack.values.len - 1];
+    old_value.free(ctx.runtime);
+    return true;
+}
+
+inline fn tryFastSetLoc(
+    ctx: *core.JSContext,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    stack: *stack_mod.Stack,
+    idx: usize,
+) bool {
+    if (stack.values.len == 0) return false;
+    const value = stack.values[stack.values.len - 1];
+    const old_value = frame.locals[idx];
+    if (!plainLocalSlotFastPath(function, idx, old_value, value)) return false;
+
+    frame.locals[idx] = if (value.requiresRefCount()) value.dup() else value;
+    old_value.free(ctx.runtime);
+    return true;
+}
+
 /// Frame-setup wrapper that runs a NORMAL-kind bytecode function through the
 /// recursive `dispatchRecursive`. Mirrors `runWithArgsState`'s setup (lines
 /// 294-339) minus the inline-`Machine` loop and the generator/eval-code state,
@@ -543,30 +592,106 @@ switch (opc) {
         pc += 2;
         array_ops.pushSlotValueAssumeCapacity(stack, frame.locals[idx]);
     },
-    op.put_loc, op.set_loc, op.put_loc8, op.set_loc8, op.set_loc0, op.set_loc1, op.set_loc2, op.set_loc3, op.get_loc0_loc1 => {
+    op.put_loc => {
+        const idx = readInt(u16, code[pc..][0..2]);
+        if (tryFastPutLoc(ctx, function, frame, stack, idx)) {
+            pc += 2;
+        } else {
+            frame.pc = pc;
+            try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
+            pc = frame.pc;
+        }
+    },
+    op.set_loc => {
+        const idx = readInt(u16, code[pc..][0..2]);
+        if (tryFastSetLoc(ctx, function, frame, stack, idx)) {
+            pc += 2;
+        } else {
+            frame.pc = pc;
+            try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
+            pc = frame.pc;
+        }
+    },
+    op.put_loc8 => {
+        const idx = code[pc];
+        if (tryFastPutLoc(ctx, function, frame, stack, idx)) {
+            pc += 1;
+        } else {
+            frame.pc = pc;
+            try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
+            pc = frame.pc;
+        }
+    },
+    op.set_loc8 => {
+        const idx = code[pc];
+        if (tryFastSetLoc(ctx, function, frame, stack, idx)) {
+            pc += 1;
+        } else {
+            frame.pc = pc;
+            try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
+            pc = frame.pc;
+        }
+    },
+    op.set_loc0 => {
+        if (!tryFastSetLoc(ctx, function, frame, stack, 0)) {
+            frame.pc = pc;
+            try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
+            pc = frame.pc;
+        }
+    },
+    op.set_loc1 => {
+        if (!tryFastSetLoc(ctx, function, frame, stack, 1)) {
+            frame.pc = pc;
+            try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
+            pc = frame.pc;
+        }
+    },
+    op.set_loc2 => {
+        if (!tryFastSetLoc(ctx, function, frame, stack, 2)) {
+            frame.pc = pc;
+            try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
+            pc = frame.pc;
+        }
+    },
+    op.set_loc3 => {
+        if (!tryFastSetLoc(ctx, function, frame, stack, 3)) {
+            frame.pc = pc;
+            try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
+            pc = frame.pc;
+        }
+    },
+    op.get_loc0_loc1 => {
         frame.pc = pc;
         try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
         pc = frame.pc;
     },
     op.put_loc0 => {
-        frame.pc = pc;
-        try slot_ops.execPutLoc(ctx, function, global, frame, stack, 0, 0, opc, false);
-        pc = frame.pc;
+        if (!tryFastPutLoc(ctx, function, frame, stack, 0)) {
+            frame.pc = pc;
+            try slot_ops.execPutLoc(ctx, function, global, frame, stack, 0, 0, opc, false);
+            pc = frame.pc;
+        }
     },
     op.put_loc1 => {
-        frame.pc = pc;
-        try slot_ops.execPutLoc(ctx, function, global, frame, stack, 1, 0, opc, false);
-        pc = frame.pc;
+        if (!tryFastPutLoc(ctx, function, frame, stack, 1)) {
+            frame.pc = pc;
+            try slot_ops.execPutLoc(ctx, function, global, frame, stack, 1, 0, opc, false);
+            pc = frame.pc;
+        }
     },
     op.put_loc2 => {
-        frame.pc = pc;
-        try slot_ops.execPutLoc(ctx, function, global, frame, stack, 2, 0, opc, false);
-        pc = frame.pc;
+        if (!tryFastPutLoc(ctx, function, frame, stack, 2)) {
+            frame.pc = pc;
+            try slot_ops.execPutLoc(ctx, function, global, frame, stack, 2, 0, opc, false);
+            pc = frame.pc;
+        }
     },
     op.put_loc3 => {
-        frame.pc = pc;
-        try slot_ops.execPutLoc(ctx, function, global, frame, stack, 3, 0, opc, false);
-        pc = frame.pc;
+        if (!tryFastPutLoc(ctx, function, frame, stack, 3)) {
+            frame.pc = pc;
+            try slot_ops.execPutLoc(ctx, function, global, frame, stack, 3, 0, opc, false);
+            pc = frame.pc;
+        }
     },
     // S2b: hot arg GETs inline the leaned body (skip the `arg` dispatcher + the
     // execGetArg call + frame.pc round-trip). Variadic bound: an arg index past
