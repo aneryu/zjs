@@ -941,11 +941,8 @@ pub const ModuleNamespacePayload = struct {
 };
 
 pub fn destroyDetachedClassPayload(rt: *JSRuntime, payload_kind: class.PayloadKind, payload: *class.Payload) void {
-    const ptr = switch (payload.*) {
-        .external => |stored| stored,
-        .none => return,
-    };
-    payload.* = .none;
+    const ptr = payload.* orelse return;
+    payload.* = null;
     switch (payload_kind) {
         .ordinary => {
             const typed: *OrdinaryPayload = @ptrCast(@alignCast(ptr));
@@ -1076,7 +1073,7 @@ pub const Object = struct {
     header: gc.GCObjectHeader,
     gc: gc.GcNode = .{},
     class_id: class.ClassId,
-    class_payload: class.Payload = .none,
+    class_payload: class.Payload = null,
     class_payload_kind: class.PayloadKind = .none,
     owner_runtime: *JSRuntime,
     shape_ref: *shape.Shape,
@@ -1089,7 +1086,7 @@ pub const Object = struct {
     properties: []property.Entry = &.{},
 
     property_capacity: usize = 0,
-    exotic: ?ExoticMethods = null,
+    exotic: ?*ExoticMethods = null,
 
     pub fn expect(val: JSValue) !*Object {
         const header = val.refHeader() orelse return error.TypeError;
@@ -1138,7 +1135,7 @@ pub const Object = struct {
             property_storage = try rt.memory.alloc(property.Entry, own_property_capacity);
             property_storage_owned = true;
         }
-        var class_payload: class.Payload = .none;
+        var class_payload: class.Payload = null;
         var class_payload_kind: class.PayloadKind = .none;
         const payload_kind = if (class_record) |record|
             record.payload_kind
@@ -1149,132 +1146,132 @@ pub const Object = struct {
                 const payload = try rt.memory.create(IteratorPayload);
                 errdefer rt.memory.destroy(IteratorPayload, payload);
                 payload.* = .{};
-                class_payload = .{ .external = @ptrCast(payload) };
+                class_payload = @ptrCast(payload);
                 class_payload_kind = .iterator;
             },
             .collection => {
                 const payload = try rt.memory.create(CollectionPayload);
                 errdefer rt.memory.destroy(CollectionPayload, payload);
                 payload.* = .{};
-                class_payload = .{ .external = @ptrCast(payload) };
+                class_payload = @ptrCast(payload);
                 class_payload_kind = .collection;
             },
             .buffer => {
                 const payload = try rt.memory.create(BufferPayload);
                 errdefer rt.memory.destroy(BufferPayload, payload);
                 payload.* = .{};
-                class_payload = .{ .external = @ptrCast(payload) };
+                class_payload = @ptrCast(payload);
                 class_payload_kind = .buffer;
             },
             .typed_array => {
                 const payload = try rt.memory.create(TypedArrayPayload);
                 errdefer rt.memory.destroy(TypedArrayPayload, payload);
                 payload.* = .{};
-                class_payload = .{ .external = @ptrCast(payload) };
+                class_payload = @ptrCast(payload);
                 class_payload_kind = .typed_array;
             },
             .regexp => {
                 const payload = try rt.memory.create(RegExpPayload);
                 errdefer rt.memory.destroy(RegExpPayload, payload);
                 payload.* = .{};
-                class_payload = .{ .external = @ptrCast(payload) };
+                class_payload = @ptrCast(payload);
                 class_payload_kind = .regexp;
             },
             .bound_function => {
                 const payload = try rt.memory.create(BoundFunctionPayload);
                 errdefer rt.memory.destroy(BoundFunctionPayload, payload);
                 payload.* = .{};
-                class_payload = .{ .external = @ptrCast(payload) };
+                class_payload = @ptrCast(payload);
                 class_payload_kind = .bound_function;
             },
             .proxy => {
                 const payload = try rt.memory.create(ProxyPayload);
                 errdefer rt.memory.destroy(ProxyPayload, payload);
                 payload.* = .{};
-                class_payload = .{ .external = @ptrCast(payload) };
+                class_payload = @ptrCast(payload);
                 class_payload_kind = .proxy;
             },
             .arguments => {
                 const payload = try rt.memory.create(ArgumentsPayload);
                 errdefer rt.memory.destroy(ArgumentsPayload, payload);
                 payload.* = .{};
-                class_payload = .{ .external = @ptrCast(payload) };
+                class_payload = @ptrCast(payload);
                 class_payload_kind = .arguments;
             },
             .object_data => {
                 const payload = try rt.memory.create(ObjectDataPayload);
                 errdefer rt.memory.destroy(ObjectDataPayload, payload);
                 payload.* = .{};
-                class_payload = .{ .external = @ptrCast(payload) };
+                class_payload = @ptrCast(payload);
                 class_payload_kind = .object_data;
             },
             .var_ref => {
                 const payload = try rt.memory.create(VarRefPayload);
                 errdefer rt.memory.destroy(VarRefPayload, payload);
                 payload.* = .{};
-                class_payload = .{ .external = @ptrCast(payload) };
+                class_payload = @ptrCast(payload);
                 class_payload_kind = .var_ref;
             },
             .array => {
                 const payload = try rt.memory.create(ArrayPayload);
                 errdefer rt.memory.destroy(ArrayPayload, payload);
                 payload.* = .{};
-                class_payload = .{ .external = @ptrCast(payload) };
+                class_payload = @ptrCast(payload);
                 class_payload_kind = .array;
             },
             .promise => {
                 const payload = try rt.memory.create(PromisePayload);
                 errdefer rt.memory.destroy(PromisePayload, payload);
                 payload.* = .{};
-                class_payload = .{ .external = @ptrCast(payload) };
+                class_payload = @ptrCast(payload);
                 class_payload_kind = .promise;
             },
             .generator => {
                 const payload = try rt.memory.create(GeneratorPayload);
                 errdefer rt.memory.destroy(GeneratorPayload, payload);
                 payload.* = .{};
-                class_payload = .{ .external = @ptrCast(payload) };
+                class_payload = @ptrCast(payload);
                 class_payload_kind = .generator;
             },
             .function => {
                 const payload = try rt.memory.create(FunctionPayload);
                 errdefer rt.memory.destroy(FunctionPayload, payload);
                 payload.* = .{};
-                class_payload = .{ .external = @ptrCast(payload) };
+                class_payload = @ptrCast(payload);
                 class_payload_kind = .function;
             },
             .module_namespace => {
                 const payload = try rt.memory.create(ModuleNamespacePayload);
                 errdefer rt.memory.destroy(ModuleNamespacePayload, payload);
                 payload.* = .{};
-                class_payload = .{ .external = @ptrCast(payload) };
+                class_payload = @ptrCast(payload);
                 class_payload_kind = .module_namespace;
             },
             .finalization_registry => {
                 const payload = try rt.memory.create(FinalizationRegistryPayload);
                 errdefer rt.memory.destroy(FinalizationRegistryPayload, payload);
                 payload.* = .{};
-                class_payload = .{ .external = @ptrCast(payload) };
+                class_payload = @ptrCast(payload);
                 class_payload_kind = .finalization_registry;
             },
             .std_file => {
                 const payload = try rt.memory.create(StdFilePayload);
                 errdefer rt.memory.destroy(StdFilePayload, payload);
                 payload.* = .{};
-                class_payload = .{ .external = @ptrCast(payload) };
+                class_payload = @ptrCast(payload);
                 class_payload_kind = .std_file;
             },
             .disposable_stack => {
                 const payload = try rt.memory.create(DisposableStackPayload);
                 errdefer rt.memory.destroy(DisposableStackPayload, payload);
                 payload.* = .{};
-                class_payload = .{ .external = @ptrCast(payload) };
+                class_payload = @ptrCast(payload);
                 class_payload_kind = .disposable_stack;
             },
             else => {},
         }
         if (inline_layout) |layout| {
-            class_payload = .{ .external = inlineClassPayloadPtr(self, layout) };
+            class_payload = inlineClassPayloadPtr(self, layout);
             class_payload_kind = .none;
         }
         var reserved_class_payload_finalizer_slot = false;
@@ -1392,10 +1389,10 @@ pub const Object = struct {
 
     pub fn ensureOrdinaryPayload(self: *Object, rt: *JSRuntime) !*OrdinaryPayload {
         if (self.ordinaryPayload()) |payload| return payload;
-        std.debug.assert(self.class_payload == .none);
+        std.debug.assert(self.class_payload == null);
         const payload = try rt.memory.create(OrdinaryPayload);
         payload.* = .{};
-        self.class_payload = .{ .external = @ptrCast(payload) };
+        self.class_payload = @ptrCast(payload);
         self.class_payload_kind = .ordinary;
         return payload;
     }
@@ -1404,31 +1401,25 @@ pub const Object = struct {
         if (self.realmPayload()) |payload| return payload;
         const payload = try rt.memory.create(RealmPayload);
         payload.* = .{};
-        self.class_payload = .{ .external = @ptrCast(payload) };
+        self.class_payload = @ptrCast(payload);
         self.class_payload_kind = .realm;
         return payload;
     }
 
     pub fn installExternalClassPayload(self: *Object, payload: *anyopaque) void {
-        std.debug.assert(self.class_payload == .none);
-        self.class_payload = .{ .external = payload };
+        std.debug.assert(self.class_payload == null);
+        self.class_payload = payload;
         self.class_payload_kind = .none;
     }
 
     pub fn externalClassPayload(self: *Object) ?*anyopaque {
         if (self.class_payload_kind != .none) return null;
-        return switch (self.class_payload) {
-            .external => |payload| payload,
-            .none => null,
-        };
+        return self.class_payload;
     }
 
     pub fn externalClassPayloadConst(self: *const Object) ?*anyopaque {
         if (self.class_payload_kind != .none) return null;
-        return switch (self.class_payload) {
-            .external => |payload| payload,
-            .none => null,
-        };
+        return self.class_payload;
     }
 
     pub fn cachedFunctionProtoSlot(self: *Object, rt: *JSRuntime) !*?*Object {
@@ -1582,6 +1573,10 @@ pub const Object = struct {
         self.destroyRealmPayload(rt);
         self.destroyPromisePayload(rt);
         self.destroyRegExpPayload(rt);
+        if (self.exotic) |ex| {
+            self.exotic = null;
+            rt.memory.destroy(ExoticMethods, ex);
+        }
         const old_prototype = self.prototype;
         self.prototype = null;
         if (old_prototype) |proto| {
@@ -1595,12 +1590,12 @@ pub const Object = struct {
         const record = rt.classes.record(self.class_id) orelse return false;
         if (!record.hasInlinePayload()) return false;
         const finalizer = record.payload_finalizer orelse {
-            self.class_payload = .none;
+            self.class_payload = null;
             self.class_payload_kind = .none;
             return true;
         };
         finalizer(@ptrCast(rt), @ptrCast(self), &self.class_payload);
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         return true;
     }
@@ -1613,7 +1608,7 @@ pub const Object = struct {
         self.flags.reserved_class_payload_finalizer_slot = false;
         const enqueued = rt.enqueueReservedDeferredClassPayloadFinalizer(self.class_id, payload, payload_kind, object_identity);
         if (!enqueued) return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
     }
 
@@ -2468,10 +2463,10 @@ pub const Object = struct {
 
     pub fn ensureVarRefPayload(self: *Object, rt: *JSRuntime) !*VarRefPayload {
         if (self.varRefPayload()) |payload| return payload;
-        std.debug.assert(self.class_payload == .none);
+        std.debug.assert(self.class_payload == null);
         const payload = try rt.memory.create(VarRefPayload);
         payload.* = .{};
-        self.class_payload = .{ .external = @ptrCast(payload) };
+        self.class_payload = @ptrCast(payload);
         self.class_payload_kind = .var_ref;
         return payload;
     }
@@ -2640,7 +2635,7 @@ pub const Object = struct {
         if (self.typedArrayPayload() != null) return;
         const payload = try rt.memory.create(TypedArrayPayload);
         payload.* = .{};
-        self.class_payload = .{ .external = @ptrCast(payload) };
+        self.class_payload = @ptrCast(payload);
         self.class_payload_kind = .typed_array;
     }
 
@@ -2987,7 +2982,7 @@ pub const Object = struct {
         if (self.proxyPayload() != null) return;
         const payload = try rt.memory.create(ProxyPayload);
         payload.* = .{};
-        self.class_payload = .{ .external = @ptrCast(payload) };
+        self.class_payload = @ptrCast(payload);
         self.class_payload_kind = .proxy;
     }
 
@@ -4519,17 +4514,17 @@ pub const Object = struct {
 
     fn ordinaryPayload(self: *Object) ?*OrdinaryPayload {
         if (self.class_payload_kind != .ordinary) return null;
-        return @ptrCast(@alignCast(self.class_payload.external));
+        return @ptrCast(@alignCast(self.class_payload.?));
     }
 
     fn ordinaryPayloadConst(self: *const Object) ?*const OrdinaryPayload {
         if (self.class_payload_kind != .ordinary) return null;
-        return @ptrCast(@alignCast(self.class_payload.external));
+        return @ptrCast(@alignCast(self.class_payload.?));
     }
 
     fn destroyOrdinaryPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.ordinaryPayload() orelse return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(OrdinaryPayload, payload);
@@ -4537,23 +4532,19 @@ pub const Object = struct {
 
     fn iteratorPayload(self: *Object) ?*IteratorPayload {
         if (self.class_payload_kind != .iterator) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn iteratorPayloadConst(self: *const Object) ?*const IteratorPayload {
         if (self.class_payload_kind != .iterator) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyIteratorPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.iteratorPayload() orelse return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(IteratorPayload, payload);
@@ -4561,23 +4552,19 @@ pub const Object = struct {
 
     fn collectionPayload(self: *Object) ?*CollectionPayload {
         if (self.class_payload_kind != .collection) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn collectionPayloadConst(self: *const Object) ?*const CollectionPayload {
         if (self.class_payload_kind != .collection) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyCollectionPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.collectionPayload() orelse return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(CollectionPayload, payload);
@@ -4585,23 +4572,19 @@ pub const Object = struct {
 
     fn finalizationRegistryPayload(self: *Object) ?*FinalizationRegistryPayload {
         if (self.class_payload_kind != .finalization_registry) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn finalizationRegistryPayloadConst(self: *const Object) ?*const FinalizationRegistryPayload {
         if (self.class_payload_kind != .finalization_registry) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyFinalizationRegistryPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.finalizationRegistryPayload() orelse return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(FinalizationRegistryPayload, payload);
@@ -4609,23 +4592,19 @@ pub const Object = struct {
 
     fn stdFilePayload(self: *Object) ?*StdFilePayload {
         if (self.class_payload_kind != .std_file) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn stdFilePayloadConst(self: *const Object) ?*const StdFilePayload {
         if (self.class_payload_kind != .std_file) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyStdFilePayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.stdFilePayload() orelse return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         payload.destroy();
         rt.memory.destroy(StdFilePayload, payload);
@@ -4633,23 +4612,19 @@ pub const Object = struct {
 
     fn disposableStackPayload(self: *Object) ?*DisposableStackPayload {
         if (self.class_payload_kind != .disposable_stack) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn disposableStackPayloadConst(self: *const Object) ?*const DisposableStackPayload {
         if (self.class_payload_kind != .disposable_stack) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyDisposableStackPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.disposableStackPayload() orelse return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(DisposableStackPayload, payload);
@@ -4657,23 +4632,19 @@ pub const Object = struct {
 
     fn realmPayload(self: *Object) ?*RealmPayload {
         if (self.class_payload_kind != .realm) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn realmPayloadConst(self: *const Object) ?*const RealmPayload {
         if (self.class_payload_kind != .realm) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyRealmPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.realmPayload() orelse return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(RealmPayload, payload);
@@ -4681,23 +4652,19 @@ pub const Object = struct {
 
     fn bufferPayload(self: *Object) ?*BufferPayload {
         if (self.class_payload_kind != .buffer) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn bufferPayloadConst(self: *const Object) ?*const BufferPayload {
         if (self.class_payload_kind != .buffer) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyBufferPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.bufferPayload() orelse return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(BufferPayload, payload);
@@ -4705,17 +4672,17 @@ pub const Object = struct {
 
     fn typedArrayPayload(self: *Object) ?*TypedArrayPayload {
         if (self.class_payload_kind != .typed_array) return null;
-        return @ptrCast(@alignCast(self.class_payload.external));
+        return @ptrCast(@alignCast(self.class_payload.?));
     }
 
     fn typedArrayPayloadConst(self: *const Object) ?*const TypedArrayPayload {
         if (self.class_payload_kind != .typed_array) return null;
-        return @ptrCast(@alignCast(self.class_payload.external));
+        return @ptrCast(@alignCast(self.class_payload.?));
     }
 
     fn destroyTypedArrayPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.typedArrayPayload() orelse return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(TypedArrayPayload, payload);
@@ -4723,23 +4690,19 @@ pub const Object = struct {
 
     fn regExpPayload(self: *Object) ?*RegExpPayload {
         if (self.class_payload_kind != .regexp) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn regExpPayloadConst(self: *const Object) ?*const RegExpPayload {
         if (self.class_payload_kind != .regexp) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyRegExpPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.regExpPayload() orelse return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(RegExpPayload, payload);
@@ -4747,23 +4710,19 @@ pub const Object = struct {
 
     fn boundFunctionPayload(self: *Object) ?*BoundFunctionPayload {
         if (self.class_payload_kind != .bound_function) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn boundFunctionPayloadConst(self: *const Object) ?*const BoundFunctionPayload {
         if (self.class_payload_kind != .bound_function) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyBoundFunctionPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.boundFunctionPayload() orelse return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(BoundFunctionPayload, payload);
@@ -4771,23 +4730,19 @@ pub const Object = struct {
 
     fn proxyPayload(self: *Object) ?*ProxyPayload {
         if (self.class_payload_kind != .proxy) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn proxyPayloadConst(self: *const Object) ?*const ProxyPayload {
         if (self.class_payload_kind != .proxy) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyProxyPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.proxyPayload() orelse return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(ProxyPayload, payload);
@@ -4795,23 +4750,19 @@ pub const Object = struct {
 
     fn argumentsPayload(self: *Object) ?*ArgumentsPayload {
         if (self.class_payload_kind != .arguments) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn argumentsPayloadConst(self: *const Object) ?*const ArgumentsPayload {
         if (self.class_payload_kind != .arguments) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyArgumentsPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.argumentsPayload() orelse return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(ArgumentsPayload, payload);
@@ -4819,23 +4770,19 @@ pub const Object = struct {
 
     fn objectDataPayload(self: *Object) ?*ObjectDataPayload {
         if (self.class_payload_kind != .object_data) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn objectDataPayloadConst(self: *const Object) ?*const ObjectDataPayload {
         if (self.class_payload_kind != .object_data) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyObjectDataPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.objectDataPayload() orelse return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(ObjectDataPayload, payload);
@@ -4843,17 +4790,17 @@ pub const Object = struct {
 
     fn varRefPayload(self: *Object) ?*VarRefPayload {
         if (self.class_payload_kind != .var_ref) return null;
-        return @ptrCast(@alignCast(self.class_payload.external));
+        return @ptrCast(@alignCast(self.class_payload.?));
     }
 
     fn varRefPayloadConst(self: *const Object) ?*const VarRefPayload {
         if (self.class_payload_kind != .var_ref) return null;
-        return @ptrCast(@alignCast(self.class_payload.external));
+        return @ptrCast(@alignCast(self.class_payload.?));
     }
 
     fn destroyVarRefPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.varRefPayload() orelse return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(VarRefPayload, payload);
@@ -4861,17 +4808,17 @@ pub const Object = struct {
 
     fn arrayPayload(self: *Object) ?*ArrayPayload {
         if (self.class_payload_kind != .array) return null;
-        return @ptrCast(@alignCast(self.class_payload.external));
+        return @ptrCast(@alignCast(self.class_payload.?));
     }
 
     fn arrayPayloadConst(self: *const Object) ?*const ArrayPayload {
         if (self.class_payload_kind != .array) return null;
-        return @ptrCast(@alignCast(self.class_payload.external));
+        return @ptrCast(@alignCast(self.class_payload.?));
     }
 
     fn destroyArrayPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.arrayPayload() orelse return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(ArrayPayload, payload);
@@ -4879,17 +4826,17 @@ pub const Object = struct {
 
     fn promisePayload(self: *Object) ?*PromisePayload {
         if (self.class_payload_kind != .promise) return null;
-        return @ptrCast(@alignCast(self.class_payload.external));
+        return @ptrCast(@alignCast(self.class_payload.?));
     }
 
     fn promisePayloadConst(self: *const Object) ?*const PromisePayload {
         if (self.class_payload_kind != .promise) return null;
-        return @ptrCast(@alignCast(self.class_payload.external));
+        return @ptrCast(@alignCast(self.class_payload.?));
     }
 
     fn destroyPromisePayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.promisePayload() orelse return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(PromisePayload, payload);
@@ -4897,23 +4844,19 @@ pub const Object = struct {
 
     fn generatorPayload(self: *Object) ?*GeneratorPayload {
         if (self.class_payload_kind != .generator) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn generatorPayloadConst(self: *const Object) ?*const GeneratorPayload {
         if (self.class_payload_kind != .generator) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyGeneratorPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.generatorPayload() orelse return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(GeneratorPayload, payload);
@@ -4921,17 +4864,17 @@ pub const Object = struct {
 
     fn functionPayload(self: *Object) ?*FunctionPayload {
         if (self.class_payload_kind != .function) return null;
-        return @ptrCast(@alignCast(self.class_payload.external));
+        return @ptrCast(@alignCast(self.class_payload.?));
     }
 
     fn functionPayloadConst(self: *const Object) ?*const FunctionPayload {
         if (self.class_payload_kind != .function) return null;
-        return @ptrCast(@alignCast(self.class_payload.external));
+        return @ptrCast(@alignCast(self.class_payload.?));
     }
 
     fn destroyFunctionPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.functionPayload() orelse return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(FunctionPayload, payload);
@@ -4939,10 +4882,8 @@ pub const Object = struct {
 
     pub fn moduleNamespacePayload(self: *Object) ?*ModuleNamespacePayload {
         if (self.class_payload_kind != .module_namespace) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     pub fn setModuleNamespaceCells(self: *Object, rt: *JSRuntime, next_cells: []JSValue) !void {
@@ -4955,10 +4896,8 @@ pub const Object = struct {
 
     fn moduleNamespacePayloadConst(self: *const Object) ?*const ModuleNamespacePayload {
         if (self.class_payload_kind != .module_namespace) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        const ptr = self.class_payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     fn moduleNamespaceBindingValue(self: Object, atom_id: atom.Atom) ?JSValue {
@@ -4978,7 +4917,7 @@ pub const Object = struct {
 
     fn destroyModuleNamespacePayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.moduleNamespacePayload() orelse return;
-        self.class_payload = .none;
+        self.class_payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(ModuleNamespacePayload, payload);
@@ -5705,7 +5644,7 @@ pub const Object = struct {
     };
 
     fn markClassPayload(self: *Object, rt: *JSRuntime, visitor: *class.PayloadVisitor) bool {
-        if (self.class_payload == .none) return false;
+        if (self.class_payload == null) return false;
         return rt.classes.markPayload(self.class_id, @ptrCast(rt), @ptrCast(self), &self.class_payload, visitor);
     }
 

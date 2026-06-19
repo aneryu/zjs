@@ -104,10 +104,7 @@ pub const PayloadKind = enum {
     realm,
 };
 
-pub const Payload = union(enum) {
-    none,
-    external: *anyopaque,
-};
+pub const Payload = ?*anyopaque;
 
 pub const PayloadVisitor = struct {
     context: *anyopaque,

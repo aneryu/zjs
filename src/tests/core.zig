@@ -929,7 +929,7 @@ fn runOneDeferredClassPayloadFinalizer(rt: *core.JSRuntime) !void {
 
 fn countPayloadFinalizer(_: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
     payload_finalizer_calls += 1;
-    payload.* = .none;
+    payload.* = null;
 }
 
 fn countPayloadMark(
@@ -957,35 +957,27 @@ const TestExternalObjectPayload = struct {
 
 fn finalizeTestExternalPayload(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
     payload_finalizer_calls += 1;
-    switch (payload.*) {
-        .external => |ptr| {
-            const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
-            const typed: *TestExternalPayload = @ptrCast(@alignCast(ptr));
-            typed.value.free(rt);
-            rt.memory.destroy(TestExternalPayload, typed);
-            payload.* = .none;
-        },
-        .none => {},
-    }
+    const ptr = payload.* orelse return;
+    const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
+    const typed: *TestExternalPayload = @ptrCast(@alignCast(ptr));
+    typed.value.free(rt);
+    rt.memory.destroy(TestExternalPayload, typed);
+    payload.* = null;
 }
 
 fn finalizeTestExternalObjectPayload(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
     payload_finalizer_calls += 1;
-    switch (payload.*) {
-        .external => |ptr| {
-            const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
-            const typed: *TestExternalObjectPayload = @ptrCast(@alignCast(ptr));
-            if (typed.object) |object| object.value().free(rt);
-            rt.memory.destroy(TestExternalObjectPayload, typed);
-            payload.* = .none;
-        },
-        .none => {},
-    }
+    const ptr = payload.* orelse return;
+    const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
+    const typed: *TestExternalObjectPayload = @ptrCast(@alignCast(ptr));
+    if (typed.object) |object| object.value().free(rt);
+    rt.memory.destroy(TestExternalObjectPayload, typed);
+    payload.* = null;
 }
 
 fn reentrantCollectionClearFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
     payload_finalizer_calls += 1;
-    payload.* = .none;
+    payload.* = null;
     if (reentrant_collection_clear_calls != 0) return;
     reentrant_collection_clear_calls += 1;
     const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
@@ -996,7 +988,7 @@ fn reentrantCollectionClearFinalizer(runtime: *anyopaque, _: *anyopaque, payload
 
 fn reentrantArrayDeleteFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
     payload_finalizer_calls += 1;
-    payload.* = .none;
+    payload.* = null;
     if (reentrant_array_delete_calls != 0) return;
     reentrant_array_delete_calls += 1;
     const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
@@ -1006,7 +998,7 @@ fn reentrantArrayDeleteFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *c
 
 fn reentrantPropertyDeleteFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
     payload_finalizer_calls += 1;
-    payload.* = .none;
+    payload.* = null;
     if (reentrant_property_delete_calls != 0) return;
     reentrant_property_delete_calls += 1;
     const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
@@ -1016,7 +1008,7 @@ fn reentrantPropertyDeleteFinalizer(runtime: *anyopaque, _: *anyopaque, payload:
 
 fn reentrantRegExpLastIndexFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
     payload_finalizer_calls += 1;
-    payload.* = .none;
+    payload.* = null;
     if (reentrant_regexp_last_index_calls != 0) return;
     reentrant_regexp_last_index_calls += 1;
     const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
@@ -1026,7 +1018,7 @@ fn reentrantRegExpLastIndexFinalizer(runtime: *anyopaque, _: *anyopaque, payload
 
 fn reentrantMappedArgumentsFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
     payload_finalizer_calls += 1;
-    payload.* = .none;
+    payload.* = null;
     if (reentrant_mapped_arguments_calls != 0) return;
     reentrant_mapped_arguments_calls += 1;
     const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
@@ -1040,7 +1032,7 @@ fn reentrantMappedArgumentsFinalizer(runtime: *anyopaque, _: *anyopaque, payload
 
 fn reentrantCachedIteratorNextFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
     payload_finalizer_calls += 1;
-    payload.* = .none;
+    payload.* = null;
     if (reentrant_cached_iterator_next_calls != 0) return;
     reentrant_cached_iterator_next_calls += 1;
     const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
@@ -1050,7 +1042,7 @@ fn reentrantCachedIteratorNextFinalizer(runtime: *anyopaque, _: *anyopaque, payl
 
 fn reentrantExceptionSlotFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
     payload_finalizer_calls += 1;
-    payload.* = .none;
+    payload.* = null;
     if (reentrant_exception_slot_calls != 0) return;
     reentrant_exception_slot_calls += 1;
     const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
@@ -1060,7 +1052,7 @@ fn reentrantExceptionSlotFinalizer(runtime: *anyopaque, _: *anyopaque, payload: 
 
 fn reentrantArrayIteratorFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
     payload_finalizer_calls += 1;
-    payload.* = .none;
+    payload.* = null;
     if (reentrant_array_iterator_calls != 0) return;
     reentrant_array_iterator_calls += 1;
     const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
@@ -1076,13 +1068,9 @@ fn markTestExternalPayload(
     visitor: *core.class.PayloadVisitor,
 ) void {
     payload_mark_calls += 1;
-    switch (payload.*) {
-        .external => |ptr| {
-            const typed: *TestExternalPayload = @ptrCast(@alignCast(ptr));
-            visitor.value(@ptrCast(&typed.value));
-        },
-        .none => {},
-    }
+    const ptr = payload.* orelse return;
+    const typed: *TestExternalPayload = @ptrCast(@alignCast(ptr));
+    visitor.value(@ptrCast(&typed.value));
 }
 
 fn markTestExternalObjectPayload(
@@ -1092,13 +1080,9 @@ fn markTestExternalObjectPayload(
     visitor: *core.class.PayloadVisitor,
 ) void {
     payload_mark_calls += 1;
-    switch (payload.*) {
-        .external => |ptr| {
-            const typed: *TestExternalObjectPayload = @ptrCast(@alignCast(ptr));
-            visitor.object(@ptrCast(&typed.object));
-        },
-        .none => {},
-    }
+    const ptr = payload.* orelse return;
+    const typed: *TestExternalObjectPayload = @ptrCast(@alignCast(ptr));
+    visitor.object(@ptrCast(&typed.object));
 }
 
 test "class finalizers and context prototype slots are wired" {
@@ -1132,10 +1116,10 @@ test "class finalizers and context prototype slots are wired" {
     try std.testing.expect(!rt.classes.runFinalizer(core.class.ids.object));
 
     payload_finalizer_calls = 0;
-    var payload: core.class.Payload = .none;
+    var payload: core.class.Payload = null;
     try std.testing.expect(rt.classes.runPayloadFinalizerForTest(dynamic_id, @ptrCast(rt), @ptrCast(ctx), &payload));
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
-    try std.testing.expectEqual(core.class.Payload.none, payload);
+    try std.testing.expectEqual(null, payload);
     try std.testing.expect(!rt.classes.runPayloadFinalizerForTest(core.class.ids.object, @ptrCast(rt), @ptrCast(ctx), &payload));
 
     payload_mark_calls = 0;
@@ -1144,7 +1128,7 @@ test "class finalizers and context prototype slots are wired" {
         .context = @ptrCast(&visited_values),
         .visit_value = countVisitedValue,
     };
-    payload = .none;
+    payload = null;
     try std.testing.expect(rt.classes.markPayload(dynamic_id, @ptrCast(rt), @ptrCast(ctx), &payload, &visitor));
     try std.testing.expectEqual(@as(usize, 1), payload_mark_calls);
     try std.testing.expectEqual(@as(usize, 1), visited_values);
@@ -1163,7 +1147,7 @@ test "object destruction defers class payload finalizers" {
 
     payload_finalizer_calls = 0;
     const payloadless = try core.Object.create(rt, payloadless_id, null);
-    try std.testing.expect(payloadless.class_payload == .none);
+    try std.testing.expect(payloadless.class_payload == null);
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     payloadless.value().free(rt);
     rt.setMemoryLimit(null);
@@ -1182,7 +1166,7 @@ test "object destruction defers class payload finalizers" {
     const external = try core.Object.create(rt, external_id, null);
     const payload = try rt.memory.create(TestExternalPayload);
     payload.* = .{};
-    external.class_payload = .{ .external = @ptrCast(payload) };
+    external.class_payload = @ptrCast(payload);
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     external.value().free(rt);
     rt.setMemoryLimit(null);
@@ -1650,7 +1634,7 @@ test "runtime cycle removal follows class payload mark hooks" {
     const external = try core.Object.create(rt, external_id, null);
     const payload = try rt.memory.create(TestExternalPayload);
     payload.* = .{ .value = payloadless.value().dup() };
-    external.class_payload = .{ .external = @ptrCast(payload) };
+    external.class_payload = @ptrCast(payload);
 
     const key = try rt.internAtom("external");
     defer rt.atoms.free(key);
@@ -1686,7 +1670,7 @@ test "pending class payload finalizers trace payload value roots" {
 
     const payload = try rt.memory.create(TestExternalPayload);
     payload.* = .{ .value = child.value().dup() };
-    wrapper.class_payload = .{ .external = @ptrCast(payload) };
+    wrapper.class_payload = @ptrCast(payload);
 
     child.value().free(rt);
     payload_finalizer_calls = 0;
@@ -1744,7 +1728,7 @@ test "runtime cycle removal clears class payload object slots before finalizers"
     const payload = try rt.memory.create(TestExternalObjectPayload);
     payload.* = .{ .object = child };
     core.gc.retain(&child.header);
-    external.class_payload = .{ .external = @ptrCast(payload) };
+    external.class_payload = @ptrCast(payload);
 
     const key = try rt.internAtom("external");
     defer rt.atoms.free(key);
@@ -1770,7 +1754,7 @@ test "plain objects do not allocate class payload storage" {
     const object = try core.Object.create(rt, core.class.ids.object, null);
     defer object.value().free(rt);
 
-    try std.testing.expectEqual(core.class.Payload.none, object.class_payload);
+    try std.testing.expectEqual(null, object.class_payload);
     try std.testing.expectEqual(core.class.PayloadKind.none, object.class_payload_kind);
     try std.testing.expect(@sizeOf(core.Object) <= core.Object.post_a_object_size_baseline / 2);
 }
@@ -1782,7 +1766,7 @@ test "iterator classes store iterator state in class payload" {
     const iterator = try core.Object.create(rt, core.class.ids.array_iterator, null);
     defer iterator.value().free(rt);
 
-    try std.testing.expect(iterator.class_payload == .external);
+    try std.testing.expect(iterator.class_payload != null);
     iterator.iteratorIndexSlot().* = 7;
     iterator.iteratorKindSlot().* = 3;
     try std.testing.expectEqual(@as(usize, 7), iterator.iteratorIndexSlot().*);
@@ -1796,7 +1780,7 @@ test "collection classes store entries in class payload" {
     const map = try core.Object.create(rt, core.class.ids.map, null);
     defer map.value().free(rt);
 
-    try std.testing.expect(map.class_payload == .external);
+    try std.testing.expect(map.class_payload != null);
     const entries = try rt.memory.alloc(core.object.CollectionEntry, 1);
     entries[0] = .{ .key = core.JSValue.int32(1), .value = core.JSValue.int32(2), .active = true };
     map.collectionEntriesSlot().* = entries;
@@ -1811,7 +1795,7 @@ test "buffer and typed array state use payload storage" {
 
     const buffer = try core.Object.create(rt, core.class.ids.array_buffer, null);
     defer buffer.value().free(rt);
-    try std.testing.expect(buffer.class_payload == .external);
+    try std.testing.expect(buffer.class_payload != null);
     try std.testing.expectEqual(core.class.PayloadKind.buffer, buffer.class_payload_kind);
     const bytes = try rt.memory.alloc(u8, 3);
     @memset(bytes, 9);
@@ -1824,7 +1808,7 @@ test "buffer and typed array state use payload storage" {
     const view = try core.Object.create(rt, core.class.ids.object, null);
     defer view.value().free(rt);
     try view.ensureTypedArrayPayload(rt);
-    try std.testing.expect(view.class_payload == .external);
+    try std.testing.expect(view.class_payload != null);
     try std.testing.expectEqual(core.class.PayloadKind.typed_array, view.class_payload_kind);
     view.typedArrayBufferSlot().* = buffer.value().dup();
     view.typedArrayByteOffsetSlot().* = 1;
@@ -2043,7 +2027,7 @@ test "regexp state uses payload storage" {
     const regexp = try core.Object.create(rt, core.class.ids.regexp, null);
     defer regexp.value().free(rt);
 
-    try std.testing.expect(regexp.class_payload == .external);
+    try std.testing.expect(regexp.class_payload != null);
     try std.testing.expectEqual(core.class.PayloadKind.regexp, regexp.class_payload_kind);
     regexp.regexpSourceSlot().* = source.value().dup();
     regexp.regexpFlagsSlot().* = flags.value().dup();
@@ -2063,7 +2047,7 @@ test "bound function state uses payload storage" {
     const bound = try core.Object.create(rt, core.class.ids.bound_function, null);
     defer bound.value().free(rt);
 
-    try std.testing.expect(bound.class_payload == .external);
+    try std.testing.expect(bound.class_payload != null);
     try std.testing.expectEqual(core.class.PayloadKind.bound_function, bound.class_payload_kind);
     bound.boundTargetSlot().* = core.JSValue.int32(11);
     bound.boundThisSlot().* = core.JSValue.int32(22);
@@ -2088,7 +2072,7 @@ test "proxy state uses payload storage" {
     proxy.flags.is_proxy = true;
     try proxy.ensureProxyPayload(rt);
 
-    try std.testing.expect(proxy.class_payload == .external);
+    try std.testing.expect(proxy.class_payload != null);
     try std.testing.expectEqual(core.class.PayloadKind.proxy, proxy.class_payload_kind);
     proxy.proxyTargetSlot().* = core.JSValue.int32(55);
     proxy.proxyHandlerSlot().* = core.JSValue.int32(66);
@@ -2104,7 +2088,7 @@ test "arguments state uses payload storage" {
     const arguments = try core.Object.create(rt, core.class.ids.mapped_arguments, null);
     defer arguments.value().free(rt);
 
-    try std.testing.expect(arguments.class_payload == .external);
+    try std.testing.expect(arguments.class_payload != null);
     try std.testing.expectEqual(core.class.PayloadKind.arguments, arguments.class_payload_kind);
     const refs = try rt.memory.alloc(core.JSValue, 2);
     refs[0] = core.JSValue.int32(77);
@@ -2126,7 +2110,7 @@ test "object data state uses payload storage" {
     const data = try core.string.String.createAscii(rt, "wrapped");
     defer data.value().free(rt);
 
-    try std.testing.expect(object.class_payload == .external);
+    try std.testing.expect(object.class_payload != null);
     try std.testing.expectEqual(core.class.PayloadKind.object_data, object.class_payload_kind);
     object.objectDataSlot().* = data.value().dup();
     try std.testing.expect(object.objectData() != null);
@@ -2139,7 +2123,7 @@ test "array element state uses payload storage" {
     const array = try core.Object.createArray(rt, null);
     defer array.value().free(rt);
 
-    try std.testing.expect(array.class_payload == .external);
+    try std.testing.expect(array.class_payload != null);
     try std.testing.expectEqual(core.class.PayloadKind.array, array.class_payload_kind);
     try std.testing.expectEqual(core.object.ArrayStorageMode.dense, array.arrayElementStorageMode());
     try std.testing.expect(try array.appendDenseArrayIndex(rt, 0, core.atom.atomFromUInt32(0), core.JSValue.int32(7)));
@@ -2154,7 +2138,7 @@ test "promise state uses payload storage" {
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
     defer promise.value().free(rt);
 
-    try std.testing.expect(promise.class_payload == .external);
+    try std.testing.expect(promise.class_payload != null);
     try std.testing.expectEqual(core.class.PayloadKind.promise, promise.class_payload_kind);
     try promise.setPromiseResult(rt, core.JSValue.int32(101));
     try promise.setPromiseReactionCallback(rt, core.JSValue.int32(202));
@@ -2174,7 +2158,7 @@ test "generator state uses payload storage" {
     const generator = try core.Object.create(rt, core.class.ids.generator, null);
     defer generator.value().free(rt);
 
-    try std.testing.expect(generator.class_payload == .external);
+    try std.testing.expect(generator.class_payload != null);
     try std.testing.expectEqual(core.class.PayloadKind.generator, generator.class_payload_kind);
     generator.generatorThisSlot().* = core.JSValue.int32(404);
     const args = try rt.memory.alloc(core.JSValue, 1);
@@ -2207,7 +2191,7 @@ test "native function state uses payload storage" {
     const source = try core.string.String.createAscii(rt, "function f(){}");
     defer source.value().free(rt);
 
-    try std.testing.expect(function.class_payload == .external);
+    try std.testing.expect(function.class_payload != null);
     try std.testing.expectEqual(core.class.PayloadKind.function, function.class_payload_kind);
     function.functionSourceSlot().* = source.value().dup();
     function.hostFunctionKindSlot().* = 11;
@@ -2257,7 +2241,7 @@ test "bytecode function state uses payload storage" {
     const function = try core.Object.create(rt, core.class.ids.bytecode_function, null);
     defer function.value().free(rt);
 
-    try std.testing.expect(function.class_payload == .external);
+    try std.testing.expect(function.class_payload != null);
     try std.testing.expectEqual(core.class.PayloadKind.function, function.class_payload_kind);
     function.hostFunctionKindSlot().* = 11;
     function.nativeFunctionIdSlot().* = 22;
@@ -2273,7 +2257,7 @@ test "module namespace uses payload storage" {
     const namespace = try core.Object.create(rt, core.class.ids.module_ns, null);
     defer namespace.value().free(rt);
 
-    try std.testing.expect(namespace.class_payload == .external);
+    try std.testing.expect(namespace.class_payload != null);
     try std.testing.expectEqual(core.class.PayloadKind.module_namespace, namespace.class_payload_kind);
 }
 
@@ -3380,7 +3364,7 @@ test "object traceChildEdgesFallible propagates class payload visitor errors" {
 
     const payload = try rt.memory.create(TestExternalPayload);
     payload.* = .{ .value = child.value().dup() };
-    obj.class_payload = .{ .external = @ptrCast(payload) };
+    obj.class_payload = @ptrCast(payload);
 
     const Visitor = struct {
         err: ?core.gc.CollectionError = null,
@@ -4093,7 +4077,7 @@ test "class payload function bytecode constant object cycle is released by runti
 
     const payload = try rt.memory.create(TestExternalPayload);
     payload.* = .{ .value = core.JSValue.functionBytecode(&fb.header) };
-    external.class_payload = .{ .external = @ptrCast(payload) };
+    external.class_payload = @ptrCast(payload);
     try captured.defineOwnProperty(rt, external_key, core.Descriptor.data(external.value(), true, true, true));
 
     payload_finalizer_calls = 0;
@@ -5805,12 +5789,14 @@ test "exotic dispatch hooks are called without builtin shortcuts" {
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
     defer obj.value().free(rt);
-    obj.exotic = .{
+    const exotic = try rt.memory.create(core.object.ExoticMethods);
+    exotic.* = .{
         .get_own_property = exoticGet,
         .define_own_property = exoticDefine,
         .delete_property = exoticDelete,
         .own_keys = exoticOwnKeys,
     };
+    obj.exotic = exotic;
 
     exotic_define_calls = 0;
     exotic_delete_calls = 0;

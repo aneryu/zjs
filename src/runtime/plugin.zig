@@ -568,7 +568,7 @@ fn opaquePayloadFinalizer(runtime: *anyopaque, object: *anyopaque, class_payload
     }
     const plugin = payload.plugin;
     rt.memory.destroy(OpaqueWrapperPayload, payload);
-    class_payload.* = .none;
+    class_payload.* = null;
     plugin.release();
 }
 
@@ -594,10 +594,8 @@ fn opaquePayloadMark(runtime: *anyopaque, object: *anyopaque, class_payload: *co
 }
 
 fn opaquePayload(class_payload: *core.class.Payload) ?*OpaqueWrapperPayload {
-    return switch (class_payload.*) {
-        .external => |payload| @ptrCast(@alignCast(payload)),
-        .none => null,
-    };
+    const payload = class_payload.* orelse return null;
+    return @ptrCast(@alignCast(payload));
 }
 
 fn createBindingFunction(ctx: *core.JSContext, plugin: *InstalledPlugin, descriptor: *const ffi.BindingDescriptor) !struct { core.JSValue, u32 } {

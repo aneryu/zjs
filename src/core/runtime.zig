@@ -528,19 +528,19 @@ pub const NativeCleanupJob = struct {
 pub const DeferredClassPayloadFinalizer = struct {
     class_id: class.ClassId = class.invalid_class_id,
     finalizer: class.PayloadFinalizer,
-    payload: class.Payload = .none,
+    payload: class.Payload = null,
     payload_kind: class.PayloadKind = .none,
     object_identity: usize = 0,
 
     pub fn run(self: *DeferredClassPayloadFinalizer, rt: *JSRuntime) void {
         var payload = self.payload;
-        self.payload = .none;
+        self.payload = null;
         self.finalizer(@ptrCast(rt), @ptrCast(&self.object_identity), &payload);
         object_mod.destroyDetachedClassPayload(rt, self.payload_kind, &payload);
     }
 
     pub fn traceRoots(self: *DeferredClassPayloadFinalizer, rt: *JSRuntime, visitor: *RootVisitor) RootTraceError!void {
-        if (self.payload == .none) return;
+        if (self.payload == null) return;
         const PayloadTraceAdaptor = struct {
             root_visitor: *RootVisitor,
             err: ?RootTraceError = null,
