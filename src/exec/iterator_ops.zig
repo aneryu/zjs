@@ -152,7 +152,7 @@ pub fn forOfStart(
     try stack.pushOwned(core.JSValue.catchOffset(catchTargetMarkerValue(catch_target)));
 }
 
-pub fn forOfStartVm(
+pub noinline fn forOfStartVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -363,7 +363,7 @@ pub fn forInStart(
     try stack.pushOwned(iterator);
 }
 
-pub fn forInStartVm(
+pub noinline fn forInStartVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -407,7 +407,7 @@ pub fn iteratorNext(
     };
 }
 
-pub fn iteratorNextVm(
+pub noinline fn iteratorNextVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -429,7 +429,7 @@ pub fn iteratorCheckObject(ctx: *core.JSContext, stack: *stack_mod.Stack) !void 
     if (!value.isObject()) return error.TypeError;
 }
 
-pub fn iteratorCheckObjectVm(
+pub noinline fn iteratorCheckObjectVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
@@ -470,7 +470,7 @@ pub fn iteratorGetValueDone(
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(coercion_ops.valueTruthy(done)));
 }
 
-pub fn iteratorGetValueDoneVm(
+pub noinline fn iteratorGetValueDoneVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -527,7 +527,7 @@ pub fn iteratorCall(
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
 }
 
-pub fn iteratorCallVm(
+pub noinline fn iteratorCallVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -645,7 +645,7 @@ fn fastArrayForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_in
     return true;
 }
 
-pub fn forOfNextVm(
+pub noinline fn forOfNextVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -661,7 +661,7 @@ pub fn forOfNextVm(
     return .done;
 }
 
-pub fn forInNext(
+pub noinline fn forInNext(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -816,7 +816,7 @@ pub fn iteratorClose(
     }
 }
 
-pub fn iteratorCloseVm(
+pub noinline fn iteratorCloseVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,

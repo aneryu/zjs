@@ -15,7 +15,7 @@ const op = bytecode.opcode.op;
 
 pub const Step = enum { done, continue_loop };
 
-pub fn object(
+pub noinline fn object(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     global: *core.Object,
@@ -26,7 +26,7 @@ pub fn object(
     try stack.pushOwned(value);
 }
 
-pub fn arrayFrom(
+pub noinline fn arrayFrom(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -167,7 +167,7 @@ fn frameHasVarRefBinding(function: *const bytecode.Bytecode, frame: *const frame
     return false;
 }
 
-pub fn defineField(
+pub noinline fn defineField(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -243,7 +243,7 @@ pub fn defineField(
     return .done;
 }
 
-pub fn setProto(
+pub noinline fn setProto(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
 ) !void {
@@ -259,7 +259,7 @@ pub fn setProto(
     }
 }
 
-pub fn defineArrayEl(
+pub noinline fn defineArrayEl(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -336,7 +336,7 @@ pub fn appendSpreadValues(
     try stack.pushOwned(core.JSValue.int32(out_index));
 }
 
-pub fn appendSpreadValuesVm(
+pub noinline fn appendSpreadValuesVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -352,7 +352,7 @@ pub fn appendSpreadValuesVm(
     return .done;
 }
 
-pub fn copyDataProperties(
+pub noinline fn copyDataProperties(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -428,7 +428,7 @@ fn handleLiteralRuntimeError(
     return err;
 }
 
-pub fn specialObject(
+pub noinline fn specialObject(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -467,7 +467,7 @@ pub fn specialObject(
     }
 }
 
-pub fn getLength(
+pub noinline fn getLength(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -515,7 +515,7 @@ fn tryFuseArrayLengthLessThanFalseBranch(
     return true;
 }
 
-pub fn rest(
+pub noinline fn rest(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,

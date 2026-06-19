@@ -73,7 +73,7 @@ pub const InlineCallRequest = struct {
 
 pub const ExecCallResult = union(enum) { done, continue_loop, inline_call: InlineCallRequest };
 
-pub fn execCall(
+pub noinline fn execCall(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,

@@ -22,7 +22,7 @@ pub const EvalStep = union(enum) {
     tail_inline: call_runtime.InlineCallRequest,
 };
 
-pub fn directEval(
+pub noinline fn directEval(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -57,7 +57,7 @@ pub fn directEval(
     };
 }
 
-pub fn applyEval(
+pub noinline fn applyEval(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -88,7 +88,7 @@ pub fn applyEval(
     };
 }
 
-pub fn dynamicImport(
+pub noinline fn dynamicImport(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,

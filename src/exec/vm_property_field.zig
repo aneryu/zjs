@@ -146,7 +146,7 @@ pub fn toPropKey(
     try stack.pushOwned(key);
 }
 
-pub fn toPropKeyVm(
+pub noinline fn toPropKeyVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -181,7 +181,7 @@ pub fn toPropKey2(
     try stack.pushOwned(key);
 }
 
-pub fn toPropKey2Vm(
+pub noinline fn toPropKey2Vm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -197,7 +197,7 @@ pub fn toPropKey2Vm(
     return .done;
 }
 
-pub fn setName(
+pub noinline fn setName(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -239,7 +239,7 @@ pub fn setName(
     }
 }
 
-pub fn inOrInstanceof(
+pub noinline fn inOrInstanceof(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -260,7 +260,7 @@ pub fn inOrInstanceof(
     return .done;
 }
 
-pub inline fn field(
+pub noinline fn field(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -631,7 +631,7 @@ fn tryFuseNumberStaticLiteralCallFromField2(
     return true;
 }
 
-pub fn arrayElement(
+pub noinline fn arrayElement(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,

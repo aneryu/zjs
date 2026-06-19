@@ -125,7 +125,7 @@ const atom_math = core.atom.predefinedId("Math", .string).?;
 const atom_regexp = core.atom.predefinedId("RegExp", .string).?;
 const atom_string = core.atom.predefinedId("String", .string).?;
 
-pub fn loc(
+pub noinline fn loc(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
@@ -217,7 +217,7 @@ pub fn loc(
     }
 }
 
-pub fn arg(
+pub noinline fn arg(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
@@ -244,7 +244,7 @@ pub fn arg(
     }
 }
 
-pub fn checkedLocVm(
+pub noinline fn checkedLocVm(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
@@ -408,7 +408,7 @@ pub fn varRef(
     return .done;
 }
 
-pub fn varRefVm(
+pub noinline fn varRefVm(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
@@ -3747,7 +3747,7 @@ fn denseArrayInt32RangeDelta(object: *core.Object, start: usize, limit: usize) ?
     };
 }
 
-pub fn closeLoc(
+pub noinline fn closeLoc(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,

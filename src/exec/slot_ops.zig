@@ -51,7 +51,7 @@ pub fn execGetLoc(
     pushSlotValueAssumeCapacity(stack, frame.locals[idx]);
 }
 
-pub fn execPutLoc(
+pub noinline fn execPutLoc(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,

@@ -225,7 +225,7 @@ pub fn pushBoolean(stack: *stack_mod.Stack, value: bool) !void {
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value));
 }
 
-pub fn pushConst(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, opc: u8) !void {
+pub noinline fn pushConst(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, opc: u8) !void {
     _ = opc;
     const index = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
@@ -234,7 +234,7 @@ pub fn pushConst(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const
     stack.pushAssumeCapacity(value);
 }
 
-pub fn pushConst8(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, opc: u8) !void {
+pub noinline fn pushConst8(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, opc: u8) !void {
     _ = opc;
     const index = function.code[frame.pc];
     frame.pc += 1;
@@ -254,7 +254,7 @@ pub fn pushAtomValue(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *c
     stack.pushOwnedAssumeCapacity(value);
 }
 
-pub fn pushAtomValueVm(
+pub noinline fn pushAtomValueVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -315,14 +315,14 @@ fn atomAsciiText(rt: *core.JSRuntime, atom_id: core.Atom, buffer: *[10]u8) ?[]co
     return text;
 }
 
-pub fn pushPrivateSymbol(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
+pub noinline fn pushPrivateSymbol(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
     const effective_atom = remapPrivateAtomFromFrame(ctx.runtime, frame, atom_id);
     try stack.pushOwned(core.JSValue.symbol(effective_atom));
 }
 
-pub fn pushEmptyString(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
+pub noinline fn pushEmptyString(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     const value = (try ctx.runtime.emptyString()).value().dup();
     errdefer value.free(ctx.runtime);
     stack.pushOwnedAssumeCapacity(value);
@@ -333,7 +333,7 @@ pub fn pushThis(stack: *stack_mod.Stack, this_value: core.JSValue) !void {
     try pushSlotValue(stack, this_value);
 }
 
-pub fn pushThisVm(
+pub noinline fn pushThisVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
@@ -359,7 +359,7 @@ pub fn toObject(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(object_value);
 }
 
-pub fn toObjectVm(
+pub noinline fn toObjectVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
@@ -376,7 +376,7 @@ pub fn toObjectVm(
     return .done;
 }
 
-pub fn typeOf(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
+pub noinline fn typeOf(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(ctx.runtime);
     const text: []const u8 = if (value.isUndefined() or value_ops.isHTMLDDA(value))
@@ -402,26 +402,26 @@ pub fn typeOf(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(out);
 }
 
-pub fn typeOfIsUndefined(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
+pub noinline fn typeOfIsUndefined(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(rt);
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.isUndefined() or value_ops.isHTMLDDA(value)));
 }
 
-pub fn typeOfIsFunction(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
+pub noinline fn typeOfIsFunction(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(rt);
     const is_func = value.isFunctionBytecode() or functionObjectFromValue(value) != null;
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(is_func));
 }
 
-pub fn logicalNot(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
+pub noinline fn logicalNot(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(rt);
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(!value_ops.isTruthy(value)));
 }
 
-pub fn drop(rt: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult {
+pub noinline fn drop(rt: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult {
     const value = try stack.pop();
     if (value.isCatchOffset()) {
         if ((value.asCatchOffset() orelse -1) == 0) {
@@ -435,7 +435,7 @@ pub fn drop(rt: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult {
     return .value;
 }
 
-pub fn nipCatch(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
+pub noinline fn nipCatch(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const ret_value = try stack.pop();
 
     while (stack.values.len != 0) {
@@ -662,19 +662,19 @@ pub fn swap2(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(b);
 }
 
-pub fn isUndefinedOrNull(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
+pub noinline fn isUndefinedOrNull(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(rt);
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.isUndefined() or value.isNull()));
 }
 
-pub fn isUndefined(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
+pub noinline fn isUndefined(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(rt);
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.isUndefined()));
 }
 
-pub fn isNull(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
+pub noinline fn isNull(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(rt);
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.isNull()));

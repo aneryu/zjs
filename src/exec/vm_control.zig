@@ -40,13 +40,13 @@ pub const InterruptPoller = struct {
     }
 };
 
-pub fn returnTop(ctx: *core.JSContext, stack: *stack_mod.Stack, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
+pub noinline fn returnTop(ctx: *core.JSContext, stack: *stack_mod.Stack, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
     if (generator) |generator_object| generator_object.generatorDoneSlot().* = true;
     const value = stack.peek() orelse core.JSValue.undefinedValue();
     return finishFunctionReturn(ctx, frame, value);
 }
 
-pub fn returnUndefined(ctx: *core.JSContext, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
+pub noinline fn returnUndefined(ctx: *core.JSContext, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
     if (generator) |generator_object| generator_object.generatorDoneSlot().* = true;
     return finishFunctionReturn(ctx, frame, core.JSValue.undefinedValue());
 }
@@ -106,7 +106,7 @@ pub fn branch8(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const b
     }
 }
 
-pub fn throwTop(
+pub noinline fn throwTop(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -147,7 +147,7 @@ pub fn throwError(function: *const bytecode.Bytecode, frame: *frame_mod.Frame) T
     };
 }
 
-pub fn throwErrorVm(
+pub noinline fn throwErrorVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -160,7 +160,7 @@ pub fn throwErrorVm(
     return err;
 }
 
-pub fn catchTarget(function: *const bytecode.Bytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack, catch_target: *?usize) !void {
+pub noinline fn catchTarget(function: *const bytecode.Bytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack, catch_target: *?usize) !void {
     const operand_pc = frame.pc;
     const diff = readInt(i32, function.code[frame.pc..][0..4]);
     frame.pc += 4;

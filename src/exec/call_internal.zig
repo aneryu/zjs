@@ -132,13 +132,312 @@ inline fn pushBorrowedWindow(stack: *const stack_mod.Stack, base: [*]core.JSValu
 
 inline fn pushSlotWindow(stack: *const stack_mod.Stack, base: [*]core.JSValue, sp: *[*]core.JSValue, slot: core.JSValue) void {
     if (!slot.requiresRefCount()) return pushOwnedWindow(stack, base, sp, slot);
-    pushBorrowedWindow(stack, base, sp, slot_ops.slotValueBorrow(slot));
+    pushBorrowedWindow(stack, base, sp, slotValueBorrowFast(slot));
 }
 
 inline fn popWindow(base: [*]core.JSValue, sp: *[*]core.JSValue) !core.JSValue {
     if (sp.* == base) return error.StackUnderflow;
     sp.* -= 1;
     return sp.*[0];
+}
+
+inline fn borrowedValueFast(value: core.JSValue) core.JSValue {
+    return if (value.requiresRefCount()) value.dup() else value;
+}
+
+inline fn stackRequire(base: [*]core.JSValue, sp: [*]core.JSValue, required: usize) !void {
+    if (!stackHas(base, sp, required)) return error.StackUnderflow;
+}
+
+inline fn dupWindow(stack: *const stack_mod.Stack, base: [*]core.JSValue, sp: *[*]core.JSValue) !void {
+    try stackRequire(base, sp.*, 1);
+    pushBorrowedWindow(stack, base, sp, (sp.* - 1)[0]);
+}
+
+inline fn dup1Window(base: [*]core.JSValue, sp: *[*]core.JSValue) !void {
+    try stackRequire(base, sp.*, 2);
+    const a = (sp.* - 2)[0];
+    const b = (sp.* - 1)[0];
+    (sp.* - 1)[0] = borrowedValueFast(a);
+    sp.*[0] = b;
+    sp.* += 1;
+}
+
+inline fn dup2Window(base: [*]core.JSValue, sp: *[*]core.JSValue) !void {
+    try stackRequire(base, sp.*, 2);
+    const a = (sp.* - 2)[0];
+    const b = (sp.* - 1)[0];
+    sp.*[0] = borrowedValueFast(a);
+    sp.*[1] = borrowedValueFast(b);
+    sp.* += 2;
+}
+
+inline fn dup3Window(base: [*]core.JSValue, sp: *[*]core.JSValue) !void {
+    try stackRequire(base, sp.*, 3);
+    const a = (sp.* - 3)[0];
+    const b = (sp.* - 2)[0];
+    const c = (sp.* - 1)[0];
+    sp.*[0] = borrowedValueFast(a);
+    sp.*[1] = borrowedValueFast(b);
+    sp.*[2] = borrowedValueFast(c);
+    sp.* += 3;
+}
+
+inline fn swapWindow(base: [*]core.JSValue, sp: [*]core.JSValue) !void {
+    try stackRequire(base, sp, 2);
+    const a_slot = sp - 2;
+    const b_slot = sp - 1;
+    const a = a_slot[0];
+    a_slot[0] = b_slot[0];
+    b_slot[0] = a;
+}
+
+inline fn swap2Window(base: [*]core.JSValue, sp: [*]core.JSValue) !void {
+    try stackRequire(base, sp, 4);
+    const a = (sp - 4)[0];
+    const b = (sp - 3)[0];
+    const c = (sp - 2)[0];
+    const d = (sp - 1)[0];
+    (sp - 4)[0] = c;
+    (sp - 3)[0] = d;
+    (sp - 2)[0] = a;
+    (sp - 1)[0] = b;
+}
+
+inline fn nipWindow(rt: *core.JSRuntime, base: [*]core.JSValue, sp: *[*]core.JSValue) !void {
+    try stackRequire(base, sp.*, 2);
+    const a_slot = sp.* - 2;
+    const b = (sp.* - 1)[0];
+    const a = a_slot[0];
+    a_slot[0] = b;
+    sp.* -= 1;
+    a.free(rt);
+}
+
+inline fn nip1Window(rt: *core.JSRuntime, base: [*]core.JSValue, sp: *[*]core.JSValue) !void {
+    try stackRequire(base, sp.*, 3);
+    const a_slot = sp.* - 3;
+    const a = a_slot[0];
+    a_slot[0] = (sp.* - 2)[0];
+    (sp.* - 2)[0] = (sp.* - 1)[0];
+    sp.* -= 1;
+    a.free(rt);
+}
+
+inline fn insert2Window(base: [*]core.JSValue, sp: *[*]core.JSValue) !void {
+    try stackRequire(base, sp.*, 2);
+    const a = (sp.* - 2)[0];
+    const b = (sp.* - 1)[0];
+    (sp.* - 2)[0] = borrowedValueFast(b);
+    (sp.* - 1)[0] = a;
+    sp.*[0] = b;
+    sp.* += 1;
+}
+
+inline fn insert3Window(base: [*]core.JSValue, sp: *[*]core.JSValue) !void {
+    try stackRequire(base, sp.*, 3);
+    const a = (sp.* - 3)[0];
+    const b = (sp.* - 2)[0];
+    const c = (sp.* - 1)[0];
+    (sp.* - 3)[0] = borrowedValueFast(c);
+    (sp.* - 2)[0] = a;
+    (sp.* - 1)[0] = b;
+    sp.*[0] = c;
+    sp.* += 1;
+}
+
+inline fn insert4Window(base: [*]core.JSValue, sp: *[*]core.JSValue) !void {
+    try stackRequire(base, sp.*, 4);
+    const a = (sp.* - 4)[0];
+    const b = (sp.* - 3)[0];
+    const c = (sp.* - 2)[0];
+    const d = (sp.* - 1)[0];
+    (sp.* - 4)[0] = borrowedValueFast(d);
+    (sp.* - 3)[0] = a;
+    (sp.* - 2)[0] = b;
+    (sp.* - 1)[0] = c;
+    sp.*[0] = d;
+    sp.* += 1;
+}
+
+inline fn rot3lWindow(base: [*]core.JSValue, sp: [*]core.JSValue) !void {
+    try stackRequire(base, sp, 3);
+    const a = (sp - 3)[0];
+    (sp - 3)[0] = (sp - 2)[0];
+    (sp - 2)[0] = (sp - 1)[0];
+    (sp - 1)[0] = a;
+}
+
+inline fn rot3rWindow(base: [*]core.JSValue, sp: [*]core.JSValue) !void {
+    try stackRequire(base, sp, 3);
+    const c = (sp - 1)[0];
+    (sp - 1)[0] = (sp - 2)[0];
+    (sp - 2)[0] = (sp - 3)[0];
+    (sp - 3)[0] = c;
+}
+
+inline fn rot4lWindow(base: [*]core.JSValue, sp: [*]core.JSValue) !void {
+    try stackRequire(base, sp, 4);
+    const a = (sp - 4)[0];
+    (sp - 4)[0] = (sp - 3)[0];
+    (sp - 3)[0] = (sp - 2)[0];
+    (sp - 2)[0] = (sp - 1)[0];
+    (sp - 1)[0] = a;
+}
+
+inline fn rot5lWindow(base: [*]core.JSValue, sp: [*]core.JSValue) !void {
+    try stackRequire(base, sp, 5);
+    const a = (sp - 5)[0];
+    (sp - 5)[0] = (sp - 4)[0];
+    (sp - 4)[0] = (sp - 3)[0];
+    (sp - 3)[0] = (sp - 2)[0];
+    (sp - 2)[0] = (sp - 1)[0];
+    (sp - 1)[0] = a;
+}
+
+inline fn perm3Window(base: [*]core.JSValue, sp: [*]core.JSValue) !void {
+    try stackRequire(base, sp, 3);
+    const a = (sp - 3)[0];
+    (sp - 3)[0] = (sp - 2)[0];
+    (sp - 2)[0] = a;
+}
+
+inline fn perm4Window(base: [*]core.JSValue, sp: [*]core.JSValue) !void {
+    try stackRequire(base, sp, 4);
+    const a = (sp - 4)[0];
+    const b = (sp - 3)[0];
+    const c = (sp - 2)[0];
+    (sp - 4)[0] = c;
+    (sp - 3)[0] = a;
+    (sp - 2)[0] = b;
+}
+
+inline fn perm5Window(base: [*]core.JSValue, sp: [*]core.JSValue) !void {
+    try stackRequire(base, sp, 5);
+    const a = (sp - 5)[0];
+    const b = (sp - 4)[0];
+    const c = (sp - 3)[0];
+    const d = (sp - 2)[0];
+    (sp - 5)[0] = d;
+    (sp - 4)[0] = a;
+    (sp - 3)[0] = b;
+    (sp - 2)[0] = c;
+}
+
+inline fn objectFromValueFast(value: core.JSValue) ?*core.Object {
+    if (!value.isObject()) return null;
+    const header = value.refHeader() orelse return null;
+    return @fieldParentPtr("header", header);
+}
+
+inline fn slotValueBorrowFast(slot: core.JSValue) core.JSValue {
+    var current = slot;
+    var depth: usize = 0;
+    while (depth < 16) : (depth += 1) {
+        const cell = slot_ops.varRefCellFromValue(current) orelse return current;
+        current = cell.varRefValueSlot().* orelse return core.JSValue.undefinedValue();
+    }
+    return current;
+}
+
+inline fn objectShapePropsFast(object: *const core.Object) []const core.shape.Property {
+    return object.shape_ref.props[0..@min(object.shape_ref.prop_count, object.properties.len)];
+}
+
+inline fn objectFindPropertyFast(object: *const core.Object, atom_id: core.Atom) ?usize {
+    const props = objectShapePropsFast(object);
+    const shape = object.shape_ref;
+    if (shape.prop_hash_mask != core.shape.no_property_hash and shape.hash_buckets.len != 0) {
+        var shape_index = shape.hash_buckets[core.shape.propertyBucketIndex(shape.hash, atom_id, shape.prop_hash_mask)];
+        var steps: usize = 0;
+        while (shape_index != core.shape.no_property_index and steps < shape.prop_count) : (steps += 1) {
+            const index: usize = @intCast(shape_index);
+            if (index >= shape.prop_count) break;
+            shape_index = shape.props[index].hash_next;
+            if (index >= props.len) continue;
+            const prop = props[index];
+            if (prop.atom_id == atom_id and !core.property.Flags.fromBits(prop.flags).deleted) return index;
+        }
+        return null;
+    }
+    for (props, 0..) |prop, index| {
+        if (prop.atom_id == atom_id and !core.property.Flags.fromBits(prop.flags).deleted) return index;
+    }
+    return null;
+}
+
+inline fn arrayPayloadConstFast(object: *const core.Object) ?*const core.object.ArrayPayload {
+    if (object.class_payload_kind != .array) return null;
+    return @ptrCast(@alignCast(object.class_payload.?));
+}
+
+inline fn arrayPayloadFast(object: *core.Object) ?*core.object.ArrayPayload {
+    if (object.class_payload_kind != .array) return null;
+    return @ptrCast(@alignCast(object.class_payload.?));
+}
+
+inline fn arrayElementsFast(object: *const core.Object) []core.JSValue {
+    const payload = arrayPayloadConstFast(object) orelse return &.{};
+    return payload.elements;
+}
+
+inline fn arrayStorageModeFast(object: *const core.Object) core.object.ArrayStorageMode {
+    const payload = arrayPayloadConstFast(object) orelse return .dense;
+    return payload.storage_mode;
+}
+
+inline fn numberToValueFast(value: f64) core.JSValue {
+    if (value >= -2147483648 and value <= 2147483647) {
+        const int_val: i32 = @intFromFloat(value);
+        if (@as(f64, @floatFromInt(int_val)) == value and !std.math.isNegativeZero(value)) {
+            return core.JSValue.int32(int_val);
+        }
+    }
+    return core.JSValue.float64(value);
+}
+
+inline fn fastInt32AddLocal(lhs: i32, rhs: i32) core.JSValue {
+    const result = @addWithOverflow(lhs, rhs);
+    if (result[1] == 0) return core.JSValue.int32(result[0]);
+    return numberToValueFast(@as(f64, @floatFromInt(lhs)) + @as(f64, @floatFromInt(rhs)));
+}
+
+inline fn fastInt32SubLocal(lhs: i32, rhs: i32) core.JSValue {
+    const result = @subWithOverflow(lhs, rhs);
+    if (result[1] == 0) return core.JSValue.int32(result[0]);
+    return numberToValueFast(@as(f64, @floatFromInt(lhs)) - @as(f64, @floatFromInt(rhs)));
+}
+
+inline fn fastInt32MulLocal(lhs: i32, rhs: i32) core.JSValue {
+    if ((lhs == 0 and rhs < 0) or (rhs == 0 and lhs < 0)) return core.JSValue.float64(-0.0);
+    const result = @mulWithOverflow(lhs, rhs);
+    if (result[1] == 0) return core.JSValue.int32(result[0]);
+    return numberToValueFast(@as(f64, @floatFromInt(lhs)) * @as(f64, @floatFromInt(rhs)));
+}
+
+inline fn fastInt32ModLocal(lhs: i32, rhs: i32) core.JSValue {
+    if (rhs == 0) return core.JSValue.float64(std.math.nan(f64));
+    if (rhs == -1) return if (lhs < 0) core.JSValue.float64(-0.0) else core.JSValue.int32(0);
+    const result = @rem(lhs, rhs);
+    if (result == 0 and lhs < 0) return core.JSValue.float64(-0.0);
+    return core.JSValue.int32(result);
+}
+
+inline fn fastBinaryInt32Local(binop: u8, lhs: i32, rhs: i32) ?core.JSValue {
+    return switch (binop) {
+        op.add => fastInt32AddLocal(lhs, rhs),
+        op.sub => fastInt32SubLocal(lhs, rhs),
+        op.mul => fastInt32MulLocal(lhs, rhs),
+        op.div => numberToValueFast(@as(f64, @floatFromInt(lhs)) / @as(f64, @floatFromInt(rhs))),
+        op.mod => fastInt32ModLocal(lhs, rhs),
+        op.shl => core.JSValue.int32(lhs << @intCast(rhs & 31)),
+        op.sar => core.JSValue.int32(lhs >> @intCast(rhs & 31)),
+        op.shr => numberToValueFast(@floatFromInt(@as(u32, @bitCast(lhs)) >> @intCast(rhs & 31))),
+        op.@"and" => core.JSValue.int32(lhs & rhs),
+        op.@"or" => core.JSValue.int32(lhs | rhs),
+        op.xor => core.JSValue.int32(lhs ^ rhs),
+        else => null,
+    };
 }
 
 inline fn tryFastPutLoc(
@@ -222,12 +521,45 @@ inline fn tryFastPutField(
     const obj_slot = sp.* - 2;
     const value = value_slot[0];
     const obj = obj_slot[0];
-    if (!vm_property_field.qjsPutFieldFast(ctx.runtime, obj, atom_id, value)) return false;
+    if (ctx.runtime.atoms.kind(atom_id) == .private) return false;
+    if (value.requiresRefCount()) return false;
+    const object = objectFromValueFast(obj) orelse return false;
+    if (object.flags.is_borrowed_reference_holder) return false;
+    if (object.flags.is_proxy or object.class_payload_kind == .proxy or object.exotic != null) return false;
+    if (object.flags.is_array) return false;
+    if (object.class_payload_kind == .typed_array) return false;
+    if (object.class_id == core.class.ids.regexp and atom_id == core.atom.ids.lastIndex and object.regexpLastIndex() != null) return false;
+    if (object.class_id == core.class.ids.module_ns or object.class_id == core.class.ids.mapped_arguments) return false;
+    const index = objectFindPropertyFast(object, atom_id) orelse return false;
+    const flags = object.propFlagsAt(index);
+    if (!flags.writable or flags.accessor) return false;
+    const entry = &object.properties[index];
+    switch (entry.slot) {
+        .data => |old_value| {
+            if (old_value.requiresRefCount()) return false;
+            entry.slot = .{ .data = value };
+        },
+        .auto_init, .accessor, .deleted => return false,
+    }
 
     sp.* = obj_slot;
     obj.free(ctx.runtime);
     value.free(ctx.runtime);
     return true;
+}
+
+inline fn fastDenseArrayElementValueLocal(value: core.JSValue, key: core.JSValue) ?core.JSValue {
+    const index_i32 = key.asInt32() orelse return null;
+    if (index_i32 < 0) return null;
+    const object = objectFromValueFast(value) orelse return null;
+    if (object.flags.is_proxy or object.class_payload_kind == .proxy or object.exotic != null) return null;
+    if (!object.flags.is_array or arrayStorageModeFast(object) != .dense) return null;
+    const index: u32 = @intCast(index_i32);
+    const atom_id = core.atom.atomFromUInt32(index);
+    if (object.properties.len != 0 and objectFindPropertyFast(object, atom_id) != null) return null;
+    const elements = arrayElementsFast(object);
+    if (@as(usize, @intCast(index_i32)) >= elements.len) return null;
+    return elements[@intCast(index_i32)].dup();
 }
 
 inline fn tryFastGetArrayEl(
@@ -241,7 +573,7 @@ inline fn tryFastGetArrayEl(
     const obj_slot = sp.* - 2;
     const key = key_slot[0];
     const obj = obj_slot[0];
-    const value = vm_property_field.fastDenseArrayElementValue(obj, key) orelse return false;
+    const value = fastDenseArrayElementValueLocal(obj, key) orelse return false;
 
     sp.* = obj_slot;
     pushOwnedWindow(stack, base, sp, value);
@@ -259,20 +591,34 @@ inline fn tryFastGetArrayEl2(
     const key_slot = sp.* - 1;
     const key = key_slot[0];
     const obj = (sp.* - 2)[0];
-    const value = vm_property_field.fastDenseArrayElementValue(obj, key) orelse return false;
+    const value = fastDenseArrayElementValueLocal(obj, key) orelse return false;
 
     key_slot[0] = value;
     key.free(ctx.runtime);
     return true;
 }
 
-inline fn denseArrayExistingIntIndexForPut(obj: core.JSValue, key: core.JSValue) bool {
+inline fn fastPutDenseArrayExistingIntIndexLocal(rt: *core.JSRuntime, obj: core.JSValue, key: core.JSValue, value: core.JSValue) bool {
     const index_i32 = key.asInt32() orelse return false;
     if (index_i32 < 0 or index_i32 > core.array.max_array_index or index_i32 > core.atom.max_int_atom) return false;
-    const object = class_vm.objectFromValue(obj) orelse return false;
+    const object = objectFromValueFast(obj) orelse return false;
     if (!object.flags.is_array) return false;
     const index: u32 = @intCast(index_i32);
-    return index < object.length;
+    if (index >= object.length) return false;
+    if (!object.flags.length_writable) return false;
+    if (object.exotic != null or object.flags.is_proxy or object.class_payload_kind == .proxy) return false;
+    if (arrayStorageModeFast(object) != .dense) return false;
+    const atom_id = core.atom.atomFromUInt32(index);
+    if (object.properties.len != 0 and objectFindPropertyFast(object, atom_id) != null) return false;
+    const elements = arrayElementsFast(object);
+    if (@as(usize, @intCast(index)) >= elements.len) return false;
+    if (rt.any_prototype_may_have_indexed_properties and object.prototype != null) return false;
+
+    const element_slot = &arrayPayloadFast(object).?.elements[@intCast(index)];
+    const old_value = element_slot.*;
+    element_slot.* = value.dup();
+    old_value.free(rt);
+    return true;
 }
 
 inline fn tryFastPutArrayEl(
@@ -287,10 +633,7 @@ inline fn tryFastPutArrayEl(
     const value = value_slot[0];
     const key = key_slot[0];
     const obj = obj_slot[0];
-    if (!denseArrayExistingIntIndexForPut(obj, key)) return false;
-
-    const wrote = array_ops.putDenseArrayElementFast(ctx.runtime, obj, key, value) catch unreachable;
-    if (!wrote) return false;
+    if (!fastPutDenseArrayExistingIntIndexLocal(ctx.runtime, obj, key, value)) return false;
 
     sp.* = obj_slot;
     obj.free(ctx.runtime);
@@ -305,7 +648,7 @@ inline fn tryInt32BinaryPtr(base: [*]core.JSValue, sp: *[*]core.JSValue, binop: 
     const lhs_slot = sp.* - 2;
     const lhs_int = lhs_slot[0].asInt32() orelse return false;
     const rhs_int = rhs_slot[0].asInt32() orelse return false;
-    const result = arith_vm.fastBinaryInt32(binop, lhs_int, rhs_int) orelse return false;
+    const result = fastBinaryInt32Local(binop, lhs_int, rhs_int) orelse return false;
     lhs_slot[0] = result;
     sp.* = rhs_slot;
     return true;
@@ -754,130 +1097,58 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
             },
             op.nip => {
-                enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
-                frame.pc = ipOff(ip, function.code.ptr);
-                try value_vm.nip(ctx, stack);
-                ip = function.code.ptr + frame.pc;
+                try nipWindow(ctx.runtime, base, &sp);
             },
             op.nip1 => {
-                enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
-                frame.pc = ipOff(ip, function.code.ptr);
-                try value_vm.nip1(ctx, stack);
-                ip = function.code.ptr + frame.pc;
+                try nip1Window(ctx.runtime, base, &sp);
             },
             op.dup => {
-                enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
-                frame.pc = ipOff(ip, function.code.ptr);
-                try value_vm.dup(ctx, stack, opc);
-                ip = function.code.ptr + frame.pc;
+                try dupWindow(stack, base, &sp);
             },
             op.dup1 => {
-                enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
-                frame.pc = ipOff(ip, function.code.ptr);
-                try value_vm.dup1(ctx, stack);
-                ip = function.code.ptr + frame.pc;
+                try dup1Window(base, &sp);
             },
             op.dup2 => {
-                enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
-                frame.pc = ipOff(ip, function.code.ptr);
-                try value_vm.dup2(ctx, stack);
-                ip = function.code.ptr + frame.pc;
+                try dup2Window(base, &sp);
             },
             op.dup3 => {
-                enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
-                frame.pc = ipOff(ip, function.code.ptr);
-                try value_vm.dup3(ctx, stack);
-                ip = function.code.ptr + frame.pc;
+                try dup3Window(base, &sp);
             },
             op.swap => {
-                enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
-                frame.pc = ipOff(ip, function.code.ptr);
-                try value_vm.swap(ctx, stack);
-                ip = function.code.ptr + frame.pc;
+                try swapWindow(base, sp);
             },
             op.swap2 => {
-                enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
-                frame.pc = ipOff(ip, function.code.ptr);
-                try value_vm.swap2(ctx, stack);
-                ip = function.code.ptr + frame.pc;
+                try swap2Window(base, sp);
             },
             op.insert2 => {
-                enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
-                frame.pc = ipOff(ip, function.code.ptr);
-                try value_vm.insert2(ctx, stack);
-                ip = function.code.ptr + frame.pc;
+                try insert2Window(base, &sp);
             },
             op.insert3 => {
-                enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
-                frame.pc = ipOff(ip, function.code.ptr);
-                try value_vm.insert3(ctx, stack);
-                ip = function.code.ptr + frame.pc;
+                try insert3Window(base, &sp);
             },
             op.insert4 => {
-                enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
-                frame.pc = ipOff(ip, function.code.ptr);
-                try value_vm.insert4(ctx, stack);
-                ip = function.code.ptr + frame.pc;
+                try insert4Window(base, &sp);
             },
             op.perm3 => {
-                enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
-                frame.pc = ipOff(ip, function.code.ptr);
-                try value_vm.perm3(ctx, stack);
-                ip = function.code.ptr + frame.pc;
+                try perm3Window(base, sp);
             },
             op.perm4 => {
-                enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
-                frame.pc = ipOff(ip, function.code.ptr);
-                try value_vm.perm4(ctx, stack);
-                ip = function.code.ptr + frame.pc;
+                try perm4Window(base, sp);
             },
             op.perm5 => {
-                enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
-                frame.pc = ipOff(ip, function.code.ptr);
-                try value_vm.perm5(ctx, stack);
-                ip = function.code.ptr + frame.pc;
+                try perm5Window(base, sp);
             },
             op.rot3l => {
-                enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
-                frame.pc = ipOff(ip, function.code.ptr);
-                try value_vm.rot3l(ctx, stack);
-                ip = function.code.ptr + frame.pc;
+                try rot3lWindow(base, sp);
             },
             op.rot3r => {
-                enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
-                frame.pc = ipOff(ip, function.code.ptr);
-                try value_vm.rot3r(ctx, stack);
-                ip = function.code.ptr + frame.pc;
+                try rot3rWindow(base, sp);
             },
             op.rot4l => {
-                enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
-                frame.pc = ipOff(ip, function.code.ptr);
-                try value_vm.rot4l(ctx, stack);
-                ip = function.code.ptr + frame.pc;
+                try rot4lWindow(base, sp);
             },
             op.rot5l => {
-                enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
-                frame.pc = ipOff(ip, function.code.ptr);
-                try value_vm.rot5l(ctx, stack);
-                ip = function.code.ptr + frame.pc;
+                try rot5lWindow(base, sp);
             },
 
             // ===================================================================

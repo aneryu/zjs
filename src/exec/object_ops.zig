@@ -5747,7 +5747,7 @@ pub fn atomPropertyName(rt: *core.JSRuntime, atom_id: core.Atom) ![]const u8 {
 
 // --- Combined from class.zig ---
 
-pub fn getSuper(
+pub noinline fn getSuper(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
@@ -5792,7 +5792,7 @@ pub fn getSuper(
     }
 }
 
-pub fn getSuperValue(
+pub noinline fn getSuperValue(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -5843,7 +5843,7 @@ pub fn getSuperValue(
     return .done;
 }
 
-pub fn putSuperValue(
+pub noinline fn putSuperValue(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -5893,7 +5893,7 @@ pub fn putSuperValue(
     return .done;
 }
 
-pub fn setHomeObject(
+pub noinline fn setHomeObject(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
 ) !void {
@@ -5930,7 +5930,7 @@ pub fn checkBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     if (!try hasPrivateBrand(ctx.runtime, obj, func)) return error.TypeError;
 }
 
-pub fn checkBrandVm(
+pub noinline fn checkBrandVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
@@ -5974,7 +5974,7 @@ pub fn addBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     }
 }
 
-pub fn addBrandVm(
+pub noinline fn addBrandVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
@@ -6015,7 +6015,7 @@ pub fn privateIn(
     try stack.pushOwned(core.JSValue.boolean(found));
 }
 
-pub fn privateInVm(
+pub noinline fn privateInVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -6031,7 +6031,7 @@ pub fn privateInVm(
     return .done;
 }
 
-pub fn defineClass(
+pub noinline fn defineClass(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -6166,7 +6166,7 @@ pub fn defineClass(
     return .done;
 }
 
-pub fn defineMethod(
+pub noinline fn defineMethod(
     ctx: *core.JSContext,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -6185,7 +6185,7 @@ pub fn defineMethod(
     return .done;
 }
 
-pub fn defineMethodComputed(
+pub noinline fn defineMethodComputed(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,

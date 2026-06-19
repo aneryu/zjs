@@ -300,7 +300,7 @@ fn tryFuseGlobalInductionInt32AddRange(
     return true;
 }
 
-pub fn getVar(
+pub noinline fn getVar(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2100,7 +2100,7 @@ fn uriCall1GlobalStringArgument(
     return .{ .value = value, .next_pc = next_pc, .owned = false };
 }
 
-pub fn putVar(
+pub noinline fn putVar(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2349,7 +2349,7 @@ fn fastLengthValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     return error.TypeError;
 }
 
-pub fn globalDefinition(
+pub noinline fn globalDefinition(
     ctx: *core.JSContext,
     global: *core.Object,
     stack: *stack_mod.Stack,
