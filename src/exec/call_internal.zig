@@ -145,6 +145,71 @@ inline fn tryFastPutField(
     return true;
 }
 
+inline fn tryFastGetArrayEl(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+) bool {
+    if (stack.values.len < 2) return false;
+    const key_index = stack.values.len - 1;
+    const obj_index = stack.values.len - 2;
+    const key = stack.values[key_index];
+    const obj = stack.values[obj_index];
+    const value = vm_property_field.fastDenseArrayElementValue(obj, key) orelse return false;
+
+    stack.values = stack.values.ptr[0..obj_index];
+    stack.pushOwnedAssumeCapacity(value);
+    obj.free(ctx.runtime);
+    key.free(ctx.runtime);
+    return true;
+}
+
+inline fn tryFastGetArrayEl2(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+) bool {
+    if (stack.values.len < 2) return false;
+    const key_index = stack.values.len - 1;
+    const key = stack.values[key_index];
+    const obj = stack.values[stack.values.len - 2];
+    const value = vm_property_field.fastDenseArrayElementValue(obj, key) orelse return false;
+
+    stack.values[key_index] = value;
+    key.free(ctx.runtime);
+    return true;
+}
+
+inline fn denseArrayExistingIntIndexForPut(obj: core.JSValue, key: core.JSValue) bool {
+    const index_i32 = key.asInt32() orelse return false;
+    if (index_i32 < 0 or index_i32 > core.array.max_array_index or index_i32 > core.atom.max_int_atom) return false;
+    const object = class_vm.objectFromValue(obj) orelse return false;
+    if (!object.flags.is_array) return false;
+    const index: u32 = @intCast(index_i32);
+    return index < object.length;
+}
+
+inline fn tryFastPutArrayEl(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+) bool {
+    if (stack.values.len < 3) return false;
+    const value_index = stack.values.len - 1;
+    const key_index = stack.values.len - 2;
+    const obj_index = stack.values.len - 3;
+    const value = stack.values[value_index];
+    const key = stack.values[key_index];
+    const obj = stack.values[obj_index];
+    if (!denseArrayExistingIntIndexForPut(obj, key)) return false;
+
+    const wrote = array_ops.putDenseArrayElementFast(ctx.runtime, obj, key, value) catch unreachable;
+    if (!wrote) return false;
+
+    stack.values = stack.values.ptr[0..obj_index];
+    obj.free(ctx.runtime);
+    key.free(ctx.runtime);
+    value.free(ctx.runtime);
+    return true;
+}
+
 /// Frame-setup wrapper that runs a NORMAL-kind bytecode function through the
 /// recursive `dispatchRecursive`. Mirrors `runWithArgsState`'s setup (lines
 /// 294-339) minus the inline-`Machine` loop and the generator/eval-code state,
@@ -1298,12 +1363,20 @@ switch (opc) {
         }
     },
     op.get_array_el, op.get_array_el2, op.put_array_el => {
-        frame.pc = pc;
-        const step = try vm_property_field.arrayElement(ctx, output, global, stack, function, frame, catch_target, opc);
-        pc = frame.pc;
-        switch (step) {
-            .done => {},
-            .continue_loop => continue,
+        const handled = switch (opc) {
+            op.get_array_el => tryFastGetArrayEl(ctx, stack),
+            op.get_array_el2 => tryFastGetArrayEl2(ctx, stack),
+            op.put_array_el => tryFastPutArrayEl(ctx, stack),
+            else => unreachable,
+        };
+        if (!handled) {
+            frame.pc = pc;
+            const step = try vm_property_field.arrayElement(ctx, output, global, stack, function, frame, catch_target, opc);
+            pc = frame.pc;
+            switch (step) {
+                .done => {},
+                .continue_loop => continue,
+            }
         }
     },
     op.to_propkey => {
