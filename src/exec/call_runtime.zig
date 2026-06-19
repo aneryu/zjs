@@ -4534,6 +4534,11 @@ pub fn directEvalGlobalDataVarNeedsTemporaryRef(rt: *core.JSRuntime, global: *co
     return desc.kind == .data and desc.writable != true;
 }
 
+fn restoreEvalGlobalLexicals(ctx: *core.JSContext, global: *core.Object, saved_lexicals: ?*core.Object) !void {
+    defer ctx.lexicals = saved_lexicals;
+    try global.setGlobalLexicals(ctx.runtime, ctx.lexicals);
+}
+
 pub fn indirectEval(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -4549,24 +4554,42 @@ pub fn indirectEval(
     const context_global = ctx.global;
     const use_global_lexicals = context_global == null or context_global.? != eval_global;
     const saved_lexicals = ctx.lexicals;
-    if (use_global_lexicals) ctx.lexicals = eval_global.global_lexicals;
-    defer if (use_global_lexicals) {
-        eval_global.global_lexicals = ctx.lexicals;
-        ctx.lexicals = saved_lexicals;
+    if (use_global_lexicals) ctx.lexicals = eval_global.globalLexicals();
+
+    const EvalResult = @typeInfo(@TypeOf(indirectEval)).@"fn".return_type.?;
+    const result: EvalResult = blk: {
+        const regexp_literal = simpleEvalRegExpLiteral(ctx, eval_global, source.items) catch |err| break :blk err;
+        if (regexp_literal) |value| break :blk value;
+        var compiled = frontend.parser.parse(ctx.runtime, source.items, .{ .mode = .eval_indirect, .filename = "<eval>", .strict = false }) catch |err| break :blk err;
+        defer compiled.deinit();
+        if (compiled.syntax_error != null) break :blk error.SyntaxError;
+        if (!compiled.function.flags.is_strict) {
+            validateGlobalEvalFunctionDeclarations(ctx, eval_global, source.items, true) catch |err| break :blk err;
+        }
+        var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
+        defer nested_stack.deinit(ctx.runtime);
+        break :blk runWithArgsState(ctx, &nested_stack, &compiled.function, eval_global.value(), &.{}, &.{}, output, eval_global, true, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), true, true, core.JSValue.undefinedValue(), false, false) catch |err| exception_ops.normalizeEvalRuntimeError(err);
     };
 
-    if (try simpleEvalRegExpLiteral(ctx, eval_global, source.items)) |value| return value;
-    var compiled = try frontend.parser.parse(ctx.runtime, source.items, .{ .mode = .eval_indirect, .filename = "<eval>", .strict = false });
-    defer compiled.deinit();
-    if (compiled.syntax_error != null) return error.SyntaxError;
-    if (!compiled.function.flags.is_strict) {
-        try validateGlobalEvalFunctionDeclarations(ctx, eval_global, source.items, true);
+    if (use_global_lexicals) {
+        var rooted_result = result catch |err| {
+            try restoreEvalGlobalLexicals(ctx, eval_global, saved_lexicals);
+            return err;
+        };
+        errdefer rooted_result.free(ctx.runtime);
+        var root_values = [_]core.runtime.ValueRootValue{
+            .{ .value = &rooted_result },
+        };
+        const root_frame = core.runtime.ValueRootFrame{
+            .previous = ctx.runtime.active_value_roots,
+            .values = &root_values,
+        };
+        ctx.runtime.active_value_roots = &root_frame;
+        defer ctx.runtime.active_value_roots = root_frame.previous;
+        try restoreEvalGlobalLexicals(ctx, eval_global, saved_lexicals);
+        return rooted_result;
     }
-    var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
-    defer nested_stack.deinit(ctx.runtime);
-    return runWithArgsState(ctx, &nested_stack, &compiled.function, eval_global.value(), &.{}, &.{}, output, eval_global, true, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), true, true, core.JSValue.undefinedValue(), false, false) catch |err| {
-        return exception_ops.normalizeEvalRuntimeError(err);
-    };
+    return result;
 }
 
 pub fn simpleEvalRegExpLiteral(ctx: *core.JSContext, global: *core.Object, source: []const u8) !?core.JSValue {

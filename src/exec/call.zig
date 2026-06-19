@@ -42,6 +42,11 @@ fn hostResult(result: anytype) HostError!switch (@typeInfo(@TypeOf(result))) {
     return result catch |err| return @errorCast(err);
 }
 
+fn restoreEvalGlobalLexicals(ctx: *core.JSContext, global: *core.Object, saved_lexicals: ?*core.Object) !void {
+    defer ctx.lexicals = saved_lexicals;
+    try global.setGlobalLexicals(ctx.runtime, ctx.lexicals);
+}
+
 pub fn returnThis(this_value: core.JSValue) core.JSValue {
     return this_value.dup();
 }
@@ -3344,18 +3349,35 @@ pub fn qjsEvalGlobalScriptSource(
     const context_global = ctx.global;
     const use_global_lexicals = context_global == null or context_global.? != global;
     const saved_lexicals = ctx.lexicals;
-    if (use_global_lexicals) ctx.lexicals = global.global_lexicals;
-    defer if (use_global_lexicals) {
-        global.global_lexicals = ctx.lexicals;
-        ctx.lexicals = saved_lexicals;
+    if (use_global_lexicals) ctx.lexicals = global.globalLexicals();
+
+    const EvalResult = @typeInfo(@TypeOf(qjsEvalGlobalScriptSource)).@"fn".return_type.?;
+    const result: EvalResult = blk: {
+        var compiled = frontend.parser.parse(ctx.runtime, source, .{ .mode = .script, .filename = filename, .strict = false, .return_completion = true }) catch |err| break :blk err;
+        defer compiled.deinit();
+        if (compiled.syntax_error != null) break :blk error.SyntaxError;
+        var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
+        defer nested_stack.deinit(ctx.runtime);
+        break :blk zjs_vm.runWithArgsState(ctx, &nested_stack, &compiled.function, global.value(), &.{}, &.{}, output, global, true, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), true, false) catch |err| exception_ops.normalizeEvalRuntimeError(err);
     };
 
-    var compiled = try frontend.parser.parse(ctx.runtime, source, .{ .mode = .script, .filename = filename, .strict = false, .return_completion = true });
-    defer compiled.deinit();
-    if (compiled.syntax_error != null) return error.SyntaxError;
-    var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
-    defer nested_stack.deinit(ctx.runtime);
-    return zjs_vm.runWithArgsState(ctx, &nested_stack, &compiled.function, global.value(), &.{}, &.{}, output, global, true, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), true, false) catch |err| {
-        return exception_ops.normalizeEvalRuntimeError(err);
-    };
+    if (use_global_lexicals) {
+        var rooted_result = result catch |err| {
+            try restoreEvalGlobalLexicals(ctx, global, saved_lexicals);
+            return err;
+        };
+        errdefer rooted_result.free(ctx.runtime);
+        var root_values = [_]core.runtime.ValueRootValue{
+            .{ .value = &rooted_result },
+        };
+        const root_frame = core.runtime.ValueRootFrame{
+            .previous = ctx.runtime.active_value_roots,
+            .values = &root_values,
+        };
+        ctx.runtime.active_value_roots = &root_frame;
+        defer ctx.runtime.active_value_roots = root_frame.previous;
+        try restoreEvalGlobalLexicals(ctx, global, saved_lexicals);
+        return rooted_result;
+    }
+    return result;
 }
