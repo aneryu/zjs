@@ -260,7 +260,7 @@ pub fn inOrInstanceof(
     return .done;
 }
 
-pub fn field(
+pub inline fn field(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -369,17 +369,15 @@ pub fn field(
     return .done;
 }
 
-fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.JSValue {
+inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.JSValue {
     if (rt.atoms.kind(atom_id) == .private) return null;
     var object = objectFromValue(receiver) orelse return null;
     while (true) {
         if (qjsFieldObjectNeedsSlow(rt, object, atom_id)) return null;
         if (object.findProperty(atom_id)) |index| {
-            if (object.propFlagsAt(index).accessor) return null;
-            return switch (object.properties[index].slot) {
-                .data => |stored| stored,
-                .auto_init, .accessor, .deleted => null,
-            };
+            const flags = object.propFlagsAt(index);
+            if (flags.accessor or flags.deleted) return null;
+            return object.properties[index].slot.dataValueForFastPath();
         }
         // End of the explicit self.prototype chain. We must NOT synthesize `undefined`
         // here: zjs resolves built-in prototype methods/constructor for arrays and other
@@ -392,7 +390,7 @@ fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.At
     }
 }
 
-fn qjsPutFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) bool {
+inline fn qjsPutFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) bool {
     if (rt.atoms.kind(atom_id) == .private) return false;
     const object = objectFromValue(receiver) orelse return false;
     if (qjsPutFieldObjectNeedsSlow(object, atom_id)) return false;
@@ -412,7 +410,7 @@ fn qjsPutFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.At
     }
 }
 
-fn qjsFieldObjectNeedsSlow(rt: *core.JSRuntime, object: *const core.Object, atom_id: core.Atom) bool {
+inline fn qjsFieldObjectNeedsSlow(rt: *core.JSRuntime, object: *const core.Object, atom_id: core.Atom) bool {
     if (object.flags.is_proxy or object.proxyTarget() != null or object.exotic != null) return true;
     if (object.flags.is_array and (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null)) return true;
     if (core.object.isTypedArrayObject(object)) return true;
@@ -421,7 +419,7 @@ fn qjsFieldObjectNeedsSlow(rt: *core.JSRuntime, object: *const core.Object, atom
     return false;
 }
 
-fn qjsPutFieldObjectNeedsSlow(object: *const core.Object, atom_id: core.Atom) bool {
+inline fn qjsPutFieldObjectNeedsSlow(object: *const core.Object, atom_id: core.Atom) bool {
     if (object.flags.is_proxy or object.proxyTarget() != null or object.exotic != null) return true;
     if (object.flags.is_array) return true;
     if (core.object.isTypedArrayObject(object)) return true;
