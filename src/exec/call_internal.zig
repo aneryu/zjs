@@ -111,12 +111,10 @@ inline fn leaveStackBoundary(
     sp: *[*]core.JSValue,
     frame: *frame_mod.Frame,
     var_buf: *[*]core.JSValue,
-    arg_buf: *[*]core.JSValue,
 ) void {
     base.* = stack.values.ptr;
     sp.* = stack.values.ptr + stack.values.len;
     var_buf.* = frame.locals.ptr;
-    arg_buf.* = frame.args.ptr;
     assertStackWindowSynced(stack, base.*, sp.*);
 }
 
@@ -890,7 +888,6 @@ pub fn dispatchRecursive(
     var base: [*]core.JSValue = stack.values.ptr;
     var sp: [*]core.JSValue = stack.values.ptr + stack.values.len;
     var var_buf: [*]core.JSValue = frame.locals.ptr;
-    var arg_buf: [*]core.JSValue = frame.args.ptr;
     // The operand-stack GC root stays `.mutable = &stack.values` for this whole
     // frame (set by FrameRootScope.init). We publish the live `sp` at every
     // cold-arm boundary, and once more here on any exit path, so `stack.values`
@@ -1037,7 +1034,7 @@ pub fn dispatchRecursive(
             op.push_const => |opc| {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try value_vm.pushConst(ctx, stack, function, frame, opc);
                 ip = function.code.ptr + frame.pc;
@@ -1047,7 +1044,7 @@ pub fn dispatchRecursive(
             op.push_const8 => |opc| {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try value_vm.pushConst8(ctx, stack, function, frame, opc);
                 ip = function.code.ptr + frame.pc;
@@ -1057,7 +1054,7 @@ pub fn dispatchRecursive(
             op.push_atom_value => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try value_vm.pushAtomValue(ctx, stack, function, frame);
                 ip = function.code.ptr + frame.pc;
@@ -1067,7 +1064,7 @@ pub fn dispatchRecursive(
             op.push_empty_string => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try value_vm.pushEmptyString(ctx, stack);
                 ip = function.code.ptr + frame.pc;
@@ -1077,7 +1074,7 @@ pub fn dispatchRecursive(
             op.private_symbol => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try value_vm.pushPrivateSymbol(ctx, stack, function, frame);
                 ip = function.code.ptr + frame.pc;
@@ -1087,7 +1084,7 @@ pub fn dispatchRecursive(
             op.regexp => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try regexp_vm.pushLiteral(ctx, stack, class_vm.constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"));
                 ip = function.code.ptr + frame.pc;
@@ -1097,7 +1094,7 @@ pub fn dispatchRecursive(
             op.fclosure, op.fclosure8 => |opc| {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try call_vm.closure(ctx, output, global, stack, function, frame, catch_target, opc, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs);
                 ip = function.code.ptr + frame.pc;
@@ -1124,7 +1121,7 @@ pub fn dispatchRecursive(
                 const top = (sp - 1)[0];
                 if (top.isCatchOffset()) {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     frame.pc = ipOff(ip, function.code.ptr);
                     switch (try value_vm.drop(ctx.runtime, stack)) {
                         .value => {},
@@ -1146,7 +1143,7 @@ pub fn dispatchRecursive(
             op.nip_catch => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try value_vm.nipCatch(ctx.runtime, stack);
                 ip = function.code.ptr + frame.pc;
@@ -1317,7 +1314,7 @@ pub fn dispatchRecursive(
                     ip += 2;
                 } else {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     frame.pc = ipOff(ip, function.code.ptr);
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     ip = function.code.ptr + frame.pc;
@@ -1332,7 +1329,7 @@ pub fn dispatchRecursive(
                     ip += 2;
                 } else {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     frame.pc = ipOff(ip, function.code.ptr);
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     ip = function.code.ptr + frame.pc;
@@ -1347,7 +1344,7 @@ pub fn dispatchRecursive(
                     ip += 1;
                 } else {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     frame.pc = ipOff(ip, function.code.ptr);
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     ip = function.code.ptr + frame.pc;
@@ -1362,7 +1359,7 @@ pub fn dispatchRecursive(
                     ip += 1;
                 } else {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     frame.pc = ipOff(ip, function.code.ptr);
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     ip = function.code.ptr + frame.pc;
@@ -1374,7 +1371,7 @@ pub fn dispatchRecursive(
                 ip += 1;
                 if (!tryFastSetLoc(ctx, function, var_buf, base, &sp, 0)) {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     frame.pc = ipOff(ip, function.code.ptr);
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     ip = function.code.ptr + frame.pc;
@@ -1386,7 +1383,7 @@ pub fn dispatchRecursive(
                 ip += 1;
                 if (!tryFastSetLoc(ctx, function, var_buf, base, &sp, 1)) {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     frame.pc = ipOff(ip, function.code.ptr);
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     ip = function.code.ptr + frame.pc;
@@ -1398,7 +1395,7 @@ pub fn dispatchRecursive(
                 ip += 1;
                 if (!tryFastSetLoc(ctx, function, var_buf, base, &sp, 2)) {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     frame.pc = ipOff(ip, function.code.ptr);
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     ip = function.code.ptr + frame.pc;
@@ -1410,7 +1407,7 @@ pub fn dispatchRecursive(
                 ip += 1;
                 if (!tryFastSetLoc(ctx, function, var_buf, base, &sp, 3)) {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     frame.pc = ipOff(ip, function.code.ptr);
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     ip = function.code.ptr + frame.pc;
@@ -1421,7 +1418,7 @@ pub fn dispatchRecursive(
             op.get_loc0_loc1 => |opc| {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                 ip = function.code.ptr + frame.pc;
@@ -1432,7 +1429,7 @@ pub fn dispatchRecursive(
                 ip += 1;
                 if (!tryFastPutLoc(ctx, function, var_buf, base, &sp, 0)) {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     frame.pc = ipOff(ip, function.code.ptr);
                     try slot_ops.execPutLoc(ctx, function, global, frame, stack, 0, 0, opc, false);
                     ip = function.code.ptr + frame.pc;
@@ -1444,7 +1441,7 @@ pub fn dispatchRecursive(
                 ip += 1;
                 if (!tryFastPutLoc(ctx, function, var_buf, base, &sp, 1)) {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     frame.pc = ipOff(ip, function.code.ptr);
                     try slot_ops.execPutLoc(ctx, function, global, frame, stack, 1, 0, opc, false);
                     ip = function.code.ptr + frame.pc;
@@ -1456,7 +1453,7 @@ pub fn dispatchRecursive(
                 ip += 1;
                 if (!tryFastPutLoc(ctx, function, var_buf, base, &sp, 2)) {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     frame.pc = ipOff(ip, function.code.ptr);
                     try slot_ops.execPutLoc(ctx, function, global, frame, stack, 2, 0, opc, false);
                     ip = function.code.ptr + frame.pc;
@@ -1468,7 +1465,7 @@ pub fn dispatchRecursive(
                 ip += 1;
                 if (!tryFastPutLoc(ctx, function, var_buf, base, &sp, 3)) {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     frame.pc = ipOff(ip, function.code.ptr);
                     try slot_ops.execPutLoc(ctx, function, global, frame, stack, 3, 0, opc, false);
                     ip = function.code.ptr + frame.pc;
@@ -1482,25 +1479,25 @@ pub fn dispatchRecursive(
             // GC-free presized-stack push, so no frame.pc publish needed.
             op.get_arg0 => {
                 ip += 1;
-                pushSlotWindow(stack, base, &sp, if (frame.args.len > 0) arg_buf[0] else core.JSValue.undefinedValue());
+                pushSlotWindow(stack, base, &sp, if (frame.args.len > 0) frame.args.ptr[0] else core.JSValue.undefinedValue());
                 if (ip == code_end) continue;
                 continue :sw ip[0];
             },
             op.get_arg1 => {
                 ip += 1;
-                pushSlotWindow(stack, base, &sp, if (frame.args.len > 1) arg_buf[1] else core.JSValue.undefinedValue());
+                pushSlotWindow(stack, base, &sp, if (frame.args.len > 1) frame.args.ptr[1] else core.JSValue.undefinedValue());
                 if (ip == code_end) continue;
                 continue :sw ip[0];
             },
             op.get_arg2 => {
                 ip += 1;
-                pushSlotWindow(stack, base, &sp, if (frame.args.len > 2) arg_buf[2] else core.JSValue.undefinedValue());
+                pushSlotWindow(stack, base, &sp, if (frame.args.len > 2) frame.args.ptr[2] else core.JSValue.undefinedValue());
                 if (ip == code_end) continue;
                 continue :sw ip[0];
             },
             op.get_arg3 => {
                 ip += 1;
-                pushSlotWindow(stack, base, &sp, if (frame.args.len > 3) arg_buf[3] else core.JSValue.undefinedValue());
+                pushSlotWindow(stack, base, &sp, if (frame.args.len > 3) frame.args.ptr[3] else core.JSValue.undefinedValue());
                 if (ip == code_end) continue;
                 continue :sw ip[0];
             },
@@ -1508,14 +1505,14 @@ pub fn dispatchRecursive(
                 ip += 1;
                 const idx = readInt(u16, ip[0..2]);
                 ip += 2;
-                pushSlotWindow(stack, base, &sp, if (idx < frame.args.len) arg_buf[idx] else core.JSValue.undefinedValue());
+                pushSlotWindow(stack, base, &sp, if (idx < frame.args.len) frame.args.ptr[idx] else core.JSValue.undefinedValue());
                 if (ip == code_end) continue;
                 continue :sw ip[0];
             },
             op.put_arg, op.set_arg, op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3, op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 => |opc| {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try vm_property_locals.arg(ctx, function, frame, stack, opc);
                 ip = function.code.ptr + frame.pc;
@@ -1525,7 +1522,7 @@ pub fn dispatchRecursive(
             op.get_var_ref, op.get_var_ref_check, op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init, op.set_var_ref, op.get_var_ref0, op.get_var_ref1, op.get_var_ref2, op.get_var_ref3, op.put_var_ref0, op.put_var_ref1, op.put_var_ref2, op.put_var_ref3, op.set_var_ref0, op.set_var_ref1, op.set_var_ref2, op.set_var_ref3 => |opc| {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try vm_property_locals.varRefVm(ctx, function, global, frame, stack, opc, catch_target, false, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                 ip = function.code.ptr + frame.pc;
@@ -1542,7 +1539,7 @@ pub fn dispatchRecursive(
             op.set_loc_uninitialized, op.get_loc_check, op.put_loc_check, op.put_loc_check_init => |opc| {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                 ip = function.code.ptr + frame.pc;
@@ -1559,7 +1556,7 @@ pub fn dispatchRecursive(
             op.close_loc => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try vm_property_locals.closeLoc(ctx, function, frame);
                 ip = function.code.ptr + frame.pc;
@@ -1569,7 +1566,7 @@ pub fn dispatchRecursive(
             op.make_loc_ref, op.make_arg_ref, op.make_var_ref_ref => |opc| {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try vm_property_ref.makeSlotRef(ctx, stack, function, frame, opc);
                 ip = function.code.ptr + frame.pc;
@@ -1579,7 +1576,7 @@ pub fn dispatchRecursive(
             op.make_var_ref => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try vm_property_ref.makeVarRefVm(ctx, output, global, stack, function, frame, catch_target, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs);
                 ip = function.code.ptr + frame.pc;
@@ -1605,7 +1602,7 @@ pub fn dispatchRecursive(
                 }
                 {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     frame.pc = ipOff(ip, function.code.ptr);
                     switch (try arith_vm.binaryVm(ctx, stack, frame, catch_target, opc, output, global)) {
                         .done => {},
@@ -1624,7 +1621,7 @@ pub fn dispatchRecursive(
                 }
                 {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     frame.pc = ipOff(ip, function.code.ptr);
                     switch (try arith_vm.compareVm(ctx, stack, frame, catch_target, opc, output, global)) {
                         .done => {},
@@ -1638,7 +1635,7 @@ pub fn dispatchRecursive(
             op.neg, op.plus, op.inc, op.dec => |opc| {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try arith_vm.unaryVm(ctx, stack, frame, catch_target, opc, output, global)) {
                     .done => {},
@@ -1651,7 +1648,7 @@ pub fn dispatchRecursive(
             op.not => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try arith_vm.bitNotVm(ctx, stack, frame, catch_target, output, global)) {
                     .done => {},
@@ -1664,7 +1661,7 @@ pub fn dispatchRecursive(
             op.lnot => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 try value_vm.logicalNot(ctx.runtime, stack);
                 if (ip == code_end) continue;
                 continue :sw ip[0];
@@ -1681,7 +1678,7 @@ pub fn dispatchRecursive(
                     pushOwnedWindow(stack, base, &sp, updated);
                 } else {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     frame.pc = ipOff(ip, function.code.ptr);
                     switch (try arith_vm.postUpdateVm(ctx, stack, frame, catch_target, opc, output, global)) {
                         .done => {},
@@ -1706,7 +1703,7 @@ pub fn dispatchRecursive(
                     var_buf[idx] = if (opc == op.inc_loc) arith_vm.fastInt32Add(iv, 1) else arith_vm.fastInt32Sub(iv, 1);
                 } else {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     frame.pc = ipOff(ip, function.code.ptr);
                     switch (try arith_vm.updateLocalVm(ctx, stack, function, global, frame, catch_target, opc, output, false)) {
                         .done => {},
@@ -1720,7 +1717,7 @@ pub fn dispatchRecursive(
             op.add_loc => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try arith_vm.addLocalVm(ctx, stack, function, global, frame, catch_target, output, false)) {
                     .done => {},
@@ -1733,7 +1730,7 @@ pub fn dispatchRecursive(
             op.typeof => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 try value_vm.typeOf(ctx, stack);
                 if (ip == code_end) continue;
                 continue :sw ip[0];
@@ -1741,7 +1738,7 @@ pub fn dispatchRecursive(
             op.typeof_is_undefined => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 try value_vm.typeOfIsUndefined(ctx.runtime, stack);
                 if (ip == code_end) continue;
                 continue :sw ip[0];
@@ -1749,7 +1746,7 @@ pub fn dispatchRecursive(
             op.typeof_is_function => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 try value_vm.typeOfIsFunction(ctx.runtime, stack);
                 if (ip == code_end) continue;
                 continue :sw ip[0];
@@ -1757,7 +1754,7 @@ pub fn dispatchRecursive(
             op.is_undefined_or_null => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 try value_vm.isUndefinedOrNull(ctx.runtime, stack);
                 if (ip == code_end) continue;
                 continue :sw ip[0];
@@ -1765,7 +1762,7 @@ pub fn dispatchRecursive(
             op.is_undefined => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 try value_vm.isUndefined(ctx.runtime, stack);
                 if (ip == code_end) continue;
                 continue :sw ip[0];
@@ -1773,7 +1770,7 @@ pub fn dispatchRecursive(
             op.is_null => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 try value_vm.isNull(ctx.runtime, stack);
                 if (ip == code_end) continue;
                 continue :sw ip[0];
@@ -1781,7 +1778,7 @@ pub fn dispatchRecursive(
             op.in, op.instanceof => |opc| {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try vm_property_field.inOrInstanceof(ctx, output, global, stack, function, frame, catch_target, opc)) {
                     .done => {},
@@ -1794,7 +1791,7 @@ pub fn dispatchRecursive(
             op.private_in => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try class_vm.privateInVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
@@ -1807,7 +1804,7 @@ pub fn dispatchRecursive(
             op.delete => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try vm_property_ref.deletePropertyVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
@@ -1820,7 +1817,7 @@ pub fn dispatchRecursive(
             op.delete_var => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try vm_property_ref.deleteVar(ctx, global, stack, function, frame, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs);
                 ip = function.code.ptr + frame.pc;
@@ -1838,7 +1835,7 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + relativePc(operand_pc, diff);
                 if (diff < 0) {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     try interrupt_poller.poll(ctx.runtime);
                 }
                 if (ip == code_end) continue;
@@ -1851,7 +1848,7 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + relativePc(operand_pc, diff);
                 if (diff < 0) {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     try interrupt_poller.poll(ctx.runtime);
                 }
                 if (ip == code_end) continue;
@@ -1864,7 +1861,7 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + relativePc(operand_pc, diff);
                 if (diff < 0) {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     try interrupt_poller.poll(ctx.runtime);
                 }
                 if (ip == code_end) continue;
@@ -1883,7 +1880,7 @@ pub fn dispatchRecursive(
                     ip = function.code.ptr + relativePc(operand_pc, diff);
                     if (diff < 0) {
                         enterStackBoundary(stack, base, sp);
-                        defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                        defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                         try interrupt_poller.poll(ctx.runtime);
                     }
                 }
@@ -1903,7 +1900,7 @@ pub fn dispatchRecursive(
                     ip = function.code.ptr + relativePc(operand_pc, diff);
                     if (diff < 0) {
                         enterStackBoundary(stack, base, sp);
-                        defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                        defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                         try interrupt_poller.poll(ctx.runtime);
                     }
                 }
@@ -1944,14 +1941,14 @@ pub fn dispatchRecursive(
             op.@"return" => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 return .{ .returned = try control_vm.returnTop(ctx, stack, frame, null) };
             },
             op.return_undef => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 return .{ .returned = try control_vm.returnUndefined(ctx, frame, null) };
             },
@@ -1960,7 +1957,7 @@ pub fn dispatchRecursive(
             op.throw => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try control_vm.throwTop(ctx, output, global, stack, frame, catch_target)) {
                     .handled => {},
@@ -1972,7 +1969,7 @@ pub fn dispatchRecursive(
             op.throw_error => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try control_vm.throwErrorVm(ctx, stack, function, frame, catch_target, global)) {
                     .handled => {},
@@ -1984,7 +1981,7 @@ pub fn dispatchRecursive(
             op.@"catch" => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try control_vm.catchTarget(function, frame, stack, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2010,7 +2007,7 @@ pub fn dispatchRecursive(
                     else => unreachable,
                 };
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 // S2a: a plain-bytecode callee runs as a NATIVE recursion via
                 // recurseInlineCall (reusing the Machine's zero-copy setup), not the
@@ -2038,7 +2035,7 @@ pub fn dispatchRecursive(
             op.tail_call => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try call_vm.tailCall(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
                     .handled => {
@@ -2068,7 +2065,7 @@ pub fn dispatchRecursive(
             op.tail_call_method => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try call_vm.tailCallMethod(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
                     .handled => {
@@ -2095,7 +2092,7 @@ pub fn dispatchRecursive(
             op.call_method => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try call_vm.callMethod(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
                     .done => {},
@@ -2120,7 +2117,7 @@ pub fn dispatchRecursive(
             op.call_prepared => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try call_vm.callPrepared(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
                     .done => {},
@@ -2145,7 +2142,7 @@ pub fn dispatchRecursive(
             op.prepare_call_prop_atom => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try call_vm.prepareCallPropAtom(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
@@ -2162,7 +2159,7 @@ pub fn dispatchRecursive(
             op.call_constructor => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try call_vm.constructor(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
@@ -2179,7 +2176,7 @@ pub fn dispatchRecursive(
             op.apply => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try call_vm.apply(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
@@ -2196,7 +2193,7 @@ pub fn dispatchRecursive(
             op.apply_eval => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try eval_module_vm.applyEval(ctx, stack, function, frame, catch_target, output, global, eval_class_field_initializer_flag, eval_parameter_initializer_flag)) {
                     .done => {},
@@ -2213,7 +2210,7 @@ pub fn dispatchRecursive(
             op.eval => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 // A non-%eval% callee (the identifier `eval` shadowed by a normal
                 // function) in tail position yields `.tail_inline` — handle it like a
@@ -2245,7 +2242,7 @@ pub fn dispatchRecursive(
             op.import => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try eval_module_vm.dynamicImport(ctx, output, global, stack, function, frame);
                 ip = function.code.ptr + frame.pc;
@@ -2257,7 +2254,7 @@ pub fn dispatchRecursive(
             op.check_ctor => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try call_vm.checkCtorVm(ctx, stack, frame, catch_target, global)) {
                     .done => {},
@@ -2270,7 +2267,7 @@ pub fn dispatchRecursive(
             op.check_ctor_return => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try call_vm.checkCtorReturnVm(ctx, stack, frame, catch_target, global)) {
                     .done => {},
@@ -2283,7 +2280,7 @@ pub fn dispatchRecursive(
             op.init_ctor => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try call_vm.initCtorVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
@@ -2296,7 +2293,7 @@ pub fn dispatchRecursive(
             op.check_brand => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try class_vm.checkBrandVm(ctx, stack, frame, catch_target, global)) {
                     .done => {},
@@ -2309,7 +2306,7 @@ pub fn dispatchRecursive(
             op.add_brand => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try class_vm.addBrandVm(ctx, stack, frame, catch_target, global)) {
                     .done => {},
@@ -2326,7 +2323,7 @@ pub fn dispatchRecursive(
             op.get_var, op.get_var_undef => |opc| {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try vm_property_globals.getVar(ctx, output, global, stack, function, frame, catch_target, opc, false, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs, core.JSValue.undefinedValue());
                 ip = function.code.ptr + frame.pc;
@@ -2343,7 +2340,7 @@ pub fn dispatchRecursive(
             op.put_var => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try vm_property_globals.putVar(ctx, output, global, stack, function, frame, catch_target, function.flags.is_strict or function.flags.runtime_strict, false, false, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs, core.JSValue.undefinedValue());
                 ip = function.code.ptr + frame.pc;
@@ -2360,7 +2357,7 @@ pub fn dispatchRecursive(
             op.check_define_var, op.define_var, op.define_func, op.put_var_init => |opc| {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try vm_property_globals.globalDefinition(ctx, global, stack, function, frame, catch_target, opc, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs, false, false);
                 ip = function.code.ptr + frame.pc;
@@ -2387,7 +2384,7 @@ pub fn dispatchRecursive(
                     ip += 4;
                 } else {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     frame.pc = ipOff(ip, function.code.ptr);
                     const step = try vm_property_field.field(ctx, output, global, stack, function, frame, catch_target, opc, false);
                     ip = function.code.ptr + frame.pc;
@@ -2412,7 +2409,7 @@ pub fn dispatchRecursive(
                 };
                 if (!handled) {
                     enterStackBoundary(stack, base, sp);
-                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                    defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                     frame.pc = ipOff(ip, function.code.ptr);
                     const step = try vm_property_field.arrayElement(ctx, output, global, stack, function, frame, catch_target, opc);
                     ip = function.code.ptr + frame.pc;
@@ -2430,7 +2427,7 @@ pub fn dispatchRecursive(
             op.to_propkey => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try vm_property_field.toPropKeyVm(ctx, output, global, stack, function, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2447,7 +2444,7 @@ pub fn dispatchRecursive(
             op.to_propkey2 => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try vm_property_field.toPropKey2Vm(ctx, output, global, stack, function, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2464,7 +2461,7 @@ pub fn dispatchRecursive(
             op.set_name, op.set_name_computed => |opc| {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try vm_property_field.setName(ctx, output, global, stack, function, frame, opc);
                 ip = function.code.ptr + frame.pc;
@@ -2474,7 +2471,7 @@ pub fn dispatchRecursive(
             op.get_ref_value => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try vm_property_ref.getRefValueVm(ctx, output, global, stack, function, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2491,7 +2488,7 @@ pub fn dispatchRecursive(
             op.put_ref_value => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try vm_property_ref.putRefValueVm(ctx, output, global, stack, function, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2508,7 +2505,7 @@ pub fn dispatchRecursive(
             op.get_private_field => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try vm_property_private.getPrivateFieldVm(ctx, output, global, stack, function, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2525,7 +2522,7 @@ pub fn dispatchRecursive(
             op.put_private_field => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try vm_property_private.putPrivateFieldVm(ctx, output, global, stack, function, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2542,7 +2539,7 @@ pub fn dispatchRecursive(
             op.define_private_field => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try vm_property_private.definePrivateFieldVm(ctx, output, global, stack, function, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2561,7 +2558,7 @@ pub fn dispatchRecursive(
             op.with_get_var, op.with_delete_var, op.with_make_ref, op.with_get_ref, op.with_get_ref_undef => |opc| {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try vm_property_ref.withGetOrDelete(ctx, output, global, stack, function, frame, catch_target, opc);
                 ip = function.code.ptr + frame.pc;
@@ -2578,7 +2575,7 @@ pub fn dispatchRecursive(
             op.with_put_var => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try vm_property_ref.withPut(ctx, output, global, stack, function, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2601,7 +2598,7 @@ pub fn dispatchRecursive(
             op.object => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try literal_vm.object(ctx, stack, global);
                 ip = function.code.ptr + frame.pc;
@@ -2611,7 +2608,7 @@ pub fn dispatchRecursive(
             op.array_from => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try literal_vm.arrayFrom(ctx, stack, function, frame, global);
                 ip = function.code.ptr + frame.pc;
@@ -2621,7 +2618,7 @@ pub fn dispatchRecursive(
             op.append => |opc| {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try literal_vm.appendSpreadValuesVm(ctx, output, global, stack, opc, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2638,7 +2635,7 @@ pub fn dispatchRecursive(
             op.rest => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try literal_vm.rest(ctx, stack, function, frame);
                 ip = function.code.ptr + frame.pc;
@@ -2648,7 +2645,7 @@ pub fn dispatchRecursive(
             op.define_field => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try literal_vm.defineField(ctx, output, global, stack, function, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2665,7 +2662,7 @@ pub fn dispatchRecursive(
             op.define_array_el => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try literal_vm.defineArrayEl(ctx, output, global, stack, function, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2682,7 +2679,7 @@ pub fn dispatchRecursive(
             op.set_proto => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try literal_vm.setProto(ctx, stack);
                 ip = function.code.ptr + frame.pc;
@@ -2692,7 +2689,7 @@ pub fn dispatchRecursive(
             op.set_home_object => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try class_vm.setHomeObject(ctx, stack);
                 ip = function.code.ptr + frame.pc;
@@ -2704,7 +2701,7 @@ pub fn dispatchRecursive(
                 const mask = ip[0];
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try literal_vm.copyDataProperties(ctx, output, global, stack, mask, function, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2721,7 +2718,7 @@ pub fn dispatchRecursive(
             op.define_method => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try class_vm.defineMethod(ctx, global, stack, function, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2738,7 +2735,7 @@ pub fn dispatchRecursive(
             op.define_method_computed => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try class_vm.defineMethodComputed(ctx, output, global, stack, function, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2755,7 +2752,7 @@ pub fn dispatchRecursive(
             op.define_class, op.define_class_computed => |opc| {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try class_vm.defineClass(ctx, output, global, stack, function, frame, catch_target, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs, opc == op.define_class_computed);
                 ip = function.code.ptr + frame.pc;
@@ -2772,7 +2769,7 @@ pub fn dispatchRecursive(
             op.special_object => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try literal_vm.specialObject(ctx, stack, function, frame, global, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs);
                 ip = function.code.ptr + frame.pc;
@@ -2782,7 +2779,7 @@ pub fn dispatchRecursive(
             op.get_super => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try class_vm.getSuper(ctx, stack, frame);
                 ip = function.code.ptr + frame.pc;
@@ -2792,7 +2789,7 @@ pub fn dispatchRecursive(
             op.get_super_value => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try class_vm.getSuperValue(ctx, output, global, stack, function, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2809,7 +2806,7 @@ pub fn dispatchRecursive(
             op.put_super_value => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try class_vm.putSuperValue(ctx, output, global, stack, function, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2826,7 +2823,7 @@ pub fn dispatchRecursive(
             op.get_length => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try literal_vm.getLength(ctx, output, global, stack, function, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2843,7 +2840,7 @@ pub fn dispatchRecursive(
             op.to_object => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try value_vm.toObjectVm(ctx, stack, frame, catch_target, global);
                 ip = function.code.ptr + frame.pc;
@@ -2860,7 +2857,7 @@ pub fn dispatchRecursive(
             op.push_this => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try value_vm.pushThisVm(ctx, stack, frame, catch_target, global);
                 ip = function.code.ptr + frame.pc;
@@ -2877,7 +2874,7 @@ pub fn dispatchRecursive(
             op.for_of_start, op.for_await_of_start => |opc| {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try iter_vm.forOfStartVm(ctx, output, global, stack, function, frame, catch_target, opc == op.for_await_of_start);
                 ip = function.code.ptr + frame.pc;
@@ -2894,7 +2891,7 @@ pub fn dispatchRecursive(
             op.for_in_start => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try iter_vm.forInStartVm(ctx, output, global, stack, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2911,7 +2908,7 @@ pub fn dispatchRecursive(
             op.iterator_next => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try iter_vm.iteratorNextVm(ctx, output, global, stack, function, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2928,7 +2925,7 @@ pub fn dispatchRecursive(
             op.iterator_check_object => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try iter_vm.iteratorCheckObjectVm(ctx, stack, frame, catch_target, global);
                 ip = function.code.ptr + frame.pc;
@@ -2945,7 +2942,7 @@ pub fn dispatchRecursive(
             op.iterator_get_value_done => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try iter_vm.iteratorGetValueDoneVm(ctx, output, global, stack, function, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2962,7 +2959,7 @@ pub fn dispatchRecursive(
             op.iterator_call => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try iter_vm.iteratorCallVm(ctx, output, global, stack, function, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2979,7 +2976,7 @@ pub fn dispatchRecursive(
             op.for_of_next => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try iter_vm.forOfNextVm(ctx, output, global, stack, function, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
@@ -2996,7 +2993,7 @@ pub fn dispatchRecursive(
             op.for_in_next => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try iter_vm.forInNext(ctx, output, global, stack);
                 ip = function.code.ptr + frame.pc;
@@ -3006,7 +3003,7 @@ pub fn dispatchRecursive(
             op.iterator_close => {
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
-                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
+                defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 const step = try iter_vm.iteratorCloseVm(ctx, output, global, stack, frame, catch_target);
                 ip = function.code.ptr + frame.pc;
