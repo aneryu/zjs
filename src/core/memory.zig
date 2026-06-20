@@ -65,22 +65,39 @@ pub fn oomCoverageReset() void {
 pub const SmallObjectSlab = struct {
     pub const arena_size: usize = 4 * 1024;
     pub const max_size: usize = 512;
-    const slab_alignment: std.mem.Alignment = .@"16";
-    const block_sizes = [_]usize{ 16, 24, 32, 48, 64, 80, 96, 128, 160, 192, 256, 320, 384, 448, 512 };
+    const slab_alignment: std.mem.Alignment = .@"8";
+    const free_nil: u16 = std.math.maxInt(u16);
+    const block_sizes = [_]usize{
+        16,  24,  32,  40,  48,  56,  64,  72,
+        80,  88,  96,  104, 112, 120, 128, 144,
+        160, 176, 192, 208, 224, 240, 256, 288,
+        320, 352, 384, 416, 448, 480, 512,
+    };
 
-    const FreeNode = extern struct {
-        next: ?*FreeNode,
+    const BlockHeader = extern struct {
+        /// Allocated: block index. Free: next free block index.
+        index_or_next: u16,
+        block_size_idx: u8,
+        reserved: u8 = 0,
+        padding: u32 = 0,
     };
 
     const Arena = struct {
         next: ?*Arena = null,
-        storage: []u8 = &.{},
-        used: usize = 0,
+        prev: ?*Arena = null,
+        free_next: ?*Arena = null,
+        free_prev: ?*Arena = null,
+        block_size_idx: u8 = 0,
+        used_blocks: u16 = 0,
+        block_count: u16 = 0,
+        first_free_block: u16 = free_nil,
     };
 
-    arenas: ?*Arena = null,
-    current: [block_sizes.len]?*Arena = @splat(null),
-    free_lists: [block_sizes.len]?*FreeNode = @splat(null),
+    const block_header_size = std.mem.alignForward(usize, @sizeOf(BlockHeader), slab_alignment.toByteUnits());
+    const arena_header_size = std.mem.alignForward(usize, @sizeOf(Arena), slab_alignment.toByteUnits());
+
+    arenas: [block_sizes.len]?*Arena = @splat(null),
+    free_arenas: [block_sizes.len]?*Arena = @splat(null),
 
     pub inline fn canUse(byte_count: usize, alignment: std.mem.Alignment) bool {
         return classIndex(byte_count, alignment) != null;
@@ -88,76 +105,170 @@ pub const SmallObjectSlab = struct {
 
     pub inline fn alloc(self: *SmallObjectSlab, backing: std.mem.Allocator, byte_count: usize, alignment: std.mem.Alignment) ![*]u8 {
         const index = classIndex(byte_count, alignment).?;
-        if (self.free_lists[index]) |node| {
-            self.free_lists[index] = node.next;
-            const ptr: [*]u8 = @ptrCast(node);
-            return ptr;
+        var arena = self.free_arenas[index] orelse try self.addArena(backing, index);
+        const block_size = block_sizes[index];
+        const block_idx = arena.first_free_block;
+        std.debug.assert(block_idx != free_nil);
+        const header = blockHeaderAt(arena, block_idx, block_size);
+        arena.first_free_block = header.index_or_next;
+        header.index_or_next = block_idx;
+        arena.used_blocks += 1;
+        if (arena.used_blocks == arena.block_count) {
+            self.removeFreeArena(index, arena);
         }
-        return self.allocSlow(backing, index);
+        return userData(header);
     }
 
-    pub inline fn free(self: *SmallObjectSlab, bytes: []u8, alignment: std.mem.Alignment) void {
-        const index = classIndex(bytes.len, alignment).?;
-        const node: *FreeNode = @ptrCast(@alignCast(bytes.ptr));
-        node.next = self.free_lists[index];
-        self.free_lists[index] = node;
-    }
+    pub inline fn free(self: *SmallObjectSlab, backing: std.mem.Allocator, bytes: []u8, alignment: std.mem.Alignment) void {
+        _ = classIndex(bytes.len, alignment).?;
+        const header = blockHeaderFromUser(bytes.ptr);
+        const block_idx = header.index_or_next;
+        const index = header.block_size_idx;
+        const block_size = block_sizes[index];
+        const arena = arenaFromBlock(header, block_idx, block_size);
 
-    pub fn owns(self: SmallObjectSlab, ptr: [*]const u8) bool {
-        const address = @intFromPtr(ptr);
-        var arena = self.arenas;
-        while (arena) |node| : (arena = node.next) {
-            const start = @intFromPtr(node.storage.ptr);
-            const end = start + node.storage.len;
-            if (address >= start and address < end) return true;
+        std.debug.assert(index < block_sizes.len);
+        std.debug.assert(block_idx < arena.block_count);
+        std.debug.assert(arena.block_size_idx == index);
+        std.debug.assert(arena.used_blocks != 0);
+
+        const was_full = arena.used_blocks == arena.block_count;
+        header.index_or_next = arena.first_free_block;
+        arena.first_free_block = block_idx;
+        if (was_full) {
+            self.addFreeArena(index, arena);
         }
-        return false;
+        arena.used_blocks -= 1;
+        if (arena.used_blocks == 0) {
+            self.removeArena(index, arena);
+            self.removeFreeArena(index, arena);
+            backing.rawFree(arenaAllocation(arena), slab_alignment, @returnAddress());
+        }
     }
 
     pub fn deinit(self: *SmallObjectSlab, backing: std.mem.Allocator) void {
-        var arena = self.arenas;
-        while (arena) |node| {
-            arena = node.next;
-            backing.rawFree(node.storage, slab_alignment, @returnAddress());
-            backing.destroy(node);
+        for (&self.arenas) |*head| {
+            var arena = head.*;
+            while (arena) |node| {
+                arena = node.next;
+                backing.rawFree(arenaAllocation(node), slab_alignment, @returnAddress());
+            }
         }
         self.* = .{};
     }
 
-    noinline fn allocSlow(self: *SmallObjectSlab, backing: std.mem.Allocator, index: usize) ![*]u8 {
-        const block_size = block_sizes[index];
-        var arena = self.current[index];
-        if (arena == null or arena.?.used + block_size > arena.?.storage.len) {
-            arena = try self.addArena(backing, index);
-        }
-        const node = arena.?;
-        const ptr = node.storage.ptr + node.used;
-        node.used += block_size;
-        return ptr;
-    }
-
     fn addArena(self: *SmallObjectSlab, backing: std.mem.Allocator, index: usize) !*Arena {
-        const storage_ptr = backing.rawAlloc(arena_size, slab_alignment, @returnAddress()) orelse return error.OutOfMemory;
-        errdefer backing.rawFree(storage_ptr[0..arena_size], slab_alignment, @returnAddress());
-        const arena = try backing.create(Arena);
+        const block_size = block_sizes[index];
+        const block_count = (arena_size - arena_header_size) / block_size;
+        std.debug.assert(block_count > 0 and block_count <= free_nil);
+        const alloc_size = arena_header_size + block_count * block_size;
+        const storage_ptr = backing.rawAlloc(alloc_size, slab_alignment, @returnAddress()) orelse return error.OutOfMemory;
+        const arena: *Arena = @ptrCast(@alignCast(storage_ptr));
         arena.* = .{
-            .next = self.arenas,
-            .storage = storage_ptr[0..arena_size],
-            .used = 0,
+            .block_size_idx = @intCast(index),
+            .block_count = @intCast(block_count),
+            .first_free_block = 0,
         };
-        self.arenas = arena;
-        self.current[index] = arena;
+        var block_idx: u16 = 0;
+        while (block_idx < arena.block_count) : (block_idx += 1) {
+            const header = blockHeaderAt(arena, block_idx, block_size);
+            header.* = .{
+                .index_or_next = if (block_idx + 1 == arena.block_count) free_nil else block_idx + 1,
+                .block_size_idx = @intCast(index),
+            };
+        }
+        self.addArenaList(index, arena);
+        self.addFreeArena(index, arena);
         return arena;
     }
 
     inline fn classIndex(byte_count: usize, alignment: std.mem.Alignment) ?usize {
-        if (byte_count == 0 or byte_count > max_size) return null;
         if (alignment.compare(.gt, slab_alignment)) return null;
-        const align_bytes = alignment.toByteUnits();
+        const total_size = totalBlockSize(byte_count) orelse return null;
         inline for (block_sizes, 0..) |block_size, index| {
-            if (byte_count <= block_size and block_size % align_bytes == 0) return index;
+            if (total_size <= block_size) return index;
         }
         return null;
+    }
+
+    inline fn totalBlockSize(byte_count: usize) ?usize {
+        if (byte_count == 0) return null;
+        const aligned_size = std.mem.alignForward(usize, byte_count, slab_alignment.toByteUnits());
+        const total_size = std.math.add(usize, aligned_size, block_header_size) catch return null;
+        if (total_size > max_size) return null;
+        return total_size;
+    }
+
+    inline fn arenaBlocks(arena: *Arena) [*]u8 {
+        return @as([*]u8, @ptrCast(arena)) + arena_header_size;
+    }
+
+    inline fn blockHeaderAt(arena: *Arena, block_idx: u16, block_size: usize) *BlockHeader {
+        return @ptrCast(@alignCast(arenaBlocks(arena) + @as(usize, block_idx) * block_size));
+    }
+
+    inline fn blockHeaderFromUser(ptr: [*]u8) *BlockHeader {
+        return @ptrFromInt(@intFromPtr(ptr) - block_header_size);
+    }
+
+    inline fn userData(header: *BlockHeader) [*]u8 {
+        return @as([*]u8, @ptrCast(header)) + block_header_size;
+    }
+
+    inline fn arenaFromBlock(header: *BlockHeader, block_idx: u16, block_size: usize) *Arena {
+        const arena_addr = @intFromPtr(header) - @as(usize, block_idx) * block_size - arena_header_size;
+        return @ptrFromInt(arena_addr);
+    }
+
+    inline fn arenaAllocation(arena: *Arena) []u8 {
+        const index = arena.block_size_idx;
+        const alloc_size = arena_header_size + @as(usize, arena.block_count) * block_sizes[index];
+        return @as([*]u8, @ptrCast(arena))[0..alloc_size];
+    }
+
+    fn addArenaList(self: *SmallObjectSlab, index: usize, arena: *Arena) void {
+        arena.prev = null;
+        arena.next = self.arenas[index];
+        if (arena.next) |next| next.prev = arena;
+        self.arenas[index] = arena;
+    }
+
+    fn removeArena(self: *SmallObjectSlab, index: usize, arena: *Arena) void {
+        if (arena.prev) |prev| {
+            prev.next = arena.next;
+        } else {
+            std.debug.assert(self.arenas[index] == arena);
+            self.arenas[index] = arena.next;
+        }
+        if (arena.next) |next| next.prev = arena.prev;
+        arena.next = null;
+        arena.prev = null;
+    }
+
+    fn addFreeArena(self: *SmallObjectSlab, index: usize, arena: *Arena) void {
+        arena.free_prev = null;
+        arena.free_next = self.free_arenas[index];
+        if (arena.free_next) |next| next.free_prev = arena;
+        self.free_arenas[index] = arena;
+    }
+
+    fn removeFreeArena(self: *SmallObjectSlab, index: usize, arena: *Arena) void {
+        if (arena.free_prev) |prev| {
+            prev.free_next = arena.free_next;
+        } else {
+            std.debug.assert(self.free_arenas[index] == arena);
+            self.free_arenas[index] = arena.free_next;
+        }
+        if (arena.free_next) |next| next.free_prev = arena.free_prev;
+        arena.free_next = null;
+        arena.free_prev = null;
+    }
+
+    fn debugArenaCount(self: SmallObjectSlab, index: usize) usize {
+        var count: usize = 0;
+        var arena = self.arenas[index];
+        while (arena) |node| : (arena = node.next) count += 1;
+        return count;
     }
 };
 
@@ -365,8 +476,8 @@ pub const MemoryAccount = struct {
     inline fn rawFree(self: *MemoryAccount, bytes: []u8, alignment: std.mem.Alignment) void {
         if (self.small_slab_enabled and SmallObjectSlab.canUse(bytes.len, alignment)) {
             // The runtime enables the slab before managed allocations begin; while
-            // enabled, every small MemoryAccount allocation comes from this slab.
-            self.small_slab.free(bytes, alignment);
+            // enabled, every slab-eligible MemoryAccount allocation comes from it.
+            self.small_slab.free(self.persistent_allocator, bytes, alignment);
             return;
         }
         self.persistent_allocator.rawFree(bytes, alignment, @returnAddress());
@@ -389,3 +500,37 @@ pub const MemoryAccount = struct {
         };
     }
 };
+
+test "small object slab releases empty arenas" {
+    var slab: SmallObjectSlab = .{};
+    defer slab.deinit(std.testing.allocator);
+
+    const alloc = try slab.alloc(std.testing.allocator, 64, .@"8");
+    const index = SmallObjectSlab.classIndex(64, .@"8").?;
+    try std.testing.expectEqual(@as(usize, 1), slab.debugArenaCount(index));
+
+    slab.free(std.testing.allocator, alloc[0..64], .@"8");
+    try std.testing.expectEqual(@as(usize, 0), slab.debugArenaCount(index));
+}
+
+test "small object slab keeps non-empty arenas reusable" {
+    var slab: SmallObjectSlab = .{};
+    defer slab.deinit(std.testing.allocator);
+
+    const first = try slab.alloc(std.testing.allocator, 64, .@"8");
+    const second = try slab.alloc(std.testing.allocator, 64, .@"8");
+    const index = SmallObjectSlab.classIndex(64, .@"8").?;
+    try std.testing.expectEqual(@as(usize, 1), slab.debugArenaCount(index));
+
+    slab.free(std.testing.allocator, first[0..64], .@"8");
+    try std.testing.expectEqual(@as(usize, 1), slab.debugArenaCount(index));
+
+    const reused = try slab.alloc(std.testing.allocator, 64, .@"8");
+    try std.testing.expectEqual(@intFromPtr(first), @intFromPtr(reused));
+
+    slab.free(std.testing.allocator, second[0..64], .@"8");
+    try std.testing.expectEqual(@as(usize, 1), slab.debugArenaCount(index));
+
+    slab.free(std.testing.allocator, reused[0..64], .@"8");
+    try std.testing.expectEqual(@as(usize, 0), slab.debugArenaCount(index));
+}
