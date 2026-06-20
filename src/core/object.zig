@@ -8346,7 +8346,14 @@ pub const Object = struct {
 
     pub fn convertFastArrayToSlow(self: *Object, rt: *JSRuntime) !void {
         std.debug.assert(self.flags.is_array);
-        if (self.arrayElementStorageMode() != .dense) return;
+        // Migrate whenever dense elements EXIST — NOT gated on storage_mode.
+        // An array can be in .sparse mode yet still hold dense elements (the
+        // split state, e.g. `a=[0,1]; a[50]=50` keeps dense [0,1] but flips the
+        // mode via updateArrayStorageMode). Gating on `!= .dense` made convert a
+        // no-op there, so deleteProperty/defineOrdinaryOwnProperty (which call
+        // convert when an index < arrayElements().len) recursed forever. The
+        // correct precondition is "there is dense data to move".
+        if (self.arrayElements().len == 0) return;
 
         const element_len = self.arrayElements().len;
         try self.ensureUniqueShapeForMutation(rt);
