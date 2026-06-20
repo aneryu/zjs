@@ -1481,7 +1481,7 @@ fn qjsJsonSourceCountForValue(rt: *core.JSRuntime, value: core.JSValue) !usize {
     defer core.Object.freeKeys(rt, keys);
     for (keys) |key| {
         if (rt.atoms.kind(key) == .symbol) continue;
-        const desc = object.getOwnProperty(key) orelse continue;
+        const desc = object.getOwnProperty(rt, key) orelse continue;
         defer desc.destroy(rt);
         if (desc.enumerable != true) continue;
         child = object.getProperty(key);

@@ -483,7 +483,7 @@ fn constructAggregateErrorObject(rt: *core.JSRuntime, constructor: core.JSValue,
         cause_val = options.getProperty(cause_key);
         var has_cause = !cause_val.isUndefined();
         if (!has_cause) {
-            if (options.getOwnProperty(cause_key)) |desc| {
+            if (options.getOwnProperty(rt, cause_key)) |desc| {
                 desc.destroy(rt);
                 has_cause = true;
             }
@@ -1115,7 +1115,7 @@ fn getPropertyWithGetter(ctx: *core.JSContext, object: *core.Object, key: core.A
     const rt = ctx.runtime;
     var cursor: ?*core.Object = object;
     while (cursor) |current_object| {
-        if (current_object.getOwnProperty(key)) |desc| {
+        if (current_object.getOwnProperty(rt, key)) |desc| {
             defer desc.destroy(rt);
             if (desc.kind == .accessor) {
                 if (desc.getter.isUndefined()) return core.JSValue.undefinedValue();
@@ -1204,7 +1204,7 @@ fn getCollectionAdder(rt: *core.JSRuntime, collection: *core.Object, name: []con
     defer rt.atoms.free(key);
     var cursor: ?*core.Object = collection;
     while (cursor) |object| {
-        if (object.getOwnProperty(key)) |desc| {
+        if (object.getOwnProperty(rt, key)) |desc| {
             defer desc.destroy(rt);
             if (desc.kind == .accessor) {
                 if (desc.getter.isUndefined()) return core.JSValue.undefinedValue();

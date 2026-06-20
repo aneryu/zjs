@@ -269,7 +269,7 @@ pub fn initializeClassPrivateMethods(rt: *core.JSRuntime, instance: *core.Object
     for (home_object.shapeProps()) |prop| {
         if (rt.atoms.kind(prop.atom_id) != .private) continue;
         if (instance.hasOwnProperty(prop.atom_id)) return error.TypeError;
-        if (home_object.getOwnProperty(prop.atom_id)) |desc| {
+        if (home_object.getOwnProperty(rt, prop.atom_id)) |desc| {
             defer desc.destroy(rt);
             instance.defineOwnProperty(rt, prop.atom_id, desc) catch |err| switch (err) {
                 error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,

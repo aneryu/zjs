@@ -85,7 +85,7 @@ test "intrinsic bootstrap registers global builtin domains through object proper
         const atom_id = try rt.internAtom(name);
         defer rt.atoms.free(atom_id);
         try std.testing.expect(intrinsics.global.hasOwnProperty(atom_id));
-        const desc = intrinsics.global.getOwnProperty(atom_id).?;
+        const desc = intrinsics.global.getOwnProperty(rt, atom_id).?;
         defer desc.destroy(rt);
         try std.testing.expectEqual(true, desc.writable.?);
         try std.testing.expectEqual(false, desc.enumerable.?);
@@ -102,7 +102,7 @@ test "intrinsic bootstrap registers global builtin domains through object proper
 
     const prototype_atom = try rt.internAtom("prototype");
     defer rt.atoms.free(prototype_atom);
-    const prototype_desc = map_ctor_object.getOwnProperty(prototype_atom).?;
+    const prototype_desc = map_ctor_object.getOwnProperty(rt, prototype_atom).?;
     defer prototype_desc.destroy(rt);
     try std.testing.expectEqual(false, prototype_desc.writable.?);
     try std.testing.expectEqual(false, prototype_desc.enumerable.?);
@@ -113,7 +113,7 @@ test "intrinsic bootstrap registers global builtin domains through object proper
 
     const set_atom = try rt.internAtom("set");
     defer rt.atoms.free(set_atom);
-    const set_desc = map_proto.getOwnProperty(set_atom).?;
+    const set_desc = map_proto.getOwnProperty(rt, set_atom).?;
     defer set_desc.destroy(rt);
     try std.testing.expectEqual(true, set_desc.writable.?);
     try std.testing.expectEqual(false, set_desc.enumerable.?);

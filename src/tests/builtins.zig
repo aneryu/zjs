@@ -3051,7 +3051,7 @@ test "module top-level await works in class computed fields inside try" {
 
 fn fillOwnPropertyStorageForFailure(rt: *core.JSRuntime, object: *core.Object) !void {
     var index: usize = 0;
-    while (object.properties.len < object.property_capacity or object.shape_ref.prop_count < object.shape_ref.props.len) : (index += 1) {
+    while (object.properties.len < object.shape_ref.props.len or object.shape_ref.prop_count < object.shape_ref.props.len) : (index += 1) {
         if (index > 512) return error.TestUnexpectedResult;
         var name_buf: [32]u8 = undefined;
         const name = try std.fmt.bufPrint(&name_buf, "fill_{d}", .{index});

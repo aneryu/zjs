@@ -1081,7 +1081,7 @@ test "call subsystem installs and invokes host globals" {
     const print_object: *core.Object = @fieldParentPtr("header", print.refHeader().?);
     const host_function_key = try rt.internAtom("__host_function");
     defer rt.atoms.free(host_function_key);
-    try std.testing.expect(print_object.getOwnProperty(host_function_key) == null);
+    try std.testing.expect(print_object.getOwnProperty(rt, host_function_key) == null);
     try std.testing.expectEqual(core.host_function.ids.external_host, print_object.hostFunctionKindSlot().*);
     try std.testing.expect(print_object.externalHostFunctionId() != 0);
 
@@ -2485,7 +2485,7 @@ test "buffer native builtin records ignore dispatch names" {
     defer array_buffer_slice_value.free(rt);
     const array_buffer_slice_object: *core.Object = @fieldParentPtr("header", array_buffer_slice_value.refHeader().?);
     try std.testing.expect(array_buffer_slice_object.nativeFunctionIdSlot().* != 0);
-    const array_buffer_byte_length_desc = array_buffer_prototype_object.getOwnProperty(byte_length_key).?;
+    const array_buffer_byte_length_desc = array_buffer_prototype_object.getOwnProperty(rt, byte_length_key).?;
     defer array_buffer_byte_length_desc.destroy(rt);
     const array_buffer_byte_length_getter: *core.Object = @fieldParentPtr("header", array_buffer_byte_length_desc.getter.refHeader().?);
     try std.testing.expect(array_buffer_byte_length_getter.nativeFunctionIdSlot().* != 0);
@@ -2515,7 +2515,7 @@ test "buffer native builtin records ignore dispatch names" {
     defer set_uint8_value.free(rt);
     const set_uint8_object: *core.Object = @fieldParentPtr("header", set_uint8_value.refHeader().?);
     try std.testing.expect(set_uint8_object.nativeFunctionIdSlot().* != 0);
-    const data_view_byte_length_desc = data_view_prototype_object.getOwnProperty(byte_length_key).?;
+    const data_view_byte_length_desc = data_view_prototype_object.getOwnProperty(rt, byte_length_key).?;
     defer data_view_byte_length_desc.destroy(rt);
     const data_view_byte_length_getter: *core.Object = @fieldParentPtr("header", data_view_byte_length_desc.getter.refHeader().?);
     try std.testing.expect(data_view_byte_length_getter.nativeFunctionIdSlot().* != 0);
@@ -2633,15 +2633,15 @@ test "typed array accessor native builtin records ignore dispatch names" {
     defer prototype_value.free(rt);
     const prototype_object: *core.Object = @fieldParentPtr("header", prototype_value.refHeader().?);
 
-    const byte_length_desc = prototype_object.getOwnProperty(byte_length_key).?;
+    const byte_length_desc = prototype_object.getOwnProperty(rt, byte_length_key).?;
     defer byte_length_desc.destroy(rt);
     const byte_length_getter: *core.Object = @fieldParentPtr("header", byte_length_desc.getter.refHeader().?);
     try std.testing.expect(byte_length_getter.nativeFunctionIdSlot().* != 0);
-    const length_desc = prototype_object.getOwnProperty(length_key).?;
+    const length_desc = prototype_object.getOwnProperty(rt, length_key).?;
     defer length_desc.destroy(rt);
     const length_getter: *core.Object = @fieldParentPtr("header", length_desc.getter.refHeader().?);
     try std.testing.expect(length_getter.nativeFunctionIdSlot().* != 0);
-    const tag_desc = prototype_object.getOwnProperty(core.atom.predefinedId("Symbol.toStringTag", .symbol).?).?;
+    const tag_desc = prototype_object.getOwnProperty(rt, core.atom.predefinedId("Symbol.toStringTag", .symbol).?).?;
     defer tag_desc.destroy(rt);
     const tag_getter: *core.Object = @fieldParentPtr("header", tag_desc.getter.refHeader().?);
     try std.testing.expect(tag_getter.nativeFunctionIdSlot().* != 0);
@@ -3034,13 +3034,13 @@ test "regexp accessor native builtin records ignore dispatch names" {
 
     const source_key = try rt.internAtom("source");
     defer rt.atoms.free(source_key);
-    const source_desc = prototype_object.getOwnProperty(source_key).?;
+    const source_desc = prototype_object.getOwnProperty(rt, source_key).?;
     defer source_desc.destroy(rt);
     const source_getter: *core.Object = @fieldParentPtr("header", source_desc.getter.refHeader().?);
     try std.testing.expect(source_getter.nativeFunctionIdSlot().* != 0);
     const global_key = try rt.internAtom("global");
     defer rt.atoms.free(global_key);
-    const global_desc = prototype_object.getOwnProperty(global_key).?;
+    const global_desc = prototype_object.getOwnProperty(rt, global_key).?;
     defer global_desc.destroy(rt);
     const global_getter: *core.Object = @fieldParentPtr("header", global_desc.getter.refHeader().?);
     try std.testing.expect(global_getter.nativeFunctionIdSlot().* != 0);

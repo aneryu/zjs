@@ -1102,7 +1102,7 @@ pub const ObjectFlags = packed struct(u16) {
     /// common case of objects that were never weakly referenced.
     has_weak_id: bool = false,
     is_borrowed_reference_holder: bool = false,
-    _padding: u1 = 0,
+    has_property_storage: bool = false,
 };
 
 var test_standard_exotic_methods: [class.ids.init_count]?*const ExoticMethods = @splat(null);
@@ -1126,11 +1126,9 @@ fn exoticMethodsForClassId(class_id: class.ClassId) ?*const ExoticMethods {
 pub const Object = struct {
     header: gc.GCObjectHeader,
     class_payload: class.Payload = null,
-    owner_runtime: *JSRuntime,
     shape_ref: *shape.Shape,
     prototype: ?*Object = null,
     properties: []property.Entry = &.{},
-    property_capacity: usize = 0,
     class_id: class.ClassId,
     flags: ObjectFlags = .{},
     class_payload_kind: class.PayloadKind = .none,
@@ -1172,14 +1170,18 @@ pub const Object = struct {
         // createObjectRootWithPropertyCapacity → ~1:1 shapes + per-object
         // appendProperty/rehashShape). The property VALUE array is still
         // pre-reserved below; only the SHAPE is shared.
-        const shape_ref = try rt.shapes.createObjectRoot(proto_id);
+        const property_capacity = shape.propertyCapacityForNeeded(own_property_capacity);
+        const shape_ref = if (property_capacity == 0)
+            try rt.shapes.createObjectRoot(proto_id)
+        else
+            try rt.shapes.createObjectRootWithPropertyCapacity(proto_id, property_capacity);
         var shape_owned = true;
         errdefer if (shape_owned) rt.shapes.release(shape_ref);
         var property_storage: []property.Entry = &.{};
         var property_storage_owned = false;
         errdefer if (property_storage_owned) rt.memory.free(property.Entry, property_storage);
-        if (own_property_capacity != 0) {
-            property_storage = try rt.memory.alloc(property.Entry, own_property_capacity);
+        if (property_capacity != 0) {
+            property_storage = try rt.memory.alloc(property.Entry, property_capacity);
             property_storage_owned = true;
         }
         var class_payload: class.Payload = null;
@@ -1341,15 +1343,14 @@ pub const Object = struct {
             .class_id = class_id,
             .class_payload = class_payload,
             .class_payload_kind = class_payload_kind,
-            .owner_runtime = rt,
             .flags = .{
                 .reserved_class_payload_finalizer_slot = reserved_class_payload_finalizer_slot,
                 .has_exotic_methods = classHasExoticMethods(rt, class_id, class_record),
+                .has_property_storage = property_capacity != 0,
             },
             .shape_ref = shape_ref,
             .prototype = prototype,
             .properties = property_storage[0..0],
-            .property_capacity = own_property_capacity,
         };
         property_storage_owned = false;
         reserved_class_payload_finalizer_slot = false;
@@ -1416,9 +1417,8 @@ pub const Object = struct {
         return JSValue.object(&self.header);
     }
 
-    pub fn cachedIteratorNextSlot(self: *Object) !*?JSValue {
-        const rt = self.owner_runtime;
-        if (self.cachedIteratorNextSlotIfPresent()) |slot| return slot;
+    pub fn cachedIteratorNextSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        if (self.cachedIteratorNextSlotIfPresent(rt)) |slot| return slot;
         const len = rt.cached_iterator_next_entries.len;
         if (len == rt.cached_iterator_next_entries_capacity) {
             var next_capacity = if (rt.cached_iterator_next_entries_capacity == 0) @as(usize, 4) else rt.cached_iterator_next_entries_capacity * 2;
@@ -1437,8 +1437,8 @@ pub const Object = struct {
         return &rt.cached_iterator_next_entries[len].value;
     }
 
-    pub fn cachedIteratorNext(self: *const Object) ?JSValue {
-        const slot = self.cachedIteratorNextSlotIfPresent() orelse return null;
+    pub fn cachedIteratorNext(self: *const Object, rt: *JSRuntime) ?JSValue {
+        const slot = self.cachedIteratorNextSlotIfPresent(rt) orelse return null;
         return slot.*;
     }
 
@@ -1456,8 +1456,7 @@ pub const Object = struct {
         removeCachedIteratorNextEntryAt(rt, index);
     }
 
-    fn cachedIteratorNextSlotIfPresent(self: *const Object) ?*?JSValue {
-        const rt = self.owner_runtime;
+    fn cachedIteratorNextSlotIfPresent(self: *const Object, rt: *JSRuntime) ?*?JSValue {
         const index = cachedIteratorNextEntryIndex(rt, self) orelse return null;
         return &rt.cached_iterator_next_entries[index].value;
     }
@@ -1651,10 +1650,10 @@ pub const Object = struct {
         self.enqueueDeferredStdFileClose(rt);
         if (!self.finalizeInlineClassPayload(rt)) self.enqueueClassPayloadFinalizer(rt);
         const old_properties = self.properties;
-        const old_property_capacity = self.property_capacity;
+        const old_property_capacity = self.propertyStorageCapacity();
         const old_shape_props = self.shape_ref.props[0..@min(self.shape_ref.prop_count, old_properties.len)];
         self.properties = &.{};
-        self.property_capacity = 0;
+        self.flags.has_property_storage = false;
         for (old_properties, 0..) |entry, index| {
             const entry_atom = if (index < old_shape_props.len) old_shape_props[index].atom_id else atom.null_atom;
             destroyPropertySlot(rt, entry_atom, entry.slot);
@@ -1820,7 +1819,7 @@ pub const Object = struct {
         var read_index: usize = 0;
         while (read_index < rt.borrowed_reference_holders.len) : (read_index += 1) {
             const current = rt.borrowed_reference_holders[read_index];
-            if (current.header.rc != 0 and current.hasBorrowedReferences()) {
+            if (current.header.rc != 0 and current.hasBorrowedReferences(rt)) {
                 if (write_index != read_index) rt.borrowed_reference_holders[write_index] = current;
                 write_index += 1;
                 continue;
@@ -1850,10 +1849,10 @@ pub const Object = struct {
 
     pub fn pruneBorrowedReferenceHolderIfEmpty(self: *Object, rt: *JSRuntime) void {
         if (!self.flags.is_borrowed_reference_holder) return;
-        if (!self.hasBorrowedReferences()) rt.unregisterBorrowedReferenceHolder(self);
+        if (!self.hasBorrowedReferences(rt)) rt.unregisterBorrowedReferenceHolder(self);
     }
 
-    fn hasBorrowedReferences(self: *const Object) bool {
+    fn hasBorrowedReferences(self: *const Object, rt: *JSRuntime) bool {
         if (self.objectDataPayloadConst()) |payload| {
             if (payload.weak_target_identity != null) return true;
         }
@@ -1867,7 +1866,7 @@ pub const Object = struct {
         for (self.properties) |entry| {
             switch (entry.slot) {
                 .auto_init => |id| {
-                    const info = property.autoInitAt(self.owner_runtime, id).*;
+                    const info = property.autoInitAt(rt, id).*;
                     if (info.host_function_realm_global != 0) return true;
                 },
                 else => {},
@@ -2082,10 +2081,10 @@ pub const Object = struct {
         return self.flags.has_exotic_methods;
     }
 
-    pub fn exoticMethods(self: *const Object) ?*const ExoticMethods {
+    pub fn exoticMethods(self: *const Object, rt: *const JSRuntime) ?*const ExoticMethods {
         if (!self.flags.has_exotic_methods) return null;
         return exoticMethodsForClassId(self.class_id) orelse blk: {
-            const record = self.owner_runtime.classes.record(self.class_id) orelse return null;
+            const record = rt.classes.record(self.class_id) orelse return null;
             const raw = record.exotic_methods orelse return null;
             break :blk @ptrCast(@alignCast(raw));
         };
@@ -3683,85 +3682,85 @@ pub const Object = struct {
         return 0;
     }
 
-    pub fn addArrayBuiltinMarker(self: *Object, marker: ArrayBuiltinMarker) bool {
+    pub fn addArrayBuiltinMarker(self: *Object, rt: *JSRuntime, marker: ArrayBuiltinMarker) bool {
         if (marker == .none) return true;
-        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
         return setArrayBuiltinMarker(payload, marker);
     }
 
-    pub fn addTypedArrayBuiltinMarker(self: *Object, marker: TypedArrayBuiltinMarker) bool {
+    pub fn addTypedArrayBuiltinMarker(self: *Object, rt: *JSRuntime, marker: TypedArrayBuiltinMarker) bool {
         if (marker == .none) return true;
-        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
         return setTypedArrayBuiltinMarker(payload, marker);
     }
 
-    pub fn addArrayIteratorKind(self: *Object, kind: u8) bool {
+    pub fn addArrayIteratorKind(self: *Object, rt: *JSRuntime, kind: u8) bool {
         if (kind == 0) return true;
-        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
         return setArrayIteratorKind(payload, kind);
     }
 
-    pub fn addIteratorIdentityFunction(self: *Object) bool {
-        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+    pub fn addIteratorIdentityFunction(self: *Object, rt: *JSRuntime) bool {
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
         payload.iterator_identity = true;
         return true;
     }
 
-    pub fn addArrayIteratorNextFunction(self: *Object) bool {
-        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+    pub fn addArrayIteratorNextFunction(self: *Object, rt: *JSRuntime) bool {
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
         payload.array_iterator_next = true;
         return true;
     }
 
-    pub fn addThrowTypeErrorIntrinsicFunction(self: *Object) bool {
-        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+    pub fn addThrowTypeErrorIntrinsicFunction(self: *Object, rt: *JSRuntime) bool {
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
         payload.throw_type_error_intrinsic = true;
         return true;
     }
 
-    pub fn addAsyncIteratorAsyncDisposeFunction(self: *Object) bool {
-        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+    pub fn addAsyncIteratorAsyncDisposeFunction(self: *Object, rt: *JSRuntime) bool {
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
         payload.async_iterator_async_dispose = true;
         return true;
     }
 
-    pub fn addAsyncGeneratorPrototypeMethod(self: *Object) bool {
-        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+    pub fn addAsyncGeneratorPrototypeMethod(self: *Object, rt: *JSRuntime) bool {
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
         payload.async_generator_method = true;
         return true;
     }
 
-    pub fn addIteratorHelperMethod(self: *Object, method_id: u8) bool {
+    pub fn addIteratorHelperMethod(self: *Object, rt: *JSRuntime, method_id: u8) bool {
         if (method_id == 0) return true;
-        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
         if (payload.iterator_helper_method != 0 and payload.iterator_helper_method != method_id) return false;
         payload.iterator_helper_method = method_id;
         return true;
     }
 
-    pub fn addAsyncFromSyncIteratorMethod(self: *Object, method_id: u8) bool {
+    pub fn addAsyncFromSyncIteratorMethod(self: *Object, rt: *JSRuntime, method_id: u8) bool {
         if (method_id == 0) return true;
-        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
         if (payload.async_from_sync_iterator_method != 0 and payload.async_from_sync_iterator_method != method_id) return false;
         payload.async_from_sync_iterator_method = method_id;
         return true;
     }
 
-    pub fn addDisposableStackMethod(self: *Object, method_id: u8) bool {
+    pub fn addDisposableStackMethod(self: *Object, rt: *JSRuntime, method_id: u8) bool {
         if (method_id == 0) return true;
-        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
         return setDisposableStackMethod(payload, method_id);
     }
 
-    pub fn addAsyncDisposableStackMethod(self: *Object, method_id: u8) bool {
+    pub fn addAsyncDisposableStackMethod(self: *Object, rt: *JSRuntime, method_id: u8) bool {
         if (method_id == 0) return true;
-        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
         return setAsyncDisposableStackMethod(payload, method_id);
     }
 
-    pub fn addCollectionMethodOwnerClass(self: *Object, owner_class: class.ClassId) bool {
+    pub fn addCollectionMethodOwnerClass(self: *Object, rt: *JSRuntime, owner_class: class.ClassId) bool {
         if (owner_class == class.invalid_class_id) return true;
-        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
         return setCollectionMethodOwnerClass(payload, owner_class);
     }
 
@@ -5769,7 +5768,7 @@ pub const Object = struct {
                 }
             }
         }
-        if (self.cachedIteratorNextSlotIfPresent()) |slot| {
+        if (self.cachedIteratorNextSlotIfPresent(rt)) |slot| {
             try Helper.traceOptValue(visitor, slot);
         }
         // Property key atoms (including symbol keys) live in the shape;
@@ -6732,7 +6731,7 @@ pub const Object = struct {
         function_bytecode: *const FunctionBytecode,
     ) ObjectGraphError!usize {
         var count: usize = 0;
-        count += countOptionalFunctionBytecodeRef(self.cachedIteratorNext(), function_bytecode);
+        count += countOptionalFunctionBytecodeRef(self.cachedIteratorNext(rt), function_bytecode);
         for (self.properties) |entry| count += countSlotFunctionBytecodeRefs(entry.slot, function_bytecode);
         if (self.realmPayloadConst()) |payload| {
             if (payload.shared_lazy_native_functions) |cache| {
@@ -6944,8 +6943,8 @@ pub const Object = struct {
         return self.flags.immutable_prototype;
     }
 
-    pub fn getOwnProperty(self: *const Object, atom_id: atom.Atom) ?descriptor.Descriptor {
-        if (self.exoticMethods()) |methods| {
+    pub fn getOwnProperty(self: *const Object, rt: *JSRuntime, atom_id: atom.Atom) ?descriptor.Descriptor {
+        if (self.exoticMethods(rt)) |methods| {
             if (methods.get_own_property) |hook| {
                 if (hook(@constCast(self), atom_id)) |desc| return desc;
             }
@@ -6970,7 +6969,7 @@ pub const Object = struct {
             // materialization the slot is `.data` or `.accessor` and
             // re-reads are ordinary fast-path loads.
             if (entry.slot == .auto_init) {
-                const info = property.autoInitAt(self.owner_runtime, entry.slot.auto_init).*;
+                const info = property.autoInit(entry.slot.auto_init).*;
                 // `materializeAutoInit` returns a fresh ref for
                 // `getProperty` semantics. On success the slot is promoted
                 // and `fromSlot` dups the stored value(s). On OOM the
@@ -7037,7 +7036,7 @@ pub const Object = struct {
                 // gives us a writable handle without changing every
                 // caller. Matches QuickJS's `JS_AutoInitProperty` which
                 // also mutates the property record in place on read.
-                .auto_init => |id| materializeAutoInit(@constCast(self), index, property.autoInitAt(self.owner_runtime, id).*),
+                .auto_init => |id| materializeAutoInit(@constCast(self), index, property.autoInit(id).*),
                 .deleted => JSValue.undefinedValue(),
             };
         }
@@ -7161,7 +7160,7 @@ pub const Object = struct {
         if (index >= self.properties.len) return error.IncompatibleDescriptor;
         const entry = self.properties[index];
         if (entry.slot != .auto_init) return;
-        const info = property.autoInitAt(self.owner_runtime, entry.slot.auto_init).*;
+        const info = property.autoInit(entry.slot.auto_init).*;
         const transient = materializeAutoInit(self, index, info);
         transient.free(info.rt);
         if (self.properties[index].slot == .auto_init) return error.OutOfMemory;
@@ -7274,13 +7273,13 @@ pub const Object = struct {
             }
         }
         if (apply_markers) {
-            applyAutoInitArrayBuiltinMarker(function_value, info.array_builtin_marker);
-            applyAutoInitTypedArrayBuiltinMarker(function_value, info.typed_array_builtin_marker);
-            applyAutoInitArrayIteratorKind(function_value, info.array_iterator_kind);
-            applyAutoInitIteratorIdentity(function_value, info.iterator_identity);
-            applyAutoInitCollectionMethodOwner(function_value, info.collection_method_owner_class);
-            applyAutoInitDisposableStackMethod(function_value, info.disposable_stack_method);
-            applyAutoInitAsyncDisposableStackMethod(function_value, info.async_disposable_stack_method);
+            applyAutoInitArrayBuiltinMarker(info.rt, function_value, info.array_builtin_marker);
+            applyAutoInitTypedArrayBuiltinMarker(info.rt, function_value, info.typed_array_builtin_marker);
+            applyAutoInitArrayIteratorKind(info.rt, function_value, info.array_iterator_kind);
+            applyAutoInitIteratorIdentity(info.rt, function_value, info.iterator_identity);
+            applyAutoInitCollectionMethodOwner(info.rt, function_value, info.collection_method_owner_class);
+            applyAutoInitDisposableStackMethod(info.rt, function_value, info.disposable_stack_method);
+            applyAutoInitAsyncDisposableStackMethod(info.rt, function_value, info.async_disposable_stack_method);
         }
         // Self-wire `[[Prototype]]` to Function.prototype. The lazy
         // install path skips the eager
@@ -7357,53 +7356,53 @@ pub const Object = struct {
         return unscopables_value;
     }
 
-    fn applyAutoInitArrayBuiltinMarker(function_value: JSValue, marker: ArrayBuiltinMarker) void {
+    fn applyAutoInitArrayBuiltinMarker(rt: *JSRuntime, function_value: JSValue, marker: ArrayBuiltinMarker) void {
         if (marker == .none) return;
         const header = function_value.refHeader() orelse return;
         const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addArrayBuiltinMarker(marker);
+        _ = function_object.addArrayBuiltinMarker(rt, marker);
     }
 
-    fn applyAutoInitTypedArrayBuiltinMarker(function_value: JSValue, marker: TypedArrayBuiltinMarker) void {
+    fn applyAutoInitTypedArrayBuiltinMarker(rt: *JSRuntime, function_value: JSValue, marker: TypedArrayBuiltinMarker) void {
         if (marker == .none) return;
         const header = function_value.refHeader() orelse return;
         const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addTypedArrayBuiltinMarker(marker);
+        _ = function_object.addTypedArrayBuiltinMarker(rt, marker);
     }
 
-    fn applyAutoInitArrayIteratorKind(function_value: JSValue, kind: u8) void {
+    fn applyAutoInitArrayIteratorKind(rt: *JSRuntime, function_value: JSValue, kind: u8) void {
         if (kind == 0) return;
         const header = function_value.refHeader() orelse return;
         const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addArrayIteratorKind(kind);
+        _ = function_object.addArrayIteratorKind(rt, kind);
     }
 
-    fn applyAutoInitIteratorIdentity(function_value: JSValue, is_identity: bool) void {
+    fn applyAutoInitIteratorIdentity(rt: *JSRuntime, function_value: JSValue, is_identity: bool) void {
         if (!is_identity) return;
         const header = function_value.refHeader() orelse return;
         const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addIteratorIdentityFunction();
+        _ = function_object.addIteratorIdentityFunction(rt);
     }
 
-    fn applyAutoInitCollectionMethodOwner(function_value: JSValue, owner_class: class.ClassId) void {
+    fn applyAutoInitCollectionMethodOwner(rt: *JSRuntime, function_value: JSValue, owner_class: class.ClassId) void {
         if (owner_class == class.invalid_class_id) return;
         const header = function_value.refHeader() orelse return;
         const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addCollectionMethodOwnerClass(owner_class);
+        _ = function_object.addCollectionMethodOwnerClass(rt, owner_class);
     }
 
-    fn applyAutoInitDisposableStackMethod(function_value: JSValue, method_id: u8) void {
+    fn applyAutoInitDisposableStackMethod(rt: *JSRuntime, function_value: JSValue, method_id: u8) void {
         if (method_id == 0) return;
         const header = function_value.refHeader() orelse return;
         const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addDisposableStackMethod(method_id);
+        _ = function_object.addDisposableStackMethod(rt, method_id);
     }
 
-    fn applyAutoInitAsyncDisposableStackMethod(function_value: JSValue, method_id: u8) void {
+    fn applyAutoInitAsyncDisposableStackMethod(rt: *JSRuntime, function_value: JSValue, method_id: u8) void {
         if (method_id == 0) return;
         const header = function_value.refHeader() orelse return;
         const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addAsyncDisposableStackMethod(method_id);
+        _ = function_object.addAsyncDisposableStackMethod(rt, method_id);
     }
 
     fn materializeHostFunctionAutoInit(info: property.AutoInit) ?JSValue {
@@ -7669,7 +7668,7 @@ pub const Object = struct {
     }
 
     pub fn defineOwnProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
-        if (self.exoticMethods()) |methods| {
+        if (self.exoticMethods(rt)) |methods| {
             if (methods.define_own_property) |hook| {
                 if (!hook(self, atom_id, desc)) return error.IncompatibleDescriptor;
                 return;
@@ -7789,13 +7788,12 @@ pub const Object = struct {
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
-        if (needed <= self.property_capacity and rt.shapes.hasReservedOwnPropertyCapacity(self.shape_ref, needed)) return;
+        if (needed <= self.propertyStorageCapacity() and rt.shapes.hasReservedOwnPropertyCapacity(self.shape_ref, needed)) return;
         // Bulk install paths build fresh ordinary objects. Once capacity is
         // reserved, keep their shapes unique and append in place instead of
         // creating a transition node per property.
         try self.ensureUniqueShapeForMutation(rt);
         try self.ensurePropertyCapacity(rt, needed);
-        try rt.shapes.reserveProperties(self.shape_ref, needed);
         try rt.shapes.reservePropertyHash(self.shape_ref, needed);
     }
 
@@ -8835,7 +8833,7 @@ pub const Object = struct {
     }
 
     pub fn deleteProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom) bool {
-        if (self.exoticMethods()) |methods| {
+        if (self.exoticMethods(rt)) |methods| {
             if (methods.delete_property) |hook| return hook(self, atom_id);
         }
         if (self.flags.is_array and atom_id == atom.ids.length) return false;
@@ -8858,7 +8856,7 @@ pub const Object = struct {
     }
 
     pub fn ownKeys(self: Object, rt: *JSRuntime) OwnKeysError![]atom.Atom {
-        if (self.exoticMethods()) |methods| {
+        if (self.exoticMethods(rt)) |methods| {
             if (methods.own_keys) |hook| return try hook(@constCast(&self), rt);
         }
         if (self.class_id == class.ids.module_ns) {
@@ -9148,17 +9146,19 @@ pub const Object = struct {
         errdefer if (slot_owned) destroyPropertySlot(rt, atom_id, slot);
 
         const old_len = self.properties.len;
-        const old_capacity = self.property_capacity;
+        const old_capacity = self.propertyStorageCapacity();
         const old_properties: []property.Entry = if (old_capacity != 0) self.properties.ptr[0..old_capacity] else self.properties[0..0];
+        const old_has_property_storage = self.flags.has_property_storage;
+        var current_capacity = old_capacity;
         var grew_properties = false;
         if (old_len + 1 > old_capacity) {
-            var next_capacity = if (old_capacity == 0) @as(usize, 4) else old_capacity * 2;
-            while (next_capacity < old_len + 1) : (next_capacity *= 2) {}
+            const next_capacity = shape.propertyCapacityForNeeded(old_len + 1);
             const next = try rt.memory.alloc(property.Entry, next_capacity);
             errdefer rt.memory.free(property.Entry, next);
             @memcpy(next[0..old_len], self.properties);
             self.properties = next[0..old_len];
-            self.property_capacity = next_capacity;
+            self.flags.has_property_storage = true;
+            current_capacity = next_capacity;
             grew_properties = true;
         }
 
@@ -9174,9 +9174,9 @@ pub const Object = struct {
             self.properties = self.properties.ptr[0..old_len];
             self.flags.may_have_indexed_properties = old_may_have_indexed_properties;
             if (grew_properties) {
-                const new_properties = self.properties.ptr[0..self.property_capacity];
+                const new_properties = self.properties.ptr[0..current_capacity];
                 self.properties = old_properties[0..old_len];
-                self.property_capacity = old_capacity;
+                self.flags.has_property_storage = old_has_property_storage;
                 rt.memory.free(property.Entry, new_properties);
             }
         };
@@ -9184,7 +9184,7 @@ pub const Object = struct {
         if (array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) {
             self.markIndexedProperties(rt);
         }
-        try self.adoptShapeForNewProperty(rt, atom_id, entry_flags.bits());
+        try self.adoptShapeForNewProperty(rt, atom_id, entry_flags.bits(), current_capacity);
         if (grew_properties and old_capacity != 0) rt.memory.free(property.Entry, old_properties);
         inserted = false;
     }
@@ -9201,13 +9201,15 @@ pub const Object = struct {
         rt.shapes.release(old_shape);
     }
 
-    fn adoptShapeForNewProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, flags: u6) !void {
+    fn adoptShapeForNewProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, flags: u6, property_capacity: usize) !void {
         if (array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) {
             try self.ensureUniqueShapeForMutation(rt);
+            try rt.shapes.reserveProperties(self.shape_ref, property_capacity);
             try rt.shapes.addProperty(self.shape_ref, atom_id, flags);
             return;
         }
         if (!self.shapeNeedsMutationCopy()) {
+            try rt.shapes.reserveProperties(self.shape_ref, property_capacity);
             try rt.shapes.addProperty(self.shape_ref, atom_id, flags);
             return;
         }
@@ -9218,17 +9220,21 @@ pub const Object = struct {
     }
 
     fn ensurePropertyCapacity(self: *Object, rt: *JSRuntime, needed: usize) !void {
-        if (needed <= self.property_capacity) return;
-        var next_capacity = if (self.property_capacity == 0) @as(usize, 4) else self.property_capacity * 2;
-        while (next_capacity < needed) : (next_capacity *= 2) {}
+        const old_capacity = self.propertyStorageCapacity();
+        if (needed <= old_capacity) return;
+        const next_capacity = shape.propertyCapacityForNeeded(needed);
         const next = try rt.memory.alloc(property.Entry, next_capacity);
         errdefer rt.memory.free(property.Entry, next);
         @memcpy(next[0..self.properties.len], self.properties);
-        const old_capacity = self.property_capacity;
         const old_properties: []property.Entry = if (old_capacity != 0) self.properties.ptr[0..old_capacity] else self.properties[0..0];
+        try rt.shapes.reserveProperties(self.shape_ref, next_capacity);
         self.properties = next[0..self.properties.len];
-        self.property_capacity = next_capacity;
+        self.flags.has_property_storage = true;
         if (old_capacity != 0) rt.memory.free(property.Entry, old_properties);
+    }
+
+    fn propertyStorageCapacity(self: *const Object) usize {
+        return if (self.flags.has_property_storage) self.shape_ref.props.len else 0;
     }
 
     fn replaceProperty(self: *Object, rt: *JSRuntime, index: usize, desc: descriptor.Descriptor) !void {
@@ -9811,7 +9817,7 @@ pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode) !JSVal
     var out_index: u32 = 0;
     for (owned_keys) |key| {
         if (rt.atoms.kind(key) == .symbol) continue;
-        const desc = object.getOwnProperty(key) orelse continue;
+        const desc = object.getOwnProperty(rt, key) orelse continue;
         defer desc.destroy(rt);
         if (!(desc.enumerable orelse false)) continue;
         element_val = switch (mode) {

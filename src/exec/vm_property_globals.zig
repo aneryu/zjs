@@ -2324,7 +2324,7 @@ fn evalFunctionDeclaresGlobalVar(function: *const bytecode.Bytecode, atom_id: co
 }
 
 fn globalOwnAccessorWithoutSetter(rt: *core.JSRuntime, global: *core.Object, atom_id: core.Atom) bool {
-    const desc = global.getOwnProperty(atom_id) orelse return false;
+    const desc = global.getOwnProperty(rt, atom_id) orelse return false;
     defer desc.destroy(rt);
     return desc.kind == .accessor and desc.setter.isUndefined();
 }
@@ -2374,7 +2374,7 @@ pub noinline fn globalDefinition(
             if (function.flags.runtime_strict and !is_eval_code and is_function_var) return .done;
             const has_global_lexical = call_runtime.globalLexicalHas(ctx, atom_id);
             var has_own_global_property = false;
-            if (global.getOwnProperty(atom_id)) |desc| {
+            if (global.getOwnProperty(ctx.runtime, atom_id)) |desc| {
                 has_own_global_property = true;
                 defer desc.destroy(ctx.runtime);
                 if (is_lexical) {

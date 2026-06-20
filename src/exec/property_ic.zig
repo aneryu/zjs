@@ -514,7 +514,7 @@ pub fn ownDataPropertyValueMaterializedForFastPath(rt: *core.JSRuntime, value: c
         .slow => {},
     }
 
-    const desc = object.getOwnProperty(atom_id) orelse return null;
+    const desc = object.getOwnProperty(rt, atom_id) orelse return null;
     defer desc.destroy(rt);
     if (desc.kind != .data or !desc.value_present) return null;
 

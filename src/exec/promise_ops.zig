@@ -153,7 +153,7 @@ pub fn asyncIteratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Objec
         const dispose = try core.function.nativeFunction(rt, "[Symbol.asyncDispose]", 0);
         defer dispose.free(rt);
         const dispose_object = objectFromValue(dispose) orelse return error.TypeError;
-        if (!dispose_object.addAsyncIteratorAsyncDisposeFunction()) return error.TypeError;
+        if (!dispose_object.addAsyncIteratorAsyncDisposeFunction(rt)) return error.TypeError;
         try object.defineOwnProperty(rt, async_dispose_atom, core.Descriptor.data(dispose, true, false, true));
     }
     const value = object.value();
@@ -194,7 +194,7 @@ pub fn defineAsyncGeneratorDataMethod(rt: *core.JSRuntime, object: *core.Object,
     const method = try core.function.nativeFunction(rt, name, length);
     defer method.free(rt);
     const method_object = property_ops.expectObject(method) catch return error.TypeError;
-    if (!method_object.addAsyncGeneratorPrototypeMethod()) return error.TypeError;
+    if (!method_object.addAsyncGeneratorPrototypeMethod(rt)) return error.TypeError;
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
 }
 

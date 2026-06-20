@@ -2790,7 +2790,7 @@ pub fn stringIteratorPrototypeFromContext(ctx: *core.JSContext, global: *core.Ob
     const iterator_method = try core.function.nativeFunction(ctx.runtime, "[Symbol.iterator]", 0);
     defer iterator_method.free(ctx.runtime);
     const iterator_function = property_ops.expectObject(iterator_method) catch return error.TypeError;
-    if (!iterator_function.addIteratorIdentityFunction()) return error.TypeError;
+    if (!iterator_function.addIteratorIdentityFunction(ctx.runtime)) return error.TypeError;
     const iterator_atom = core.atom.predefinedId("Symbol.iterator", .symbol) orelse return error.TypeError;
     try object.defineOwnProperty(ctx.runtime, iterator_atom, core.Descriptor.data(iterator_method, true, false, true));
 
@@ -4533,7 +4533,7 @@ pub fn concatSpreadLengthValue(
     errdefer dynamic.free(ctx.runtime);
     if (!core.object.isTypedArrayObject(object) or object.typedArrayFixedLength() == null) return dynamic;
     if (try core.object.typedArrayOutOfBounds(object)) return dynamic;
-    const own = object.getOwnProperty(core.atom.ids.length) orelse return dynamic;
+    const own = object.getOwnProperty(ctx.runtime, core.atom.ids.length) orelse return dynamic;
     defer own.destroy(ctx.runtime);
     if (own.kind != .data or !own.value.isNumber() or !dynamic.isNumber()) return dynamic;
     const own_number = value_ops.numberValue(own.value) orelse return dynamic;

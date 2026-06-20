@@ -607,7 +607,7 @@ pub const object = struct {
     }
 
     pub fn getOwnIndexPropertyValue(rt: *JSRuntime, obj: *Object, index: u32) ?value.Value {
-        const desc = toCore(obj).getOwnProperty(atomFromUInt32(index)) orelse return null;
+        const desc = toCore(obj).getOwnProperty(rt, atomFromUInt32(index)) orelse return null;
         if (!desc.value_present) {
             desc.destroy(rt);
             return null;

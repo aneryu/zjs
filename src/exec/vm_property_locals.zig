@@ -3481,7 +3481,7 @@ fn fastGlobalDataValueForRange(
     if (globalOwnDataPropertyValue(global, atom_id)) |value| return value;
     if (global.hasExoticMethods()) return null;
 
-    const desc = global.getOwnProperty(atom_id) orelse return null;
+    const desc = global.getOwnProperty(ctx.runtime, atom_id) orelse return null;
     defer desc.destroy(ctx.runtime);
     if (desc.kind != .data or !desc.value_present) return null;
 

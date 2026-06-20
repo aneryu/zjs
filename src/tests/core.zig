@@ -1521,7 +1521,7 @@ test "cached iterator next clear defers value finalizer reentry" {
     const object = try core.Object.create(rt, core.class.ids.iterator, null);
     defer object.value().free(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
-    (try object.cachedIteratorNextSlot()).* = value.value().dup();
+    (try object.cachedIteratorNextSlot(rt)).* = value.value().dup();
     value.value().free(rt);
 
     payload_finalizer_calls = 0;
@@ -1537,11 +1537,11 @@ test "cached iterator next clear defers value finalizer reentry" {
     try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), reentrant_cached_iterator_next_calls);
     try expectOneDeferredClassPayloadFinalizer(rt);
-    try std.testing.expect(object.cachedIteratorNext() == null);
+    try std.testing.expect(object.cachedIteratorNext(rt) == null);
     try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_cached_iterator_next_calls);
-    try std.testing.expect(object.cachedIteratorNext() == null);
+    try std.testing.expect(object.cachedIteratorNext(rt) == null);
 }
 
 test "exception slot clear defers value finalizer reentry" {
@@ -2405,7 +2405,7 @@ test "failed new property definition rolls back retained entry" {
     try object.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(3), true, true, true));
 
     try std.testing.expectEqual(@as(usize, 3), object.properties.len);
-    try std.testing.expectEqual(@as(usize, 4), object.property_capacity);
+    try std.testing.expectEqual(@as(usize, 4), object.shape_ref.props.len);
     try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
 
     const retained_refs = retained.header.rc;
@@ -2461,7 +2461,7 @@ test "failed auto-init property definition rolls back retained entry" {
     try object.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(3), true, true, true));
 
     try std.testing.expectEqual(@as(usize, 3), object.properties.len);
-    try std.testing.expectEqual(@as(usize, 4), object.property_capacity);
+    try std.testing.expectEqual(@as(usize, 4), object.shape_ref.props.len);
     try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
@@ -5563,7 +5563,7 @@ test "ordinary objects define own data properties and descriptors" {
     defer rt.atoms.free(key);
 
     try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(42), true, true, true));
-    const desc = obj.getOwnProperty(key).?;
+    const desc = obj.getOwnProperty(rt, key).?;
     defer desc.destroy(rt);
     try std.testing.expectEqual(core.descriptor.Kind.data, desc.kind);
     try std.testing.expectEqual(@as(?i32, 42), desc.value.asInt32());
@@ -5613,7 +5613,7 @@ test "accessor descriptors store getter setter placeholders" {
     getter.value().free(rt);
     setter.value().free(rt);
 
-    const desc = obj.getOwnProperty(key).?;
+    const desc = obj.getOwnProperty(rt, key).?;
     defer desc.destroy(rt);
     try std.testing.expectEqual(core.descriptor.Kind.accessor, desc.kind);
     try std.testing.expect(desc.getter.isString());
@@ -5687,7 +5687,7 @@ test "extensibility seal and freeze update descriptor flags" {
     try std.testing.expectError(error.NotExtensible, obj.defineOwnProperty(rt, other, core.Descriptor.data(core.JSValue.int32(2), true, true, true)));
 
     try obj.freeze(rt);
-    const desc = obj.getOwnProperty(key).?;
+    const desc = obj.getOwnProperty(rt, key).?;
     defer desc.destroy(rt);
     try std.testing.expectEqual(false, desc.configurable.?);
     try std.testing.expectEqual(false, desc.writable.?);
@@ -5807,7 +5807,7 @@ test "exotic dispatch hooks are called without builtin shortcuts" {
     const key = try rt.internAtom("hooked");
     defer rt.atoms.free(key);
 
-    const desc = obj.getOwnProperty(key).?;
+    const desc = obj.getOwnProperty(rt, key).?;
     defer desc.destroy(rt);
     try std.testing.expectEqual(@as(?i32, 99), desc.value.asInt32());
     try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));

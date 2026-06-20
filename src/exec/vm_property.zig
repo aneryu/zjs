@@ -462,7 +462,7 @@ fn varRefGlobalLexicalWritable(
 ) bool {
     if (var_ref_idx >= function.var_ref_names.len) return false;
     const env = call_runtime.existingGlobalLexicalEnv(ctx) orelse return false;
-    const desc = env.getOwnProperty(function.var_ref_names[var_ref_idx]) orelse return false;
+    const desc = env.getOwnProperty(ctx.runtime, function.var_ref_names[var_ref_idx]) orelse return false;
     return desc.kind == .data and (desc.writable orelse false);
 }
 

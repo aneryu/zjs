@@ -339,7 +339,7 @@ fn asyncFromSyncMethod(rt: *core.JSRuntime, name: []const u8, method_id: i32) !c
     errdefer method.free(rt);
     const object = try property_ops.expectObject(method);
     if (method_id < 1 or method_id > 2) return error.TypeError;
-    if (!object.addAsyncFromSyncIteratorMethod(@intCast(method_id))) return error.TypeError;
+    if (!object.addAsyncFromSyncIteratorMethod(rt, @intCast(method_id))) return error.TypeError;
     return method;
 }
 
@@ -848,12 +848,12 @@ pub fn arrayIteratorPrototypeFromContext(
     const next_value = object.getProperty(next_atom);
     defer next_value.free(ctx.runtime);
     const next_function = property_ops.expectObject(next_value) catch return error.TypeError;
-    if (!next_function.addArrayIteratorNextFunction()) return error.TypeError;
+    if (!next_function.addArrayIteratorNextFunction(ctx.runtime)) return error.TypeError;
 
     const iterator_method = try core.function.nativeFunction(ctx.runtime, "[Symbol.iterator]", 0);
     defer iterator_method.free(ctx.runtime);
     const iterator_function = property_ops.expectObject(iterator_method) catch return error.TypeError;
-    if (!iterator_function.addIteratorIdentityFunction()) return error.TypeError;
+    if (!iterator_function.addIteratorIdentityFunction(ctx.runtime)) return error.TypeError;
     const iterator_atom = core.atom.predefinedId("Symbol.iterator", .symbol) orelse return error.TypeError;
     try object.defineOwnProperty(ctx.runtime, iterator_atom, core.Descriptor.data(iterator_method, true, false, true));
 
@@ -1123,7 +1123,7 @@ pub fn qjsIteratorPrototypeAccessorSet(
             if (object == home) return error.TypeError;
         }
     }
-    if (object.getOwnProperty(atom_id)) |desc| {
+    if (object.getOwnProperty(ctx.runtime, atom_id)) |desc| {
         defer desc.destroy(ctx.runtime);
         object.setProperty(ctx.runtime, atom_id, value) catch |err| switch (err) {
             error.ReadOnly, error.AccessorWithoutSetter, error.NotExtensible, error.IncompatibleDescriptor => return error.TypeError,
@@ -1180,7 +1180,7 @@ pub fn qjsInstallIteratorHelperMethod(
     defer method.free(rt);
     const method_object = property_ops.expectObject(method) catch return error.TypeError;
     if (method_id < 1 or method_id > 2) return error.TypeError;
-    if (!method_object.addIteratorHelperMethod(@intCast(method_id))) return error.TypeError;
+    if (!method_object.addIteratorHelperMethod(rt, @intCast(method_id))) return error.TypeError;
     try helper.defineOwnProperty(rt, key, core.Descriptor.data(method, true, false, true));
 }
 
@@ -1770,7 +1770,7 @@ pub fn qjsIteratorZipNextMethod(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const iterator = objectFromValue(iterator_value) orelse return error.TypeError;
-    if (iterator.cachedIteratorNext()) |cached| return cached.dup();
+    if (iterator.cachedIteratorNext(ctx.runtime)) |cached| return cached.dup();
     const next_key = try ctx.runtime.internAtom("next");
     defer ctx.runtime.atoms.free(next_key);
     const next_value = try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, caller_function, caller_frame);

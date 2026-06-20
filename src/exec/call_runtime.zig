@@ -2785,7 +2785,7 @@ pub fn cacheIteratorNextMethodMode(
     const next_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
     defer next_method.free(ctx.runtime);
     if (require_callable and !isCallableValue(next_method)) return error.TypeError;
-    const cached = try iterator.cachedIteratorNextSlot();
+    const cached = try iterator.cachedIteratorNextSlot(ctx.runtime);
     try iterator.setOptionalValueSlot(ctx.runtime, cached, next_method.dup());
 }
 
@@ -2809,7 +2809,7 @@ pub fn destructuringIteratorStep(
     const iterator_value = (state.iteratorTargetSlot().*) orelse
         return .{ .value = core.JSValue.undefinedValue(), .done = true };
     const iterator = try property_ops.expectObject(iterator_value);
-    const next_method = if (iterator.cachedIteratorNext()) |stored| stored.dup() else blk: {
+    const next_method = if (iterator.cachedIteratorNext(ctx.runtime)) |stored| stored.dup() else blk: {
         const next_key = try ctx.runtime.internAtom("next");
         defer ctx.runtime.atoms.free(next_key);
         break :blk try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
@@ -2889,7 +2889,7 @@ pub fn iteratorStepValue(
     iterator_value: core.JSValue,
 ) !DestructuringIteratorStep {
     const iterator = try property_ops.expectObject(iterator_value);
-    const next_method = if (iterator.cachedIteratorNext()) |stored| stored.dup() else blk: {
+    const next_method = if (iterator.cachedIteratorNext(ctx.runtime)) |stored| stored.dup() else blk: {
         const next_key = try ctx.runtime.internAtom("next");
         defer ctx.runtime.atoms.free(next_key);
         break :blk try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
@@ -2930,7 +2930,7 @@ pub fn iteratorStepResult(
     next_arg: core.JSValue,
 ) !IteratorStepResult {
     const iterator = try property_ops.expectObject(iterator_value);
-    const next_method = if (iterator.cachedIteratorNext()) |stored| stored.dup() else blk: {
+    const next_method = if (iterator.cachedIteratorNext(ctx.runtime)) |stored| stored.dup() else blk: {
         const next_key = try ctx.runtime.internAtom("next");
         defer ctx.runtime.atoms.free(next_key);
         break :blk try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
@@ -3769,7 +3769,7 @@ pub fn looksLikeStatementFunctionKeyword(source: []const u8, keyword_index: usiz
 pub fn canDeclareGlobalFunction(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom, ignore_global_lexical: bool) bool {
     if (!ignore_global_lexical and globalLexicalHas(ctx, atom_id)) return false;
     const rt = ctx.runtime;
-    const desc = global.getOwnProperty(atom_id) orelse return global.isExtensible();
+    const desc = global.getOwnProperty(rt, atom_id) orelse return global.isExtensible();
     defer desc.destroy(rt);
     if (desc.configurable == true) return true;
     if (desc.kind != .data) return false;
@@ -4516,7 +4516,7 @@ pub fn publishDirectEvalVarRefs(
 }
 
 pub fn directEvalGlobalVarPublishBlocked(rt: *core.JSRuntime, global: *core.Object, atom_id: core.Atom) bool {
-    const desc = global.getOwnProperty(atom_id) orelse return false;
+    const desc = global.getOwnProperty(rt, atom_id) orelse return false;
     defer desc.destroy(rt);
     return switch (desc.kind) {
         .generic => false,
@@ -4526,13 +4526,13 @@ pub fn directEvalGlobalVarPublishBlocked(rt: *core.JSRuntime, global: *core.Obje
 }
 
 pub fn directEvalVarDeclarationShouldCreateRef(rt: *core.JSRuntime, global: *core.Object, atom_id: core.Atom) bool {
-    const desc = global.getOwnProperty(atom_id) orelse return true;
+    const desc = global.getOwnProperty(rt, atom_id) orelse return true;
     defer desc.destroy(rt);
     return desc.kind != .accessor;
 }
 
 pub fn directEvalGlobalDataVarNeedsTemporaryRef(rt: *core.JSRuntime, global: *core.Object, atom_id: core.Atom) bool {
-    const desc = global.getOwnProperty(atom_id) orelse return false;
+    const desc = global.getOwnProperty(rt, atom_id) orelse return false;
     defer desc.destroy(rt);
     return desc.kind == .data and desc.writable != true;
 }
@@ -6183,7 +6183,7 @@ pub fn wrapIteratorFromIterator(ctx: *core.JSContext, global: *core.Object, iter
         try wrapper.setOptionalValueSlot(ctx.runtime, wrapper.iteratorNextSlot(), rooted_next_method.dup());
         return wrapper.value();
     }
-    if (iterator_object.cachedIteratorNext()) |cached_next_method| {
+    if (iterator_object.cachedIteratorNext(ctx.runtime)) |cached_next_method| {
         try wrapper.setOptionalValueSlot(ctx.runtime, wrapper.iteratorNextSlot(), cached_next_method.dup());
         iterator_object.clearCachedIteratorNext(ctx.runtime);
     }
@@ -6451,7 +6451,7 @@ pub fn throwTypeErrorIntrinsicForGlobal(rt: *core.JSRuntime, global: *core.Objec
     const empty_name = try value_ops.createStringValue(rt, "");
     defer empty_name.free(rt);
     try thrower_object.defineOwnProperty(rt, core.atom.ids.name, core.Descriptor.data(empty_name, false, false, false));
-    if (!thrower_object.addThrowTypeErrorIntrinsicFunction()) return error.TypeError;
+    if (!thrower_object.addThrowTypeErrorIntrinsicFunction(rt)) return error.TypeError;
     try thrower_object.freeze(rt);
 
     try object_ops.installFunctionPrototypeThrowTypeErrorAccessors(rt, global, thrower);
@@ -6645,7 +6645,7 @@ pub fn ordinarySetWithReceiver(
         _ = try object_ops.qjsObjectProtoSetterCall(ctx, output, global, receiver_value, value, caller_function, caller_frame);
         return true;
     }
-    if (target.getOwnProperty(atom_id)) |own_desc| {
+    if (target.getOwnProperty(ctx.runtime, atom_id)) |own_desc| {
         defer own_desc.destroy(ctx.runtime);
         return object_ops.setWithOwnDescriptor(ctx, output, global, receiver_value, atom_id, value, own_desc, caller_function, caller_frame);
     }
@@ -7054,7 +7054,7 @@ pub fn callAccessorSetter(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
-    if (try object_ops.findPropertyDescriptor(object, atom_id)) |desc| {
+    if (try object_ops.findPropertyDescriptor(ctx.runtime, object, atom_id)) |desc| {
         defer desc.destroy(ctx.runtime);
         if (desc.kind != .accessor) return false;
         if (desc.setter.isUndefined()) return error.AccessorWithoutSetter;

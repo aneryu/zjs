@@ -9,6 +9,13 @@ pub const no_property_hash: u32 = 0;
 pub const no_property_index: u32 = std.math.maxInt(u32);
 pub const no_registry_index: usize = std.math.maxInt(usize);
 
+pub fn propertyCapacityForNeeded(needed: usize) usize {
+    if (needed == 0) return 0;
+    var capacity: usize = initial_prop_size;
+    while (capacity < needed) : (capacity *= 2) {}
+    return capacity;
+}
+
 pub const Property = struct {
     hash_next: u32 = no_property_index,
     flags: u6 = 0,
@@ -189,7 +196,7 @@ pub const Registry = struct {
             }
         }
 
-        const child = try self.cloneShape(parent, parent.proto_id, true, parent.prop_count + 1);
+        const child = try self.cloneShape(parent, parent.proto_id, true, propertyCapacityForNeeded(parent.prop_count + 1));
         errdefer self.release(child);
         child.parent = parent;
         parent.retain();
@@ -206,13 +213,13 @@ pub const Registry = struct {
     }
 
     pub fn cloneForMutation(self: *Registry, source: *Shape) !*Shape {
-        const clone = try self.cloneShape(source, source.proto_id, false, source.prop_count);
+        const clone = try self.cloneShape(source, source.proto_id, false, source.props.len);
         clone.version = source.version +% 1;
         return clone;
     }
 
     pub fn cloneWithPrototype(self: *Registry, source: *Shape, proto_id: ?usize) !*Shape {
-        const clone = try self.cloneShape(source, proto_id, false, source.prop_count);
+        const clone = try self.cloneShape(source, proto_id, false, source.props.len);
         const old_hash = clone.hash;
         clone.hash = initialHash(proto_id);
         for (clone.props[0..clone.prop_count]) |prop| {

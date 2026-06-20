@@ -972,7 +972,7 @@ pub fn getValueProperty(
     const object = try expectObjectArg(receiver_value);
     var cursor: ?*core.Object = object;
     while (cursor) |current| : (cursor = current.getPrototype()) {
-        const desc = current.getOwnProperty(key) orelse continue;
+        const desc = current.getOwnProperty(ctx.runtime, key) orelse continue;
         defer desc.destroy(ctx.runtime);
         return switch (desc.kind) {
             .data => desc.value.dup(),
@@ -1707,7 +1707,7 @@ fn tagRealmRegExpAccessorErrors(rt: *core.JSRuntime, realm_global: *core.Object)
     for (accessors) |name| {
         const key = try rt.internAtom(name);
         defer rt.atoms.free(key);
-        const desc = proto.getOwnProperty(key) orelse continue;
+        const desc = proto.getOwnProperty(rt, key) orelse continue;
         defer desc.destroy(rt);
         if (desc.kind != .accessor or desc.getter.isUndefined()) continue;
         const getter_object = expectObjectArg(desc.getter) catch continue;
@@ -1761,7 +1761,7 @@ pub fn callObjectStatic(
             const keys = try source.ownKeys(rt);
             defer core.Object.freeKeys(rt, keys);
             for (keys) |key| {
-                const desc = source.getOwnProperty(key) orelse continue;
+                const desc = source.getOwnProperty(rt, key) orelse continue;
                 defer desc.destroy(rt);
                 if (desc.enumerable != true) continue;
                 const value = try objectAssignGet(ctx, output, global, globals, source_value, desc);
@@ -1816,7 +1816,7 @@ pub fn callObjectStatic(
         const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
         const key = try atomFromPropertyKey(rt, key_value);
         defer rt.atoms.free(key);
-        var desc = object.getOwnProperty(key) orelse return core.JSValue.undefinedValue();
+        var desc = object.getOwnProperty(rt, key) orelse return core.JSValue.undefinedValue();
         materializeMappedArgumentsDescriptorValue(rt, object, key, &desc);
         defer desc.destroy(rt);
         return descriptorObject(rt, desc);
@@ -1831,7 +1831,7 @@ pub fn callObjectStatic(
         const out = try core.Object.create(rt, core.class.ids.object, null);
         errdefer core.Object.destroyFromHeader(rt, &out.header);
         for (keys) |key| {
-            var desc = object.getOwnProperty(key) orelse continue;
+            var desc = object.getOwnProperty(rt, key) orelse continue;
             materializeMappedArgumentsDescriptorValue(rt, object, key, &desc);
             defer desc.destroy(rt);
             const desc_value = try descriptorObject(rt, desc);
@@ -1881,7 +1881,7 @@ pub fn callObjectStatic(
         const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
         const key = try atomFromPropertyKey(rt, key_value);
         defer rt.atoms.free(key);
-        if (object.getOwnProperty(key)) |desc| {
+        if (object.getOwnProperty(rt, key)) |desc| {
             desc.destroy(rt);
             return core.JSValue.boolean(true);
         }
@@ -2017,7 +2017,7 @@ fn objectAssignSet(
     key: core.Atom,
     value: core.JSValue,
 ) !void {
-    if (target.getOwnProperty(key)) |desc| {
+    if (target.getOwnProperty(ctx.runtime, key)) |desc| {
         defer desc.destroy(ctx.runtime);
         switch (desc.kind) {
             .accessor => {
@@ -2034,7 +2034,7 @@ fn objectAssignSet(
     } else {
         var proto = target.getPrototype();
         while (proto) |prototype| : (proto = prototype.getPrototype()) {
-            if (prototype.getOwnProperty(key)) |desc| {
+            if (prototype.getOwnProperty(ctx.runtime, key)) |desc| {
                 defer desc.destroy(ctx.runtime);
                 switch (desc.kind) {
                     .accessor => {
@@ -2064,7 +2064,7 @@ fn objectIsSealed(rt: *core.JSRuntime, object: *core.Object) !bool {
     const keys = try object.ownKeys(rt);
     defer core.Object.freeKeys(rt, keys);
     for (keys) |key| {
-        const desc = object.getOwnProperty(key) orelse continue;
+        const desc = object.getOwnProperty(rt, key) orelse continue;
         defer desc.destroy(rt);
         if (desc.configurable == true) return false;
     }
@@ -2076,7 +2076,7 @@ fn objectIsFrozen(rt: *core.JSRuntime, object: *core.Object) !bool {
     const keys = try object.ownKeys(rt);
     defer core.Object.freeKeys(rt, keys);
     for (keys) |key| {
-        const desc = object.getOwnProperty(key) orelse continue;
+        const desc = object.getOwnProperty(rt, key) orelse continue;
         defer desc.destroy(rt);
         if (desc.kind == .data and desc.writable == true) return false;
     }
@@ -2143,7 +2143,7 @@ fn objectPrototypeHasOwn(ctx: *core.JSContext, global: ?*core.Object, receiver: 
     const receiver_value = try objectStaticToObjectValue(ctx, global, receiver);
     defer receiver_value.free(rt);
     const object = try expectObjectArg(receiver_value);
-    if (object.getOwnProperty(key)) |desc| {
+    if (object.getOwnProperty(rt, key)) |desc| {
         desc.destroy(rt);
         return core.JSValue.boolean(true);
     }
@@ -2158,7 +2158,7 @@ fn objectPrototypePropertyIsEnumerable(ctx: *core.JSContext, global: ?*core.Obje
     const receiver_value = try objectStaticToObjectValue(ctx, global, receiver);
     defer receiver_value.free(rt);
     const object = try expectObjectArg(receiver_value);
-    const desc = object.getOwnProperty(key) orelse return core.JSValue.boolean(false);
+    const desc = object.getOwnProperty(rt, key) orelse return core.JSValue.boolean(false);
     defer desc.destroy(rt);
     return core.JSValue.boolean(desc.enumerable orelse false);
 }
@@ -2208,7 +2208,7 @@ fn objectPrototypeLookupAccessor(ctx: *core.JSContext, global: ?*core.Object, re
     defer rt.atoms.free(key);
     var cursor: ?*core.Object = object;
     while (cursor) |current| : (cursor = current.getPrototype()) {
-        const desc = current.getOwnProperty(key) orelse continue;
+        const desc = current.getOwnProperty(rt, key) orelse continue;
         defer desc.destroy(rt);
         if (desc.kind != .accessor) return core.JSValue.undefinedValue();
         return if (getter) desc.getter.dup() else desc.setter.dup();

@@ -353,7 +353,7 @@ fn installSource(ctx: *core.JSContext, target_value: core.JSValue, path: []const
     defer destroyOriginalDescriptors(rt, original_descriptors);
 
     for (atoms, 0..) |atom_id, index| {
-        if (target.getOwnProperty(atom_id)) |current| {
+        if (target.getOwnProperty(rt, atom_id)) |current| {
             original_descriptors[index] = current;
         }
     }
@@ -406,7 +406,7 @@ fn expectPlainTarget(rt: *core.JSRuntime, value: core.JSValue) InstallError!*cor
 
 fn precheckTarget(target: *core.Object, rt: *core.JSRuntime, atoms: []const core.Atom, options: InstallOptions) !void {
     for (atoms) |atom_id| {
-        if (target.getOwnProperty(atom_id)) |current| {
+        if (target.getOwnProperty(rt, atom_id)) |current| {
             defer current.destroy(rt);
             if (!options.overwrite) return error.PropertyAlreadyExists;
             if (!(current.configurable orelse false)) return error.IncompatibleDescriptor;
@@ -786,7 +786,7 @@ test "runtime Plugin installs synchronous bindings on an ordinary target" {
 
     const add_atom = try rt.internAtom("add");
     defer rt.atoms.free(add_atom);
-    const add_descriptor = target.getOwnProperty(add_atom) orelse return error.TestExpectedEqual;
+    const add_descriptor = target.getOwnProperty(rt, add_atom) orelse return error.TestExpectedEqual;
     defer add_descriptor.destroy(rt);
     try std.testing.expect(add_descriptor.value.isObject());
     try std.testing.expectEqual(true, add_descriptor.writable.?);
@@ -970,7 +970,7 @@ test "runtime Plugin accepts empty descriptors as no-op installs" {
     try std.testing.expect(plugin.loaded == null);
     try std.testing.expectError(error.PluginAlreadyConsumed, plugin.install(&ctx.core, target_value, .{}));
 
-    const sentinel = target.getOwnProperty(sentinel_atom) orelse return error.TestExpectedEqual;
+    const sentinel = target.getOwnProperty(rt, sentinel_atom) orelse return error.TestExpectedEqual;
     defer sentinel.destroy(rt);
     try std.testing.expectEqual(@as(?i32, 17), sentinel.value.asInt32());
     try std.testing.expectEqual(false, sentinel.writable.?);
@@ -1126,7 +1126,7 @@ test "runtime Plugin install ignores inherited binding-name properties" {
     defer inherited.free(rt);
     try std.testing.expectEqual(@as(i32, 1), inherited.asInt32().?);
 
-    const own = target.getOwnProperty(key) orelse return error.TestExpectedEqual;
+    const own = target.getOwnProperty(rt, key) orelse return error.TestExpectedEqual;
     defer own.destroy(rt);
     try std.testing.expect(own.value.isObject());
 }
@@ -1247,7 +1247,7 @@ test "runtime Plugin overwrite replaces configurable own properties" {
 
     try installDescriptorForTesting(ctx, target_value, TestPlugin.descriptor(), .{ .overwrite = true });
 
-    const overwritten = target.getOwnProperty(add_atom).?;
+    const overwritten = target.getOwnProperty(rt, add_atom).?;
     defer overwritten.destroy(rt);
     try std.testing.expect(overwritten.value.isObject());
     try std.testing.expectEqual(true, overwritten.writable.?);
@@ -1281,7 +1281,7 @@ test "runtime Plugin rollback restores overwritten descriptors" {
 
     var atoms = [_]core.Atom{ add_atom, mul_atom };
     var originals = [_]?core.Descriptor{
-        target.getOwnProperty(add_atom).?,
+        target.getOwnProperty(rt, add_atom).?,
         null,
     };
     defer destroyOriginalDescriptors(rt, originals[0..]);
@@ -1291,7 +1291,7 @@ test "runtime Plugin rollback restores overwritten descriptors" {
 
     rollbackDefinedProperties(rt, target, atoms[0..], originals[0..]);
 
-    const restored = target.getOwnProperty(add_atom).?;
+    const restored = target.getOwnProperty(rt, add_atom).?;
     defer restored.destroy(rt);
     try std.testing.expectEqual(@as(?i32, 1), restored.value.asInt32());
     try std.testing.expectEqual(false, restored.writable.?);

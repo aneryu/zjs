@@ -396,7 +396,7 @@ pub fn defineGlobalFunctionBindingValue(
     value: core.JSValue,
     configurable: bool,
 ) !void {
-    const desc = if (global.getOwnProperty(atom_id)) |current| blk: {
+    const desc = if (global.getOwnProperty(rt, atom_id)) |current| blk: {
         defer current.destroy(rt);
         if (current.configurable == true) {
             break :blk core.Descriptor.data(value, true, true, configurable);

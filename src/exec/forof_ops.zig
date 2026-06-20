@@ -189,7 +189,7 @@ pub fn findForOfIteratorIndex(rt: *core.JSRuntime, stack: *const stack_mod.Stack
 
 pub fn isIteratorLikeValue(rt: *core.JSRuntime, value: core.JSValue) bool {
     const object = property_ops.expectObject(value) catch return false;
-    if (object.cachedIteratorNext() != null) return true;
+    if (object.cachedIteratorNext(rt) != null) return true;
     const next_key = rt.internAtom("next") catch return false;
     defer rt.atoms.free(next_key);
     const next_value = object.getProperty(next_key);

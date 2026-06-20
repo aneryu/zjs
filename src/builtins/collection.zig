@@ -712,7 +712,7 @@ fn createIteratorPrototype(
         const iterator_method = try function_builtin.nativeFunction(rt, "[Symbol.iterator]", 0);
         defer iterator_method.free(rt);
         const iterator_function = try expectObject(iterator_method);
-        if (!iterator_function.addIteratorIdentityFunction()) return error.TypeError;
+        if (!iterator_function.addIteratorIdentityFunction(rt)) return error.TypeError;
         try fallback.defineOwnProperty(rt, core.atom.predefinedId("Symbol.iterator", .symbol).?, core.Descriptor.data(iterator_method, true, false, true));
 
         owned_base = fallback;
@@ -2434,7 +2434,7 @@ fn qjsSetLikeKeysIterator(
     const next_method = try object_ops.getValueProperty(ctx, output, global, source, next_key, caller_function, caller_frame);
     defer next_method.free(ctx.runtime);
     if (!call_runtime.isCallableValue(next_method)) return error.TypeError;
-    const cached = try iterator_object.cachedIteratorNextSlot();
+    const cached = try iterator_object.cachedIteratorNextSlot(ctx.runtime);
     try iterator_object.setOptionalValueSlot(ctx.runtime, cached, next_method.dup());
     return source;
 }

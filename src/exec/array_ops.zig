@@ -2459,7 +2459,7 @@ pub fn qjsArraySpliceCall(
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return null;
     var verify_own_length_write = false;
-    if (object.getOwnProperty(core.atom.ids.length)) |length_desc| {
+    if (object.getOwnProperty(ctx.runtime, core.atom.ids.length)) |length_desc| {
         defer length_desc.destroy(ctx.runtime);
         verify_own_length_write = !object.flags.is_array;
         if (length_desc.kind == .accessor and length_desc.setter.isUndefined()) return null;
@@ -3250,7 +3250,7 @@ pub fn unshiftMoveIndex(
 }
 
 pub fn ensureSettableForArrayBuiltin(ctx: *core.JSContext, object: *core.Object, atom_id: core.Atom) !void {
-    if (try findPropertyDescriptor(object, atom_id)) |desc| {
+    if (try findPropertyDescriptor(ctx.runtime, object, atom_id)) |desc| {
         defer desc.destroy(ctx.runtime);
         if (desc.kind == .data and desc.writable == false) return error.TypeError;
         if (desc.kind == .accessor and desc.setter.isUndefined()) return error.TypeError;
@@ -3258,7 +3258,7 @@ pub fn ensureSettableForArrayBuiltin(ctx: *core.JSContext, object: *core.Object,
 }
 
 pub fn ensureLengthWritableForArrayBuiltin(ctx: *core.JSContext, object: *core.Object) !void {
-    if (object.getOwnProperty(core.atom.ids.length)) |desc| {
+    if (object.getOwnProperty(ctx.runtime, core.atom.ids.length)) |desc| {
         defer desc.destroy(ctx.runtime);
         if (desc.kind == .data and desc.writable == false) return error.TypeError;
         if (desc.kind == .accessor and desc.setter.isUndefined()) return error.TypeError;
@@ -3365,7 +3365,7 @@ pub fn arraySpeciesCreate(
 
 pub fn defaultArraySpeciesCreate(rt: *core.JSRuntime, global: *core.Object, original: *core.Object, length: usize) !?core.JSValue {
     if (!original.flags.is_array or original.proxyTarget() != null) return null;
-    if (original.getOwnProperty(core.atom.ids.constructor)) |desc| {
+    if (original.getOwnProperty(rt, core.atom.ids.constructor)) |desc| {
         desc.destroy(rt);
         return null;
     }
@@ -3375,7 +3375,7 @@ pub fn defaultArraySpeciesCreate(rt: *core.JSRuntime, global: *core.Object, orig
     const array_ctor = arrayConstructorFromGlobal(rt, global) orelse return null;
     if (array_ctor.arrayBuiltinMarker() != .constructor) return null;
 
-    const proto_constructor = array_proto.getOwnProperty(core.atom.ids.constructor) orelse return null;
+    const proto_constructor = array_proto.getOwnProperty(rt, core.atom.ids.constructor) orelse return null;
     defer proto_constructor.destroy(rt);
     if (proto_constructor.kind != .data or !proto_constructor.value_present or
         !sameObjectIdentity(proto_constructor.value, array_ctor.value()))
@@ -3384,7 +3384,7 @@ pub fn defaultArraySpeciesCreate(rt: *core.JSRuntime, global: *core.Object, orig
     }
 
     const species_atom = core.atom.predefinedId("Symbol.species", .symbol) orelse return null;
-    const species = array_ctor.getOwnProperty(species_atom) orelse return null;
+    const species = array_ctor.getOwnProperty(rt, species_atom) orelse return null;
     defer species.destroy(rt);
     if (species.kind != .accessor or !species.getter_present or !species.setter_present or
         !species.setter.isUndefined())
@@ -5165,7 +5165,7 @@ pub fn iteratorFlattenableForIteratorFrom(
     defer next_method.free(ctx.runtime);
     if (next_method.isUndefined() or next_method.isNull()) return iterator_object.value().dup();
     if (!isCallableValue(next_method)) return error.TypeError;
-    const cached = try iterator_object.cachedIteratorNextSlot();
+    const cached = try iterator_object.cachedIteratorNextSlot(ctx.runtime);
     try iterator_object.setOptionalValueSlot(ctx.runtime, cached, next_method.dup());
     return iterator_object.value().dup();
 }
@@ -5302,7 +5302,7 @@ pub fn typedArrayReflectSetReceiverOwn(
         if (try typedArrayDefineOwnPropertyVm(ctx, output, global, receiver_object, atom_id, typed_array_desc)) |ok| return ok;
     }
 
-    if (receiver_object.getOwnProperty(atom_id)) |current| {
+    if (receiver_object.getOwnProperty(ctx.runtime, atom_id)) |current| {
         defer current.destroy(ctx.runtime);
         if (current.kind == .accessor) return false;
         if (current.writable == false) return false;

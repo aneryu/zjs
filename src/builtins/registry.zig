@@ -1027,7 +1027,7 @@ fn tagTypedArrayStaticMethods(rt: *core.JSRuntime, ctor: *core.Object) !void {
         const value = ctor.getProperty(key);
         defer value.free(rt);
         if (!value.isObject()) continue;
-        if (!expectObject(value).addTypedArrayBuiltinMarker(tag.marker)) return error.InvalidBuiltinRegistry;
+        if (!expectObject(value).addTypedArrayBuiltinMarker(rt, tag.marker)) return error.InvalidBuiltinRegistry;
     }
 }
 
@@ -1262,7 +1262,7 @@ fn tagAutoInitArrayBuiltinByAtom(rt: *core.JSRuntime, object: *core.Object, atom
             .auto_init => |id| return setAutoInitArrayBuiltinMarker(core.property.autoInitAt(rt, id), marker),
             .data => |value| {
                 if (!value.isObject()) return false;
-                return expectObject(value).addArrayBuiltinMarker(marker);
+                return expectObject(value).addArrayBuiltinMarker(rt, marker);
             },
             else => return false,
         }
@@ -1284,7 +1284,7 @@ fn tagAutoInitTypedArrayBuiltinByAtom(rt: *core.JSRuntime, object: *core.Object,
             .auto_init => |id| return setAutoInitTypedArrayBuiltinMarker(core.property.autoInitAt(rt, id), marker),
             .data => |value| {
                 if (!value.isObject()) return false;
-                return expectObject(value).addTypedArrayBuiltinMarker(marker);
+                return expectObject(value).addTypedArrayBuiltinMarker(rt, marker);
             },
             else => return false,
         }
@@ -1306,7 +1306,7 @@ fn tagAutoInitArrayIteratorKindByAtom(rt: *core.JSRuntime, object: *core.Object,
             .auto_init => |id| return setAutoInitArrayIteratorKind(core.property.autoInitAt(rt, id), kind),
             .data => |value| {
                 if (!value.isObject()) return false;
-                return expectObject(value).addArrayIteratorKind(kind);
+                return expectObject(value).addArrayIteratorKind(rt, kind);
             },
             else => return false,
         }
@@ -1332,7 +1332,7 @@ fn tagAutoInitIteratorIdentityByAtom(rt: *core.JSRuntime, object: *core.Object, 
             },
             .data => |value| {
                 if (!value.isObject()) return false;
-                return expectObject(value).addIteratorIdentityFunction();
+                return expectObject(value).addIteratorIdentityFunction(rt);
             },
             else => return false,
         }
@@ -1348,7 +1348,7 @@ fn tagAutoInitCollectionOwnerByAtom(rt: *core.JSRuntime, object: *core.Object, a
             .auto_init => |id| return setAutoInitCollectionOwner(core.property.autoInitAt(rt, id), owner_class),
             .data => |value| {
                 if (!value.isObject()) return false;
-                return expectObject(value).addCollectionMethodOwnerClass(owner_class);
+                return expectObject(value).addCollectionMethodOwnerClass(rt, owner_class);
             },
             else => return false,
         }
@@ -1370,7 +1370,7 @@ fn tagAutoInitDisposableStackMethodByAtom(rt: *core.JSRuntime, object: *core.Obj
             .auto_init => |id| return setAutoInitDisposableStackMethod(core.property.autoInitAt(rt, id), method_id),
             .data => |value| {
                 if (!value.isObject()) return false;
-                return expectObject(value).addDisposableStackMethod(method_id);
+                return expectObject(value).addDisposableStackMethod(rt, method_id);
             },
             else => return false,
         }
@@ -1392,7 +1392,7 @@ fn tagAutoInitAsyncDisposableStackMethodByAtom(rt: *core.JSRuntime, object: *cor
             .auto_init => |id| return setAutoInitAsyncDisposableStackMethod(core.property.autoInitAt(rt, id), method_id),
             .data => |value| {
                 if (!value.isObject()) return false;
-                return expectObject(value).addAsyncDisposableStackMethod(method_id);
+                return expectObject(value).addAsyncDisposableStackMethod(rt, method_id);
             },
             else => return false,
         }
@@ -1482,12 +1482,12 @@ fn tagTypedArrayPrototypeMethods(rt: *core.JSRuntime, proto: *core.Object) !void
         if (value.isObject()) {
             const object = expectObject(value);
             if (!typed_array_marker_deferred) {
-                if (!object.addTypedArrayBuiltinMarker(.prototype_method)) return error.InvalidBuiltinRegistry;
+                if (!object.addTypedArrayBuiltinMarker(rt, .prototype_method)) return error.InvalidBuiltinRegistry;
             }
             if (std.mem.eql(u8, name, "toString") and !array_marker_deferred) {
-                if (!object.addArrayBuiltinMarker(.to_string)) return error.InvalidBuiltinRegistry;
+                if (!object.addArrayBuiltinMarker(rt, .to_string)) return error.InvalidBuiltinRegistry;
             } else if (std.mem.eql(u8, name, "toLocaleString") and !array_marker_deferred) {
-                if (!object.addArrayBuiltinMarker(.to_locale_string)) return error.InvalidBuiltinRegistry;
+                if (!object.addArrayBuiltinMarker(rt, .to_locale_string)) return error.InvalidBuiltinRegistry;
             }
         }
     }
@@ -2418,7 +2418,7 @@ fn tagArrayIteratorMethod(rt: *core.JSRuntime, proto: *core.Object, name: []cons
     const value = proto.getProperty(key);
     defer value.free(rt);
     if (!value.isObject()) return;
-    if (!expectObject(value).addArrayIteratorKind(kind)) return error.InvalidBuiltinRegistry;
+    if (!expectObject(value).addArrayIteratorKind(rt, kind)) return error.InvalidBuiltinRegistry;
 }
 
 fn installPerformance(rt: *core.JSRuntime, global: *core.Object) !void {
@@ -2712,7 +2712,7 @@ fn installDisposableStackExtras(rt: *core.JSRuntime, global: *core.Object, ctor:
         const value = proto.getProperty(key);
         defer value.free(rt);
         if (!value.isObject()) return error.InvalidBuiltinRegistry;
-        if (!expectObject(value).addDisposableStackMethod(tag.id)) return error.InvalidBuiltinRegistry;
+        if (!expectObject(value).addDisposableStackMethod(rt, tag.id)) return error.InvalidBuiltinRegistry;
     }
 
     const disposed_key = try temporaryStringAtom(rt, "disposed");
@@ -2747,7 +2747,7 @@ fn installAsyncDisposableStackExtras(rt: *core.JSRuntime, global: *core.Object, 
         const value = proto.getProperty(key);
         defer value.free(rt);
         if (!value.isObject()) return error.InvalidBuiltinRegistry;
-        if (!expectObject(value).addAsyncDisposableStackMethod(tag.id)) return error.InvalidBuiltinRegistry;
+        if (!expectObject(value).addAsyncDisposableStackMethod(rt, tag.id)) return error.InvalidBuiltinRegistry;
     }
 
     const disposed_key = try temporaryStringAtom(rt, "disposed");
@@ -2816,7 +2816,7 @@ fn tagCollectionPrototypeMethods(rt: *core.JSRuntime, name: []const u8, ctor: *c
         if (collection_builtin.prototypeMethodId(method.name)) |id| {
             function_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.collection, id);
         }
-        if (!function_object.addCollectionMethodOwnerClass(class_id)) return error.InvalidBuiltinRegistry;
+        if (!function_object.addCollectionMethodOwnerClass(rt, class_id)) return error.InvalidBuiltinRegistry;
     }
 }
 
