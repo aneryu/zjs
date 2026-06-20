@@ -568,17 +568,13 @@ fn slotValueBorrow(slot: core.JSValue) core.JSValue {
     var depth: usize = 0;
     while (depth < 16) : (depth += 1) {
         const cell = varRefCellFromValue(current) orelse return current;
-        current = cell.varRefValueSlot().* orelse return core.JSValue.undefinedValue();
+        current = cell.varRefValue();
     }
     return current;
 }
 
-fn varRefCellFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    const cell: *core.Object = @fieldParentPtr("header", header);
-    if (cell.class_payload_kind != .var_ref) return null;
-    return cell;
+fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
+    return core.VarRef.fromValue(value);
 }
 
 fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {

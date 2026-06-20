@@ -1118,8 +1118,7 @@ fn callSimpleCapture0PostIncReturn(rt: *core.JSRuntime, captures: []const core.J
     if (captures.len == 0) return null;
     const cell = slot_ops.varRefCellFromValue(captures[0]) orelse return null;
     if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return null;
-    const slot = cell.varRefValueSlot();
-    const current_value = slot.* orelse return null;
+    const current_value = cell.varRefValue();
     const current = current_value.asInt32() orelse return null;
     const updated = simpleInt32Add(current, 1);
     try cell.setVarRefValue(rt, updated);
@@ -2350,7 +2349,7 @@ pub fn collectCallerEvalRefs(
     }
     for (caller.var_names[0..local_count], 0..) |atom_id, idx| {
         names[initialized] = atom_id;
-        refs[initialized] = try slot_ops.ensureVarRefCell(ctx, &frame.locals[idx]);
+        refs[initialized] = try slot_ops.ensureFrameVarRefCell(ctx, frame, &frame.locals[idx]);
         initialized += 1;
         rooted_refs = refs[0..initialized];
     }
@@ -4040,10 +4039,8 @@ pub fn createEvalVarRefCells(ctx: *core.JSContext, len: usize) ![]core.JSValue {
         ctx.runtime.memory.free(core.JSValue, refs);
     }
     while (initialized < len) : (initialized += 1) {
-        const object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-        errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
-        try object.initVarRefPayload(ctx.runtime, core.JSValue.undefinedValue());
-        refs[initialized] = object.value();
+        const cell = try core.VarRef.createClosed(ctx.runtime, core.JSValue.undefinedValue());
+        refs[initialized] = cell.valueRef();
         rooted_refs = refs[0 .. initialized + 1];
     }
     return refs;
@@ -4083,8 +4080,7 @@ test "createEvalVarRefCells roots initialized refs while allocating next cell" {
 
         fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
             const self: *@This() = @ptrCast(@alignCast(context));
-            const object = object_ops.objectFromValue(slot.*) orelse return;
-            if (object.class_payload_kind == .var_ref) self.saw_var_ref = true;
+            if (core.VarRef.fromValue(slot.*) != null) self.saw_var_ref = true;
         }
 
         fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
@@ -4139,7 +4135,7 @@ pub fn createDirectEvalVarRefCells(
             if (caller_frame) |frame| {
                 if (callerArgIndex(ctx.runtime, function, names[initialized])) |arg_idx| {
                     if (arg_idx < frame.args.len) {
-                        refs[initialized] = try slot_ops.ensureVarRefCell(ctx, &frame.args[arg_idx]);
+                        refs[initialized] = try slot_ops.ensureFrameVarRefCell(ctx, frame, &frame.args[arg_idx]);
                         rooted_refs = refs[0 .. initialized + 1];
                         continue;
                     }
@@ -4147,7 +4143,7 @@ pub fn createDirectEvalVarRefCells(
                 if (!eval_in_parameter_initializer) {
                     if (callerLocalIndex(ctx.runtime, function, names[initialized])) |local_idx| {
                         if (local_idx < frame.locals.len) {
-                            refs[initialized] = try slot_ops.ensureVarRefCell(ctx, &frame.locals[local_idx]);
+                            refs[initialized] = try slot_ops.ensureFrameVarRefCell(ctx, frame, &frame.locals[local_idx]);
                             rooted_refs = refs[0 .. initialized + 1];
                             continue;
                         }
@@ -4155,11 +4151,9 @@ pub fn createDirectEvalVarRefCells(
                 }
             }
         }
-        const object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-        errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
-        try object.initVarRefPayload(ctx.runtime, core.JSValue.undefinedValue());
-        object.varRefIsDeletableSlot().* = true;
-        refs[initialized] = object.value();
+        const cell = try core.VarRef.createClosed(ctx.runtime, core.JSValue.undefinedValue());
+        cell.varRefIsDeletableSlot().* = true;
+        refs[initialized] = cell.valueRef();
         rooted_refs = refs[0 .. initialized + 1];
     }
     return refs;
@@ -4217,7 +4211,7 @@ pub fn createDirectEvalVisibleLocalBindings(
         }
         names[initialized] = ctx.runtime.atoms.dup(atom_id);
         initialized_names += 1;
-        slots[initialized] = try slot_ops.ensureVarRefCell(ctx, &caller_frame.locals[local_index]);
+        slots[initialized] = try slot_ops.ensureFrameVarRefCell(ctx, caller_frame, &caller_frame.locals[local_index]);
         initialized += 1;
         rooted_slots = slots[0..initialized];
     }
@@ -4229,7 +4223,7 @@ pub fn createDirectEvalVisibleLocalBindings(
         if (eval_ops.directEvalVisibleBindingExists(ctx.runtime, names[0..initialized], atom_id)) continue;
         names[initialized] = ctx.runtime.atoms.dup(atom_id);
         initialized_names += 1;
-        slots[initialized] = try slot_ops.ensureVarRefCell(ctx, &caller_frame.args[arg_index]);
+        slots[initialized] = try slot_ops.ensureFrameVarRefCell(ctx, caller_frame, &caller_frame.args[arg_index]);
         initialized += 1;
         rooted_slots = slots[0..initialized];
     }
@@ -4506,7 +4500,7 @@ pub fn publishDirectEvalVarRefs(
     var index: usize = 0;
     while (index < count) : (index += 1) {
         const value = if (slot_ops.varRefCellFromValue(refs[index])) |cell|
-            if (cell.varRefValueSlot().*) |stored| stored.dup() else core.JSValue.undefinedValue()
+            cell.varRefValue().dup()
         else
             refs[index].dup();
         defer value.free(ctx.runtime);
@@ -7488,7 +7482,7 @@ pub fn deleteVarRefSlot(rt: *core.JSRuntime, slot: core.JSValue) ?bool {
     const old_value = cell.varRefValueSlot().*;
     cell.varRefValueSlot().* = core.JSValue.undefinedValue();
     cell.varRefIsDeletedSlot().* = true;
-    if (old_value) |stored| stored.free(rt);
+    old_value.free(rt);
     return true;
 }
 
@@ -7630,7 +7624,7 @@ pub fn mappedArgumentsValue(rt: *core.JSRuntime, object: *core.Object, atom_id: 
     if (refs[index].isUninitialized()) return null;
     if (!object.hasOwnProperty(atom_id)) return null;
     const cell = slot_ops.varRefCellFromValue(refs[index]) orelse return refs[index].dup();
-    return if (cell.varRefValueSlot().*) |value| value.dup() else core.JSValue.undefinedValue();
+    return cell.varRefValue().dup();
 }
 
 pub fn setMappedArgumentsValue(ctx: *core.JSContext, object: *core.Object, atom_id: core.Atom, value: core.JSValue) !bool {

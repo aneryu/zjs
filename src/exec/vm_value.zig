@@ -743,7 +743,7 @@ fn slotValueBorrow(slot: core.JSValue) core.JSValue {
     var depth: usize = 0;
     while (depth < 16) : (depth += 1) {
         const cell = varRefCellFromValue(current) orelse return current;
-        current = cell.varRefValueSlot().* orelse return core.JSValue.undefinedValue();
+        current = cell.varRefValue();
     }
     return current;
 }
@@ -763,12 +763,8 @@ fn varRefSlotIsUninitialized(slot: core.JSValue) bool {
     return slotValueBorrow(slot).isUninitialized();
 }
 
-fn varRefCellFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
-    if (object.class_payload_kind != .var_ref) return null;
-    return object;
+fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
+    return core.VarRef.fromValue(value);
 }
 
 fn functionObjectFromValue(value: core.JSValue) ?*core.Object {

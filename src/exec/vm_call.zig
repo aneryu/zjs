@@ -194,10 +194,8 @@ pub fn initFrameVarRefs(ctx: *core.JSContext, global: *core.Object, function: *c
     }
     for (function.var_ref_names, 0..) |var_name, idx| {
         const val = call_runtime.globalLexicalValue(ctx, var_name) orelse global.getProperty(var_name);
-        const cell = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-        errdefer core.Object.destroyFromHeader(ctx.runtime, &cell.header);
-        try cell.initVarRefPayload(ctx.runtime, val);
-        owned_refs[idx] = cell.value();
+        const cell = try core.VarRef.createClosed(ctx.runtime, val);
+        owned_refs[idx] = cell.valueRef();
         initialized += 1;
     }
     frame.var_refs = owned_refs;
@@ -539,8 +537,7 @@ fn simpleNumericCallResult(rt: *core.JSRuntime, simple: SimpleNumericCallable, a
 fn simpleCapture0PostIncReturn(rt: *core.JSRuntime, capture0_slot: core.JSValue) !core.JSValue {
     const cell = slot_ops.varRefCellFromValue(capture0_slot) orelse return error.NotSimpleNumericCall;
     if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return error.NotSimpleNumericCall;
-    const slot = cell.varRefValueSlot();
-    const current_value = slot.* orelse return error.NotSimpleNumericCall;
+    const current_value = cell.varRefValue();
     const current = current_value.asInt32() orelse return error.NotSimpleNumericCall;
     const updated = fastInt32Add(current, 1);
     try cell.setVarRefValue(rt, updated);
@@ -860,8 +857,7 @@ fn simplePreIncVarRef0CallResult(rt: *core.JSRuntime, func: core.JSValue) !?core
     if (captures.len == 0) return null;
     const cell = slot_ops.varRefCellFromValue(captures[0]) orelse return null;
     if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return null;
-    const slot = cell.varRefValueSlot();
-    const current_value = slot.* orelse return null;
+    const current_value = cell.varRefValue();
     const current = current_value.asInt32() orelse return null;
     const updated = fastInt32Add(current, 1);
     try cell.setVarRefValue(rt, updated);

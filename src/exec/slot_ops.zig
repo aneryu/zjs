@@ -294,14 +294,14 @@ pub fn execPutVarRef(
     const slot = frame.var_refs[idx];
     if (varRefCellFromValue(slot)) |cell| {
         if (opc == op.put_var_ref_check_init) {
-            const current = cell.varRefValueSlot().* orelse core.JSValue.undefinedValue();
+            const current = cell.varRefValue();
             if (!current.isUninitialized()) {
                 value.free(ctx.runtime);
                 return error.ReferenceError;
             }
         }
         if (opc == op.put_var_ref_check) {
-            const current = cell.varRefValueSlot().* orelse core.JSValue.undefinedValue();
+            const current = cell.varRefValue();
             if (current.isUninitialized()) {
                 value.free(ctx.runtime);
                 return throwTdzReference(ctx);
@@ -364,7 +364,7 @@ pub fn isVarRefInitOpcode(opc: u8) bool {
         opc == op.put_var_ref3;
 }
 
-pub fn constVarRefWriteAllowed(cell: *core.Object, opc: u8) bool {
+pub fn constVarRefWriteAllowed(cell: *core.VarRef, opc: u8) bool {
     _ = cell;
     return isVarRefInitOpcode(opc);
 }
@@ -439,7 +439,7 @@ pub fn slotValueBorrow(slot: core.JSValue) core.JSValue {
     var depth: usize = 0;
     while (depth < 16) : (depth += 1) {
         const cell = varRefCellFromValue(current) orelse return current;
-        current = cell.varRefValueSlot().* orelse return core.JSValue.undefinedValue();
+        current = cell.varRefValue();
     }
     return current;
 }
@@ -488,8 +488,9 @@ pub fn derivedConstructorThisLocalSlot(frame: *frame_mod.Frame) ?*core.JSValue {
 
 pub fn closeLocalVarRef(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: u16) !void {
     if (idx >= frame.locals.len) return error.InvalidBytecode;
+    frame.closeOpenVarRefForSlot(ctx.runtime, &frame.locals[idx]);
     const cell = varRefCellFromValue(frame.locals[idx]) orelse return;
-    const value = if (cell.varRefValueSlot().*) |stored| stored.dup() else core.JSValue.undefinedValue();
+    const value = cell.varRefValue().dup();
     const old_value = frame.locals[idx];
     frame.locals[idx] = value;
     old_value.free(ctx.runtime);
@@ -497,33 +498,53 @@ pub fn closeLocalVarRef(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: u16)
 
 pub fn ensureVarRefCell(ctx: *core.JSContext, slot: *core.JSValue) !core.JSValue {
     if (varRefCellFromValue(slot.*) != null) return slot.*.dup();
-    const object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
-    try object.initVarRefPayload(ctx.runtime, slot.*);
-    slot.* = object.value();
+    const cell = try core.VarRef.createClosed(ctx.runtime, slot.*);
+    slot.* = cell.valueRef();
     return slot.*.dup();
 }
 
+pub fn ensureFrameVarRefCell(ctx: *core.JSContext, frame: *frame_mod.Frame, slot: *core.JSValue) !core.JSValue {
+    if (varRefCellFromValue(slot.*) != null) return ensureVarRefCell(ctx, slot);
+    if (!frameSlotCanOpenAlias(frame, slot)) return ensureVarRefCell(ctx, slot);
+    if (frame.findOpenVarRef(slot)) |cell| return cell.valueRef().dup();
+
+    // The frame owns the initial reference; callers receive an additional
+    // reference and may drop it on error without leaving the open list dangling.
+    const cell = try core.VarRef.createOpen(ctx.runtime, slot);
+    frame.addOpenVarRef(cell);
+    return cell.valueRef().dup();
+}
+
 pub fn ensureLocalVarRefCell(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: usize, is_lexical: bool) !core.JSValue {
-    _ = is_lexical;
     if (idx < frame.locals_uninit.len and frame.localIsUninitialized(idx)) {
         if (varRefCellFromValue(frame.locals[idx])) |cell| {
             const old_value = cell.varRefValueSlot().*;
             cell.varRefValueSlot().* = core.JSValue.uninitialized();
-            if (old_value) |stored| stored.free(ctx.runtime);
+            old_value.free(ctx.runtime);
             return frame.locals[idx].dup();
         }
         const old_value = frame.locals[idx];
         frame.locals[idx] = core.JSValue.uninitialized();
         old_value.free(ctx.runtime);
     }
-    return ensureVarRefCell(ctx, &frame.locals[idx]);
+    if (is_lexical) return ensureVarRefCell(ctx, &frame.locals[idx]);
+    return ensureFrameVarRefCell(ctx, frame, &frame.locals[idx]);
 }
 
-pub fn varRefCellFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
-    if (object.class_payload_kind != .var_ref) return null;
-    return object;
+pub fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
+    return core.VarRef.fromValue(value);
+}
+
+fn frameSlotCanOpenAlias(frame: *const frame_mod.Frame, slot: *const core.JSValue) bool {
+    if (frame.function.flags.is_generator or frame.function.flags.is_async) return false;
+    return slotInSlice(slot, frame.locals) or slotInSlice(slot, frame.args);
+}
+
+fn slotInSlice(slot: *const core.JSValue, values: []const core.JSValue) bool {
+    if (values.len == 0) return false;
+    const slot_addr = @intFromPtr(slot);
+    const start = @intFromPtr(values.ptr);
+    const byte_len = values.len * @sizeOf(core.JSValue);
+    const end = start + byte_len;
+    return slot_addr >= start and slot_addr < end and (slot_addr - start) % @sizeOf(core.JSValue) == 0;
 }

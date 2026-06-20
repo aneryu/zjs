@@ -153,7 +153,7 @@ pub noinline fn makeSlotRef(
         },
         op.make_arg_ref => blk: {
             if (idx >= frame.args.len) return error.InvalidBytecode;
-            break :blk try slot_ops.ensureVarRefCell(ctx, &frame.args[idx]);
+            break :blk try slot_ops.ensureFrameVarRefCell(ctx, frame, &frame.args[idx]);
         },
         op.make_var_ref_ref => blk: {
             try frame_mod.ensureVarRefsCapacity(ctx, frame, idx);

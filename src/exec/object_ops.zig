@@ -74,6 +74,7 @@ const currentFrameFunctionIsStrict = call_runtime.currentFrameFunctionIsStrict;
 const defineNativeDataMethod = builtin_glue.defineNativeDataMethod;
 const defineStringWrapperIndexProperty = string_ops.defineStringWrapperIndexProperty;
 const derivedConstructorThisLocalSlot = slot_ops.derivedConstructorThisLocalSlot;
+const ensureFrameVarRefCell = slot_ops.ensureFrameVarRefCell;
 const ensureLocalVarRefCell = slot_ops.ensureLocalVarRefCell;
 const ensureVarRefCell = slot_ops.ensureVarRefCell;
 const ensureVarRefsCapacity = frame_mod.ensureVarRefsCapacity;
@@ -374,7 +375,7 @@ pub fn createBytecodeFunctionObject(
                 },
                 .arg => blk: {
                     if (cv.var_idx >= frame.args.len) return error.InvalidBytecode;
-                    break :blk try ensureVarRefCell(ctx, &frame.args[cv.var_idx]);
+                    break :blk try ensureFrameVarRefCell(ctx, frame, &frame.args[cv.var_idx]);
                 },
                 .ref => blk: {
                     try ensureVarRefsCapacity(ctx, frame, cv.var_idx);
@@ -500,7 +501,7 @@ pub fn createBytecodeFunctionObject(
                     if (shouldSkipDirectEvalLocalCapture(fb, frame.locals[idx], skip_direct_eval_capture_values)) continue;
                     names[initialized] = ctx.runtime.atoms.dup(atom_id);
                     initialized_names += 1;
-                    refs[initialized] = try ensureVarRefCell(ctx, &frame.locals[idx]);
+                    refs[initialized] = try ensureFrameVarRefCell(ctx, frame, &frame.locals[idx]);
                     initialized += 1;
                     rooted_refs = refs[0..initialized];
                 }
@@ -511,7 +512,7 @@ pub fn createBytecodeFunctionObject(
                     if (shouldSkipDirectEvalLocalCapture(fb, frame.args[idx], skip_direct_eval_capture_values)) continue;
                     names[initialized] = ctx.runtime.atoms.dup(atom_id);
                     initialized_names += 1;
-                    refs[initialized] = try ensureVarRefCell(ctx, &frame.args[idx]);
+                    refs[initialized] = try ensureFrameVarRefCell(ctx, frame, &frame.args[idx]);
                     initialized += 1;
                     rooted_refs = refs[0..initialized];
                 }
@@ -3335,9 +3336,7 @@ pub fn constructorPrototypeObject(rt: *core.JSRuntime, constructor: core.JSValue
     }
     const prototype_value = try property_ops.getPropertyValue(rt, constructor, core.atom.ids.prototype);
     defer prototype_value.free(rt);
-    if (!prototype_value.isObject()) return null;
-    const header = prototype_value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
+    return objectFromValue(prototype_value);
 }
 
 pub fn dynamicFunctionNewTargetPrototype(
@@ -4135,7 +4134,7 @@ pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: 
     for (args, 0..) |arg, index| {
         const refs = object.argumentsVarRefsSlot();
         if (mapped and index < refs.*.len and index < frame.args.len) {
-            const rooted_cell = try ensureVarRefCell(ctx, &frame.args[index]);
+            const rooted_cell = try ensureFrameVarRefCell(ctx, frame, &frame.args[index]);
             refs.*[index] = rooted_cell;
             rooted_argument_refs = refs.*[0 .. index + 1];
         }
@@ -4178,9 +4177,7 @@ pub fn frameArgumentsObjectForSpecialObject(ctx: *core.JSContext, global: *core.
 }
 
 pub fn functionObjectFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object = objectFromValue(value) orelse return null;
     if (object.class_id != core.class.ids.bytecode_function) return null;
     return object;
 }
@@ -4188,13 +4185,12 @@ pub fn functionObjectFromValue(value: core.JSValue) ?*core.Object {
 pub fn objectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
+    if (header.kind != .object) return null;
     return @fieldParentPtr("header", header);
 }
 
 pub fn callableObjectFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
+    const object = objectFromValue(value) orelse return null;
     if (object.class_id != core.class.ids.c_function and
         object.class_id != core.class.ids.c_closure and
         object.class_id != core.class.ids.bound_function) return null;

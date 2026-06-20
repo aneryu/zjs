@@ -407,7 +407,7 @@ pub fn bindingStoreWritableForFastPath(
         const slot = frame.var_refs[binding.idx];
         if (varRefCellFromValue(slot)) |cell| {
             if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return false;
-            const stored = cell.varRefValueSlot().* orelse return false;
+            const stored = cell.varRefValue();
             return !stored.isUninitialized();
         }
         if (slot.isUninitialized()) return false;
@@ -643,7 +643,7 @@ pub fn varRefStoreWritableForFastPath(
     const slot = frame.var_refs[store.idx];
     if (varRefCellFromValue(slot)) |cell| {
         if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return false;
-        const stored = cell.varRefValueSlot().* orelse return false;
+        const stored = cell.varRefValue();
         return !stored.isUninitialized();
     }
     if (slot.isUninitialized()) return false;
@@ -730,8 +730,7 @@ fn simpleCapture0PostIncReturn(rt: *core.JSRuntime, captures: []const core.JSVal
     if (args.len != 0 or captures.len == 0) return null;
     const cell = varRefCellFromValue(captures[0]) orelse return null;
     if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return null;
-    const slot = cell.varRefValueSlot();
-    const current_value = slot.* orelse return null;
+    const current_value = cell.varRefValue();
     const current = current_value.asInt32() orelse return null;
     const updated = fastInt32Add(current, 1);
     try cell.setVarRefValue(rt, updated);
@@ -821,7 +820,7 @@ pub fn slotValueBorrowed(slot: core.JSValue) core.JSValue {
     var depth: usize = 0;
     while (depth < 16) : (depth += 1) {
         const cell = varRefCellFromValue(current) orelse return current;
-        current = cell.varRefValueSlot().* orelse return core.JSValue.undefinedValue();
+        current = cell.varRefValue();
     }
     return current;
 }
@@ -1770,12 +1769,8 @@ pub fn stringFromValue(value: core.JSValue) ?*core.string.String {
     return @fieldParentPtr("header", header);
 }
 
-fn varRefCellFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
-    if (object.class_payload_kind != .var_ref) return null;
-    return object;
+fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
+    return core.VarRef.fromValue(value);
 }
 
 fn readInt(comptime T: type, bytes: []const u8) T {

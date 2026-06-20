@@ -179,6 +179,7 @@ pub const Frame = struct {
     original_args_on_heap: bool = false,
     var_refs: []JSValue = &.{},
     var_refs_on_heap: bool = false,
+    open_var_refs: ?*core.VarRef = null,
     eval_local_names: []const Atom = &.{},
     eval_local_slots: []JSValue = &.{},
     eval_var_ref_names: []const Atom = &.{},
@@ -414,6 +415,7 @@ pub const Frame = struct {
     }
 
     pub fn releaseOwnedStorage(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
+        self.closeOpenVarRefs(rt);
         const locals = self.locals;
         const args = self.args;
         const original_args = self.original_args;
@@ -442,6 +444,7 @@ pub const Frame = struct {
         self.original_args_on_heap = false;
         self.var_refs = &.{};
         self.var_refs_on_heap = false;
+        self.open_var_refs = null;
         self.locals_uninit = &.{};
         self.locals_uninit_count = 0;
         self.global_lexical_sync_env = null;
@@ -469,6 +472,44 @@ pub const Frame = struct {
         if (global_lexical_sync_indices.len != 0) account.free(usize, global_lexical_sync_indices);
         if (prepared_call_targets_on_heap and prepared_call_target_capacity != 0) account.free(PreparedCallTarget, prepared_call_targets.ptr[0..prepared_call_target_capacity]);
         if (prepared_call_values_on_heap and prepared_call_value_capacity != 0) account.free(JSValue, prepared_call_values.ptr[0..prepared_call_value_capacity]);
+    }
+
+    pub fn findOpenVarRef(self: *Frame, slot: *JSValue) ?*core.VarRef {
+        var current = self.open_var_refs;
+        while (current) |ref| : (current = ref.next_open) {
+            if (ref.is_open and ref.pvalue == slot) return ref;
+        }
+        return null;
+    }
+
+    pub fn addOpenVarRef(self: *Frame, ref: *core.VarRef) void {
+        std.debug.assert(ref.is_open);
+        ref.next_open = self.open_var_refs;
+        self.open_var_refs = ref;
+    }
+
+    pub fn closeOpenVarRefForSlot(self: *Frame, rt: anytype, slot: *JSValue) void {
+        var link = &self.open_var_refs;
+        while (link.*) |ref| {
+            if (ref.is_open and ref.pvalue == slot) {
+                link.* = ref.next_open;
+                ref.close(rt);
+                ref.valueRef().free(rt);
+                return;
+            }
+            link = &ref.next_open;
+        }
+    }
+
+    pub fn closeOpenVarRefs(self: *Frame, rt: anytype) void {
+        var current = self.open_var_refs;
+        self.open_var_refs = null;
+        while (current) |ref| {
+            const next = ref.next_open;
+            ref.close(rt);
+            ref.valueRef().free(rt);
+            current = next;
+        }
     }
 
     pub fn pushPreparedNativeCall(

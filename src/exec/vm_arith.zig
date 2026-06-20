@@ -578,7 +578,7 @@ pub fn addLocal(
     defer rhs.free(ctx.runtime);
 
     const cell_opt = slot_ops.varRefCellFromValue(frame.locals[idx]);
-    const lhs_borrowed = if (cell_opt) |cell| (cell.varRefValueSlot().* orelse core.JSValue.undefinedValue()) else frame.locals[idx];
+    const lhs_borrowed = if (cell_opt) |cell| cell.varRefValue() else frame.locals[idx];
     if (lhs_borrowed.isString()) {
         const lhs = slot_ops.slotValueDup(frame.locals[idx]);
         defer lhs.free(ctx.runtime);

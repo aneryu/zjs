@@ -7,6 +7,7 @@ const builtin = @import("builtin");
 const memory = @import("memory.zig");
 const bigint = @import("bigint.zig");
 const object = @import("object.zig");
+const var_ref = @import("var_ref.zig");
 const string = @import("string.zig");
 const function_bytecode_mod = @import("function_bytecode.zig");
 const FunctionBytecode = function_bytecode_mod.FunctionBytecode;
@@ -114,6 +115,7 @@ pub const RefKind = enum(u8) {
     object = 1,
     big_int = 2,
     function_bytecode = 3,
+    var_ref = 4,
 };
 
 pub const GcKind = RefKind;
@@ -582,6 +584,7 @@ pub const Registry = struct {
     // Reusable structures for cycle detection
     preserved_bytecodes: std.AutoHashMap(usize, void),
     object_worklist: std.ArrayList(*object.Object),
+    var_ref_worklist: std.ArrayList(*var_ref.VarRef),
     bytecode_worklist: std.ArrayList(*FunctionBytecode),
 
     pub fn init(account: *memory.MemoryAccount, policy: Policy) Registry {
@@ -592,6 +595,7 @@ pub const Registry = struct {
             .large_space = .{},
             .preserved_bytecodes = std.AutoHashMap(usize, void).init(account.persistent_allocator),
             .object_worklist = std.ArrayList(*object.Object).empty,
+            .var_ref_worklist = std.ArrayList(*var_ref.VarRef).empty,
             .bytecode_worklist = std.ArrayList(*FunctionBytecode).empty,
         };
     }
@@ -623,6 +627,7 @@ pub const Registry = struct {
 
         self.preserved_bytecodes.deinit();
         self.object_worklist.deinit(self.memory.persistent_allocator);
+        self.var_ref_worklist.deinit(self.memory.persistent_allocator);
         self.bytecode_worklist.deinit(self.memory.persistent_allocator);
         if (self.external_tokens_capacity != 0) {
             self.memory.free(ExternalTokenEntry, self.external_tokens.ptr[0..self.external_tokens_capacity]);
@@ -972,6 +977,7 @@ pub const Registry = struct {
         return switch (h.kind) {
             .object => @sizeOf(object.Object),
             .function_bytecode => @sizeOf(FunctionBytecode),
+            .var_ref => @sizeOf(var_ref.VarRef),
             .string, .big_int => 0,
         };
     }
@@ -997,6 +1003,7 @@ pub const Registry = struct {
                 const fb: *const FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                 break :blk fb.heapByteSize();
             },
+            .var_ref => @sizeOf(var_ref.VarRef),
             .string, .big_int => 0,
         };
     }
@@ -1006,7 +1013,7 @@ pub const Registry = struct {
     }
 
     fn isCycleCandidate(h: *const GCObjectHeader) bool {
-        return h.kind == .object or h.kind == .function_bytecode;
+        return h.kind == .object or h.kind == .function_bytecode or h.kind == .var_ref;
     }
 
     fn recordHeapAlloc(self: *Registry, is_large: bool, bytes: usize) void {
@@ -1371,7 +1378,7 @@ pub inline fn release(rt: anytype, header: *Header) void {
 }
 
 noinline fn releaseAndDestroy(rt: anytype, header: *Header) void {
-    if (rt.gc.phase == .deinit and header.kind == .object) return;
+    if (rt.gc.phase == .deinit and (header.kind == .object or header.kind == .var_ref)) return;
     rt.gc.unlinkObjectWithBytes(header, Registry.heapByteSizeFromHeader(rt, header));
 
     // 10.1 静态 kind switch 派发销毁
@@ -1380,5 +1387,6 @@ noinline fn releaseAndDestroy(rt: anytype, header: *Header) void {
         .object => object.Object.destroyFromHeader(rt, header),
         .big_int => bigint.BigInt.destroyFromHeader(rt, header),
         .function_bytecode => function_bytecode_mod.destroyFromHeader(rt, header),
+        .var_ref => var_ref.VarRef.destroyFromHeader(rt, header),
     }
 }

@@ -3085,7 +3085,7 @@ fn materializeMappedArgumentsDescriptorValue(
     const mapped = object.argumentsVarRefs()[index];
     if (mapped.isUninitialized()) return;
     const value = if (varRefCellFromValue(mapped)) |cell|
-        if (cell.varRefValueSlot().*) |stored| stored.dup() else core.JSValue.undefinedValue()
+        cell.varRefValue().dup()
     else
         mapped.dup();
     const old_value = desc.value;
@@ -3103,12 +3103,8 @@ pub fn materializeMappedArgumentsDescriptorValueForVm(
     materializeMappedArgumentsDescriptorValue(rt, object, key, desc);
 }
 
-fn varRefCellFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
-    if (object.class_payload_kind != .var_ref) return null;
-    return object;
+fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
+    return core.VarRef.fromValue(value);
 }
 
 pub fn descriptorFromObject(rt: *core.JSRuntime, object: *core.Object) !core.Descriptor {

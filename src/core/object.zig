@@ -11,6 +11,7 @@ const profile = @import("profile.zig");
 const runtime_mod = @import("runtime.zig");
 const shape = @import("shape.zig");
 const string = @import("string.zig");
+const var_ref_mod = @import("var_ref.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 const function_bytecode_mod = @import("function_bytecode.zig");
@@ -5141,7 +5142,7 @@ pub const Object = struct {
         for (payload.names, 0..) |name, idx| {
             if (name != atom_id or idx >= payload.cells.len) continue;
             const cell = varRefCellFromValue(payload.cells[idx]) orelse return JSValue.undefinedValue();
-            return if (cell.varRefValueSlot().*) |stored| stored.dup() else JSValue.undefinedValue();
+            return cell.varRefValue().dup();
         }
         return null;
     }
@@ -5173,6 +5174,10 @@ pub const Object = struct {
                 if (fb.class_fields_init) |*stored| visitor.visitValue(stored);
                 for (fb.cpool) |*stored| visitor.visitValue(stored);
             },
+            .var_ref => {
+                const ref: *var_ref_mod.VarRef = @alignCast(@fieldParentPtr("header", header));
+                visitor.visitValue(ref.varRefValueSlot());
+            },
             else => {},
         }
     }
@@ -5182,7 +5187,7 @@ pub const Object = struct {
 
         pub fn visitValue(self: DecrefVisitor, val: *JSValue) void {
             if (val.refHeader()) |h| {
-                if (h.kind == .object or h.kind == .function_bytecode) {
+                if (h.kind == .object or h.kind == .function_bytecode or h.kind == .var_ref) {
                     self.visitHeader(h);
                 }
             } else if (val.objectHeader()) |h| {
@@ -5224,7 +5229,7 @@ pub const Object = struct {
 
         pub fn visitValue(self: ScanIncrefVisitor, val: *JSValue) void {
             if (val.refHeader()) |h| {
-                if (h.kind == .object or h.kind == .function_bytecode) {
+                if (h.kind == .object or h.kind == .function_bytecode or h.kind == .var_ref) {
                     self.visitHeader(h);
                 }
             } else if (val.objectHeader()) |h| {
@@ -5268,7 +5273,7 @@ pub const Object = struct {
 
         pub fn visitValue(self: ScanRestoreVisitor, val: *JSValue) void {
             if (val.refHeader()) |h| {
-                if (h.kind == .object or h.kind == .function_bytecode) {
+                if (h.kind == .object or h.kind == .function_bytecode or h.kind == .var_ref) {
                     self.visitHeader(h);
                 }
             } else if (val.objectHeader()) |h| {
@@ -5365,7 +5370,7 @@ pub const Object = struct {
         var preserved_count: usize = 0;
         {
             for (rt.gc.gc_objects) |h| {
-                if (h.kind == .object) {
+                if (h.kind == .object or h.kind == .var_ref) {
                     h.flags.cycle_visited = true;
                     h.flags.cycle_preserved = !h.flags.mark;
                     if (h.flags.cycle_preserved) preserved_count += 1;
@@ -5385,6 +5390,7 @@ pub const Object = struct {
                 preserved_bytecodes: *ObjectVisitSet,
                 symbol_roots_set: *SymbolRootSet,
                 object_worklist: *std.ArrayList(*Object),
+                var_ref_worklist: *std.ArrayList(*var_ref_mod.VarRef),
                 bytecode_worklist: *std.ArrayList(*FunctionBytecode),
                 val: JSValue,
             ) ObjectGraphError!void {
@@ -5393,7 +5399,13 @@ pub const Object = struct {
                     if (obj.header.flags.cycle_visited and !obj.header.flags.cycle_preserved) {
                         obj.header.flags.cycle_preserved = true;
                         try object_worklist.append(runtime.memory.persistent_allocator, obj);
-                        runtime.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
+                        runtime.gc.recordMarkStackDepth(object_worklist.items.len + var_ref_worklist.items.len + bytecode_worklist.items.len);
+                    }
+                } else if (var_ref_mod.VarRef.fromValue(val)) |ref| {
+                    if (ref.header.flags.cycle_visited and !ref.header.flags.cycle_preserved) {
+                        ref.header.flags.cycle_preserved = true;
+                        try var_ref_worklist.append(runtime.memory.persistent_allocator, ref);
+                        runtime.gc.recordMarkStackDepth(object_worklist.items.len + var_ref_worklist.items.len + bytecode_worklist.items.len);
                     }
                 } else if (functionBytecodeFromValue(val)) |const_fb| {
                     const fb = @constCast(const_fb);
@@ -5401,7 +5413,7 @@ pub const Object = struct {
                     const entry = try preserved_bytecodes.getOrPut(addr);
                     if (!entry.found_existing) {
                         try bytecode_worklist.append(runtime.memory.persistent_allocator, fb);
-                        runtime.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
+                        runtime.gc.recordMarkStackDepth(object_worklist.items.len + var_ref_worklist.items.len + bytecode_worklist.items.len);
                     }
                 }
             }
@@ -5411,14 +5423,15 @@ pub const Object = struct {
                 preserved_bytecodes: *ObjectVisitSet,
                 symbol_roots_set: *SymbolRootSet,
                 object_worklist: *std.ArrayList(*Object),
+                var_ref_worklist: *std.ArrayList(*var_ref_mod.VarRef),
                 bytecode_worklist: *std.ArrayList(*FunctionBytecode),
                 fb: *FunctionBytecode,
             ) ObjectGraphError!void {
                 if (fb.class_fields_init) |val| {
-                    try scanAndPreserveValue(runtime, preserved_bytecodes, symbol_roots_set, object_worklist, bytecode_worklist, val);
+                    try scanAndPreserveValue(runtime, preserved_bytecodes, symbol_roots_set, object_worklist, var_ref_worklist, bytecode_worklist, val);
                 }
                 for (fb.cpool) |val| {
-                    try scanAndPreserveValue(runtime, preserved_bytecodes, symbol_roots_set, object_worklist, bytecode_worklist, val);
+                    try scanAndPreserveValue(runtime, preserved_bytecodes, symbol_roots_set, object_worklist, var_ref_worklist, bytecode_worklist, val);
                 }
             }
         };
@@ -5428,6 +5441,7 @@ pub const Object = struct {
             preserved_bytecodes: *ObjectVisitSet,
             symbol_roots_set: *SymbolRootSet,
             object_worklist: *std.ArrayList(*Object),
+            var_ref_worklist: *std.ArrayList(*var_ref_mod.VarRef),
             bytecode_worklist: *std.ArrayList(*FunctionBytecode),
             err: ?ObjectGraphError = null,
 
@@ -5437,7 +5451,7 @@ pub const Object = struct {
                     if (obj.header.flags.cycle_visited and !obj.header.flags.cycle_preserved) {
                         obj.header.flags.cycle_preserved = true;
                         try self.object_worklist.append(self.rt.memory.persistent_allocator, obj);
-                        self.rt.gc.recordMarkStackDepth(self.object_worklist.items.len + self.bytecode_worklist.items.len);
+                        self.rt.gc.recordMarkStackDepth(self.object_worklist.items.len + self.var_ref_worklist.items.len + self.bytecode_worklist.items.len);
                     }
                 }
             }
@@ -5448,6 +5462,7 @@ pub const Object = struct {
                     self.preserved_bytecodes,
                     self.symbol_roots_set,
                     self.object_worklist,
+                    self.var_ref_worklist,
                     self.bytecode_worklist,
                     val_ptr.*,
                 );
@@ -5474,6 +5489,9 @@ pub const Object = struct {
         var object_worklist = &rt.gc.object_worklist;
         object_worklist.clearRetainingCapacity();
 
+        var var_ref_worklist = &rt.gc.var_ref_worklist;
+        var_ref_worklist.clearRetainingCapacity();
+
         var bytecode_worklist = &rt.gc.bytecode_worklist;
         bytecode_worklist.clearRetainingCapacity();
 
@@ -5483,34 +5501,54 @@ pub const Object = struct {
                 if (h.kind == .object and h.flags.cycle_preserved) {
                     const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                     try object_worklist.append(rt.memory.persistent_allocator, obj);
-                    rt.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
+                    rt.gc.recordMarkStackDepth(object_worklist.items.len + var_ref_worklist.items.len + bytecode_worklist.items.len);
+                } else if (h.kind == .var_ref and h.flags.cycle_preserved) {
+                    const ref: *var_ref_mod.VarRef = @alignCast(@fieldParentPtr("header", h));
+                    try var_ref_worklist.append(rt.memory.persistent_allocator, ref);
+                    rt.gc.recordMarkStackDepth(object_worklist.items.len + var_ref_worklist.items.len + bytecode_worklist.items.len);
                 }
             }
         }
 
         // Fixed-point transitive resurrection loop
-        while (object_worklist.items.len > 0 or bytecode_worklist.items.len > 0) {
+        while (object_worklist.items.len > 0 or var_ref_worklist.items.len > 0 or bytecode_worklist.items.len > 0) {
             while (object_worklist.items.len > 0) {
                 const obj = object_worklist.pop().?;
-                rt.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
+                rt.gc.recordMarkStackDepth(object_worklist.items.len + var_ref_worklist.items.len + bytecode_worklist.items.len);
                 var visitor = ObjectResurrectVisitor{
                     .rt = rt,
                     .preserved_bytecodes = preserved_bytecodes,
                     .symbol_roots_set = &symbol_roots,
                     .object_worklist = object_worklist,
+                    .var_ref_worklist = var_ref_worklist,
                     .bytecode_worklist = bytecode_worklist,
                 };
                 try obj.traceChildEdgesFallible(rt, &visitor);
             }
 
+            while (var_ref_worklist.items.len > 0) {
+                const ref = var_ref_worklist.pop().?;
+                rt.gc.recordMarkStackDepth(object_worklist.items.len + var_ref_worklist.items.len + bytecode_worklist.items.len);
+                try ResurrectHelper.scanAndPreserveValue(
+                    rt,
+                    preserved_bytecodes,
+                    &symbol_roots,
+                    object_worklist,
+                    var_ref_worklist,
+                    bytecode_worklist,
+                    ref.varRefValue(),
+                );
+            }
+
             while (bytecode_worklist.items.len > 0) {
                 const fb = bytecode_worklist.pop().?;
-                rt.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
+                rt.gc.recordMarkStackDepth(object_worklist.items.len + var_ref_worklist.items.len + bytecode_worklist.items.len);
                 try ResurrectHelper.scanBytecodeChildObjectsAndBytecodes(
                     rt,
                     preserved_bytecodes,
                     &symbol_roots,
                     object_worklist,
+                    var_ref_worklist,
                     bytecode_worklist,
                     fb,
                 );
@@ -5521,6 +5559,10 @@ pub const Object = struct {
         {
             for (garbage_headers.items) |h| {
                 if (h.kind == .object) {
+                    if (h.flags.cycle_preserved) {
+                        h.flags.mark = false;
+                    }
+                } else if (h.kind == .var_ref) {
                     if (h.flags.cycle_preserved) {
                         h.flags.mark = false;
                     }
@@ -5555,19 +5597,27 @@ pub const Object = struct {
         // and guard release may destroy nodes. The object worklist is empty here,
         // so reuse its buffer.
         std.debug.assert(object_worklist.items.len == 0);
+        std.debug.assert(var_ref_worklist.items.len == 0);
         {
             for (rt.gc.gc_objects) |h| {
                 if (h.kind == .object and h.flags.cycle_preserved) {
                     const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                     try object_worklist.append(rt.memory.persistent_allocator, obj);
+                } else if (h.kind == .var_ref and h.flags.cycle_preserved) {
+                    const ref: *var_ref_mod.VarRef = @alignCast(@fieldParentPtr("header", h));
+                    try var_ref_worklist.append(rt.memory.persistent_allocator, ref);
                 }
             }
         }
         const preserved_objects: []const *Object = object_worklist.items;
+        const preserved_var_refs: []const *var_ref_mod.VarRef = var_ref_worklist.items;
 
         // Temporarily increment ref counts of all preserved objects and bytecodes
         // to prevent them from being destroyed/freed during weak entries sweeping.
         for (preserved_objects) |current| {
+            current.header.rc += 1;
+        }
+        for (preserved_var_refs) |current| {
             current.header.rc += 1;
         }
         {
@@ -5601,6 +5651,13 @@ pub const Object = struct {
                 gc.release(rt, &current.header);
             }
         }
+        for (preserved_var_refs) |current| {
+            current.header.rc -= 1;
+            if (current.header.rc == 0) {
+                current.header.rc = 1;
+                gc.release(rt, &current.header);
+            }
+        }
         {
             var iterator = preserved_bytecodes.keyIterator();
             while (iterator.next()) |address| {
@@ -5616,7 +5673,7 @@ pub const Object = struct {
         var garbage_count: usize = 0;
         {
             for (garbage_headers.items) |h| {
-                if (h.kind == .object and h.flags.mark) garbage_count += 1;
+                if ((h.kind == .object or h.kind == .var_ref) and h.flags.mark) garbage_count += 1;
             }
         }
 
@@ -5648,6 +5705,9 @@ pub const Object = struct {
             if (h.kind == .object) {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                 try obj.clearReferencesToVisited(rt, &free_internal_bytecodes);
+            } else if (h.kind == .var_ref) {
+                const ref: *var_ref_mod.VarRef = @alignCast(@fieldParentPtr("header", h));
+                clearValueReferenceToVisited(rt, ref.varRefValueSlot(), &free_internal_bytecodes);
             } else if (h.kind == .function_bytecode) {
                 const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                 clearFunctionBytecodeReferencesToVisited(rt, fb, &free_internal_bytecodes);
@@ -5660,6 +5720,9 @@ pub const Object = struct {
             if (!h.flags.mark) continue;
             if (h.kind == .object) {
                 destroyFromHeader(rt, h);
+            } else if (h.kind == .var_ref) {
+                rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
+                var_ref_mod.VarRef.destroyFromHeader(rt, h);
             } else if (h.kind == .function_bytecode) {
                 rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
                 function_bytecode_mod.destroyFromHeader(rt, h);
@@ -6387,6 +6450,14 @@ pub const Object = struct {
             try scanPreservedObjects(rt, symbol_roots, preserved_count, child);
             return;
         }
+        if (var_ref_mod.VarRef.fromValue(stored)) |ref| {
+            if (ref.header.flags.cycle_visited and !ref.header.flags.cycle_preserved) {
+                ref.header.flags.cycle_preserved = true;
+                preserved_count.* += 1;
+            }
+            try scanPreservedValueObject(rt, symbol_roots, preserved_count, ref.varRefValue());
+            return;
+        }
         const function_bytecode = functionBytecodeFromValue(stored) orelse return;
         try scanPreservedFunctionBytecodeChildObjects(rt, symbol_roots, preserved_count, function_bytecode);
     }
@@ -6685,6 +6756,10 @@ pub const Object = struct {
         return child.header.flags.cycle_visited and !child.header.flags.cycle_preserved;
     }
 
+    inline fn headerIsCycleGarbage(header: *const gc.Header) bool {
+        return header.flags.cycle_visited and !header.flags.cycle_preserved;
+    }
+
     fn clearReferencesToVisited(
         self: *Object,
         rt: *JSRuntime,
@@ -6762,9 +6837,7 @@ pub const Object = struct {
             return;
         }
         const cell = varRefCellFromValue(stored.*) orelse return;
-        if (cell.varRefValueSlot().*) |cell_value| {
-            if (valueReferencesVisited(cell_value)) cell.varRefValueSlot().* = JSValue.undefinedValue();
-        }
+        if (valueReferencesVisited(cell.varRefValue())) cell.varRefValueSlot().* = JSValue.undefinedValue();
     }
 
     fn clearFunctionBytecodeReferencesToVisited(
@@ -6777,8 +6850,9 @@ pub const Object = struct {
     }
 
     fn valueReferencesVisited(stored: JSValue) bool {
-        const child = objectFromValue(stored) orelse return false;
-        return objectIsCycleGarbage(child);
+        if (objectFromValue(stored)) |child| return objectIsCycleGarbage(child);
+        if (var_ref_mod.VarRef.fromValue(stored)) |ref| return headerIsCycleGarbage(&ref.header);
+        return false;
     }
 
     fn functionBytecodeFromValue(stored: JSValue) ?*FunctionBytecode {
@@ -7006,7 +7080,9 @@ pub const Object = struct {
         count += countOptionalFunctionBytecodeRef(self.generatorCurrentFunction(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.generatorYieldStarIterator(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.generatorAsyncPromise(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.varRefValue(), function_bytecode);
+        if (self.varRefPayloadConst()) |payload| {
+            if (payload.value) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
+        }
         for (self.argumentsVarRefs()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.proxyTarget(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.proxyHandler(), function_bytecode);
@@ -9462,7 +9538,7 @@ pub const Object = struct {
         const mapped = refs[slot_index];
         if (mapped.isUninitialized()) return null;
         if (varRefCellFromValue(mapped)) |cell| {
-            return if (cell.varRefValueSlot().*) |stored| stored.dup() else JSValue.undefinedValue();
+            return cell.varRefValue().dup();
         }
         return mapped.dup();
     }
@@ -9811,12 +9887,8 @@ fn arrayLengthStringNumber(rt: *JSRuntime, value: JSValue) !f64 {
     return std.fmt.parseFloat(f64, trimmed) catch std.math.nan(f64);
 }
 
-fn varRefCellFromValue(value: JSValue) ?*Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    const object: *Object = @fieldParentPtr("header", header);
-    if (object.varRefPayload() == null) return null;
-    return object;
+fn varRefCellFromValue(value: JSValue) ?*var_ref_mod.VarRef {
+    return var_ref_mod.VarRef.fromValue(value);
 }
 
 fn appendAtom(rt: *JSRuntime, keys: *[]atom.Atom, atom_id: atom.Atom) OwnKeysError!void {

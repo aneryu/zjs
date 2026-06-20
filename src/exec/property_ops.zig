@@ -52,30 +52,26 @@ pub fn propertyIn(rt: *core.JSRuntime, object_value: core.JSValue, key_value: co
 }
 
 pub fn instanceOfObject(value: core.JSValue) core.JSValue {
-    return core.JSValue.boolean(value.isObject());
+    return core.JSValue.boolean(objectHeader(value) != null);
 }
 
 pub fn instanceOfArray(value: core.JSValue) core.JSValue {
-    const header = value.refHeader() orelse return core.JSValue.boolean(false);
-    if (!value.isObject()) return core.JSValue.boolean(false);
+    const header = objectHeader(value) orelse return core.JSValue.boolean(false);
     const object: *core.Object = @fieldParentPtr("header", header);
     return core.JSValue.boolean(object.flags.is_array);
 }
 
 pub fn instanceOf(rt: *core.JSRuntime, value: core.JSValue, constructor_value: core.JSValue) !core.JSValue {
-    const header = value.refHeader() orelse return core.JSValue.boolean(false);
-    if (!value.isObject()) return core.JSValue.boolean(false);
+    const header = objectHeader(value) orelse return core.JSValue.boolean(false);
     const object: *core.Object = @fieldParentPtr("header", header);
 
-    const constructor_header = constructor_value.refHeader() orelse return error.TypeError;
-    if (!constructor_value.isObject()) return error.TypeError;
+    const constructor_header = objectHeader(constructor_value) orelse return error.TypeError;
     const constructor: *core.Object = @fieldParentPtr("header", constructor_header);
     const prototype_key = try rt.internAtom("prototype");
     defer rt.atoms.free(prototype_key);
     const prototype_value = constructor.getProperty(prototype_key);
     defer prototype_value.free(rt);
-    const prototype_header = prototype_value.refHeader() orelse return error.TypeError;
-    if (!prototype_value.isObject()) return error.TypeError;
+    const prototype_header = objectHeader(prototype_value) orelse return error.TypeError;
     const prototype: *core.Object = @fieldParentPtr("header", prototype_header);
 
     var cursor = object.getPrototype();
@@ -103,7 +99,13 @@ pub fn propertyKeyAtom(rt: *core.JSRuntime, value: core.JSValue) !core.Atom {
 }
 
 pub fn expectObject(value: core.JSValue) !*core.Object {
-    const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isObject()) return error.TypeError;
+    const header = objectHeader(value) orelse return error.TypeError;
     return @fieldParentPtr("header", header);
+}
+
+fn objectHeader(value: core.JSValue) ?*core.gc.Header {
+    if (!value.isObject()) return null;
+    const header = value.refHeader() orelse return null;
+    if (header.kind != .object) return null;
+    return header;
 }

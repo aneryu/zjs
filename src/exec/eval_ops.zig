@@ -94,7 +94,7 @@ pub fn shouldSkipDirectEvalLocalCapture(
     skip_values: []const core.JSValue,
 ) bool {
     const value = if (varRefCellFromValue(slot)) |cell|
-        cell.varRefValueSlot().* orelse core.JSValue.undefinedValue()
+        cell.varRefValue()
     else
         slot;
     if (value.isUninitialized()) return true;

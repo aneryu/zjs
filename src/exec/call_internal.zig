@@ -335,7 +335,7 @@ inline fn slotValueBorrowFast(slot: core.JSValue) core.JSValue {
     var depth: usize = 0;
     while (depth < 16) : (depth += 1) {
         const cell = slot_ops.varRefCellFromValue(current) orelse return current;
-        current = cell.varRefValueSlot().* orelse return core.JSValue.undefinedValue();
+        current = cell.varRefValue();
     }
     return current;
 }

@@ -2072,7 +2072,7 @@ fn uriCall1VarRefStringArgument(frame: *const frame_mod.Frame, idx: usize, next_
     const value = frame.var_refs[idx];
     if (varRefCellFromValue(value)) |cell| {
         if (cell.varRefIsDeletedSlot().*) return null;
-        const stored = cell.varRefValueSlot().* orelse return null;
+        const stored = cell.varRefValue();
         if (!stored.isString() or stored.isUninitialized()) return null;
         return .{ .value = stored, .next_pc = next_pc, .owned = false };
     }

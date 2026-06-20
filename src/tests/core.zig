@@ -1428,10 +1428,9 @@ test "mapped arguments var-ref binding update defers value finalizer reentry" {
     defer arguments.value().free(rt);
     const key = core.atom.atomFromUInt32(0);
     const value = try core.Object.create(rt, reentrant_id, null);
-    const cell = try core.Object.create(rt, core.class.ids.object, null);
-    try cell.initVarRefPayload(rt, value.value().dup());
+    const cell = try core.VarRef.createClosed(rt, value.value().dup());
     const refs = try rt.memory.alloc(core.JSValue, 1);
-    refs[0] = cell.value().dup();
+    refs[0] = cell.valueRef();
     arguments.argumentsVarRefsSlot().* = refs;
     value.value().free(rt);
 
@@ -1450,12 +1449,11 @@ test "mapped arguments var-ref binding update defers value finalizer reentry" {
     try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), reentrant_mapped_arguments_calls);
     try expectOneDeferredClassPayloadFinalizer(rt);
-    try std.testing.expectEqual(@as(?i32, 7), cell.varRefValue().?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 7), cell.varRefValue().asInt32());
     try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_mapped_arguments_calls);
-    try std.testing.expectEqual(@as(?i32, 99), cell.varRefValue().?.asInt32());
-    cell.value().free(rt);
+    try std.testing.expectEqual(@as(?i32, 99), cell.varRefValue().asInt32());
 }
 
 test "mapped arguments binding delete defers value finalizer reentry" {
