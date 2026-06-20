@@ -2205,10 +2205,10 @@ fn tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt(
     if (current_i < 0) return false;
     const array_value = bindingReadableBorrowed(frame, bound_array_get) orelse return false;
     const array_object = objectFromValue(array_value) orelse return false;
-    if (array_object.proxyTarget() != null or array_object.exotic != null) return false;
+    if (array_object.proxyTarget() != null or array_object.hasExoticMethods()) return false;
     if (!array_object.flags.is_array or array_object.arrayElementStorageMode() != .dense) return false;
-    if (array_object.length > @as(u32, @intCast(std.math.maxInt(i32)))) return false;
-    const limit: i32 = @intCast(array_object.length);
+    if (array_object.arrayLength() > @as(u32, @intCast(std.math.maxInt(i32)))) return false;
+    const limit: i32 = @intCast(array_object.arrayLength());
     if (current_i >= limit) {
         frame.pc = exit_branch.false_pc;
         return true;
@@ -2646,12 +2646,12 @@ fn tryFuseCheckedLocalArrayPushInt32Range(
     const receiver = bindingReadableBorrowed(frame, receiver_get) orelse return false;
     if (!fastArrayPrototypeMethodIsDefault(receiver, method_atom, @intFromEnum(method_ids.array.PrototypeMethod.push))) return false;
     const array_object = objectFromValue(receiver) orelse return false;
-    if (array_object.proxyTarget() != null or array_object.exotic != null) return false;
+    if (array_object.proxyTarget() != null or array_object.hasExoticMethods()) return false;
     if (array_object.properties.len != 0) return false;
 
-    const start_index = array_object.length;
+    const start_index = array_object.arrayLength();
     if (!try array_object.appendDenseArrayInt32ValueRange(ctx.runtime, start_index, current_i, iteration_count)) return false;
-    const final_length_value = array_ops.lengthIndexValue(array_object.length);
+    const final_length_value = array_ops.lengthIndexValue(array_object.arrayLength());
     try storeLocalCompletionBorrowedValue(ctx, function, global, frame, completion_tail.completion_put, final_length_value, sync_global_lexical_locals);
     try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
@@ -3479,7 +3479,7 @@ fn fastGlobalDataValueForRange(
         return null;
     }
     if (globalOwnDataPropertyValue(global, atom_id)) |value| return value;
-    if (global.exotic != null) return null;
+    if (global.hasExoticMethods()) return null;
 
     const desc = global.getOwnProperty(atom_id) orelse return null;
     defer desc.destroy(ctx.runtime);
@@ -3715,9 +3715,9 @@ fn invariantInt32LoadValue(rt: *core.JSRuntime, receiver: core.JSValue, code: []
     const index = smallPushOpcodeIndex(code[pc]) orelse return null;
     if (pc + 2 > code.len or code[pc + 1] != op.get_array_el) return null;
     const object = objectFromValue(receiver) orelse return null;
-    if (object.proxyTarget() != null or object.exotic != null) return null;
+    if (object.proxyTarget() != null or object.hasExoticMethods()) return null;
     if (!object.flags.is_array or object.arrayElementStorageMode() != .dense) return null;
-    if (index >= @as(usize, @intCast(object.length))) return null;
+    if (index >= @as(usize, @intCast(object.arrayLength()))) return null;
     const elements = object.arrayElements();
     if (index >= elements.len) return null;
     const element = elements[index];
@@ -3726,9 +3726,9 @@ fn invariantInt32LoadValue(rt: *core.JSRuntime, receiver: core.JSValue, code: []
 
 fn denseArrayInt32RangeDelta(object: *core.Object, start: usize, limit: usize) ?IntRangeDeltaBounds {
     if (start > limit) return null;
-    if (object.proxyTarget() != null or object.exotic != null) return null;
+    if (object.proxyTarget() != null or object.hasExoticMethods()) return null;
     if (!object.flags.is_array or object.arrayElementStorageMode() != .dense) return null;
-    if (limit > @as(usize, @intCast(object.length))) return null;
+    if (limit > @as(usize, @intCast(object.arrayLength()))) return null;
     const elements = object.arrayElements();
     if (limit > elements.len) return null;
 

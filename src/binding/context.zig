@@ -424,7 +424,7 @@ pub const JSContext = struct {
     pub fn arrayLength(self: *JSContext, val: JSValue) !u32 {
         _ = self;
         const object = (try arrayObjectFromValue(val)) orelse return error.TypeError;
-        return object.length;
+        return object.arrayLength();
     }
 
     pub fn getIndex(self: *JSContext, val: JSValue, index: u32) !JSValue {

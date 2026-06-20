@@ -525,7 +525,7 @@ inline fn tryFastPutField(
     if (value.requiresRefCount()) return false;
     const object = objectFromValueFast(obj) orelse return false;
     if (object.flags.is_borrowed_reference_holder) return false;
-    if (object.flags.is_proxy or object.class_payload_kind == .proxy or object.exotic != null) return false;
+    if (object.flags.is_proxy or object.class_payload_kind == .proxy or object.hasExoticMethods()) return false;
     if (object.flags.is_array) return false;
     if (object.class_payload_kind == .typed_array) return false;
     if (object.class_id == core.class.ids.regexp and atom_id == core.atom.ids.lastIndex and object.regexpLastIndex() != null) return false;
@@ -552,7 +552,7 @@ inline fn fastDenseArrayElementValueLocal(value: core.JSValue, key: core.JSValue
     const index_i32 = key.asInt32() orelse return null;
     if (index_i32 < 0) return null;
     const object = objectFromValueFast(value) orelse return null;
-    if (object.flags.is_proxy or object.class_payload_kind == .proxy or object.exotic != null) return null;
+    if (object.flags.is_proxy or object.class_payload_kind == .proxy or object.hasExoticMethods()) return null;
     if (!object.flags.is_array or arrayStorageModeFast(object) != .dense) return null;
     const index: u32 = @intCast(index_i32);
     const atom_id = core.atom.atomFromUInt32(index);
@@ -604,9 +604,9 @@ inline fn fastPutDenseArrayExistingIntIndexLocal(rt: *core.JSRuntime, obj: core.
     const object = objectFromValueFast(obj) orelse return false;
     if (!object.flags.is_array) return false;
     const index: u32 = @intCast(index_i32);
-    if (index >= object.length) return false;
+    if (index >= object.arrayLength()) return false;
     if (!object.flags.length_writable) return false;
-    if (object.exotic != null or object.flags.is_proxy or object.class_payload_kind == .proxy) return false;
+    if (object.hasExoticMethods() or object.flags.is_proxy or object.class_payload_kind == .proxy) return false;
     if (arrayStorageModeFast(object) != .dense) return false;
     const atom_id = core.atom.atomFromUInt32(index);
     if (object.properties.len != 0 and objectFindPropertyFast(object, atom_id) != null) return false;

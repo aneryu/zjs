@@ -889,7 +889,7 @@ fn globalDataOrAutoInitValueForReadFastPath(
     if (globalDataPropertyValueForFastPath(rt, global, function, site_pc, atom_id)) |value| {
         return .{ .value = value, .owned = false };
     }
-    if (global.exotic != null) return null;
+    if (global.hasExoticMethods()) return null;
     for (global.shapeProps(), 0..) |prop, property_index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
@@ -2216,7 +2216,7 @@ pub noinline fn putVar(
 }
 
 fn globalOwnRejectedNonStrictSet(global: *core.Object, atom_id: core.Atom) bool {
-    if (global.exotic != null) return false;
+    if (global.hasExoticMethods()) return false;
     for (global.shapeProps(), 0..) |prop, property_index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
@@ -2338,10 +2338,10 @@ fn fastLengthValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     const object = objectFromValue(value) orelse return error.TypeError;
     if (object.proxyTarget() != null) return error.TypeError;
     if (object.flags.is_array) {
-        if (object.length <= @as(u32, @intCast(std.math.maxInt(i32)))) {
-            return core.JSValue.int32(@intCast(object.length));
+        if (object.arrayLength() <= @as(u32, @intCast(std.math.maxInt(i32)))) {
+            return core.JSValue.int32(@intCast(object.arrayLength()));
         }
-        return core.JSValue.float64(@floatFromInt(object.length));
+        return core.JSValue.float64(@floatFromInt(object.arrayLength()));
     }
     if (core.object.isTypedArrayObject(object)) {
         return core.JSValue.int32(@intCast(try core.object.typedArrayLength(rt, object)));
@@ -2396,7 +2396,7 @@ pub noinline fn globalDefinition(
                     } else if (!has_own_global_property) {
                         const configurable = (flags & (1 << 5)) != 0;
                         const define_desc = core.Descriptor.data(core.JSValue.undefinedValue(), true, true, configurable);
-                        if (global.exotic == null and !global.flags.is_array and global.isExtensible()) {
+                        if (!global.hasExoticMethods() and !global.flags.is_array and global.isExtensible()) {
                             try global.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, define_desc);
                         } else if (!global.hasOwnProperty(atom_id)) {
                             global.defineOwnProperty(ctx.runtime, atom_id, define_desc) catch |err| switch (err) {
@@ -2428,7 +2428,7 @@ pub noinline fn globalDefinition(
             } else if (!global.hasOwnProperty(atom_id)) {
                 const configurable = (flags & (1 << 5)) != 0;
                 const desc = core.Descriptor.data(core.JSValue.undefinedValue(), true, true, configurable);
-                const define_result = if (global.exotic == null and !global.flags.is_array and global.isExtensible())
+                const define_result = if (!global.hasExoticMethods() and !global.flags.is_array and global.isExtensible())
                     global.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, desc)
                 else
                     global.defineOwnProperty(ctx.runtime, atom_id, desc);

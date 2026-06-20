@@ -691,7 +691,7 @@ test "qjsAggregateErrorConstructWithPrototype preserves direct symbol errors and
     const error_atom = try rt.atoms.newValueSymbol("gc-aggregate-error-item-symbol");
     const cause_atom = try rt.atoms.newValueSymbol("gc-aggregate-error-cause-symbol");
     try errors_source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.symbol(error_atom), true, true, true));
-    errors_source.length = 1;
+    errors_source.setArrayLength(1);
     try errors_source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(1), true, false, false));
     try defineDataProperty(rt, options, "cause", core.JSValue.symbol(cause_atom), true, false, true);
 
@@ -1017,7 +1017,7 @@ pub fn qjsRegExpPrototypeMethodIsDefault(object: *core.Object, atom_id: core.Ato
     if (object.class_id != core.class.ids.regexp) return false;
     if (object.hasOwnProperty(atom_id)) return false;
     const proto = object.getPrototype() orelse return false;
-    if (proto.exotic != null) return false;
+    if (proto.hasExoticMethods()) return false;
     for (proto.shapeProps(), 0..) |prop, property_index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
@@ -3582,7 +3582,7 @@ test "qjsDestructuringRest roots direct symbol values while creating rest array"
     defer if (source_alive) source.value().free(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-destructuring-rest-symbol");
     try source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.symbol(symbol_atom), true, true, true));
-    source.length = 1;
+    source.setArrayLength(1);
 
     const args = [_]core.JSValue{ source.value(), core.JSValue.int32(0) };
     const old_threshold = rt.gcThreshold();
@@ -4301,7 +4301,7 @@ pub fn getValueProperty(
             if (atom_id == atom_byte_length) return core.JSValue.int32(@intCast(try core.object.typedArrayByteLength(rt, object)));
             if (atom_id == atom_byte_offset) return core.JSValue.int32(@intCast(try core.object.typedArrayEffectiveByteOffset(object)));
         }
-        if (object.exotic == null) {
+        if (!object.hasExoticMethods()) {
             if (object.flags.is_array) {
                 if (atom_id == core.atom.ids.length) return value_ops.length(rt, value);
                 if (core.atom.isTaggedInt(atom_id)) {
@@ -4516,7 +4516,7 @@ pub fn getPrimitiveProperty(
 }
 
 pub fn ownDataOrAutoInitPropertyValue(object: *core.Object, atom_id: core.Atom) ?core.JSValue {
-    if (object.exotic != null) return null;
+    if (object.hasExoticMethods()) return null;
     if (object.findProperty(atom_id)) |index| {
         if (object.propFlagsAt(index).accessor) return null;
         return switch (object.properties[index].slot) {
@@ -4968,7 +4968,7 @@ pub fn qjsObjectEnumerableOwnPropertiesCall(
             element.free(ctx.runtime);
             element = core.JSValue.undefinedValue();
         }
-        try createDataPropertyOrThrow(ctx, output, global, out_value, out, core.atom.atomFromUInt32(out.length), element, caller_function, caller_frame);
+        try createDataPropertyOrThrow(ctx, output, global, out_value, out, core.atom.atomFromUInt32(out.arrayLength()), element, caller_function, caller_frame);
         element.free(ctx.runtime);
         element = core.JSValue.undefinedValue();
     }

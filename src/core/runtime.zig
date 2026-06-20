@@ -572,6 +572,11 @@ pub const DeferredClassPayloadFinalizer = struct {
     }
 };
 
+pub const CachedIteratorNextEntry = struct {
+    object: *Object,
+    value: ?JSValue = null,
+};
+
 const RecentTwoUnitString = struct {
     first: u16,
     second: u16,
@@ -725,6 +730,8 @@ pub const JSRuntime = struct {
     opcode_profile: ?*profile.OpcodeProfile = null,
     external_host_functions: []host_function.ExternalRecord = &.{},
     external_host_functions_capacity: usize = 0,
+    cached_iterator_next_entries: []CachedIteratorNextEntry = &.{},
+    cached_iterator_next_entries_capacity: usize = 0,
     /// Static internal-builtin record table, indexed
     /// `[domain][domain-local id]` with the `NativeBuiltinDomain` enum value
     /// as the outer index (slot 0 unused). Built at comptime by
@@ -855,6 +862,8 @@ pub const JSRuntime = struct {
         rt.opcode_profile = null;
         rt.external_host_functions = &.{};
         rt.external_host_functions_capacity = 0;
+        rt.cached_iterator_next_entries = &.{};
+        rt.cached_iterator_next_entries_capacity = 0;
         rt.internal_builtins = &.{};
         rt.any_prototype_may_have_indexed_properties = false;
         rt.memory.profile_alloc_count = null;
@@ -963,6 +972,7 @@ pub const JSRuntime = struct {
         const external_symbol_roots: []atom.Atom = if (self.external_symbol_roots_capacity != 0) self.external_symbol_roots.ptr[0..self.external_symbol_roots_capacity] else self.external_symbol_roots[0..0];
         const external_value_roots: []JSValue = if (self.external_value_roots_capacity != 0) self.external_value_roots.ptr[0..self.external_value_roots_capacity] else self.external_value_roots[0..0];
         const external_host_functions: []host_function.ExternalRecord = if (self.external_host_functions_capacity != 0) self.external_host_functions.ptr[0..self.external_host_functions_capacity] else self.external_host_functions[0..0];
+        const cached_iterator_next_entries: []CachedIteratorNextEntry = if (self.cached_iterator_next_entries_capacity != 0) self.cached_iterator_next_entries.ptr[0..self.cached_iterator_next_entries_capacity] else self.cached_iterator_next_entries[0..0];
         const deferred_native_cleanups: []NativeCleanupJob = if (self.deferred_native_cleanups_capacity != 0) self.deferred_native_cleanups.ptr[0..self.deferred_native_cleanups_capacity] else self.deferred_native_cleanups[0..0];
         const deferred_class_payload_finalizers: []DeferredClassPayloadFinalizer = if (self.deferred_class_payload_finalizers_capacity != 0) self.deferred_class_payload_finalizers.ptr[0..self.deferred_class_payload_finalizers_capacity] else self.deferred_class_payload_finalizers[0..0];
         self.borrowed_reference_holders = &.{};
@@ -981,6 +991,8 @@ pub const JSRuntime = struct {
         self.external_value_roots_capacity = 0;
         self.external_host_functions = &.{};
         self.external_host_functions_capacity = 0;
+        self.cached_iterator_next_entries = &.{};
+        self.cached_iterator_next_entries_capacity = 0;
         self.deferred_native_cleanups = &.{};
         self.deferred_native_cleanups_capacity = 0;
         self.deferred_class_payload_finalizers = &.{};
@@ -994,6 +1006,7 @@ pub const JSRuntime = struct {
         if (external_symbol_roots.len != 0) self.memory.free(atom.Atom, external_symbol_roots);
         if (external_value_roots.len != 0) self.memory.free(JSValue, external_value_roots);
         if (external_host_functions.len != 0) self.memory.free(host_function.ExternalRecord, external_host_functions);
+        if (cached_iterator_next_entries.len != 0) self.memory.free(CachedIteratorNextEntry, cached_iterator_next_entries);
         if (deferred_native_cleanups.len != 0) self.memory.free(NativeCleanupJob, deferred_native_cleanups);
         if (deferred_class_payload_finalizers.len != 0) self.memory.free(DeferredClassPayloadFinalizer, deferred_class_payload_finalizers);
         if (self.owns_self_allocation) {

@@ -183,7 +183,7 @@ pub noinline fn defineField(
     if (!value.requiresRefCount() and ctx.runtime.atoms.kind(atom_id) != .private) {
         if (property_ops.expectObject(obj)) |target| {
             if (target.class_id == core.class.ids.object and
-                target.exotic == null and
+                !target.hasExoticMethods() and
                 target.proxyTarget() == null and
                 !target.flags.is_array and
                 target.properties.len == 0)
@@ -212,9 +212,9 @@ pub noinline fn defineField(
     if (target.flags.is_array and effective_atom == core.atom.ids.length) {
         if (value.asInt32()) |length| {
             const new_len: u32 = @intCast(@max(length, 0));
-            if (new_len > target.length) try target.convertDenseArrayElementsToSparseProperties(ctx.runtime);
+            if (new_len > target.arrayLength()) try target.convertDenseArrayElementsToSparseProperties(ctx.runtime);
             target.truncateArrayElements(ctx.runtime, new_len);
-            target.length = new_len;
+            target.setArrayLength(new_len);
             return .done;
         }
     }
@@ -228,7 +228,7 @@ pub noinline fn defineField(
         return .done;
     }
     if (target.class_id == core.class.ids.object and
-        target.exotic == null and
+        !target.hasExoticMethods() and
         target.proxyTarget() == null and
         !target.flags.is_array and
         target.properties.len == 0)
@@ -321,7 +321,7 @@ pub fn appendSpreadValues(
     if (source) |source_object| {
         if (source_object.flags.is_array) {
             var source_index: u32 = 0;
-            while (source_index < source_object.length) : (source_index += 1) {
+            while (source_index < source_object.arrayLength()) : (source_index += 1) {
                 const item = source_object.getProperty(core.atom.atomFromUInt32(source_index));
                 defer item.free(ctx.runtime);
                 try property_ops.defineDataProperty(ctx.runtime, array, core.atom.atomFromUInt32(@intCast(out_index)), item);
@@ -507,7 +507,7 @@ fn tryFuseArrayLengthLessThanFalseBranch(
     const operand_pc = frame.pc + 2;
     const diff: i8 = @bitCast(function.code[operand_pc]);
     const lhs_number: f64 = @floatFromInt(lhs_int);
-    const rhs_number: f64 = @floatFromInt(array_object.length);
+    const rhs_number: f64 = @floatFromInt(array_object.arrayLength());
     frame.pc = if (lhs_number < rhs_number)
         frame.pc + 3
     else
@@ -551,7 +551,7 @@ pub noinline fn rest(
             element_value = core.JSValue.undefinedValue();
             value.free(ctx.runtime);
         };
-        try object_value.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(object_value.length), core.Descriptor.data(value, true, true, true));
+        try object_value.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(object_value.arrayLength()), core.Descriptor.data(value, true, true, true));
         element_value = core.JSValue.undefinedValue();
         value.free(ctx.runtime);
         value_owned = false;

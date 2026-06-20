@@ -115,7 +115,7 @@ pub fn functionOwnNativeBuiltinRefForFastPath(
     atom_id: core.Atom,
 ) ?core.function.NativeBuiltinRef {
     const object = functionOwnDataPropertyObject(rt, value, atom_id) orelse return null;
-    if (object.exotic != null) return null;
+    if (object.hasExoticMethods()) return null;
 
     if (cachedOwnDataPropertyLookupForObjectNoProfile(function, site_pc, object, atom_id)) |lookup| {
         return nativeBuiltinRefFromFunctionValue(lookup.value);
@@ -247,7 +247,7 @@ fn setCachedOwnDataProperty(
 fn setObjectDataPropertyForSimplePutField(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) !bool {
     if (rt.atoms.kind(atom_id) == .private) return false;
     const object = objectFromValue(receiver) orelse return false;
-    if (object.proxyTarget() != null or object.exotic != null) return false;
+    if (object.proxyTarget() != null or object.hasExoticMethods()) return false;
     if (core.object.isTypedArrayObject(object)) return false;
     if (object.flags.is_array) {
         if (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
@@ -429,9 +429,9 @@ inline fn cacheableNamedDataObject(rt: *core.JSRuntime, object: *core.Object, at
         !object.flags.is_global and
         !object.flags.is_proxy)
     {
-        return object.exotic == null;
+        return !object.hasExoticMethods();
     }
-    if (object.flags.is_proxy or object.exotic != null) return false;
+    if (object.flags.is_proxy or object.hasExoticMethods()) return false;
     if (object.flags.is_array) {
         if (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
     } else if (object.class_id != core.class.ids.object and !object.flags.is_global and object.class_id < core.class.ids.init_count) return false;
@@ -498,14 +498,14 @@ pub fn setPlainObjectInt32DataPropertyForFastPath(rt: *core.JSRuntime, object: *
 }
 
 fn plainObjectDataPropertyFastPathReceiver(object: *core.Object) bool {
-    if (object.proxyTarget() != null or object.exotic != null) return false;
+    if (object.proxyTarget() != null or object.hasExoticMethods()) return false;
     return object.class_id == core.class.ids.object and !object.flags.is_array and !object.flags.is_global;
 }
 
 pub fn ownDataPropertyValueMaterializedForFastPath(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
     if (rt.atoms.kind(atom_id) == .private) return null;
     const object = objectFromValue(value) orelse return null;
-    if (object.proxyTarget() != null or object.exotic != null) return null;
+    if (object.proxyTarget() != null or object.hasExoticMethods()) return null;
     if (object.class_id != core.class.ids.object and !object.flags.is_global) return null;
 
     switch (fastOwnOrdinaryDataPropertyBorrowedValue(object, atom_id)) {
@@ -571,7 +571,7 @@ fn ordinaryDataPropertyLookup(rt: *core.JSRuntime, value: core.JSValue, atom_id:
     if (rt.atoms.kind(atom_id) == .private) return .slow;
     var cursor = objectFromValue(value) orelse return .slow;
     while (true) {
-        if (cursor.proxyTarget() != null or cursor.exotic != null) return .slow;
+        if (cursor.proxyTarget() != null or cursor.hasExoticMethods()) return .slow;
         if (cursor.flags.is_array) {
             if (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return .slow;
         } else if (cursor.class_id != core.class.ids.object and !cursor.flags.is_global) return .slow;
@@ -618,7 +618,7 @@ fn declaredGlobalVarDataBorrowedLookup(global: *core.Object, function: *const by
 }
 
 fn globalOwnDataPropertyBorrowedLookup(global: *core.Object, atom_id: core.Atom) ?BorrowedGlobalDataLookup {
-    if (global.exotic != null) return null;
+    if (global.hasExoticMethods()) return null;
     for (global.shapeProps(), 0..) |prop, index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
@@ -844,7 +844,7 @@ fn globalWritableDataPropertyLookupAt(global: *core.Object, index: usize, atom_i
 }
 
 fn dataSlotAt(object: *core.Object, index: usize, atom_id: core.Atom) ?DataSlot {
-    if (object.exotic != null or index >= object.shapeProps().len) return null;
+    if (object.hasExoticMethods() or index >= object.shapeProps().len) return null;
     const prop = object.shapeProps()[index];
     const prop_flags = core.property.Flags.fromBits(prop.flags);
     if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.accessor) return null;

@@ -706,7 +706,7 @@ pub fn formatCapturedErrorStackStringValue(ctx: *core.JSContext, sites_value: co
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(ctx.runtime.memory.allocator);
 
-    const current_length: usize = if (sites.flags.is_array) @intCast(sites.length) else 0;
+    const current_length: usize = if (sites.flags.is_array) @intCast(sites.arrayLength()) else 0;
     const length = @min(current_length, site_count);
     var index: usize = 0;
     var emitted: usize = 0;
@@ -822,7 +822,7 @@ pub fn qjsStringFromCodePointArray(
     var units = std.ArrayList(u16).empty;
     defer units.deinit(ctx.runtime.memory.allocator);
     var index: u32 = 0;
-    while (index < array.length) : (index += 1) {
+    while (index < array.arrayLength()) : (index += 1) {
         const value = array.getProperty(core.atom.atomFromUInt32(index));
         defer value.free(ctx.runtime);
         const primitive = try toPrimitiveForNumber(ctx, output, global, value);
@@ -841,7 +841,7 @@ pub fn qjsStringFromCodePointArray(
 
 pub fn qjsStringFromCodePointDenseArray(rt: *core.JSRuntime, array: *core.Object) !?core.JSValue {
     if (array.arrayElementStorageMode() != .dense) return null;
-    const length: usize = @intCast(array.length);
+    const length: usize = @intCast(array.arrayLength());
     if (array.arrayElements().len >= length) {
         if (length == 0) return (try core.string.String.createAscii(rt, "")).value();
         const max_units = try std.math.mul(usize, length, 2);
@@ -879,7 +879,7 @@ pub fn qjsStringFromCodePointDenseArray(rt: *core.JSRuntime, array: *core.Object
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted) continue;
         const index = core.array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;
-        if (index >= array.length) continue;
+        if (index >= array.arrayLength()) continue;
         if (prop_flags.accessor) return null;
         const value = switch (array.properties[property_index].slot) {
             .data => |stored| stored,
@@ -3852,7 +3852,7 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
     matched: core.JSValue,
 ) !void {
     std.debug.assert(out.flags.is_array);
-    std.debug.assert(out.length == 0);
+    std.debug.assert(out.arrayLength() == 0);
     std.debug.assert(out.arrayElements().len == 0);
     std.debug.assert(out.arrayElementsCapacity() == 0);
 
@@ -3883,7 +3883,7 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
     out.arrayElementsSlot().* = elements[0..element_count];
     out.arrayElementsCapacitySlot().* = element_count;
     out.flags.may_have_indexed_properties = true;
-    out.length = @intCast(element_count);
+    out.setArrayLength(@intCast(element_count));
 }
 
 pub fn createRegExpMatchArrayNoCapturesFromValue(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: RegExpMatch, input_len: usize, has_indices: bool) !core.JSValue {
@@ -4389,7 +4389,7 @@ pub fn qjsArraySearchCall(
     const length = if (is_typed_array)
         try arrayMethodTypedArrayLength(ctx.runtime, object, is_typed_method)
     else if (object.flags.is_array)
-        @as(usize, @intCast(object.length))
+        @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
         defer length_value.free(ctx.runtime);

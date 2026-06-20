@@ -342,7 +342,7 @@ fn promiseAll(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*core.Ob
     out_val = out.value();
 
     var index: u32 = 0;
-    while (index < source.length) : (index += 1) {
+    while (index < source.arrayLength()) : (index += 1) {
         item_val = source.getProperty(core.atom.atomFromUInt32(index));
         defer {
             item_val.free(rt);
@@ -363,14 +363,14 @@ fn promiseAll(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*core.Ob
             try out.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(item_val, true, true, true));
         }
     }
-    out.length = source.length;
+    out.setArrayLength(source.arrayLength());
     return fulfilledWithPrototype(rt, out_val, prototype);
 }
 
 fn promiseRace(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*core.Object) !core.JSValue {
     const rt = ctx.runtime;
     const source = arrayObject(iterable) orelse return rejectedWithUnhandledPrototype(ctx, core.JSValue.undefinedValue(), prototype);
-    if (source.length == 0) return constructWithPrototype(rt, prototype);
+    if (source.arrayLength() == 0) return constructWithPrototype(rt, prototype);
     const item = source.getProperty(core.atom.atomFromUInt32(0));
     defer item.free(rt);
     if (promiseObject(item)) |promise| {
@@ -412,7 +412,7 @@ fn promiseAllSettled(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*
     out_val = out.value();
 
     var index: u32 = 0;
-    while (index < source.length) : (index += 1) {
+    while (index < source.arrayLength()) : (index += 1) {
         item_val = source.getProperty(core.atom.atomFromUInt32(index));
         defer {
             item_val.free(rt);
@@ -428,7 +428,7 @@ fn promiseAllSettled(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*
         }
         try out.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(record_val, true, true, true));
     }
-    out.length = source.length;
+    out.setArrayLength(source.arrayLength());
     return fulfilledWithPrototype(rt, out_val, prototype);
 }
 
@@ -462,7 +462,7 @@ fn promiseAny(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*core.Ob
     var has_fulfillment = false;
     var error_count: u32 = 0;
     var index: u32 = 0;
-    while (index < source.length) : (index += 1) {
+    while (index < source.arrayLength()) : (index += 1) {
         item_val = source.getProperty(core.atom.atomFromUInt32(index));
         defer {
             item_val.free(rt);
@@ -491,7 +491,7 @@ fn promiseAny(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*core.Ob
     if (has_fulfillment) {
         return fulfilledWithPrototype(rt, fulfillment_val, prototype);
     }
-    errors.length = error_count;
+    errors.setArrayLength(error_count);
     const aggregate_error = try aggregateErrorValue(ctx, global, errors);
     defer aggregate_error.free(rt);
     return rejectedWithUnhandledPrototype(ctx, aggregate_error, prototype);
@@ -508,14 +508,14 @@ test "promise all family preserves direct symbol payload ownership" {
     var all_source_alive = true;
     defer if (all_source_alive) all_source.value().free(rt);
     try all_source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.symbol(all_symbol), true, true, true));
-    all_source.length = 1;
+    all_source.setArrayLength(1);
 
     const settled_symbol = try rt.atoms.newValueSymbol("gc-promise-all-settled-symbol");
     const settled_source = try core.Object.createArray(rt, null);
     var settled_source_alive = true;
     defer if (settled_source_alive) settled_source.value().free(rt);
     try settled_source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.symbol(settled_symbol), true, true, true));
-    settled_source.length = 1;
+    settled_source.setArrayLength(1);
 
     const any_symbol = try rt.atoms.newValueSymbol("gc-promise-any-rejection-symbol");
     const rejected_value = try rejectedWithPrototype(rt, core.JSValue.symbol(any_symbol), null);
@@ -525,7 +525,7 @@ test "promise all family preserves direct symbol payload ownership" {
     var any_source_alive = true;
     defer if (any_source_alive) any_source.value().free(rt);
     try any_source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(rejected_value, true, true, true));
-    any_source.length = 1;
+    any_source.setArrayLength(1);
 
     const all_promise_value = try promiseAll(ctx, all_source.value(), null);
     var all_promise_alive = true;
@@ -727,7 +727,7 @@ test "aggregateErrorValue roots errors array while creating aggregate error" {
     defer if (errors_alive) errors.value().free(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-aggregate-errors-symbol");
     try errors.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.symbol(symbol_atom), true, true, true));
-    errors.length = 1;
+    errors.setArrayLength(1);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);

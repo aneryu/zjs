@@ -553,7 +553,7 @@ pub fn groupByWithCallbackHost(
     const source = try expectObject(args[0]);
     if (!source.flags.is_array) return error.TypeError;
     var index: u32 = 0;
-    while (index < source.length) : (index += 1) {
+    while (index < source.arrayLength()) : (index += 1) {
         const item = source.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(rt);
         try addGroupedItem(rt, map, args[1], host, item, index);
@@ -1007,17 +1007,17 @@ fn assertAndShiftExpected(rt: *core.JSRuntime, globals: []globals_mod.Slot, actu
     }
     defer expects_value.free(rt);
     const expects = try expectObject(expects_value);
-    if (!expects.flags.is_array or expects.length == 0) return error.TypeError;
+    if (!expects.flags.is_array or expects.arrayLength() == 0) return error.TypeError;
     const expected = expects.getProperty(core.atom.atomFromUInt32(0));
     defer expected.free(rt);
     if (!actual.sameValue(expected)) return error.JSException;
     var index: u32 = 1;
-    while (index < expects.length) : (index += 1) {
+    while (index < expects.arrayLength()) : (index += 1) {
         const next = expects.getProperty(core.atom.atomFromUInt32(index));
         defer next.free(rt);
         try expects.defineOwnProperty(rt, core.atom.atomFromUInt32(index - 1), core.Descriptor.data(next, true, true, true));
     }
-    expects.length -= 1;
+    expects.setArrayLength(expects.arrayLength() - 1);
 }
 
 fn getGlobalObjectProperty(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8) !core.JSValue {
@@ -1518,7 +1518,7 @@ fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, host: CallbackHost) !
         var values: []core.JSValue = &.{};
         errdefer freeValueList(rt, values);
         var index: u32 = 0;
-        while (index < iterable.length) : (index += 1) {
+        while (index < iterable.arrayLength()) : (index += 1) {
             const value = iterable.getProperty(core.atom.atomFromUInt32(index));
             defer value.free(rt);
             try appendValue(rt, &values, value);
@@ -1623,7 +1623,7 @@ fn appendGlobalString(rt: *core.JSRuntime, globals: []globals_mod.Slot, array_na
     if (!array.flags.is_array) return error.TypeError;
     const value = try makeString(rt, bytes);
     defer value.free(rt);
-    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.length), core.Descriptor.data(value, true, true, true));
+    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.arrayLength()), core.Descriptor.data(value, true, true, true));
 }
 
 fn addStringToGlobalSet(rt: *core.JSRuntime, globals: []globals_mod.Slot, set_name: []const u8, bytes: []const u8) !void {
@@ -1842,7 +1842,7 @@ fn addGroupedItem(
 
 fn appendArrayValue(rt: *core.JSRuntime, array: *core.Object, value: core.JSValue) !void {
     if (!array.flags.is_array) return error.TypeError;
-    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.length), core.Descriptor.data(value, true, true, true));
+    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.arrayLength()), core.Descriptor.data(value, true, true, true));
 }
 
 fn stringElementAt(rt: *core.JSRuntime, string_object: *core.string.String, index: *usize) !core.JSValue {
@@ -1993,7 +1993,6 @@ fn stringFromValue(value: core.JSValue) ?*core.string.String {
     const header = value.refHeader() orelse return null;
     return @fieldParentPtr("header", header);
 }
-
 
 // === Realm-aware Map/Set/WeakMap method bodies (relocated from exec) ===
 //
@@ -2435,7 +2434,7 @@ fn qjsSetLikeKeysIterator(
     const next_method = try object_ops.getValueProperty(ctx, output, global, source, next_key, caller_function, caller_frame);
     defer next_method.free(ctx.runtime);
     if (!call_runtime.isCallableValue(next_method)) return error.TypeError;
-    const cached = iterator_object.cachedIteratorNextSlot();
+    const cached = try iterator_object.cachedIteratorNextSlot();
     try iterator_object.setOptionalValueSlot(ctx.runtime, cached, next_method.dup());
     return source;
 }
@@ -2937,7 +2936,7 @@ fn qjsMapAppendGroupByValue(
         if (!group.flags.is_array) return error.TypeError;
         try group.defineOwnProperty(
             ctx.runtime,
-            core.atom.atomFromUInt32(group.length),
+            core.atom.atomFromUInt32(group.arrayLength()),
             core.Descriptor.data(value, true, true, true),
         );
         return;
@@ -2947,7 +2946,7 @@ fn qjsMapAppendGroupByValue(
     errdefer core.Object.destroyFromHeader(ctx.runtime, &group.header);
     try group.defineOwnProperty(
         ctx.runtime,
-        core.atom.atomFromUInt32(group.length),
+        core.atom.atomFromUInt32(group.arrayLength()),
         core.Descriptor.data(value, true, true, true),
     );
     const set_result = try methodCall(ctx.runtime, map_value, 1, &.{ key, group.value() });

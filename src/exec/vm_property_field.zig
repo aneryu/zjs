@@ -411,7 +411,7 @@ pub inline fn qjsPutFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_
 }
 
 inline fn qjsFieldObjectNeedsSlow(rt: *core.JSRuntime, object: *const core.Object, atom_id: core.Atom) bool {
-    if (object.flags.is_proxy or object.proxyTarget() != null or object.exotic != null) return true;
+    if (object.flags.is_proxy or object.proxyTarget() != null or object.hasExoticMethods()) return true;
     if (object.flags.is_array and (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null)) return true;
     if (core.object.isTypedArrayObject(object)) return true;
     if (object.class_id == core.class.ids.regexp and atom_id == core.atom.ids.lastIndex and object.regexpLastIndex() != null) return true;
@@ -420,7 +420,7 @@ inline fn qjsFieldObjectNeedsSlow(rt: *core.JSRuntime, object: *const core.Objec
 }
 
 inline fn qjsPutFieldObjectNeedsSlow(object: *const core.Object, atom_id: core.Atom) bool {
-    if (object.flags.is_proxy or object.proxyTarget() != null or object.exotic != null) return true;
+    if (object.flags.is_proxy or object.proxyTarget() != null or object.hasExoticMethods()) return true;
     if (object.flags.is_array) return true;
     if (core.object.isTypedArrayObject(object)) return true;
     if (object.class_id == core.class.ids.regexp and atom_id == core.atom.ids.lastIndex and object.regexpLastIndex() != null) return true;
@@ -460,10 +460,10 @@ fn setArrayLengthForPutFieldFastPath(
     const length = value.asInt32() orelse return false;
     if (length < 0) return false;
     const object = objectFromValue(receiver) orelse return false;
-    if (!object.flags.is_array or object.exotic != null or object.proxyTarget() != null) return false;
+    if (!object.flags.is_array or object.hasExoticMethods() or object.proxyTarget() != null) return false;
     if (!object.flags.length_writable) return false;
     const new_len: u32 = @intCast(length);
-    if (new_len < object.length) {
+    if (new_len < object.arrayLength()) {
         if (object.arrayElementStorageMode() != .dense) return false;
         for (object.shapeProps()) |prop| {
             if (core.property.Flags.fromBits(prop.flags).deleted) continue;
@@ -471,10 +471,10 @@ fn setArrayLengthForPutFieldFastPath(
             if (index >= new_len) return false;
         }
         object.truncateArrayElements(rt, new_len);
-    } else if (new_len > object.length) {
+    } else if (new_len > object.arrayLength()) {
         return false;
     }
-    object.length = new_len;
+    object.setArrayLength(new_len);
     return true;
 }
 
@@ -859,8 +859,8 @@ fn tryFuseArrayPushCallFromField2(
     if (!fastArrayPrototypeMethodIsDefault(receiver, method_atom, @intFromEnum(method_ids.array.PrototypeMethod.push))) return false;
 
     const object = objectFromValue(receiver) orelse return false;
-    if (object.proxyTarget() != null or object.exotic != null) return false;
-    if (object.length >= core.array.max_array_length) return false;
+    if (object.proxyTarget() != null or object.hasExoticMethods()) return false;
+    if (object.arrayLength() >= core.array.max_array_length) return false;
 
     const code = function.code;
     const call_arg = borrowedSimpleCallArg(frame, function, frame.pc) orelse return false;
@@ -868,7 +868,7 @@ fn tryFuseArrayPushCallFromField2(
     if (call_pc + 3 > code.len or code[call_pc] != op.call_method) return false;
     if (readInt(u16, code[call_pc + 1 ..][0..2]) != 1) return false;
 
-    const index = object.length;
+    const index = object.arrayLength();
     if (!try object.appendDenseArrayIndex(ctx.runtime, index, core.atom.atomFromUInt32(index), call_arg.value)) return false;
     const result = array_ops.lengthIndexValue(index + 1);
 

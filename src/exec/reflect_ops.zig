@@ -194,7 +194,7 @@ const ReflectConstructArguments = struct {
 fn reflectConstructArgumentList(rt: *core.JSRuntime, value: core.JSValue) ![]core.JSValue {
     const object = try expectObjectArg(value);
     if (!object.flags.is_array) return error.TypeError;
-    const out = try rt.memory.alloc(core.JSValue, object.length);
+    const out = try rt.memory.alloc(core.JSValue, object.arrayLength());
     errdefer rt.memory.free(core.JSValue, out);
     var rooted_out: []core.JSValue = out[0..0];
     var out_root = ValueSliceRoot{};
@@ -205,7 +205,7 @@ fn reflectConstructArgumentList(rt: *core.JSRuntime, value: core.JSValue) ![]cor
         for (out[0..initialized]) |item| item.free(rt);
     }
     var index: u32 = 0;
-    while (index < object.length) : (index += 1) {
+    while (index < object.arrayLength()) : (index += 1) {
         out[index] = object.getProperty(core.atom.atomFromUInt32(index));
         initialized += 1;
         rooted_out = out[0..initialized];

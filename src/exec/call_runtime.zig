@@ -2105,7 +2105,7 @@ fn decodeSimpleConstructorArgGet(code: []const u8, pc: *usize) ?u16 {
 fn prototypeChainBlocksSimpleFieldStore(prototype: *core.Object, pattern: SimpleFieldConstructorPattern) bool {
     var current: ?*core.Object = prototype;
     while (current) |object| {
-        if (object.exotic != null or object.proxyTarget() != null) return true;
+        if (object.hasExoticMethods() or object.proxyTarget() != null) return true;
         for (pattern.atoms[0..pattern.len]) |atom_id| {
             if (object.hasOwnProperty(atom_id)) return true;
         }
@@ -2413,7 +2413,7 @@ pub fn qjsCollectIteratorValues(
             return err;
         };
     }
-    values.length = index;
+    values.setArrayLength(index);
     return values_value;
 }
 
@@ -2592,7 +2592,7 @@ pub fn qjsDestructuringRest(
                 value = core.JSValue.undefinedValue();
                 break;
             }
-            try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(out.length), core.Descriptor.data(value, true, true, true));
+            try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(out.arrayLength()), core.Descriptor.data(value, true, true, true));
             value.free(ctx.runtime);
             value = core.JSValue.undefinedValue();
             current_index += 1;
@@ -2619,9 +2619,9 @@ pub fn qjsDestructuringRest(
         defer value.free(ctx.runtime);
 
         var index = start_index;
-        while (index < object.length) : (index += 1) {
+        while (index < object.arrayLength()) : (index += 1) {
             value = object.getProperty(core.atom.atomFromUInt32(index));
-            try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(out.length), core.Descriptor.data(value, true, true, true));
+            try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(out.arrayLength()), core.Descriptor.data(value, true, true, true));
             value.free(ctx.runtime);
             value = core.JSValue.undefinedValue();
         }
@@ -2782,7 +2782,7 @@ pub fn cacheIteratorNextMethodMode(
     const next_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
     defer next_method.free(ctx.runtime);
     if (require_callable and !isCallableValue(next_method)) return error.TypeError;
-    const cached = iterator.cachedIteratorNextSlot();
+    const cached = try iterator.cachedIteratorNextSlot();
     try iterator.setOptionalValueSlot(ctx.runtime, cached, next_method.dup());
 }
 
@@ -7035,7 +7035,7 @@ pub fn qjsReflectOwnKeysCall(
     for (keys) |key| {
         const key_value = try object_ops.proxyTrapKeyValue(ctx.runtime, key);
         defer key_value.free(ctx.runtime);
-        try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(out.length), core.Descriptor.data(key_value, true, true, true));
+        try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(out.arrayLength()), core.Descriptor.data(key_value, true, true, true));
     }
     return out.value();
 }

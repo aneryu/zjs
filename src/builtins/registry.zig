@@ -1239,7 +1239,7 @@ fn bindNativeRecordByName(
 }
 
 fn bindAutoInitNativeRecordByAtom(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, native_id: i32) bool {
-    if (object.exotic != null) return false;
+    if (object.hasExoticMethods()) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
         switch (entry.slot) {
@@ -1255,7 +1255,7 @@ fn bindAutoInitNativeRecordByAtom(rt: *core.JSRuntime, object: *core.Object, ato
 }
 
 fn tagAutoInitArrayBuiltinByAtom(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, marker: core.property.ArrayBuiltinMarker) bool {
-    if (object.exotic != null) return false;
+    if (object.hasExoticMethods()) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
         switch (entry.slot) {
@@ -1277,7 +1277,7 @@ fn setAutoInitArrayBuiltinMarker(info: *core.property.AutoInit, marker: core.pro
 }
 
 fn tagAutoInitTypedArrayBuiltinByAtom(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, marker: core.property.TypedArrayBuiltinMarker) bool {
-    if (object.exotic != null) return false;
+    if (object.hasExoticMethods()) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
         switch (entry.slot) {
@@ -1299,7 +1299,7 @@ fn setAutoInitTypedArrayBuiltinMarker(info: *core.property.AutoInit, marker: cor
 }
 
 fn tagAutoInitArrayIteratorKindByAtom(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, kind: u8) bool {
-    if (object.exotic != null) return false;
+    if (object.hasExoticMethods()) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
         switch (entry.slot) {
@@ -1321,7 +1321,7 @@ fn setAutoInitArrayIteratorKind(info: *core.property.AutoInit, kind: u8) bool {
 }
 
 fn tagAutoInitIteratorIdentityByAtom(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) bool {
-    if (object.exotic != null) return false;
+    if (object.hasExoticMethods()) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
         switch (entry.slot) {
@@ -1341,7 +1341,7 @@ fn tagAutoInitIteratorIdentityByAtom(rt: *core.JSRuntime, object: *core.Object, 
 }
 
 fn tagAutoInitCollectionOwnerByAtom(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, owner_class: core.ClassId) bool {
-    if (object.exotic != null) return false;
+    if (object.hasExoticMethods()) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
         switch (entry.slot) {
@@ -1363,7 +1363,7 @@ fn setAutoInitCollectionOwner(info: *core.property.AutoInit, owner_class: core.C
 }
 
 fn tagAutoInitDisposableStackMethodByAtom(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, method_id: u8) bool {
-    if (object.exotic != null) return false;
+    if (object.hasExoticMethods()) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
         switch (entry.slot) {
@@ -1385,7 +1385,7 @@ fn setAutoInitDisposableStackMethod(info: *core.property.AutoInit, method_id: u8
 }
 
 fn tagAutoInitAsyncDisposableStackMethodByAtom(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, method_id: u8) bool {
-    if (object.exotic != null) return false;
+    if (object.hasExoticMethods()) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
         switch (entry.slot) {

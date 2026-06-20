@@ -1759,7 +1759,7 @@ pub fn qjsPromiseCapability(
 
 pub fn qjsPromiseSetArrayIndex(rt: *core.JSRuntime, array: *core.Object, index: u32, value: core.JSValue) !void {
     try property_ops.defineDataProperty(rt, array, core.atom.atomFromUInt32(index), value);
-    if (array.length <= index) array.length = index + 1;
+    if (array.arrayLength() <= index) array.setArrayLength(index + 1);
 }
 
 pub fn qjsPromiseKeyedResult(rt: *core.JSRuntime, keys: *core.Object, values: *core.Object) !core.JSValue {
@@ -1788,7 +1788,7 @@ pub fn qjsPromiseKeyedResult(rt: *core.JSRuntime, keys: *core.Object, values: *c
     result.flags.null_prototype = true;
 
     var index: u32 = 0;
-    while (index < keys.length) : (index += 1) {
+    while (index < keys.arrayLength()) : (index += 1) {
         const index_atom = core.atom.atomFromUInt32(index);
         key_value = keys.getProperty(index_atom);
         defer {

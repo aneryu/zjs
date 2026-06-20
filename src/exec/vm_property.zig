@@ -1608,9 +1608,9 @@ pub fn frameHasVarRefBinding(function: *const bytecode.Bytecode, frame: *const f
 
 pub fn denseArrayModFieldInt32Increments(rt: *core.JSRuntime, array_value: core.JSValue, field_atom: core.Atom, modulus: usize) ?DenseArrayModFieldIncrements {
     const array_object = objectFromValue(array_value) orelse return null;
-    if (array_object.proxyTarget() != null or array_object.exotic != null) return null;
+    if (array_object.proxyTarget() != null or array_object.hasExoticMethods()) return null;
     if (!array_object.flags.is_array or array_object.arrayElementStorageMode() != .dense) return null;
-    if (modulus > @as(usize, @intCast(array_object.length))) return null;
+    if (modulus > @as(usize, @intCast(array_object.arrayLength()))) return null;
     const elements = array_object.arrayElements();
     if (modulus > elements.len) return null;
     var increments = DenseArrayModFieldIncrements{ .values = undefined, .len = modulus };
@@ -1668,7 +1668,7 @@ fn autoInitCollectionNativeBuiltinMatches(info: core.property.AutoInit, expected
 }
 
 pub fn ownPrototypeEntryIsNativeBuiltinDefault(proto: *const core.Object, atom_id: core.Atom, domain: core.function.NativeBuiltinDomain, expected_id: u32) bool {
-    if (proto.exotic != null) return false;
+    if (proto.hasExoticMethods()) return false;
     for (proto.shapeProps(), 0..) |prop, property_index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
@@ -1683,7 +1683,7 @@ pub fn ownPrototypeEntryIsNativeBuiltinDefault(proto: *const core.Object, atom_i
 }
 
 fn ownPrototypeEntryIsCollectionNativeBuiltinDefault(proto: *const core.Object, atom_id: core.Atom, expected_id: u32, owner_class: core.ClassId) bool {
-    if (proto.exotic != null) return false;
+    if (proto.hasExoticMethods()) return false;
     for (proto.shapeProps(), 0..) |prop, property_index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
@@ -1735,7 +1735,7 @@ pub fn fastDenseArrayElementValue(value: core.JSValue, key: core.JSValue) ?core.
     const index_i32 = key.asInt32() orelse return null;
     if (index_i32 < 0) return null;
     const object = objectFromValue(value) orelse return null;
-    if (object.proxyTarget() != null or object.exotic != null) return null;
+    if (object.proxyTarget() != null or object.hasExoticMethods()) return null;
     if (!object.flags.is_array or object.arrayElementStorageMode() != .dense) return null;
     const index: u32 = @intCast(index_i32);
     const atom_id = core.atom.atomFromUInt32(index);

@@ -1521,7 +1521,7 @@ test "cached iterator next clear defers value finalizer reentry" {
     const object = try core.Object.create(rt, core.class.ids.iterator, null);
     defer object.value().free(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
-    object.cachedIteratorNextSlot().* = value.value().dup();
+    (try object.cachedIteratorNextSlot()).* = value.value().dup();
     value.value().free(rt);
 
     payload_finalizer_calls = 0;
@@ -5715,12 +5715,12 @@ test "array length tracks sparse indices and truncation" {
     defer rt.atoms.free(index_1);
 
     try array_obj.defineOwnProperty(rt, index_5, core.Descriptor.data(core.JSValue.int32(5), true, true, true));
-    try std.testing.expectEqual(@as(u32, 6), array_obj.length);
+    try std.testing.expectEqual(@as(u32, 6), array_obj.arrayLength());
     try array_obj.defineOwnProperty(rt, index_1, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
-    try std.testing.expectEqual(@as(u32, 6), array_obj.length);
+    try std.testing.expectEqual(@as(u32, 6), array_obj.arrayLength());
 
     try array_obj.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), false, false, false));
-    try std.testing.expectEqual(@as(u32, 2), array_obj.length);
+    try std.testing.expectEqual(@as(u32, 2), array_obj.arrayLength());
     try std.testing.expect(!array_obj.hasOwnProperty(index_5));
     try std.testing.expect(array_obj.hasOwnProperty(index_1));
     try std.testing.expectError(error.ReadOnly, array_obj.defineOwnProperty(rt, index_5, core.Descriptor.data(core.JSValue.int32(5), true, true, true)));
@@ -5789,16 +5789,18 @@ test "exotic dispatch hooks are called without builtin shortcuts" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const obj = try core.Object.create(rt, core.class.ids.object, null);
-    defer obj.value().free(rt);
-    const exotic = try rt.memory.create(core.object.ExoticMethods);
-    exotic.* = .{
+    const exotic_id = rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(exotic_id, .{ .class_name = "ExoticDispatchHooksForTest" });
+    const exotic = core.object.ExoticMethods{
         .get_own_property = exoticGet,
         .define_own_property = exoticDefine,
         .delete_property = exoticDelete,
         .own_keys = exoticOwnKeys,
     };
-    obj.exotic = exotic;
+    core.Object.installClassExoticMethods(rt, exotic_id, &exotic);
+
+    const obj = try core.Object.create(rt, exotic_id, null);
+    defer obj.value().free(rt);
 
     exotic_define_calls = 0;
     exotic_delete_calls = 0;

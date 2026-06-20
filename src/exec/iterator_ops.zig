@@ -607,10 +607,10 @@ fn fastArrayForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_in
         return true;
     };
     const target = objectFromValue(target_value) orelse return false;
-    if (!target.flags.is_array or target.exotic != null or target.proxyTarget() != null) return false;
+    if (!target.flags.is_array or target.hasExoticMethods() or target.proxyTarget() != null) return false;
 
     const index = iterator.iteratorIndexSlot().*;
-    const length: usize = @intCast(target.length);
+    const length: usize = @intCast(target.arrayLength());
     if (index >= length) {
         try stack.reserveAdditional(2);
         iterator.clearOptionalValueSlot(ctx.runtime, iterator.iteratorTargetSlot());
@@ -681,7 +681,7 @@ pub noinline fn forInNext(
         const index_value = iterator.getProperty(index_key);
         defer index_value.free(ctx.runtime);
         const index: u32 = @intCast(index_value.asInt32() orelse 0);
-        if (index >= iterator.length) {
+        if (index >= iterator.iteratorLength()) {
             try stack.reserveAdditional(2);
             stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
             stack.pushOwnedAssumeCapacity(core.JSValue.boolean(true));
@@ -727,7 +727,7 @@ fn simpleForInNext(
 
     while (true) {
         const index = iterator.iteratorIndexSlot().*;
-        if (index >= iterator.length) {
+        if (index >= iterator.iteratorLength()) {
             try stack.reserveAdditional(2);
             iterator.clearOptionalValueSlot(ctx.runtime, iterator.iteratorTargetSlot());
             stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
@@ -917,7 +917,7 @@ pub fn arrayIteratorNext(
         if (try core.object.typedArrayDetached(target)) return error.TypeError;
         if (try core.object.typedArrayOutOfBounds(target)) return error.TypeError;
         break :blk core.object.typedArrayLength(ctx.runtime, target) catch return error.TypeError;
-    } else if (target.flags.is_array) target.length else blk: {
+    } else if (target.flags.is_array) target.arrayLength() else blk: {
         const length_value = try object_ops.getValueProperty(ctx, output, global, target_value, core.atom.ids.length, null, null);
         defer length_value.free(ctx.runtime);
         break :blk @min(try coercion_ops.toLengthIndex(ctx, output, global, length_value), std.math.maxInt(u32));
@@ -1011,7 +1011,7 @@ test "arrayIteratorValue roots entry value while creating pair array" {
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-iterator-entry-symbol");
     try target.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.symbol(symbol_atom), true, true, true));
-    target.length = 1;
+    target.setArrayLength(1);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -2137,7 +2137,7 @@ fn qjsIteratorToArrayCall(
         const done_value = try object_ops.getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("done", .string).?, caller_function, caller_frame);
         defer done_value.free(ctx.runtime);
         if (coercion_ops.valueTruthy(done_value)) {
-            out.length = index;
+            out.setArrayLength(index);
             return out.value();
         }
         const value = try object_ops.getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("value", .string).?, caller_function, caller_frame);
@@ -2619,7 +2619,7 @@ fn qjsIteratorZipHelperNext(
         return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     }
 
-    if (keys == null) results.length = @intCast(count);
+    if (keys == null) results.setArrayLength(@intCast(count));
     helper.iteratorZipStateSlot().* = 1;
     return try call_runtime.createIteratorResult(ctx.runtime, global, results_value, false);
 }
@@ -2690,7 +2690,7 @@ pub fn qjsIteratorHelperNext(
                 }
 
                 const records = objectFromValue(iterator) orelse return error.TypeError;
-                if ((helper.iteratorIndexSlot().*) >= records.length / 2) {
+                if ((helper.iteratorIndexSlot().*) >= records.arrayLength() / 2) {
                     try qjsIteratorHelperClear(ctx.runtime, helper);
                     return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
                 }

@@ -2074,7 +2074,7 @@ test "constructValue AggregateError releases copied errors array owner" {
     defer source.value().free(rt);
     try source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     try source.defineOwnProperty(rt, core.atom.atomFromUInt32(1), core.Descriptor.data(core.JSValue.int32(2), true, true, true));
-    source.length = 2;
+    source.setArrayLength(2);
     try source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), true, false, false));
 
     const baseline_objects = rt.gc.liveCount();
@@ -2194,7 +2194,7 @@ test "array static native builtin records ignore dispatch names" {
     defer direct_from_result.free(rt);
     const direct_from_array: *core.Object = @fieldParentPtr("header", direct_from_result.refHeader().?);
     try std.testing.expect(direct_from_array.flags.is_array);
-    try std.testing.expectEqual(@as(u32, 1), direct_from_array.length);
+    try std.testing.expectEqual(@as(u32, 1), direct_from_array.arrayLength());
 
     const fake_is_array_key = try rt.internAtom("fakeArrayIsArray");
     defer rt.atoms.free(fake_is_array_key);
@@ -2977,7 +2977,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     defer split_result.free(rt);
     const split_array: *core.Object = @fieldParentPtr("header", split_result.refHeader().?);
     try std.testing.expect(split_array.flags.is_array);
-    try std.testing.expectEqual(@as(u32, 2), split_array.length);
+    try std.testing.expectEqual(@as(u32, 2), split_array.arrayLength());
 
     const fake_search_key = try rt.internAtom("fakeRegExpSearch");
     defer rt.atoms.free(fake_search_key);
@@ -4960,7 +4960,7 @@ const ReflectActiveRootSymbolProbe = struct {
 
 fn reflectTestSetArrayIndex(rt: *core.JSRuntime, array: *core.Object, index: u32, value: core.JSValue) !void {
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, true, true, true));
-    if (array.length <= index) array.length = index + 1;
+    if (array.arrayLength() <= index) array.setArrayLength(index + 1);
 }
 
 test "reflect construct roots argument list while resolving prototype" {

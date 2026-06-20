@@ -302,7 +302,7 @@ pub fn constructConstructorWithPrototype(rt: *core.JSRuntime, args: []const core
         const length = arrayLengthFromNumber(args[0]) orelse return error.RangeError;
         const object = try core.Object.createArray(rt, prototype);
         errdefer core.Object.destroyFromHeader(rt, &object.header);
-        object.length = length;
+        object.setArrayLength(length);
         if (length != 0) object.arrayStorageModeSlot().* = .sparse;
         return object.value();
     }
@@ -361,7 +361,7 @@ pub fn join(rt: *core.JSRuntime, array_value: core.JSValue, separator_value: cor
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
     var index: u32 = 0;
-    while (index < object.length) : (index += 1) {
+    while (index < object.arrayLength()) : (index += 1) {
         if (index != 0) try buffer.appendSlice(rt.memory.allocator, separator.items);
         const item = object.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(rt);
@@ -748,7 +748,7 @@ fn filterEven(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     errdefer core.Object.destroyFromHeader(rt, &out.header);
     var out_index: u32 = 0;
     var index: u32 = 0;
-    while (index < array.length) : (index += 1) {
+    while (index < array.arrayLength()) : (index += 1) {
         const item = array.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(rt);
         if (item.asInt32()) |n| {
@@ -765,7 +765,7 @@ fn reduceSum(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     const array = try expectArray(array_value);
     var sum: i32 = 0;
     var index: u32 = 0;
-    while (index < array.length) : (index += 1) {
+    while (index < array.arrayLength()) : (index += 1) {
         const item = array.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(rt);
         sum += item.asInt32() orelse 0;
@@ -777,7 +777,7 @@ fn someEven(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     const array = try expectArray(array_value);
     var found = false;
     var index: u32 = 0;
-    while (index < array.length) : (index += 1) {
+    while (index < array.arrayLength()) : (index += 1) {
         const item = array.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(rt);
         if (item.asInt32()) |n| found = found or @mod(n, 2) == 0;
@@ -789,7 +789,7 @@ fn everyPositive(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     const array = try expectArray(array_value);
     var ok = true;
     var index: u32 = 0;
-    while (index < array.length) : (index += 1) {
+    while (index < array.arrayLength()) : (index += 1) {
         const item = array.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(rt);
         if ((item.asInt32() orelse 0) <= 0) ok = false;
@@ -808,7 +808,7 @@ fn indexSearch(rt: *core.JSRuntime, value: core.JSValue, needle: core.JSValue, m
     const array = try expectArray(value);
     var found_index: i32 = -1;
     if (array.arrayElements().len != 0) {
-        const dense_len: u32 = @intCast(@min(array.arrayElements().len, @as(usize, @intCast(array.length))));
+        const dense_len: u32 = @intCast(@min(array.arrayElements().len, @as(usize, @intCast(array.arrayLength()))));
         var dense_index: u32 = 0;
         while (dense_index < dense_len) : (dense_index += 1) {
             const item = array.arrayElements()[@intCast(dense_index)];
@@ -823,7 +823,7 @@ fn indexSearch(rt: *core.JSRuntime, value: core.JSValue, needle: core.JSValue, m
                 else => core.JSValue.int32(found_index),
             };
         }
-        if (dense_len >= array.length) {
+        if (dense_len >= array.arrayLength()) {
             return switch (mode) {
                 .includes => core.JSValue.boolean(found_index >= 0),
                 else => core.JSValue.int32(found_index),
@@ -831,7 +831,7 @@ fn indexSearch(rt: *core.JSRuntime, value: core.JSValue, needle: core.JSValue, m
         }
     }
     var index: u32 = 0;
-    while (index < array.length) : (index += 1) {
+    while (index < array.arrayLength()) : (index += 1) {
         const item = array.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(rt);
         if (valuesEqual(item, needle)) {
@@ -839,7 +839,7 @@ fn indexSearch(rt: *core.JSRuntime, value: core.JSValue, needle: core.JSValue, m
             if (mode != .last) break;
         }
     }
-    if (needle.isUndefined() and mode != .includes) found_index = @as(i32, @intCast(array.length)) - 1;
+    if (needle.isUndefined() and mode != .includes) found_index = @as(i32, @intCast(array.arrayLength())) - 1;
     return switch (mode) {
         .includes => core.JSValue.boolean(found_index >= 0),
         else => core.JSValue.int32(found_index),
@@ -863,21 +863,21 @@ fn stringSearchValue(rt: *core.JSRuntime, value: core.JSValue, needle: core.JSVa
 fn at(_: *core.JSRuntime, array_value: core.JSValue, index_value: core.JSValue) !core.JSValue {
     const array = try expectArray(array_value);
     var index = index_value.asInt32() orelse 0;
-    if (index < 0) index = @as(i32, @intCast(array.length)) + index;
-    if (index < 0 or index >= array.length) return core.JSValue.undefinedValue();
+    if (index < 0) index = @as(i32, @intCast(array.arrayLength())) + index;
+    if (index < 0 or index >= array.arrayLength()) return core.JSValue.undefinedValue();
     return array.getProperty(core.atom.atomFromUInt32(@intCast(index)));
 }
 
 fn slice(rt: *core.JSRuntime, array_value: core.JSValue, start_value: core.JSValue) !core.JSValue {
     const array = try expectArray(array_value);
     var start = start_value.asInt32() orelse 0;
-    if (start < 0) start = @as(i32, @intCast(array.length)) + start;
+    if (start < 0) start = @as(i32, @intCast(array.arrayLength())) + start;
     if (start < 0) start = 0;
     const out = try core.Object.createArray(rt, null);
     errdefer core.Object.destroyFromHeader(rt, &out.header);
     var out_index: u32 = 0;
     var index: u32 = @intCast(start);
-    while (index < array.length) : (index += 1) {
+    while (index < array.arrayLength()) : (index += 1) {
         const item = array.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(rt);
         try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out_index), core.Descriptor.data(item, true, true, true));
@@ -922,15 +922,15 @@ fn splice(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSV
 fn push(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const array = try expectArray(array_value);
     for (args) |item| {
-        try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.length), core.Descriptor.data(item, true, true, true));
+        try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.arrayLength()), core.Descriptor.data(item, true, true, true));
     }
-    return core.JSValue.int32(@intCast(array.length));
+    return core.JSValue.int32(@intCast(array.arrayLength()));
 }
 
 fn pop(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     const array = try expectArray(array_value);
-    if (array.length == 0) return core.JSValue.undefinedValue();
-    const index = array.length - 1;
+    if (array.arrayLength() == 0) return core.JSValue.undefinedValue();
+    const index = array.arrayLength() - 1;
     const key = core.atom.atomFromUInt32(index);
     const value = array.getProperty(key);
     _ = array.deleteProperty(rt, key);
@@ -942,10 +942,10 @@ fn pop(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
 /// (`quickjs.c:42497-42547`) for ordinary arrays.
 fn reverse(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     const array = try expectArray(array_value);
-    if (array.length <= 1) return array_value.dup();
+    if (array.arrayLength() <= 1) return array_value.dup();
 
     var lower: u32 = 0;
-    var upper: u32 = array.length - 1;
+    var upper: u32 = array.arrayLength() - 1;
     while (lower < upper) : ({
         lower += 1;
         upper -= 1;
@@ -991,7 +991,7 @@ fn sort(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSVal
     }
 
     var index: u32 = 0;
-    while (index < array.length) : (index += 1) {
+    while (index < array.arrayLength()) : (index += 1) {
         const value = array.getProperty(core.atom.atomFromUInt32(index));
         if (value.isUndefined()) {
             value.free(rt);
@@ -1019,7 +1019,7 @@ fn sort(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSVal
     }.lessThan);
 
     index = 0;
-    while (index < array.length) : (index += 1) {
+    while (index < array.arrayLength()) : (index += 1) {
         _ = array.deleteProperty(rt, core.atom.atomFromUInt32(index));
     }
     for (entries.items, 0..) |entry, out_index| {
@@ -1070,7 +1070,7 @@ fn concatAppend(rt: *core.JSRuntime, out: *core.Object, next_index: *u32, value:
         const object: *core.Object = @fieldParentPtr("header", header);
         if (object.flags.is_array) {
             var index: u32 = 0;
-            while (index < object.length) : (index += 1) {
+            while (index < object.arrayLength()) : (index += 1) {
                 const item = object.getProperty(core.atom.atomFromUInt32(index));
                 defer item.free(rt);
                 if (!item.isUndefined()) {
@@ -1109,7 +1109,7 @@ fn expectArrayIteratorTarget(value: core.JSValue) !*core.Object {
 }
 
 fn arrayIteratorTargetLength(rt: *core.JSRuntime, object: *core.Object) u32 {
-    if (object.flags.is_array) return object.length;
+    if (object.flags.is_array) return object.arrayLength();
     if (buffer_builtin.isTypedArrayObject(object)) return buffer_builtin.typedArrayLength(rt, object) catch 0;
     const length = object.getProperty(core.atom.ids.length);
     defer length.free(rt);
@@ -1206,7 +1206,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
 
 fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
     var index: u32 = 0;
-    while (index < object.length) : (index += 1) {
+    while (index < object.arrayLength()) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
         const value = object.getProperty(core.atom.atomFromUInt32(index));
         defer value.free(rt);

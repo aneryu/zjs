@@ -1162,7 +1162,7 @@ fn rejectPromiseCapability(
 
 fn setArrayIndex(rt: *core.JSRuntime, array: *core.Object, index: u32, value: core.JSValue) !void {
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, true, true, true));
-    if (array.length <= index) array.length = index + 1;
+    if (array.arrayLength() <= index) array.setArrayLength(index + 1);
 }
 
 fn createPromiseSettlementRecord(rt: *core.JSRuntime, rejected: bool, payload: core.JSValue) !core.JSValue {
@@ -1869,7 +1869,7 @@ pub fn callObjectStatic(
         errdefer core.Object.destroyFromHeader(rt, &out.header);
         for (keys) |key| {
             if (rt.atoms.kind(key) != .symbol) continue;
-            try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out.length), core.Descriptor.data(core.JSValue.symbol(key), true, true, true));
+            try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out.arrayLength()), core.Descriptor.data(core.JSValue.symbol(key), true, true, true));
         }
         return out.value();
     }
@@ -3286,7 +3286,7 @@ fn runtimeErrorName(err: anytype) []const u8 {
 
 fn printArray(rt: *core.JSRuntime, writer: *std.Io.Writer, object: *core.Object) PrintError!void {
     var index: u32 = 0;
-    while (index < object.length) : (index += 1) {
+    while (index < object.arrayLength()) : (index += 1) {
         if (index != 0) try writer.writeByte(',');
         const value = object.getProperty(core.atom.atomFromUInt32(index));
         defer value.free(rt);

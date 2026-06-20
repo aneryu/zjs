@@ -955,7 +955,7 @@ fn autoInitNativeTargetInObjectChain(
 ) ?PreparedNativeLookup {
     var cursor: ?*core.Object = start;
     while (cursor) |object| {
-        if (object.proxyTarget() != null or object.exotic != null) return null;
+        if (object.proxyTarget() != null or object.hasExoticMethods()) return null;
         if (object.findProperty(atom_id)) |index| {
             const target = preparedNativeTargetFromAutoInitEntry(rt, receiver, object, index, atom_id) orelse return null;
             return .{ .target = target, .holder = object, .index = index };
@@ -972,7 +972,7 @@ fn cachedPreparedNativeCallTarget(
     receiver: core.JSValue,
 ) ?frame_mod.PreparedNativeCallTarget {
     const object = objectFromValue(receiver) orelse return null;
-    if (object.proxyTarget() != null or object.exotic != null) return null;
+    if (object.proxyTarget() != null or object.hasExoticMethods()) return null;
     const slot = function.icSlotForPc(site.prepare_pc) orelse return null;
 
     switch (slot.lookupOwnDataResult(object, site.atom_id)) {
@@ -997,7 +997,7 @@ fn preparedNativeTargetFromAutoInitEntry(
     index: usize,
     atom_id: core.Atom,
 ) ?frame_mod.PreparedNativeCallTarget {
-    if (holder.proxyTarget() != null or holder.exotic != null) return null;
+    if (holder.proxyTarget() != null or holder.hasExoticMethods()) return null;
     if (index >= holder.shapeProps().len) return null;
     const prop = holder.shapeProps()[index];
     const prop_flags = core.property.Flags.fromBits(prop.flags);
@@ -1022,8 +1022,8 @@ fn installPreparedNativeCallIc(
     index: usize,
 ) void {
     const object = objectFromValue(receiver) orelse return;
-    if (object.proxyTarget() != null or object.exotic != null) return;
-    if (holder.proxyTarget() != null or holder.exotic != null) return;
+    if (object.proxyTarget() != null or object.hasExoticMethods()) return;
+    if (holder.proxyTarget() != null or holder.hasExoticMethods()) return;
     const slot = function.icSlotForPc(site.prepare_pc) orelse return;
     if (holder == object) {
         _ = slot.installOwnData(&rt.shapes, object, site.atom_id, index);

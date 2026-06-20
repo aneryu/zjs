@@ -143,6 +143,7 @@ pub const Definition = struct {
     payload_mark: ?PayloadMark = null,
     call: ?Call = null,
     has_exotic: bool = false,
+    exotic_methods: ?*const anyopaque = null,
 };
 
 pub const Record = struct {
@@ -159,6 +160,7 @@ pub const Record = struct {
     payload_mark: ?PayloadMark = null,
     call: ?Call = null,
     has_exotic: bool = false,
+    exotic_methods: ?*const anyopaque = null,
 
     pub fn isRegistered(self: Record) bool {
         return self.id != invalid_class_id;
@@ -337,7 +339,8 @@ pub const Table = struct {
             .payload_finalizer = def.payload_finalizer,
             .payload_mark = def.payload_mark,
             .call = def.call,
-            .has_exotic = def.has_exotic,
+            .has_exotic = def.has_exotic or def.exotic_methods != null,
+            .exotic_methods = def.exotic_methods,
         };
     }
 
