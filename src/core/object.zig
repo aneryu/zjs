@@ -1086,7 +1086,8 @@ pub const ObjectFlags = packed struct(u32) {
     has_weak_id: bool = false,
     is_borrowed_reference_holder: bool = false,
     has_property_storage: bool = false,
-    _padding: u15 = 0,
+    needs_slow_property: bool = false,
+    _padding: u14 = 0,
 };
 
 var test_standard_exotic_methods: [class.ids.init_count]?*const ExoticMethods = @splat(null);
@@ -1096,6 +1097,32 @@ fn classHasExoticMethods(rt: *const JSRuntime, class_id: class.ClassId, class_re
     if (class_record) |record| return record.has_exotic or record.exotic_methods != null;
     const record = rt.classes.record(class_id) orelse return false;
     return record.has_exotic or record.exotic_methods != null;
+}
+
+fn classNeedsSlowPropertyAccess(class_id: class.ClassId, has_exotic_methods: bool) bool {
+    if (has_exotic_methods) return true;
+    return switch (class_id) {
+        class.ids.array,
+        class.ids.mapped_arguments,
+        class.ids.module_ns,
+        class.ids.proxy,
+        class.ids.regexp,
+        class.ids.uint8c_array,
+        class.ids.int8_array,
+        class.ids.uint8_array,
+        class.ids.int16_array,
+        class.ids.uint16_array,
+        class.ids.int32_array,
+        class.ids.uint32_array,
+        class.ids.big_int64_array,
+        class.ids.big_uint64_array,
+        class.ids.float16_array,
+        class.ids.float32_array,
+        class.ids.float64_array,
+        class.ids.dataview,
+        => true,
+        else => false,
+    };
 }
 
 fn exoticMethodsForClassId(class_id: class.ClassId) ?*const ExoticMethods {
@@ -1318,6 +1345,7 @@ pub const Object = struct {
                 rt.any_prototype_may_have_indexed_properties = true;
             }
         }
+        const has_exotic_methods = classHasExoticMethods(rt, class_id, class_record);
         self.* = .{
             .header = .{ .kind = .object },
             .class_id = class_id,
@@ -1325,7 +1353,8 @@ pub const Object = struct {
             .class_payload_kind = class_payload_kind,
             .flags = .{
                 .reserved_class_payload_finalizer_slot = reserved_class_payload_finalizer_slot,
-                .has_exotic_methods = classHasExoticMethods(rt, class_id, class_record),
+                .has_exotic_methods = has_exotic_methods,
+                .needs_slow_property = classNeedsSlowPropertyAccess(class_id, has_exotic_methods),
                 .has_property_storage = property_capacity != 0,
             },
             .shape_ref = shape_ref,
@@ -1385,6 +1414,7 @@ pub const Object = struct {
         const self = try create(rt, class.ids.array, prototype);
         self.flags.is_array = true;
         self.flags.fast_array = true;
+        self.flags.needs_slow_property = true;
         return self;
     }
 
@@ -1392,6 +1422,7 @@ pub const Object = struct {
         const self = try createWithOwnPropertyCapacity(rt, class.ids.array, prototype, capacity);
         self.flags.is_array = true;
         self.flags.fast_array = true;
+        self.flags.needs_slow_property = true;
         return self;
     }
 
@@ -2063,6 +2094,10 @@ pub const Object = struct {
 
     pub fn hasExoticMethods(self: *const Object) bool {
         return self.flags.has_exotic_methods;
+    }
+
+    pub inline fn needsSlowPropertyAccess(self: *const Object) bool {
+        return self.flags.needs_slow_property;
     }
 
     pub fn exoticMethods(self: *const Object, rt: *const JSRuntime) ?*const ExoticMethods {
@@ -2779,6 +2814,7 @@ pub const Object = struct {
         payload.* = .{};
         self.class_payload = @ptrCast(payload);
         self.class_payload_kind = .typed_array;
+        self.flags.needs_slow_property = true;
     }
 
     pub fn byteStorageSlot(self: *Object) *[]u8 {
@@ -3126,6 +3162,8 @@ pub const Object = struct {
         payload.* = .{};
         self.class_payload = @ptrCast(payload);
         self.class_payload_kind = .proxy;
+        self.flags.is_proxy = true;
+        self.flags.needs_slow_property = true;
     }
 
     pub fn proxyTargetSlot(self: *Object) *?JSValue {
@@ -9458,11 +9496,78 @@ pub const Object = struct {
         return property.Flags.fromBits(self.shape_ref.props[index].flags);
     }
 
+    pub const OwnDataPropertyFastLookup = struct {
+        index: usize,
+        flags: property.Flags,
+        value: JSValue,
+    };
+
+    pub const OwnDataPropertyFastResult = union(enum) {
+        value: OwnDataPropertyFastLookup,
+        missing,
+        slow,
+    };
+
+    pub const WritableOwnDataPropertyFastLookup = struct {
+        index: usize,
+        flags: property.Flags,
+        value: *JSValue,
+    };
+
+    const PropertyProbe = struct {
+        index: usize,
+        prop: shape.Property,
+    };
+
     /// Shape-side metadata records matching `self.properties` by index.
     /// Clamped to the entry count so a partially appended property
     /// (entry pushed, shape not yet transitioned) is never exposed.
     pub inline fn shapeProps(self: *const Object) []const shape.Property {
         return self.shape_ref.props[0..@min(self.shape_ref.prop_count, self.properties.len)];
+    }
+
+    fn findPropertyProbeTrusted(self: *const Object, atom_id: atom.Atom) ?PropertyProbe {
+        const prop_count = self.shape_ref.prop_count;
+        std.debug.assert(prop_count <= self.properties.len);
+        const props = self.shape_ref.props.ptr;
+        if (self.shape_ref.hasPropertyHash()) {
+            var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
+            while (shape_index != shape.no_property_index) {
+                const index: usize = @intCast(shape_index);
+                std.debug.assert(index < prop_count);
+                const prop = props[index];
+                shape_index = prop.hash_next;
+                const flags = property.Flags.fromBits(prop.flags);
+                if (prop.atom_id == atom_id and !flags.deleted) return .{ .index = index, .prop = prop };
+            }
+            return null;
+        }
+        for (self.shape_ref.props[0..prop_count], 0..) |prop, index| {
+            const flags = property.Flags.fromBits(prop.flags);
+            if (prop.atom_id == atom_id and !flags.deleted) return .{ .index = index, .prop = prop };
+        }
+        return null;
+    }
+
+    pub fn findOwnDataPropertyFast(self: *const Object, atom_id: atom.Atom) OwnDataPropertyFastResult {
+        const lookup = self.findPropertyProbeTrusted(atom_id) orelse return .missing;
+        const flags = property.Flags.fromBits(lookup.prop.flags);
+        if (flags.accessor) return .slow;
+        return switch (self.properties[lookup.index].slot) {
+            .data => |stored| .{ .value = .{ .index = lookup.index, .flags = flags, .value = stored } },
+            .auto_init, .accessor, .deleted => .slow,
+        };
+    }
+
+    pub fn findWritableOwnDataPropertyFast(self: *Object, atom_id: atom.Atom) ?WritableOwnDataPropertyFastLookup {
+        const lookup = self.findPropertyProbeTrusted(atom_id) orelse return null;
+        const flags = property.Flags.fromBits(lookup.prop.flags);
+        if (flags.accessor or !flags.writable) return null;
+        const entry = &self.properties[lookup.index];
+        return switch (entry.slot) {
+            .data => |*stored| .{ .index = lookup.index, .flags = flags, .value = stored },
+            .auto_init, .accessor, .deleted => null,
+        };
     }
 
     pub fn findProperty(self: *const Object, atom_id: atom.Atom) ?usize {

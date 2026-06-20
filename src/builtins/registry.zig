@@ -2125,6 +2125,7 @@ fn installArrayPrototypeSymbols(rt: *core.JSRuntime, global: *core.Object, ctor:
     try ctor.reserveOwnPropertyCapacityAssumingPlain(rt, ctor.properties.len + 1);
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.properties.len + 2);
     proto.flags.is_array = true;
+    proto.flags.needs_slow_property = true;
 
     const species_atom = core.atom.predefinedId("Symbol.species", .symbol).?;
     try defineLazyNativeGetterAtom(rt, ctor, species_atom, "get [Symbol.species]", core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.species_getter)), accessor_flags);

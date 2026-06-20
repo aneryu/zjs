@@ -1076,6 +1076,7 @@ pub const JSRuntime = struct {
         if (object.flags.is_borrowed_reference_holder) return;
         try appendRuntimeObject(&self.memory, &self.borrowed_reference_holders, &self.borrowed_reference_holders_capacity, object);
         object.flags.is_borrowed_reference_holder = true;
+        object.flags.needs_slow_property = true;
     }
 
     pub fn borrowedReferenceHolderRegistered(self: *const JSRuntime, object: *Object) bool {

@@ -320,26 +320,23 @@ pub noinline fn field(
             if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseStringSliceConstLocalStoreFromField2, try tryFuseStringSliceConstLocalStoreFromField2(ctx, function, global, frame, stack, obj, atom_id, sync_global_lexical_locals))) return .done;
             if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseArrayPushCallFromField2, try tryFuseArrayPushCallFromField2(ctx, function, global, frame, stack, obj, atom_id, sync_global_lexical_locals))) return .done;
             if (qjsGetFieldFast(ctx.runtime, obj, atom_id)) |value| {
-                try stack.push(value);
+                stack.pushAssumeCapacity(value);
                 return .done;
             }
             if (ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, obj, atom_id)) |value| {
-                try stack.push(value);
+                stack.pushAssumeCapacity(value);
                 return .done;
             }
             if (fastRegExpPrototypeMethodValue(ctx.runtime, obj, atom_id)) |value| {
-                errdefer value.free(ctx.runtime);
-                try stack.pushOwned(value);
+                stack.pushOwnedAssumeCapacity(value);
                 return .done;
             }
             if (functionOwnDataPropertyValueForFastPath(ctx.runtime, obj, atom_id)) |value| {
-                errdefer value.free(ctx.runtime);
-                try stack.pushOwned(value);
+                stack.pushOwnedAssumeCapacity(value);
                 return .done;
             }
             if (fastCollectionPrototypeMethodValue(ctx.runtime, obj, atom_id)) |value| {
-                errdefer value.free(ctx.runtime);
-                try stack.pushOwned(value);
+                stack.pushOwnedAssumeCapacity(value);
                 return .done;
             }
             const value = object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame) catch |err| {
@@ -370,14 +367,14 @@ pub noinline fn field(
 }
 
 pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.JSValue {
-    if (rt.atoms.kind(atom_id) == .private) return null;
+    if (rt.atoms.mightBePrivate(atom_id)) return null;
     var object = objectFromValue(receiver) orelse return null;
     while (true) {
-        if (qjsFieldObjectNeedsSlow(rt, object, atom_id)) return null;
-        if (object.findProperty(atom_id)) |index| {
-            const flags = object.propFlagsAt(index);
-            if (flags.accessor or flags.deleted) return null;
-            return object.properties[index].slot.dataValueForFastPath();
+        if (object.needsSlowPropertyAccess()) return null;
+        switch (object.findOwnDataPropertyFast(atom_id)) {
+            .value => |lookup| return lookup.value,
+            .slow => return null,
+            .missing => {},
         }
         // End of the explicit self.prototype chain. We must NOT synthesize `undefined`
         // here: zjs resolves built-in prototype methods/constructor for arrays and other
@@ -391,41 +388,15 @@ pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_
 }
 
 pub inline fn qjsPutFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) bool {
-    if (rt.atoms.kind(atom_id) == .private) return false;
+    if (rt.atoms.mightBePrivate(atom_id)) return false;
     const object = objectFromValue(receiver) orelse return false;
-    if (qjsPutFieldObjectNeedsSlow(object, atom_id)) return false;
-    const index = object.findProperty(atom_id) orelse return false;
-    const flags = object.propFlagsAt(index);
-    if (!flags.writable or flags.accessor) return false;
-    const entry = &object.properties[index];
-    switch (entry.slot) {
-        .data => |old_value| {
-            const next_value = core.object.dupPropertyDataValue(&rt.atoms, atom_id, value);
-            entry.slot = .{ .data = next_value };
-            core.object.destroyPropertySlot(rt, atom_id, .{ .data = old_value });
-            object.pruneBorrowedReferenceHolderIfEmpty(rt);
-            return true;
-        },
-        .auto_init, .accessor, .deleted => return false,
-    }
-}
-
-inline fn qjsFieldObjectNeedsSlow(rt: *core.JSRuntime, object: *const core.Object, atom_id: core.Atom) bool {
-    if (object.flags.is_proxy or object.proxyTarget() != null or object.hasExoticMethods()) return true;
-    if (object.flags.is_array and (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null)) return true;
-    if (core.object.isTypedArrayObject(object)) return true;
-    if (object.class_id == core.class.ids.regexp and atom_id == core.atom.ids.lastIndex and object.regexpLastIndex() != null) return true;
-    if (object.class_id == core.class.ids.module_ns or object.class_id == core.class.ids.mapped_arguments) return true;
-    return false;
-}
-
-inline fn qjsPutFieldObjectNeedsSlow(object: *const core.Object, atom_id: core.Atom) bool {
-    if (object.flags.is_proxy or object.proxyTarget() != null or object.hasExoticMethods()) return true;
-    if (object.flags.is_array) return true;
-    if (core.object.isTypedArrayObject(object)) return true;
-    if (object.class_id == core.class.ids.regexp and atom_id == core.atom.ids.lastIndex and object.regexpLastIndex() != null) return true;
-    if (object.class_id == core.class.ids.module_ns or object.class_id == core.class.ids.mapped_arguments) return true;
-    return false;
+    if (object.needsSlowPropertyAccess()) return false;
+    const lookup = object.findWritableOwnDataPropertyFast(atom_id) orelse return false;
+    const next_value = value.dup();
+    const old_value = lookup.value.*;
+    lookup.value.* = next_value;
+    old_value.free(rt);
+    return true;
 }
 
 inline fn replaceTopBorrowed(
