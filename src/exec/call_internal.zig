@@ -912,9 +912,7 @@ pub fn dispatchRecursive(
                 (if ((sp - 1)[0].requiresRefCount()) (sp - 1)[0].dup() else (sp - 1)[0]);
             return .{ .returned = try control_vm.finishFunctionReturn(ctx, frame, value) };
         }
-        const opc = ip[0];
-        ip += 1;
-        switch (opc) {
+        sw: switch (ip[0]) {
             // ===================================================================
             // Pushes that decode an immediate operand (INLINE on C-local pc)
             // ===================================================================
@@ -923,57 +921,141 @@ pub fn dispatchRecursive(
             // (reserveEntryFrameCapacity), so the bounds check is redundant — mirrors
             // qjs's bare `*sp++` and the get_loc inline above.
             op.push_i32 => {
+                ip += 1;
                 const v = readInt(i32, ip[0..4]);
                 ip += 4;
                 pushOwnedWindow(stack, base, &sp, core.JSValue.int32(v));
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.push_i16 => {
+                ip += 1;
                 const v: i32 = readInt(i16, ip[0..2]);
                 ip += 2;
                 pushOwnedWindow(stack, base, &sp, core.JSValue.int32(v));
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.push_i8 => {
+                ip += 1;
                 const v: i32 = @as(i8, @bitCast(ip[0]));
                 ip += 1;
                 pushOwnedWindow(stack, base, &sp, core.JSValue.int32(v));
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.push_bigint_i32 => {
+                ip += 1;
                 const v = readInt(i32, ip[0..4]);
                 ip += 4;
                 pushOwnedWindow(stack, base, &sp, core.JSValue.shortBigInt(v));
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
 
             // ---- Small-int / literal pushes (no operand; plain unfused push) ----
-            op.push_minus1 => pushOwnedWindow(stack, base, &sp, core.JSValue.int32(-1)),
-            op.push_0 => pushOwnedWindow(stack, base, &sp, core.JSValue.int32(0)),
-            op.push_1 => pushOwnedWindow(stack, base, &sp, core.JSValue.int32(1)),
-            op.push_2 => pushOwnedWindow(stack, base, &sp, core.JSValue.int32(2)),
-            op.push_3 => pushOwnedWindow(stack, base, &sp, core.JSValue.int32(3)),
-            op.push_4 => pushOwnedWindow(stack, base, &sp, core.JSValue.int32(4)),
-            op.push_5 => pushOwnedWindow(stack, base, &sp, core.JSValue.int32(5)),
-            op.push_6 => pushOwnedWindow(stack, base, &sp, core.JSValue.int32(6)),
-            op.push_7 => pushOwnedWindow(stack, base, &sp, core.JSValue.int32(7)),
-            op.undefined => pushOwnedWindow(stack, base, &sp, core.JSValue.undefinedValue()),
-            op.null => pushOwnedWindow(stack, base, &sp, core.JSValue.nullValue()),
-            op.push_false => pushOwnedWindow(stack, base, &sp, core.JSValue.boolean(false)),
-            op.push_true => pushOwnedWindow(stack, base, &sp, core.JSValue.boolean(true)),
+            op.push_minus1 => {
+                ip += 1;
+                pushOwnedWindow(stack, base, &sp, core.JSValue.int32(-1));
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
+            op.push_0 => {
+                ip += 1;
+                pushOwnedWindow(stack, base, &sp, core.JSValue.int32(0));
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
+            op.push_1 => {
+                ip += 1;
+                pushOwnedWindow(stack, base, &sp, core.JSValue.int32(1));
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
+            op.push_2 => {
+                ip += 1;
+                pushOwnedWindow(stack, base, &sp, core.JSValue.int32(2));
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
+            op.push_3 => {
+                ip += 1;
+                pushOwnedWindow(stack, base, &sp, core.JSValue.int32(3));
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
+            op.push_4 => {
+                ip += 1;
+                pushOwnedWindow(stack, base, &sp, core.JSValue.int32(4));
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
+            op.push_5 => {
+                ip += 1;
+                pushOwnedWindow(stack, base, &sp, core.JSValue.int32(5));
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
+            op.push_6 => {
+                ip += 1;
+                pushOwnedWindow(stack, base, &sp, core.JSValue.int32(6));
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
+            op.push_7 => {
+                ip += 1;
+                pushOwnedWindow(stack, base, &sp, core.JSValue.int32(7));
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
+            op.undefined => {
+                ip += 1;
+                pushOwnedWindow(stack, base, &sp, core.JSValue.undefinedValue());
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
+            op.null => {
+                ip += 1;
+                pushOwnedWindow(stack, base, &sp, core.JSValue.nullValue());
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
+            op.push_false => {
+                ip += 1;
+                pushOwnedWindow(stack, base, &sp, core.JSValue.boolean(false));
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
+            op.push_true => {
+                ip += 1;
+                pushOwnedWindow(stack, base, &sp, core.JSValue.boolean(true));
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
 
             // ---- Constant-table / atom pushes (DELEGATE: operand decode + fusion) ----
-            op.push_const => {
+            op.push_const => |opc| {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try value_vm.pushConst(ctx, stack, function, frame, opc);
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.push_const8 => {
+            op.push_const8 => |opc| {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try value_vm.pushConst8(ctx, stack, function, frame, opc);
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.push_atom_value => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -987,29 +1069,41 @@ pub fn dispatchRecursive(
                     .regexp_prototype = class_vm.constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"),
                 });
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.push_empty_string => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try value_vm.pushEmptyString(ctx, stack);
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.private_symbol => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try value_vm.pushPrivateSymbol(ctx, stack, function, frame);
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.regexp => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try regexp_vm.pushLiteral(ctx, stack, class_vm.constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"));
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.fclosure, op.fclosure8 => {
+            op.fclosure, op.fclosure8 => |opc| {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1017,14 +1111,20 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
 
             // ===================================================================
             // Stack manipulation (DELEGATE; pure-stack, no operand)
             // ===================================================================
             op.drop => {
+                ip += 1;
                 // Fast path: a plain (non catch-marker) top is popped + freed inline
                 // (free is a no-op for ints). Catch markers carry the try-region target
                 // and delegate to the full handler.
@@ -1039,7 +1139,8 @@ pub fn dispatchRecursive(
                         .catch_target => |target| {
                             catch_target.* = target;
                             ip = function.code.ptr + frame.pc;
-                            continue;
+                            if (ip == code_end) continue;
+                            continue :sw ip[0];
                         },
                     }
                     ip = function.code.ptr + frame.pc;
@@ -1047,67 +1148,126 @@ pub fn dispatchRecursive(
                     sp -= 1;
                     top.free(ctx.runtime);
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.nip_catch => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try value_vm.nipCatch(ctx.runtime, stack);
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.nip => {
+                ip += 1;
                 try nipWindow(ctx.runtime, base, &sp);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.nip1 => {
+                ip += 1;
                 try nip1Window(ctx.runtime, base, &sp);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.dup => {
+                ip += 1;
                 try dupWindow(stack, base, &sp);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.dup1 => {
+                ip += 1;
                 try dup1Window(base, &sp);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.dup2 => {
+                ip += 1;
                 try dup2Window(base, &sp);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.dup3 => {
+                ip += 1;
                 try dup3Window(base, &sp);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.swap => {
+                ip += 1;
                 try swapWindow(base, sp);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.swap2 => {
+                ip += 1;
                 try swap2Window(base, sp);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.insert2 => {
+                ip += 1;
                 try insert2Window(base, &sp);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.insert3 => {
+                ip += 1;
                 try insert3Window(base, &sp);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.insert4 => {
+                ip += 1;
                 try insert4Window(base, &sp);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.perm3 => {
+                ip += 1;
                 try perm3Window(base, sp);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.perm4 => {
+                ip += 1;
                 try perm4Window(base, sp);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.perm5 => {
+                ip += 1;
                 try perm5Window(base, sp);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.rot3l => {
+                ip += 1;
                 try rot3lWindow(base, sp);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.rot3r => {
+                ip += 1;
                 try rot3rWindow(base, sp);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.rot4l => {
+                ip += 1;
                 try rot4lWindow(base, sp);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.rot5l => {
+                ip += 1;
                 try rot5lWindow(base, sp);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
 
             // ===================================================================
@@ -1118,21 +1278,48 @@ pub fn dispatchRecursive(
             // execGetLoc call AND the frame.pc round-trip. GC-free (presized-stack
             // assumeCapacity push + a verifier-trusted var_buf[idx] read, no bounds
             // check), so no frame.pc publish is needed. This is the #1 crypto opcode.
-            op.get_loc0 => pushSlotWindow(stack, base, &sp, var_buf[0]),
-            op.get_loc1 => pushSlotWindow(stack, base, &sp, var_buf[1]),
-            op.get_loc2 => pushSlotWindow(stack, base, &sp, var_buf[2]),
-            op.get_loc3 => pushSlotWindow(stack, base, &sp, var_buf[3]),
+            op.get_loc0 => {
+                ip += 1;
+                pushSlotWindow(stack, base, &sp, var_buf[0]);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
+            op.get_loc1 => {
+                ip += 1;
+                pushSlotWindow(stack, base, &sp, var_buf[1]);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
+            op.get_loc2 => {
+                ip += 1;
+                pushSlotWindow(stack, base, &sp, var_buf[2]);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
+            op.get_loc3 => {
+                ip += 1;
+                pushSlotWindow(stack, base, &sp, var_buf[3]);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
             op.get_loc8 => {
+                ip += 1;
                 const idx = ip[0];
                 ip += 1;
                 pushSlotWindow(stack, base, &sp, var_buf[idx]);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.get_loc => {
+                ip += 1;
                 const idx = readInt(u16, ip[0..2]);
                 ip += 2;
                 pushSlotWindow(stack, base, &sp, var_buf[idx]);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.put_loc => {
+            op.put_loc => |opc| {
+                ip += 1;
                 const idx = readInt(u16, ip[0..2]);
                 if (tryFastPutLoc(ctx, function, var_buf, base, &sp, idx)) {
                     ip += 2;
@@ -1143,8 +1330,11 @@ pub fn dispatchRecursive(
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     ip = function.code.ptr + frame.pc;
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.set_loc => {
+            op.set_loc => |opc| {
+                ip += 1;
                 const idx = readInt(u16, ip[0..2]);
                 if (tryFastSetLoc(ctx, function, var_buf, base, &sp, idx)) {
                     ip += 2;
@@ -1155,8 +1345,11 @@ pub fn dispatchRecursive(
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     ip = function.code.ptr + frame.pc;
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.put_loc8 => {
+            op.put_loc8 => |opc| {
+                ip += 1;
                 const idx = ip[0];
                 if (tryFastPutLoc(ctx, function, var_buf, base, &sp, idx)) {
                     ip += 1;
@@ -1167,8 +1360,11 @@ pub fn dispatchRecursive(
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     ip = function.code.ptr + frame.pc;
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.set_loc8 => {
+            op.set_loc8 => |opc| {
+                ip += 1;
                 const idx = ip[0];
                 if (tryFastSetLoc(ctx, function, var_buf, base, &sp, idx)) {
                     ip += 1;
@@ -1179,8 +1375,11 @@ pub fn dispatchRecursive(
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     ip = function.code.ptr + frame.pc;
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.set_loc0 => {
+            op.set_loc0 => |opc| {
+                ip += 1;
                 if (!tryFastSetLoc(ctx, function, var_buf, base, &sp, 0)) {
                     enterStackBoundary(stack, base, sp);
                     defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
@@ -1188,8 +1387,11 @@ pub fn dispatchRecursive(
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     ip = function.code.ptr + frame.pc;
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.set_loc1 => {
+            op.set_loc1 => |opc| {
+                ip += 1;
                 if (!tryFastSetLoc(ctx, function, var_buf, base, &sp, 1)) {
                     enterStackBoundary(stack, base, sp);
                     defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
@@ -1197,8 +1399,11 @@ pub fn dispatchRecursive(
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     ip = function.code.ptr + frame.pc;
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.set_loc2 => {
+            op.set_loc2 => |opc| {
+                ip += 1;
                 if (!tryFastSetLoc(ctx, function, var_buf, base, &sp, 2)) {
                     enterStackBoundary(stack, base, sp);
                     defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
@@ -1206,8 +1411,11 @@ pub fn dispatchRecursive(
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     ip = function.code.ptr + frame.pc;
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.set_loc3 => {
+            op.set_loc3 => |opc| {
+                ip += 1;
                 if (!tryFastSetLoc(ctx, function, var_buf, base, &sp, 3)) {
                     enterStackBoundary(stack, base, sp);
                     defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
@@ -1215,15 +1423,21 @@ pub fn dispatchRecursive(
                     try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                     ip = function.code.ptr + frame.pc;
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.get_loc0_loc1 => {
+            op.get_loc0_loc1 => |opc| {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try vm_property_locals.loc(ctx, function, global, frame, stack, opc, true, false, &.{}, frame.eval_var_ref_names, core.JSValue.undefinedValue());
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.put_loc0 => {
+            op.put_loc0 => |opc| {
+                ip += 1;
                 if (!tryFastPutLoc(ctx, function, var_buf, base, &sp, 0)) {
                     enterStackBoundary(stack, base, sp);
                     defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
@@ -1231,8 +1445,11 @@ pub fn dispatchRecursive(
                     try slot_ops.execPutLoc(ctx, function, global, frame, stack, 0, 0, opc, false);
                     ip = function.code.ptr + frame.pc;
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.put_loc1 => {
+            op.put_loc1 => |opc| {
+                ip += 1;
                 if (!tryFastPutLoc(ctx, function, var_buf, base, &sp, 1)) {
                     enterStackBoundary(stack, base, sp);
                     defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
@@ -1240,8 +1457,11 @@ pub fn dispatchRecursive(
                     try slot_ops.execPutLoc(ctx, function, global, frame, stack, 1, 0, opc, false);
                     ip = function.code.ptr + frame.pc;
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.put_loc2 => {
+            op.put_loc2 => |opc| {
+                ip += 1;
                 if (!tryFastPutLoc(ctx, function, var_buf, base, &sp, 2)) {
                     enterStackBoundary(stack, base, sp);
                     defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
@@ -1249,8 +1469,11 @@ pub fn dispatchRecursive(
                     try slot_ops.execPutLoc(ctx, function, global, frame, stack, 2, 0, opc, false);
                     ip = function.code.ptr + frame.pc;
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.put_loc3 => {
+            op.put_loc3 => |opc| {
+                ip += 1;
                 if (!tryFastPutLoc(ctx, function, var_buf, base, &sp, 3)) {
                     enterStackBoundary(stack, base, sp);
                     defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
@@ -1258,28 +1481,57 @@ pub fn dispatchRecursive(
                     try slot_ops.execPutLoc(ctx, function, global, frame, stack, 3, 0, opc, false);
                     ip = function.code.ptr + frame.pc;
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             // S2b: hot arg GETs inline the leaned body (skip the `arg` dispatcher + the
             // execGetArg call + frame.pc round-trip). Variadic bound: an arg index past
             // the actual arg count reads undefined (args may be fewer than declared).
             // GC-free presized-stack push, so no frame.pc publish needed.
-            op.get_arg0 => pushSlotWindow(stack, base, &sp, if (frame.args.len > 0) arg_buf[0] else core.JSValue.undefinedValue()),
-            op.get_arg1 => pushSlotWindow(stack, base, &sp, if (frame.args.len > 1) arg_buf[1] else core.JSValue.undefinedValue()),
-            op.get_arg2 => pushSlotWindow(stack, base, &sp, if (frame.args.len > 2) arg_buf[2] else core.JSValue.undefinedValue()),
-            op.get_arg3 => pushSlotWindow(stack, base, &sp, if (frame.args.len > 3) arg_buf[3] else core.JSValue.undefinedValue()),
+            op.get_arg0 => {
+                ip += 1;
+                pushSlotWindow(stack, base, &sp, if (frame.args.len > 0) arg_buf[0] else core.JSValue.undefinedValue());
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
+            op.get_arg1 => {
+                ip += 1;
+                pushSlotWindow(stack, base, &sp, if (frame.args.len > 1) arg_buf[1] else core.JSValue.undefinedValue());
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
+            op.get_arg2 => {
+                ip += 1;
+                pushSlotWindow(stack, base, &sp, if (frame.args.len > 2) arg_buf[2] else core.JSValue.undefinedValue());
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
+            op.get_arg3 => {
+                ip += 1;
+                pushSlotWindow(stack, base, &sp, if (frame.args.len > 3) arg_buf[3] else core.JSValue.undefinedValue());
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
             op.get_arg => {
+                ip += 1;
                 const idx = readInt(u16, ip[0..2]);
                 ip += 2;
                 pushSlotWindow(stack, base, &sp, if (idx < frame.args.len) arg_buf[idx] else core.JSValue.undefinedValue());
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.put_arg, op.set_arg, op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3, op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 => {
+            op.put_arg, op.set_arg, op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3, op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 => |opc| {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try vm_property_locals.arg(ctx, function, frame, stack, opc);
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.get_var_ref, op.get_var_ref_check, op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init, op.set_var_ref, op.get_var_ref0, op.get_var_ref1, op.get_var_ref2, op.get_var_ref3, op.put_var_ref0, op.put_var_ref1, op.put_var_ref2, op.put_var_ref3, op.set_var_ref0, op.set_var_ref1, op.set_var_ref2, op.set_var_ref3 => {
+            op.get_var_ref, op.get_var_ref_check, op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init, op.set_var_ref, op.get_var_ref0, op.get_var_ref1, op.get_var_ref2, op.get_var_ref3, op.put_var_ref0, op.put_var_ref1, op.put_var_ref2, op.put_var_ref3, op.set_var_ref0, op.set_var_ref1, op.set_var_ref2, op.set_var_ref3 => |opc| {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1287,10 +1539,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.set_loc_uninitialized, op.get_loc_check, op.put_loc_check, op.put_loc_check_init => {
+            op.set_loc_uninitialized, op.get_loc_check, op.put_loc_check, op.put_loc_check_init => |opc| {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1298,24 +1556,36 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.close_loc => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try vm_property_locals.closeLoc(ctx, function, frame);
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.make_loc_ref, op.make_arg_ref, op.make_var_ref_ref => {
+            op.make_loc_ref, op.make_arg_ref, op.make_var_ref_ref => |opc| {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try vm_property_ref.makeSlotRef(ctx, stack, function, frame, opc);
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.make_var_ref => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1323,15 +1593,24 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
 
             // ===================================================================
             // Arithmetic / compare / logic (int32 fast path INLINE; slow DELEGATE)
             // ===================================================================
-            op.add, op.sub, op.mul, op.div, op.mod, op.pow, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor => {
-                if (opc != op.pow and tryInt32BinaryPtr(base, &sp, opc)) continue;
+            op.add, op.sub, op.mul, op.div, op.mod, op.pow, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor => |opc| {
+                ip += 1;
+                if (opc != op.pow and tryInt32BinaryPtr(base, &sp, opc)) {
+                    if (ip == code_end) continue;
+                    continue :sw ip[0];
+                }
                 {
                     enterStackBoundary(stack, base, sp);
                     defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
@@ -1342,9 +1621,15 @@ pub fn dispatchRecursive(
                     }
                     ip = function.code.ptr + frame.pc;
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq => {
-                if (tryInt32ComparePtr(base, &sp, opc)) continue;
+            op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq => |opc| {
+                ip += 1;
+                if (tryInt32ComparePtr(base, &sp, opc)) {
+                    if (ip == code_end) continue;
+                    continue :sw ip[0];
+                }
                 {
                     enterStackBoundary(stack, base, sp);
                     defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
@@ -1355,8 +1640,11 @@ pub fn dispatchRecursive(
                     }
                     ip = function.code.ptr + frame.pc;
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.neg, op.plus, op.inc, op.dec => {
+            op.neg, op.plus, op.inc, op.dec => |opc| {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1365,8 +1653,11 @@ pub fn dispatchRecursive(
                     .continue_loop => {},
                 }
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.not => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1375,13 +1666,19 @@ pub fn dispatchRecursive(
                     .continue_loop => {},
                 }
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.lnot => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 try value_vm.logicalNot(ctx.runtime, stack);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.post_inc, op.post_dec => {
+            op.post_inc, op.post_dec => |opc| {
+                ip += 1;
                 // Int32 fast path: leave the old value on the stack and push old±1 on
                 // top (mirrors postUpdate's int branch). Overflow folds to float via
                 // fastInt32Add. GC-free. Non-int delegates.
@@ -1400,8 +1697,11 @@ pub fn dispatchRecursive(
                     }
                     ip = function.code.ptr + frame.pc;
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.inc_loc, op.dec_loc => {
+            op.inc_loc, op.dec_loc => |opc| {
+                ip += 1;
                 // Int32 fast path: a local holding an int32 is a plain slot (NOT a
                 // var-ref cell — a cell is an object), so update it in place with no
                 // dup/free and no global-lexical sync (dispatchRecursive runs only
@@ -1422,8 +1722,11 @@ pub fn dispatchRecursive(
                     }
                     ip = function.code.ptr + frame.pc;
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.add_loc => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1432,38 +1735,59 @@ pub fn dispatchRecursive(
                     .continue_loop => {},
                 }
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.typeof => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 try value_vm.typeOf(ctx, stack);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.typeof_is_undefined => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 try value_vm.typeOfIsUndefined(ctx.runtime, stack);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.typeof_is_function => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 try value_vm.typeOfIsFunction(ctx.runtime, stack);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.is_undefined_or_null => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 try value_vm.isUndefinedOrNull(ctx.runtime, stack);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.is_undefined => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 try value_vm.isUndefined(ctx.runtime, stack);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.is_null => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 try value_vm.isNull(ctx.runtime, stack);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.in, op.instanceof => {
+            op.in, op.instanceof => |opc| {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1472,8 +1796,11 @@ pub fn dispatchRecursive(
                     .continue_loop => {},
                 }
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.private_in => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1482,8 +1809,11 @@ pub fn dispatchRecursive(
                     .continue_loop => {},
                 }
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.delete => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1492,19 +1822,25 @@ pub fn dispatchRecursive(
                     .continue_loop => {},
                 }
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.delete_var => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try vm_property_ref.deleteVar(ctx, global, stack, function, frame, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs);
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
 
             // ===================================================================
             // Control flow (jumps/branches INLINE on C-local pc; throw DELEGATE)
             // ===================================================================
             op.goto => {
+                ip += 1;
                 const operand_pc = ipOff(ip, function.code.ptr);
                 const diff = readInt(i32, ip[0..4]);
                 ip = function.code.ptr + relativePc(operand_pc, diff);
@@ -1513,8 +1849,11 @@ pub fn dispatchRecursive(
                     defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                     try interrupt_poller.poll(ctx.runtime);
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.goto16 => {
+                ip += 1;
                 const operand_pc = ipOff(ip, function.code.ptr);
                 const diff: i32 = readInt(i16, ip[0..2]);
                 ip = function.code.ptr + relativePc(operand_pc, diff);
@@ -1523,8 +1862,11 @@ pub fn dispatchRecursive(
                     defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                     try interrupt_poller.poll(ctx.runtime);
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.goto8 => {
+                ip += 1;
                 const operand_pc = ipOff(ip, function.code.ptr);
                 const diff: i32 = @as(i8, @bitCast(ip[0]));
                 ip = function.code.ptr + relativePc(operand_pc, diff);
@@ -1533,8 +1875,11 @@ pub fn dispatchRecursive(
                     defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                     try interrupt_poller.poll(ctx.runtime);
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.if_false, op.if_true => {
+            op.if_false, op.if_true => |opc| {
+                ip += 1;
                 const operand_pc = ipOff(ip, function.code.ptr);
                 const diff = readInt(i32, ip[0..4]);
                 ip += 4;
@@ -1550,8 +1895,11 @@ pub fn dispatchRecursive(
                         try interrupt_poller.poll(ctx.runtime);
                     }
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.if_false8, op.if_true8 => {
+            op.if_false8, op.if_true8 => |opc| {
+                ip += 1;
                 const operand_pc = ipOff(ip, function.code.ptr);
                 const diff: i32 = @as(i8, @bitCast(ip[0]));
                 ip += 1;
@@ -1567,16 +1915,22 @@ pub fn dispatchRecursive(
                         try interrupt_poller.poll(ctx.runtime);
                     }
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.gosub => {
+                ip += 1;
                 const operand_pc = ipOff(ip, function.code.ptr);
                 const diff = readInt(i32, ip[0..4]);
                 const return_pc = operand_pc + 4;
                 if (return_pc > @as(usize, @intCast(std.math.maxInt(i32)))) return error.InvalidBytecode;
                 pushOwnedWindow(stack, base, &sp, core.JSValue.int32(@intCast(return_pc)));
                 ip = function.code.ptr + relativePc(operand_pc, diff);
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.ret => {
+                ip += 1;
                 const target = try popWindow(base, &sp);
                 defer target.free(ctx.runtime);
                 const pc_i32 = target.asInt32() orelse return error.InvalidBytecode;
@@ -1584,17 +1938,26 @@ pub fn dispatchRecursive(
                 const target_pc: usize = @intCast(pc_i32);
                 if (target_pc >= code.len) return error.InvalidBytecode;
                 ip = function.code.ptr + target_pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.nop => control_vm.nop(),
+            op.nop => {
+                ip += 1;
+                control_vm.nop();
+                if (ip == code_end) continue;
+                continue :sw ip[0];
+            },
 
             // ---- Return ----
             op.@"return" => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 return .{ .returned = try control_vm.returnTop(ctx, stack, frame, null) };
             },
             op.return_undef => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1603,6 +1966,7 @@ pub fn dispatchRecursive(
 
             // ---- Throw / catch ----
             op.throw => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1610,9 +1974,11 @@ pub fn dispatchRecursive(
                     .handled => {},
                 }
                 ip = function.code.ptr + frame.pc;
-                continue;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.throw_error => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1620,20 +1986,25 @@ pub fn dispatchRecursive(
                     .handled => {},
                 }
                 ip = function.code.ptr + frame.pc;
-                continue;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.@"catch" => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try control_vm.catchTarget(function, frame, stack, catch_target);
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
 
             // ===================================================================
             // Calls (DELEGATE to the out-of-line recursive call resolution)
             // ===================================================================
-            op.call, op.call0, op.call1, op.call2, op.call3 => {
+            op.call, op.call0, op.call1, op.call2, op.call3 => |opc| {
+                ip += 1;
                 const argc: u16 = switch (opc) {
                     op.call => blk: {
                         const v = readInt(u16, ip[0..2]);
@@ -1656,26 +2027,32 @@ pub fn dispatchRecursive(
                     .done => {},
                     .continue_loop => {
                         ip = function.code.ptr + frame.pc;
-                        continue;
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
                     },
                     .inline_call => |request| switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
                         .value => |v| stack.pushOwnedAssumeCapacity(v),
                         .caught => {
                             ip = function.code.ptr + frame.pc;
-                            continue;
+                            if (ip == code_end) continue;
+                            continue :sw ip[0];
                         },
                     },
                 }
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.tail_call => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try call_vm.tailCall(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
                     .handled => {
                         ip = function.code.ptr + frame.pc;
-                        continue;
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
                     },
                     .return_value => |value| {
                         return .{ .returned = value };
@@ -1689,20 +2066,23 @@ pub fn dispatchRecursive(
                             .value => |v| return .{ .returned = v },
                             .caught => {
                                 ip = function.code.ptr + frame.pc;
-                                continue;
+                                if (ip == code_end) continue;
+                                continue :sw ip[0];
                             },
                         }
                     },
                 }
             },
             op.tail_call_method => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 switch (try call_vm.tailCallMethod(ctx, output, global, stack, function, frame, catch_target, allow_inline_calls)) {
                     .handled => {
                         ip = function.code.ptr + frame.pc;
-                        continue;
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
                     },
                     .return_value => |value| {
                         return .{ .returned = value };
@@ -1713,13 +2093,15 @@ pub fn dispatchRecursive(
                             .value => |v| return .{ .returned = v },
                             .caught => {
                                 ip = function.code.ptr + frame.pc;
-                                continue;
+                                if (ip == code_end) continue;
+                                continue :sw ip[0];
                             },
                         }
                     },
                 }
             },
             op.call_method => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1727,19 +2109,24 @@ pub fn dispatchRecursive(
                     .done => {},
                     .continue_loop => {
                         ip = function.code.ptr + frame.pc;
-                        continue;
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
                     },
                     .inline_call => |request| switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
                         .value => |v| stack.pushOwnedAssumeCapacity(v),
                         .caught => {
                             ip = function.code.ptr + frame.pc;
-                            continue;
+                            if (ip == code_end) continue;
+                            continue :sw ip[0];
                         },
                     },
                 }
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.call_prepared => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1747,19 +2134,24 @@ pub fn dispatchRecursive(
                     .done => {},
                     .continue_loop => {
                         ip = function.code.ptr + frame.pc;
-                        continue;
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
                     },
                     .inline_call => |request| switch (try recurseInlineCall(ctx, output, global, stack, frame, catch_target, request)) {
                         .value => |v| stack.pushOwnedAssumeCapacity(v),
                         .caught => {
                             ip = function.code.ptr + frame.pc;
-                            continue;
+                            if (ip == code_end) continue;
+                            continue :sw ip[0];
                         },
                     },
                 }
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.prepare_call_prop_atom => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1767,12 +2159,16 @@ pub fn dispatchRecursive(
                     .done => {},
                     .continue_loop => {
                         ip = function.code.ptr + frame.pc;
-                        continue;
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
                     },
                 }
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.call_constructor => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1780,12 +2176,16 @@ pub fn dispatchRecursive(
                     .done => {},
                     .continue_loop => {
                         ip = function.code.ptr + frame.pc;
-                        continue;
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
                     },
                 }
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.apply => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1793,12 +2193,16 @@ pub fn dispatchRecursive(
                     .done => {},
                     .continue_loop => {
                         ip = function.code.ptr + frame.pc;
-                        continue;
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
                     },
                 }
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.apply_eval => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1806,12 +2210,16 @@ pub fn dispatchRecursive(
                     .done => {},
                     .continue_loop => {
                         ip = function.code.ptr + frame.pc;
-                        continue;
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
                     },
                 }
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.eval => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1823,7 +2231,8 @@ pub fn dispatchRecursive(
                     .done => {},
                     .continue_loop => {
                         ip = function.code.ptr + frame.pc;
-                        continue;
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
                     },
                     .tail_inline => |request| {
                         if (allow_tail_signal) return .{ .tail = request };
@@ -1831,23 +2240,30 @@ pub fn dispatchRecursive(
                             .value => |v| return .{ .returned = v },
                             .caught => {
                                 ip = function.code.ptr + frame.pc;
-                                continue;
+                                if (ip == code_end) continue;
+                                continue :sw ip[0];
                             },
                         }
                     },
                 }
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.import => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try eval_module_vm.dynamicImport(ctx, output, global, stack, function, frame);
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
 
             // ---- ctor / brand helpers (DELEGATE) ----
             op.check_ctor => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1856,8 +2272,11 @@ pub fn dispatchRecursive(
                     .continue_loop => {},
                 }
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.check_ctor_return => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1866,8 +2285,11 @@ pub fn dispatchRecursive(
                     .continue_loop => {},
                 }
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.init_ctor => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1876,8 +2298,11 @@ pub fn dispatchRecursive(
                     .continue_loop => {},
                 }
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.check_brand => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1886,8 +2311,11 @@ pub fn dispatchRecursive(
                     .continue_loop => {},
                 }
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.add_brand => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1896,12 +2324,15 @@ pub fn dispatchRecursive(
                     .continue_loop => {},
                 }
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
 
             // ===================================================================
             // Variables / globals / property access (DELEGATE)
             // ===================================================================
-            op.get_var, op.get_var_undef => {
+            op.get_var, op.get_var_undef => |opc| {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1909,10 +2340,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.put_var => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1920,10 +2357,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.check_define_var, op.define_var, op.define_func, op.put_var_init => {
+            op.check_define_var, op.define_var, op.define_func, op.put_var_init => |opc| {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1931,10 +2374,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.get_field, op.get_field2, op.put_field => {
+            op.get_field, op.get_field2, op.put_field => |opc| {
+                ip += 1;
                 const atom_id = readInt(u32, ip[0..4]);
                 const handled = switch (opc) {
                     op.get_field => tryFastGetField(ctx, stack, base, &sp, atom_id),
@@ -1952,11 +2401,17 @@ pub fn dispatchRecursive(
                     ip = function.code.ptr + frame.pc;
                     switch (step) {
                         .done => {},
-                        .continue_loop => continue,
+                        .continue_loop => {
+                            if (ip == code_end) continue;
+                            continue :sw ip[0];
+                        },
                     }
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.get_array_el, op.get_array_el2, op.put_array_el => {
+            op.get_array_el, op.get_array_el2, op.put_array_el => |opc| {
+                ip += 1;
                 const handled = switch (opc) {
                     op.get_array_el => tryFastGetArrayEl(ctx, stack, base, &sp),
                     op.get_array_el2 => tryFastGetArrayEl2(ctx, base, &sp),
@@ -1971,11 +2426,17 @@ pub fn dispatchRecursive(
                     ip = function.code.ptr + frame.pc;
                     switch (step) {
                         .done => {},
-                        .continue_loop => continue,
+                        .continue_loop => {
+                            if (ip == code_end) continue;
+                            continue :sw ip[0];
+                        },
                     }
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.to_propkey => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1983,10 +2444,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.to_propkey2 => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -1994,17 +2461,26 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.set_name, op.set_name_computed => {
+            op.set_name, op.set_name_computed => |opc| {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try vm_property_field.setName(ctx, output, global, stack, function, frame, opc);
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.get_ref_value => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2012,10 +2488,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.put_ref_value => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2023,10 +2505,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.get_private_field => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2034,10 +2522,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.put_private_field => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2045,10 +2539,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.define_private_field => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2056,12 +2556,18 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
 
             // ---- with-statement opcodes (a normal function body may contain `with`) ----
-            op.with_get_var, op.with_delete_var, op.with_make_ref, op.with_get_ref, op.with_get_ref_undef => {
+            op.with_get_var, op.with_delete_var, op.with_make_ref, op.with_get_ref, op.with_get_ref_undef => |opc| {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2069,10 +2575,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.with_put_var => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2080,8 +2592,13 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
 
             // ===================================================================
@@ -2090,20 +2607,27 @@ pub fn dispatchRecursive(
             //  get_length appeared in two draft categories — merged here once)
             // ===================================================================
             op.object => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try literal_vm.object(ctx, stack, global);
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.array_from => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try literal_vm.arrayFrom(ctx, stack, function, frame, global);
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.append => {
+            op.append => |opc| {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2111,17 +2635,26 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.rest => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try literal_vm.rest(ctx, stack, function, frame);
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.define_field => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2129,10 +2662,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.define_array_el => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2140,24 +2679,36 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.set_proto => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try literal_vm.setProto(ctx, stack);
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.set_home_object => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try class_vm.setHomeObject(ctx, stack);
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.copy_data_properties => {
+                ip += 1;
                 const mask = ip[0];
                 ip += 1;
                 enterStackBoundary(stack, base, sp);
@@ -2167,10 +2718,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.define_method => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2178,10 +2735,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.define_method_computed => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2189,10 +2752,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.define_class, op.define_class_computed => {
+            op.define_class, op.define_class_computed => |opc| {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2200,24 +2769,36 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.special_object => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try literal_vm.specialObject(ctx, stack, function, frame, global, &.{}, &.{}, frame.eval_var_ref_names, frame.eval_var_refs);
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.get_super => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try class_vm.getSuper(ctx, stack, frame);
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.get_super_value => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2225,10 +2806,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.put_super_value => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2236,10 +2823,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.get_length => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2247,10 +2840,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.to_object => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2258,10 +2857,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.push_this => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2269,10 +2874,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
-            op.for_of_start, op.for_await_of_start => {
+            op.for_of_start, op.for_await_of_start => |opc| {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2280,10 +2891,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.for_in_start => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2291,10 +2908,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.iterator_next => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2302,10 +2925,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.iterator_check_object => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2313,10 +2942,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.iterator_get_value_done => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2324,10 +2959,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.iterator_call => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2335,10 +2976,16 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.for_of_next => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2346,17 +2993,26 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.for_in_next => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
                 try iter_vm.forInNext(ctx, output, global, stack);
                 ip = function.code.ptr + frame.pc;
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
             op.iterator_close => {
+                ip += 1;
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
@@ -2364,8 +3020,13 @@ pub fn dispatchRecursive(
                 ip = function.code.ptr + frame.pc;
                 switch (step) {
                     .done => {},
-                    .continue_loop => continue,
+                    .continue_loop => {
+                        if (ip == code_end) continue;
+                        continue :sw ip[0];
+                    },
                 }
+                if (ip == code_end) continue;
+                continue :sw ip[0];
             },
 
             // ===================================================================
@@ -2377,7 +3038,7 @@ pub fn dispatchRecursive(
             // Invalid / unknown
             // ===================================================================
             op.invalid => return error.InvalidBytecode,
-            else => return error.InvalidBytecode,
+            else => unreachable,
         }
     }
 }
