@@ -599,15 +599,7 @@ fn coldDispatch(opc: u8, vm: *Vm) HostError!ColdStep {
     },
     op.push_atom_value => {
         frame.pc = pc;
-        try value_vm.pushAtomValueVm(ctx, stack, function, frame, .{
-            .global_env = .{
-                .global = global,
-                .eval_local_names = &.{},
-                .eval_var_ref_names = frame.eval_var_ref_names,
-                .eval_with_object = core.JSValue.undefinedValue(),
-            },
-            .regexp_prototype = class_vm.constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"),
-        });
+        try value_vm.pushAtomValue(ctx, stack, function, frame);
         pc = frame.pc;
     },
     op.push_empty_string => {

@@ -1059,15 +1059,7 @@ pub fn dispatchRecursive(
                 enterStackBoundary(stack, base, sp);
                 defer leaveStackBoundary(stack, &base, &sp, frame, &var_buf, &arg_buf);
                 frame.pc = ipOff(ip, function.code.ptr);
-                try value_vm.pushAtomValueVm(ctx, stack, function, frame, .{
-                    .global_env = .{
-                        .global = global,
-                        .eval_local_names = &.{},
-                        .eval_var_ref_names = frame.eval_var_ref_names,
-                        .eval_with_object = core.JSValue.undefinedValue(),
-                    },
-                    .regexp_prototype = class_vm.constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"),
-                });
+                try value_vm.pushAtomValue(ctx, stack, function, frame);
                 ip = function.code.ptr + frame.pc;
                 if (ip == code_end) continue;
                 continue :sw ip[0];

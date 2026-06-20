@@ -458,17 +458,12 @@ pub const String = struct {
     }
 
     pub fn compare(self: String, other: String) i32 {
-        const shared_len = @min(self.len(), other.len());
-        var i: usize = 0;
-        while (i < shared_len) : (i += 1) {
-            const a = self.codeUnitAt(i);
-            const b = other.codeUnitAt(i);
-            if (a < b) return -1;
-            if (a > b) return 1;
+        if (self.atom_id) |self_atom| {
+            if (other.atom_id) |other_atom| {
+                if (self_atom == other_atom) return 0;
+            }
         }
-        if (self.len() < other.len()) return -1;
-        if (self.len() > other.len()) return 1;
-        return 0;
+        return compareResolved(self.resolveData(), other.resolveData());
     }
 
     pub const ResolvedData = union(enum) {
@@ -801,6 +796,62 @@ pub const String = struct {
         rt.memory.freeAlignedBytes(bytes[0..inline_layout.total_size], inline_layout.allocation_alignment);
     }
 };
+
+fn compareResolved(a: String.ResolvedData, b: String.ResolvedData) i32 {
+    return switch (a) {
+        .latin1 => |a_bytes| switch (b) {
+            .latin1 => |b_bytes| compareSameWidth(u8, a_bytes, b_bytes),
+            .utf16 => |b_units| compareLatin1Utf16(a_bytes, b_units),
+        },
+        .utf16 => |a_units| switch (b) {
+            .latin1 => |b_bytes| compareUtf16Latin1(a_units, b_bytes),
+            .utf16 => |b_units| compareSameWidth(u16, a_units, b_units),
+        },
+    };
+}
+
+fn compareSameWidth(comptime T: type, a: []const T, b: []const T) i32 {
+    if (a.len == b.len and std.mem.eql(u8, std.mem.sliceAsBytes(a), std.mem.sliceAsBytes(b))) return 0;
+    return orderToI32(std.mem.order(T, a, b));
+}
+
+fn compareLatin1Utf16(a: []const u8, b: []const u16) i32 {
+    const shared_len = @min(a.len, b.len);
+    var i: usize = 0;
+    while (i < shared_len) : (i += 1) {
+        const a_unit: u16 = a[i];
+        const b_unit = b[i];
+        if (a_unit < b_unit) return -1;
+        if (a_unit > b_unit) return 1;
+    }
+    return compareLength(a.len, b.len);
+}
+
+fn compareUtf16Latin1(a: []const u16, b: []const u8) i32 {
+    const shared_len = @min(a.len, b.len);
+    var i: usize = 0;
+    while (i < shared_len) : (i += 1) {
+        const a_unit = a[i];
+        const b_unit: u16 = b[i];
+        if (a_unit < b_unit) return -1;
+        if (a_unit > b_unit) return 1;
+    }
+    return compareLength(a.len, b.len);
+}
+
+fn compareLength(a_len: usize, b_len: usize) i32 {
+    if (a_len < b_len) return -1;
+    if (a_len > b_len) return 1;
+    return 0;
+}
+
+fn orderToI32(order: std.math.Order) i32 {
+    return switch (order) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    };
+}
 
 fn flattenedRopeData(self: *const String, node: *Rope) String.ResolvedData {
     flattenRopeNode(node);
@@ -1214,6 +1265,60 @@ test "string ascii byte helper covers byte boundary" {
     try std.testing.expect(isAsciiBytes("plain/ascii-127\x7f"));
     try std.testing.expect(!isAsciiBytes("latin1-\xc3\xa9"));
     try std.testing.expect(!isAsciiBytes(&.{0x80}));
+}
+
+test "string compare uses code-unit ordering for same and mixed width strings" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const latin_a = try String.createUtf8(rt, "abc");
+    const latin_a_value = latin_a.value();
+    defer latin_a_value.free(rt);
+    const latin_b = try String.createUtf8(rt, "abd");
+    const latin_b_value = latin_b.value();
+    defer latin_b_value.free(rt);
+    try std.testing.expectEqual(@as(i32, 0), latin_a.compare(latin_a.*));
+    try std.testing.expect(latin_a.compare(latin_b.*) < 0);
+
+    const wide_a = try String.createUtf16(rt, &.{0x0100});
+    const wide_a_value = wide_a.value();
+    defer wide_a_value.free(rt);
+    const wide_b = try String.createUtf16(rt, &.{ 0x00ff, 0x0100 });
+    const wide_b_value = wide_b.value();
+    defer wide_b_value.free(rt);
+    try std.testing.expect(wide_a.compare(wide_b.*) > 0);
+
+    const wide_parent = try String.createUtf16(rt, &.{ 0x0100, 'a' });
+    const wide_parent_value = wide_parent.value();
+    defer wide_parent_value.free(rt);
+    const wide_slice = try String.createSlice(rt, wide_parent, 1, 1);
+    const wide_slice_value = wide_slice.value();
+    defer wide_slice_value.free(rt);
+    const latin_single = try String.createUtf8(rt, "a");
+    const latin_single_value = latin_single.value();
+    defer latin_single_value.free(rt);
+    try std.testing.expectEqual(@as(i32, 0), latin_single.compare(wide_slice.*));
+}
+
+test "string compare short-circuits equal interned atom ids" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const first = try String.createUtf8(rt, "length");
+    const first_value = first.value();
+    defer first_value.free(rt);
+    const first_atom = try first.internAtom(rt);
+    defer rt.atoms.free(first_atom);
+
+    const second = try String.createUtf8(rt, "length");
+    const second_value = second.value();
+    defer second_value.free(rt);
+    const second_atom = try second.internAtom(rt);
+    defer rt.atoms.free(second_atom);
+
+    try std.testing.expectEqual(first_atom, second_atom);
+    try std.testing.expect(first != second);
+    try std.testing.expectEqual(@as(i32, 0), first.compare(second.*));
 }
 
 const std = @import("std");
