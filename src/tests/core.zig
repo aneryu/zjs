@@ -1243,11 +1243,11 @@ test "dense array delete defers element finalizer reentry" {
     try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), reentrant_array_delete_calls);
     try expectOneDeferredClassPayloadFinalizer(rt);
-    try std.testing.expectEqual(@as(?core.JSValue, null), array.arrayElements()[0]);
+    try std.testing.expectEqual(@as(usize, 0), array.arrayElements().len);
     try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_array_delete_calls);
-    try std.testing.expectEqual(@as(?core.JSValue, null), array.arrayElements()[0]);
+    try std.testing.expectEqual(@as(usize, 0), array.arrayElements().len);
 }
 
 test "ordinary property delete defers value finalizer reentry" {
