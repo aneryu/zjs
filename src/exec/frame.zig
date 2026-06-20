@@ -71,6 +71,28 @@ pub const FrameRootScope = struct {
     frame: runtime.ValueRootFrame = .{},
 
     pub fn init(self: *FrameRootScope, rt: *JSRuntime, stack: *stack_mod.Stack, exec_frame: *Frame, eval_var_refs: *EvalVarRefSnapshot) void {
+        self.initWithOptions(rt, stack, exec_frame, eval_var_refs, .{});
+    }
+
+    pub const RootOptions = struct {
+        stack: bool = true,
+        locals: bool = true,
+        args: bool = true,
+        original_args: bool = true,
+        var_refs: bool = true,
+        eval_local_slots: bool = true,
+        eval_var_refs: bool = true,
+        prepared_call_values: bool = true,
+    };
+
+    pub fn initWithOptions(
+        self: *FrameRootScope,
+        rt: *JSRuntime,
+        stack: *stack_mod.Stack,
+        exec_frame: *Frame,
+        eval_var_refs: *EvalVarRefSnapshot,
+        options: RootOptions,
+    ) void {
         self.rt = rt;
         self.values = .{
             .{ .value = &exec_frame.this_value },
@@ -78,19 +100,42 @@ pub const FrameRootScope = struct {
             .{ .value = &exec_frame.current_function },
             .{ .value = &exec_frame.new_target },
         };
-        self.slices = .{
-            .{ .mutable = &stack.values },
-            .{ .mutable = &exec_frame.locals },
-            .{ .mutable = &exec_frame.args },
-            .{ .mutable = &exec_frame.original_args },
-            .{ .mutable = &exec_frame.var_refs },
-            .{ .mutable = &exec_frame.eval_local_slots },
-            eval_var_refs.rootSlice(),
-            .{ .mutable = &exec_frame.prepared_call_values },
-        };
+        var slice_count: usize = 0;
+        if (options.stack) {
+            self.slices[slice_count] = .{ .mutable = &stack.values };
+            slice_count += 1;
+        }
+        if (options.locals) {
+            self.slices[slice_count] = .{ .mutable = &exec_frame.locals };
+            slice_count += 1;
+        }
+        if (options.args) {
+            self.slices[slice_count] = .{ .mutable = &exec_frame.args };
+            slice_count += 1;
+        }
+        if (options.original_args) {
+            self.slices[slice_count] = .{ .mutable = &exec_frame.original_args };
+            slice_count += 1;
+        }
+        if (options.var_refs) {
+            self.slices[slice_count] = .{ .mutable = &exec_frame.var_refs };
+            slice_count += 1;
+        }
+        if (options.eval_local_slots) {
+            self.slices[slice_count] = .{ .mutable = &exec_frame.eval_local_slots };
+            slice_count += 1;
+        }
+        if (options.eval_var_refs) {
+            self.slices[slice_count] = eval_var_refs.rootSlice();
+            slice_count += 1;
+        }
+        if (options.prepared_call_values) {
+            self.slices[slice_count] = .{ .mutable = &exec_frame.prepared_call_values };
+            slice_count += 1;
+        }
         self.frame = .{
             .previous = rt.active_value_roots,
-            .slices = &self.slices,
+            .slices = self.slices[0..slice_count],
             .values = &self.values,
         };
         rt.active_value_roots = &self.frame;
@@ -236,6 +281,12 @@ pub const Frame = struct {
         const frame_eval_var_ref_names = if (inputs.inherited_eval_var_ref_names.len != 0) inputs.inherited_eval_var_ref_names else inputs.input_eval_var_ref_names;
         const frame_eval_var_refs = if (inputs.inherited_eval_var_ref_names.len != 0) inputs.inherited_eval_var_refs else inputs.input_eval_var_refs;
 
+        if (frame_eval_var_ref_names.len == 0 and frame_eval_var_refs.len == 0) {
+            self.eval_var_ref_names = &.{};
+            self.eval_var_refs = &.{};
+            return .{};
+        }
+
         var snapshot = try EvalVarRefSnapshot.init(rt, frame_eval_var_ref_names, frame_eval_var_refs);
         snapshot.install(self);
         return snapshot;
@@ -317,6 +368,26 @@ pub const Frame = struct {
         if (args.len > 0 and need_original_snapshot) {
             try self.initOriginalArgsSnapshot(account, self.args[0..args.len], use_inline_storage, true);
         }
+    }
+
+    /// Transfer already-owned argument slots into the frame without copying the
+    /// slot payloads. The source slice must remain allocated until frame
+    /// teardown; the frame releases the values but does not free the backing
+    /// storage. Used for stack-backed JS->JS calls where no arity padding is
+    /// needed, matching QuickJS's `arg_buf = argv` fast path.
+    pub fn initArgumentsBorrowedSlots(
+        self: *Frame,
+        account: *memory.MemoryAccount,
+        args: []JSValue,
+        use_inline_storage: bool,
+        need_original_snapshot: bool,
+    ) !void {
+        self.actual_arg_count = args.len;
+        std.debug.assert(args.len >= @as(usize, @intCast(self.function.arg_count)));
+        if (args.len > 0 and need_original_snapshot) {
+            try self.initOriginalArgsSnapshot(account, args, use_inline_storage, true);
+        }
+        self.args = args;
     }
 
     fn allocArgsSlice(
