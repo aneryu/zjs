@@ -1137,9 +1137,9 @@ pub const Object = struct {
         const class_record = rt.classes.record(class_id);
         const inline_layout = inlineClassPayloadLayout(class_record);
         const self = if (inline_layout) |layout| blk: {
-            const bytes = try rt.memory.allocAlignedBytes(layout.total_size, layout.allocation_alignment);
+            const bytes = try rt.allocRuntimeAlignedBytes(layout.total_size, layout.allocation_alignment);
             break :blk @as(*Object, @ptrCast(@alignCast(bytes.ptr)));
-        } else try rt.memory.create(Object);
+        } else try rt.createRuntime(Object);
         var initialized = false;
         errdefer {
             if (initialized) {
@@ -1167,7 +1167,7 @@ pub const Object = struct {
         var property_storage_owned = false;
         errdefer if (property_storage_owned) rt.memory.free(property.Entry, property_storage);
         if (property_capacity != 0) {
-            property_storage = try rt.memory.alloc(property.Entry, property_capacity);
+            property_storage = try rt.allocRuntime(property.Entry, property_capacity);
             property_storage_owned = true;
         }
         var class_payload: class.Payload = null;
@@ -1178,119 +1178,119 @@ pub const Object = struct {
             class.standardPayloadKind(class_id);
         switch (payload_kind) {
             .iterator => {
-                const payload = try rt.memory.create(IteratorPayload);
+                const payload = try rt.createRuntime(IteratorPayload);
                 errdefer rt.memory.destroy(IteratorPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .iterator;
             },
             .collection => {
-                const payload = try rt.memory.create(CollectionPayload);
+                const payload = try rt.createRuntime(CollectionPayload);
                 errdefer rt.memory.destroy(CollectionPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .collection;
             },
             .buffer => {
-                const payload = try rt.memory.create(BufferPayload);
+                const payload = try rt.createRuntime(BufferPayload);
                 errdefer rt.memory.destroy(BufferPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .buffer;
             },
             .typed_array => {
-                const payload = try rt.memory.create(TypedArrayPayload);
+                const payload = try rt.createRuntime(TypedArrayPayload);
                 errdefer rt.memory.destroy(TypedArrayPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .typed_array;
             },
             .regexp => {
-                const payload = try rt.memory.create(RegExpPayload);
+                const payload = try rt.createRuntime(RegExpPayload);
                 errdefer rt.memory.destroy(RegExpPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .regexp;
             },
             .bound_function => {
-                const payload = try rt.memory.create(BoundFunctionPayload);
+                const payload = try rt.createRuntime(BoundFunctionPayload);
                 errdefer rt.memory.destroy(BoundFunctionPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .bound_function;
             },
             .proxy => {
-                const payload = try rt.memory.create(ProxyPayload);
+                const payload = try rt.createRuntime(ProxyPayload);
                 errdefer rt.memory.destroy(ProxyPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .proxy;
             },
             .arguments => {
-                const payload = try rt.memory.create(ArgumentsPayload);
+                const payload = try rt.createRuntime(ArgumentsPayload);
                 errdefer rt.memory.destroy(ArgumentsPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .arguments;
             },
             .object_data => {
-                const payload = try rt.memory.create(ObjectDataPayload);
+                const payload = try rt.createRuntime(ObjectDataPayload);
                 errdefer rt.memory.destroy(ObjectDataPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .object_data;
             },
             .var_ref => {
-                const payload = try rt.memory.create(VarRefPayload);
+                const payload = try rt.createRuntime(VarRefPayload);
                 errdefer rt.memory.destroy(VarRefPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .var_ref;
             },
             .promise => {
-                const payload = try rt.memory.create(PromisePayload);
+                const payload = try rt.createRuntime(PromisePayload);
                 errdefer rt.memory.destroy(PromisePayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .promise;
             },
             .generator => {
-                const payload = try rt.memory.create(GeneratorPayload);
+                const payload = try rt.createRuntime(GeneratorPayload);
                 errdefer rt.memory.destroy(GeneratorPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .generator;
             },
             .function => {
-                const payload = try rt.memory.create(FunctionPayload);
+                const payload = try rt.createRuntime(FunctionPayload);
                 errdefer rt.memory.destroy(FunctionPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .function;
             },
             .module_namespace => {
-                const payload = try rt.memory.create(ModuleNamespacePayload);
+                const payload = try rt.createRuntime(ModuleNamespacePayload);
                 errdefer rt.memory.destroy(ModuleNamespacePayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .module_namespace;
             },
             .finalization_registry => {
-                const payload = try rt.memory.create(FinalizationRegistryPayload);
+                const payload = try rt.createRuntime(FinalizationRegistryPayload);
                 errdefer rt.memory.destroy(FinalizationRegistryPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .finalization_registry;
             },
             .std_file => {
-                const payload = try rt.memory.create(StdFilePayload);
+                const payload = try rt.createRuntime(StdFilePayload);
                 errdefer rt.memory.destroy(StdFilePayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .std_file;
             },
             .disposable_stack => {
-                const payload = try rt.memory.create(DisposableStackPayload);
+                const payload = try rt.createRuntime(DisposableStackPayload);
                 errdefer rt.memory.destroy(DisposableStackPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
@@ -1404,7 +1404,7 @@ pub const Object = struct {
         if (len == rt.cached_iterator_next_entries_capacity) {
             var next_capacity = if (rt.cached_iterator_next_entries_capacity == 0) @as(usize, 4) else rt.cached_iterator_next_entries_capacity * 2;
             while (next_capacity < len + 1) : (next_capacity *= 2) {}
-            const next = try rt.memory.alloc(runtime_mod.CachedIteratorNextEntry, next_capacity);
+            const next = try rt.allocRuntime(runtime_mod.CachedIteratorNextEntry, next_capacity);
             errdefer rt.memory.free(runtime_mod.CachedIteratorNextEntry, next);
             @memcpy(next[0..len], rt.cached_iterator_next_entries);
             const old_capacity = rt.cached_iterator_next_entries_capacity;
@@ -1458,7 +1458,7 @@ pub const Object = struct {
     pub fn ensureSharedLazyNativeFunctionCache(self: *Object, rt: *JSRuntime) !void {
         const payload = try self.ensureRealmPayload(rt);
         if (payload.shared_lazy_native_functions != null) return;
-        const cache = try rt.memory.create([runtime_mod.shared_lazy_native_function_slots]?JSValue);
+        const cache = try rt.createRuntime([runtime_mod.shared_lazy_native_function_slots]?JSValue);
         cache.* = @splat(null);
         payload.shared_lazy_native_functions = cache;
     }
@@ -1466,7 +1466,7 @@ pub const Object = struct {
     pub fn ensureOrdinaryPayload(self: *Object, rt: *JSRuntime) !*OrdinaryPayload {
         if (self.ordinaryPayload()) |payload| return payload;
         std.debug.assert(self.class_payload == null);
-        const payload = try rt.memory.create(OrdinaryPayload);
+        const payload = try rt.createRuntime(OrdinaryPayload);
         payload.* = .{};
         self.class_payload = @ptrCast(payload);
         self.class_payload_kind = .ordinary;
@@ -1483,7 +1483,7 @@ pub const Object = struct {
 
     pub fn ensureRealmPayload(self: *Object, rt: *JSRuntime) !*RealmPayload {
         if (self.realmPayload()) |payload| return payload;
-        const payload = try rt.memory.create(RealmPayload);
+        const payload = try rt.createRuntime(RealmPayload);
         payload.* = .{};
         self.class_payload = @ptrCast(payload);
         self.class_payload_kind = .realm;
@@ -1496,7 +1496,7 @@ pub const Object = struct {
             return error.TypeError;
         };
         if (payload.rare) |rare| return rare;
-        const rare = try rt.memory.create(FunctionRarePayload);
+        const rare = try rt.createRuntime(FunctionRarePayload);
         rare.* = .{};
         payload.rare = rare;
         return rare;
@@ -1609,7 +1609,7 @@ pub const Object = struct {
         if (payload.is_stdio) return;
         payload.file = null;
 
-        const job = rt.memory.create(DeferredStdFileClose) catch {
+        const job = rt.createRuntime(DeferredStdFileClose) catch {
             _ = closeStdFileHandle(file, payload.is_popen);
             return;
         };
@@ -2268,7 +2268,7 @@ pub const Object = struct {
         if (next_capacity < 8) next_capacity = 8;
         while (next_capacity < min_capacity) next_capacity *= 2;
 
-        const next = try rt.memory.alloc(CollectionEntry, next_capacity);
+        const next = try rt.allocRuntime(CollectionEntry, next_capacity);
         errdefer rt.memory.free(CollectionEntry, next);
         @memcpy(next[0..entries_slot.*.len], entries_slot.*);
         const old_entries = entries_slot.*;
@@ -2323,7 +2323,7 @@ pub const Object = struct {
         if (next_capacity < 4) next_capacity = 4;
         while (next_capacity < min_capacity) next_capacity *= 2;
 
-        const next = try rt.memory.alloc(WeakCollectionEntry, next_capacity);
+        const next = try rt.allocRuntime(WeakCollectionEntry, next_capacity);
         errdefer rt.memory.free(WeakCollectionEntry, next);
         @memcpy(next[0..entries_slot.*.len], entries_slot.*);
         const old_entries = entries_slot.*;
@@ -2412,7 +2412,7 @@ pub const Object = struct {
         if (next_capacity < 4) next_capacity = 4;
         while (next_capacity < min_capacity) next_capacity *= 2;
 
-        const next = try rt.memory.alloc(FinalizationRegistryCell, next_capacity);
+        const next = try rt.allocRuntime(FinalizationRegistryCell, next_capacity);
         errdefer rt.memory.free(FinalizationRegistryCell, next);
         @memcpy(next[0..payload.cells.len], payload.cells);
         const old_cells = payload.cells;
@@ -2524,7 +2524,7 @@ pub const Object = struct {
         };
         if (payload.resources.len == payload.resource_capacity) {
             const new_capacity = if (payload.resource_capacity == 0) @as(usize, 4) else payload.resource_capacity * 2;
-            const next = try rt.memory.alloc(DisposableResource, new_capacity);
+            const next = try rt.allocRuntime(DisposableResource, new_capacity);
             errdefer rt.memory.free(DisposableResource, next);
             if (payload.resources.len != 0) @memcpy(next[0..payload.resources.len], payload.resources);
             const old_resources = payload.resources;
@@ -2605,7 +2605,7 @@ pub const Object = struct {
     pub fn ensureVarRefPayload(self: *Object, rt: *JSRuntime) !*VarRefPayload {
         if (self.varRefPayload()) |payload| return payload;
         std.debug.assert(self.class_payload == null);
-        const payload = try rt.memory.create(VarRefPayload);
+        const payload = try rt.createRuntime(VarRefPayload);
         payload.* = .{};
         self.class_payload = @ptrCast(payload);
         self.class_payload_kind = .var_ref;
@@ -2774,7 +2774,7 @@ pub const Object = struct {
 
     pub fn ensureTypedArrayPayload(self: *Object, rt: *JSRuntime) !void {
         if (self.typedArrayPayload() != null) return;
-        const payload = try rt.memory.create(TypedArrayPayload);
+        const payload = try rt.createRuntime(TypedArrayPayload);
         payload.* = .{};
         self.class_payload = @ptrCast(payload);
         self.class_payload_kind = .typed_array;
@@ -3072,7 +3072,7 @@ pub const Object = struct {
                 return;
             }
 
-            const owned = try rt.memory.alloc(u8, bytecode.len);
+            const owned = try rt.allocRuntime(u8, bytecode.len);
             @memcpy(owned, bytecode);
             const old_bytecode = payload.compiled_bytecode;
             payload.compiled_bytecode = owned;
@@ -3121,7 +3121,7 @@ pub const Object = struct {
 
     pub fn ensureProxyPayload(self: *Object, rt: *JSRuntime) !void {
         if (self.proxyPayload() != null) return;
-        const payload = try rt.memory.create(ProxyPayload);
+        const payload = try rt.createRuntime(ProxyPayload);
         payload.* = .{};
         self.class_payload = @ptrCast(payload);
         self.class_payload_kind = .proxy;
@@ -3350,7 +3350,7 @@ pub const Object = struct {
             next_capacity += growth;
         }
         if (next_capacity > std.math.maxInt(u32)) return error.OutOfMemory;
-        const next = try rt.memory.alloc(JSValue, next_capacity);
+        const next = try rt.allocRuntime(JSValue, next_capacity);
         errdefer rt.memory.free(JSValue, next);
         if (self.flags.fast_array and self.array_count != 0) {
             const count: usize = @intCast(self.array_count);
@@ -3788,7 +3788,7 @@ pub const Object = struct {
     pub fn ensureRegExpLegacyStatics(self: *Object, rt: *JSRuntime) !*RegExpLegacyStatics {
         const payload = try self.ensureFunctionRarePayload(rt);
         if (payload.regexp_legacy_statics) |legacy| return legacy;
-        const legacy = try rt.memory.create(RegExpLegacyStatics);
+        const legacy = try rt.createRuntime(RegExpLegacyStatics);
         legacy.* = .{};
         payload.regexp_legacy_statics = legacy;
         return legacy;
@@ -9258,7 +9258,7 @@ pub const Object = struct {
         var grew_properties = false;
         if (old_len + 1 > old_capacity) {
             const next_capacity = shape.propertyCapacityForNeeded(old_len + 1);
-            const next = try rt.memory.alloc(property.Entry, next_capacity);
+            const next = try rt.allocRuntime(property.Entry, next_capacity);
             errdefer rt.memory.free(property.Entry, next);
             @memcpy(next[0..old_len], self.properties);
             self.properties = next[0..old_len];
@@ -9328,7 +9328,7 @@ pub const Object = struct {
         const old_capacity = self.propertyStorageCapacity();
         if (needed <= old_capacity) return;
         const next_capacity = shape.propertyCapacityForNeeded(needed);
-        const next = try rt.memory.alloc(property.Entry, next_capacity);
+        const next = try rt.allocRuntime(property.Entry, next_capacity);
         errdefer rt.memory.free(property.Entry, next);
         @memcpy(next[0..self.properties.len], self.properties);
         const old_properties: []property.Entry = if (old_capacity != 0) self.properties.ptr[0..old_capacity] else self.properties[0..0];
@@ -9820,7 +9820,7 @@ fn varRefCellFromValue(value: JSValue) ?*Object {
 }
 
 fn appendAtom(rt: *JSRuntime, keys: *[]atom.Atom, atom_id: atom.Atom) OwnKeysError!void {
-    const next = try rt.memory.alloc(atom.Atom, keys.*.len + 1);
+    const next = try rt.allocRuntime(atom.Atom, keys.*.len + 1);
     errdefer rt.memory.free(atom.Atom, next);
     @memcpy(next[0..keys.*.len], keys.*);
     next[keys.*.len] = rt.atoms.dup(atom_id);

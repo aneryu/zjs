@@ -2970,6 +2970,7 @@ pub fn qjsArrayShiftCall(
     defer receiver_object_value.free(ctx.runtime);
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return error.TypeError;
+    if (qjsFastDenseArrayShift(object)) |value| return value;
     const length = if (object.flags.is_array)
         @as(usize, @intCast(object.arrayLength()))
     else blk: {
@@ -3012,6 +3013,21 @@ pub fn qjsArrayShiftCall(
     const set_length = try setValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(length - 1), null, null);
     set_length.free(ctx.runtime);
     try verifyArrayLikeLengthSet(ctx, output, global, receiver_object_value, length - 1);
+    return first;
+}
+
+fn qjsFastDenseArrayShift(object: *core.Object) ?core.JSValue {
+    if (!object.flags.is_array or !object.flags.length_writable) return null;
+    if (!object.isFastArray()) return null;
+    const values = object.fastArrayValuesMut();
+    if (values.len == 0) return core.JSValue.undefinedValue();
+
+    const first = values[0];
+    if (values.len > 1) {
+        std.mem.copyForwards(core.JSValue, values[0 .. values.len - 1], values[1..values.len]);
+    }
+    values[values.len - 1] = core.JSValue.undefinedValue();
+    object.setFastArrayCountAssumeCapacity(@intCast(values.len - 1));
     return first;
 }
 

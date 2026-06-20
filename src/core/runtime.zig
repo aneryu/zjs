@@ -867,6 +867,7 @@ pub const JSRuntime = struct {
         rt.internal_builtins = &.{};
         rt.any_prototype_may_have_indexed_properties = false;
         rt.memory.profile_alloc_count = null;
+        rt.memory.enableSmallObjectSlab();
         rt.memory.trigger_gc_fn = JSRuntime.triggerGCOnAllocation;
         rt.memory.trigger_gc_ctx = rt;
     }
@@ -1009,6 +1010,7 @@ pub const JSRuntime = struct {
         if (cached_iterator_next_entries.len != 0) self.memory.free(CachedIteratorNextEntry, cached_iterator_next_entries);
         if (deferred_native_cleanups.len != 0) self.memory.free(NativeCleanupJob, deferred_native_cleanups);
         if (deferred_class_payload_finalizers.len != 0) self.memory.free(DeferredClassPayloadFinalizer, deferred_class_payload_finalizers);
+        self.memory.deinitSmallObjectSlab();
         if (self.owns_self_allocation) {
             std.debug.assert(self.memory.allocation_count == 1);
             std.debug.assert(self.memory.allocated_bytes == @sizeOf(JSRuntime));
@@ -1022,6 +1024,36 @@ pub const JSRuntime = struct {
         var account = self.memory;
         account.destroy(JSRuntime, self);
         std.debug.assert(!account.hasOutstandingAllocations());
+    }
+
+    pub inline fn allocRuntime(self: *JSRuntime, comptime T: type, count: usize) ![]T {
+        if (count != 0) {
+            const bytes = std.math.mul(usize, @sizeOf(T), count) catch std.math.maxInt(usize);
+            self.requestGCForAllocation(bytes);
+        }
+        return self.memory.allocNoTrigger(T, count);
+    }
+
+    pub inline fn freeRuntime(self: *JSRuntime, comptime T: type, slice: []T) void {
+        self.memory.free(T, slice);
+    }
+
+    pub inline fn createRuntime(self: *JSRuntime, comptime T: type) !*T {
+        self.requestGCForAllocation(@sizeOf(T));
+        return self.memory.createNoTrigger(T);
+    }
+
+    pub inline fn destroyRuntime(self: *JSRuntime, comptime T: type, ptr: *T) void {
+        self.memory.destroy(T, ptr);
+    }
+
+    pub inline fn allocRuntimeAlignedBytes(self: *JSRuntime, byte_count: usize, alignment: std.mem.Alignment) ![]u8 {
+        if (byte_count != 0) self.requestGCForAllocation(byte_count);
+        return self.memory.allocAlignedBytesNoTrigger(byte_count, alignment);
+    }
+
+    pub inline fn freeRuntimeAlignedBytes(self: *JSRuntime, bytes: []u8, alignment: std.mem.Alignment) void {
+        self.memory.freeAlignedBytes(bytes, alignment);
     }
 
     pub fn registerObject(self: *JSRuntime, object: *Object) !void {
@@ -1932,13 +1964,25 @@ pub const JSRuntime = struct {
         _ = self.runObjectCycleRemoval();
     }
 
-    fn triggerGCOnAllocation(ctx: ?*anyopaque, size: usize) void {
-        const self: *JSRuntime = @ptrCast(@alignCast(ctx));
+    pub inline fn requestGCForAllocation(self: *JSRuntime, size: usize) void {
+        if (comptime builtin.is_test) {
+            if (self.memory.trigger_gc_fn) |trigger| {
+                if (trigger != JSRuntime.triggerGCOnAllocation) {
+                    trigger(self.memory.trigger_gc_ctx, size);
+                    return;
+                }
+            }
+        }
         if (self.gc_running) return;
         const total = std.math.add(usize, self.memory.allocated_bytes, size) catch std.math.maxInt(usize);
         if (total > self.malloc_gc_threshold) {
             self.gc.requestGC(.allocation_threshold, .soon);
         }
+    }
+
+    fn triggerGCOnAllocation(ctx: ?*anyopaque, size: usize) void {
+        const self: *JSRuntime = @ptrCast(@alignCast(ctx));
+        self.requestGCForAllocation(size);
     }
 
     fn resetGCThreshold(self: *JSRuntime) void {
