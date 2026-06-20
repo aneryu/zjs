@@ -318,34 +318,9 @@ pub const Machine = struct {
         const fb_strict = target.fb.is_strict_mode or target.fb.runtime_strict_mode;
         const effective_this = try call_runtime.coerceCallThis(ctx, global, fb_strict, target.this_value, &boxed_this);
 
-        var binding_inputs = frame_mod.CallBindingInputs{
-            .initial_this_value = effective_this,
-            .current_function_value = callable,
-            .new_target_value = target.new_target,
-            .constructor_this_value = core.JSValue.undefinedValue(),
-            .eval_local_names = &.{},
-            .eval_local_slots = &.{},
-            .input_eval_var_ref_names = eval_names,
-            .input_eval_var_refs = eval_refs,
-            .inherited_eval_local_names = &.{},
-            .inherited_eval_local_slots = &.{},
-            .inherited_eval_var_ref_names = &.{},
-            .inherited_eval_var_refs = &.{},
-        };
-        var binding_modes = frame_mod.CallBindingModes{
-            .this_value = .borrow,
-            .constructor_this_value = .borrow,
-            .current_function = .take,
-            .new_target = .borrow,
-        };
-
         const receiver_slot = sourceReceiverSlot(source);
         var take_receiver_as_this = false;
-        if (boxed_this) |boxed| {
-            binding_inputs.initial_this_value = boxed;
-            binding_modes.this_value = .take;
-            boxed_this = null;
-        } else if (!target.fb.is_arrow_function) {
+        if (boxed_this == null and !target.fb.is_arrow_function) {
             if (receiver_slot) |slot| {
                 if (effective_this.same(slot.*)) {
                     take_receiver_as_this = true;
@@ -356,21 +331,39 @@ pub const Machine = struct {
         var cleanup_source: SourceCleanupMode = if (sourceHasStackRegion(source)) .full else .none;
         errdefer cleanupSource(rt, source, cleanup_source);
 
-        binding_inputs.current_function_value = takeSourceSlot(callable_slot);
-        if (take_receiver_as_this) {
-            // `takeSourceSlot` transfers the receiver slot's owned ref into
-            // `this`; the binding must therefore OWN it (.take), mirroring the
-            // boxed_this branch. Leaving it at the default `.borrow` leaked one
-            // receiver ref per method call (the slot is nulled, so the popped
-            // stack region never frees it) — an O(n^2) live-heap blowup on
-            // allocation+method-heavy code (raytrace/box2d/deltablue).
-            binding_inputs.initial_this_value = takeSourceSlot(receiver_slot.?);
-            binding_modes.this_value = .take;
+        // Bind the frame values INLINE — qjs's JS_CallInternal sets cur_func /
+        // this / new_target directly rather than threading a 14-field
+        // CallBindingInputs descriptor through initCallBindingValues. This is
+        // the common-path equivalent; ownership flags must mirror the old
+        // bindCallValue/modeOwnsValue result EXACTLY (Frame.deinit frees by
+        // these flags, and the frame.deinit errdefer above covers a later
+        // failure):
+        //   current_function .take  -> owns the callable's transferred ref
+        //   new_target / constructor_this .borrow -> not owned
+        //   this .borrow, unless boxed (sloppy primitive `this`) or taken from
+        //   the receiver slot (method call) -> then .take/owned.
+        // `takeSourceSlot` nulls the source slot so the popped stack region
+        // never double-frees the value (the leak guard the method-call comment
+        // below describes).
+        entry.frame.current_function = takeSourceSlot(callable_slot);
+        entry.frame.current_function_owned = true;
+        entry.frame.new_target = target.new_target;
+        entry.frame.new_target_owned = false;
+        entry.frame.constructor_this_value = core.JSValue.undefinedValue();
+        entry.frame.constructor_this_value_owned = false;
+        if (boxed_this) |boxed| {
+            entry.frame.this_value = boxed;
+            entry.frame.this_value_owned = true;
+            boxed_this = null;
+        } else if (take_receiver_as_this) {
+            entry.frame.this_value = takeSourceSlot(receiver_slot.?);
+            entry.frame.this_value_owned = true;
+        } else {
+            entry.frame.this_value = effective_this;
+            entry.frame.this_value_owned = false;
         }
 
         entry.eval_snapshot = .{};
-        entry.frame.initCallBindingValues(binding_inputs, binding_modes);
-
         entry.frame_roots = .{};
         const argc = sourceArgCount(source);
         const frame_arg_count = @max(argc, @as(usize, @intCast(entry.view.arg_count)));
@@ -387,7 +380,27 @@ pub const Machine = struct {
         });
         errdefer entry.frame_roots.deinit();
 
-        entry.eval_snapshot = try entry.frame.initCallEvalBindings(rt, binding_inputs);
+        // Direct-eval bindings are COLD: only build the snapshot when the callee
+        // actually carries eval-introduced var refs. The common call leaves
+        // `eval_snapshot` empty (its deinit is a no-op) and the frame's eval_*
+        // fields keep their empty Frame.init defaults — byte-identical to what
+        // the old unconditional initCallEvalBindings produced for no-eval.
+        if (need_eval_var_refs) {
+            entry.eval_snapshot = try entry.frame.initCallEvalBindings(rt, .{
+                .initial_this_value = effective_this,
+                .current_function_value = callable,
+                .new_target_value = target.new_target,
+                .constructor_this_value = core.JSValue.undefinedValue(),
+                .eval_local_names = &.{},
+                .eval_local_slots = &.{},
+                .input_eval_var_ref_names = eval_names,
+                .input_eval_var_refs = eval_refs,
+                .inherited_eval_local_names = &.{},
+                .inherited_eval_local_slots = &.{},
+                .inherited_eval_var_ref_names = &.{},
+                .inherited_eval_var_refs = &.{},
+            });
+        }
         errdefer entry.eval_snapshot.deinit(rt);
 
         try vm_call.initFrameLocals(ctx, &entry.view, &entry.frame, &.{}, &.{}, true);
