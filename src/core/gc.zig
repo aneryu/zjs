@@ -1171,7 +1171,6 @@ pub const Registry = struct {
     pub fn releaseObject(self: *Registry, h: *GCObjectHeader) bool {
         std.debug.assert(h.rc > 0);
         h.rc -= 1;
-        self.stats.rc_dec += 1;
 
         if (h.rc == 0) {
             self.unlinkObject(h);
@@ -1416,18 +1415,22 @@ pub fn retain(header: *Header) void {
 pub fn release(rt: anytype, header: *Header) void {
     std.debug.assert(header.rc > 0);
     header.rc -= 1;
-    rt.gc.stats.rc_dec += 1;
 
     if (header.rc == 0) {
-        if (rt.gc.phase == .deinit and header.kind == .object) return;
-        rt.gc.unlinkObjectWithBytes(header, Registry.heapByteSizeFromHeader(rt, header));
+        @branchHint(.cold);
+        releaseDestroy(rt, header);
+    }
+}
 
-        // 10.1 静态 kind switch 派发销毁
-        switch (header.kind) {
-            .string => string.String.destroyFromHeader(rt, header),
-            .object => object.Object.destroyFromHeader(rt, header),
-            .big_int => bigint.BigInt.destroyFromHeader(rt, header),
-            .function_bytecode => function_bytecode_mod.destroyFromHeader(rt, header),
-        }
+fn releaseDestroy(rt: anytype, header: *Header) void {
+    if (rt.gc.phase == .deinit and header.kind == .object) return;
+    rt.gc.unlinkObjectWithBytes(header, Registry.heapByteSizeFromHeader(rt, header));
+
+    // 10.1 静态 kind switch 派发销毁
+    switch (header.kind) {
+        .string => string.String.destroyFromHeader(rt, header),
+        .object => object.Object.destroyFromHeader(rt, header),
+        .big_int => bigint.BigInt.destroyFromHeader(rt, header),
+        .function_bytecode => function_bytecode_mod.destroyFromHeader(rt, header),
     }
 }

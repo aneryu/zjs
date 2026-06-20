@@ -996,7 +996,6 @@ fn releaseStringRefIntoChain(rt: *JSRuntime, s: *String, pending: *?*String) voi
         // instead of recursing through gc.release -> destroyFromHeader.
         std.debug.assert(s.header.rc > 0);
         s.header.rc -= 1;
-        rt.gc.stats.rc_dec += 1;
         if (s.header.rc == 0) {
             s.data.rope.chain_next = pending.*;
             pending.* = s;
