@@ -1616,7 +1616,7 @@ pub fn denseArrayModFieldInt32Increments(rt: *core.JSRuntime, array_value: core.
     var increments = DenseArrayModFieldIncrements{ .values = undefined, .len = modulus };
     if (modulus > increments.values.len) return null;
     for (0..modulus) |index| {
-        const element = elements[index] orelse return null;
+        const element = elements[index];
         const field_value = ordinaryDataPropertyBorrowedValueForFastPath(rt, element, field_atom) orelse return null;
         const int_value = field_value.asInt32() orelse return null;
         if (int_value < 0) return null;
@@ -1742,8 +1742,7 @@ pub fn fastDenseArrayElementValue(value: core.JSValue, key: core.JSValue) ?core.
     if (object.properties.len != 0 and object.findProperty(atom_id) != null) return null;
     const elements = object.arrayElements();
     if (@as(usize, @intCast(index_i32)) >= elements.len) return null;
-    if (elements[@intCast(index_i32)]) |stored| return stored.dup();
-    return null;
+    return elements[@intCast(index_i32)].dup();
 }
 
 pub fn fastInt32Add(lhs: i32, rhs: i32) core.JSValue {

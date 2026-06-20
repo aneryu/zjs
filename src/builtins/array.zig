@@ -41,7 +41,6 @@ const RootedValueCopies = struct {
     }
 };
 
-
 pub const StaticMethod = core.host_function.builtin_method_ids.array.StaticMethod;
 pub const PrototypeMethod = core.host_function.builtin_method_ids.array.PrototypeMethod;
 pub const ConstructorMethod = core.host_function.builtin_method_ids.array.ConstructorMethod;
@@ -811,8 +810,8 @@ fn indexSearch(rt: *core.JSRuntime, value: core.JSValue, needle: core.JSValue, m
         const dense_len: u32 = @intCast(@min(array.arrayElements().len, @as(usize, @intCast(array.length))));
         var dense_index: u32 = 0;
         while (dense_index < dense_len) : (dense_index += 1) {
-            const maybe_item = array.arrayElements()[@intCast(dense_index)] orelse continue;
-            if (valuesEqual(maybe_item, needle)) {
+            const item = array.arrayElements()[@intCast(dense_index)];
+            if (valuesEqual(item, needle)) {
                 found_index = @intCast(dense_index);
                 if (mode != .last) break;
             }

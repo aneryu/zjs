@@ -631,7 +631,7 @@ fn fastArrayForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_in
             if (target.findProperty(atom_id) != null) return false;
             const elements = target.arrayElements();
             if (index >= elements.len) return false;
-            const element = elements[index] orelse return false;
+            const element = elements[index];
             break :blk element.dup();
         },
         else => unreachable,

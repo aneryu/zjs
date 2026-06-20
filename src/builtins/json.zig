@@ -1845,10 +1845,7 @@ fn qjsJsonAppendSimpleArray(
     var index: usize = 0;
     while (index < object.length) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
-        const element = elements[index] orelse {
-            buffer.shrinkRetainingCapacity(start);
-            return .fallback;
-        };
+        const element = elements[index];
         switch (try qjsJsonAppendSimpleValue(rt, global, buffer, element, true, stack)) {
             .appended => {},
             .omitted => try buffer.appendSlice(rt.memory.allocator, "null"),

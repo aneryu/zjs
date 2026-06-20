@@ -2128,7 +2128,7 @@ test "array element state uses payload storage" {
     try std.testing.expectEqual(core.object.ArrayStorageMode.dense, array.arrayElementStorageMode());
     try std.testing.expect(try array.appendDenseArrayIndex(rt, 0, core.atom.atomFromUInt32(0), core.JSValue.int32(7)));
     try std.testing.expectEqual(@as(usize, 1), array.arrayElements().len);
-    try std.testing.expectEqual(@as(?i32, 7), array.arrayElements()[0].?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 7), array.arrayElements()[0].asInt32());
 }
 
 test "promise state uses payload storage" {
@@ -2614,11 +2614,11 @@ test "dense array element self-assignment keeps stored object alive" {
     stored.value().free(rt);
     try std.testing.expectEqual(@as(i32, 1), stored.header.rc);
 
-    const current = array.arrayElements()[0].?;
+    const current = array.arrayElements()[0];
     try array.setProperty(rt, index, current);
 
     try std.testing.expectEqual(@as(i32, 1), stored.header.rc);
-    try std.testing.expectEqual(&stored.header, array.arrayElements()[0].?.refHeader().?);
+    try std.testing.expectEqual(&stored.header, array.arrayElements()[0].refHeader().?);
 }
 
 test "prototype replacement clones shared transition shape" {
@@ -3256,7 +3256,7 @@ test "object child edge tracing exposes mutable value slots" {
     const property_value = array_obj.getProperty(key);
     defer property_value.free(rt);
     try std.testing.expectEqual(@as(?i32, 501), property_value.asInt32());
-    try std.testing.expectEqual(@as(?i32, 502), array_obj.arrayElements()[0].?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 502), array_obj.arrayElements()[0].asInt32());
 }
 
 test "gc registry debug verifier accepts linked and unlinked list states" {
