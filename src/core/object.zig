@@ -5313,11 +5313,12 @@ pub const Object = struct {
         rt.gc.stats.collections += 1;
 
         var garbage_headers = std.ArrayList(*gc.GCObjectHeader).empty;
-        try garbage_headers.ensureTotalCapacity(rt.memory.persistent_allocator, rt.gc.gc_objects.len);
+        try garbage_headers.ensureTotalCapacity(rt.memory.persistent_allocator, rt.gc.liveCount());
         defer garbage_headers.deinit(rt.memory.persistent_allocator);
 
         defer {
-            for (rt.gc.gc_objects) |h| {
+            var gc_iter = rt.gc.objectIterator();
+            while (gc_iter.next()) |h| {
                 h.flags.mark = false;
                 h.flags.cycle_visited = false;
                 h.flags.cycle_preserved = false;
@@ -5326,18 +5327,21 @@ pub const Object = struct {
 
         // Phase 1: gc_decref
         {
-            for (rt.gc.gc_objects) |h| {
+            var gc_iter = rt.gc.objectIterator();
+            while (gc_iter.next()) |h| {
                 h.flags.mark = true;
             }
 
-            for (rt.gc.gc_objects) |h| {
+            gc_iter = rt.gc.objectIterator();
+            while (gc_iter.next()) |h| {
                 traceChildren(rt, h, DecrefVisitor{ .rt = rt });
             }
         }
 
         // Phase 2: gc_scan
         {
-            for (rt.gc.gc_objects) |h| {
+            var gc_iter = rt.gc.objectIterator();
+            while (gc_iter.next()) |h| {
                 if (h.rc > 0 and h.flags.mark) {
                     h.flags.mark = false;
                     traceChildren(rt, h, ScanIncrefVisitor{ .rt = rt });
@@ -5349,7 +5353,8 @@ pub const Object = struct {
         // candidates until destruction; `mark` distinguishes garbage from live
         // entries for the rest of this round.
         {
-            for (rt.gc.gc_objects) |h| {
+            var gc_iter = rt.gc.objectIterator();
+            while (gc_iter.next()) |h| {
                 if (h.flags.mark) garbage_headers.appendAssumeCapacity(h);
             }
         }
@@ -5369,7 +5374,8 @@ pub const Object = struct {
         // Free/garbage membership is derived as (cycle_visited and !cycle_preserved).
         var preserved_count: usize = 0;
         {
-            for (rt.gc.gc_objects) |h| {
+            var gc_iter = rt.gc.objectIterator();
+            while (gc_iter.next()) |h| {
                 if (h.kind == .object or h.kind == .var_ref) {
                     h.flags.cycle_visited = true;
                     h.flags.cycle_preserved = !h.flags.mark;
@@ -5497,7 +5503,8 @@ pub const Object = struct {
 
         // Initialize object worklist with all objects currently preserved.
         {
-            for (rt.gc.gc_objects) |h| {
+            var gc_iter = rt.gc.objectIterator();
+            while (gc_iter.next()) |h| {
                 if (h.kind == .object and h.flags.cycle_preserved) {
                     const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                     try object_worklist.append(rt.memory.persistent_allocator, obj);
@@ -5599,7 +5606,8 @@ pub const Object = struct {
         std.debug.assert(object_worklist.items.len == 0);
         std.debug.assert(var_ref_worklist.items.len == 0);
         {
-            for (rt.gc.gc_objects) |h| {
+            var gc_iter = rt.gc.objectIterator();
+            while (gc_iter.next()) |h| {
                 if (h.kind == .object and h.flags.cycle_preserved) {
                     const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                     try object_worklist.append(rt.memory.persistent_allocator, obj);
@@ -5736,7 +5744,8 @@ pub const Object = struct {
         var candidates = ObjectVisitSet.init(rt.memory.allocator);
         defer candidates.deinit();
 
-        for (rt.gc.gc_objects) |h| {
+        var gc_iter = rt.gc.objectIterator();
+        while (gc_iter.next()) |h| {
             const function_bytecode = functionBytecodeFromGcHeader(h) orelse continue;
             candidates.put(@intFromPtr(function_bytecode), {}) catch return;
         }
@@ -6480,7 +6489,8 @@ pub const Object = struct {
         var changed = true;
         while (changed) {
             changed = false;
-            for (rt.gc.gc_objects) |h| {
+            var gc_iter = rt.gc.objectIterator();
+            while (gc_iter.next()) |h| {
                 if (h.kind != .object or !h.flags.cycle_preserved) continue;
                 const current: *Object = @alignCast(@fieldParentPtr("header", h));
                 for (current.weakCollectionEntries()) |entry| {
@@ -6523,7 +6533,8 @@ pub const Object = struct {
         symbol_roots: *SymbolRootSet,
         preserved_count: *usize,
     ) ObjectGraphError!void {
-        for (rt.gc.gc_objects) |header| {
+        var gc_iter = rt.gc.objectIterator();
+        while (gc_iter.next()) |header| {
             if (header.kind == .object) {
                 const current: *Object = @alignCast(@fieldParentPtr("header", header));
                 if (header.flags.cycle_preserved) {
@@ -6878,7 +6889,8 @@ pub const Object = struct {
         var changed = true;
         while (changed) {
             changed = false;
-            for (rt.gc.gc_objects) |header| {
+            var gc_iter = rt.gc.objectIterator();
+            while (gc_iter.next()) |header| {
                 const function_bytecode = functionBytecodeFromGcHeader(header) orelse {
                     continue;
                 };

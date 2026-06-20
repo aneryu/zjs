@@ -330,15 +330,17 @@ pub const BlockFlags = packed struct(u8) {
     _reserved: u2 = 0,
 };
 
-/// Z-GE v1.0 8-byte BlockHeader
+/// Z-GE v1.0 block header with qjs-style intrusive GC list links.
 pub const BlockHeader = extern struct {
     size_class: u16 align(8) = 0,
     kind: GcKind,
     flags: BlockFlags = .{},
     rc: i32 = 1,
+    prev: ?*BlockHeader = null,
+    next: ?*BlockHeader = null,
 
     comptime {
-        std.debug.assert(@sizeOf(BlockHeader) == 8);
+        std.debug.assert(@sizeOf(BlockHeader) == 24);
     }
 
     pub inline fn retain(self: *BlockHeader) void {
@@ -561,10 +563,12 @@ pub const Registry = struct {
     memory: *memory.MemoryAccount,
     policy: Policy = .{},
 
-    // Cycle-collection candidates (Object, FunctionBytecode). The candidate
-    // set is registry-owned so heap objects do not carry a permanent GC node.
-    gc_objects: []*GCObjectHeader = &.{},
-    gc_objects_capacity: usize = 0,
+    // qjs-style cycle-collection candidates (Object, FunctionBytecode, VarRef):
+    // each GC object header embeds its permanent list node, so add/remove are
+    // O(1) pointer splices.
+    gc_object_head: ?*GCObjectHeader = null,
+    gc_object_tail: ?*GCObjectHeader = null,
+    gc_object_count: usize = 0,
     external_tokens: []ExternalTokenEntry = &.{},
     external_tokens_capacity: usize = 0,
     next_external_token_id: u64 = 1,
@@ -604,9 +608,8 @@ pub const Registry = struct {
         self.phase = .deinit;
 
         // 释放可能存活的所有 Candidate 对象
-        while (self.gc_objects.len != 0) {
-            const h = self.gc_objects[self.gc_objects.len - 1];
-            self.gc_objects = self.gc_objects[0 .. self.gc_objects.len - 1];
+        while (self.gc_object_tail) |h| {
+            self.removeGcObject(h);
             self.recordHeapFreeWithBytes(h, heapByteSizeFromHeader(rt, h));
             h.flags.finalizing = true;
             if (h.kind == .object) {
@@ -617,13 +620,9 @@ pub const Registry = struct {
             }
         }
 
-        if (self.gc_objects_capacity != 0) {
-            self.memory.free(*GCObjectHeader, self.gc_objects.ptr[0..self.gc_objects_capacity]);
-        } else if (self.gc_objects.len != 0) {
-            self.memory.free(*GCObjectHeader, self.gc_objects);
-        }
-        self.gc_objects = &.{};
-        self.gc_objects_capacity = 0;
+        self.gc_object_head = null;
+        self.gc_object_tail = null;
+        self.gc_object_count = 0;
 
         self.preserved_bytecodes.deinit();
         self.object_worklist.deinit(self.memory.persistent_allocator);
@@ -963,14 +962,15 @@ pub const Registry = struct {
     pub fn addWithSize(self: *Registry, h: *GCObjectHeader, bytes: usize) !void {
         const is_large = self.isLargeAllocation(bytes);
         const tracked = isCycleCandidate(h);
-        if (tracked) try self.ensureGcObjectCapacity(self.gc_objects.len + 1);
 
         h.rc = 1;
         h.flags = .{};
+        h.prev = null;
+        h.next = null;
         h.size_class = encodeHeapBytes(bytes);
         self.recordHeapAlloc(is_large, bytes);
 
-        if (tracked) self.appendGcObjectAssumeCapacity(h);
+        if (tracked) self.appendGcObject(h);
     }
 
     fn defaultHeapBytes(h: *const GCObjectHeader) usize {
@@ -1198,45 +1198,55 @@ pub const Registry = struct {
         self.pin_entries_capacity = new_capacity;
     }
 
-    fn ensureGcObjectCapacity(self: *Registry, required: usize) !void {
-        if (required <= self.gc_objects_capacity) return;
-        var new_capacity = if (self.gc_objects_capacity == 0) @as(usize, 64) else self.gc_objects_capacity * 2;
-        while (new_capacity < required) new_capacity *= 2;
-        const next = try self.memory.alloc(*GCObjectHeader, new_capacity);
-        errdefer self.memory.free(*GCObjectHeader, next);
-        @memcpy(next[0..self.gc_objects.len], self.gc_objects);
-        if (self.gc_objects_capacity != 0) {
-            self.memory.free(*GCObjectHeader, self.gc_objects.ptr[0..self.gc_objects_capacity]);
-        } else if (self.gc_objects.len != 0) {
-            self.memory.free(*GCObjectHeader, self.gc_objects);
+    pub const GcObjectIterator = struct {
+        cursor: ?*GCObjectHeader,
+
+        pub fn next(self: *GcObjectIterator) ?*GCObjectHeader {
+            const current = self.cursor orelse return null;
+            self.cursor = current.next;
+            return current;
         }
-        self.gc_objects = next[0..self.gc_objects.len];
-        self.gc_objects_capacity = new_capacity;
+    };
+
+    pub fn objectIterator(self: *const Registry) GcObjectIterator {
+        return .{ .cursor = self.gc_object_head };
     }
 
-    fn appendGcObjectAssumeCapacity(self: *Registry, header: *GCObjectHeader) void {
-        std.debug.assert(self.gc_objects.len < self.gc_objects_capacity);
-        self.gc_objects.ptr[self.gc_objects.len] = header;
-        self.gc_objects = self.gc_objects.ptr[0 .. self.gc_objects.len + 1];
+    fn appendGcObject(self: *Registry, header: *GCObjectHeader) void {
+        std.debug.assert(isCycleCandidate(header));
+        std.debug.assert(header.prev == null);
+        std.debug.assert(header.next == null);
+
+        header.prev = self.gc_object_tail;
+        header.next = null;
+        if (self.gc_object_tail) |tail| {
+            tail.next = header;
+        } else {
+            self.gc_object_head = header;
+        }
+        self.gc_object_tail = header;
+        self.gc_object_count += 1;
     }
 
     fn removeGcObject(self: *Registry, header: *GCObjectHeader) void {
-        const index = self.gcObjectIndex(header) orelse return;
-        if (index + 1 < self.gc_objects.len) {
-            std.mem.copyForwards(
-                *GCObjectHeader,
-                self.gc_objects[index .. self.gc_objects.len - 1],
-                self.gc_objects[index + 1 ..],
-            );
-        }
-        self.gc_objects = self.gc_objects[0 .. self.gc_objects.len - 1];
-    }
+        const prev = header.prev;
+        const next = header.next;
+        if (prev == null and next == null and self.gc_object_head != header and self.gc_object_tail != header) return;
 
-    fn gcObjectIndex(self: Registry, header: *const GCObjectHeader) ?usize {
-        for (self.gc_objects, 0..) |candidate, index| {
-            if (candidate == header) return index;
+        if (prev) |p| {
+            p.next = next;
+        } else {
+            self.gc_object_head = next;
         }
-        return null;
+        if (next) |n| {
+            n.prev = prev;
+        } else {
+            self.gc_object_tail = prev;
+        }
+        header.prev = null;
+        header.next = null;
+        std.debug.assert(self.gc_object_count != 0);
+        self.gc_object_count -= 1;
     }
 
     pub fn recordFailure(self: *Registry, err: CollectionError) void {
@@ -1258,14 +1268,41 @@ pub const Registry = struct {
     }
 
     pub fn verifyIntrusiveList(self: *Registry) InvariantError!void {
-        for (self.gc_objects, 0..) |h, index| {
+        if (self.gc_object_count == 0) {
+            if (self.gc_object_head != null or self.gc_object_tail != null) return error.CorruptGcList;
+            return;
+        }
+        if (self.gc_object_head == null or self.gc_object_tail == null) return error.CorruptGcList;
+
+        var tortoise = self.gc_object_head;
+        var hare = self.gc_object_head;
+        while (hare) |hare_node| {
+            hare = hare_node.next orelse break;
+            hare = hare.?.next;
+            tortoise = tortoise.?.next;
+            if (hare != null and tortoise == hare) return error.CorruptGcList;
+        }
+
+        var previous: ?*GCObjectHeader = null;
+        var current = self.gc_object_head;
+        var count: usize = 0;
+        while (current) |h| {
             if (!isCycleCandidate(h)) return error.CorruptGcList;
             if (h.rc < 0) return error.NegativeRefCount;
             if (h.flags.mark and self.phase == .none) return error.MarkBitLeftSet;
-            for (self.gc_objects[0..index]) |previous| {
-                if (previous == h) return error.DuplicateHeapAllocation;
-            }
+
+            if (h.prev != previous) return error.CorruptGcList;
+
+            if (h.next) |next| {
+                if (next.prev != h) return error.CorruptGcList;
+            } else if (self.gc_object_tail != h) return error.CorruptGcList;
+
+            previous = h;
+            current = h.next;
+            count += 1;
         }
+        if (previous != self.gc_object_tail) return error.CorruptGcList;
+        if (count != self.gc_object_count) return error.CorruptGcList;
     }
 
     pub fn verifyHeapAccounting(self: Registry, rt: anytype) InvariantError!void {
@@ -1273,7 +1310,8 @@ pub const Registry = struct {
         var old_live_bytes: usize = 0;
         var large_object_bytes: usize = 0;
 
-        for (self.gc_objects) |header| {
+        var iterator = self.objectIterator();
+        while (iterator.next()) |header| {
             const bytes = heapByteSizeFromHeader(rt, header);
             if (bytes == 0) return error.MissingHeapAllocation;
             heap_live_bytes = std.math.add(usize, heap_live_bytes, bytes) catch std.math.maxInt(usize);
@@ -1333,11 +1371,15 @@ pub const Registry = struct {
     }
 
     pub fn liveCount(self: Registry) usize {
-        return self.gc_objects.len;
+        return self.gc_object_count;
     }
 
     pub fn containsHeader(self: Registry, header: *const GCObjectHeader) bool {
-        return self.gcObjectIndex(header) != null;
+        var iterator = self.objectIterator();
+        while (iterator.next()) |candidate| {
+            if (candidate == header) return true;
+        }
+        return false;
     }
 };
 

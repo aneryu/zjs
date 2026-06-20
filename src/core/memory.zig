@@ -363,7 +363,9 @@ pub const MemoryAccount = struct {
     }
 
     inline fn rawFree(self: *MemoryAccount, bytes: []u8, alignment: std.mem.Alignment) void {
-        if (self.small_slab_enabled and SmallObjectSlab.canUse(bytes.len, alignment) and self.small_slab.owns(bytes.ptr)) {
+        if (self.small_slab_enabled and SmallObjectSlab.canUse(bytes.len, alignment)) {
+            // The runtime enables the slab before managed allocations begin; while
+            // enabled, every small MemoryAccount allocation comes from this slab.
             self.small_slab.free(bytes, alignment);
             return;
         }

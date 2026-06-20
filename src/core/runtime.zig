@@ -1909,7 +1909,8 @@ pub const JSRuntime = struct {
 
     fn weakReferenceCount(self: JSRuntime) usize {
         var count = self.weak_root_slots.len;
-        for (self.gc.gc_objects) |header| {
+        var gc_iter = self.gc.objectIterator();
+        while (gc_iter.next()) |header| {
             if (header.kind == .object) {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", header));
                 count +|= obj.weakCollectionEntries().len;
