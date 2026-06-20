@@ -109,7 +109,6 @@ pub const CallSite = struct {
 /// runtime-mutable and independently released via `deinitIcSlots`.
 pub const FunctionBytecode = struct {
     header: gc.GCObjectHeader,
-    gc: gc.GcNode = .{},
     memory: *memory.MemoryAccount,
     atoms: *atom.AtomTable,
 

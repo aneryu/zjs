@@ -1125,7 +1125,6 @@ fn exoticMethodsForClassId(class_id: class.ClassId) ?*const ExoticMethods {
 
 pub const Object = struct {
     header: gc.GCObjectHeader,
-    gc: gc.GcNode = .{},
     class_payload: class.Payload = null,
     owner_runtime: *JSRuntime,
     shape_ref: *shape.Shape,
@@ -5140,55 +5139,35 @@ pub const Object = struct {
         }
     };
 
-    fn unlinkNodeFromList(head: *?*gc.GcNode, tail: *?*gc.GcNode, node: *gc.GcNode) void {
-        if (node.prev) |prev| {
-            prev.next = node.next;
-        } else {
-            head.* = node.next;
-        }
-        if (node.next) |next| {
-            next.prev = node.prev;
-        } else {
-            tail.* = node.prev;
-        }
-        node.prev = null;
-        node.next = null;
-    }
-
-    fn linkNodeToList(head: *?*gc.GcNode, tail: *?*gc.GcNode, node: *gc.GcNode) void {
-        node.prev = tail.*;
-        node.next = null;
-        if (tail.*) |t| {
-            t.next = node;
-        } else {
-            head.* = node;
-        }
-        tail.* = node;
-    }
-
     pub fn destroyRuntimeCyclesWithValueRoots(rt: *JSRuntime, roots: ?*const runtime_mod.ValueRootFrame) ObjectGraphError!usize {
         rt.gc.stats.collections += 1;
 
+        var garbage_headers = std.ArrayList(*gc.GCObjectHeader).empty;
+        try garbage_headers.ensureTotalCapacity(rt.memory.persistent_allocator, rt.gc.gc_objects.len);
+        defer garbage_headers.deinit(rt.memory.persistent_allocator);
+
+        defer {
+            for (rt.gc.gc_objects) |h| {
+                h.flags.mark = false;
+                h.flags.cycle_visited = false;
+                h.flags.cycle_preserved = false;
+            }
+        }
+
         // Phase 1: gc_decref
         {
-            var current = rt.gc.gc_obj_list_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
+            for (rt.gc.gc_objects) |h| {
                 h.flags.mark = true;
             }
 
-            current = rt.gc.gc_obj_list_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
+            for (rt.gc.gc_objects) |h| {
                 traceChildren(rt, h, DecrefVisitor{ .rt = rt });
             }
         }
 
         // Phase 2: gc_scan
         {
-            var current = rt.gc.gc_obj_list_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
+            for (rt.gc.gc_objects) |h| {
                 if (h.rc > 0 and h.flags.mark) {
                     h.flags.mark = false;
                     traceChildren(rt, h, ScanIncrefVisitor{ .rt = rt });
@@ -5196,38 +5175,18 @@ pub const Object = struct {
             }
         }
 
-        // Phase 3: move dead cycles to tmp_head
-        var tmp_head: ?*gc.GcNode = null;
-        var tmp_tail: ?*gc.GcNode = null;
-        defer {
-            var current = tmp_head;
-            while (current) |node| {
-                const next = node.next;
-                const h = gc.headerFromGcNode(node);
-                unlinkNodeFromList(&tmp_head, &tmp_tail, node);
-                linkNodeToList(&rt.gc.gc_obj_list_head, &rt.gc.gc_obj_list_tail, node);
-                h.flags.mark = false;
-                current = next;
-            }
-        }
+        // Phase 3: snapshot dead-cycle candidates. The registry keeps all
+        // candidates until destruction; `mark` distinguishes garbage from live
+        // entries for the rest of this round.
         {
-            var current = rt.gc.gc_obj_list_head;
-            while (current) |node| {
-                const next = node.next;
-                const h = gc.headerFromGcNode(node);
-                if (h.flags.mark) {
-                    unlinkNodeFromList(&rt.gc.gc_obj_list_head, &rt.gc.gc_obj_list_tail, node);
-                    linkNodeToList(&tmp_head, &tmp_tail, node);
-                }
-                current = next;
+            for (rt.gc.gc_objects) |h| {
+                if (h.flags.mark) garbage_headers.appendAssumeCapacity(h);
             }
         }
 
-        // Phase 3b: restore refcounts of all objects in tmp_head (to be deleted)
+        // Phase 3b: restore refcounts of all objects to be deleted.
         {
-            var current = tmp_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
+            for (garbage_headers.items) |h| {
                 traceChildren(rt, h, ScanRestoreVisitor{ .rt = rt });
             }
         }
@@ -5240,23 +5199,11 @@ pub const Object = struct {
         // Free/garbage membership is derived as (cycle_visited and !cycle_preserved).
         var preserved_count: usize = 0;
         {
-            var current = rt.gc.gc_obj_list_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
+            for (rt.gc.gc_objects) |h| {
                 if (h.kind == .object) {
                     h.flags.cycle_visited = true;
-                    h.flags.cycle_preserved = true;
-                    preserved_count += 1;
-                }
-            }
-        }
-        {
-            var current = tmp_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
-                if (h.kind == .object) {
-                    h.flags.cycle_visited = true;
-                    h.flags.cycle_preserved = false;
+                    h.flags.cycle_preserved = !h.flags.mark;
+                    if (h.flags.cycle_preserved) preserved_count += 1;
                 }
             }
         }
@@ -5265,7 +5212,7 @@ pub const Object = struct {
         defer symbol_roots.deinit();
         try seedSymbolRootsFromRuntimeHeldValues(rt, roots, &symbol_roots);
 
-        try scanPreservedWeakAndFinalizationEdges(rt, tmp_head, &symbol_roots, &preserved_count);
+        try scanPreservedWeakAndFinalizationEdges(rt, &symbol_roots, &preserved_count);
 
         const ResurrectHelper = struct {
             pub fn scanAndPreserveValue(
@@ -5365,20 +5312,13 @@ pub const Object = struct {
         var bytecode_worklist = &rt.gc.bytecode_worklist;
         bytecode_worklist.clearRetainingCapacity();
 
-        // Initialize object worklist with all objects currently preserved. At this
-        // point preserved objects live either on the live list (all of them) or on
-        // the garbage list (resurrected via weak/finalization edges, not yet moved).
+        // Initialize object worklist with all objects currently preserved.
         {
-            const list_heads = [2]?*gc.GcNode{ rt.gc.gc_obj_list_head, tmp_head };
-            for (list_heads) |list_head| {
-                var current = list_head;
-                while (current) |node| : (current = node.next) {
-                    const h = gc.headerFromGcNode(node);
-                    if (h.kind == .object and h.flags.cycle_preserved) {
-                        const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                        try object_worklist.append(rt.memory.persistent_allocator, obj);
-                        rt.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
-                    }
+            for (rt.gc.gc_objects) |h| {
+                if (h.kind == .object and h.flags.cycle_preserved) {
+                    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
+                    try object_worklist.append(rt.memory.persistent_allocator, obj);
+                    rt.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
                 }
             }
         }
@@ -5412,27 +5352,19 @@ pub const Object = struct {
             }
         }
 
-        // Move newly-preserved objects and bytecodes back to live list
+        // Mark newly-preserved objects and bytecodes as live again.
         {
-            var current = tmp_head;
-            while (current) |node| {
-                const next = node.next;
-                const h = gc.headerFromGcNode(node);
+            for (garbage_headers.items) |h| {
                 if (h.kind == .object) {
                     if (h.flags.cycle_preserved) {
-                        unlinkNodeFromList(&tmp_head, &tmp_tail, node);
-                        linkNodeToList(&rt.gc.gc_obj_list_head, &rt.gc.gc_obj_list_tail, node);
                         h.flags.mark = false;
                     }
                 } else if (h.kind == .function_bytecode) {
                     const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                     if (preserved_bytecodes.contains(@intFromPtr(fb))) {
-                        unlinkNodeFromList(&tmp_head, &tmp_tail, node);
-                        linkNodeToList(&rt.gc.gc_obj_list_head, &rt.gc.gc_obj_list_tail, node);
                         h.flags.mark = false;
                     }
                 }
-                current = next;
             }
         }
 
@@ -5443,10 +5375,9 @@ pub const Object = struct {
         var free_internal_bytecodes = ObjectVisitSet.init(rt.memory.allocator);
         defer free_internal_bytecodes.deinit();
         {
-            var current = tmp_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
+            for (garbage_headers.items) |h| {
                 if (h.kind == .function_bytecode) {
+                    if (!h.flags.mark) continue;
                     const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                     try free_internal_bytecodes.put(@intFromPtr(fb), {});
                 }
@@ -5460,9 +5391,7 @@ pub const Object = struct {
         // so reuse its buffer.
         std.debug.assert(object_worklist.items.len == 0);
         {
-            var current = rt.gc.gc_obj_list_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
+            for (rt.gc.gc_objects) |h| {
                 if (h.kind == .object and h.flags.cycle_preserved) {
                     const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                     try object_worklist.append(rt.memory.persistent_allocator, obj);
@@ -5521,10 +5450,8 @@ pub const Object = struct {
 
         var garbage_count: usize = 0;
         {
-            var current = tmp_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
-                if (h.kind == .object) garbage_count += 1;
+            for (garbage_headers.items) |h| {
+                if (h.kind == .object and h.flags.mark) garbage_count += 1;
             }
         }
 
@@ -5533,32 +5460,26 @@ pub const Object = struct {
         defer rt.gc.phase = old_phase;
 
         if (garbage_count == 0) {
-            var current = tmp_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
+            for (garbage_headers.items) |h| {
                 if (h.kind == .function_bytecode) {
+                    if (!h.flags.mark) continue;
                     const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                     clearFunctionBytecodeReferencesToVisited(rt, fb, &free_internal_bytecodes);
                 }
             }
 
-            current = tmp_head;
-            while (current) |node| {
-                const next = node.next;
-                const h = gc.headerFromGcNode(node);
+            for (garbage_headers.items) |h| {
                 if (h.kind == .function_bytecode) {
-                    unlinkNodeFromList(&tmp_head, &tmp_tail, node);
+                    if (!h.flags.mark) continue;
                     rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
                     function_bytecode_mod.destroyFromHeader(rt, h);
                 }
-                current = next;
             }
             return 0;
         }
 
-        var current_garbage = tmp_head;
-        while (current_garbage) |node| : (current_garbage = node.next) {
-            const h = gc.headerFromGcNode(node);
+        for (garbage_headers.items) |h| {
+            if (!h.flags.mark) continue;
             if (h.kind == .object) {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                 try obj.clearReferencesToVisited(rt, &free_internal_bytecodes);
@@ -5570,18 +5491,14 @@ pub const Object = struct {
 
         const freed = garbage_count;
 
-        current_garbage = tmp_head;
-        while (current_garbage) |node| {
-            const next = node.next;
-            const h = gc.headerFromGcNode(node);
-            unlinkNodeFromList(&tmp_head, &tmp_tail, node);
+        for (garbage_headers.items) |h| {
+            if (!h.flags.mark) continue;
             if (h.kind == .object) {
                 destroyFromHeader(rt, h);
             } else if (h.kind == .function_bytecode) {
                 rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
                 function_bytecode_mod.destroyFromHeader(rt, h);
             }
-            current_garbage = next;
         }
 
         return freed;
@@ -5591,9 +5508,7 @@ pub const Object = struct {
         var candidates = ObjectVisitSet.init(rt.memory.allocator);
         defer candidates.deinit();
 
-        var current = rt.gc.gc_obj_list_head;
-        while (current) |node| : (current = node.next) {
-            const h = gc.headerFromGcNode(node);
+        for (rt.gc.gc_objects) |h| {
             const function_bytecode = functionBytecodeFromGcHeader(h) orelse continue;
             candidates.put(@intFromPtr(function_bytecode), {}) catch return;
         }
@@ -5639,17 +5554,12 @@ pub const Object = struct {
     }
 
     fn releaseFunctionBytecodeGuards(rt: *JSRuntime, candidates: *const ObjectVisitSet) void {
-        var current = rt.gc.gc_obj_list_tail;
-        while (current) |node| {
-            const prev = node.prev;
-            const h = gc.headerFromGcNode(node);
-            const fb_ptr = if (h.kind == .function_bytecode) @as(*FunctionBytecode, @alignCast(@fieldParentPtr("header", h))) else null;
-            if (fb_ptr) |fb| {
-                if (candidates.contains(@intFromPtr(fb))) {
-                    gc.release(rt, h);
-                }
+        var iterator = candidates.keyIterator();
+        while (iterator.next()) |address| {
+            const function_bytecode: *FunctionBytecode = @ptrFromInt(address.*);
+            if (rt.gc.containsHeader(&function_bytecode.header)) {
+                gc.release(rt, &function_bytecode.header);
             }
-            current = prev;
         }
     }
 
@@ -6328,39 +6238,31 @@ pub const Object = struct {
 
     fn scanPreservedWeakEdges(
         rt: *JSRuntime,
-        tmp_head: ?*gc.GcNode,
         symbol_roots: *SymbolRootSet,
         preserved_count: *usize,
     ) ObjectGraphError!void {
         var changed = true;
         while (changed) {
             changed = false;
-            // Preserved objects live on the live list or (if resurrected via
-            // weak/finalization edges and not yet moved back) the garbage list.
-            const list_heads = [2]?*gc.GcNode{ rt.gc.gc_obj_list_head, tmp_head };
-            for (list_heads) |list_head| {
-                var node_it = list_head;
-                while (node_it) |node| : (node_it = node.next) {
-                    const h = gc.headerFromGcNode(node);
-                    if (h.kind != .object or !h.flags.cycle_preserved) continue;
-                    const current: *Object = @alignCast(@fieldParentPtr("header", h));
-                    for (current.weakCollectionEntries()) |entry| {
-                        if (!weakEntryKeyIsPreserved(rt, symbol_roots, entry.key_identity)) continue;
-                        const before = preserved_count.*;
-                        const before_symbols = symbol_roots.count();
-                        try scanPreservedValueObject(rt, symbol_roots, preserved_count, entry.value);
-                        if (preserved_count.* != before or symbol_roots.count() != before_symbols) changed = true;
-                    }
-                    for (current.finalizationRegistryCells()) |entry| {
-                        if (!entry.isActive()) continue;
-                        const target_identity = entry.target_identity orelse continue;
-                        if (!weakEntryKeyIsPreserved(rt, symbol_roots, target_identity)) continue;
-                        const before = preserved_count.*;
-                        const before_symbols = symbol_roots.count();
-                        try scanPreservedValueObject(rt, symbol_roots, preserved_count, entry.held_value);
-                        try scanPreservedValueObject(rt, symbol_roots, preserved_count, entry.unregister_token);
-                        if (preserved_count.* != before or symbol_roots.count() != before_symbols) changed = true;
-                    }
+            for (rt.gc.gc_objects) |h| {
+                if (h.kind != .object or !h.flags.cycle_preserved) continue;
+                const current: *Object = @alignCast(@fieldParentPtr("header", h));
+                for (current.weakCollectionEntries()) |entry| {
+                    if (!weakEntryKeyIsPreserved(rt, symbol_roots, entry.key_identity)) continue;
+                    const before = preserved_count.*;
+                    const before_symbols = symbol_roots.count();
+                    try scanPreservedValueObject(rt, symbol_roots, preserved_count, entry.value);
+                    if (preserved_count.* != before or symbol_roots.count() != before_symbols) changed = true;
+                }
+                for (current.finalizationRegistryCells()) |entry| {
+                    if (!entry.isActive()) continue;
+                    const target_identity = entry.target_identity orelse continue;
+                    if (!weakEntryKeyIsPreserved(rt, symbol_roots, target_identity)) continue;
+                    const before = preserved_count.*;
+                    const before_symbols = symbol_roots.count();
+                    try scanPreservedValueObject(rt, symbol_roots, preserved_count, entry.held_value);
+                    try scanPreservedValueObject(rt, symbol_roots, preserved_count, entry.unregister_token);
+                    if (preserved_count.* != before or symbol_roots.count() != before_symbols) changed = true;
                 }
             }
         }
@@ -6368,14 +6270,13 @@ pub const Object = struct {
 
     fn scanPreservedWeakAndFinalizationEdges(
         rt: *JSRuntime,
-        tmp_head: ?*gc.GcNode,
         symbol_roots: *SymbolRootSet,
         preserved_count: *usize,
     ) ObjectGraphError!void {
         while (true) {
             const before_objects = preserved_count.*;
             const before_symbols = symbol_roots.count();
-            try scanPreservedWeakEdges(rt, tmp_head, symbol_roots, preserved_count);
+            try scanPreservedWeakEdges(rt, symbol_roots, preserved_count);
             try queueFinalizationCleanupJobs(rt, symbol_roots, preserved_count);
             if (preserved_count.* == before_objects and symbol_roots.count() == before_symbols) return;
         }
@@ -6386,16 +6287,12 @@ pub const Object = struct {
         symbol_roots: *SymbolRootSet,
         preserved_count: *usize,
     ) ObjectGraphError!void {
-        var current_node = rt.gc.gc_obj_list_head;
-        while (current_node) |node| {
-            const next = node.next;
-            const header = gc.headerFromGcNode(node);
+        for (rt.gc.gc_objects) |header| {
             if (header.kind == .object) {
                 const current: *Object = @alignCast(@fieldParentPtr("header", header));
                 if (header.flags.cycle_preserved) {
                     const finalization_payload = current.finalizationRegistryPayload() orelse {
                         current.pruneBorrowedReferenceHolderIfEmpty(rt);
-                        current_node = next;
                         continue;
                     };
                     var cell_index: usize = 0;
@@ -6420,7 +6317,6 @@ pub const Object = struct {
                     }
                 }
             }
-            current_node = next;
         }
     }
 
@@ -6743,17 +6639,12 @@ pub const Object = struct {
         var changed = true;
         while (changed) {
             changed = false;
-            var current_node = rt.gc.gc_obj_list_head;
-            while (current_node) |node| {
-                const next = node.next;
-                const header = gc.headerFromGcNode(node);
+            for (rt.gc.gc_objects) |header| {
                 const function_bytecode = functionBytecodeFromGcHeader(header) orelse {
-                    current_node = next;
                     continue;
                 };
                 const address = @intFromPtr(function_bytecode);
                 if (candidates.contains(address)) {
-                    current_node = next;
                     continue;
                 }
 
@@ -6761,13 +6652,11 @@ pub const Object = struct {
                     (try countFunctionBytecodeRefsFromVisitedObjects(rt, function_bytecode, visited)) +
                     countFunctionBytecodeRefsFromFunctionBytecodes(function_bytecode, candidates);
                 if (internal_refs == 0) {
-                    current_node = next;
                     continue;
                 }
 
                 try candidates.put(address, {});
                 changed = true;
-                current_node = next;
             }
         }
     }
