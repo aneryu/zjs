@@ -737,7 +737,7 @@ fn promiseCombinatorElementCall(
         else => return error.TypeError,
     };
     if (function_object.functionPromiseCombinatorCalled()) return core.JSValue.undefinedValue();
-    function_object.functionPromiseCombinatorCalledSlot().* = true;
+    (try function_object.functionPromiseCombinatorCalledSlot(ctx.runtime)).* = true;
 
     const state_value = function_object.functionPromiseCombinatorState() orelse return error.TypeError;
     const state = thisObject(state_value) orelse return error.TypeError;
@@ -886,9 +886,9 @@ fn createPromiseCapability(
         const resolve_object = thisObject(resolve_val) orelse return error.TypeError;
         const reject_object = thisObject(reject_val) orelse return error.TypeError;
         try resolve_object.setFunctionPromiseResolvingTarget(ctx.runtime, promise_val.dup());
-        resolve_object.functionPromiseResolvingRejectSlot().* = false;
+        (try resolve_object.functionPromiseResolvingRejectSlot(ctx.runtime)).* = false;
         try reject_object.setFunctionPromiseResolvingTarget(ctx.runtime, promise_val.dup());
-        reject_object.functionPromiseResolvingRejectSlot().* = true;
+        (try reject_object.functionPromiseResolvingRejectSlot(ctx.runtime)).* = true;
         return .{
             .promise = promise_val.dup(),
             .resolve = resolve_val.dup(),
@@ -951,8 +951,8 @@ test "createPromiseCapability roots builtin promise capability under GC" {
     const reject_object = thisObject(capability.reject) orelse return error.TypeError;
     try std.testing.expect(resolve_object.functionPromiseResolvingTarget().?.same(promise.value()));
     try std.testing.expect(reject_object.functionPromiseResolvingTarget().?.same(promise.value()));
-    try std.testing.expect(!resolve_object.functionPromiseResolvingRejectSlot().*);
-    try std.testing.expect(reject_object.functionPromiseResolvingRejectSlot().*);
+    try std.testing.expect(!resolve_object.functionPromiseResolvingReject());
+    try std.testing.expect(reject_object.functionPromiseResolvingReject());
 
     constructor_value.free(rt);
     constructor_alive = false;
@@ -1314,10 +1314,10 @@ fn createPromiseCombinatorCallback(
     const callback = try createPromiseBuiltinFunction(rt, global, "", 1);
     errdefer callback.free(rt);
     const callback_object = thisObject(callback) orelse return error.TypeError;
-    callback_object.functionPromiseCombinatorModeSlot().* = @intFromEnum(mode);
+    (try callback_object.functionPromiseCombinatorModeSlot(rt)).* = @intFromEnum(mode);
     try callback_object.setFunctionPromiseCombinatorState(rt, state.value().dup());
-    callback_object.functionPromiseCombinatorIndexSlot().* = index;
-    callback_object.functionPromiseCombinatorCalledSlot().* = false;
+    (try callback_object.functionPromiseCombinatorIndexSlot(rt)).* = index;
+    (try callback_object.functionPromiseCombinatorCalledSlot(rt)).* = false;
     return callback;
 }
 
@@ -1666,7 +1666,7 @@ fn tagRealmEval(rt: *core.JSRuntime, realm_global: *core.Object) !void {
     const eval_value = realm_global.getProperty(eval_key);
     defer eval_value.free(rt);
     const eval_object = expectObjectArg(eval_value) catch return;
-    const slot = eval_object.functionRealmGlobalSlot();
+    const slot = try eval_object.functionRealmGlobalSlot(rt);
     try eval_object.setOptionalValueSlot(rt, slot, realm_global.value().dup());
 }
 
@@ -1711,7 +1711,7 @@ fn tagRealmRegExpAccessorErrors(rt: *core.JSRuntime, realm_global: *core.Object)
         defer desc.destroy(rt);
         if (desc.kind != .accessor or desc.getter.isUndefined()) continue;
         const getter_object = expectObjectArg(desc.getter) catch continue;
-        const slot = getter_object.functionRealmTypeErrorConstructorSlot();
+        const slot = try getter_object.functionRealmTypeErrorConstructorSlot(rt);
         try getter_object.setOptionalValueSlot(rt, slot, type_error_value.dup());
     }
 }
@@ -2374,7 +2374,7 @@ fn createBoundFunction(
     try object.setOptionalValueSlot(rt, object.boundTargetSlot(), rooted_target.dup());
     try object.setOptionalValueSlot(rt, object.boundThisSlot(), rooted_bound_this.dup());
     if (target_object.functionRealmGlobalPtr()) |realm_global| try object.setFunctionRealmGlobalPtr(rt, realm_global);
-    if (target_object.functionRealmGlobal()) |realm_value| try object.setOptionalValueSlot(rt, object.functionRealmGlobalSlot(), realm_value.dup());
+    if (target_object.functionRealmGlobal()) |realm_value| try object.setOptionalValueSlot(rt, try object.functionRealmGlobalSlot(rt), realm_value.dup());
     if (rooted_bound_args.len != 0) {
         const owned_bound_args = try rt.memory.alloc(core.JSValue, rooted_bound_args.len);
         var rooted_owned_bound_args: []core.JSValue = owned_bound_args[0..0];
@@ -2656,7 +2656,7 @@ pub fn functionToStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSV
         return nativeFunctionSourceValue(rt, null);
     }
     if (isFunctionClass(object.class_id)) {
-        if (object.functionSourceSlot().*) |source| return source.dup();
+        if (object.functionSource()) |source| return source.dup();
         return nativeFunctionSourceValue(rt, object);
     }
     return error.TypeError;
@@ -2742,7 +2742,7 @@ fn functionBytecodeToStringValue(
 ) !core.JSValue {
     if (bytecode.source) |source| return value_ops.createStringValue(rt, source);
     if (object) |function_object| {
-        if (function_object.functionSourceSlot().*) |source| return source.dup();
+        if (function_object.functionSource()) |source| return source.dup();
         return nativeFunctionSourceValue(rt, function_object);
     }
     return nativeFunctionSourceValue(rt, null);
@@ -3320,7 +3320,7 @@ fn isFunctionClass(class_id: core.ClassId) bool {
 }
 
 fn printNativeFunction(rt: *core.JSRuntime, writer: *std.Io.Writer, object: *core.Object) !void {
-    if (object.functionSourceSlot().*) |source| {
+    if (object.functionSource()) |source| {
         try printString(rt, writer, source);
         return;
     }

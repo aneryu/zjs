@@ -270,8 +270,8 @@ pub const Machine = struct {
         // Direct-eval bindings extend the callee's var-ref view, mirroring
         // the combined slices `callFunctionBytecodeModeState` builds on the
         // recursive path. Contents are borrowed; storage is entry-owned.
-        const eval_names = target.function_object.functionEvalLocalNamesSlot().*;
-        const eval_refs = target.function_object.functionEvalLocalRefsSlot().*;
+        const eval_names = target.function_object.functionEvalLocalNames();
+        const eval_refs = target.function_object.functionEvalLocalRefs();
         var frame_var_refs: []const core.JSValue = target.function_object.functionCapturesSlot().*;
         if (eval_names.len > 0 and eval_refs.len > 0) {
             try mergeEvalBindings(rt, entry, frame_var_refs, eval_names, eval_refs);

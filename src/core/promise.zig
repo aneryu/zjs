@@ -247,7 +247,7 @@ fn createResolvingFunction(rt: *core.JSRuntime, promise: core.JSValue, reject: b
     (try state.promiseAlreadyResolvedSlot(rt)).* = false;
     try object.setFunctionPromiseResolvingTarget(rt, rooted_promise.dup());
     try object.setFunctionPromiseResolvingState(rt, state_val.dup());
-    object.functionPromiseResolvingRejectSlot().* = reject;
+    (try object.functionPromiseResolvingRejectSlot(rt)).* = reject;
     return function_val;
 }
 
@@ -310,8 +310,8 @@ test "withResolvers roots promise and resolving functions while creating result"
     const reject_object: *core.Object = @fieldParentPtr("header", reject_value.refHeader() orelse return error.TypeError);
     try std.testing.expect(resolve_object.functionPromiseResolvingTarget().?.same(promise_value));
     try std.testing.expect(reject_object.functionPromiseResolvingTarget().?.same(promise_value));
-    try std.testing.expect(!resolve_object.functionPromiseResolvingRejectSlot().*);
-    try std.testing.expect(reject_object.functionPromiseResolvingRejectSlot().*);
+    try std.testing.expect(!resolve_object.functionPromiseResolvingReject());
+    try std.testing.expect(reject_object.functionPromiseResolvingReject());
 
     result_value.free(rt);
     result_alive = false;

@@ -323,7 +323,7 @@ pub fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const 
     if (functionPrototypeFromGlobal(rt, global)) |function_proto| {
         try revoke_object.setPrototype(rt, function_proto);
     }
-    try revoke_object.setOptionalValueSlot(rt, revoke_object.functionProxyRevokeTargetSlot(), proxy.value().dup());
+    try revoke_object.setOptionalValueSlot(rt, try revoke_object.functionProxyRevokeTargetSlot(rt), proxy.value().dup());
     try defineObjectProperty(rt, object, "revoke", revoke);
     return object.value();
 }
@@ -333,7 +333,7 @@ pub fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const 
 /// in exec with the rest of the proxy core; the `.reflect` record handler in
 /// builtins/reflect_proxy.zig forwards the `proxy_revoke` id here.
 pub fn revokeProxy(rt: *core.JSRuntime, function_object: *core.Object) !core.JSValue {
-    const proxy_slot = function_object.functionProxyRevokeTargetSlot();
+    const proxy_slot = try function_object.functionProxyRevokeTargetSlot(rt);
     const proxy_value = function_object.takeOptionalValueSlot(proxy_slot) orelse return core.JSValue.undefinedValue();
     defer proxy_value.free(rt);
     const proxy = thisObject(proxy_value) orelse return core.JSValue.undefinedValue();

@@ -519,7 +519,7 @@ fn callValueOrBytecodeClassModeDispatch(
         if (allow_class_constructor_call and !fb.is_class_constructor) {
             if (fb.is_arrow_function or !fb.has_prototype or fb.func_kind == .generator or fb.func_kind == .async_generator) return error.TypeError;
             const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-            const result = try callFunctionBytecodeConstruct(ctx, function_value, func, this_value, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNamesSlot().*, function_object.functionEvalLocalRefsSlot().*, class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
+            const result = try callFunctionBytecodeConstruct(ctx, function_value, func, this_value, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNames(), function_object.functionEvalLocalRefs(), class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
             if (result.isObject()) return result;
             result.free(ctx.runtime);
             return this_value.dup();
@@ -532,19 +532,19 @@ fn callValueOrBytecodeClassModeDispatch(
             if (!fb.is_derived_class_constructor) {
                 try class_init_ops.initializeClassInstanceElements(ctx, output, function_global, func, this_value, fb, caller_function, caller_frame);
             }
-            return callFunctionBytecodeModeState(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNamesSlot().*, function_object.functionEvalLocalRefsSlot().*, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
+            return callFunctionBytecodeModeState(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNames(), function_object.functionEvalLocalRefs(), true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
         }
         if (!allow_class_constructor_call) {
             if (try string_ops.callSimpleStringBytecode(ctx.runtime, fb, args)) |value| return value;
             if (try callSimpleNumericBytecode(ctx.runtime, fb, args, function_object.functionCapturesSlot().*)) |value| return value;
         }
-        const effective_this = function_object.functionLexicalThisSlot().* orelse this_value;
+        const effective_this = function_object.functionLexicalThis() orelse this_value;
         const effective_new_target = if (fb.is_arrow_function) blk: {
             if (function_object.functionArrowNewTarget()) |new_target| break :blk new_target;
             break :blk core.JSValue.undefinedValue();
         } else core.JSValue.undefinedValue();
         const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-        return callFunctionBytecodeModeState(ctx, function_value, func, effective_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNamesSlot().*, function_object.functionEvalLocalRefsSlot().*, true, null, null, null, effective_new_target, core.JSValue.undefinedValue());
+        return callFunctionBytecodeModeState(ctx, function_value, func, effective_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNames(), function_object.functionEvalLocalRefs(), true, null, null, null, effective_new_target, core.JSValue.undefinedValue());
     }
     if (object_ops.objectFromValue(func)) |object| {
         if (object.proxyTarget() != null and object_ops.proxyTargetIsCallable(func)) {
@@ -844,7 +844,7 @@ fn callValueOrBytecodeClassModeDispatch(
             if (try promise_ops.qjsPromiseThen(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
         }
         if (std.mem.eql(u8, name, "eval")) {
-            const eval_global = if (function_object.functionRealmGlobalSlot().*) |realm_value|
+            const eval_global = if (function_object.functionRealmGlobal()) |realm_value|
                 property_ops.expectObject(realm_value) catch global
             else
                 global;
@@ -1728,7 +1728,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
             const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
             const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
             const constructor_this = if (fb.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
-            const result = try callFunctionBytecodeConstruct(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNamesSlot().*, function_object.functionEvalLocalRefsSlot().*, new_target, constructor_this);
+            const result = try callFunctionBytecodeConstruct(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNames(), function_object.functionEvalLocalRefs(), new_target, constructor_this);
             if (result.isObject()) {
                 instance.free(ctx.runtime);
                 return result;
@@ -1746,7 +1746,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
         const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
         const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
         const constructor_this = if (fb.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
-        const result = try callFunctionBytecodeConstruct(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNamesSlot().*, function_object.functionEvalLocalRefsSlot().*, new_target, constructor_this);
+        const result = try callFunctionBytecodeConstruct(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNames(), function_object.functionEvalLocalRefs(), new_target, constructor_this);
         if (result.isObject()) {
             instance.free(ctx.runtime);
             return result;
@@ -2224,7 +2224,7 @@ pub fn constructDynamicFunctionFromSource(
         clearFunctionEvalCaptures(ctx.runtime, function_object);
         try object_ops.copyRealmPrototypeKeys(ctx.runtime, constructor, function_object);
         if (function_global != global) {
-            try function_object.setOptionalValueSlot(ctx.runtime, function_object.functionRealmGlobalSlot(), function_global.value().dup());
+            try function_object.setOptionalValueSlot(ctx.runtime, try function_object.functionRealmGlobalSlot(ctx.runtime), function_global.value().dup());
         }
     }
     return result;
@@ -2244,10 +2244,13 @@ pub fn functionRealmGlobal(object: *core.Object) ?*core.Object {
 }
 
 pub fn clearFunctionEvalCaptures(rt: *core.JSRuntime, function_object: *core.Object) void {
-    const old_names = function_object.functionEvalLocalNamesSlot().*;
-    const old_refs = function_object.functionEvalLocalRefsSlot().*;
-    function_object.functionEvalLocalNamesSlot().* = &.{};
-    function_object.functionEvalLocalRefsSlot().* = &.{};
+    if (function_object.functionEvalLocalNames().len == 0 and function_object.functionEvalLocalRefs().len == 0) return;
+    const names_slot = function_object.functionEvalLocalNamesSlot(rt) catch return;
+    const refs_slot = function_object.functionEvalLocalRefsSlot(rt) catch return;
+    const old_names = names_slot.*;
+    const old_refs = refs_slot.*;
+    names_slot.* = &.{};
+    refs_slot.* = &.{};
     for (old_names) |atom_id| rt.atoms.free(atom_id);
     if (old_names.len != 0) rt.memory.free(core.Atom, old_names);
     array_ops.freeValueSlice(rt, old_refs);
@@ -4493,8 +4496,8 @@ pub fn publishDirectEvalVarRefs(
                         string_ops.replaceFrameVarRefBinding(ctx.runtime, frame, names[index], refs[index]);
                     }
                 }
-                frame.eval_var_ref_names = function_object.functionEvalLocalNamesSlot().*;
-                frame.eval_var_refs = function_object.functionEvalLocalRefsSlot().*;
+                frame.eval_var_ref_names = function_object.functionEvalLocalNames();
+                frame.eval_var_refs = function_object.functionEvalLocalRefs();
                 frame.eval_var_refs_republished = true;
             }
         }
@@ -5120,7 +5123,7 @@ pub fn runGeneratorParameterInit(
 
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
-    return runWithArgsState(ctx, &nested_stack, &nested, this_value, args, var_refs, output, global, false, true, false, &.{}, &.{}, object.functionEvalLocalNamesSlot().*, object.functionEvalLocalRefsSlot().*, &.{}, &.{}, &.{}, &.{}, object, null, fb.generator_body_pc, current_function_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), false, false);
+    return runWithArgsState(ctx, &nested_stack, &nested, this_value, args, var_refs, output, global, false, true, false, &.{}, &.{}, object.functionEvalLocalNames(), object.functionEvalLocalRefs(), &.{}, &.{}, &.{}, &.{}, object, null, fb.generator_body_pc, current_function_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), false, false);
 }
 
 pub fn qjsGeneratorNext(
@@ -5159,8 +5162,8 @@ pub fn qjsGeneratorNext(
         object.functionCapturesSlot().*,
         output,
         generator_global,
-        object.functionEvalLocalNamesSlot().*,
-        object.functionEvalLocalRefsSlot().*,
+        object.functionEvalLocalNames(),
+        object.functionEvalLocalRefs(),
         false,
         object,
         resume_value,
@@ -5250,8 +5253,8 @@ pub fn resumeGeneratorYieldStarCompletion(
         object.functionCapturesSlot().*,
         output,
         global,
-        object.functionEvalLocalNamesSlot().*,
-        object.functionEvalLocalRefsSlot().*,
+        object.functionEvalLocalNames(),
+        object.functionEvalLocalRefs(),
         false,
         object,
         resume_value,
@@ -5342,8 +5345,8 @@ pub fn qjsGeneratorReturn(
                 object.functionCapturesSlot().*,
                 output,
                 generator_global,
-                object.functionEvalLocalNamesSlot().*,
-                object.functionEvalLocalRefsSlot().*,
+                object.functionEvalLocalNames(),
+                object.functionEvalLocalRefs(),
                 false,
                 object,
                 core.JSValue.undefinedValue(),
@@ -5399,8 +5402,8 @@ pub fn resumeGeneratorCatchForRuntimeError(
         object.functionCapturesSlot().*,
         output,
         global,
-        object.functionEvalLocalNamesSlot().*,
-        object.functionEvalLocalRefsSlot().*,
+        object.functionEvalLocalNames(),
+        object.functionEvalLocalRefs(),
         false,
         object,
         thrown,
@@ -5594,8 +5597,8 @@ pub fn qjsGeneratorThrow(
                     object.functionCapturesSlot().*,
                     output,
                     generator_global,
-                    object.functionEvalLocalNamesSlot().*,
-                    object.functionEvalLocalRefsSlot().*,
+                    object.functionEvalLocalNames(),
+                    object.functionEvalLocalRefs(),
                     false,
                     object,
                     value,
@@ -5629,8 +5632,8 @@ pub fn qjsGeneratorThrow(
                 object.functionCapturesSlot().*,
                 output,
                 generator_global,
-                object.functionEvalLocalNamesSlot().*,
-                object.functionEvalLocalRefsSlot().*,
+                object.functionEvalLocalNames(),
+                object.functionEvalLocalRefs(),
                 false,
                 object,
                 thrown,
@@ -6876,7 +6879,7 @@ pub fn qjsReflectConstructGenericCallable(
         const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
         const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
         const constructor_this = if (fb.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
-        const result = try callFunctionBytecodeConstruct(ctx, function_value, resolved.target, initial_this, resolved_args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNamesSlot().*, function_object.functionEvalLocalRefsSlot().*, resolved.new_target, constructor_this);
+        const result = try callFunctionBytecodeConstruct(ctx, function_value, resolved.target, initial_this, resolved_args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNames(), function_object.functionEvalLocalRefs(), resolved.new_target, constructor_this);
         if (result.isObject()) {
             instance.free(ctx.runtime);
             return result;
@@ -7406,7 +7409,7 @@ pub fn lookupParentFunctionEvalBindingValue(
     const function_object = object_ops.objectFromValue(frame.current_function) orelse return null;
     const parent_value = function_object.functionEvalParentFunction() orelse return null;
     const parent_object = object_ops.objectFromValue(parent_value) orelse return null;
-    return lookupNamedVarRef(rt, parent_object.functionEvalLocalNamesSlot().*, parent_object.functionEvalLocalRefsSlot().*, atom_id);
+    return lookupNamedVarRef(rt, parent_object.functionEvalLocalNames(), parent_object.functionEvalLocalRefs(), atom_id);
 }
 
 pub fn atomIdOrNameEql(rt: *core.JSRuntime, left: core.Atom, right: core.Atom) bool {

@@ -135,17 +135,19 @@ pub fn shouldSkipDirectEvalScopeCaptureName(
 }
 
 pub fn appendFunctionEvalLocal(ctx: *core.JSContext, object: *core.Object, atom_id: core.Atom, value: core.JSValue) !void {
-    for (object.functionEvalLocalNamesSlot().*, 0..) |name, idx| {
-        if (!atomIdOrNameEql(ctx.runtime, name, atom_id) or idx >= object.functionEvalLocalRefsSlot().*.len) continue;
+    const old_function_names = object.functionEvalLocalNames();
+    const old_function_refs = object.functionEvalLocalRefs();
+    for (old_function_names, 0..) |name, idx| {
+        if (!atomIdOrNameEql(ctx.runtime, name, atom_id) or idx >= old_function_refs.len) continue;
         const next = value.dup();
-        const ref_slot = &object.functionEvalLocalRefsSlot().*[idx];
+        const ref_slot = &old_function_refs[idx];
         const old_value = ref_slot.*;
         ref_slot.* = next;
         old_value.free(ctx.runtime);
         return;
     }
 
-    const old_len = object.functionEvalLocalNamesSlot().*.len;
+    const old_len = old_function_names.len;
     const names = try ctx.runtime.memory.alloc(core.Atom, old_len + 1);
     errdefer ctx.runtime.memory.free(core.Atom, names);
     const refs = try ctx.runtime.memory.alloc(core.JSValue, old_len + 1);
@@ -155,8 +157,8 @@ pub fn appendFunctionEvalLocal(ctx: *core.JSContext, object: *core.Object, atom_
     refs_root.init(ctx.runtime, &rooted_refs);
     defer refs_root.deinit();
 
-    for (object.functionEvalLocalNamesSlot().*, 0..) |name, idx| names[idx] = name;
-    for (object.functionEvalLocalRefsSlot().*, 0..) |stored, idx| refs[idx] = stored;
+    for (old_function_names, 0..) |name, idx| names[idx] = name;
+    for (old_function_refs, 0..) |stored, idx| refs[idx] = stored;
     rooted_refs = refs[0..old_len];
     names[old_len] = ctx.runtime.atoms.dup(atom_id);
     var name_owned = true;
@@ -170,12 +172,14 @@ pub fn appendFunctionEvalLocal(ctx: *core.JSContext, object: *core.Object, atom_
         rooted_refs = refs[0..old_len];
     };
 
-    const old_names = object.functionEvalLocalNamesSlot().*;
-    const old_refs = object.functionEvalLocalRefsSlot().*;
+    const names_slot = try object.functionEvalLocalNamesSlot(ctx.runtime);
+    const refs_slot = try object.functionEvalLocalRefsSlot(ctx.runtime);
+    const old_names = names_slot.*;
+    const old_refs = refs_slot.*;
     name_owned = false;
     value_owned = false;
-    object.functionEvalLocalNamesSlot().* = names;
-    object.functionEvalLocalRefsSlot().* = refs;
+    names_slot.* = names;
+    refs_slot.* = refs;
     if (old_names.len != 0) ctx.runtime.memory.free(core.Atom, old_names);
     if (old_refs.len != 0) ctx.runtime.memory.free(core.JSValue, old_refs);
 }

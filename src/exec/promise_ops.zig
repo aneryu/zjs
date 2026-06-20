@@ -489,8 +489,8 @@ pub fn qjsAsyncDisposableStackContinuation(
     const callback = try qjsCreateBuiltinFunction(rt, global, "", 1);
     errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
-    try callback_object.setOptionalValueSlot(rt, callback_object.functionAsyncDisposeStackSlot(), stack.value().dup());
-    callback_object.functionAsyncDisposeRejectedSlot().* = rejected;
+    try callback_object.setOptionalValueSlot(rt, try callback_object.functionAsyncDisposeStackSlot(rt), stack.value().dup());
+    (try callback_object.functionAsyncDisposeRejectedSlot(rt)).* = rejected;
     return callback;
 }
 
@@ -790,7 +790,7 @@ pub fn createPromiseResolvingFunction(rt: *core.JSRuntime, global: *core.Object,
     }
     try object.setFunctionPromiseResolvingTarget(rt, rooted_promise.dup());
     try object.setFunctionPromiseResolvingState(rt, state_val.dup());
-    object.functionPromiseResolvingRejectSlot().* = reject;
+    (try object.functionPromiseResolvingRejectSlot(rt)).* = reject;
     return function_val;
 }
 
@@ -822,7 +822,7 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
     try std.testing.expect(rt.atoms.name(promise_symbol) != null);
     try std.testing.expect(rt.atoms.name(state_symbol) != null);
     try std.testing.expect(function_object.functionPromiseResolvingTarget().?.same(core.JSValue.symbol(promise_symbol)));
-    try std.testing.expect(function_object.functionPromiseResolvingRejectSlot().*);
+    try std.testing.expect(function_object.functionPromiseResolvingReject());
 
     state.value().free(rt);
     state_alive = false;
@@ -969,7 +969,7 @@ pub fn qjsPromiseReactionJob(
     const job_object = objectFromValue(job_val) orelse return error.TypeError;
     try job_object.setFunctionPromiseReactionRecord(rt, reaction_value.dup());
     try job_object.setFunctionPromiseReactionValue(rt, rooted_value.dup());
-    job_object.functionPromiseReactionIsRejectedSlot().* = rejected;
+    (try job_object.functionPromiseReactionIsRejectedSlot(rt)).* = rejected;
     return job_val;
 }
 
@@ -1001,7 +1001,7 @@ test "qjsPromiseReactionJob roots reaction and value while allocating job" {
     try std.testing.expect(rt.atoms.name(reaction_symbol) != null);
     try std.testing.expect(rt.atoms.name(value_symbol) != null);
     try std.testing.expect(job_object.functionPromiseReactionValue().?.same(core.JSValue.symbol(value_symbol)));
-    try std.testing.expect(job_object.functionPromiseReactionIsRejectedSlot().*);
+    try std.testing.expect(job_object.functionPromiseReactionIsRejected());
 
     reaction.value().free(rt);
     reaction_alive = false;
@@ -1634,7 +1634,7 @@ pub fn qjsPromiseCombinatorElementCall(
     };
 
     if (function_object.functionPromiseCombinatorCalled()) return core.JSValue.undefinedValue();
-    function_object.functionPromiseCombinatorCalledSlot().* = true;
+    (try function_object.functionPromiseCombinatorCalledSlot(ctx.runtime)).* = true;
 
     const state_value = function_object.functionPromiseCombinatorState() orelse return error.TypeError;
     const state = objectFromValue(state_value) orelse return error.TypeError;
@@ -1985,10 +1985,10 @@ pub fn qjsPromiseCombinatorCallback(
     const callback = try qjsCreateBuiltinFunction(rt, global, "", 1);
     errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
-    callback_object.functionPromiseCombinatorModeSlot().* = @intFromEnum(mode);
+    (try callback_object.functionPromiseCombinatorModeSlot(rt)).* = @intFromEnum(mode);
     try callback_object.setFunctionPromiseCombinatorState(rt, state.value().dup());
-    callback_object.functionPromiseCombinatorIndexSlot().* = index;
-    callback_object.functionPromiseCombinatorCalledSlot().* = false;
+    (try callback_object.functionPromiseCombinatorIndexSlot(rt)).* = index;
+    (try callback_object.functionPromiseCombinatorCalledSlot(rt)).* = false;
     return callback;
 }
 
@@ -2829,7 +2829,7 @@ pub fn qjsAsyncFunctionRunState(
     const async_global = objectRealmGlobal(continuation) orelse global;
     const current_function_value = continuation.generatorCurrentFunction() orelse continuation.value();
     const fb_runtime_strict = fb.is_strict_mode or fb.runtime_strict_mode;
-    return runWithArgsState(ctx, &nested_stack, &nested, continuation.generatorThis() orelse core.JSValue.undefinedValue(), continuation.generatorArgs(), continuation.functionCapturesSlot().*, output, async_global, false, fb_runtime_strict, false, &.{}, &.{}, continuation.functionEvalLocalNamesSlot().*, continuation.functionEvalLocalRefsSlot().*, &.{}, &.{}, &.{}, &.{}, continuation, resume_value, null, current_function_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), false, true);
+    return runWithArgsState(ctx, &nested_stack, &nested, continuation.generatorThis() orelse core.JSValue.undefinedValue(), continuation.generatorArgs(), continuation.functionCapturesSlot().*, output, async_global, false, fb_runtime_strict, false, &.{}, &.{}, continuation.functionEvalLocalNames(), continuation.functionEvalLocalRefs(), &.{}, &.{}, &.{}, &.{}, continuation, resume_value, null, current_function_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), false, true);
 }
 
 pub fn qjsAsyncFunctionRunAndSettle(
@@ -2922,8 +2922,8 @@ pub fn qjsAsyncFunctionResumeCallback(
     const callback = try qjsCreateBuiltinFunction(rt, global, "", 1);
     errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
-    try callback_object.setOptionalValueSlot(rt, callback_object.functionAsyncContinuationSlot(), continuation.value().dup());
-    callback_object.functionAsyncContinuationRejectedSlot().* = rejected;
+    try callback_object.setOptionalValueSlot(rt, try callback_object.functionAsyncContinuationSlot(rt), continuation.value().dup());
+    (try callback_object.functionAsyncContinuationRejectedSlot(rt)).* = rejected;
     return callback;
 }
 
@@ -3245,7 +3245,7 @@ pub fn qjsAsyncFromSyncIteratorUnwrap(
     const callback = try qjsCreateBuiltinFunction(rt, global, "", 1);
     errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
-    callback_object.functionAsyncFromSyncUnwrapDoneSlot().* = if (done) 2 else 1;
+    (try callback_object.functionAsyncFromSyncUnwrapDoneSlot(rt)).* = if (done) 2 else 1;
     return callback;
 }
 
@@ -3295,7 +3295,7 @@ pub fn qjsPromiseFinallyCallback(
     const callback = try qjsCreateBuiltinFunction(rt, global, "", if (mode == .fulfill or mode == .reject) 1 else 0);
     errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
-    callback_object.functionPromiseFinallyModeSlot().* = @intFromEnum(mode);
+    (try callback_object.functionPromiseFinallyModeSlot(rt)).* = @intFromEnum(mode);
     if (payload != null) try callback_object.setFunctionPromiseFinallyPayload(rt, rooted_payload.dup());
     if (on_finally != null) try callback_object.setFunctionPromiseFinallyCallback(rt, rooted_on_finally.dup());
     if (constructor_value != null) try callback_object.setFunctionPromiseFinallyConstructor(rt, rooted_constructor.dup());

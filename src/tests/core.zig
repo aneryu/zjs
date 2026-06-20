@@ -2195,29 +2195,29 @@ test "native function state uses payload storage" {
 
     try std.testing.expect(function.class_payload != null);
     try std.testing.expectEqual(core.class.PayloadKind.function, function.class_payload_kind);
-    function.functionSourceSlot().* = source.value().dup();
+    (try function.functionSourceSlot(rt)).* = source.value().dup();
     function.hostFunctionKindSlot().* = 11;
     function.nativeFunctionIdSlot().* = 22;
     function.functionBytecodeSlot().* = core.JSValue.int32(33);
-    function.functionClassFieldsInitSlot().* = core.JSValue.int32(44);
+    (try function.functionClassFieldsInitSlot(rt)).* = core.JSValue.int32(44);
     const captures = try rt.memory.alloc(core.JSValue, 1);
     captures[0] = core.JSValue.int32(55);
     function.functionCapturesSlot().* = captures;
     const names = try rt.memory.alloc(core.Atom, 1);
     names[0] = try rt.internAtom("evalLocal");
-    function.functionEvalLocalNamesSlot().* = names;
+    (try function.functionEvalLocalNamesSlot(rt)).* = names;
     const refs = try rt.memory.alloc(core.JSValue, 1);
     refs[0] = core.JSValue.int32(66);
-    function.functionEvalLocalRefsSlot().* = refs;
-    function.functionLexicalThisSlot().* = core.JSValue.int32(77);
+    (try function.functionEvalLocalRefsSlot(rt)).* = refs;
+    (try function.functionLexicalThisSlot(rt)).* = core.JSValue.int32(77);
     try function.setFunctionHomeObject(rt, home);
     const remap_from = try rt.memory.alloc(core.Atom, 1);
     remap_from[0] = try rt.internAtom("oldPrivate");
-    function.privateRemapFromSlot().* = remap_from;
+    (try function.privateRemapFromSlotEnsured(rt)).* = remap_from;
     const remap_to = try rt.memory.alloc(core.Atom, 1);
     remap_to[0] = try rt.internAtom("newPrivate");
-    function.privateRemapToSlot().* = remap_to;
-    function.functionRealmGlobalSlot().* = home.value().dup();
+    (try function.privateRemapToSlotEnsured(rt)).* = remap_to;
+    (try function.functionRealmGlobalSlot(rt)).* = home.value().dup();
     try function.setFunctionRealmGlobalPtr(rt, home);
 
     try std.testing.expect(function.functionSource() != null);
@@ -3682,7 +3682,7 @@ test "async continuation function cycle is released by runtime cycle removal" {
     const key = try rt.internAtom("continuation");
     defer rt.atoms.free(key);
 
-    continuation.functionAsyncContinuationSlot().* = promise.value().dup();
+    (try continuation.functionAsyncContinuationSlot(rt)).* = promise.value().dup();
     try promise.defineOwnProperty(rt, key, core.Descriptor.data(continuation.value(), true, true, true));
 
     continuation.value().free(rt);

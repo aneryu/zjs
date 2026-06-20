@@ -777,7 +777,7 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
                     try bindNativeRecordByName(rt, constructor, "revocable", .reflect, @intFromEnum(reflect_builtin.StaticMethod.proxy_revocable));
                 },
                 .array => {
-                    constructor.arrayBuiltinMarkerSlot().* = .constructor;
+                    (try constructor.arrayBuiltinMarkerSlot(rt)).* = .constructor;
                     const array_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
                     const cached = try global.cachedRealmValueSlot(rt, .array_prototype);
                     try global.setOptionalValueSlot(rt, cached, array_proto.value().dup());
@@ -1067,7 +1067,7 @@ fn installObjectConstructorPrimitivePrototypes(
     for (entries) |entry| {
         const ctor = installedConstructor(constructors, entry.kind) orelse continue;
         const proto = constructorPrototypeObject(rt, ctor) orelse continue;
-        const slot = object_ctor.functionPrimitivePrototypeSlot(entry.slot);
+        const slot = try object_ctor.functionPrimitivePrototypeSlot(rt, entry.slot);
         try object_ctor.setOptionalValueSlot(rt, slot, proto.value().dup());
     }
 }

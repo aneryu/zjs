@@ -835,12 +835,8 @@ pub const RegExpLegacyStatics = struct {
     }
 };
 
-pub const FunctionPayload = struct {
+pub const FunctionRarePayload = struct {
     source: ?JSValue = null,
-    host_function_kind: i32 = 0,
-    native_function_id: i32 = 0,
-    external_host_function_id: u32 = 0,
-    native_dispatch_name: atom.Atom = atom.null_atom,
     array_builtin_marker: ArrayBuiltinMarker = .none,
     typed_array_builtin_marker: TypedArrayBuiltinMarker = .none,
     array_iterator_kind: u8 = 0,
@@ -859,9 +855,7 @@ pub const FunctionPayload = struct {
     iterator_wrap_method: u8 = 0,
     async_from_sync_unwrap_done: u8 = 0,
     primitive_prototypes: [primitive_prototype_slot_count]?JSValue = @splat(null),
-    bytecode: ?JSValue = null,
     class_fields_init: ?JSValue = null,
-    captures: []JSValue = &.{},
     eval_local_names: []atom.Atom = &.{},
     eval_local_refs: []JSValue = &.{},
     eval_parent_function: ?JSValue = null,
@@ -870,11 +864,9 @@ pub const FunctionPayload = struct {
     arrow_constructor_this: ?JSValue = null,
     arrow_new_target: ?JSValue = null,
     super_constructor: ?JSValue = null,
-    home_object: ?*Object = null,
     private_remap_from: []atom.Atom = &.{},
     private_remap_to: []atom.Atom = &.{},
     realm_global: ?JSValue = null,
-    realm_global_ptr: ?*Object = null,
     proxy_revoke_target: ?JSValue = null,
     promise_capability_slot: ?JSValue = null,
     promise_resolving_target: ?JSValue = null,
@@ -901,14 +893,9 @@ pub const FunctionPayload = struct {
     realm_type_error_constructor: ?JSValue = null,
     regexp_legacy_statics: ?*RegExpLegacyStatics = null,
 
-    pub fn destroy(self: *FunctionPayload, rt: *JSRuntime) void {
+    pub fn destroy(self: *FunctionRarePayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.source);
-        destroyOptionalValue(rt, &self.bytecode);
         destroyOptionalValue(rt, &self.class_fields_init);
-        const native_dispatch_name = self.native_dispatch_name;
-        self.native_dispatch_name = atom.null_atom;
-        rt.atoms.free(native_dispatch_name);
-        destroyValueSlice(rt, &self.captures);
         destroyAtomSlice(rt, &self.eval_local_names);
         destroyValueSlice(rt, &self.eval_local_refs);
         destroyOptionalValue(rt, &self.eval_parent_function);
@@ -917,7 +904,6 @@ pub const FunctionPayload = struct {
         destroyOptionalValue(rt, &self.arrow_constructor_this);
         destroyOptionalValue(rt, &self.arrow_new_target);
         destroyOptionalValue(rt, &self.super_constructor);
-        destroyOptionalObjectRef(rt, &self.home_object);
         destroyAtomSlice(rt, &self.private_remap_from);
         destroyAtomSlice(rt, &self.private_remap_to);
         destroyOptionalValue(rt, &self.realm_global);
@@ -944,6 +930,35 @@ pub const FunctionPayload = struct {
             rt.memory.destroy(RegExpLegacyStatics, legacy);
         }
         destroyOptionalValueSlots(rt, &self.primitive_prototypes);
+        self.* = .{};
+    }
+};
+
+pub const FunctionPayload = struct {
+    host_function_kind: i32 = 0,
+    native_function_id: i32 = 0,
+    external_host_function_id: u32 = 0,
+    native_dispatch_name: atom.Atom = atom.null_atom,
+    typed_array_element_size: u32 = 0,
+    typed_array_kind: u8 = 0,
+    bytecode: ?JSValue = null,
+    captures: []JSValue = &.{},
+    home_object: ?*Object = null,
+    realm_global_ptr: ?*Object = null,
+    rare: ?*FunctionRarePayload = null,
+
+    pub fn destroy(self: *FunctionPayload, rt: *JSRuntime) void {
+        destroyOptionalValue(rt, &self.bytecode);
+        const native_dispatch_name = self.native_dispatch_name;
+        self.native_dispatch_name = atom.null_atom;
+        rt.atoms.free(native_dispatch_name);
+        destroyValueSlice(rt, &self.captures);
+        destroyOptionalObjectRef(rt, &self.home_object);
+        if (self.rare) |rare| {
+            self.rare = null;
+            rare.destroy(rt);
+            rt.memory.destroy(FunctionRarePayload, rare);
+        }
         self.* = .{};
     }
 };
@@ -1494,6 +1509,28 @@ pub const Object = struct {
         self.class_payload = @ptrCast(payload);
         self.class_payload_kind = .realm;
         return payload;
+    }
+
+    fn ensureFunctionRarePayload(self: *Object, rt: *JSRuntime) !*FunctionRarePayload {
+        const payload = self.functionPayload() orelse {
+            std.debug.assert(self.class_payload_kind == .function);
+            return error.TypeError;
+        };
+        if (payload.rare) |rare| return rare;
+        const rare = try rt.memory.create(FunctionRarePayload);
+        rare.* = .{};
+        payload.rare = rare;
+        return rare;
+    }
+
+    fn functionRarePayload(self: *Object) ?*FunctionRarePayload {
+        const payload = self.functionPayload() orelse return null;
+        return payload.rare;
+    }
+
+    fn functionRarePayloadConst(self: *const Object) ?*const FunctionRarePayload {
+        const payload = self.functionPayloadConst() orelse return null;
+        return payload.rare;
     }
 
     pub fn installExternalClassPayload(self: *Object, payload: *anyopaque) void {
@@ -2672,51 +2709,51 @@ pub const Object = struct {
     }
 
     pub fn setFunctionPromiseCapabilitySlot(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseCapabilitySlotSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseCapabilitySlotSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseResolvingTarget(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseResolvingTargetSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseResolvingTargetSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseResolvingState(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseResolvingStateSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseResolvingStateSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseThenableTarget(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseThenableTargetSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseThenableTargetSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseThenableThis(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseThenableThisSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseThenableThisSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseThenableThen(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseThenableThenSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseThenableThenSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseReactionRecord(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseReactionRecordSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseReactionRecordSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseReactionValue(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseReactionValueSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseReactionValueSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseCombinatorState(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseCombinatorStateSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseCombinatorStateSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseFinallyPayload(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseFinallyPayloadSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseFinallyPayloadSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseFinallyCallback(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseFinallyCallbackSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseFinallyCallbackSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseFinallyConstructor(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseFinallyConstructorSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseFinallyConstructorSlot(rt), next_value);
     }
 
     pub fn varRefValueSlot(self: *Object) *?JSValue {
@@ -3492,14 +3529,12 @@ pub const Object = struct {
         return false;
     }
 
-    pub fn functionSourceSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.source;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionSourceSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).source;
     }
 
     pub fn functionSource(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.source;
+        if (self.functionRarePayloadConst()) |payload| return payload.source;
         return null;
     }
 
@@ -3536,25 +3571,22 @@ pub const Object = struct {
         return 0;
     }
 
-    pub fn functionIteratorWrapMethodSlot(self: *Object) *u8 {
-        if (self.functionPayload()) |payload| return &payload.iterator_wrap_method;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionIteratorWrapMethodSlot(self: *Object, rt: *JSRuntime) !*u8 {
+        return &(try self.ensureFunctionRarePayload(rt)).iterator_wrap_method;
     }
 
     pub fn functionIteratorWrapMethod(self: *const Object) u8 {
-        if (self.functionPayloadConst()) |payload| return payload.iterator_wrap_method;
+        if (self.functionRarePayloadConst()) |payload| return payload.iterator_wrap_method;
         return 0;
     }
 
-    pub fn functionPrimitivePrototypeSlot(self: *Object, slot: PrimitivePrototypeSlot) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.primitive_prototypes[@intFromEnum(slot)];
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPrimitivePrototypeSlot(self: *Object, rt: *JSRuntime, slot: PrimitivePrototypeSlot) !*?JSValue {
+        const payload = try self.ensureFunctionRarePayload(rt);
+        return &payload.primitive_prototypes[@intFromEnum(slot)];
     }
 
     pub fn functionPrimitivePrototype(self: *const Object, slot: PrimitivePrototypeSlot) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.primitive_prototypes[@intFromEnum(slot)];
+        if (self.functionRarePayloadConst()) |payload| return payload.primitive_prototypes[@intFromEnum(slot)];
         return null;
     }
 
@@ -3570,232 +3602,212 @@ pub const Object = struct {
     }
 
     pub fn ensureRegExpLegacyStatics(self: *Object, rt: *JSRuntime) !*RegExpLegacyStatics {
-        if (self.functionPayload()) |payload| {
-            if (payload.regexp_legacy_statics) |legacy| return legacy;
-            const legacy = try rt.memory.create(RegExpLegacyStatics);
-            legacy.* = .{};
-            payload.regexp_legacy_statics = legacy;
-            return legacy;
-        }
-        return error.TypeError;
+        const payload = try self.ensureFunctionRarePayload(rt);
+        if (payload.regexp_legacy_statics) |legacy| return legacy;
+        const legacy = try rt.memory.create(RegExpLegacyStatics);
+        legacy.* = .{};
+        payload.regexp_legacy_statics = legacy;
+        return legacy;
     }
 
     pub fn regExpLegacyStatics(self: *Object) ?*RegExpLegacyStatics {
-        if (self.functionPayload()) |payload| return payload.regexp_legacy_statics;
+        if (self.functionRarePayload()) |payload| return payload.regexp_legacy_statics;
         return null;
     }
 
     pub fn regExpLegacyStaticsConst(self: *const Object) ?*const RegExpLegacyStatics {
-        if (self.functionPayloadConst()) |payload| return payload.regexp_legacy_statics;
+        if (self.functionRarePayloadConst()) |payload| return payload.regexp_legacy_statics;
         return null;
     }
 
-    pub fn arrayBuiltinMarkerSlot(self: *Object) *ArrayBuiltinMarker {
-        if (self.functionPayload()) |payload| return &payload.array_builtin_marker;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn arrayBuiltinMarkerSlot(self: *Object, rt: *JSRuntime) !*ArrayBuiltinMarker {
+        return &(try self.ensureFunctionRarePayload(rt)).array_builtin_marker;
     }
 
     pub fn arrayBuiltinMarker(self: *const Object) ArrayBuiltinMarker {
-        if (self.functionPayloadConst()) |payload| return payload.array_builtin_marker;
+        if (self.functionRarePayloadConst()) |payload| return payload.array_builtin_marker;
         return .none;
     }
 
     pub fn typedArrayBuiltinMarker(self: *const Object) TypedArrayBuiltinMarker {
-        if (self.functionPayloadConst()) |payload| return payload.typed_array_builtin_marker;
+        if (self.functionRarePayloadConst()) |payload| return payload.typed_array_builtin_marker;
         return .none;
     }
 
     pub fn arrayIteratorKind(self: *const Object) u8 {
-        if (self.functionPayloadConst()) |payload| return payload.array_iterator_kind;
+        if (self.functionRarePayloadConst()) |payload| return payload.array_iterator_kind;
         return 0;
     }
 
     pub fn isIteratorIdentityFunction(self: *const Object) bool {
-        if (self.functionPayloadConst()) |payload| return payload.iterator_identity;
+        if (self.functionRarePayloadConst()) |payload| return payload.iterator_identity;
         return false;
     }
 
     pub fn isArrayIteratorNextFunction(self: *const Object) bool {
-        if (self.functionPayloadConst()) |payload| return payload.array_iterator_next;
+        if (self.functionRarePayloadConst()) |payload| return payload.array_iterator_next;
         return false;
     }
 
     pub fn isThrowTypeErrorIntrinsicFunction(self: *const Object) bool {
-        if (self.functionPayloadConst()) |payload| return payload.throw_type_error_intrinsic;
+        if (self.functionRarePayloadConst()) |payload| return payload.throw_type_error_intrinsic;
         return false;
     }
 
     pub fn isAsyncIteratorAsyncDisposeFunction(self: *const Object) bool {
-        if (self.functionPayloadConst()) |payload| return payload.async_iterator_async_dispose;
+        if (self.functionRarePayloadConst()) |payload| return payload.async_iterator_async_dispose;
         return false;
     }
 
     pub fn isAsyncGeneratorPrototypeMethod(self: *const Object) bool {
-        if (self.functionPayloadConst()) |payload| return payload.async_generator_method;
+        if (self.functionRarePayloadConst()) |payload| return payload.async_generator_method;
         return false;
     }
 
     pub fn iteratorHelperMethod(self: *const Object) u8 {
-        if (self.functionPayloadConst()) |payload| return payload.iterator_helper_method;
+        if (self.functionRarePayloadConst()) |payload| return payload.iterator_helper_method;
         return 0;
     }
 
     pub fn asyncFromSyncIteratorMethod(self: *const Object) u8 {
-        if (self.functionPayloadConst()) |payload| return payload.async_from_sync_iterator_method;
+        if (self.functionRarePayloadConst()) |payload| return payload.async_from_sync_iterator_method;
         return 0;
     }
 
     pub fn disposableStackMethod(self: *const Object) u8 {
-        if (self.functionPayloadConst()) |payload| return payload.disposable_stack_method;
+        if (self.functionRarePayloadConst()) |payload| return payload.disposable_stack_method;
         return 0;
     }
 
     pub fn asyncDisposableStackMethod(self: *const Object) u8 {
-        if (self.functionPayloadConst()) |payload| return payload.async_disposable_stack_method;
+        if (self.functionRarePayloadConst()) |payload| return payload.async_disposable_stack_method;
         return 0;
     }
 
     pub fn addArrayBuiltinMarker(self: *Object, marker: ArrayBuiltinMarker) bool {
         if (marker == .none) return true;
-        if (self.functionPayload()) |payload| return setArrayBuiltinMarker(payload, marker);
-        return false;
+        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        return setArrayBuiltinMarker(payload, marker);
     }
 
     pub fn addTypedArrayBuiltinMarker(self: *Object, marker: TypedArrayBuiltinMarker) bool {
         if (marker == .none) return true;
-        if (self.functionPayload()) |payload| return setTypedArrayBuiltinMarker(payload, marker);
-        return false;
+        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        return setTypedArrayBuiltinMarker(payload, marker);
     }
 
     pub fn addArrayIteratorKind(self: *Object, kind: u8) bool {
         if (kind == 0) return true;
-        if (self.functionPayload()) |payload| return setArrayIteratorKind(payload, kind);
-        return false;
+        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        return setArrayIteratorKind(payload, kind);
     }
 
     pub fn addIteratorIdentityFunction(self: *Object) bool {
-        if (self.functionPayload()) |payload| {
-            payload.iterator_identity = true;
-            return true;
-        }
-        return false;
+        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        payload.iterator_identity = true;
+        return true;
     }
 
     pub fn addArrayIteratorNextFunction(self: *Object) bool {
-        if (self.functionPayload()) |payload| {
-            payload.array_iterator_next = true;
-            return true;
-        }
-        return false;
+        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        payload.array_iterator_next = true;
+        return true;
     }
 
     pub fn addThrowTypeErrorIntrinsicFunction(self: *Object) bool {
-        if (self.functionPayload()) |payload| {
-            payload.throw_type_error_intrinsic = true;
-            return true;
-        }
-        return false;
+        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        payload.throw_type_error_intrinsic = true;
+        return true;
     }
 
     pub fn addAsyncIteratorAsyncDisposeFunction(self: *Object) bool {
-        if (self.functionPayload()) |payload| {
-            payload.async_iterator_async_dispose = true;
-            return true;
-        }
-        return false;
+        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        payload.async_iterator_async_dispose = true;
+        return true;
     }
 
     pub fn addAsyncGeneratorPrototypeMethod(self: *Object) bool {
-        if (self.functionPayload()) |payload| {
-            payload.async_generator_method = true;
-            return true;
-        }
-        return false;
+        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        payload.async_generator_method = true;
+        return true;
     }
 
     pub fn addIteratorHelperMethod(self: *Object, method_id: u8) bool {
         if (method_id == 0) return true;
-        if (self.functionPayload()) |payload| {
-            if (payload.iterator_helper_method != 0 and payload.iterator_helper_method != method_id) return false;
-            payload.iterator_helper_method = method_id;
-            return true;
-        }
-        return false;
+        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        if (payload.iterator_helper_method != 0 and payload.iterator_helper_method != method_id) return false;
+        payload.iterator_helper_method = method_id;
+        return true;
     }
 
     pub fn addAsyncFromSyncIteratorMethod(self: *Object, method_id: u8) bool {
         if (method_id == 0) return true;
-        if (self.functionPayload()) |payload| {
-            if (payload.async_from_sync_iterator_method != 0 and payload.async_from_sync_iterator_method != method_id) return false;
-            payload.async_from_sync_iterator_method = method_id;
-            return true;
-        }
-        return false;
+        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        if (payload.async_from_sync_iterator_method != 0 and payload.async_from_sync_iterator_method != method_id) return false;
+        payload.async_from_sync_iterator_method = method_id;
+        return true;
     }
 
     pub fn addDisposableStackMethod(self: *Object, method_id: u8) bool {
         if (method_id == 0) return true;
-        if (self.functionPayload()) |payload| return setDisposableStackMethod(payload, method_id);
-        return false;
+        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        return setDisposableStackMethod(payload, method_id);
     }
 
     pub fn addAsyncDisposableStackMethod(self: *Object, method_id: u8) bool {
         if (method_id == 0) return true;
-        if (self.functionPayload()) |payload| return setAsyncDisposableStackMethod(payload, method_id);
-        return false;
+        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        return setAsyncDisposableStackMethod(payload, method_id);
     }
 
     pub fn addCollectionMethodOwnerClass(self: *Object, owner_class: class.ClassId) bool {
         if (owner_class == class.invalid_class_id) return true;
-        if (self.functionPayload()) |payload| return setCollectionMethodOwnerClass(payload, owner_class);
-        return false;
+        const payload = self.ensureFunctionRarePayload(self.owner_runtime) catch return false;
+        return setCollectionMethodOwnerClass(payload, owner_class);
     }
 
-    fn setArrayBuiltinMarker(payload: *FunctionPayload, marker: ArrayBuiltinMarker) bool {
+    fn setArrayBuiltinMarker(payload: *FunctionRarePayload, marker: ArrayBuiltinMarker) bool {
         if (payload.array_builtin_marker != .none and payload.array_builtin_marker != marker) return false;
         payload.array_builtin_marker = marker;
         return true;
     }
 
-    fn setTypedArrayBuiltinMarker(payload: *FunctionPayload, marker: TypedArrayBuiltinMarker) bool {
+    fn setTypedArrayBuiltinMarker(payload: *FunctionRarePayload, marker: TypedArrayBuiltinMarker) bool {
         if (payload.typed_array_builtin_marker != .none and payload.typed_array_builtin_marker != marker) return false;
         payload.typed_array_builtin_marker = marker;
         return true;
     }
 
-    fn setArrayIteratorKind(payload: *FunctionPayload, kind: u8) bool {
+    fn setArrayIteratorKind(payload: *FunctionRarePayload, kind: u8) bool {
         if (payload.array_iterator_kind != 0 and payload.array_iterator_kind != kind) return false;
         payload.array_iterator_kind = kind;
         return true;
     }
 
-    fn setDisposableStackMethod(payload: *FunctionPayload, method_id: u8) bool {
+    fn setDisposableStackMethod(payload: *FunctionRarePayload, method_id: u8) bool {
         if (payload.disposable_stack_method != 0 and payload.disposable_stack_method != method_id) return false;
         payload.disposable_stack_method = method_id;
         return true;
     }
 
-    fn setAsyncDisposableStackMethod(payload: *FunctionPayload, method_id: u8) bool {
+    fn setAsyncDisposableStackMethod(payload: *FunctionRarePayload, method_id: u8) bool {
         if (payload.async_disposable_stack_method != 0 and payload.async_disposable_stack_method != method_id) return false;
         payload.async_disposable_stack_method = method_id;
         return true;
     }
 
-    fn setCollectionMethodOwnerClass(payload: *FunctionPayload, owner_class: class.ClassId) bool {
+    fn setCollectionMethodOwnerClass(payload: *FunctionRarePayload, owner_class: class.ClassId) bool {
         if (payload.collection_method_owner_class != class.invalid_class_id and payload.collection_method_owner_class != owner_class) return false;
         payload.collection_method_owner_class = owner_class;
         return true;
     }
 
-    pub fn collectionMethodOwnerClassSlot(self: *Object) *class.ClassId {
-        if (self.functionPayload()) |payload| return &payload.collection_method_owner_class;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn collectionMethodOwnerClassSlot(self: *Object, rt: *JSRuntime) !*class.ClassId {
+        return &(try self.ensureFunctionRarePayload(rt)).collection_method_owner_class;
     }
 
     pub fn collectionMethodOwnerClass(self: *const Object) class.ClassId {
-        if (self.functionPayloadConst()) |payload| return payload.collection_method_owner_class;
+        if (self.functionRarePayloadConst()) |payload| return payload.collection_method_owner_class;
         return class.invalid_class_id;
     }
 
@@ -3812,344 +3824,282 @@ pub const Object = struct {
         return null;
     }
 
-    pub fn functionClassFieldsInitSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.class_fields_init;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionClassFieldsInitSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).class_fields_init;
     }
 
     pub fn functionClassFieldsInit(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.class_fields_init;
+        if (self.functionRarePayloadConst()) |payload| return payload.class_fields_init;
         return null;
     }
 
-    pub fn functionEvalParentFunctionSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.eval_parent_function;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionEvalParentFunctionSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).eval_parent_function;
     }
 
     pub fn functionEvalParentFunction(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.eval_parent_function;
+        if (self.functionRarePayloadConst()) |payload| return payload.eval_parent_function;
         return null;
     }
 
-    pub fn functionImportMetaSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.import_meta;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionImportMetaSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).import_meta;
     }
 
     pub fn functionImportMeta(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.import_meta;
+        if (self.functionRarePayloadConst()) |payload| return payload.import_meta;
         return null;
     }
 
-    pub fn functionProxyRevokeTargetSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.proxy_revoke_target;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionProxyRevokeTargetSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).proxy_revoke_target;
     }
 
     pub fn functionProxyRevokeTarget(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.proxy_revoke_target;
+        if (self.functionRarePayloadConst()) |payload| return payload.proxy_revoke_target;
         return null;
     }
 
-    pub fn functionPromiseCapabilitySlotSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_capability_slot;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseCapabilitySlotSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_capability_slot;
     }
 
     pub fn functionPromiseCapabilitySlot(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_capability_slot;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_capability_slot;
         return null;
     }
 
-    pub fn functionPromiseResolvingTargetSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_resolving_target;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseResolvingTargetSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_resolving_target;
     }
 
     pub fn functionPromiseResolvingTarget(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_resolving_target;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_resolving_target;
         return null;
     }
 
-    pub fn functionPromiseResolvingStateSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_resolving_state;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseResolvingStateSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_resolving_state;
     }
 
     pub fn functionPromiseResolvingState(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_resolving_state;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_resolving_state;
         return null;
     }
 
-    pub fn functionPromiseResolvingRejectSlot(self: *Object) *bool {
-        if (self.functionPayload()) |payload| return &payload.promise_resolving_reject;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseResolvingRejectSlot(self: *Object, rt: *JSRuntime) !*bool {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_resolving_reject;
     }
 
     pub fn functionPromiseResolvingReject(self: *const Object) bool {
-        if (self.functionPayloadConst()) |payload| return payload.promise_resolving_reject;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_resolving_reject;
         return false;
     }
 
-    pub fn functionPromiseThenableTargetSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_thenable_target;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseThenableTargetSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_thenable_target;
     }
 
     pub fn functionPromiseThenableTarget(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_thenable_target;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_thenable_target;
         return null;
     }
 
-    pub fn functionPromiseThenableThisSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_thenable_this;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseThenableThisSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_thenable_this;
     }
 
     pub fn functionPromiseThenableThis(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_thenable_this;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_thenable_this;
         return null;
     }
 
-    pub fn functionPromiseThenableThenSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_thenable_then;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseThenableThenSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_thenable_then;
     }
 
     pub fn functionPromiseThenableThen(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_thenable_then;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_thenable_then;
         return null;
     }
 
-    pub fn functionPromiseReactionRecordSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_reaction_record;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseReactionRecordSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_reaction_record;
     }
 
     pub fn functionPromiseReactionRecord(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_reaction_record;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_reaction_record;
         return null;
     }
 
-    pub fn functionPromiseReactionValueSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_reaction_value;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseReactionValueSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_reaction_value;
     }
 
     pub fn functionPromiseReactionValue(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_reaction_value;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_reaction_value;
         return null;
     }
 
-    pub fn functionPromiseReactionIsRejectedSlot(self: *Object) *bool {
-        if (self.functionPayload()) |payload| return &payload.promise_reaction_is_rejected;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseReactionIsRejectedSlot(self: *Object, rt: *JSRuntime) !*bool {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_reaction_is_rejected;
     }
 
     pub fn functionPromiseReactionIsRejected(self: *const Object) bool {
-        if (self.functionPayloadConst()) |payload| return payload.promise_reaction_is_rejected;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_reaction_is_rejected;
         return false;
     }
 
-    pub fn functionPromiseCombinatorStateSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_combinator_state;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseCombinatorStateSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_combinator_state;
     }
 
     pub fn functionPromiseCombinatorState(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_combinator_state;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_combinator_state;
         return null;
     }
 
-    pub fn functionPromiseCombinatorModeSlot(self: *Object) *u8 {
-        if (self.functionPayload()) |payload| return &payload.promise_combinator_mode;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseCombinatorModeSlot(self: *Object, rt: *JSRuntime) !*u8 {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_combinator_mode;
     }
 
     pub fn functionPromiseCombinatorMode(self: *const Object) u8 {
-        if (self.functionPayloadConst()) |payload| return payload.promise_combinator_mode;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_combinator_mode;
         return 0;
     }
 
-    pub fn functionPromiseCombinatorIndexSlot(self: *Object) *u32 {
-        if (self.functionPayload()) |payload| return &payload.promise_combinator_index;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseCombinatorIndexSlot(self: *Object, rt: *JSRuntime) !*u32 {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_combinator_index;
     }
 
     pub fn functionPromiseCombinatorIndex(self: *const Object) u32 {
-        if (self.functionPayloadConst()) |payload| return payload.promise_combinator_index;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_combinator_index;
         return 0;
     }
 
-    pub fn functionPromiseCombinatorCalledSlot(self: *Object) *bool {
-        if (self.functionPayload()) |payload| return &payload.promise_combinator_called;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseCombinatorCalledSlot(self: *Object, rt: *JSRuntime) !*bool {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_combinator_called;
     }
 
     pub fn functionPromiseCombinatorCalled(self: *const Object) bool {
-        if (self.functionPayloadConst()) |payload| return payload.promise_combinator_called;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_combinator_called;
         return false;
     }
 
-    pub fn functionPromiseFinallyPayloadSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_finally_payload;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseFinallyPayloadSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_finally_payload;
     }
 
     pub fn functionPromiseFinallyPayload(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_finally_payload;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_finally_payload;
         return null;
     }
 
-    pub fn functionPromiseFinallyCallbackSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_finally_callback;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseFinallyCallbackSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_finally_callback;
     }
 
     pub fn functionPromiseFinallyCallback(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_finally_callback;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_finally_callback;
         return null;
     }
 
-    pub fn functionPromiseFinallyConstructorSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_finally_constructor;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseFinallyConstructorSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_finally_constructor;
     }
 
     pub fn functionPromiseFinallyConstructor(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_finally_constructor;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_finally_constructor;
         return null;
     }
 
-    pub fn functionPromiseFinallyModeSlot(self: *Object) *u8 {
-        if (self.functionPayload()) |payload| return &payload.promise_finally_mode;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseFinallyModeSlot(self: *Object, rt: *JSRuntime) !*u8 {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_finally_mode;
     }
 
     pub fn functionPromiseFinallyMode(self: *const Object) u8 {
-        if (self.functionPayloadConst()) |payload| return payload.promise_finally_mode;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_finally_mode;
         return 0;
     }
 
-    pub fn functionAsyncDisposeStackSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.async_dispose_stack;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionAsyncDisposeStackSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).async_dispose_stack;
     }
 
     pub fn functionAsyncDisposeStack(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.async_dispose_stack;
+        if (self.functionRarePayloadConst()) |payload| return payload.async_dispose_stack;
         return null;
     }
 
-    pub fn functionAsyncDisposeRejectedSlot(self: *Object) *bool {
-        if (self.functionPayload()) |payload| return &payload.async_dispose_rejected;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionAsyncDisposeRejectedSlot(self: *Object, rt: *JSRuntime) !*bool {
+        return &(try self.ensureFunctionRarePayload(rt)).async_dispose_rejected;
     }
 
     pub fn functionAsyncDisposeRejected(self: *const Object) bool {
-        if (self.functionPayloadConst()) |payload| return payload.async_dispose_rejected;
+        if (self.functionRarePayloadConst()) |payload| return payload.async_dispose_rejected;
         return false;
     }
 
-    pub fn functionAsyncContinuationSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.async_function_continuation;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionAsyncContinuationSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).async_function_continuation;
     }
 
     pub fn functionAsyncContinuation(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.async_function_continuation;
+        if (self.functionRarePayloadConst()) |payload| return payload.async_function_continuation;
         return null;
     }
 
-    pub fn functionAsyncContinuationRejectedSlot(self: *Object) *bool {
-        if (self.functionPayload()) |payload| return &payload.async_function_rejected;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionAsyncContinuationRejectedSlot(self: *Object, rt: *JSRuntime) !*bool {
+        return &(try self.ensureFunctionRarePayload(rt)).async_function_rejected;
     }
 
     pub fn functionAsyncContinuationRejected(self: *const Object) bool {
-        if (self.functionPayloadConst()) |payload| return payload.async_function_rejected;
+        if (self.functionRarePayloadConst()) |payload| return payload.async_function_rejected;
         return false;
     }
 
-    pub fn functionAsyncFromSyncUnwrapDoneSlot(self: *Object) *u8 {
-        if (self.functionPayload()) |payload| return &payload.async_from_sync_unwrap_done;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionAsyncFromSyncUnwrapDoneSlot(self: *Object, rt: *JSRuntime) !*u8 {
+        return &(try self.ensureFunctionRarePayload(rt)).async_from_sync_unwrap_done;
     }
 
     pub fn functionAsyncFromSyncUnwrapDone(self: *const Object) u8 {
-        if (self.functionPayloadConst()) |payload| return payload.async_from_sync_unwrap_done;
+        if (self.functionRarePayloadConst()) |payload| return payload.async_from_sync_unwrap_done;
         return 0;
     }
 
-    pub fn functionRealmTypeErrorConstructorSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.realm_type_error_constructor;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionRealmTypeErrorConstructorSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).realm_type_error_constructor;
     }
 
     pub fn functionRealmTypeErrorConstructor(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.realm_type_error_constructor;
+        if (self.functionRarePayloadConst()) |payload| return payload.realm_type_error_constructor;
         return null;
     }
 
-    pub fn functionArrowConstructorThisSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.arrow_constructor_this;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionArrowConstructorThisSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).arrow_constructor_this;
     }
 
     pub fn functionArrowConstructorThis(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.arrow_constructor_this;
+        if (self.functionRarePayloadConst()) |payload| return payload.arrow_constructor_this;
         return null;
     }
 
-    pub fn functionArrowNewTargetSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.arrow_new_target;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionArrowNewTargetSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).arrow_new_target;
     }
 
     pub fn functionArrowNewTarget(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.arrow_new_target;
+        if (self.functionRarePayloadConst()) |payload| return payload.arrow_new_target;
         return null;
     }
 
-    pub fn functionSuperConstructorSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.super_constructor;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionSuperConstructorSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).super_constructor;
     }
 
     pub fn functionSuperConstructor(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.super_constructor;
+        if (self.functionRarePayloadConst()) |payload| return payload.super_constructor;
         return null;
     }
 
@@ -4166,40 +4116,38 @@ pub const Object = struct {
         return &.{};
     }
 
-    pub fn functionEvalLocalNamesSlot(self: *Object) *[]atom.Atom {
-        if (self.functionPayload()) |payload| return &payload.eval_local_names;
+    pub fn functionEvalLocalNamesSlot(self: *Object, rt: *JSRuntime) !*[]atom.Atom {
+        if (self.class_payload_kind == .function) return &(try self.ensureFunctionRarePayload(rt)).eval_local_names;
         if (self.generatorPayload()) |payload| return &payload.eval_local_names;
         std.debug.assert(self.class_payload_kind == .function or self.class_payload_kind == .generator);
         unreachable;
     }
 
     pub fn functionEvalLocalNames(self: *const Object) []atom.Atom {
-        if (self.functionPayloadConst()) |payload| return payload.eval_local_names;
+        if (self.functionRarePayloadConst()) |payload| return payload.eval_local_names;
         if (self.generatorPayloadConst()) |payload| return payload.eval_local_names;
         return &.{};
     }
 
-    pub fn functionEvalLocalRefsSlot(self: *Object) *[]JSValue {
-        if (self.functionPayload()) |payload| return &payload.eval_local_refs;
+    pub fn functionEvalLocalRefsSlot(self: *Object, rt: *JSRuntime) !*[]JSValue {
+        if (self.class_payload_kind == .function) return &(try self.ensureFunctionRarePayload(rt)).eval_local_refs;
         if (self.generatorPayload()) |payload| return &payload.eval_local_refs;
         std.debug.assert(self.class_payload_kind == .function or self.class_payload_kind == .generator);
         unreachable;
     }
 
     pub fn functionEvalLocalRefs(self: *const Object) []JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.eval_local_refs;
+        if (self.functionRarePayloadConst()) |payload| return payload.eval_local_refs;
         if (self.generatorPayloadConst()) |payload| return payload.eval_local_refs;
         return &.{};
     }
 
-    pub fn functionLexicalThisSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.lexical_this;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionLexicalThisSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).lexical_this;
     }
 
     pub fn functionLexicalThis(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.lexical_this;
+        if (self.functionRarePayloadConst()) |payload| return payload.lexical_this;
         return null;
     }
 
@@ -4229,41 +4177,41 @@ pub const Object = struct {
 
     pub fn privateRemapFromSlot(self: *Object) *[]atom.Atom {
         if (self.ordinaryPayload()) |payload| return &payload.private_remap_from;
-        if (self.functionPayload()) |payload| return &payload.private_remap_from;
+        if (self.functionRarePayload()) |payload| return &payload.private_remap_from;
         std.debug.assert(self.class_payload_kind == .ordinary or self.class_payload_kind == .function);
         unreachable;
     }
 
     pub fn privateRemapFromSlotEnsured(self: *Object, rt: *JSRuntime) !*[]atom.Atom {
         if (self.ordinaryPayload()) |payload| return &payload.private_remap_from;
-        if (self.functionPayload()) |payload| return &payload.private_remap_from;
+        if (self.class_payload_kind == .function) return &(try self.ensureFunctionRarePayload(rt)).private_remap_from;
         const payload = try self.ensureOrdinaryPayload(rt);
         return &payload.private_remap_from;
     }
 
     pub fn privateRemapFrom(self: *const Object) []atom.Atom {
         if (self.ordinaryPayloadConst()) |payload| return payload.private_remap_from;
-        if (self.functionPayloadConst()) |payload| return payload.private_remap_from;
+        if (self.functionRarePayloadConst()) |payload| return payload.private_remap_from;
         return &.{};
     }
 
     pub fn privateRemapToSlot(self: *Object) *[]atom.Atom {
         if (self.ordinaryPayload()) |payload| return &payload.private_remap_to;
-        if (self.functionPayload()) |payload| return &payload.private_remap_to;
+        if (self.functionRarePayload()) |payload| return &payload.private_remap_to;
         std.debug.assert(self.class_payload_kind == .ordinary or self.class_payload_kind == .function);
         unreachable;
     }
 
     pub fn privateRemapToSlotEnsured(self: *Object, rt: *JSRuntime) !*[]atom.Atom {
         if (self.ordinaryPayload()) |payload| return &payload.private_remap_to;
-        if (self.functionPayload()) |payload| return &payload.private_remap_to;
+        if (self.class_payload_kind == .function) return &(try self.ensureFunctionRarePayload(rt)).private_remap_to;
         const payload = try self.ensureOrdinaryPayload(rt);
         return &payload.private_remap_to;
     }
 
     pub fn privateRemapTo(self: *const Object) []atom.Atom {
         if (self.ordinaryPayloadConst()) |payload| return payload.private_remap_to;
-        if (self.functionPayloadConst()) |payload| return payload.private_remap_to;
+        if (self.functionRarePayloadConst()) |payload| return payload.private_remap_to;
         return &.{};
     }
 
@@ -4551,15 +4499,15 @@ pub const Object = struct {
         return 0;
     }
 
-    pub fn functionRealmGlobalSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.realm_global;
+    pub fn functionRealmGlobalSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        if (self.class_payload_kind == .function) return &(try self.ensureFunctionRarePayload(rt)).realm_global;
         if (self.boundFunctionPayload()) |payload| return &payload.realm_global;
         std.debug.assert(self.class_payload_kind == .function or self.class_payload_kind == .bound_function);
         unreachable;
     }
 
     pub fn functionRealmGlobal(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.realm_global;
+        if (self.functionRarePayloadConst()) |payload| return payload.realm_global;
         if (self.boundFunctionPayloadConst()) |payload| return payload.realm_global;
         return null;
     }
@@ -5965,46 +5913,48 @@ pub const Object = struct {
             try Helper.traceOptValue(visitor, &payload.data);
         }
         if (self.functionPayload()) |payload| {
-            try Helper.traceOptValue(visitor, &payload.source);
             try Helper.traceOptValue(visitor, &payload.bytecode);
-            try Helper.traceOptValue(visitor, &payload.class_fields_init);
             for (payload.captures) |*stored| try Helper.callVisitValue(visitor, stored);
-            for (payload.eval_local_refs) |*stored| try Helper.callVisitValue(visitor, stored);
-            try Helper.traceOptValue(visitor, &payload.eval_parent_function);
-            try Helper.traceOptValue(visitor, &payload.import_meta);
-            try Helper.traceOptValue(visitor, &payload.lexical_this);
-            try Helper.traceOptValue(visitor, &payload.arrow_constructor_this);
-            try Helper.traceOptValue(visitor, &payload.arrow_new_target);
-            try Helper.traceOptValue(visitor, &payload.super_constructor);
             try Helper.callVisitObject(visitor, &payload.home_object);
-            try Helper.traceOptValue(visitor, &payload.realm_global);
-            for (&payload.primitive_prototypes) |*slot| {
-                try Helper.traceOptValue(visitor, slot);
-            }
-            try Helper.traceOptValue(visitor, &payload.proxy_revoke_target);
-            try Helper.traceOptValue(visitor, &payload.promise_capability_slot);
-            try Helper.traceOptValue(visitor, &payload.promise_resolving_target);
-            try Helper.traceOptValue(visitor, &payload.promise_resolving_state);
-            try Helper.traceOptValue(visitor, &payload.promise_thenable_target);
-            try Helper.traceOptValue(visitor, &payload.promise_thenable_this);
-            try Helper.traceOptValue(visitor, &payload.promise_thenable_then);
-            try Helper.traceOptValue(visitor, &payload.promise_reaction_record);
-            try Helper.traceOptValue(visitor, &payload.promise_reaction_value);
-            try Helper.traceOptValue(visitor, &payload.promise_combinator_state);
-            try Helper.traceOptValue(visitor, &payload.promise_finally_payload);
-            try Helper.traceOptValue(visitor, &payload.promise_finally_callback);
-            try Helper.traceOptValue(visitor, &payload.promise_finally_constructor);
-            try Helper.traceOptValue(visitor, &payload.async_dispose_stack);
-            try Helper.traceOptValue(visitor, &payload.async_function_continuation);
-            try Helper.traceOptValue(visitor, &payload.realm_type_error_constructor);
-            if (payload.regexp_legacy_statics) |legacy| {
-                try Helper.traceOptValue(visitor, &legacy.input);
-                try Helper.traceOptValue(visitor, &legacy.last_match);
-                try Helper.traceOptValue(visitor, &legacy.last_paren);
-                try Helper.traceOptValue(visitor, &legacy.left_context);
-                try Helper.traceOptValue(visitor, &legacy.right_context);
-                for (&legacy.captures) |*slot| {
+            if (payload.rare) |rare| {
+                try Helper.traceOptValue(visitor, &rare.source);
+                try Helper.traceOptValue(visitor, &rare.class_fields_init);
+                for (rare.eval_local_refs) |*stored| try Helper.callVisitValue(visitor, stored);
+                try Helper.traceOptValue(visitor, &rare.eval_parent_function);
+                try Helper.traceOptValue(visitor, &rare.import_meta);
+                try Helper.traceOptValue(visitor, &rare.lexical_this);
+                try Helper.traceOptValue(visitor, &rare.arrow_constructor_this);
+                try Helper.traceOptValue(visitor, &rare.arrow_new_target);
+                try Helper.traceOptValue(visitor, &rare.super_constructor);
+                try Helper.traceOptValue(visitor, &rare.realm_global);
+                for (&rare.primitive_prototypes) |*slot| {
                     try Helper.traceOptValue(visitor, slot);
+                }
+                try Helper.traceOptValue(visitor, &rare.proxy_revoke_target);
+                try Helper.traceOptValue(visitor, &rare.promise_capability_slot);
+                try Helper.traceOptValue(visitor, &rare.promise_resolving_target);
+                try Helper.traceOptValue(visitor, &rare.promise_resolving_state);
+                try Helper.traceOptValue(visitor, &rare.promise_thenable_target);
+                try Helper.traceOptValue(visitor, &rare.promise_thenable_this);
+                try Helper.traceOptValue(visitor, &rare.promise_thenable_then);
+                try Helper.traceOptValue(visitor, &rare.promise_reaction_record);
+                try Helper.traceOptValue(visitor, &rare.promise_reaction_value);
+                try Helper.traceOptValue(visitor, &rare.promise_combinator_state);
+                try Helper.traceOptValue(visitor, &rare.promise_finally_payload);
+                try Helper.traceOptValue(visitor, &rare.promise_finally_callback);
+                try Helper.traceOptValue(visitor, &rare.promise_finally_constructor);
+                try Helper.traceOptValue(visitor, &rare.async_dispose_stack);
+                try Helper.traceOptValue(visitor, &rare.async_function_continuation);
+                try Helper.traceOptValue(visitor, &rare.realm_type_error_constructor);
+                if (rare.regexp_legacy_statics) |legacy| {
+                    try Helper.traceOptValue(visitor, &legacy.input);
+                    try Helper.traceOptValue(visitor, &legacy.last_match);
+                    try Helper.traceOptValue(visitor, &legacy.last_paren);
+                    try Helper.traceOptValue(visitor, &legacy.left_context);
+                    try Helper.traceOptValue(visitor, &legacy.right_context);
+                    for (&legacy.captures) |*slot| {
+                        try Helper.traceOptValue(visitor, slot);
+                    }
                 }
             }
         }
@@ -6966,7 +6916,7 @@ pub const Object = struct {
         count += countOptionalFunctionBytecodeRef(self.functionArrowNewTarget(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionSuperConstructor(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionRealmGlobal(), function_bytecode);
-        if (self.functionPayloadConst()) |payload| {
+        if (self.functionRarePayloadConst()) |payload| {
             for (payload.primitive_prototypes) |stored| count += countOptionalFunctionBytecodeRef(stored, function_bytecode);
             if (payload.regexp_legacy_statics) |legacy| {
                 count += countOptionalFunctionBytecodeRef(legacy.input, function_bytecode);

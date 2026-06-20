@@ -89,7 +89,7 @@ pub fn sourceFunction(rt: *core.JSRuntime, name: []const u8, source: []const u8)
     try defineFunctionName(rt, function_object, name);
     const source_string = try core.string.String.createUtf8(rt, source);
     source_value = source_string.value();
-    try function_object.setOptionalValueSlot(rt, function_object.functionSourceSlot(), source_value.dup());
+    try function_object.setOptionalValueSlot(rt, try function_object.functionSourceSlot(rt), source_value.dup());
     source_value.free(rt);
     source_value = core.JSValue.undefinedValue();
 

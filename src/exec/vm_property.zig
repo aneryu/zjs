@@ -1552,7 +1552,7 @@ fn functionHasDynamicScopeBindings(function: *const bytecode.Bytecode, frame: *c
     if (function.var_ref_names.len != 0 or frame.var_refs.len != 0) return true;
     const function_object = objectFromValue(frame.current_function) orelse return false;
     if (function_object.functionCapturesSlot().*.len != 0) return true;
-    if (function_object.functionEvalLocalNamesSlot().*.len != 0) return true;
+    if (function_object.functionEvalLocalNames().len != 0) return true;
     if (function_object.functionEvalParentFunction() != null) return true;
     return false;
 }
@@ -1573,8 +1573,8 @@ fn parentFunctionEvalBindingShadowsGlobal(rt: *core.JSRuntime, frame: *const fra
     const function_object = objectFromValue(frame.current_function) orelse return false;
     const parent_value = function_object.functionEvalParentFunction() orelse return false;
     const parent_object = objectFromValue(parent_value) orelse return false;
-    const names = parent_object.functionEvalLocalNamesSlot().*;
-    const refs = parent_object.functionEvalLocalRefsSlot().*;
+    const names = parent_object.functionEvalLocalNames();
+    const refs = parent_object.functionEvalLocalRefs();
     const count = @min(names.len, refs.len);
     for (names[0..count]) |name| {
         if (call_runtime.atomIdOrNameEql(rt, name, atom_id)) return true;

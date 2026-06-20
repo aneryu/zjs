@@ -297,21 +297,21 @@ pub fn createBytecodeFunctionObject(
     try object.setFunctionRealmGlobalPtr(ctx.runtime, global);
     try object.setOptionalValueSlot(ctx.runtime, object.functionBytecodeSlot(), rooted_value.dup());
     if (objectFromValue(frame.current_function)) |parent_function_object| {
-        if (parent_function_object.functionEvalLocalNamesSlot().*.len != 0) {
-            try object.setOptionalValueSlot(ctx.runtime, object.functionEvalParentFunctionSlot(), frame.current_function.dup());
+        if (parent_function_object.functionEvalLocalNames().len != 0) {
+            try object.setOptionalValueSlot(ctx.runtime, try object.functionEvalParentFunctionSlot(ctx.runtime), frame.current_function.dup());
         }
         if (parent_function_object.functionImportMeta()) |import_meta| {
-            try object.setOptionalValueSlot(ctx.runtime, object.functionImportMetaSlot(), import_meta.dup());
+            try object.setOptionalValueSlot(ctx.runtime, try object.functionImportMetaSlot(ctx.runtime), import_meta.dup());
         }
     } else if (caller_function.flags.is_module and functionBytecodeUsesImportMeta(fb)) {
         const import_meta = try importMetaObject(ctx, global, caller_function, frame);
         defer import_meta.free(ctx.runtime);
-        try object.setOptionalValueSlot(ctx.runtime, object.functionImportMetaSlot(), import_meta.dup());
+        try object.setOptionalValueSlot(ctx.runtime, try object.functionImportMetaSlot(ctx.runtime), import_meta.dup());
     }
     try installLexicalPrivateNameRemap(ctx.runtime, object, frame, fb.private_bound_names);
     if (fb.class_fields_init) |init_bytecode| {
         const init_value = try createBytecodeFunctionObject(ctx, frame, caller_function, global, init_bytecode, core.atom.ids.empty_string, opc, false, eval_local_names, eval_local_slots, capture_eval_var_ref_names, eval_var_refs, &.{});
-        try object.setOptionalValueSlot(ctx.runtime, object.functionClassFieldsInitSlot(), init_value);
+        try object.setOptionalValueSlot(ctx.runtime, try object.functionClassFieldsInitSlot(ctx.runtime), init_value);
     }
     if (fb.is_arrow_function) {
         const lexical_this_slot = derivedConstructorThisLocalSlot(frame) orelse &frame.this_value;
@@ -319,17 +319,17 @@ pub fn createBytecodeFunctionObject(
             try ensureVarRefCell(ctx, lexical_this_slot)
         else
             lexical_this_slot.*.dup();
-        try object.setOptionalValueSlot(ctx.runtime, object.functionLexicalThisSlot(), lexical_this_value);
+        try object.setOptionalValueSlot(ctx.runtime, try object.functionLexicalThisSlot(ctx.runtime), lexical_this_value);
         if (property_ops.expectObject(frame.current_function)) |function_object| {
             try object.setFunctionHomeObject(ctx.runtime, function_object.functionHomeObject());
-            if (function_object.functionSuperConstructor()) |super_constructor| try object.setOptionalValueSlot(ctx.runtime, object.functionSuperConstructorSlot(), super_constructor.dup());
-            if (function_object.functionArrowConstructorThis()) |constructor_this| try object.setOptionalValueSlot(ctx.runtime, object.functionArrowConstructorThisSlot(), constructor_this.dup());
+            if (function_object.functionSuperConstructor()) |super_constructor| try object.setOptionalValueSlot(ctx.runtime, try object.functionSuperConstructorSlot(ctx.runtime), super_constructor.dup());
+            if (function_object.functionArrowConstructorThis()) |constructor_this| try object.setOptionalValueSlot(ctx.runtime, try object.functionArrowConstructorThisSlot(ctx.runtime), constructor_this.dup());
         } else |_| {}
         if (frame.function.flags.is_derived_class_constructor) {
-            try object.setOptionalValueSlot(ctx.runtime, object.functionArrowConstructorThisSlot(), frame.constructor_this_value.dup());
+            try object.setOptionalValueSlot(ctx.runtime, try object.functionArrowConstructorThisSlot(ctx.runtime), frame.constructor_this_value.dup());
         }
         if (!frame.new_target.isUndefined()) {
-            try object.setOptionalValueSlot(ctx.runtime, object.functionArrowNewTargetSlot(), frame.new_target.dup());
+            try object.setOptionalValueSlot(ctx.runtime, try object.functionArrowNewTargetSlot(ctx.runtime), frame.new_target.dup());
         }
         if (functionBytecodeUsesAtom(fb, core.atom.ids.arguments) or functionBytecodeUsesArgumentsSpecialObject(fb)) {
             const arguments_value = lookupFrameFirstEvalBindingValue(ctx.runtime, eval_local_names, eval_local_slots, capture_eval_var_ref_names, eval_var_refs, frame, core.atom.ids.arguments) orelse
@@ -527,8 +527,8 @@ pub fn createBytecodeFunctionObject(
                 }
             }
             eval_bindings_transferred = true;
-            object.functionEvalLocalNamesSlot().* = names;
-            object.functionEvalLocalRefsSlot().* = refs;
+            (try object.functionEvalLocalNamesSlot(ctx.runtime)).* = names;
+            (try object.functionEvalLocalRefsSlot(ctx.runtime)).* = refs;
         }
     }
     if (create_prototype and fb.has_prototype) {
@@ -3958,8 +3958,8 @@ pub fn createGeneratorObject(
             rooted_refs = refs[0..initialized];
         }
         locals_transferred = true;
-        object.functionEvalLocalNamesSlot().* = names;
-        object.functionEvalLocalRefsSlot().* = refs;
+        (try object.functionEvalLocalNamesSlot(ctx.runtime)).* = names;
+        (try object.functionEvalLocalRefsSlot(ctx.runtime)).* = refs;
     }
 
     if (fb.generator_body_pc != 0) {
@@ -4074,7 +4074,7 @@ pub fn tagIteratorWrapPrototypeMethod(rt: *core.JSRuntime, global: *core.Object,
     const method = proto.getProperty(key);
     defer method.free(rt);
     const method_object = objectFromValue(method) orelse return;
-    method_object.functionIteratorWrapMethodSlot().* = @intCast(method_id);
+    (try method_object.functionIteratorWrapMethodSlot(rt)).* = @intCast(method_id);
     if (functionPrototypeFromGlobal(rt, global)) |function_proto| {
         try method_object.setPrototype(rt, function_proto);
     }
@@ -5760,7 +5760,7 @@ pub noinline fn getSuper(
         return;
     };
     if (function_object.functionSuperConstructor()) |super_constructor| {
-        if (function_object.functionLexicalThisSlot().* != null) {
+        if (function_object.functionLexicalThis() != null) {
             try stack.push(super_constructor);
         } else if (function_object.getPrototype()) |prototype| {
             try stack.push(prototype.value());
@@ -5914,7 +5914,7 @@ pub noinline fn setHomeObject(
         if (can_set_home_object) {
             try func_object.setFunctionHomeObject(ctx.runtime, try property_ops.expectObject(home_value));
             if (is_arrow_function) {
-                const slot = func_object.functionLexicalThisSlot();
+                const slot = try func_object.functionLexicalThisSlot(ctx.runtime);
                 try func_object.setOptionalValueSlot(ctx.runtime, slot, home_value.dup());
             }
         }
@@ -6125,7 +6125,7 @@ pub noinline fn defineClass(
             }
             const superclass_object = try property_ops.expectObject(superclass_value);
             try ctor_object.setPrototype(ctx.runtime, superclass_object);
-            try ctor_object.setOptionalValueSlot(ctx.runtime, ctor_object.functionSuperConstructorSlot(), superclass_value.dup());
+            try ctor_object.setOptionalValueSlot(ctx.runtime, try ctor_object.functionSuperConstructorSlot(ctx.runtime), superclass_value.dup());
             superclass_proto = getValueProperty(ctx, output, global, superclass_value, core.atom.ids.prototype, function, frame) catch |err| {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
@@ -6153,7 +6153,7 @@ pub noinline fn defineClass(
         }
     }
     try ctor_object.setFunctionHomeObject(ctx.runtime, proto);
-    if (ctor_object.functionClassFieldsInitSlot().*) |init_value| {
+    if (ctor_object.functionClassFieldsInit()) |init_value| {
         if (objectFromValue(init_value)) |init_object| {
             try init_object.setFunctionHomeObject(ctx.runtime, proto);
         }
