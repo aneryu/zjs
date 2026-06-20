@@ -2940,39 +2940,16 @@ fn qjsArrayPopCallImpl(
 
 fn qjsFastDenseArrayPop(object: *core.Object) ?core.JSValue {
     if (!object.flags.is_array or !object.flags.length_writable) return null;
-    if (object.proxyTarget() != null or object.hasExoticMethods() or object.arrayElementStorageMode() != .dense) return null;
-    if (object.arrayLength() == 0) return null;
-
-    const index = object.arrayLength() - 1;
-    const atom_id = core.atom.atomFromUInt32(index);
-    if (object.properties.len != 0 and object.findProperty(atom_id) != null) return null;
-
-    const element_index: usize = @intCast(index);
-    const elements = object.arrayElementsSlot();
-    if (element_index >= elements.*.len) return null;
-
-    const value = elements.*[element_index];
-
-    elements.* = elements.*.ptr[0..element_index];
-    object.setArrayLength(index);
-    return value;
+    if (!object.isFastArray()) return null;
+    return object.takeLastFastArrayElement();
 }
 
 pub fn qjsFastDensePrimitiveArrayPop(object: *core.Object) ?core.JSValue {
     if (!object.flags.is_array or !object.flags.length_writable) return null;
-    if (object.hasExoticMethods() or object.arrayElementStorageMode() != .dense) return null;
-    if (object.properties.len != 0) return null;
-    if (object.arrayLength() == 0) return null;
-
-    const index = object.arrayLength() - 1;
-    const elements = object.arrayElementsSlot();
-    if (index >= elements.*.len) return null;
-    const value = elements.*[@intCast(index)] orelse return null;
+    const slot = object.borrowLastFastArrayElement() orelse return null;
+    const value = slot.*;
     if (!qjsCanFastJoinPrimitive(value)) return null;
-
-    elements.*[@intCast(index)] = null;
-    object.setArrayLength(index);
-    return value;
+    return object.takeLastFastArrayElement();
 }
 
 pub fn qjsArrayShiftCall(
@@ -4937,25 +4914,18 @@ pub fn putDenseArrayElementFast(rt: *core.JSRuntime, object_value: core.JSValue,
     const object = property_ops.expectObject(object_value) catch return false;
     if (!object.flags.is_array) return false;
     if (key.asInt32()) |index_i32| {
-        if (index_i32 >= 0 and index_i32 <= core.array.max_array_index and index_i32 <= core.atom.max_int_atom) {
-            const index: u32 = @intCast(index_i32);
-            const atom_id = core.atom.atomFromUInt32(index);
-            if (index < object.arrayLength()) {
-                if (try object.writeDenseArrayIndex(rt, index, atom_id, value)) return true;
-            }
-            return try object.appendDenseArrayIndex(rt, index, atom_id, value);
-        }
-        return false;
+        if (index_i32 < 0 or index_i32 > core.array.max_array_index) return false;
+        const index: u32 = @intCast(index_i32);
+        if (object.setFastArrayElementDup(rt, index, value)) return true;
+        if (index > core.atom.max_int_atom) return false;
+        return try object.appendDenseArrayIndex(rt, index, core.atom.atomFromUInt32(index), value);
     }
     const number = value_ops.numberValue(key) orelse return false;
     if (std.math.isNan(number) or !std.math.isFinite(number) or number < 0 or number > core.array.max_array_index or @trunc(number) != number) return false;
     const index: u32 = @intFromFloat(number);
+    if (object.setFastArrayElementDup(rt, index, value)) return true;
     if (index > core.atom.max_int_atom) return false;
-    const atom_id = core.atom.atomFromUInt32(index);
-    if (index < object.arrayLength()) {
-        if (try object.writeDenseArrayIndex(rt, index, atom_id, value)) return true;
-    }
-    return try object.appendDenseArrayIndex(rt, index, atom_id, value);
+    return try object.appendDenseArrayIndex(rt, index, core.atom.atomFromUInt32(index), value);
 }
 
 pub fn argsFromArray(rt: *core.JSRuntime, array_value: core.JSValue) ![]core.JSValue {

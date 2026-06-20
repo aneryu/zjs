@@ -1735,14 +1735,8 @@ pub fn fastDenseArrayElementValue(value: core.JSValue, key: core.JSValue) ?core.
     const index_i32 = key.asInt32() orelse return null;
     if (index_i32 < 0) return null;
     const object = objectFromValue(value) orelse return null;
-    if (object.proxyTarget() != null or object.hasExoticMethods()) return null;
-    if (!object.flags.is_array or object.arrayElementStorageMode() != .dense) return null;
     const index: u32 = @intCast(index_i32);
-    const atom_id = core.atom.atomFromUInt32(index);
-    if (object.properties.len != 0 and object.findProperty(atom_id) != null) return null;
-    const elements = object.arrayElements();
-    if (@as(usize, @intCast(index_i32)) >= elements.len) return null;
-    return elements[@intCast(index_i32)].dup();
+    return object.fastArrayElementDup(index);
 }
 
 pub fn fastInt32Add(lhs: i32, rhs: i32) core.JSValue {

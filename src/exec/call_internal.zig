@@ -366,26 +366,6 @@ inline fn objectFindPropertyFast(object: *const core.Object, atom_id: core.Atom)
     return null;
 }
 
-inline fn arrayPayloadConstFast(object: *const core.Object) ?*const core.object.ArrayPayload {
-    if (object.class_payload_kind != .array) return null;
-    return @ptrCast(@alignCast(object.class_payload.?));
-}
-
-inline fn arrayPayloadFast(object: *core.Object) ?*core.object.ArrayPayload {
-    if (object.class_payload_kind != .array) return null;
-    return @ptrCast(@alignCast(object.class_payload.?));
-}
-
-inline fn arrayElementsFast(object: *const core.Object) []core.JSValue {
-    const payload = arrayPayloadConstFast(object) orelse return &.{};
-    return payload.elements;
-}
-
-inline fn arrayStorageModeFast(object: *const core.Object) core.object.ArrayStorageMode {
-    const payload = arrayPayloadConstFast(object) orelse return .dense;
-    return payload.storage_mode;
-}
-
 inline fn numberToValueFast(value: f64) core.JSValue {
     if (value >= -2147483648 and value <= 2147483647) {
         const int_val: i32 = @intFromFloat(value);
@@ -552,14 +532,8 @@ inline fn fastDenseArrayElementValueLocal(value: core.JSValue, key: core.JSValue
     const index_i32 = key.asInt32() orelse return null;
     if (index_i32 < 0) return null;
     const object = objectFromValueFast(value) orelse return null;
-    if (object.flags.is_proxy or object.class_payload_kind == .proxy or object.hasExoticMethods()) return null;
-    if (!object.flags.is_array or arrayStorageModeFast(object) != .dense) return null;
     const index: u32 = @intCast(index_i32);
-    const atom_id = core.atom.atomFromUInt32(index);
-    if (object.properties.len != 0 and objectFindPropertyFast(object, atom_id) != null) return null;
-    const elements = arrayElementsFast(object);
-    if (@as(usize, @intCast(index_i32)) >= elements.len) return null;
-    return elements[@intCast(index_i32)].dup();
+    return object.fastArrayElementDup(index);
 }
 
 inline fn tryFastGetArrayEl(
@@ -600,25 +574,10 @@ inline fn tryFastGetArrayEl2(
 
 inline fn fastPutDenseArrayExistingIntIndexLocal(rt: *core.JSRuntime, obj: core.JSValue, key: core.JSValue, value: core.JSValue) bool {
     const index_i32 = key.asInt32() orelse return false;
-    if (index_i32 < 0 or index_i32 > core.array.max_array_index or index_i32 > core.atom.max_int_atom) return false;
+    if (index_i32 < 0 or index_i32 > core.array.max_array_index) return false;
     const object = objectFromValueFast(obj) orelse return false;
-    if (!object.flags.is_array) return false;
     const index: u32 = @intCast(index_i32);
-    if (index >= object.arrayLength()) return false;
-    if (!object.flags.length_writable) return false;
-    if (object.hasExoticMethods() or object.flags.is_proxy or object.class_payload_kind == .proxy) return false;
-    if (arrayStorageModeFast(object) != .dense) return false;
-    const atom_id = core.atom.atomFromUInt32(index);
-    if (object.properties.len != 0 and objectFindPropertyFast(object, atom_id) != null) return false;
-    const elements = arrayElementsFast(object);
-    if (@as(usize, @intCast(index)) >= elements.len) return false;
-    if (rt.any_prototype_may_have_indexed_properties and object.prototype != null) return false;
-
-    const element_slot = &arrayPayloadFast(object).?.elements[@intCast(index)];
-    const old_value = element_slot.*;
-    element_slot.* = value.dup();
-    old_value.free(rt);
-    return true;
+    return object.setFastArrayElementDup(rt, index, value);
 }
 
 inline fn tryFastPutArrayEl(

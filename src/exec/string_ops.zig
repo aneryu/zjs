@@ -3859,9 +3859,12 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
     const element_count = found.capture_count + 1;
     const elements = try rt.memory.alloc(core.JSValue, element_count);
     var initialized: usize = 0;
+    var transferred = false;
     errdefer {
-        for (elements[0..initialized]) |value| value.free(rt);
-        rt.memory.free(core.JSValue, elements);
+        if (!transferred) {
+            for (elements[0..initialized]) |value| value.free(rt);
+            rt.memory.free(core.JSValue, elements);
+        }
     }
 
     elements[0] = matched.dup();
@@ -3880,10 +3883,9 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
         initialized += 1;
     }
 
-    out.arrayElementsSlot().* = elements[0..element_count];
-    out.arrayElementsCapacitySlot().* = element_count;
+    out.adoptDenseArrayElementsAssumingEmpty(elements[0..element_count]);
+    transferred = true;
     out.flags.may_have_indexed_properties = true;
-    out.setArrayLength(@intCast(element_count));
 }
 
 pub fn createRegExpMatchArrayNoCapturesFromValue(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: RegExpMatch, input_len: usize, has_indices: bool) !core.JSValue {

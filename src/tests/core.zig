@@ -870,7 +870,7 @@ test "class table registers QuickJS standard classes and dynamic classes" {
     try std.testing.expect(rt.classes.isRegistered(dynamic_id));
 
     try std.testing.expectEqual(core.class.PayloadKind.ordinary, rt.classes.record(core.class.ids.object).?.payload_kind);
-    try std.testing.expectEqual(core.class.PayloadKind.array, rt.classes.record(core.class.ids.array).?.payload_kind);
+    try std.testing.expectEqual(core.class.PayloadKind.none, rt.classes.record(core.class.ids.array).?.payload_kind);
     try std.testing.expectEqual(core.class.PayloadKind.regexp, rt.classes.record(core.class.ids.regexp).?.payload_kind);
     try std.testing.expectEqual(core.class.PayloadKind.collection, rt.classes.record(core.class.ids.map).?.payload_kind);
     try std.testing.expectEqual(core.class.PayloadKind.iterator, rt.classes.record(core.class.ids.array_iterator).?.payload_kind);
@@ -2118,15 +2118,16 @@ test "object data state uses payload storage" {
     try std.testing.expect(object.objectData() != null);
 }
 
-test "array element state uses payload storage" {
+test "array element state uses inline fast-array storage" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const array = try core.Object.createArray(rt, null);
     defer array.value().free(rt);
 
-    try std.testing.expect(array.class_payload != null);
-    try std.testing.expectEqual(core.class.PayloadKind.array, array.class_payload_kind);
+    try std.testing.expect(array.class_payload == null);
+    try std.testing.expectEqual(core.class.PayloadKind.none, array.class_payload_kind);
+    try std.testing.expect(array.flags.fast_array);
     try std.testing.expectEqual(core.object.ArrayStorageMode.dense, array.arrayElementStorageMode());
     try std.testing.expect(try array.appendDenseArrayIndex(rt, 0, core.atom.atomFromUInt32(0), core.JSValue.int32(7)));
     try std.testing.expectEqual(@as(usize, 1), array.arrayElements().len);

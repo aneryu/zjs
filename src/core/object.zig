@@ -717,20 +717,6 @@ pub const RealmPayload = struct {
     }
 };
 
-pub const ArrayPayload = struct {
-    storage_mode: ArrayStorageMode = .dense,
-    length: u32 = 0,
-    elements: []JSValue = &.{},
-    elements_capacity: usize = 0,
-    realm_global_ptr: ?*Object = null,
-
-    pub fn destroy(self: *ArrayPayload, rt: *JSRuntime) void {
-        destroyValueSliceWithCapacity(rt, &self.elements, &self.elements_capacity);
-        self.storage_mode = .dense;
-        self.length = 0;
-    }
-};
-
 pub const PromisePayload = struct {
     result: ?JSValue = null,
     reaction_callback: ?JSValue = null,
@@ -1054,11 +1040,6 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, payload_kind: class.PayloadKi
             typed.destroy(rt);
             rt.memory.destroy(VarRefPayload, typed);
         },
-        .array => {
-            const typed: *ArrayPayload = @ptrCast(@alignCast(ptr));
-            typed.destroy(rt);
-            rt.memory.destroy(ArrayPayload, typed);
-        },
         .promise => {
             const typed: *PromisePayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
@@ -1083,11 +1064,12 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, payload_kind: class.PayloadKi
     }
 }
 
-pub const ObjectFlags = packed struct(u16) {
+pub const ObjectFlags = packed struct(u32) {
     null_prototype: bool = false,
     extensible: bool = true,
     immutable_prototype: bool = false,
     is_array: bool = false,
+    fast_array: bool = false,
     is_proxy: bool = false,
     is_global: bool = false,
     is_html_dda: bool = false,
@@ -1103,6 +1085,7 @@ pub const ObjectFlags = packed struct(u16) {
     has_weak_id: bool = false,
     is_borrowed_reference_holder: bool = false,
     has_property_storage: bool = false,
+    _padding: u15 = 0,
 };
 
 var test_standard_exotic_methods: [class.ids.init_count]?*const ExoticMethods = @splat(null);
@@ -1129,6 +1112,9 @@ pub const Object = struct {
     shape_ref: *shape.Shape,
     prototype: ?*Object = null,
     properties: []property.Entry = &.{},
+    array_values: [*]JSValue = undefined,
+    array_count: u32 = 0,
+    array_capacity: u32 = 0,
     class_id: class.ClassId,
     flags: ObjectFlags = .{},
     class_payload_kind: class.PayloadKind = .none,
@@ -1260,13 +1246,6 @@ pub const Object = struct {
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .var_ref;
-            },
-            .array => {
-                const payload = try rt.memory.create(ArrayPayload);
-                errdefer rt.memory.destroy(ArrayPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .array;
             },
             .promise => {
                 const payload = try rt.memory.create(PromisePayload);
@@ -1404,12 +1383,14 @@ pub const Object = struct {
     pub fn createArray(rt: *JSRuntime, prototype: ?*Object) !*Object {
         const self = try create(rt, class.ids.array, prototype);
         self.flags.is_array = true;
+        self.flags.fast_array = true;
         return self;
     }
 
     pub fn createArrayWithOwnPropertyCapacity(rt: *JSRuntime, prototype: ?*Object, capacity: usize) !*Object {
         const self = try createWithOwnPropertyCapacity(rt, class.ids.array, prototype, capacity);
         self.flags.is_array = true;
+        self.flags.fast_array = true;
         return self;
     }
 
@@ -1660,7 +1641,7 @@ pub const Object = struct {
         }
         if (old_property_capacity != 0) rt.memory.free(property.Entry, old_properties.ptr[0..old_property_capacity]);
         self.destroyOrdinaryPayload(rt);
-        self.destroyArrayPayload(rt);
+        self.destroyArrayElements(rt);
         self.destroyBufferPayload(rt);
         self.destroyTypedArrayPayload(rt);
         self.destroyObjectDataPayload(rt);
@@ -2010,7 +1991,6 @@ pub const Object = struct {
         if (self.finalizationRegistryPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
         if (self.stdFilePayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
         if (self.disposableStackPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-        if (self.arrayPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
         if (self.promisePayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
         if (self.generatorPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
         if (self.functionPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
@@ -2063,18 +2043,21 @@ pub const Object = struct {
     }
 
     pub fn arrayLengthSlot(self: *Object) *u32 {
-        if (self.arrayPayload()) |payload| return &payload.length;
         std.debug.assert(self.flags.is_array);
-        unreachable;
+        return &self.array_count;
     }
 
     pub fn arrayLength(self: *const Object) u32 {
-        if (self.arrayPayloadConst()) |payload| return payload.length;
-        return 0;
+        return if (self.flags.is_array) self.array_count else 0;
     }
 
     pub fn setArrayLength(self: *Object, length: u32) void {
-        self.arrayLengthSlot().* = length;
+        std.debug.assert(self.flags.is_array);
+        if (self.flags.fast_array and @as(usize, @intCast(length)) > self.array_capacity) {
+            std.debug.assert(self.array_count == 0);
+            self.flags.fast_array = false;
+        }
+        self.array_count = length;
     }
 
     pub fn hasExoticMethods(self: *const Object) bool {
@@ -3228,37 +3211,240 @@ pub const Object = struct {
         return target.value().dup();
     }
 
-    pub fn arrayStorageModeSlot(self: *Object) *ArrayStorageMode {
-        if (self.arrayPayload()) |payload| return &payload.storage_mode;
-        std.debug.assert(self.flags.is_array);
-        unreachable;
-    }
-
     pub fn arrayElementStorageMode(self: *const Object) ArrayStorageMode {
-        if (self.arrayPayloadConst()) |payload| return payload.storage_mode;
-        return .dense;
-    }
-
-    pub fn arrayElementsSlot(self: *Object) *[]JSValue {
-        if (self.arrayPayload()) |payload| return &payload.elements;
-        std.debug.assert(self.flags.is_array);
-        unreachable;
+        return if (self.flags.is_array and self.flags.fast_array) .dense else .sparse;
     }
 
     pub fn arrayElements(self: *const Object) []JSValue {
-        if (self.arrayPayloadConst()) |payload| return payload.elements;
-        return &.{};
+        if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return &.{};
+        std.debug.assert(self.array_capacity >= self.array_count);
+        return self.array_values[0..@as(usize, @intCast(self.array_count))];
     }
 
-    pub fn arrayElementsCapacitySlot(self: *Object) *usize {
-        if (self.arrayPayload()) |payload| return &payload.elements_capacity;
-        std.debug.assert(self.flags.is_array);
-        unreachable;
+    fn arrayElementsMut(self: *Object) []JSValue {
+        if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return &.{};
+        std.debug.assert(self.array_capacity >= self.array_count);
+        return self.array_values[0..@as(usize, @intCast(self.array_count))];
+    }
+
+    fn allocatedArrayElements(self: *Object) []JSValue {
+        if (!self.flags.is_array or self.array_capacity == 0) return &.{};
+        return self.array_values[0..@as(usize, @intCast(self.array_capacity))];
     }
 
     pub fn arrayElementsCapacity(self: *const Object) usize {
-        if (self.arrayPayloadConst()) |payload| return payload.elements_capacity;
-        return 0;
+        if (!self.flags.is_array) return 0;
+        return @intCast(self.array_capacity);
+    }
+
+    pub fn isFastArray(self: *const Object) bool {
+        return self.flags.is_array and self.flags.fast_array;
+    }
+
+    pub fn isFastArrayIndexInBounds(self: *const Object, index: u32) bool {
+        return self.isFastArray() and index < self.array_count;
+    }
+
+    pub fn fastArrayElementAt(self: *const Object, index: u32) JSValue {
+        std.debug.assert(self.isFastArrayIndexInBounds(index));
+        return self.array_values[@intCast(index)];
+    }
+
+    pub fn fastArrayElementSlot(self: *Object, index: u32) *JSValue {
+        std.debug.assert(self.isFastArrayIndexInBounds(index));
+        return &self.array_values[@intCast(index)];
+    }
+
+    pub fn fastArrayElementDup(self: *const Object, index: u32) ?JSValue {
+        if (!self.isFastArrayIndexInBounds(index)) return null;
+        return self.array_values[@intCast(index)].dup();
+    }
+
+    pub fn setFastArrayElementDup(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) bool {
+        if (!self.isFastArrayIndexInBounds(index)) return false;
+        const slot = &self.array_values[@intCast(index)];
+        const old = slot.*;
+        slot.* = new_value.dup();
+        old.free(rt);
+        return true;
+    }
+
+    pub fn adoptDenseArrayElementsAssumingEmpty(self: *Object, elements: []JSValue) void {
+        std.debug.assert(self.flags.is_array);
+        std.debug.assert(self.array_count == 0);
+        std.debug.assert(self.array_capacity == 0);
+        self.array_values = elements.ptr;
+        self.array_count = @intCast(elements.len);
+        self.array_capacity = @intCast(elements.len);
+        self.flags.fast_array = true;
+    }
+
+    pub fn clearFastArray(self: *Object) void {
+        if (!self.flags.is_array) return;
+        std.debug.assert(self.array_capacity == 0);
+        self.flags.fast_array = false;
+    }
+
+    pub fn setArraySparseLength(self: *Object, length: u32) void {
+        std.debug.assert(self.flags.is_array);
+        std.debug.assert(self.array_capacity == 0);
+        self.array_count = length;
+        self.flags.fast_array = false;
+    }
+
+    pub fn resetFastArrayEmpty(self: *Object) void {
+        std.debug.assert(self.flags.is_array);
+        std.debug.assert(self.array_capacity == 0);
+        self.array_count = 0;
+        self.flags.fast_array = true;
+    }
+
+    pub fn takeLastFastArrayElement(self: *Object) ?JSValue {
+        if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return null;
+        self.array_count -= 1;
+        return self.array_values[@intCast(self.array_count)];
+    }
+
+    pub fn borrowLastFastArrayElement(self: *Object) ?*JSValue {
+        if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return null;
+        return &self.array_values[@intCast(self.array_count - 1)];
+    }
+
+    pub fn shrinkFastArrayByOne(self: *Object) void {
+        std.debug.assert(self.flags.is_array and self.flags.fast_array and self.array_count != 0);
+        self.array_count -= 1;
+    }
+
+    fn destroyArrayElements(self: *Object, rt: *JSRuntime) void {
+        if (!self.flags.is_array) return;
+        if (self.flags.fast_array) {
+            var index: usize = 0;
+            const count: usize = @intCast(self.array_count);
+            while (index < count) : (index += 1) self.array_values[index].free(rt);
+        } else {
+            std.debug.assert(self.array_capacity == 0);
+        }
+        const allocated = self.allocatedArrayElements();
+        self.array_count = 0;
+        self.array_capacity = 0;
+        self.flags.fast_array = false;
+        if (allocated.len != 0) rt.memory.free(JSValue, allocated);
+    }
+
+    fn freeArrayElementBufferAfterMove(self: *Object, rt: *JSRuntime) void {
+        std.debug.assert(self.flags.is_array);
+        std.debug.assert(!self.flags.fast_array or self.array_count == 0);
+        const allocated = self.allocatedArrayElements();
+        self.array_capacity = 0;
+        self.flags.fast_array = false;
+        if (allocated.len != 0) rt.memory.free(JSValue, allocated);
+    }
+
+    fn ensureArrayBufferCapacity(self: *Object, rt: *JSRuntime, needed_len: usize) !void {
+        const old_capacity: usize = @intCast(self.array_capacity);
+        if (needed_len <= old_capacity) return;
+        var next_capacity = if (old_capacity == 0) @as(usize, 16) else old_capacity + old_capacity / 2;
+        if (next_capacity <= old_capacity) next_capacity = old_capacity + 1;
+        while (next_capacity < needed_len) {
+            const growth = @max(next_capacity / 2, 1);
+            next_capacity += growth;
+        }
+        if (next_capacity > std.math.maxInt(u32)) return error.OutOfMemory;
+        const next = try rt.memory.alloc(JSValue, next_capacity);
+        errdefer rt.memory.free(JSValue, next);
+        if (self.flags.fast_array and self.array_count != 0) {
+            const count: usize = @intCast(self.array_count);
+            @memcpy(next[0..count], self.array_values[0..count]);
+        }
+        const old_allocated = self.allocatedArrayElements();
+        self.array_values = next.ptr;
+        self.array_capacity = @intCast(next_capacity);
+        if (old_allocated.len != 0) rt.memory.free(JSValue, old_allocated);
+    }
+
+    pub fn appendUninitializedFastArraySlot(self: *Object, rt: *JSRuntime) !*JSValue {
+        const index = self.array_count;
+        try self.ensureArrayBufferCapacity(rt, @as(usize, @intCast(index)) + 1);
+        self.array_count = index + 1;
+        self.flags.fast_array = true;
+        return &self.array_values[@intCast(index)];
+    }
+
+    pub fn fastArrayEnsureCapacity(self: *Object, rt: *JSRuntime, needed: u32) !void {
+        try self.ensureArrayBufferCapacity(rt, @intCast(needed));
+    }
+
+    pub fn fastArrayValuesPtr(self: *const Object) ?[*]JSValue {
+        if (!self.isFastArray() or self.array_count == 0) return null;
+        return self.array_values;
+    }
+
+    pub fn fastArrayCount(self: *const Object) u32 {
+        return if (self.isFastArray()) self.array_count else 0;
+    }
+
+    pub fn fastArrayCapacity(self: *const Object) u32 {
+        return if (self.flags.is_array) self.array_capacity else 0;
+    }
+
+    pub fn fastArrayValues(self: *const Object) []JSValue {
+        return self.arrayElements();
+    }
+
+    pub fn fastArrayValuesMut(self: *Object) []JSValue {
+        return self.arrayElementsMut();
+    }
+
+    pub fn arrayElementsForCount(self: *const Object) []const JSValue {
+        if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return &.{};
+        return self.array_values[0..@as(usize, @intCast(self.array_count))];
+    }
+
+    pub fn setFastArrayCountAssumeCapacity(self: *Object, count: u32) void {
+        std.debug.assert(count <= self.array_capacity);
+        self.array_count = count;
+        self.flags.fast_array = true;
+    }
+
+    pub fn fastArraySlotAssumeCapacity(self: *Object, index: u32) *JSValue {
+        std.debug.assert(index < self.array_capacity);
+        return &self.array_values[@intCast(index)];
+    }
+
+    pub fn fastArraySetSparseLength(self: *Object, length: u32) void {
+        self.setArraySparseLength(length);
+    }
+
+    pub fn fastArrayResetEmpty(self: *Object) void {
+        self.resetFastArrayEmpty();
+    }
+
+    pub fn fastArrayAdoptElementsAssumingEmpty(self: *Object, elements: []JSValue) void {
+        self.adoptDenseArrayElementsAssumingEmpty(elements);
+    }
+
+    pub fn fastArrayTakeLast(self: *Object) ?JSValue {
+        return self.takeLastFastArrayElement();
+    }
+
+    pub fn fastArrayBorrowLast(self: *Object) ?*JSValue {
+        return self.borrowLastFastArrayElement();
+    }
+
+    pub fn fastArrayShrinkLast(self: *Object) void {
+        self.shrinkFastArrayByOne();
+    }
+
+    pub fn fastArrayHasIndex(self: *const Object, index: u32) bool {
+        return self.isFastArrayIndexInBounds(index);
+    }
+
+    pub fn fastArrayGetDup(self: *const Object, index: u32) ?JSValue {
+        return self.fastArrayElementDup(index);
+    }
+
+    pub fn fastArraySetDup(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) bool {
+        return self.setFastArrayElementDup(rt, index, new_value);
     }
 
     pub fn promiseResultSlot(self: *Object) *?JSValue {
@@ -4512,7 +4698,6 @@ pub const Object = struct {
 
     pub fn functionRealmGlobalPtrSlot(self: *Object) *?*Object {
         if (self.ordinaryPayload()) |payload| return &payload.realm_global_ptr;
-        if (self.arrayPayload()) |payload| return &payload.realm_global_ptr;
         if (self.objectDataPayload()) |payload| return &payload.realm_global_ptr;
         if (self.iteratorPayload()) |payload| return &payload.realm_global_ptr;
         if (self.collectionPayload()) |payload| return &payload.realm_global_ptr;
@@ -4560,7 +4745,6 @@ pub const Object = struct {
 
     pub fn functionRealmGlobalPtr(self: *const Object) ?*Object {
         if (self.ordinaryPayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.arrayPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.objectDataPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.iteratorPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.collectionPayloadConst()) |payload| return payload.realm_global_ptr;
@@ -4873,24 +5057,6 @@ pub const Object = struct {
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(VarRefPayload, payload);
-    }
-
-    fn arrayPayload(self: *Object) ?*ArrayPayload {
-        if (self.class_payload_kind != .array) return null;
-        return @ptrCast(@alignCast(self.class_payload.?));
-    }
-
-    fn arrayPayloadConst(self: *const Object) ?*const ArrayPayload {
-        if (self.class_payload_kind != .array) return null;
-        return @ptrCast(@alignCast(self.class_payload.?));
-    }
-
-    fn destroyArrayPayload(self: *Object, rt: *JSRuntime) void {
-        const payload = self.arrayPayload() orelse return;
-        self.class_payload = null;
-        self.class_payload_kind = .none;
-        payload.destroy(rt);
-        rt.memory.destroy(ArrayPayload, payload);
     }
 
     fn promisePayload(self: *Object) ?*PromisePayload {
@@ -7658,13 +7824,7 @@ pub const Object = struct {
     }
 
     pub fn getDenseArrayElementValue(self: *const Object, index: u32) ?JSValue {
-        if (!self.flags.is_array or self.arrayElementStorageMode() != .dense) return null;
-        const atom_id = atom.atomFromUInt32(index);
-        if (self.properties.len != 0 and self.findProperty(atom_id) != null) return null;
-        const element_index: usize = @intCast(index);
-        const elements = self.arrayElements();
-        if (element_index >= elements.len) return null;
-        return elements[element_index].dup();
+        return self.fastArrayElementDup(index);
     }
 
     pub fn defineOwnProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
@@ -7693,7 +7853,7 @@ pub const Object = struct {
             if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| {
                 if (index >= self.arrayLength() and !self.flags.length_writable) return error.ReadOnly;
                 const old_length = self.arrayLength();
-                if (index > old_length) try self.convertDenseArrayElementsToSparseProperties(rt);
+                if (self.flags.fast_array) try self.convertDenseArrayElementsToSparseProperties(rt);
                 try self.defineOrdinaryOwnProperty(rt, atom_id, actual_desc);
                 if (index >= old_length) self.setArrayLength(index + 1);
                 self.updateArrayStorageMode(index);
@@ -8300,11 +8460,7 @@ pub const Object = struct {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt) and proto.hasProperty(atom_id)) return false;
         }
 
-        const element_slot = &self.arrayElementsSlot().*[@intCast(index)];
-        const old_value = element_slot.*;
-        element_slot.* = new_value.dup();
-        old_value.free(rt);
-        return true;
+        return self.setFastArrayElementDup(rt, index, new_value);
     }
 
     pub fn appendDenseArrayIndex(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
@@ -8316,15 +8472,10 @@ pub const Object = struct {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt) and proto.hasProperty(atom_id)) return false;
         }
 
-        const element_index: usize = @intCast(index);
-        if (element_index != self.arrayElements().len) return false;
-        try self.ensureArrayElementCapacity(rt, index + 1);
-        const elements = self.arrayElementsSlot();
-        elements.* = elements.*.ptr[0 .. element_index + 1];
-        const element_slot = &elements.*[element_index];
+        if (index != self.array_count) return false;
+        const element_slot = try self.appendUninitializedFastArraySlot(rt);
         element_slot.* = new_value.dup();
         self.markIndexedProperties(rt);
-        self.setArrayLength(index + 1);
         return true;
     }
 
@@ -8336,28 +8487,19 @@ pub const Object = struct {
         std.debug.assert(self.arrayElements().len == 0);
         std.debug.assert(self.arrayElementsCapacity() == 0);
 
-        const elements = try rt.memory.alloc(JSValue, 1);
-        errdefer rt.memory.free(JSValue, elements);
-        elements[0] = new_value.dup();
-        self.arrayElementsSlot().* = elements[0..1];
-        self.arrayElementsCapacitySlot().* = 1;
+        const element_slot = try self.appendUninitializedFastArraySlot(rt);
+        element_slot.* = new_value.dup();
         self.markIndexedProperties(rt);
-        self.setArrayLength(1);
     }
 
     pub fn appendDenseArrayLiteralIndex(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !bool {
         if (!self.flags.is_array or index != self.arrayLength() or !self.flags.length_writable) return false;
         if (!self.flags.extensible) return false;
 
-        const element_index: usize = @intCast(index);
-        if (element_index != self.arrayElements().len) return false;
-        try self.ensureArrayElementCapacity(rt, index + 1);
-        const elements = self.arrayElementsSlot();
-        elements.* = elements.*.ptr[0 .. element_index + 1];
-        const element_slot = &elements.*[element_index];
+        if (index != self.array_count) return false;
+        const element_slot = try self.appendUninitializedFastArraySlot(rt);
         element_slot.* = new_value.dup();
         self.markIndexedProperties(rt);
-        self.setArrayLength(index + 1);
         return true;
     }
 
@@ -8367,15 +8509,13 @@ pub const Object = struct {
         if (self.arrayElementStorageMode() != .dense) return false;
         if (values.len > array.max_array_length) return false;
 
-        try self.ensureArrayElementCapacity(rt, @intCast(values.len));
-        const elements = self.arrayElementsSlot();
-        elements.* = elements.*.ptr[0..values.len];
+        try self.ensureArrayElementCapacity(rt, values.len);
+        self.setFastArrayCountAssumeCapacity(@intCast(values.len));
         for (values, 0..) |item, index| {
-            const element_slot = &elements.*[index];
+            const element_slot = &self.array_values[index];
             element_slot.* = item.dup();
         }
         if (values.len != 0) self.markIndexedProperties(rt);
-        self.setArrayLength(@intCast(values.len));
         return true;
     }
 
@@ -8388,17 +8528,15 @@ pub const Object = struct {
 
         const start_index: usize = @intCast(start);
         const limit_index: usize = @intCast(limit);
-        const elements = self.arrayElementsSlot();
-        if (start_index != elements.*.len) return false;
+        if (start != self.array_count) return false;
 
-        try self.ensureArrayElementCapacity(rt, limit);
-        elements.* = elements.*.ptr[0..limit_index];
+        try self.ensureArrayElementCapacity(rt, limit_index);
+        self.setFastArrayCountAssumeCapacity(limit);
         self.markIndexedProperties(rt);
-        self.setArrayLength(limit);
 
         var index = start_index;
         while (index < limit_index) : (index += 1) {
-            elements.*[index] = JSValue.int32(@intCast(index));
+            self.array_values[index] = JSValue.int32(@intCast(index));
         }
         return true;
     }
@@ -8420,20 +8558,18 @@ pub const Object = struct {
 
         const start_element: usize = @intCast(start_index);
         const limit_element: usize = @intCast(limit);
-        const elements = self.arrayElementsSlot();
-        if (start_element != elements.*.len) return false;
+        if (start_element != self.array_count) return false;
 
-        try self.ensureArrayElementCapacity(rt, limit);
-        elements.* = elements.*.ptr[0..limit_element];
+        try self.ensureArrayElementCapacity(rt, limit_element);
+        self.setFastArrayCountAssumeCapacity(limit);
         self.markIndexedProperties(rt);
-        self.setArrayLength(limit);
 
         var offset: u32 = 0;
         while (offset < count) : (offset += 1) {
             const index = start_element + @as(usize, @intCast(offset));
             const element_delta: i32 = @intCast(offset);
             const element_value = start_value + element_delta;
-            elements.*[index] = JSValue.int32(element_value);
+            self.array_values[index] = JSValue.int32(element_value);
         }
         return true;
     }
@@ -8455,20 +8591,18 @@ pub const Object = struct {
 
         const start_element: usize = @intCast(start_index);
         const limit_element: usize = @intCast(limit);
-        const elements = self.arrayElementsSlot();
-        if (start_element != elements.*.len) return false;
+        if (start_element != self.array_count) return false;
 
-        try self.ensureArrayElementCapacity(rt, limit);
-        elements.* = elements.*.ptr[0..limit_element];
+        try self.ensureArrayElementCapacity(rt, limit_element);
+        self.setFastArrayCountAssumeCapacity(limit);
         self.markIndexedProperties(rt);
-        self.setArrayLength(limit);
 
         var index = start_element;
         while (index < limit_element) : (index += 1) {
             const product_exact = @as(i128, @intCast(index)) * @as(i128, multiplier);
             const product: i32 = @truncate(product_exact);
             const element_value = product & mask;
-            elements.*[index] = JSValue.int32(element_value);
+            self.array_values[index] = JSValue.int32(element_value);
         }
         return true;
     }
@@ -8483,9 +8617,8 @@ pub const Object = struct {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
         }
 
-        const elements = self.arrayElementsSlot();
         const mask_index: usize = @intCast(mask);
-        if (mask_index >= elements.*.len) return false;
+        if (mask_index >= self.array_count) return false;
 
         var guard_index: u32 = 0;
         while (guard_index <= mask) : (guard_index += 1) {
@@ -8497,7 +8630,7 @@ pub const Object = struct {
         var value_index = start;
         while (value_index < limit) : (value_index += 1) {
             const element_index: usize = @intCast(value_index & mask);
-            const element_slot = &elements.*[element_index];
+            const element_slot = &self.array_values[element_index];
             const old = element_slot.*;
             const new_value = JSValue.int32(@intCast(value_index));
             element_slot.* = new_value;
@@ -8508,7 +8641,7 @@ pub const Object = struct {
 
     pub fn reserveDenseArrayElements(self: *Object, rt: *JSRuntime, needed: u32) !void {
         if (!self.flags.is_array) return;
-        try self.ensureArrayElementCapacity(rt, needed);
+        try self.ensureArrayElementCapacity(rt, @intCast(needed));
     }
 
     pub fn defineDenseArrayDataProperty(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !bool {
@@ -8517,24 +8650,22 @@ pub const Object = struct {
         if (self.findProperty(atom_id) != null) return false;
 
         const element_index: usize = @intCast(index);
-        const elements = self.arrayElementsSlot();
-        if (element_index > elements.*.len) return false;
-        const appended = element_index == elements.*.len;
+        if (element_index > self.array_count) return false;
+        const appended = element_index == self.array_count;
         if (appended) {
             if (!self.flags.extensible) return false;
             if (index >= self.arrayLength() and !self.flags.length_writable) return false;
             if (index != self.arrayLength()) return false;
-            try self.ensureArrayElementCapacity(rt, index + 1);
-            elements.* = elements.*.ptr[0 .. element_index + 1];
+            try self.ensureArrayElementCapacity(rt, element_index + 1);
+            self.setFastArrayCountAssumeCapacity(index + 1);
         }
 
         const next_value = new_value.dup();
         errdefer next_value.free(rt);
-        const element_slot = &elements.*[element_index];
+        const element_slot = &self.array_values[element_index];
         const old = if (appended) JSValue.undefinedValue() else element_slot.*;
         element_slot.* = next_value;
         self.markIndexedProperties(rt);
-        if (index >= self.arrayLength()) self.setArrayLength(index + 1);
         if (!appended) old.free(rt);
         return true;
     }
@@ -8560,7 +8691,7 @@ pub const Object = struct {
         return self.flags.is_array and
             !self.hasExoticMethods() and
             self.arrayElementStorageMode() == .dense and
-            self.arrayElements().len == @as(usize, @intCast(self.arrayLength())) and
+            self.flags.fast_array and
             self.flags.extensible and
             self.properties.len == 0;
     }
@@ -8570,21 +8701,19 @@ pub const Object = struct {
         std.debug.assert(index < self.arrayLength() or self.flags.length_writable);
 
         const element_index: usize = @intCast(index);
-        const elements = self.arrayElementsSlot();
-        if (element_index > elements.*.len) return;
-        const appended = element_index == elements.*.len;
+        if (element_index > self.array_count) return;
+        const appended = element_index == self.array_count;
         if (appended) {
-            try self.ensureArrayElementCapacity(rt, index + 1);
-            elements.* = elements.*.ptr[0 .. element_index + 1];
+            try self.ensureArrayElementCapacity(rt, element_index + 1);
+            self.setFastArrayCountAssumeCapacity(index + 1);
         }
 
         const next_value = new_value.dup();
         errdefer next_value.free(rt);
-        const element_slot = &elements.*[element_index];
+        const element_slot = &self.array_values[element_index];
         const old = if (appended) JSValue.undefinedValue() else element_slot.*;
         element_slot.* = next_value;
         self.markIndexedProperties(rt);
-        if (index >= self.arrayLength()) self.setArrayLength(index + 1);
         if (!appended) old.free(rt);
     }
 
@@ -9049,86 +9178,62 @@ pub const Object = struct {
     }
 
     pub fn truncateArrayElements(self: *Object, rt: *JSRuntime, new_len: u32) void {
-        const elements = self.arrayElementsSlot();
-        const len: usize = @min(@as(usize, @intCast(new_len)), elements.*.len);
-        while (elements.*.len > len) {
-            const index = elements.*.len - 1;
-            const old = elements.*[index];
-            elements.* = elements.*.ptr[0..index];
+        if (!self.flags.is_array or !self.flags.fast_array) return;
+        const len: usize = @min(@as(usize, @intCast(new_len)), self.array_count);
+        while (self.array_count > len) {
+            self.array_count -= 1;
+            const old = self.array_values[@intCast(self.array_count)];
             old.free(rt);
         }
     }
 
     pub fn convertDenseArrayElementsToSparseProperties(self: *Object, rt: *JSRuntime) !void {
-        if (!self.flags.is_array) return;
+        if (!self.flags.is_array or !self.flags.fast_array) return;
+        const old_length = self.array_count;
         const elements = self.arrayElements();
         for (elements, 0..) |stored, index| {
             const atom_id = atom.atomFromUInt32(@intCast(index));
             if (self.findProperty(atom_id) != null) continue;
             try self.addProperty(rt, atom_id, descriptor.Descriptor.data(stored, true, true, true));
         }
-        destroyValueSliceWithCapacity(rt, self.arrayElementsSlot(), self.arrayElementsCapacitySlot());
-        self.arrayStorageModeSlot().* = .sparse;
+        for (elements) |stored| stored.free(rt);
+        self.array_count = 0;
+        self.freeArrayElementBufferAfterMove(rt);
+        self.array_count = old_length;
     }
 
     fn denseArrayElement(self: *const Object, atom_id: atom.Atom) ?JSValue {
-        if (!self.flags.is_array) return null;
+        if (!self.flags.is_array or !self.flags.fast_array) return null;
         if (!atom.isTaggedInt(atom_id)) return null;
-        const index: usize = @intCast(atom.atomToUInt32(atom_id));
-        if (index >= self.arrayElements().len) return null;
-        return self.arrayElements()[index];
+        const index = atom.atomToUInt32(atom_id);
+        if (index >= self.array_count) return null;
+        return self.array_values[@intCast(index)];
     }
 
     fn hasDenseArrayElement(self: *const Object, index: u32) bool {
-        const element_index: usize = @intCast(index);
-        return element_index < self.arrayElements().len;
+        return self.isFastArrayIndexInBounds(index);
     }
 
     fn setDenseArrayElement(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !bool {
         if (!self.flags.is_array) return false;
-        const element_index: usize = @intCast(index);
-        const elements = self.arrayElementsSlot();
-        if (element_index >= elements.*.len) return false;
-        const next_value = new_value.dup();
-        errdefer next_value.free(rt);
-        const element_slot = &elements.*[element_index];
-        const old = element_slot.*;
-        element_slot.* = next_value;
+        if (!self.setFastArrayElementDup(rt, index, new_value)) return false;
         self.markIndexedProperties(rt);
-        old.free(rt);
         return true;
     }
 
-    fn ensureArrayElementCapacity(self: *Object, rt: *JSRuntime, needed: u32) !void {
-        const needed_len: usize = @intCast(needed);
-        const elements = self.arrayElementsSlot();
-        const capacity = self.arrayElementsCapacitySlot();
-        if (needed_len <= capacity.*) return;
-        var next_capacity = if (capacity.* == 0) @as(usize, 16) else capacity.* + capacity.* / 2;
-        if (next_capacity <= capacity.*) next_capacity = capacity.* + 1;
-        while (next_capacity < needed_len) {
-            const growth = @max(next_capacity / 2, 1);
-            next_capacity += growth;
-        }
-        const next = try rt.memory.alloc(JSValue, next_capacity);
-        errdefer rt.memory.free(JSValue, next);
-        @memcpy(next[0..elements.*.len], elements.*);
-        const old_capacity = capacity.*;
-        const old_elements: []JSValue = if (old_capacity != 0) elements.*.ptr[0..old_capacity] else elements.*[0..0];
-        elements.* = next[0..elements.*.len];
-        capacity.* = next_capacity;
-        if (old_capacity != 0) rt.memory.free(JSValue, old_elements);
+    fn ensureArrayElementCapacity(self: *Object, rt: *JSRuntime, needed_len: usize) !void {
+        try self.ensureArrayBufferCapacity(rt, needed_len);
     }
 
     fn updateArrayStorageMode(self: *Object, index: u32) void {
         if (!self.flags.is_array) return;
         _ = index;
-        self.arrayStorageModeSlot().* = .sparse;
+        self.flags.fast_array = false;
     }
 
     fn recomputeArrayStorageMode(self: *Object, rt: *JSRuntime) void {
         if (!self.flags.is_array) return;
-        self.arrayStorageModeSlot().* = if (self.arrayElements().len == @as(usize, @intCast(self.arrayLength()))) .dense else .sparse;
+        self.flags.fast_array = self.array_capacity >= self.array_count;
         for (self.shapeProps()) |prop| {
             if (property.Flags.fromBits(prop.flags).deleted) continue;
             const index = array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;

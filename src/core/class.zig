@@ -83,7 +83,6 @@ pub const ids = struct {
 pub const PayloadKind = enum {
     none,
     ordinary,
-    array,
     arguments,
     object_data,
     function,
@@ -432,7 +431,7 @@ pub fn standardPayloadKind(id: ClassId) PayloadKind {
         ids.std_file => .std_file,
         ids.disposable_stack, ids.async_disposable_stack => .disposable_stack,
 
-        ids.array => .array,
+        ids.array => .none,
         ids.arguments, ids.mapped_arguments => .arguments,
         ids.number, ids.string, ids.boolean, ids.symbol, ids.date, ids.big_int => .object_data,
         ids.module_ns => .module_namespace,

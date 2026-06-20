@@ -303,7 +303,7 @@ pub fn constructConstructorWithPrototype(rt: *core.JSRuntime, args: []const core
         const object = try core.Object.createArray(rt, prototype);
         errdefer core.Object.destroyFromHeader(rt, &object.header);
         object.setArrayLength(length);
-        if (length != 0) object.arrayStorageModeSlot().* = .sparse;
+        if (length != 0) object.setArraySparseLength(length);
         return object.value();
     }
     return constructWithPrototype(rt, args, prototype);
