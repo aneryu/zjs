@@ -9412,10 +9412,11 @@ pub const Object = struct {
             }
         };
 
-        if (array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) {
+        const array_index = array.arrayIndexFromAtom(&rt.atoms, atom_id);
+        if (array_index != null) {
             self.markIndexedProperties(rt);
         }
-        try self.adoptShapeForNewProperty(rt, atom_id, entry_flags.bits(), current_capacity);
+        try self.adoptShapeForNewProperty(rt, atom_id, entry_flags.bits(), current_capacity, array_index);
         if (grew_properties and old_capacity != 0) rt.memory.free(property.Entry, old_properties);
         inserted = false;
     }
@@ -9432,8 +9433,8 @@ pub const Object = struct {
         rt.shapes.release(old_shape);
     }
 
-    fn adoptShapeForNewProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, flags: u6, property_capacity: usize) !void {
-        if (array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) {
+    fn adoptShapeForNewProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, flags: u6, property_capacity: usize, array_index: ?u32) !void {
+        if (array_index != null) {
             try self.ensureUniqueShapeForMutation(rt);
             try rt.shapes.reserveProperties(self.shape_ref, property_capacity);
             try rt.shapes.addProperty(self.shape_ref, atom_id, flags);
