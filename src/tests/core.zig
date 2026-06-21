@@ -1243,7 +1243,9 @@ test "dense array delete defers element finalizer reentry" {
     try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), reentrant_array_delete_calls);
     try expectOneDeferredClassPayloadFinalizer(rt);
+    try std.testing.expectEqual(core.object.ArrayStorageMode.sparse, array.arrayElementStorageMode());
     try std.testing.expectEqual(@as(usize, 0), array.arrayElements().len);
+    try std.testing.expect(!array.hasOwnProperty(core.atom.atomFromUInt32(0)));
     try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_array_delete_calls);
@@ -5752,12 +5754,12 @@ test "array element storage mode moves between dense and sparse" {
     defer rt.atoms.free(index_0);
     defer rt.atoms.free(index_100);
 
-    try array_obj.defineOwnProperty(rt, index_0, core.Descriptor.data(core.JSValue.int32(0), true, true, true));
+    try std.testing.expect(try array_obj.appendDenseArrayIndex(rt, 0, index_0, core.JSValue.int32(0)));
     try std.testing.expectEqual(core.object.ArrayStorageMode.dense, array_obj.arrayElementStorageMode());
     try array_obj.defineOwnProperty(rt, index_100, core.Descriptor.data(core.JSValue.int32(100), true, true, true));
     try std.testing.expectEqual(core.object.ArrayStorageMode.sparse, array_obj.arrayElementStorageMode());
     try array_obj.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(1), true, false, false));
-    try std.testing.expectEqual(core.object.ArrayStorageMode.dense, array_obj.arrayElementStorageMode());
+    try std.testing.expectEqual(core.object.ArrayStorageMode.sparse, array_obj.arrayElementStorageMode());
 }
 
 var exotic_define_calls: usize = 0;

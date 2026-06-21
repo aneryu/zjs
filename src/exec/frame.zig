@@ -96,6 +96,14 @@ pub const FrameRootScope = struct {
         rt.active_value_roots = &self.frame;
     }
 
+    pub fn useMutableOperandStack(self: *FrameRootScope, stack: *stack_mod.Stack) void {
+        self.slices[0] = .{ .mutable = &stack.values };
+    }
+
+    pub fn useWindowedOperandStack(self: *FrameRootScope, stack: *stack_mod.Stack, live_len: *const usize) void {
+        self.slices[0] = .{ .windowed = .{ .values = &stack.values, .live_len = live_len } };
+    }
+
     pub fn deinit(self: *FrameRootScope) void {
         const rt = self.rt orelse return;
         rt.active_value_roots = self.frame.previous;

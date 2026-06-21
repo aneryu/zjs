@@ -172,6 +172,17 @@ pub inline fn tryInt32Binary(stack: *stack_mod.Stack, binop: u8) bool {
     return true;
 }
 
+pub inline fn tryInt32BinaryWindow(base: [*]core.JSValue, sp_len: *usize, binop: u8) bool {
+    const n = sp_len.*;
+    if (n < 2) return false;
+    const lhs_int = base[n - 2].asInt32() orelse return false;
+    const rhs_int = base[n - 1].asInt32() orelse return false;
+    const result = fastBinaryInt32(binop, lhs_int, rhs_int) orelse return false;
+    base[n - 2] = result;
+    sp_len.* = n - 1;
+    return true;
+}
+
 /// Inline operand-stack fast path for two int32 operands of a comparison op.
 /// Mirrors `compare()`'s int32 branch exactly (same per-op boolean switch).
 /// Returns false untouched when either operand is not int32.
@@ -191,6 +202,25 @@ pub inline fn tryInt32Compare(stack: *stack_mod.Stack, cmp: u8) bool {
     };
     stack.values[n - 2] = core.JSValue.boolean(result);
     stack.values = stack.values.ptr[0 .. n - 1];
+    return true;
+}
+
+pub inline fn tryInt32CompareWindow(base: [*]core.JSValue, sp_len: *usize, cmp: u8) bool {
+    const n = sp_len.*;
+    if (n < 2) return false;
+    const lhs_int = base[n - 2].asInt32() orelse return false;
+    const rhs_int = base[n - 1].asInt32() orelse return false;
+    const result = switch (cmp) {
+        op.lt => lhs_int < rhs_int,
+        op.lte => lhs_int <= rhs_int,
+        op.gt => lhs_int > rhs_int,
+        op.gte => lhs_int >= rhs_int,
+        op.eq, op.strict_eq => lhs_int == rhs_int,
+        op.neq, op.strict_neq => lhs_int != rhs_int,
+        else => return false,
+    };
+    base[n - 2] = core.JSValue.boolean(result);
+    sp_len.* = n - 1;
     return true;
 }
 

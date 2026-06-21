@@ -339,7 +339,7 @@ pub const BlockHeader = extern struct {
         std.debug.assert(@sizeOf(BlockHeader) == 8);
     }
 
-    pub fn retain(self: *BlockHeader) void {
+    pub inline fn retain(self: *BlockHeader) void {
         std.debug.assert(self.rc > 0);
         self.rc += 1;
     }
@@ -1171,6 +1171,7 @@ pub const Registry = struct {
     pub fn releaseObject(self: *Registry, h: *GCObjectHeader) bool {
         std.debug.assert(h.rc > 0);
         h.rc -= 1;
+        self.stats.rc_dec += 1;
 
         if (h.rc == 0) {
             self.unlinkObject(h);
@@ -1408,21 +1409,22 @@ pub inline fn headerFromGcNode(node: *GcNode) *BlockHeader {
 }
 
 /// 9.1 统一的非原子 retain/release/dup/free 路径
-pub fn retain(header: *Header) void {
+pub inline fn retain(header: *Header) void {
     header.retain();
 }
 
-pub fn release(rt: anytype, header: *Header) void {
+pub inline fn release(rt: anytype, header: *Header) void {
+    comptime {
+        @setEvalBranchQuota(10_000);
+    }
     std.debug.assert(header.rc > 0);
     header.rc -= 1;
+    rt.gc.stats.rc_dec += 1;
 
-    if (header.rc == 0) {
-        @branchHint(.cold);
-        releaseDestroy(rt, header);
-    }
+    if (header.rc == 0) releaseAndDestroy(rt, header);
 }
 
-fn releaseDestroy(rt: anytype, header: *Header) void {
+noinline fn releaseAndDestroy(rt: anytype, header: *Header) void {
     if (rt.gc.phase == .deinit and header.kind == .object) return;
     rt.gc.unlinkObjectWithBytes(header, Registry.heapByteSizeFromHeader(rt, header));
 

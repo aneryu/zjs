@@ -2949,14 +2949,10 @@ fn qjsFastDenseArrayPop(object: *core.Object) ?core.JSValue {
 
     const element_index: usize = @intCast(index);
     const elements = object.arrayElementsSlot();
-    if (element_index >= elements.*.len) {
-        if (!arrayPrototypeChainHasNoIndexedProperties(object)) return null;
-        object.length = index;
-        return core.JSValue.undefinedValue();
-    }
+    if (element_index >= elements.*.len) return null;
 
     const value = elements.*[element_index];
-    elements.*[element_index] = core.JSValue.uninitialized();
+
     elements.* = elements.*.ptr[0..element_index];
     object.length = index;
     return value;
@@ -2971,12 +2967,10 @@ pub fn qjsFastDensePrimitiveArrayPop(object: *core.Object) ?core.JSValue {
     const index = object.length - 1;
     const elements = object.arrayElementsSlot();
     if (index >= elements.*.len) return null;
-    const element_index: usize = @intCast(index);
-    const value = elements.*[element_index];
+    const value = elements.*[@intCast(index)] orelse return null;
     if (!qjsCanFastJoinPrimitive(value)) return null;
 
-    elements.*[element_index] = core.JSValue.uninitialized();
-    elements.* = elements.*.ptr[0..element_index];
+    elements.*[@intCast(index)] = null;
     object.length = index;
     return value;
 }
@@ -5440,7 +5434,7 @@ pub fn qjsArrayJoinCall(
         if (!item.isUndefined() and !item.isNull()) {
             const string_item = try toStringForAnnexB(ctx, output, global, item, caller_function, caller_frame);
             defer string_item.free(ctx.runtime);
-            try value_ops.appendRawString(ctx.runtime, &bytes, string_item);
+            try value_ops.appendValueString(ctx.runtime, &bytes, string_item);
         }
     }
     return try value_ops.createStringValue(ctx.runtime, bytes.items);

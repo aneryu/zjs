@@ -677,11 +677,11 @@ pub fn hashIndex(hash: u32, bits: u6) u32 {
     return hash >> shift;
 }
 
-pub fn propertyBucketIndex(shape_hash: u32, atom_id: atom.Atom, mask: u32) usize {
+pub inline fn propertyBucketIndex(shape_hash: u32, atom_id: atom.Atom, mask: u32) usize {
     std.debug.assert(mask != no_property_hash);
+    std.debug.assert(std.math.isPowerOfTwo(@as(usize, mask) + 1));
     _ = shape_hash;
-    const mixed = shapeHash(0, atom_id);
-    return @intCast(mixed & mask);
+    return @intCast(atom_id & mask);
 }
 
 pub fn shapeHash(seed: u32, value: u32) u32 {

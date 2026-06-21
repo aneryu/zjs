@@ -121,6 +121,11 @@ pub const Slot = union(enum) {
     auto_init: u32,
     deleted,
 
+    pub inline fn dataValueForFastPath(self: Slot) ?JSValue {
+        if (self != .data) return null;
+        return self.data;
+    }
+
     pub fn destroy(self: Slot, rt: anytype) void {
         switch (self) {
             .data => |value| value.free(rt),

@@ -3860,9 +3860,7 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
     const elements = try rt.memory.alloc(core.JSValue, element_count);
     var initialized: usize = 0;
     errdefer {
-        for (elements[0..initialized]) |slot| {
-            slot.free(rt);
-        }
+        for (elements[0..initialized]) |value| value.free(rt);
         rt.memory.free(core.JSValue, elements);
     }
 
