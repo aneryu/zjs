@@ -330,7 +330,7 @@ pub fn buildCallSiteArray(ctx: *core.JSContext, global: *core.Object, skip_name:
         try array.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(@intCast(emitted)), core.Descriptor.data(site, true, true, true));
         emitted += 1;
     }
-    array.length = @intCast(emitted);
+    array.setArrayLength(@intCast(emitted));
     try array.defineOwnProperty(ctx.runtime, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(@intCast(emitted)), true, false, false));
     return array.value();
 }
@@ -409,7 +409,7 @@ pub fn aggregateErrorsIterableToArray(
         item = try getValueProperty(ctx, output, global, next_result.value(), value_key, caller_function, caller_frame);
         try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(index), core.Descriptor.data(item, true, true, true));
     }
-    out.length = index;
+    out.setArrayLength(index);
     try out.defineOwnProperty(ctx.runtime, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, false, false));
     return out;
 }
@@ -813,7 +813,7 @@ pub fn qjsTypedArrayConstructArrayLikeOwnDataFast(
     source_object: *core.Object,
     length: usize,
 ) !bool {
-    if (source_object.proxyTarget() != null or source_object.exotic != null) return false;
+    if (source_object.proxyTarget() != null or source_object.hasExoticMethods()) return false;
     if (length > @as(usize, @intCast(std.math.maxInt(u32)))) return false;
 
     var first_index_property: ?usize = null;
@@ -1056,7 +1056,7 @@ pub fn qjsTypedArrayConstructFromIterable(
         };
         try values.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(index), core.Descriptor.data(item, true, true, true));
     }
-    values.length = index;
+    values.setArrayLength(index);
     if (callableObjectFromValue(constructor)) |function_object| {
         if (function_object.typedArrayElementSize() != 0 and function_object.typedArrayKind() != 0) {
             const kind = function_object.typedArrayKind();
@@ -1540,7 +1540,7 @@ pub fn addCollectionEntriesFromArray(
     adder: core.JSValue,
 ) !void {
     var index: u32 = 0;
-    while (index < source.length) : (index += 1) {
+    while (index < source.arrayLength()) : (index += 1) {
         const entry_value = try getValueProperty(ctx, output, global, source.value(), core.atom.atomFromUInt32(index), null, null);
         defer entry_value.free(ctx.runtime);
         if (kind == 1 or kind == 3) {
@@ -1600,7 +1600,7 @@ pub fn qjsArrayForEachCall(
 
     const callback_this = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     var index: u32 = 0;
-    while (index < object.length) : (index += 1) {
+    while (index < object.arrayLength()) : (index += 1) {
         const item = object.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(ctx.runtime);
         const index_value = core.JSValue.int32(@intCast(index));
@@ -1641,7 +1641,7 @@ pub fn qjsArrayAtCall(
     const length = if (is_typed_array)
         @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)))
     else if (object.flags.is_array)
-        @as(usize, @intCast(object.length))
+        @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
         defer length_value.free(ctx.runtime);
@@ -1754,7 +1754,7 @@ pub fn qjsArrayIterationCall(
     const length = if (is_typed_array)
         try arrayMethodTypedArrayLength(ctx.runtime, object, is_typed_method)
     else if (object.flags.is_array)
-        @as(usize, @intCast(object.length))
+        @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, caller_function, caller_frame);
         defer length_value.free(ctx.runtime);
@@ -1901,9 +1901,9 @@ pub fn qjsArrayMapSimpleNumericArg0DefaultSpeciesFastCall(
     callback: core.JSValue,
 ) !?core.JSValue {
     const source = objectFromValue(receiver) orelse return null;
-    if (!source.flags.is_array or source.proxyTarget() != null or source.exotic != null) return null;
+    if (!source.flags.is_array or source.proxyTarget() != null or source.hasExoticMethods()) return null;
     if (source.arrayElementStorageMode() != .dense) return null;
-    const length: usize = @intCast(source.length);
+    const length: usize = @intCast(source.arrayLength());
     if (length > std.math.maxInt(u32)) return null;
     const simple = simpleNumericArg0Callback(callback) orelse return null;
 
@@ -2059,7 +2059,7 @@ pub fn qjsArrayReduceCall(
     const length = if (is_typed_array)
         try arrayMethodTypedArrayLength(ctx.runtime, object, is_typed_method)
     else if (object.flags.is_array)
-        @as(usize, @intCast(object.length))
+        @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
         defer length_value.free(ctx.runtime);
@@ -2293,7 +2293,7 @@ pub fn qjsArraySliceCall(
     const length = if (primitive_non_string_receiver)
         0
     else if (object.flags.is_array and !object.flags.is_proxy)
-        @as(usize, @intCast(object.length))
+        @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
         defer length_value.free(ctx.runtime);
@@ -2459,7 +2459,7 @@ pub fn qjsArraySpliceCall(
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return null;
     var verify_own_length_write = false;
-    if (object.getOwnProperty(core.atom.ids.length)) |length_desc| {
+    if (object.getOwnProperty(ctx.runtime, core.atom.ids.length)) |length_desc| {
         defer length_desc.destroy(ctx.runtime);
         verify_own_length_write = !object.flags.is_array;
         if (length_desc.kind == .accessor and length_desc.setter.isUndefined()) return null;
@@ -2467,7 +2467,7 @@ pub fn qjsArraySpliceCall(
         if (length_desc.kind == .data and !object.flags.is_array and isCallableValue(length_desc.value)) return null;
     }
     const length = if (object.flags.is_array)
-        @as(usize, @intCast(object.length))
+        @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
         defer length_value.free(ctx.runtime);
@@ -2651,7 +2651,7 @@ pub fn qjsArrayCopyWithinCall(
     const length = if (core.object.isTypedArrayObject(object))
         try arrayMethodTypedArrayLength(ctx.runtime, object, false)
     else if (object.flags.is_array)
-        @as(usize, @intCast(object.length))
+        @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
         defer length_value.free(ctx.runtime);
@@ -2752,7 +2752,7 @@ pub fn qjsArrayFillCall(
     const length = if (core.object.isTypedArrayObject(object))
         try arrayMethodTypedArrayLength(ctx.runtime, object, false)
     else if (object.flags.is_array)
-        @as(usize, @intCast(object.length))
+        @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
         defer length_value.free(ctx.runtime);
@@ -2772,7 +2772,7 @@ pub fn qjsArrayFillCall(
     } else raw_value.dup();
     defer value.free(ctx.runtime);
 
-    if (object.flags.is_array and object.exotic == null and object.proxyTarget() == null and object.arrayElementStorageMode() == .dense and object.flags.extensible and arrayPrototypeChainHasNoIndexedProperties(object)) {
+    if (object.flags.is_array and !object.hasExoticMethods() and object.proxyTarget() == null and object.arrayElementStorageMode() == .dense and object.flags.extensible and arrayPrototypeChainHasNoIndexedProperties(object)) {
         if (final <= @as(usize, @intCast(std.math.maxInt(u32))) + 1) {
             var dense_index = start;
             if (object.canDefineDenseArrayDataPropertiesUnchecked()) {
@@ -2811,7 +2811,7 @@ pub fn qjsArrayFillCall(
 pub fn arrayPrototypeChainHasNoIndexedProperties(object: *core.Object) bool {
     var cursor = object.getPrototype();
     while (cursor) |candidate| {
-        if (candidate.proxyTarget() != null or candidate.exotic != null) return false;
+        if (candidate.proxyTarget() != null or candidate.hasExoticMethods()) return false;
         if (candidate.flags.may_have_indexed_properties) return false;
         cursor = candidate.getPrototype();
     }
@@ -2854,8 +2854,8 @@ fn qjsArrayPushCallImpl(
     defer receiver_object_value.free(ctx.runtime);
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return error.TypeError;
-    if (args.len == 1 and objectFromValue(receiver) == object and object.flags.is_array and object.exotic == null and object.length < core.array.max_array_length) {
-        const index = object.length;
+    if (args.len == 1 and objectFromValue(receiver) == object and object.flags.is_array and !object.hasExoticMethods() and object.arrayLength() < core.array.max_array_length) {
+        const index = object.arrayLength();
         if (try object.appendDenseArrayIndex(ctx.runtime, index, core.atom.atomFromUInt32(index), args[0])) {
             return lengthIndexValue(index + 1);
         }
@@ -2940,39 +2940,16 @@ fn qjsArrayPopCallImpl(
 
 fn qjsFastDenseArrayPop(object: *core.Object) ?core.JSValue {
     if (!object.flags.is_array or !object.flags.length_writable) return null;
-    if (object.proxyTarget() != null or object.exotic != null or object.arrayElementStorageMode() != .dense) return null;
-    if (object.length == 0) return null;
-
-    const index = object.length - 1;
-    const atom_id = core.atom.atomFromUInt32(index);
-    if (object.properties.len != 0 and object.findProperty(atom_id) != null) return null;
-
-    const element_index: usize = @intCast(index);
-    const elements = object.arrayElementsSlot();
-    if (element_index >= elements.*.len) return null;
-
-    const value = elements.*[element_index];
-
-    elements.* = elements.*.ptr[0..element_index];
-    object.length = index;
-    return value;
+    if (!object.isFastArray()) return null;
+    return object.takeLastFastArrayElement();
 }
 
 pub fn qjsFastDensePrimitiveArrayPop(object: *core.Object) ?core.JSValue {
     if (!object.flags.is_array or !object.flags.length_writable) return null;
-    if (object.exotic != null or object.arrayElementStorageMode() != .dense) return null;
-    if (object.properties.len != 0) return null;
-    if (object.length == 0) return null;
-
-    const index = object.length - 1;
-    const elements = object.arrayElementsSlot();
-    if (index >= elements.*.len) return null;
-    const value = elements.*[@intCast(index)] orelse return null;
+    const slot = object.borrowLastFastArrayElement() orelse return null;
+    const value = slot.*;
     if (!qjsCanFastJoinPrimitive(value)) return null;
-
-    elements.*[@intCast(index)] = null;
-    object.length = index;
-    return value;
+    return object.takeLastFastArrayElement();
 }
 
 pub fn qjsArrayShiftCall(
@@ -2993,8 +2970,9 @@ pub fn qjsArrayShiftCall(
     defer receiver_object_value.free(ctx.runtime);
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return error.TypeError;
+    if (qjsFastDenseArrayShift(object)) |value| return value;
     const length = if (object.flags.is_array)
-        @as(usize, @intCast(object.length))
+        @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
         defer length_value.free(ctx.runtime);
@@ -3038,6 +3016,21 @@ pub fn qjsArrayShiftCall(
     return first;
 }
 
+fn qjsFastDenseArrayShift(object: *core.Object) ?core.JSValue {
+    if (!object.flags.is_array or !object.flags.length_writable) return null;
+    if (!object.isFastArray()) return null;
+    const values = object.fastArrayValuesMut();
+    if (values.len == 0) return core.JSValue.undefinedValue();
+
+    const first = values[0];
+    if (values.len > 1) {
+        std.mem.copyForwards(core.JSValue, values[0 .. values.len - 1], values[1..values.len]);
+    }
+    values[values.len - 1] = core.JSValue.undefinedValue();
+    object.setFastArrayCountAssumeCapacity(@intCast(values.len - 1));
+    return first;
+}
+
 pub fn qjsArrayUnshiftCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -3059,7 +3052,7 @@ pub fn qjsArrayUnshiftCall(
     if (object.class_id == core.class.ids.string) return error.TypeError;
 
     const length = if (object.flags.is_array)
-        @as(usize, @intCast(object.length))
+        @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
         defer length_value.free(ctx.runtime);
@@ -3138,7 +3131,7 @@ pub fn qjsArrayReverseCall(
     const length = if (core.object.isTypedArrayObject(object))
         try arrayMethodTypedArrayLength(ctx.runtime, object, false)
     else if (object.flags.is_array)
-        @as(usize, @intCast(object.length))
+        @as(usize, @intCast(object.arrayLength()))
     else if (!receiver.isObject() and !receiver.isString())
         @as(usize, 0)
     else blk: {
@@ -3250,7 +3243,7 @@ pub fn unshiftMoveIndex(
 }
 
 pub fn ensureSettableForArrayBuiltin(ctx: *core.JSContext, object: *core.Object, atom_id: core.Atom) !void {
-    if (try findPropertyDescriptor(object, atom_id)) |desc| {
+    if (try findPropertyDescriptor(ctx.runtime, object, atom_id)) |desc| {
         defer desc.destroy(ctx.runtime);
         if (desc.kind == .data and desc.writable == false) return error.TypeError;
         if (desc.kind == .accessor and desc.setter.isUndefined()) return error.TypeError;
@@ -3258,7 +3251,7 @@ pub fn ensureSettableForArrayBuiltin(ctx: *core.JSContext, object: *core.Object,
 }
 
 pub fn ensureLengthWritableForArrayBuiltin(ctx: *core.JSContext, object: *core.Object) !void {
-    if (object.getOwnProperty(core.atom.ids.length)) |desc| {
+    if (object.getOwnProperty(ctx.runtime, core.atom.ids.length)) |desc| {
         defer desc.destroy(ctx.runtime);
         if (desc.kind == .data and desc.writable == false) return error.TypeError;
         if (desc.kind == .accessor and desc.setter.isUndefined()) return error.TypeError;
@@ -3324,7 +3317,7 @@ pub fn arraySpeciesCreate(
     const object = objectFromValue(original) orelse {
         if (length > core.array.max_array_length) return error.RangeError;
         const out = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
-        out.length = @intCast(length);
+        out.setArrayLength(@intCast(length));
         return out.value();
     };
     if (try defaultArraySpeciesCreate(ctx.runtime, global, object, length)) |value| return value;
@@ -3336,14 +3329,14 @@ pub fn arraySpeciesCreate(
     if (constructor_value.isUndefined()) {
         if (length > core.array.max_array_length) return error.RangeError;
         const out = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
-        out.length = @intCast(length);
+        out.setArrayLength(@intCast(length));
         return out.value();
     }
     if (!constructor_value.isObject()) return error.TypeError;
     if (try arraySpeciesConstructorIsForeignArray(ctx.runtime, global, constructor_value)) {
         if (length > core.array.max_array_length) return error.RangeError;
         const out = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
-        out.length = @intCast(length);
+        out.setArrayLength(@intCast(length));
         return out.value();
     }
     const species_atom = core.atom.predefinedId("Symbol.species", .symbol) orelse return error.TypeError;
@@ -3356,7 +3349,7 @@ pub fn arraySpeciesCreate(
     if (species_value.isUndefined()) {
         if (length > core.array.max_array_length) return error.RangeError;
         const out = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
-        out.length = @intCast(length);
+        out.setArrayLength(@intCast(length));
         return out.value();
     }
     const length_value = lengthIndexValue(length);
@@ -3365,7 +3358,7 @@ pub fn arraySpeciesCreate(
 
 pub fn defaultArraySpeciesCreate(rt: *core.JSRuntime, global: *core.Object, original: *core.Object, length: usize) !?core.JSValue {
     if (!original.flags.is_array or original.proxyTarget() != null) return null;
-    if (original.getOwnProperty(core.atom.ids.constructor)) |desc| {
+    if (original.getOwnProperty(rt, core.atom.ids.constructor)) |desc| {
         desc.destroy(rt);
         return null;
     }
@@ -3375,7 +3368,7 @@ pub fn defaultArraySpeciesCreate(rt: *core.JSRuntime, global: *core.Object, orig
     const array_ctor = arrayConstructorFromGlobal(rt, global) orelse return null;
     if (array_ctor.arrayBuiltinMarker() != .constructor) return null;
 
-    const proto_constructor = array_proto.getOwnProperty(core.atom.ids.constructor) orelse return null;
+    const proto_constructor = array_proto.getOwnProperty(rt, core.atom.ids.constructor) orelse return null;
     defer proto_constructor.destroy(rt);
     if (proto_constructor.kind != .data or !proto_constructor.value_present or
         !sameObjectIdentity(proto_constructor.value, array_ctor.value()))
@@ -3384,7 +3377,7 @@ pub fn defaultArraySpeciesCreate(rt: *core.JSRuntime, global: *core.Object, orig
     }
 
     const species_atom = core.atom.predefinedId("Symbol.species", .symbol) orelse return null;
-    const species = array_ctor.getOwnProperty(species_atom) orelse return null;
+    const species = array_ctor.getOwnProperty(rt, species_atom) orelse return null;
     defer species.destroy(rt);
     if (species.kind != .accessor or !species.getter_present or !species.setter_present or
         !species.setter.isUndefined())
@@ -3397,7 +3390,7 @@ pub fn defaultArraySpeciesCreate(rt: *core.JSRuntime, global: *core.Object, orig
     if (length > core.array.max_array_length) return error.RangeError;
 
     const out = try core.Object.createArray(rt, array_proto);
-    out.length = @intCast(length);
+    out.setArrayLength(@intCast(length));
     return out.value();
 }
 
@@ -3461,7 +3454,7 @@ pub fn qjsArrayFromCall(
     if (typedArrayConstructorObject(constructor_value) != null) {
         if (objectFromValue(source)) |source_object| {
             if (source_object.flags.is_array) {
-                return try qjsArrayFromArrayLike(ctx, output, global, constructor_value, source_object.value(), source_object.length, map_fn, this_arg, caller_function, caller_frame);
+                return try qjsArrayFromArrayLike(ctx, output, global, constructor_value, source_object.value(), source_object.arrayLength(), map_fn, this_arg, caller_function, caller_frame);
             }
         }
     }
@@ -3508,7 +3501,7 @@ pub fn qjsArrayFromCall(
     else blk: {
         const out = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
         errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
-        out.length = @intCast(length);
+        out.setArrayLength(@intCast(length));
         break :blk out.value();
     };
     errdefer out_value.free(ctx.runtime);
@@ -3601,7 +3594,7 @@ pub fn qjsTypedArrayFromIteratorValue(
         global,
         constructor_value,
         values_value,
-        @intCast(values.length),
+        @intCast(values.arrayLength()),
         map_fn,
         this_arg,
         caller_function,
@@ -3671,7 +3664,7 @@ pub fn qjsArrayFromArrayLike(
     const out = objectFromValue(out_value) orelse return error.TypeError;
     if (fixed_length) |length| {
         if (length > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
-        if (out.flags.is_array) out.length = @intCast(length);
+        if (out.flags.is_array) out.setArrayLength(@intCast(length));
     }
 
     var index: usize = 0;
@@ -3679,7 +3672,7 @@ pub fn qjsArrayFromArrayLike(
         const length = if (fixed_length) |length_value|
             length_value
         else if (objectFromValue(source)) |source_object|
-            @as(usize, @intCast(source_object.length))
+            @as(usize, @intCast(source_object.arrayLength()))
         else
             0;
         if (index >= length) break;
@@ -3796,7 +3789,7 @@ pub fn qjsArrayOfCall(
     else blk: {
         const out = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
         errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
-        out.length = @intCast(args.len);
+        out.setArrayLength(@intCast(args.len));
         break :blk out.value();
     };
     errdefer out_value.free(ctx.runtime);
@@ -3944,7 +3937,7 @@ pub fn qjsArrayMapCall(
     const mapped = try core.Object.createArray(ctx.runtime, null);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &mapped.header);
     var index: u32 = 0;
-    while (index < object.length) : (index += 1) {
+    while (index < object.arrayLength()) : (index += 1) {
         const item = object.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(ctx.runtime);
         const mapped_value = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), args[0], &.{item}, null, null);
@@ -3992,7 +3985,7 @@ pub fn qjsArraySortCall(
     const length = if (is_typed_array)
         try arrayMethodTypedArrayLength(ctx.runtime, object, is_typed_method)
     else if (object.flags.is_array)
-        @as(usize, @intCast(object.length))
+        @as(usize, @intCast(object.arrayLength()))
     else if (!receiver.isObject() and !receiver.isString())
         @as(usize, 0)
     else blk: {
@@ -4176,7 +4169,7 @@ pub fn qjsArrayByCopyCall(
     }
 
     const length = if (object.flags.is_array)
-        @as(usize, @intCast(object.length))
+        @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, caller_function, caller_frame);
         defer length_value.free(ctx.runtime);
@@ -4422,7 +4415,7 @@ pub fn qjsArrayFlatCall(
     defer receiver_object_value.free(ctx.runtime);
     const source = objectFromValue(receiver_object_value) orelse return null;
     const source_length = if (source.flags.is_array)
-        @as(usize, @intCast(source.length))
+        @as(usize, @intCast(source.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, caller_function, caller_frame);
         defer length_value.free(ctx.runtime);
@@ -4490,7 +4483,7 @@ pub fn flattenIntoArray(
         const element_object = objectFromValue(element);
         if (depth > 0 and element_object != null and try arraySpeciesOriginalIsArray(element_object.?)) {
             const element_length = if (element_object.?.flags.is_array)
-                @as(usize, @intCast(element_object.?.length))
+                @as(usize, @intCast(element_object.?.arrayLength()))
             else blk: {
                 const length_value = try getValueProperty(ctx, output, global, element, core.atom.ids.length, caller_function, caller_frame);
                 defer length_value.free(ctx.runtime);
@@ -4513,7 +4506,7 @@ pub fn flattenIntoArray(
 pub fn createArrayByCopyOutput(rt: *core.JSRuntime, global: *core.Object, length: usize) !*core.Object {
     if (length > core.array.max_array_length) return error.RangeError;
     const out = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
-    out.length = @intCast(length);
+    out.setArrayLength(@intCast(length));
     return out;
 }
 
@@ -4937,32 +4930,25 @@ pub fn putDenseArrayElementFast(rt: *core.JSRuntime, object_value: core.JSValue,
     const object = property_ops.expectObject(object_value) catch return false;
     if (!object.flags.is_array) return false;
     if (key.asInt32()) |index_i32| {
-        if (index_i32 >= 0 and index_i32 <= core.array.max_array_index and index_i32 <= core.atom.max_int_atom) {
-            const index: u32 = @intCast(index_i32);
-            const atom_id = core.atom.atomFromUInt32(index);
-            if (index < object.length) {
-                if (try object.writeDenseArrayIndex(rt, index, atom_id, value)) return true;
-            }
-            return try object.appendDenseArrayIndex(rt, index, atom_id, value);
-        }
-        return false;
+        if (index_i32 < 0 or index_i32 > core.array.max_array_index) return false;
+        const index: u32 = @intCast(index_i32);
+        if (object.setFastArrayElementDup(rt, index, value)) return true;
+        if (index > core.atom.max_int_atom) return false;
+        return try object.appendDenseArrayIndex(rt, index, core.atom.atomFromUInt32(index), value);
     }
     const number = value_ops.numberValue(key) orelse return false;
     if (std.math.isNan(number) or !std.math.isFinite(number) or number < 0 or number > core.array.max_array_index or @trunc(number) != number) return false;
     const index: u32 = @intFromFloat(number);
+    if (object.setFastArrayElementDup(rt, index, value)) return true;
     if (index > core.atom.max_int_atom) return false;
-    const atom_id = core.atom.atomFromUInt32(index);
-    if (index < object.length) {
-        if (try object.writeDenseArrayIndex(rt, index, atom_id, value)) return true;
-    }
-    return try object.appendDenseArrayIndex(rt, index, atom_id, value);
+    return try object.appendDenseArrayIndex(rt, index, core.atom.atomFromUInt32(index), value);
 }
 
 pub fn argsFromArray(rt: *core.JSRuntime, array_value: core.JSValue) ![]core.JSValue {
     const array = try property_ops.expectObject(array_value);
     if (!array.flags.is_array) return error.TypeError;
-    if (array.length == 0) return &.{};
-    const args = try rt.memory.alloc(core.JSValue, array.length);
+    if (array.arrayLength() == 0) return &.{};
+    const args = try rt.memory.alloc(core.JSValue, array.arrayLength());
     errdefer rt.memory.free(core.JSValue, args);
     var rooted_args: []core.JSValue = args[0..0];
     var args_root = ValueSliceRoot{};
@@ -4977,7 +4963,7 @@ pub fn argsFromArray(rt: *core.JSRuntime, array_value: core.JSValue) ![]core.JSV
         rooted_args = &.{};
     }
     var index: u32 = 0;
-    while (index < array.length) : (index += 1) {
+    while (index < array.arrayLength()) : (index += 1) {
         args[index] = array.getProperty(core.atom.atomFromUInt32(index));
         initialized += 1;
         rooted_args = args[0..initialized];
@@ -5075,7 +5061,7 @@ pub fn qjsGeneratorSlice(
             skipped += 1;
             continue;
         }
-        try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(out.length), core.Descriptor.data(value, true, true, true));
+        try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(out.arrayLength()), core.Descriptor.data(value, true, true, true));
     }
     return out.value();
 }
@@ -5165,7 +5151,7 @@ pub fn iteratorFlattenableForIteratorFrom(
     defer next_method.free(ctx.runtime);
     if (next_method.isUndefined() or next_method.isNull()) return iterator_object.value().dup();
     if (!isCallableValue(next_method)) return error.TypeError;
-    const cached = iterator_object.cachedIteratorNextSlot();
+    const cached = try iterator_object.cachedIteratorNextSlot(ctx.runtime);
     try iterator_object.setOptionalValueSlot(ctx.runtime, cached, next_method.dup());
     return iterator_object.value().dup();
 }
@@ -5302,7 +5288,7 @@ pub fn typedArrayReflectSetReceiverOwn(
         if (try typedArrayDefineOwnPropertyVm(ctx, output, global, receiver_object, atom_id, typed_array_desc)) |ok| return ok;
     }
 
-    if (receiver_object.getOwnProperty(atom_id)) |current| {
+    if (receiver_object.getOwnProperty(ctx.runtime, atom_id)) |current| {
         defer current.destroy(ctx.runtime);
         if (current.kind == .accessor) return false;
         if (current.writable == false) return false;
@@ -5403,7 +5389,7 @@ pub fn qjsArrayJoinCall(
     const length = if (is_typed_array)
         try arrayMethodTypedArrayLength(ctx.runtime, object, is_typed_method)
     else if (object.flags.is_array)
-        @as(usize, @intCast(object.length))
+        @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, object_value, core.atom.ids.length, caller_function, caller_frame);
         defer length_value.free(ctx.runtime);
@@ -5445,10 +5431,10 @@ pub fn qjsFastDensePrimitiveArrayJoin(
     object: *core.Object,
     args: []const core.JSValue,
 ) !?core.JSValue {
-    if (!object.flags.is_array or object.exotic != null or object.arrayElementStorageMode() != .dense) return null;
+    if (!object.flags.is_array or object.hasExoticMethods() or object.arrayElementStorageMode() != .dense) return null;
     if (object.properties.len != 0) return null;
 
-    const length: usize = @intCast(object.length);
+    const length: usize = @intCast(object.arrayLength());
     const elements = object.arrayElements();
     if (length > elements.len) return null;
 

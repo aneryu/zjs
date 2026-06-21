@@ -15,7 +15,7 @@ const op = bytecode.opcode.op;
 
 pub const Step = enum { done, continue_loop };
 
-pub fn object(
+pub noinline fn object(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     global: *core.Object,
@@ -26,7 +26,7 @@ pub fn object(
     try stack.pushOwned(value);
 }
 
-pub fn arrayFrom(
+pub noinline fn arrayFrom(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -167,7 +167,7 @@ fn frameHasVarRefBinding(function: *const bytecode.Bytecode, frame: *const frame
     return false;
 }
 
-pub fn defineField(
+pub noinline fn defineField(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -183,7 +183,7 @@ pub fn defineField(
     if (!value.requiresRefCount() and ctx.runtime.atoms.kind(atom_id) != .private) {
         if (property_ops.expectObject(obj)) |target| {
             if (target.class_id == core.class.ids.object and
-                target.exotic == null and
+                !target.hasExoticMethods() and
                 target.proxyTarget() == null and
                 !target.flags.is_array and
                 target.properties.len == 0)
@@ -212,9 +212,9 @@ pub fn defineField(
     if (target.flags.is_array and effective_atom == core.atom.ids.length) {
         if (value.asInt32()) |length| {
             const new_len: u32 = @intCast(@max(length, 0));
-            if (new_len > target.length) try target.convertDenseArrayElementsToSparseProperties(ctx.runtime);
+            if (new_len > target.arrayLength()) try target.convertDenseArrayElementsToSparseProperties(ctx.runtime);
             target.truncateArrayElements(ctx.runtime, new_len);
-            target.length = new_len;
+            target.setArrayLength(new_len);
             return .done;
         }
     }
@@ -228,7 +228,7 @@ pub fn defineField(
         return .done;
     }
     if (target.class_id == core.class.ids.object and
-        target.exotic == null and
+        !target.hasExoticMethods() and
         target.proxyTarget() == null and
         !target.flags.is_array and
         target.properties.len == 0)
@@ -243,7 +243,7 @@ pub fn defineField(
     return .done;
 }
 
-pub fn setProto(
+pub noinline fn setProto(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
 ) !void {
@@ -259,7 +259,7 @@ pub fn setProto(
     }
 }
 
-pub fn defineArrayEl(
+pub noinline fn defineArrayEl(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -321,7 +321,7 @@ pub fn appendSpreadValues(
     if (source) |source_object| {
         if (source_object.flags.is_array) {
             var source_index: u32 = 0;
-            while (source_index < source_object.length) : (source_index += 1) {
+            while (source_index < source_object.arrayLength()) : (source_index += 1) {
                 const item = source_object.getProperty(core.atom.atomFromUInt32(source_index));
                 defer item.free(ctx.runtime);
                 try property_ops.defineDataProperty(ctx.runtime, array, core.atom.atomFromUInt32(@intCast(out_index)), item);
@@ -336,7 +336,7 @@ pub fn appendSpreadValues(
     try stack.pushOwned(core.JSValue.int32(out_index));
 }
 
-pub fn appendSpreadValuesVm(
+pub noinline fn appendSpreadValuesVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -352,7 +352,7 @@ pub fn appendSpreadValuesVm(
     return .done;
 }
 
-pub fn copyDataProperties(
+pub noinline fn copyDataProperties(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -428,7 +428,7 @@ fn handleLiteralRuntimeError(
     return err;
 }
 
-pub fn specialObject(
+pub noinline fn specialObject(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -467,7 +467,7 @@ pub fn specialObject(
     }
 }
 
-pub fn getLength(
+pub noinline fn getLength(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -507,7 +507,7 @@ fn tryFuseArrayLengthLessThanFalseBranch(
     const operand_pc = frame.pc + 2;
     const diff: i8 = @bitCast(function.code[operand_pc]);
     const lhs_number: f64 = @floatFromInt(lhs_int);
-    const rhs_number: f64 = @floatFromInt(array_object.length);
+    const rhs_number: f64 = @floatFromInt(array_object.arrayLength());
     frame.pc = if (lhs_number < rhs_number)
         frame.pc + 3
     else
@@ -515,7 +515,7 @@ fn tryFuseArrayLengthLessThanFalseBranch(
     return true;
 }
 
-pub fn rest(
+pub noinline fn rest(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -551,7 +551,7 @@ pub fn rest(
             element_value = core.JSValue.undefinedValue();
             value.free(ctx.runtime);
         };
-        try object_value.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(object_value.length), core.Descriptor.data(value, true, true, true));
+        try object_value.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(object_value.arrayLength()), core.Descriptor.data(value, true, true, true));
         element_value = core.JSValue.undefinedValue();
         value.free(ctx.runtime);
         value_owned = false;
@@ -568,17 +568,13 @@ fn slotValueBorrow(slot: core.JSValue) core.JSValue {
     var depth: usize = 0;
     while (depth < 16) : (depth += 1) {
         const cell = varRefCellFromValue(current) orelse return current;
-        current = cell.varRefValueSlot().* orelse return core.JSValue.undefinedValue();
+        current = cell.varRefValue();
     }
     return current;
 }
 
-fn varRefCellFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    const cell: *core.Object = @fieldParentPtr("header", header);
-    if (cell.class_payload_kind != .var_ref) return null;
-    return cell;
+fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
+    return core.VarRef.fromValue(value);
 }
 
 fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {

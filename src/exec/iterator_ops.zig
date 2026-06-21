@@ -152,7 +152,7 @@ pub fn forOfStart(
     try stack.pushOwned(core.JSValue.catchOffset(catchTargetMarkerValue(catch_target)));
 }
 
-pub fn forOfStartVm(
+pub noinline fn forOfStartVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -339,7 +339,7 @@ fn asyncFromSyncMethod(rt: *core.JSRuntime, name: []const u8, method_id: i32) !c
     errdefer method.free(rt);
     const object = try property_ops.expectObject(method);
     if (method_id < 1 or method_id > 2) return error.TypeError;
-    if (!object.addAsyncFromSyncIteratorMethod(@intCast(method_id))) return error.TypeError;
+    if (!object.addAsyncFromSyncIteratorMethod(rt, @intCast(method_id))) return error.TypeError;
     return method;
 }
 
@@ -363,7 +363,7 @@ pub fn forInStart(
     try stack.pushOwned(iterator);
 }
 
-pub fn forInStartVm(
+pub noinline fn forInStartVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -407,7 +407,7 @@ pub fn iteratorNext(
     };
 }
 
-pub fn iteratorNextVm(
+pub noinline fn iteratorNextVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -429,7 +429,7 @@ pub fn iteratorCheckObject(ctx: *core.JSContext, stack: *stack_mod.Stack) !void 
     if (!value.isObject()) return error.TypeError;
 }
 
-pub fn iteratorCheckObjectVm(
+pub noinline fn iteratorCheckObjectVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
@@ -470,7 +470,7 @@ pub fn iteratorGetValueDone(
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(coercion_ops.valueTruthy(done)));
 }
 
-pub fn iteratorGetValueDoneVm(
+pub noinline fn iteratorGetValueDoneVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -527,7 +527,7 @@ pub fn iteratorCall(
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
 }
 
-pub fn iteratorCallVm(
+pub noinline fn iteratorCallVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -607,10 +607,10 @@ fn fastArrayForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_in
         return true;
     };
     const target = objectFromValue(target_value) orelse return false;
-    if (!target.flags.is_array or target.exotic != null or target.proxyTarget() != null) return false;
+    if (!target.flags.is_array or target.hasExoticMethods() or target.proxyTarget() != null) return false;
 
     const index = iterator.iteratorIndexSlot().*;
-    const length: usize = @intCast(target.length);
+    const length: usize = @intCast(target.arrayLength());
     if (index >= length) {
         try stack.reserveAdditional(2);
         iterator.clearOptionalValueSlot(ctx.runtime, iterator.iteratorTargetSlot());
@@ -645,7 +645,7 @@ fn fastArrayForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_in
     return true;
 }
 
-pub fn forOfNextVm(
+pub noinline fn forOfNextVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -661,7 +661,7 @@ pub fn forOfNextVm(
     return .done;
 }
 
-pub fn forInNext(
+pub noinline fn forInNext(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -681,7 +681,7 @@ pub fn forInNext(
         const index_value = iterator.getProperty(index_key);
         defer index_value.free(ctx.runtime);
         const index: u32 = @intCast(index_value.asInt32() orelse 0);
-        if (index >= iterator.length) {
+        if (index >= iterator.iteratorLength()) {
             try stack.reserveAdditional(2);
             stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
             stack.pushOwnedAssumeCapacity(core.JSValue.boolean(true));
@@ -727,7 +727,7 @@ fn simpleForInNext(
 
     while (true) {
         const index = iterator.iteratorIndexSlot().*;
-        if (index >= iterator.length) {
+        if (index >= iterator.iteratorLength()) {
             try stack.reserveAdditional(2);
             iterator.clearOptionalValueSlot(ctx.runtime, iterator.iteratorTargetSlot());
             stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
@@ -816,7 +816,7 @@ pub fn iteratorClose(
     }
 }
 
-pub fn iteratorCloseVm(
+pub noinline fn iteratorCloseVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -848,12 +848,12 @@ pub fn arrayIteratorPrototypeFromContext(
     const next_value = object.getProperty(next_atom);
     defer next_value.free(ctx.runtime);
     const next_function = property_ops.expectObject(next_value) catch return error.TypeError;
-    if (!next_function.addArrayIteratorNextFunction()) return error.TypeError;
+    if (!next_function.addArrayIteratorNextFunction(ctx.runtime)) return error.TypeError;
 
     const iterator_method = try core.function.nativeFunction(ctx.runtime, "[Symbol.iterator]", 0);
     defer iterator_method.free(ctx.runtime);
     const iterator_function = property_ops.expectObject(iterator_method) catch return error.TypeError;
-    if (!iterator_function.addIteratorIdentityFunction()) return error.TypeError;
+    if (!iterator_function.addIteratorIdentityFunction(ctx.runtime)) return error.TypeError;
     const iterator_atom = core.atom.predefinedId("Symbol.iterator", .symbol) orelse return error.TypeError;
     try object.defineOwnProperty(ctx.runtime, iterator_atom, core.Descriptor.data(iterator_method, true, false, true));
 
@@ -917,7 +917,7 @@ pub fn arrayIteratorNext(
         if (try core.object.typedArrayDetached(target)) return error.TypeError;
         if (try core.object.typedArrayOutOfBounds(target)) return error.TypeError;
         break :blk core.object.typedArrayLength(ctx.runtime, target) catch return error.TypeError;
-    } else if (target.flags.is_array) target.length else blk: {
+    } else if (target.flags.is_array) target.arrayLength() else blk: {
         const length_value = try object_ops.getValueProperty(ctx, output, global, target_value, core.atom.ids.length, null, null);
         defer length_value.free(ctx.runtime);
         break :blk @min(try coercion_ops.toLengthIndex(ctx, output, global, length_value), std.math.maxInt(u32));
@@ -1011,7 +1011,7 @@ test "arrayIteratorValue roots entry value while creating pair array" {
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-iterator-entry-symbol");
     try target.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.symbol(symbol_atom), true, true, true));
-    target.length = 1;
+    target.setArrayLength(1);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -1123,7 +1123,7 @@ pub fn qjsIteratorPrototypeAccessorSet(
             if (object == home) return error.TypeError;
         }
     }
-    if (object.getOwnProperty(atom_id)) |desc| {
+    if (object.getOwnProperty(ctx.runtime, atom_id)) |desc| {
         defer desc.destroy(ctx.runtime);
         object.setProperty(ctx.runtime, atom_id, value) catch |err| switch (err) {
             error.ReadOnly, error.AccessorWithoutSetter, error.NotExtensible, error.IncompatibleDescriptor => return error.TypeError,
@@ -1180,7 +1180,7 @@ pub fn qjsInstallIteratorHelperMethod(
     defer method.free(rt);
     const method_object = property_ops.expectObject(method) catch return error.TypeError;
     if (method_id < 1 or method_id > 2) return error.TypeError;
-    if (!method_object.addIteratorHelperMethod(@intCast(method_id))) return error.TypeError;
+    if (!method_object.addIteratorHelperMethod(rt, @intCast(method_id))) return error.TypeError;
     try helper.defineOwnProperty(rt, key, core.Descriptor.data(method, true, false, true));
 }
 
@@ -1770,7 +1770,7 @@ pub fn qjsIteratorZipNextMethod(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const iterator = objectFromValue(iterator_value) orelse return error.TypeError;
-    if (iterator.cachedIteratorNext()) |cached| return cached.dup();
+    if (iterator.cachedIteratorNext(ctx.runtime)) |cached| return cached.dup();
     const next_key = try ctx.runtime.internAtom("next");
     defer ctx.runtime.atoms.free(next_key);
     const next_value = try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, caller_function, caller_frame);
@@ -2137,7 +2137,7 @@ fn qjsIteratorToArrayCall(
         const done_value = try object_ops.getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("done", .string).?, caller_function, caller_frame);
         defer done_value.free(ctx.runtime);
         if (coercion_ops.valueTruthy(done_value)) {
-            out.length = index;
+            out.setArrayLength(index);
             return out.value();
         }
         const value = try object_ops.getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("value", .string).?, caller_function, caller_frame);
@@ -2619,7 +2619,7 @@ fn qjsIteratorZipHelperNext(
         return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     }
 
-    if (keys == null) results.length = @intCast(count);
+    if (keys == null) results.setArrayLength(@intCast(count));
     helper.iteratorZipStateSlot().* = 1;
     return try call_runtime.createIteratorResult(ctx.runtime, global, results_value, false);
 }
@@ -2690,7 +2690,7 @@ pub fn qjsIteratorHelperNext(
                 }
 
                 const records = objectFromValue(iterator) orelse return error.TypeError;
-                if ((helper.iteratorIndexSlot().*) >= records.length / 2) {
+                if ((helper.iteratorIndexSlot().*) >= records.arrayLength() / 2) {
                     try qjsIteratorHelperClear(ctx.runtime, helper);
                     return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
                 }

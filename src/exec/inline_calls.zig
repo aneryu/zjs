@@ -270,8 +270,8 @@ pub const Machine = struct {
         // Direct-eval bindings extend the callee's var-ref view, mirroring
         // the combined slices `callFunctionBytecodeModeState` builds on the
         // recursive path. Contents are borrowed; storage is entry-owned.
-        const eval_names = target.function_object.functionEvalLocalNamesSlot().*;
-        const eval_refs = target.function_object.functionEvalLocalRefsSlot().*;
+        const eval_names = target.function_object.functionEvalLocalNames();
+        const eval_refs = target.function_object.functionEvalLocalRefs();
         var frame_var_refs: []const core.JSValue = target.function_object.functionCapturesSlot().*;
         if (eval_names.len > 0 and eval_refs.len > 0) {
             try mergeEvalBindings(rt, entry, frame_var_refs, eval_names, eval_refs);
@@ -318,34 +318,9 @@ pub const Machine = struct {
         const fb_strict = target.fb.is_strict_mode or target.fb.runtime_strict_mode;
         const effective_this = try call_runtime.coerceCallThis(ctx, global, fb_strict, target.this_value, &boxed_this);
 
-        var binding_inputs = frame_mod.CallBindingInputs{
-            .initial_this_value = effective_this,
-            .current_function_value = callable,
-            .new_target_value = target.new_target,
-            .constructor_this_value = core.JSValue.undefinedValue(),
-            .eval_local_names = &.{},
-            .eval_local_slots = &.{},
-            .input_eval_var_ref_names = eval_names,
-            .input_eval_var_refs = eval_refs,
-            .inherited_eval_local_names = &.{},
-            .inherited_eval_local_slots = &.{},
-            .inherited_eval_var_ref_names = &.{},
-            .inherited_eval_var_refs = &.{},
-        };
-        var binding_modes = frame_mod.CallBindingModes{
-            .this_value = .borrow,
-            .constructor_this_value = .borrow,
-            .current_function = .take,
-            .new_target = .borrow,
-        };
-
         const receiver_slot = sourceReceiverSlot(source);
         var take_receiver_as_this = false;
-        if (boxed_this) |boxed| {
-            binding_inputs.initial_this_value = boxed;
-            binding_modes.this_value = .take;
-            boxed_this = null;
-        } else if (!target.fb.is_arrow_function) {
+        if (boxed_this == null and !target.fb.is_arrow_function) {
             if (receiver_slot) |slot| {
                 if (effective_this.same(slot.*)) {
                     take_receiver_as_this = true;
@@ -353,63 +328,102 @@ pub const Machine = struct {
             }
         }
 
-        var cleanup_stack_source = false;
-        errdefer if (cleanup_stack_source) cleanupStackSource(rt, source);
+        var cleanup_source: SourceCleanupMode = if (sourceHasStackRegion(source)) .full else .none;
+        errdefer cleanupSource(rt, source, cleanup_source);
 
-        binding_inputs.current_function_value = takeSourceSlot(callable_slot);
-        if (sourceHasStackRegion(source)) cleanup_stack_source = true;
-        if (take_receiver_as_this) {
-            // `takeSourceSlot` transfers the receiver slot's owned ref into
-            // `this`; the binding must therefore OWN it (.take), mirroring the
-            // boxed_this branch. Leaving it at the default `.borrow` leaked one
-            // receiver ref per method call (the slot is nulled, so the popped
-            // stack region never frees it) — an O(n^2) live-heap blowup on
-            // allocation+method-heavy code (raytrace/box2d/deltablue).
-            binding_inputs.initial_this_value = takeSourceSlot(receiver_slot.?);
-            binding_modes.this_value = .take;
+        // Bind the frame values INLINE — qjs's JS_CallInternal sets cur_func /
+        // this / new_target directly rather than threading a 14-field
+        // CallBindingInputs descriptor through initCallBindingValues. This is
+        // the common-path equivalent; ownership flags must mirror the old
+        // bindCallValue/modeOwnsValue result EXACTLY (Frame.deinit frees by
+        // these flags, and the frame.deinit errdefer above covers a later
+        // failure):
+        //   current_function .take  -> owns the callable's transferred ref
+        //   new_target / constructor_this .borrow -> not owned
+        //   this .borrow, unless boxed (sloppy primitive `this`) or taken from
+        //   the receiver slot (method call) -> then .take/owned.
+        // `takeSourceSlot` nulls the source slot so the popped stack region
+        // never double-frees the value (the leak guard the method-call comment
+        // below describes).
+        entry.frame.current_function = takeSourceSlot(callable_slot);
+        entry.frame.current_function_owned = true;
+        entry.frame.new_target = target.new_target;
+        entry.frame.new_target_owned = false;
+        entry.frame.constructor_this_value = core.JSValue.undefinedValue();
+        entry.frame.constructor_this_value_owned = false;
+        if (boxed_this) |boxed| {
+            entry.frame.this_value = boxed;
+            entry.frame.this_value_owned = true;
+            boxed_this = null;
+        } else if (take_receiver_as_this) {
+            entry.frame.this_value = takeSourceSlot(receiver_slot.?);
+            entry.frame.this_value_owned = true;
+        } else {
+            entry.frame.this_value = effective_this;
+            entry.frame.this_value_owned = false;
         }
 
         entry.eval_snapshot = .{};
-        entry.frame.initCallBindingValues(binding_inputs, binding_modes);
-
         entry.frame_roots = .{};
-        entry.frame_roots.init(rt, &entry.stack, &entry.frame, &entry.eval_snapshot);
+        const argc = sourceArgCount(source);
+        const frame_arg_count = @max(argc, @as(usize, @intCast(entry.view.arg_count)));
+        const need_original_args = argc > 0 and frame_mod.argumentsNeedsOriginalSnapshot(&entry.view);
+        const need_eval_var_refs = eval_names.len != 0 or eval_refs.len != 0;
+        entry.frame_roots.initWithOptions(rt, &entry.stack, &entry.frame, &entry.eval_snapshot, .{
+            .locals = entry.view.var_count != 0,
+            .args = frame_arg_count != 0,
+            .original_args = need_original_args,
+            .var_refs = frame_var_refs.len != 0 or entry.view.var_ref_names.len != 0,
+            .eval_local_slots = false,
+            .eval_var_refs = need_eval_var_refs,
+            .prepared_call_values = true,
+        });
         errdefer entry.frame_roots.deinit();
 
-        entry.eval_snapshot = try entry.frame.initCallEvalBindings(rt, binding_inputs);
+        // Direct-eval bindings are COLD: only build the snapshot when the callee
+        // actually carries eval-introduced var refs. The common call leaves
+        // `eval_snapshot` empty (its deinit is a no-op) and the frame's eval_*
+        // fields keep their empty Frame.init defaults — byte-identical to what
+        // the old unconditional initCallEvalBindings produced for no-eval.
+        if (need_eval_var_refs) {
+            entry.eval_snapshot = try entry.frame.initCallEvalBindings(rt, .{
+                .initial_this_value = effective_this,
+                .current_function_value = callable,
+                .new_target_value = target.new_target,
+                .constructor_this_value = core.JSValue.undefinedValue(),
+                .eval_local_names = &.{},
+                .eval_local_slots = &.{},
+                .input_eval_var_ref_names = eval_names,
+                .input_eval_var_refs = eval_refs,
+                .inherited_eval_local_names = &.{},
+                .inherited_eval_local_slots = &.{},
+                .inherited_eval_var_ref_names = &.{},
+                .inherited_eval_var_refs = &.{},
+            });
+        }
         errdefer entry.eval_snapshot.deinit(rt);
 
         try vm_call.initFrameLocals(ctx, &entry.view, &entry.frame, &.{}, &.{}, true);
-        switch (source) {
-            .stack_region => |region| {
-                const args_start = region.region_base + 1 + @as(usize, @intFromBool(region.has_receiver));
-                try entry.frame.initArgumentsMoved(
-                    &rt.memory,
-                    &rt.vm_stack,
-                    region.stack.values[args_start..][0..region.argc],
-                    true,
-                    frame_mod.argumentsNeedsOriginalSnapshot(&entry.view),
-                );
-            },
-            .moved => |moved| try entry.frame.initArgumentsMoved(
+        const need_original_snapshot = frame_mod.argumentsNeedsOriginalSnapshot(&entry.view);
+        if (canBorrowSourceArgs(&entry.view, source)) {
+            try entry.frame.initArgumentsBorrowedSlots(
+                &rt.memory,
+                sourceArgs(source),
+                true,
+                need_original_snapshot,
+            );
+            cleanup_source = .non_args;
+        } else {
+            try entry.frame.initArgumentsMoved(
                 &rt.memory,
                 &rt.vm_stack,
-                moved.values[if (moved.has_receiver) 2 else 1..],
+                sourceArgs(source),
                 true,
-                frame_mod.argumentsNeedsOriginalSnapshot(&entry.view),
-            ),
-            .prepared => |region| {
-                try entry.frame.initArgumentsMoved(
-                    &rt.memory,
-                    &rt.vm_stack,
-                    region.stack.values[region.region_base + 1 ..][0..region.argc],
-                    true,
-                    frame_mod.argumentsNeedsOriginalSnapshot(&entry.view),
-                );
-            },
+                need_original_snapshot,
+            );
         }
-        cleanupStackSource(rt, source);
-        cleanup_stack_source = false;
+        cleanupSource(rt, source, cleanup_source);
+        cleanup_source = .none;
 
         if (frame_var_refs.len != 0 or entry.view.var_ref_names.len != 0) {
             try vm_call.initFrameVarRefs(ctx, global, &entry.view, &entry.frame, frame_var_refs, true);
@@ -445,12 +459,77 @@ pub const Machine = struct {
         };
     }
 
+    fn sourceArgCount(source: ArgsSource) usize {
+        return switch (source) {
+            .stack_region => |region| region.argc,
+            .moved => |moved| moved.values.len - if (moved.has_receiver) @as(usize, 2) else @as(usize, 1),
+            .prepared => |region| region.argc,
+        };
+    }
+
+    fn sourceArgs(source: ArgsSource) []core.JSValue {
+        return switch (source) {
+            .stack_region => |region| blk: {
+                const args_start = region.region_base + 1 + @as(usize, @intFromBool(region.has_receiver));
+                break :blk region.stack.values[args_start..][0..region.argc];
+            },
+            .moved => |moved| moved.values[if (moved.has_receiver) 2 else 1..],
+            .prepared => |region| region.stack.values[region.region_base + 1 ..][0..region.argc],
+        };
+    }
+
+    fn canBorrowSourceArgs(function: *const bytecode.Bytecode, source: ArgsSource) bool {
+        const argc = sourceArgCount(source);
+        if (argc == 0) return false;
+        if (@max(argc, @as(usize, @intCast(function.arg_count))) != argc) return false;
+        return switch (source) {
+            .stack_region, .prepared => true,
+            .moved => false,
+        };
+    }
+
+    const SourceCleanupMode = enum {
+        none,
+        full,
+        non_args,
+    };
+
+    fn cleanupSource(rt: *core.JSRuntime, source: ArgsSource, mode: SourceCleanupMode) void {
+        switch (mode) {
+            .none => {},
+            .full => cleanupStackSource(rt, source),
+            .non_args => cleanupStackSourcePreserveArgs(rt, source),
+        }
+    }
+
     fn cleanupStackSource(rt: *core.JSRuntime, source: ArgsSource) void {
         switch (source) {
             .stack_region => |region| call_runtime.popOwnedStackRegion(rt, region.stack, region.region_base),
             .prepared => |region| call_runtime.popOwnedStackRegion(rt, region.stack, region.region_base),
             .moved => {},
         }
+    }
+
+    fn cleanupStackSourcePreserveArgs(rt: *core.JSRuntime, source: ArgsSource) void {
+        switch (source) {
+            .stack_region => |region| {
+                if (region.has_receiver) freeSourceSlot(rt, &region.stack.values[region.region_base]);
+                freeSourceSlot(rt, &region.stack.values[region.region_base + @as(usize, @intFromBool(region.has_receiver))]);
+                region.stack.values = region.stack.values.ptr[0..region.region_base];
+            },
+            .prepared => |region| {
+                freeSourceSlot(rt, &region.stack.values[region.region_base]);
+                freeSourceSlot(rt, &region.stack.values[region.region_base + 1 + @as(usize, region.argc)]);
+                region.stack.values = region.stack.values.ptr[0..region.region_base];
+            },
+            .moved => {},
+        }
+    }
+
+    fn freeSourceSlot(rt: *core.JSRuntime, slot: *core.JSValue) void {
+        const value = slot.*;
+        slot.* = core.JSValue.undefinedValue();
+        value.free(rt);
     }
 
     /// Build the entry-owned merged `var_ref_names` / var_refs slices for a

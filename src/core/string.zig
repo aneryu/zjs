@@ -176,7 +176,7 @@ pub const String = struct {
             return self;
         }
 
-        const self = try rt.memory.create(String);
+        const self = try rt.createRuntime(String);
         self.* = .{
             .header = .{ .kind = .string },
             .data = .{ .utf16 = units },
@@ -349,9 +349,9 @@ pub const String = struct {
     /// Retains both children; content is materialized lazily on first read.
     pub fn createRope(rt: *JSRuntime, left: *String, right: *String) !*String {
         const total = try std.math.add(usize, left.len(), right.len());
-        const node = try rt.memory.create(Rope);
+        const node = try rt.createRuntime(Rope);
         errdefer rt.memory.destroy(Rope, node);
-        const self = try rt.memory.create(String);
+        const self = try rt.createRuntime(String);
         node.* = .{
             .left = left,
             .right = right,
@@ -458,17 +458,12 @@ pub const String = struct {
     }
 
     pub fn compare(self: String, other: String) i32 {
-        const shared_len = @min(self.len(), other.len());
-        var i: usize = 0;
-        while (i < shared_len) : (i += 1) {
-            const a = self.codeUnitAt(i);
-            const b = other.codeUnitAt(i);
-            if (a < b) return -1;
-            if (a > b) return 1;
+        if (self.atom_id) |self_atom| {
+            if (other.atom_id) |other_atom| {
+                if (self_atom == other_atom) return 0;
+            }
         }
-        if (self.len() < other.len()) return -1;
-        if (self.len() > other.len()) return 1;
-        return 0;
+        return compareResolved(self.resolveData(), other.resolveData());
     }
 
     pub const ResolvedData = union(enum) {
@@ -545,7 +540,7 @@ pub const String = struct {
 
     pub fn createSlice(rt: *JSRuntime, parent: *String, start: usize, slice_len: usize) !*String {
         if (slice_len == 0) return try createAscii(rt, "");
-        const self = try rt.memory.create(String);
+        const self = try rt.createRuntime(String);
         errdefer rt.memory.destroy(String, self);
         self.header = .{ .kind = .string };
         self.hash = 0;
@@ -584,7 +579,7 @@ pub const String = struct {
         while (next_capacity < new_len) {
             next_capacity = next_capacity * 2;
         }
-        const expanded = try rt.memory.alloc(u8, next_capacity);
+        const expanded = try rt.allocRuntime(u8, next_capacity);
         errdefer rt.memory.free(u8, expanded);
         @memcpy(expanded[0..old_len], bytes);
         @memcpy(expanded[old_len..new_len], suffix);
@@ -615,7 +610,7 @@ pub const String = struct {
         if (self.layout != .separate) return false;
 
         const next_capacity = nextStringCapacity(self.capacity, new_len);
-        const expanded = try rt.memory.alloc(u16, next_capacity);
+        const expanded = try rt.allocRuntime(u16, next_capacity);
         errdefer rt.memory.free(u16, expanded);
         @memcpy(expanded[0..old_len], units);
         @memcpy(expanded[old_len..new_len], suffix);
@@ -646,7 +641,7 @@ pub const String = struct {
         if (self.layout != .separate) return false;
 
         const next_capacity = nextStringCapacity(self.capacity, new_len);
-        const expanded = try rt.memory.alloc(u16, next_capacity);
+        const expanded = try rt.allocRuntime(u16, next_capacity);
         errdefer rt.memory.free(u16, expanded);
         @memcpy(expanded[0..old_len], units);
         for (suffix, old_len..) |byte, index| expanded[index] = byte;
@@ -669,7 +664,7 @@ pub const String = struct {
         const new_len = checkedAddLength(old_len, suffix.len) orelse return false;
         if (self.layout != .separate) return false;
         const next_capacity = nextStringCapacity(self.capacity, new_len);
-        const expanded = try rt.memory.alloc(u16, next_capacity);
+        const expanded = try rt.allocRuntime(u16, next_capacity);
         errdefer rt.memory.free(u16, expanded);
         for (bytes, 0..) |byte, index| expanded[index] = byte;
         @memcpy(expanded[old_len..new_len], suffix);
@@ -709,7 +704,7 @@ pub const String = struct {
                 const doubled = @mulWithOverflow(next_capacity, 2);
                 next_capacity = if (doubled[1] == 0 and doubled[0] > next_capacity) doubled[0] else new_len;
             }
-            expanded = try rt.memory.alloc(u8, next_capacity);
+            expanded = try rt.allocRuntime(u8, next_capacity);
             errdefer rt.memory.free(u8, expanded);
             @memcpy(expanded[0..old_len], bytes);
             old_bytes = bytes.ptr[0..self.capacity];
@@ -754,7 +749,7 @@ pub const String = struct {
     fn createInlineUninitialized(rt: *JSRuntime, comptime tag: std.meta.Tag(Data), unit_count: usize, capacity: usize) !*String {
         std.debug.assert(capacity >= unit_count);
         const inline_layout = inlineAllocationLayout(tag, capacity) orelse return error.OutOfMemory;
-        const bytes = try rt.memory.allocAlignedBytes(inline_layout.total_size, inline_layout.allocation_alignment);
+        const bytes = try rt.allocRuntimeAlignedBytes(inline_layout.total_size, inline_layout.allocation_alignment);
         const self: *String = @ptrCast(@alignCast(bytes.ptr));
         self.header = .{ .kind = .string };
         self.hash = 0;
@@ -802,6 +797,62 @@ pub const String = struct {
     }
 };
 
+fn compareResolved(a: String.ResolvedData, b: String.ResolvedData) i32 {
+    return switch (a) {
+        .latin1 => |a_bytes| switch (b) {
+            .latin1 => |b_bytes| compareSameWidth(u8, a_bytes, b_bytes),
+            .utf16 => |b_units| compareLatin1Utf16(a_bytes, b_units),
+        },
+        .utf16 => |a_units| switch (b) {
+            .latin1 => |b_bytes| compareUtf16Latin1(a_units, b_bytes),
+            .utf16 => |b_units| compareSameWidth(u16, a_units, b_units),
+        },
+    };
+}
+
+fn compareSameWidth(comptime T: type, a: []const T, b: []const T) i32 {
+    if (a.len == b.len and std.mem.eql(u8, std.mem.sliceAsBytes(a), std.mem.sliceAsBytes(b))) return 0;
+    return orderToI32(std.mem.order(T, a, b));
+}
+
+fn compareLatin1Utf16(a: []const u8, b: []const u16) i32 {
+    const shared_len = @min(a.len, b.len);
+    var i: usize = 0;
+    while (i < shared_len) : (i += 1) {
+        const a_unit: u16 = a[i];
+        const b_unit = b[i];
+        if (a_unit < b_unit) return -1;
+        if (a_unit > b_unit) return 1;
+    }
+    return compareLength(a.len, b.len);
+}
+
+fn compareUtf16Latin1(a: []const u16, b: []const u8) i32 {
+    const shared_len = @min(a.len, b.len);
+    var i: usize = 0;
+    while (i < shared_len) : (i += 1) {
+        const a_unit = a[i];
+        const b_unit: u16 = b[i];
+        if (a_unit < b_unit) return -1;
+        if (a_unit > b_unit) return 1;
+    }
+    return compareLength(a.len, b.len);
+}
+
+fn compareLength(a_len: usize, b_len: usize) i32 {
+    if (a_len < b_len) return -1;
+    if (a_len > b_len) return 1;
+    return 0;
+}
+
+fn orderToI32(order: std.math.Order) i32 {
+    return switch (order) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    };
+}
+
 fn flattenedRopeData(self: *const String, node: *Rope) String.ResolvedData {
     flattenRopeNode(node);
     // Keep the canonical wrapper's hash cache coherent for direct readers.
@@ -835,13 +886,13 @@ fn flattenRopeNodeFallible(node: *Rope) !void {
     if (node.flat != .none) return;
     const rt = node.rt;
     if (node.wide) {
-        const buf = try rt.memory.alloc(u16, node.len);
+        const buf = try rt.allocRuntime(u16, node.len);
         errdefer rt.memory.free(u16, buf);
         try copyRopeContent(u16, rt, node, buf);
         node.flat = .{ .utf16 = buf };
         node.hash = hashUtf16(buf, 0);
     } else {
-        const buf = try rt.memory.alloc(u8, node.len);
+        const buf = try rt.allocRuntime(u8, node.len);
         errdefer rt.memory.free(u8, buf);
         try copyRopeContent(u8, rt, node, buf);
         node.flat = .{ .latin1 = buf };
@@ -871,14 +922,14 @@ fn ropeTailEnsureNarrow(rt: *JSRuntime, node: *Rope, need: usize) ![]u8 {
     switch (node.tail) {
         .latin1 => |buf| {
             if (need <= buf.len) return buf;
-            const grown = try rt.memory.alloc(u8, nextStringCapacity(buf.len, need));
+            const grown = try rt.allocRuntime(u8, nextStringCapacity(buf.len, need));
             @memcpy(grown[0..node.tail_len], buf[0..node.tail_len]);
             rt.memory.free(u8, buf);
             node.tail = .{ .latin1 = grown };
             return grown;
         },
         .none => {
-            const buf = try rt.memory.alloc(u8, nextStringCapacity(0, need));
+            const buf = try rt.allocRuntime(u8, nextStringCapacity(0, need));
             node.tail = .{ .latin1 = buf };
             return buf;
         },
@@ -893,21 +944,21 @@ fn ropeTailEnsureWide(rt: *JSRuntime, node: *Rope, need: usize) ![]u16 {
     switch (node.tail) {
         .utf16 => |buf| {
             if (need <= buf.len) return buf;
-            const grown = try rt.memory.alloc(u16, nextStringCapacity(buf.len, need));
+            const grown = try rt.allocRuntime(u16, nextStringCapacity(buf.len, need));
             @memcpy(grown[0..node.tail_len], buf[0..node.tail_len]);
             rt.memory.free(u16, buf);
             node.tail = .{ .utf16 = grown };
             return grown;
         },
         .latin1 => |buf| {
-            const widened = try rt.memory.alloc(u16, nextStringCapacity(buf.len, need));
+            const widened = try rt.allocRuntime(u16, nextStringCapacity(buf.len, need));
             for (buf[0..node.tail_len], 0..) |byte, index| widened[index] = byte;
             rt.memory.free(u8, buf);
             node.tail = .{ .utf16 = widened };
             return widened;
         },
         .none => {
-            const buf = try rt.memory.alloc(u16, nextStringCapacity(0, need));
+            const buf = try rt.allocRuntime(u16, nextStringCapacity(0, need));
             node.tail = .{ .utf16 = buf };
             return buf;
         },
@@ -996,6 +1047,7 @@ fn releaseStringRefIntoChain(rt: *JSRuntime, s: *String, pending: *?*String) voi
         // instead of recursing through gc.release -> destroyFromHeader.
         std.debug.assert(s.header.rc > 0);
         s.header.rc -= 1;
+        rt.gc.stats.rc_dec += 1;
         if (s.header.rc == 0) {
             s.data.rope.chain_next = pending.*;
             pending.* = s;
@@ -1213,6 +1265,60 @@ test "string ascii byte helper covers byte boundary" {
     try std.testing.expect(isAsciiBytes("plain/ascii-127\x7f"));
     try std.testing.expect(!isAsciiBytes("latin1-\xc3\xa9"));
     try std.testing.expect(!isAsciiBytes(&.{0x80}));
+}
+
+test "string compare uses code-unit ordering for same and mixed width strings" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const latin_a = try String.createUtf8(rt, "abc");
+    const latin_a_value = latin_a.value();
+    defer latin_a_value.free(rt);
+    const latin_b = try String.createUtf8(rt, "abd");
+    const latin_b_value = latin_b.value();
+    defer latin_b_value.free(rt);
+    try std.testing.expectEqual(@as(i32, 0), latin_a.compare(latin_a.*));
+    try std.testing.expect(latin_a.compare(latin_b.*) < 0);
+
+    const wide_a = try String.createUtf16(rt, &.{0x0100});
+    const wide_a_value = wide_a.value();
+    defer wide_a_value.free(rt);
+    const wide_b = try String.createUtf16(rt, &.{ 0x00ff, 0x0100 });
+    const wide_b_value = wide_b.value();
+    defer wide_b_value.free(rt);
+    try std.testing.expect(wide_a.compare(wide_b.*) > 0);
+
+    const wide_parent = try String.createUtf16(rt, &.{ 0x0100, 'a' });
+    const wide_parent_value = wide_parent.value();
+    defer wide_parent_value.free(rt);
+    const wide_slice = try String.createSlice(rt, wide_parent, 1, 1);
+    const wide_slice_value = wide_slice.value();
+    defer wide_slice_value.free(rt);
+    const latin_single = try String.createUtf8(rt, "a");
+    const latin_single_value = latin_single.value();
+    defer latin_single_value.free(rt);
+    try std.testing.expectEqual(@as(i32, 0), latin_single.compare(wide_slice.*));
+}
+
+test "string compare short-circuits equal interned atom ids" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const first = try String.createUtf8(rt, "length");
+    const first_value = first.value();
+    defer first_value.free(rt);
+    const first_atom = try first.internAtom(rt);
+    defer rt.atoms.free(first_atom);
+
+    const second = try String.createUtf8(rt, "length");
+    const second_value = second.value();
+    defer second_value.free(rt);
+    const second_atom = try second.internAtom(rt);
+    defer rt.atoms.free(second_atom);
+
+    try std.testing.expectEqual(first_atom, second_atom);
+    try std.testing.expect(first != second);
+    try std.testing.expectEqual(@as(i32, 0), first.compare(second.*));
 }
 
 const std = @import("std");

@@ -4552,7 +4552,14 @@ pub fn parsePostfixExpr(s: *ParseState, flags: ParseFlags) Error!void {
             return Error.InvalidAssignmentTarget;
         }
     }
-    const keep_postfix_result = flags.result_needed or shape == .var_ref;
+    // A discarded `x++`/`x--` needs only the side effect, so emit the
+    // non-keeping `inc`/`dec` form for EVERY lvalue shape (var_ref included),
+    // matching qjs — which then peephole-fuses `get_loc;inc;put_loc` into
+    // `inc_loc` (see resolve_variables fuseIncLoc). The old `or shape ==
+    // .var_ref` forced bare-identifier updates through `post_inc`+keep, which
+    // can never fuse and pushed the dead old value every iteration of a loop
+    // counter (`for(;i<n;i++)`). result-needed updates still keep via post_inc.
+    const keep_postfix_result = flags.result_needed;
     const update_op: u8 = if (keep_postfix_result)
         if (k == tok.TOK_INC) opcode.op.post_inc else opcode.op.post_dec
     else if (k == tok.TOK_INC) opcode.op.inc else opcode.op.dec;
@@ -8240,8 +8247,20 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
                 // for-head, then move its emitted bytes after the body.
                 const update_start = s.currentCodeLen();
                 if (s.peekKind() != ')') {
-                    try parseExpr(s);
-                    try s.emitOp(opcode.op.drop);
+                    // Parse the update clause in result-DISCARDED mode (qjs
+                    // parses the for-update with no result), mirroring the
+                    // expression-statement discard path: a bare `i++`/`i--`
+                    // then lowers to `get_loc;inc;put_loc` (fusable to
+                    // `inc_loc` in fuseIncLoc) and assignments consume their
+                    // own value, instead of `post_inc;put_keep` + an explicit
+                    // `drop` — which can never fuse and pushed the dead old
+                    // value every iteration.
+                    try parseExpr2(s, ParseFlags{ .in_accepted = true, .result_needed = false });
+                    if (s.suppress_expr_statement_drop) {
+                        s.suppress_expr_statement_drop = false;
+                    } else {
+                        try s.emitOp(opcode.op.drop);
+                    }
                 }
                 const update_code = s.currentCode()[update_start..];
                 var saved_update: []u8 = &.{};

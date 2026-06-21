@@ -299,7 +299,7 @@ fn appendJsonArray(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *cor
 
     try buffer.append(rt.memory.allocator, '[');
     var index: u32 = 0;
-    while (index < object.length) : (index += 1) {
+    while (index < object.arrayLength()) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
         if (options.gap.len != 0) {
             try buffer.append(rt.memory.allocator, '\n');
@@ -319,7 +319,7 @@ fn appendJsonArray(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *cor
         defer rt.active_value_roots = root_frame.previous;
         try appendJsonValue(rt, buffer, rooted_value, true, stack, options, depth + 1);
     }
-    if (options.gap.len != 0 and object.length != 0) {
+    if (options.gap.len != 0 and object.arrayLength() != 0) {
         try buffer.append(rt.memory.allocator, '\n');
         try appendIndent(rt, buffer, options.gap, depth);
     }
@@ -772,7 +772,7 @@ fn stringifyPropertyList(rt: *core.JSRuntime, replacer: core.JSValue) ![]core.At
         list.deinit(rt.memory.allocator);
     }
     var index: u32 = 0;
-    while (index < object.length) : (index += 1) {
+    while (index < object.arrayLength()) : (index += 1) {
         const item = object.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(rt);
         var rooted_item = item;
@@ -1464,7 +1464,7 @@ fn qjsJsonSourceCountForValue(rt: *core.JSRuntime, value: core.JSValue) !usize {
     var count: usize = 0;
     if (object.flags.is_array) {
         var index: usize = 0;
-        while (index < object.length) : (index += 1) {
+        while (index < object.arrayLength()) : (index += 1) {
             const key = try object_ops.propertyAtomFromLengthIndex(rt, index);
             defer deinitLengthIndexAtom(rt, key);
             child = object.getProperty(key.atom);
@@ -1481,7 +1481,7 @@ fn qjsJsonSourceCountForValue(rt: *core.JSRuntime, value: core.JSValue) !usize {
     defer core.Object.freeKeys(rt, keys);
     for (keys) |key| {
         if (rt.atoms.kind(key) == .symbol) continue;
-        const desc = object.getOwnProperty(key) orelse continue;
+        const desc = object.getOwnProperty(rt, key) orelse continue;
         defer desc.destroy(rt);
         if (desc.enumerable != true) continue;
         child = object.getProperty(key);
@@ -1813,7 +1813,7 @@ fn qjsJsonSimplePrototypeChainHasNoToJSON(object: *core.Object) bool {
     const to_json_key = core.atom.ids.toJSON;
     var cursor: ?*core.Object = object;
     while (cursor) |current| {
-        if (current.exotic != null or current.flags.is_proxy) return false;
+        if (current.hasExoticMethods() or current.flags.is_proxy) return false;
         if (current.hasOwnProperty(to_json_key)) return false;
         cursor = current.getPrototype();
     }
@@ -1828,10 +1828,10 @@ fn qjsJsonAppendSimpleArray(
     stack: *std.ArrayList(*core.Object),
 ) SimpleJsonStringifyError!SimpleJsonResult {
     const start = buffer.items.len;
-    if (object.exotic != null or object.arrayElementStorageMode() != .dense) return .fallback;
+    if (object.hasExoticMethods() or object.arrayElementStorageMode() != .dense) return .fallback;
     if (qjsJsonObjectInStack(stack.items, object)) return error.TypeError;
     const elements = object.arrayElements();
-    if (object.length > elements.len) return .fallback;
+    if (object.arrayLength() > elements.len) return .fallback;
     for (object.shapeProps()) |prop| {
         if (core.property.Flags.fromBits(prop.flags).deleted) continue;
         if (core.array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) != null) return .fallback;
@@ -1843,7 +1843,7 @@ fn qjsJsonAppendSimpleArray(
 
     try buffer.append(rt.memory.allocator, '[');
     var index: usize = 0;
-    while (index < object.length) : (index += 1) {
+    while (index < object.arrayLength()) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
         const element = elements[index];
         switch (try qjsJsonAppendSimpleValue(rt, global, buffer, element, true, stack)) {
@@ -1867,7 +1867,7 @@ fn qjsJsonAppendSimpleObject(
     stack: *std.ArrayList(*core.Object),
 ) SimpleJsonStringifyError!SimpleJsonResult {
     const start = buffer.items.len;
-    if (object.exotic != null or object.flags.is_proxy or object.class_id != core.class.ids.object) return .fallback;
+    if (object.hasExoticMethods() or object.flags.is_proxy or object.class_id != core.class.ids.object) return .fallback;
     if (qjsJsonObjectInStack(stack.items, object)) return error.TypeError;
 
     try stack.append(rt.memory.allocator, object);

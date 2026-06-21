@@ -83,7 +83,6 @@ pub const ids = struct {
 pub const PayloadKind = enum {
     none,
     ordinary,
-    array,
     arguments,
     object_data,
     function,
@@ -143,6 +142,7 @@ pub const Definition = struct {
     payload_mark: ?PayloadMark = null,
     call: ?Call = null,
     has_exotic: bool = false,
+    exotic_methods: ?*const anyopaque = null,
 };
 
 pub const Record = struct {
@@ -159,6 +159,7 @@ pub const Record = struct {
     payload_mark: ?PayloadMark = null,
     call: ?Call = null,
     has_exotic: bool = false,
+    exotic_methods: ?*const anyopaque = null,
 
     pub fn isRegistered(self: Record) bool {
         return self.id != invalid_class_id;
@@ -337,7 +338,8 @@ pub const Table = struct {
             .payload_finalizer = def.payload_finalizer,
             .payload_mark = def.payload_mark,
             .call = def.call,
-            .has_exotic = def.has_exotic,
+            .has_exotic = def.has_exotic or def.exotic_methods != null,
+            .exotic_methods = def.exotic_methods,
         };
     }
 
@@ -429,7 +431,7 @@ pub fn standardPayloadKind(id: ClassId) PayloadKind {
         ids.std_file => .std_file,
         ids.disposable_stack, ids.async_disposable_stack => .disposable_stack,
 
-        ids.array => .array,
+        ids.array => .none,
         ids.arguments, ids.mapped_arguments => .arguments,
         ids.number, ids.string, ids.boolean, ids.symbol, ids.date, ids.big_int => .object_data,
         ids.module_ns => .module_namespace,

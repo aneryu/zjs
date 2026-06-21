@@ -65,7 +65,7 @@ pub fn binary(
     try stack.pushOwned(result);
 }
 
-pub fn binaryVm(
+pub noinline fn binaryVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
@@ -137,7 +137,7 @@ pub fn compare(
     try stack.pushOwned(result);
 }
 
-pub fn compareVm(
+pub noinline fn compareVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
@@ -259,7 +259,7 @@ pub fn unary(
     try stack.pushOwned(result);
 }
 
-pub fn unaryVm(
+pub noinline fn unaryVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
@@ -290,7 +290,7 @@ pub fn bitNot(
     try stack.pushOwned(result);
 }
 
-pub fn bitNotVm(
+pub noinline fn bitNotVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
@@ -342,7 +342,7 @@ pub fn postUpdate(
     try stack.push(updated);
 }
 
-pub fn postUpdateVm(
+pub noinline fn postUpdateVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
@@ -542,7 +542,7 @@ pub fn updateLocal(
     try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
 }
 
-pub fn updateLocalVm(
+pub noinline fn updateLocalVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -578,7 +578,7 @@ pub fn addLocal(
     defer rhs.free(ctx.runtime);
 
     const cell_opt = slot_ops.varRefCellFromValue(frame.locals[idx]);
-    const lhs_borrowed = if (cell_opt) |cell| (cell.varRefValueSlot().* orelse core.JSValue.undefinedValue()) else frame.locals[idx];
+    const lhs_borrowed = if (cell_opt) |cell| cell.varRefValue() else frame.locals[idx];
     if (lhs_borrowed.isString()) {
         const lhs = slot_ops.slotValueDup(frame.locals[idx]);
         defer lhs.free(ctx.runtime);
@@ -641,7 +641,7 @@ pub fn addLocal(
     try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
 }
 
-pub fn addLocalVm(
+pub noinline fn addLocalVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -984,9 +984,9 @@ fn localArrayLengthI32(frame: *const frame_mod.Frame, array_idx: u16) ?i32 {
     if (array_idx >= frame.locals.len or array_idx >= frame.locals_uninit.len) return null;
     if (frame.localIsUninitialized(array_idx)) return null;
     const object = objectFromValue(frame.locals[array_idx]) orelse return null;
-    if (object.proxyTarget() != null or object.exotic != null or !object.flags.is_array) return null;
-    if (object.length > @as(u32, @intCast(std.math.maxInt(i32)))) return null;
-    return @intCast(object.length);
+    if (object.proxyTarget() != null or object.hasExoticMethods() or !object.flags.is_array) return null;
+    if (object.arrayLength() > @as(u32, @intCast(std.math.maxInt(i32)))) return null;
+    return @intCast(object.arrayLength());
 }
 
 fn parseCheckedLocalShortBigIntLessThanImmediateCondition(code: []const u8, target_pc: usize, loop_idx: u16) ?ShortBigIntLoopCondition {

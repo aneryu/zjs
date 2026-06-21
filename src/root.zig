@@ -213,7 +213,7 @@ pub const object = struct {
     }
 
     pub fn arrayLength(obj: *Object) u32 {
-        return toCore(obj).length;
+        return toCore(obj).arrayLength();
     }
 
     pub fn promiseResult(obj: *Object) ?value.Value {
@@ -607,7 +607,7 @@ pub const object = struct {
     }
 
     pub fn getOwnIndexPropertyValue(rt: *JSRuntime, obj: *Object, index: u32) ?value.Value {
-        const desc = toCore(obj).getOwnProperty(atomFromUInt32(index)) orelse return null;
+        const desc = toCore(obj).getOwnProperty(rt, atomFromUInt32(index)) orelse return null;
         if (!desc.value_present) {
             desc.destroy(rt);
             return null;
@@ -680,7 +680,7 @@ pub const object = struct {
             };
             item_value.free(rt);
         }
-        array_core.length = @intCast(items.len);
+        array_core.setArrayLength(@intCast(items.len));
         try defineValueProperty(rt, global, name, array_value);
         array_value.free(rt);
     }
@@ -714,7 +714,7 @@ pub const object = struct {
         const array_core = toCore(array);
         try array_core.defineOwnProperty(
             rt,
-            atomFromUInt32(array_core.length),
+            atomFromUInt32(array_core.arrayLength()),
             zjs_core.Descriptor.data(v, true, true, true),
         );
     }

@@ -737,7 +737,7 @@ fn promiseCombinatorElementCall(
         else => return error.TypeError,
     };
     if (function_object.functionPromiseCombinatorCalled()) return core.JSValue.undefinedValue();
-    function_object.functionPromiseCombinatorCalledSlot().* = true;
+    (try function_object.functionPromiseCombinatorCalledSlot(ctx.runtime)).* = true;
 
     const state_value = function_object.functionPromiseCombinatorState() orelse return error.TypeError;
     const state = thisObject(state_value) orelse return error.TypeError;
@@ -886,9 +886,9 @@ fn createPromiseCapability(
         const resolve_object = thisObject(resolve_val) orelse return error.TypeError;
         const reject_object = thisObject(reject_val) orelse return error.TypeError;
         try resolve_object.setFunctionPromiseResolvingTarget(ctx.runtime, promise_val.dup());
-        resolve_object.functionPromiseResolvingRejectSlot().* = false;
+        (try resolve_object.functionPromiseResolvingRejectSlot(ctx.runtime)).* = false;
         try reject_object.setFunctionPromiseResolvingTarget(ctx.runtime, promise_val.dup());
-        reject_object.functionPromiseResolvingRejectSlot().* = true;
+        (try reject_object.functionPromiseResolvingRejectSlot(ctx.runtime)).* = true;
         return .{
             .promise = promise_val.dup(),
             .resolve = resolve_val.dup(),
@@ -951,8 +951,8 @@ test "createPromiseCapability roots builtin promise capability under GC" {
     const reject_object = thisObject(capability.reject) orelse return error.TypeError;
     try std.testing.expect(resolve_object.functionPromiseResolvingTarget().?.same(promise.value()));
     try std.testing.expect(reject_object.functionPromiseResolvingTarget().?.same(promise.value()));
-    try std.testing.expect(!resolve_object.functionPromiseResolvingRejectSlot().*);
-    try std.testing.expect(reject_object.functionPromiseResolvingRejectSlot().*);
+    try std.testing.expect(!resolve_object.functionPromiseResolvingReject());
+    try std.testing.expect(reject_object.functionPromiseResolvingReject());
 
     constructor_value.free(rt);
     constructor_alive = false;
@@ -972,7 +972,7 @@ pub fn getValueProperty(
     const object = try expectObjectArg(receiver_value);
     var cursor: ?*core.Object = object;
     while (cursor) |current| : (cursor = current.getPrototype()) {
-        const desc = current.getOwnProperty(key) orelse continue;
+        const desc = current.getOwnProperty(ctx.runtime, key) orelse continue;
         defer desc.destroy(ctx.runtime);
         return switch (desc.kind) {
             .data => desc.value.dup(),
@@ -1162,7 +1162,7 @@ fn rejectPromiseCapability(
 
 fn setArrayIndex(rt: *core.JSRuntime, array: *core.Object, index: u32, value: core.JSValue) !void {
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, true, true, true));
-    if (array.length <= index) array.length = index + 1;
+    if (array.arrayLength() <= index) array.setArrayLength(index + 1);
 }
 
 fn createPromiseSettlementRecord(rt: *core.JSRuntime, rejected: bool, payload: core.JSValue) !core.JSValue {
@@ -1314,10 +1314,10 @@ fn createPromiseCombinatorCallback(
     const callback = try createPromiseBuiltinFunction(rt, global, "", 1);
     errdefer callback.free(rt);
     const callback_object = thisObject(callback) orelse return error.TypeError;
-    callback_object.functionPromiseCombinatorModeSlot().* = @intFromEnum(mode);
+    (try callback_object.functionPromiseCombinatorModeSlot(rt)).* = @intFromEnum(mode);
     try callback_object.setFunctionPromiseCombinatorState(rt, state.value().dup());
-    callback_object.functionPromiseCombinatorIndexSlot().* = index;
-    callback_object.functionPromiseCombinatorCalledSlot().* = false;
+    (try callback_object.functionPromiseCombinatorIndexSlot(rt)).* = index;
+    (try callback_object.functionPromiseCombinatorCalledSlot(rt)).* = false;
     return callback;
 }
 
@@ -1666,7 +1666,7 @@ fn tagRealmEval(rt: *core.JSRuntime, realm_global: *core.Object) !void {
     const eval_value = realm_global.getProperty(eval_key);
     defer eval_value.free(rt);
     const eval_object = expectObjectArg(eval_value) catch return;
-    const slot = eval_object.functionRealmGlobalSlot();
+    const slot = try eval_object.functionRealmGlobalSlot(rt);
     try eval_object.setOptionalValueSlot(rt, slot, realm_global.value().dup());
 }
 
@@ -1707,11 +1707,11 @@ fn tagRealmRegExpAccessorErrors(rt: *core.JSRuntime, realm_global: *core.Object)
     for (accessors) |name| {
         const key = try rt.internAtom(name);
         defer rt.atoms.free(key);
-        const desc = proto.getOwnProperty(key) orelse continue;
+        const desc = proto.getOwnProperty(rt, key) orelse continue;
         defer desc.destroy(rt);
         if (desc.kind != .accessor or desc.getter.isUndefined()) continue;
         const getter_object = expectObjectArg(desc.getter) catch continue;
-        const slot = getter_object.functionRealmTypeErrorConstructorSlot();
+        const slot = try getter_object.functionRealmTypeErrorConstructorSlot(rt);
         try getter_object.setOptionalValueSlot(rt, slot, type_error_value.dup());
     }
 }
@@ -1761,7 +1761,7 @@ pub fn callObjectStatic(
             const keys = try source.ownKeys(rt);
             defer core.Object.freeKeys(rt, keys);
             for (keys) |key| {
-                const desc = source.getOwnProperty(key) orelse continue;
+                const desc = source.getOwnProperty(rt, key) orelse continue;
                 defer desc.destroy(rt);
                 if (desc.enumerable != true) continue;
                 const value = try objectAssignGet(ctx, output, global, globals, source_value, desc);
@@ -1816,7 +1816,7 @@ pub fn callObjectStatic(
         const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
         const key = try atomFromPropertyKey(rt, key_value);
         defer rt.atoms.free(key);
-        var desc = object.getOwnProperty(key) orelse return core.JSValue.undefinedValue();
+        var desc = object.getOwnProperty(rt, key) orelse return core.JSValue.undefinedValue();
         materializeMappedArgumentsDescriptorValue(rt, object, key, &desc);
         defer desc.destroy(rt);
         return descriptorObject(rt, desc);
@@ -1831,7 +1831,7 @@ pub fn callObjectStatic(
         const out = try core.Object.create(rt, core.class.ids.object, null);
         errdefer core.Object.destroyFromHeader(rt, &out.header);
         for (keys) |key| {
-            var desc = object.getOwnProperty(key) orelse continue;
+            var desc = object.getOwnProperty(rt, key) orelse continue;
             materializeMappedArgumentsDescriptorValue(rt, object, key, &desc);
             defer desc.destroy(rt);
             const desc_value = try descriptorObject(rt, desc);
@@ -1869,7 +1869,7 @@ pub fn callObjectStatic(
         errdefer core.Object.destroyFromHeader(rt, &out.header);
         for (keys) |key| {
             if (rt.atoms.kind(key) != .symbol) continue;
-            try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out.length), core.Descriptor.data(core.JSValue.symbol(key), true, true, true));
+            try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out.arrayLength()), core.Descriptor.data(core.JSValue.symbol(key), true, true, true));
         }
         return out.value();
     }
@@ -1881,7 +1881,7 @@ pub fn callObjectStatic(
         const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
         const key = try atomFromPropertyKey(rt, key_value);
         defer rt.atoms.free(key);
-        if (object.getOwnProperty(key)) |desc| {
+        if (object.getOwnProperty(rt, key)) |desc| {
             desc.destroy(rt);
             return core.JSValue.boolean(true);
         }
@@ -2017,7 +2017,7 @@ fn objectAssignSet(
     key: core.Atom,
     value: core.JSValue,
 ) !void {
-    if (target.getOwnProperty(key)) |desc| {
+    if (target.getOwnProperty(ctx.runtime, key)) |desc| {
         defer desc.destroy(ctx.runtime);
         switch (desc.kind) {
             .accessor => {
@@ -2034,7 +2034,7 @@ fn objectAssignSet(
     } else {
         var proto = target.getPrototype();
         while (proto) |prototype| : (proto = prototype.getPrototype()) {
-            if (prototype.getOwnProperty(key)) |desc| {
+            if (prototype.getOwnProperty(ctx.runtime, key)) |desc| {
                 defer desc.destroy(ctx.runtime);
                 switch (desc.kind) {
                     .accessor => {
@@ -2064,7 +2064,7 @@ fn objectIsSealed(rt: *core.JSRuntime, object: *core.Object) !bool {
     const keys = try object.ownKeys(rt);
     defer core.Object.freeKeys(rt, keys);
     for (keys) |key| {
-        const desc = object.getOwnProperty(key) orelse continue;
+        const desc = object.getOwnProperty(rt, key) orelse continue;
         defer desc.destroy(rt);
         if (desc.configurable == true) return false;
     }
@@ -2076,7 +2076,7 @@ fn objectIsFrozen(rt: *core.JSRuntime, object: *core.Object) !bool {
     const keys = try object.ownKeys(rt);
     defer core.Object.freeKeys(rt, keys);
     for (keys) |key| {
-        const desc = object.getOwnProperty(key) orelse continue;
+        const desc = object.getOwnProperty(rt, key) orelse continue;
         defer desc.destroy(rt);
         if (desc.kind == .data and desc.writable == true) return false;
     }
@@ -2143,7 +2143,7 @@ fn objectPrototypeHasOwn(ctx: *core.JSContext, global: ?*core.Object, receiver: 
     const receiver_value = try objectStaticToObjectValue(ctx, global, receiver);
     defer receiver_value.free(rt);
     const object = try expectObjectArg(receiver_value);
-    if (object.getOwnProperty(key)) |desc| {
+    if (object.getOwnProperty(rt, key)) |desc| {
         desc.destroy(rt);
         return core.JSValue.boolean(true);
     }
@@ -2158,7 +2158,7 @@ fn objectPrototypePropertyIsEnumerable(ctx: *core.JSContext, global: ?*core.Obje
     const receiver_value = try objectStaticToObjectValue(ctx, global, receiver);
     defer receiver_value.free(rt);
     const object = try expectObjectArg(receiver_value);
-    const desc = object.getOwnProperty(key) orelse return core.JSValue.boolean(false);
+    const desc = object.getOwnProperty(rt, key) orelse return core.JSValue.boolean(false);
     defer desc.destroy(rt);
     return core.JSValue.boolean(desc.enumerable orelse false);
 }
@@ -2208,7 +2208,7 @@ fn objectPrototypeLookupAccessor(ctx: *core.JSContext, global: ?*core.Object, re
     defer rt.atoms.free(key);
     var cursor: ?*core.Object = object;
     while (cursor) |current| : (cursor = current.getPrototype()) {
-        const desc = current.getOwnProperty(key) orelse continue;
+        const desc = current.getOwnProperty(rt, key) orelse continue;
         defer desc.destroy(rt);
         if (desc.kind != .accessor) return core.JSValue.undefinedValue();
         return if (getter) desc.getter.dup() else desc.setter.dup();
@@ -2374,7 +2374,7 @@ fn createBoundFunction(
     try object.setOptionalValueSlot(rt, object.boundTargetSlot(), rooted_target.dup());
     try object.setOptionalValueSlot(rt, object.boundThisSlot(), rooted_bound_this.dup());
     if (target_object.functionRealmGlobalPtr()) |realm_global| try object.setFunctionRealmGlobalPtr(rt, realm_global);
-    if (target_object.functionRealmGlobal()) |realm_value| try object.setOptionalValueSlot(rt, object.functionRealmGlobalSlot(), realm_value.dup());
+    if (target_object.functionRealmGlobal()) |realm_value| try object.setOptionalValueSlot(rt, try object.functionRealmGlobalSlot(rt), realm_value.dup());
     if (rooted_bound_args.len != 0) {
         const owned_bound_args = try rt.memory.alloc(core.JSValue, rooted_bound_args.len);
         var rooted_owned_bound_args: []core.JSValue = owned_bound_args[0..0];
@@ -2656,7 +2656,7 @@ pub fn functionToStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSV
         return nativeFunctionSourceValue(rt, null);
     }
     if (isFunctionClass(object.class_id)) {
-        if (object.functionSourceSlot().*) |source| return source.dup();
+        if (object.functionSource()) |source| return source.dup();
         return nativeFunctionSourceValue(rt, object);
     }
     return error.TypeError;
@@ -2742,7 +2742,7 @@ fn functionBytecodeToStringValue(
 ) !core.JSValue {
     if (bytecode.source) |source| return value_ops.createStringValue(rt, source);
     if (object) |function_object| {
-        if (function_object.functionSourceSlot().*) |source| return source.dup();
+        if (function_object.functionSource()) |source| return source.dup();
         return nativeFunctionSourceValue(rt, function_object);
     }
     return nativeFunctionSourceValue(rt, null);
@@ -3085,7 +3085,7 @@ fn materializeMappedArgumentsDescriptorValue(
     const mapped = object.argumentsVarRefs()[index];
     if (mapped.isUninitialized()) return;
     const value = if (varRefCellFromValue(mapped)) |cell|
-        if (cell.varRefValueSlot().*) |stored| stored.dup() else core.JSValue.undefinedValue()
+        cell.varRefValue().dup()
     else
         mapped.dup();
     const old_value = desc.value;
@@ -3103,12 +3103,8 @@ pub fn materializeMappedArgumentsDescriptorValueForVm(
     materializeMappedArgumentsDescriptorValue(rt, object, key, desc);
 }
 
-fn varRefCellFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
-    if (object.class_payload_kind != .var_ref) return null;
-    return object;
+fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
+    return core.VarRef.fromValue(value);
 }
 
 pub fn descriptorFromObject(rt: *core.JSRuntime, object: *core.Object) !core.Descriptor {
@@ -3286,7 +3282,7 @@ fn runtimeErrorName(err: anytype) []const u8 {
 
 fn printArray(rt: *core.JSRuntime, writer: *std.Io.Writer, object: *core.Object) PrintError!void {
     var index: u32 = 0;
-    while (index < object.length) : (index += 1) {
+    while (index < object.arrayLength()) : (index += 1) {
         if (index != 0) try writer.writeByte(',');
         const value = object.getProperty(core.atom.atomFromUInt32(index));
         defer value.free(rt);
@@ -3320,7 +3316,7 @@ fn isFunctionClass(class_id: core.ClassId) bool {
 }
 
 fn printNativeFunction(rt: *core.JSRuntime, writer: *std.Io.Writer, object: *core.Object) !void {
-    if (object.functionSourceSlot().*) |source| {
+    if (object.functionSource()) |source| {
         try printString(rt, writer, source);
         return;
     }

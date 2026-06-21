@@ -504,13 +504,11 @@ pub fn qjsObjectIsPrototypeOf(
     return core.JSValue.boolean(false);
 }
 
-
 pub fn qjsObjectValueOfCall(rt: *core.JSRuntime, global: *core.Object, this_value: core.JSValue) !core.JSValue {
     if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
     if (this_value.isObject()) return this_value.dup();
     return primitiveObjectForAccess(rt, global, this_value);
 }
-
 
 pub fn qjsObjectCreateCall(
     ctx: *core.JSContext,
@@ -533,7 +531,6 @@ pub fn qjsObjectCreateCall(
     }
     return object.value();
 }
-
 
 pub fn qjsObjectAssignCall(
     ctx: *core.JSContext,
@@ -567,7 +564,6 @@ pub fn qjsObjectAssignCall(
     return target_value;
 }
 
-
 pub fn qjsObjectAssignKeys(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -594,7 +590,6 @@ pub fn qjsObjectAssignKeys(
     }
 }
 
-
 pub fn qjsObjectHasOwnCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -615,7 +610,6 @@ pub fn qjsObjectHasOwnCall(
     desc.destroy(ctx.runtime);
     return core.JSValue.boolean(true);
 }
-
 
 pub fn qjsObjectPrototypeOwnPropertyCall(
     ctx: *core.JSContext,
@@ -642,7 +636,6 @@ pub fn qjsObjectPrototypeOwnPropertyCall(
     if (method_id == @intFromEnum(PrototypeMethod.property_is_enumerable)) return core.JSValue.boolean(desc.enumerable orelse false);
     return core.JSValue.boolean(true);
 }
-
 
 pub fn qjsObjectPrototypeDefineAccessorCall(
     ctx: *core.JSContext,
@@ -696,7 +689,6 @@ pub fn qjsObjectPrototypeDefineAccessorCall(
     return core.JSValue.undefinedValue();
 }
 
-
 pub fn qjsObjectPrototypeLookupAccessorCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -726,7 +718,6 @@ pub fn qjsObjectPrototypeLookupAccessorCall(
         object = (try qjsObjectGetPrototypeOfStep(ctx, output, global, object, caller_function, caller_frame)) orelse return core.JSValue.undefinedValue();
     }
 }
-
 
 pub fn qjsObjectFromEntriesCall(
     ctx: *core.JSContext,
@@ -775,7 +766,6 @@ pub fn qjsObjectFromEntriesCall(
     }
 }
 
-
 pub fn qjsObjectGroupByCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -820,7 +810,6 @@ pub fn qjsObjectGroupByCall(
         index += 1;
     }
 }
-
 
 pub fn qjsObjectSetIntegrityCall(
     ctx: *core.JSContext,
@@ -876,7 +865,6 @@ pub fn qjsObjectSetIntegrityCall(
     return target_value.dup();
 }
 
-
 pub fn qjsObjectTestIntegrityCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -897,7 +885,6 @@ pub fn qjsObjectTestIntegrityCall(
     }
     return core.JSValue.boolean(true);
 }
-
 
 pub fn objectIsExtensibleForIntegrity(
     ctx: *core.JSContext,
@@ -922,7 +909,6 @@ pub fn objectIsExtensibleForIntegrity(
     return extensible;
 }
 
-
 pub fn appendObjectGroupByValue(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -943,7 +929,7 @@ pub fn appendObjectGroupByValue(
         try createDataPropertyOrThrow(ctx, output, global, out_value, out, key, group_value, caller_function, caller_frame);
     }
     const group = objectFromValue(group_value) orelse return error.TypeError;
-    try createDataPropertyOrThrow(ctx, output, global, group_value, group, core.atom.atomFromUInt32(group.length), value, caller_function, caller_frame);
+    try createDataPropertyOrThrow(ctx, output, global, group_value, group, core.atom.atomFromUInt32(group.arrayLength()), value, caller_function, caller_frame);
 }
 
 test "Object.groupBy new group define failure releases group once" {
@@ -986,7 +972,6 @@ pub fn qjsObjectPreventExtensionsCall(
     return target_value.dup();
 }
 
-
 pub fn qjsGetOwnPropertyDescriptorCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1010,7 +995,6 @@ pub fn qjsGetOwnPropertyDescriptorCall(
     return desc_value;
 }
 
-
 pub fn qjsObjectGetPrototypeOfCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1028,7 +1012,6 @@ pub fn qjsObjectGetPrototypeOfCall(
     return try qjsObjectGetPrototypeOfValue(ctx, output, global, object, caller_function, caller_frame);
 }
 
-
 pub fn qjsObjectPrototypeMethodFunctionPrototype(
     ctx: *core.JSContext,
     global: *core.Object,
@@ -1039,12 +1022,10 @@ pub fn qjsObjectPrototypeMethodFunctionPrototype(
     return functionPrototypeFromGlobal(ctx.runtime, global);
 }
 
-
 pub fn isObjectPrototypeNativeRecord(object: *core.Object, id: u32) bool {
     const native_ref = core.function.decodeNativeBuiltinId(object.nativeFunctionIdSlot().*) orelse return false;
     return native_ref.domain == .object and native_ref.id == id;
 }
-
 
 pub fn qjsGetOwnPropertyDescriptorsCall(
     ctx: *core.JSContext,
@@ -1075,12 +1056,10 @@ pub fn qjsGetOwnPropertyDescriptorsCall(
     return out.value();
 }
 
-
 pub const OwnPropertyKeyFilter = enum {
     string,
     symbol,
 };
-
 
 pub fn qjsObjectOwnPropertyKeysCall(
     ctx: *core.JSContext,
@@ -1108,11 +1087,11 @@ pub fn qjsObjectOwnPropertyKeysCall(
                 if (is_symbol) continue;
                 const name_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, key);
                 defer name_value.free(ctx.runtime);
-                try createDataPropertyOrThrow(ctx, output, global, out.value(), out, core.atom.atomFromUInt32(out.length), name_value, caller_function, caller_frame);
+                try createDataPropertyOrThrow(ctx, output, global, out.value(), out, core.atom.atomFromUInt32(out.arrayLength()), name_value, caller_function, caller_frame);
             },
             .symbol => {
                 if (!is_symbol) continue;
-                try createDataPropertyOrThrow(ctx, output, global, out.value(), out, core.atom.atomFromUInt32(out.length), core.JSValue.symbol(key), caller_function, caller_frame);
+                try createDataPropertyOrThrow(ctx, output, global, out.value(), out, core.atom.atomFromUInt32(out.arrayLength()), core.JSValue.symbol(key), caller_function, caller_frame);
             },
         }
     }

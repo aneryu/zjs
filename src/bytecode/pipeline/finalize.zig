@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const atom = @import("../../core/atom.zig");
+const memory_mod = @import("../../core/memory.zig");
 const fb_mod = @import("../../core/function_bytecode.zig");
 const bytecode_function = @import("../function.zig");
 const function_def_mod = @import("../function_def.zig");
@@ -556,6 +557,13 @@ fn runPhases(
         resolve_variables.JSContext.init(function);
     try resolve_variables.run(&resolve_ctx);
 
+    // Peephole: fuse `get_locN; inc/dec; put_locN` triples into a single
+    // `inc_loc`/`dec_loc` (mirrors QuickJS OP_inc_loc). Runs after
+    // resolve_variables (locals are now in SHORT form) and before
+    // resolve_labels (jump operands are still absolute u32; OP_label
+    // markers are still present to keep jump targets off the triple).
+    try fuseIncLoc(function, function.memory);
+
     // After resolve_variables, enable short opcodes for resolve_labels
     // (mirrors quickjs.c:35101 where use_short_opcodes is set after
     // the resolve_variables pass completes).
@@ -599,6 +607,191 @@ fn runPhases(
 
 fn computeStackSizeForCurrentBytecode(code: []const u8) !u16 {
     return stack_size.compute(code, .{});
+}
+
+/// Byte length of an opcode in the post-resolve_variables stream. At this
+/// pipeline stage `OP_label` (size 5) markers are still present and must be
+/// stepped over explicitly, exactly as resolve_variables / resolve_labels do.
+fn fuseInstrSize(op_id: u8) usize {
+    if (op_id == opcode.op.label) return 5;
+    const total = opcode.sizeOf(op_id);
+    return if (total == 0) 1 else total;
+}
+
+/// Byte offset within `op_id` of an absolute u32 jump target, or null when
+/// the opcode carries no label operand. Mirrors resolve_variables'
+/// `labelOperandOffset`: at this stage targets are still absolute u32.
+fn fuseLabelOperandOffset(op_id: u8) ?usize {
+    return switch (opcode.formatOf(op_id)) {
+        .label => 1, // u32 target at bytes[1..5]
+        .atom_label_u8, .atom_label_u16 => 5, // atom at bytes[1..5], target at bytes[5..9]
+        else => null,
+    };
+}
+
+/// Decode a `get_loc` form at `pc`: the short forms get_loc0..get_loc3 /
+/// get_loc8, or the wide u16 `get_loc` (id 87). Returns the local index and
+/// byte size, or null for any other opcode.
+///
+/// NOTE: this pass runs between resolve_variables and resolve_labels.
+/// resolve_variables emits the WIDE `get_loc`/`put_loc` form here (it only
+/// enables short-opcode selection AFTER it returns; resolve_labels is what
+/// shortens loc forms). We therefore decode both forms and fuse whenever the
+/// index fits the 2-byte `inc_loc`/`dec_loc` loc8 encoding (idx < 256). The
+/// short forms are decoded too so the pass stays correct if it is ever moved
+/// after short-form selection.
+const LocOp = struct { idx: usize, size: usize };
+
+fn decodeGetLoc(code: []const u8, pc: usize) ?LocOp {
+    const op = opcode.op;
+    return switch (code[pc]) {
+        op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3 => .{
+            .idx = code[pc] - op.get_loc0,
+            .size = 1,
+        },
+        op.get_loc8 => blk: {
+            if (pc + 2 > code.len) break :blk null;
+            break :blk .{ .idx = code[pc + 1], .size = 2 };
+        },
+        op.get_loc => blk: {
+            if (pc + 3 > code.len) break :blk null;
+            break :blk .{ .idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little), .size = 3 };
+        },
+        else => null,
+    };
+}
+
+fn decodePutLoc(code: []const u8, pc: usize) ?LocOp {
+    const op = opcode.op;
+    return switch (code[pc]) {
+        op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3 => .{
+            .idx = code[pc] - op.put_loc0,
+            .size = 1,
+        },
+        op.put_loc8 => blk: {
+            if (pc + 2 > code.len) break :blk null;
+            break :blk .{ .idx = code[pc + 1], .size = 2 };
+        },
+        op.put_loc => blk: {
+            if (pc + 3 > code.len) break :blk null;
+            break :blk .{ .idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little), .size = 3 };
+        },
+        else => null,
+    };
+}
+
+/// Peephole pass: fuse a contiguous `get_locN; inc/dec; put_locN` triple
+/// (same local index, idx < 256) into a single 2-byte `inc_loc`/`dec_loc`
+/// (`loc8` format), matching QuickJS's `OP_inc_loc` / `OP_dec_loc`.
+///
+/// Modeled on the tail of `resolve_variables.run`: at this pipeline stage
+/// jump operands are ABSOLUTE u32 targets and `OP_label` markers (size 5)
+/// are still in the stream. Because the match must be CONTIGUOUS in the byte
+/// stream, no `OP_label` can sit inside a fused triple, so no jump target can
+/// land mid-triple. We build a pc_map over every old pc, remap all absolute
+/// u32 jump targets through it, and remap source-locs / direct-call-sites,
+/// then install the compacted code via `installCode`. There are no atom
+/// operands in any fused op, so `atom_operands` is left untouched.
+pub fn fuseIncLoc(function: *bytecode_function.Bytecode, mem: *memory_mod.MemoryAccount) !void {
+    const op = opcode.op;
+    const code = function.code;
+    if (code.len == 0) return;
+
+    // Output is always <= input (each fused triple shrinks 2->.. -> 2 bytes,
+    // i.e. it never grows). Allocate worst-case (== input length).
+    const output = try mem.alloc(u8, code.len);
+    var output_owned = true;
+    errdefer if (output_owned) mem.free(u8, output);
+
+    const pc_map = try mem.alloc(usize, code.len + 1);
+    defer mem.free(usize, pc_map);
+    @memset(pc_map, 0);
+
+    var i: usize = 0;
+    var out_idx: usize = 0;
+    while (i < code.len) {
+        const op_id = code[i];
+        pc_map[i] = out_idx;
+
+        // Try to match a contiguous get_loc; inc/dec; put_loc triple.
+        if (decodeGetLoc(code, i)) |get| {
+            const mid_pc = i + get.size;
+            if (mid_pc < code.len and
+                (code[mid_pc] == op.inc or code[mid_pc] == op.dec))
+            {
+                const put_pc = mid_pc + 1; // inc/dec is size 1
+                if (put_pc < code.len) {
+                    if (decodePutLoc(code, put_pc)) |put| {
+                        if (put.idx == get.idx and get.idx < 256) {
+                            // Emit the fused 2-byte loc8 op.
+                            output[out_idx] = if (code[mid_pc] == op.inc)
+                                op.inc_loc
+                            else
+                                op.dec_loc;
+                            output[out_idx + 1] = @intCast(get.idx);
+                            // Map the two removed positions (inc/dec, put_loc)
+                            // to the new pc of the emitted op. They are never
+                            // jump targets, but map them safely.
+                            pc_map[mid_pc] = out_idx;
+                            pc_map[put_pc] = out_idx;
+                            out_idx += 2;
+                            i = put_pc + put.size;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        // No fuse: copy the op verbatim.
+        const size = fuseInstrSize(op_id);
+        if (i + size > code.len) return error.InvalidBytecode;
+        @memcpy(output[out_idx .. out_idx + size], code[i .. i + size]);
+        out_idx += size;
+        i += size;
+    }
+    // Terminal entry: a jump that targets exactly one-past-the-end resolves
+    // to the new end of the stream.
+    pc_map[code.len] = out_idx;
+
+    // Patch absolute u32 jump targets in the OUTPUT through pc_map.
+    var scan: usize = 0;
+    while (scan < out_idx) {
+        const out_op = output[scan];
+        const out_size = fuseInstrSize(out_op);
+        if (scan + out_size > out_idx) break;
+        if (fuseLabelOperandOffset(out_op)) |offset| {
+            const operand_pos = scan + offset;
+            const old_target = std.mem.readInt(u32, output[operand_pos..][0..4], .little);
+            const new_target: u32 = if (old_target <= code.len)
+                @intCast(pc_map[old_target])
+            else
+                old_target;
+            std.mem.writeInt(u32, output[operand_pos..][0..4], new_target, .little);
+        }
+        scan += out_size;
+    }
+
+    // Build an exact-fit buffer (output is <= input). Keep the temporary
+    // buffer owned via errdefer until every fallible step succeeds.
+    const code_to_install: []u8 = if (out_idx < output.len) blk: {
+        if (out_idx == 0) break :blk &.{};
+        const trimmed = try mem.alloc(u8, out_idx);
+        @memcpy(trimmed, output[0..out_idx]);
+        break :blk trimmed;
+    } else output;
+    var code_to_install_owned = code_to_install.len != 0 and code_to_install.ptr != output.ptr;
+    errdefer if (code_to_install_owned) mem.free(u8, code_to_install);
+
+    function.remapSourceLocs(pc_map);
+    function.remapDirectCallSites(pc_map);
+    if (code_to_install.ptr != output.ptr) {
+        mem.free(u8, output);
+        output_owned = false;
+    }
+    function.installCode(code_to_install);
+    if (code_to_install_owned) code_to_install_owned = false;
+    if (code_to_install.ptr == output.ptr) output_owned = false;
 }
 
 fn removeUncapturedCloseLoc(

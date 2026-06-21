@@ -483,7 +483,7 @@ fn constructAggregateErrorObject(rt: *core.JSRuntime, constructor: core.JSValue,
         cause_val = options.getProperty(cause_key);
         var has_cause = !cause_val.isUndefined();
         if (!has_cause) {
-            if (options.getOwnProperty(cause_key)) |desc| {
+            if (options.getOwnProperty(rt, cause_key)) |desc| {
                 desc.destroy(rt);
                 has_cause = true;
             }
@@ -497,14 +497,14 @@ fn constructAggregateErrorObject(rt: *core.JSRuntime, constructor: core.JSValue,
     errors_array_val = errors_array.value();
 
     var index: u32 = 0;
-    while (index < errors_source.length) : (index += 1) {
+    while (index < errors_source.arrayLength()) : (index += 1) {
         copied_error_val = errors_source.getProperty(core.atom.atomFromUInt32(index));
         try errors_array.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(copied_error_val, true, true, true));
         copied_error_val.free(rt);
         copied_error_val = core.JSValue.undefinedValue();
     }
-    errors_array.length = errors_source.length;
-    try errors_array.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(@intCast(errors_source.length)), true, false, false));
+    errors_array.setArrayLength(errors_source.arrayLength());
+    try errors_array.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(@intCast(errors_source.arrayLength())), true, false, false));
     try defineData(rt, instance, "errors", errors_array_val, true, false, true);
     return instance.value();
 }
@@ -673,7 +673,7 @@ pub fn typedArrayElement(name: []const u8) ?TypedArrayElement {
 }
 
 fn constructTypedArrayArrayInput(rt: *core.JSRuntime, prototype: ?*core.Object, element: TypedArrayElement, source: *core.Object, global: ?*core.Object) !core.JSValue {
-    const byte_length = try std.math.mul(u32, source.length, element.size);
+    const byte_length = try std.math.mul(u32, source.arrayLength(), element.size);
     var backing_buffer = core.JSValue.undefinedValue();
     var object_value = core.JSValue.undefinedValue();
     var value = core.JSValue.undefinedValue();
@@ -701,7 +701,7 @@ fn constructTypedArrayArrayInput(rt: *core.JSRuntime, prototype: ?*core.Object, 
     const object = try expectObject(object_value);
 
     var index: u32 = 0;
-    while (index < source.length) : (index += 1) {
+    while (index < source.arrayLength()) : (index += 1) {
         value = source.getProperty(core.atom.atomFromUInt32(index));
         coerced = try typedArraySourceValue(rt, value);
         _ = try core.typed_array.typedArraySetIndex(rt, object, index, coerced);
@@ -910,7 +910,7 @@ fn constructCollectionValue(
         return collection_value;
     }
     var index: u32 = 0;
-    while (index < source.length) : (index += 1) {
+    while (index < source.arrayLength()) : (index += 1) {
         const entry_value = source.getProperty(core.atom.atomFromUInt32(index));
         defer entry_value.free(rt);
         if (kind == 1 or kind == 3) {
@@ -1115,7 +1115,7 @@ fn getPropertyWithGetter(ctx: *core.JSContext, object: *core.Object, key: core.A
     const rt = ctx.runtime;
     var cursor: ?*core.Object = object;
     while (cursor) |current_object| {
-        if (current_object.getOwnProperty(key)) |desc| {
+        if (current_object.getOwnProperty(rt, key)) |desc| {
             defer desc.destroy(rt);
             if (desc.kind == .accessor) {
                 if (desc.getter.isUndefined()) return core.JSValue.undefinedValue();
@@ -1204,7 +1204,7 @@ fn getCollectionAdder(rt: *core.JSRuntime, collection: *core.Object, name: []con
     defer rt.atoms.free(key);
     var cursor: ?*core.Object = collection;
     while (cursor) |object| {
-        if (object.getOwnProperty(key)) |desc| {
+        if (object.getOwnProperty(rt, key)) |desc| {
             defer desc.destroy(rt);
             if (desc.kind == .accessor) {
                 if (desc.getter.isUndefined()) return core.JSValue.undefinedValue();

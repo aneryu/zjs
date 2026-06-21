@@ -1,6 +1,7 @@
 const class = @import("class.zig");
 const JSValue = @import("value.zig").JSValue;
 const JSRuntime = @import("runtime.zig").JSRuntime;
+const std = @import("std");
 
 pub const Flags = packed struct(u6) {
     writable: bool = false,
@@ -115,10 +116,15 @@ pub const AutoInit = struct {
     shared_native_cache_slot: u8 = 0,
 };
 
+pub const AutoInitRef = struct {
+    rt: *JSRuntime,
+    id: u32,
+};
+
 pub const Slot = union(enum) {
     data: JSValue,
     accessor: Accessor,
-    auto_init: u32,
+    auto_init: AutoInitRef,
     deleted,
 
     pub inline fn dataValueForFastPath(self: Slot) ?JSValue {
@@ -153,13 +159,18 @@ pub const Slot = union(enum) {
     }
 };
 
-pub fn internAutoInit(rt: *JSRuntime, info: AutoInit) !u32 {
+pub fn internAutoInit(rt: *JSRuntime, info: AutoInit) !AutoInitRef {
     try rt.auto_init_table.append(rt.memory.allocator, info);
-    return @intCast(rt.auto_init_table.items.len - 1);
+    return .{ .rt = rt, .id = @intCast(rt.auto_init_table.items.len - 1) };
 }
 
-pub fn autoInitAt(rt: *JSRuntime, id: u32) *AutoInit {
-    return &rt.auto_init_table.items[id];
+pub fn autoInitAt(rt: *JSRuntime, ref: AutoInitRef) *AutoInit {
+    std.debug.assert(ref.rt == rt);
+    return autoInit(ref);
+}
+
+pub fn autoInit(ref: AutoInitRef) *AutoInit {
+    return &ref.rt.auto_init_table.items[ref.id];
 }
 
 /// Per-object property storage. Holds only the value side of a

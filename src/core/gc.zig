@@ -7,6 +7,7 @@ const builtin = @import("builtin");
 const memory = @import("memory.zig");
 const bigint = @import("bigint.zig");
 const object = @import("object.zig");
+const var_ref = @import("var_ref.zig");
 const string = @import("string.zig");
 const function_bytecode_mod = @import("function_bytecode.zig");
 const FunctionBytecode = function_bytecode_mod.FunctionBytecode;
@@ -114,6 +115,7 @@ pub const RefKind = enum(u8) {
     object = 1,
     big_int = 2,
     function_bytecode = 3,
+    var_ref = 4,
 };
 
 pub const GcKind = RefKind;
@@ -328,15 +330,17 @@ pub const BlockFlags = packed struct(u8) {
     _reserved: u2 = 0,
 };
 
-/// Z-GE v1.0 8-byte BlockHeader
+/// Z-GE v1.0 block header with qjs-style intrusive GC list links.
 pub const BlockHeader = extern struct {
     size_class: u16 align(8) = 0,
     kind: GcKind,
     flags: BlockFlags = .{},
     rc: i32 = 1,
+    prev: ?*BlockHeader = null,
+    next: ?*BlockHeader = null,
 
     comptime {
-        std.debug.assert(@sizeOf(BlockHeader) == 8);
+        std.debug.assert(@sizeOf(BlockHeader) == 24);
     }
 
     pub inline fn retain(self: *BlockHeader) void {
@@ -357,25 +361,6 @@ pub const Header = BlockHeader;
 pub const GCObjectHeader = Header;
 pub const ObjectHeader = Header;
 const large_heap_size_class = std.math.maxInt(u16);
-
-/// 11.2 GcNode definition
-pub const GcColor = enum(u8) {
-    white = 0,
-    gray = 1,
-    black = 2,
-};
-
-pub const GcNode = extern struct {
-    prev: ?*GcNode = null,
-    next: ?*GcNode = null,
-    tmp_rc: i32 = 0,
-    color: GcColor = .white,
-    _pad: [3]u8 = .{ 0, 0, 0 },
-
-    pub fn init() GcNode {
-        return .{};
-    }
-};
 
 pub const FailureKind = enum(u8) {
     none = 0,
@@ -578,9 +563,12 @@ pub const Registry = struct {
     memory: *memory.MemoryAccount,
     policy: Policy = .{},
 
-    // GcNode 链表头与尾，仅串联可能参与循环检测的 GcCandidate (如 Object, FunctionBytecode)
-    gc_obj_list_head: ?*GcNode = null,
-    gc_obj_list_tail: ?*GcNode = null,
+    // qjs-style cycle-collection candidates (Object, FunctionBytecode, VarRef):
+    // each GC object header embeds its permanent list node, so add/remove are
+    // O(1) pointer splices.
+    gc_object_head: ?*GCObjectHeader = null,
+    gc_object_tail: ?*GCObjectHeader = null,
+    gc_object_count: usize = 0,
     external_tokens: []ExternalTokenEntry = &.{},
     external_tokens_capacity: usize = 0,
     next_external_token_id: u64 = 1,
@@ -600,6 +588,7 @@ pub const Registry = struct {
     // Reusable structures for cycle detection
     preserved_bytecodes: std.AutoHashMap(usize, void),
     object_worklist: std.ArrayList(*object.Object),
+    var_ref_worklist: std.ArrayList(*var_ref.VarRef),
     bytecode_worklist: std.ArrayList(*FunctionBytecode),
 
     pub fn init(account: *memory.MemoryAccount, policy: Policy) Registry {
@@ -610,6 +599,7 @@ pub const Registry = struct {
             .large_space = .{},
             .preserved_bytecodes = std.AutoHashMap(usize, void).init(account.persistent_allocator),
             .object_worklist = std.ArrayList(*object.Object).empty,
+            .var_ref_worklist = std.ArrayList(*var_ref.VarRef).empty,
             .bytecode_worklist = std.ArrayList(*FunctionBytecode).empty,
         };
     }
@@ -618,10 +608,9 @@ pub const Registry = struct {
         self.phase = .deinit;
 
         // 释放可能存活的所有 Candidate 对象
-        while (self.gc_obj_list_tail) |node| {
-            const h = headerFromGcNode(node);
+        while (self.gc_object_tail) |h| {
+            self.removeGcObject(h);
             self.recordHeapFreeWithBytes(h, heapByteSizeFromHeader(rt, h));
-            self.unlinkNode(node);
             h.flags.finalizing = true;
             if (h.kind == .object) {
                 object.Object.destroyFromHeader(rt, h);
@@ -631,11 +620,13 @@ pub const Registry = struct {
             }
         }
 
-        self.gc_obj_list_head = null;
-        self.gc_obj_list_tail = null;
+        self.gc_object_head = null;
+        self.gc_object_tail = null;
+        self.gc_object_count = 0;
 
         self.preserved_bytecodes.deinit();
         self.object_worklist.deinit(self.memory.persistent_allocator);
+        self.var_ref_worklist.deinit(self.memory.persistent_allocator);
         self.bytecode_worklist.deinit(self.memory.persistent_allocator);
         if (self.external_tokens_capacity != 0) {
             self.memory.free(ExternalTokenEntry, self.external_tokens.ptr[0..self.external_tokens_capacity]);
@@ -970,27 +961,23 @@ pub const Registry = struct {
 
     pub fn addWithSize(self: *Registry, h: *GCObjectHeader, bytes: usize) !void {
         const is_large = self.isLargeAllocation(bytes);
+        const tracked = isCycleCandidate(h);
 
         h.rc = 1;
         h.flags = .{};
+        h.prev = null;
+        h.next = null;
         h.size_class = encodeHeapBytes(bytes);
         self.recordHeapAlloc(is_large, bytes);
 
-        if (h.kind == .object) {
-            const obj: *object.Object = @alignCast(@fieldParentPtr("header", h));
-            obj.gc._pad[0] = @intFromEnum(h.kind);
-            self.linkNode(&obj.gc);
-        } else if (h.kind == .function_bytecode) {
-            const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
-            fb.gc._pad[0] = @intFromEnum(h.kind);
-            self.linkNode(&fb.gc);
-        }
+        if (tracked) self.appendGcObject(h);
     }
 
     fn defaultHeapBytes(h: *const GCObjectHeader) usize {
         return switch (h.kind) {
             .object => @sizeOf(object.Object),
             .function_bytecode => @sizeOf(FunctionBytecode),
+            .var_ref => @sizeOf(var_ref.VarRef),
             .string, .big_int => 0,
         };
     }
@@ -1016,12 +1003,17 @@ pub const Registry = struct {
                 const fb: *const FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                 break :blk fb.heapByteSize();
             },
+            .var_ref => @sizeOf(var_ref.VarRef),
             .string, .big_int => 0,
         };
     }
 
     fn isLargeAllocation(self: Registry, bytes: usize) bool {
         return bytes != 0 and bytes >= self.policy.large_object_threshold;
+    }
+
+    fn isCycleCandidate(h: *const GCObjectHeader) bool {
+        return h.kind == .object or h.kind == .function_bytecode or h.kind == .var_ref;
     }
 
     fn recordHeapAlloc(self: *Registry, is_large: bool, bytes: usize) void {
@@ -1149,13 +1141,7 @@ pub const Registry = struct {
 
     pub fn unlinkObjectWithBytes(self: *Registry, h: *GCObjectHeader, bytes: usize) void {
         self.recordHeapFreeWithBytes(h, bytes);
-        if (h.kind == .object) {
-            const obj: *object.Object = @alignCast(@fieldParentPtr("header", h));
-            self.unlinkNode(&obj.gc);
-        } else if (h.kind == .function_bytecode) {
-            const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
-            self.unlinkNode(&fb.gc);
-        }
+        if (isCycleCandidate(h)) self.removeGcObject(h);
     }
 
     pub fn unlinkObject(self: *Registry, h: *GCObjectHeader) void {
@@ -1212,6 +1198,57 @@ pub const Registry = struct {
         self.pin_entries_capacity = new_capacity;
     }
 
+    pub const GcObjectIterator = struct {
+        cursor: ?*GCObjectHeader,
+
+        pub fn next(self: *GcObjectIterator) ?*GCObjectHeader {
+            const current = self.cursor orelse return null;
+            self.cursor = current.next;
+            return current;
+        }
+    };
+
+    pub fn objectIterator(self: *const Registry) GcObjectIterator {
+        return .{ .cursor = self.gc_object_head };
+    }
+
+    fn appendGcObject(self: *Registry, header: *GCObjectHeader) void {
+        std.debug.assert(isCycleCandidate(header));
+        std.debug.assert(header.prev == null);
+        std.debug.assert(header.next == null);
+
+        header.prev = self.gc_object_tail;
+        header.next = null;
+        if (self.gc_object_tail) |tail| {
+            tail.next = header;
+        } else {
+            self.gc_object_head = header;
+        }
+        self.gc_object_tail = header;
+        self.gc_object_count += 1;
+    }
+
+    fn removeGcObject(self: *Registry, header: *GCObjectHeader) void {
+        const prev = header.prev;
+        const next = header.next;
+        if (prev == null and next == null and self.gc_object_head != header and self.gc_object_tail != header) return;
+
+        if (prev) |p| {
+            p.next = next;
+        } else {
+            self.gc_object_head = next;
+        }
+        if (next) |n| {
+            n.prev = prev;
+        } else {
+            self.gc_object_tail = prev;
+        }
+        header.prev = null;
+        header.next = null;
+        std.debug.assert(self.gc_object_count != 0);
+        self.gc_object_count -= 1;
+    }
+
     pub fn recordFailure(self: *Registry, err: CollectionError) void {
         self.stats.failed_collections += 1;
         self.stats.last_failure = switch (err) {
@@ -1231,8 +1268,14 @@ pub const Registry = struct {
     }
 
     pub fn verifyIntrusiveList(self: *Registry) InvariantError!void {
-        var tortoise = self.gc_obj_list_head;
-        var hare = self.gc_obj_list_head;
+        if (self.gc_object_count == 0) {
+            if (self.gc_object_head != null or self.gc_object_tail != null) return error.CorruptGcList;
+            return;
+        }
+        if (self.gc_object_head == null or self.gc_object_tail == null) return error.CorruptGcList;
+
+        var tortoise = self.gc_object_head;
+        var hare = self.gc_object_head;
         while (hare) |hare_node| {
             hare = hare_node.next orelse break;
             hare = hare.?.next;
@@ -1240,17 +1283,26 @@ pub const Registry = struct {
             if (hare != null and tortoise == hare) return error.CorruptGcList;
         }
 
-        var previous: ?*GcNode = null;
-        var current = self.gc_obj_list_head;
-        while (current) |node| {
-            if (node.prev != previous) return error.CorruptGcList;
-            const h = headerFromGcNode(node);
+        var previous: ?*GCObjectHeader = null;
+        var current = self.gc_object_head;
+        var count: usize = 0;
+        while (current) |h| {
+            if (!isCycleCandidate(h)) return error.CorruptGcList;
             if (h.rc < 0) return error.NegativeRefCount;
             if (h.flags.mark and self.phase == .none) return error.MarkBitLeftSet;
-            previous = node;
-            current = node.next;
+
+            if (h.prev != previous) return error.CorruptGcList;
+
+            if (h.next) |next| {
+                if (next.prev != h) return error.CorruptGcList;
+            } else if (self.gc_object_tail != h) return error.CorruptGcList;
+
+            previous = h;
+            current = h.next;
+            count += 1;
         }
-        if (previous != self.gc_obj_list_tail) return error.CorruptGcList;
+        if (previous != self.gc_object_tail) return error.CorruptGcList;
+        if (count != self.gc_object_count) return error.CorruptGcList;
     }
 
     pub fn verifyHeapAccounting(self: Registry, rt: anytype) InvariantError!void {
@@ -1258,9 +1310,8 @@ pub const Registry = struct {
         var old_live_bytes: usize = 0;
         var large_object_bytes: usize = 0;
 
-        var current = self.gc_obj_list_head;
-        while (current) |node| {
-            const header = headerFromGcNode(node);
+        var iterator = self.objectIterator();
+        while (iterator.next()) |header| {
             const bytes = heapByteSizeFromHeader(rt, header);
             if (bytes == 0) return error.MissingHeapAllocation;
             heap_live_bytes = std.math.add(usize, heap_live_bytes, bytes) catch std.math.maxInt(usize);
@@ -1269,7 +1320,6 @@ pub const Registry = struct {
             } else {
                 old_live_bytes = std.math.add(usize, old_live_bytes, bytes) catch std.math.maxInt(usize);
             }
-            current = node.next;
         }
 
         for (self.pin_entries, 0..) |entry, index| {
@@ -1320,50 +1370,14 @@ pub const Registry = struct {
             expected.evacuation_candidate_page_count == space.evacuation_candidate_page_count;
     }
 
-    pub fn linkNode(self: *Registry, node: *GcNode) void {
-        node.prev = self.gc_obj_list_tail;
-        node.next = null;
-        if (self.gc_obj_list_tail) |tail| {
-            tail.next = node;
-        } else {
-            self.gc_obj_list_head = node;
-        }
-        self.gc_obj_list_tail = node;
-        node.color = .white;
-    }
-
-    pub fn unlinkNode(self: *Registry, node: *GcNode) void {
-        if (self.gc_obj_list_head != node and node.prev == null) return;
-
-        if (node.prev) |prev| {
-            prev.next = node.next;
-        } else {
-            self.gc_obj_list_head = node.next;
-        }
-        if (node.next) |next| {
-            next.prev = node.prev;
-        } else {
-            self.gc_obj_list_tail = node.prev;
-        }
-        node.prev = null;
-        node.next = null;
-    }
-
     pub fn liveCount(self: Registry) usize {
-        var count: usize = 0;
-        var current = self.gc_obj_list_head;
-        while (current) |node| {
-            count += 1;
-            current = node.next;
-        }
-        return count;
+        return self.gc_object_count;
     }
 
     pub fn containsHeader(self: Registry, header: *const GCObjectHeader) bool {
-        var current = self.gc_obj_list_head;
-        while (current) |node| {
-            if (headerFromGcNode(node) == header) return true;
-            current = node.next;
+        var iterator = self.objectIterator();
+        while (iterator.next()) |candidate| {
+            if (candidate == header) return true;
         }
         return false;
     }
@@ -1389,25 +1403,6 @@ pub inline fn payloadFromHeader(h: *BlockHeader) *anyopaque {
     return @ptrFromInt(addr + @sizeOf(BlockHeader));
 }
 
-pub inline fn objectFromGcNode(node: *GcNode) *object.Object {
-    return @alignCast(@fieldParentPtr("gc", node));
-}
-
-pub inline fn headerFromGcNode(node: *GcNode) *BlockHeader {
-    const kind: RefKind = @enumFromInt(node._pad[0]);
-    switch (kind) {
-        .object => {
-            const obj: *object.Object = @alignCast(@fieldParentPtr("gc", node));
-            return &obj.header;
-        },
-        .function_bytecode => {
-            const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("gc", node));
-            return &fb.header;
-        },
-        else => unreachable,
-    }
-}
-
 /// 9.1 统一的非原子 retain/release/dup/free 路径
 pub inline fn retain(header: *Header) void {
     header.retain();
@@ -1425,7 +1420,7 @@ pub inline fn release(rt: anytype, header: *Header) void {
 }
 
 noinline fn releaseAndDestroy(rt: anytype, header: *Header) void {
-    if (rt.gc.phase == .deinit and header.kind == .object) return;
+    if (rt.gc.phase == .deinit and (header.kind == .object or header.kind == .var_ref)) return;
     rt.gc.unlinkObjectWithBytes(header, Registry.heapByteSizeFromHeader(rt, header));
 
     // 10.1 静态 kind switch 派发销毁
@@ -1434,5 +1429,6 @@ noinline fn releaseAndDestroy(rt: anytype, header: *Header) void {
         .object => object.Object.destroyFromHeader(rt, header),
         .big_int => bigint.BigInt.destroyFromHeader(rt, header),
         .function_bytecode => function_bytecode_mod.destroyFromHeader(rt, header),
+        .var_ref => var_ref.VarRef.destroyFromHeader(rt, header),
     }
 }

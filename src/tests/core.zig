@@ -870,7 +870,7 @@ test "class table registers QuickJS standard classes and dynamic classes" {
     try std.testing.expect(rt.classes.isRegistered(dynamic_id));
 
     try std.testing.expectEqual(core.class.PayloadKind.ordinary, rt.classes.record(core.class.ids.object).?.payload_kind);
-    try std.testing.expectEqual(core.class.PayloadKind.array, rt.classes.record(core.class.ids.array).?.payload_kind);
+    try std.testing.expectEqual(core.class.PayloadKind.none, rt.classes.record(core.class.ids.array).?.payload_kind);
     try std.testing.expectEqual(core.class.PayloadKind.regexp, rt.classes.record(core.class.ids.regexp).?.payload_kind);
     try std.testing.expectEqual(core.class.PayloadKind.collection, rt.classes.record(core.class.ids.map).?.payload_kind);
     try std.testing.expectEqual(core.class.PayloadKind.iterator, rt.classes.record(core.class.ids.array_iterator).?.payload_kind);
@@ -1428,10 +1428,9 @@ test "mapped arguments var-ref binding update defers value finalizer reentry" {
     defer arguments.value().free(rt);
     const key = core.atom.atomFromUInt32(0);
     const value = try core.Object.create(rt, reentrant_id, null);
-    const cell = try core.Object.create(rt, core.class.ids.object, null);
-    try cell.initVarRefPayload(rt, value.value().dup());
+    const cell = try core.VarRef.createClosed(rt, value.value().dup());
     const refs = try rt.memory.alloc(core.JSValue, 1);
-    refs[0] = cell.value().dup();
+    refs[0] = cell.valueRef();
     arguments.argumentsVarRefsSlot().* = refs;
     value.value().free(rt);
 
@@ -1450,12 +1449,11 @@ test "mapped arguments var-ref binding update defers value finalizer reentry" {
     try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), reentrant_mapped_arguments_calls);
     try expectOneDeferredClassPayloadFinalizer(rt);
-    try std.testing.expectEqual(@as(?i32, 7), cell.varRefValue().?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 7), cell.varRefValue().asInt32());
     try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_mapped_arguments_calls);
-    try std.testing.expectEqual(@as(?i32, 99), cell.varRefValue().?.asInt32());
-    cell.value().free(rt);
+    try std.testing.expectEqual(@as(?i32, 99), cell.varRefValue().asInt32());
 }
 
 test "mapped arguments binding delete defers value finalizer reentry" {
@@ -1521,7 +1519,7 @@ test "cached iterator next clear defers value finalizer reentry" {
     const object = try core.Object.create(rt, core.class.ids.iterator, null);
     defer object.value().free(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
-    object.cachedIteratorNextSlot().* = value.value().dup();
+    (try object.cachedIteratorNextSlot(rt)).* = value.value().dup();
     value.value().free(rt);
 
     payload_finalizer_calls = 0;
@@ -1537,11 +1535,11 @@ test "cached iterator next clear defers value finalizer reentry" {
     try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), reentrant_cached_iterator_next_calls);
     try expectOneDeferredClassPayloadFinalizer(rt);
-    try std.testing.expect(object.cachedIteratorNext() == null);
+    try std.testing.expect(object.cachedIteratorNext(rt) == null);
     try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_cached_iterator_next_calls);
-    try std.testing.expect(object.cachedIteratorNext() == null);
+    try std.testing.expect(object.cachedIteratorNext(rt) == null);
 }
 
 test "exception slot clear defers value finalizer reentry" {
@@ -2118,15 +2116,16 @@ test "object data state uses payload storage" {
     try std.testing.expect(object.objectData() != null);
 }
 
-test "array element state uses payload storage" {
+test "array element state uses inline fast-array storage" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const array = try core.Object.createArray(rt, null);
     defer array.value().free(rt);
 
-    try std.testing.expect(array.class_payload != null);
-    try std.testing.expectEqual(core.class.PayloadKind.array, array.class_payload_kind);
+    try std.testing.expect(array.class_payload == null);
+    try std.testing.expectEqual(core.class.PayloadKind.none, array.class_payload_kind);
+    try std.testing.expect(array.flags.fast_array);
     try std.testing.expectEqual(core.object.ArrayStorageMode.dense, array.arrayElementStorageMode());
     try std.testing.expect(try array.appendDenseArrayIndex(rt, 0, core.atom.atomFromUInt32(0), core.JSValue.int32(7)));
     try std.testing.expectEqual(@as(usize, 1), array.arrayElements().len);
@@ -2195,29 +2194,29 @@ test "native function state uses payload storage" {
 
     try std.testing.expect(function.class_payload != null);
     try std.testing.expectEqual(core.class.PayloadKind.function, function.class_payload_kind);
-    function.functionSourceSlot().* = source.value().dup();
+    (try function.functionSourceSlot(rt)).* = source.value().dup();
     function.hostFunctionKindSlot().* = 11;
     function.nativeFunctionIdSlot().* = 22;
     function.functionBytecodeSlot().* = core.JSValue.int32(33);
-    function.functionClassFieldsInitSlot().* = core.JSValue.int32(44);
+    (try function.functionClassFieldsInitSlot(rt)).* = core.JSValue.int32(44);
     const captures = try rt.memory.alloc(core.JSValue, 1);
     captures[0] = core.JSValue.int32(55);
     function.functionCapturesSlot().* = captures;
     const names = try rt.memory.alloc(core.Atom, 1);
     names[0] = try rt.internAtom("evalLocal");
-    function.functionEvalLocalNamesSlot().* = names;
+    (try function.functionEvalLocalNamesSlot(rt)).* = names;
     const refs = try rt.memory.alloc(core.JSValue, 1);
     refs[0] = core.JSValue.int32(66);
-    function.functionEvalLocalRefsSlot().* = refs;
-    function.functionLexicalThisSlot().* = core.JSValue.int32(77);
+    (try function.functionEvalLocalRefsSlot(rt)).* = refs;
+    (try function.functionLexicalThisSlot(rt)).* = core.JSValue.int32(77);
     try function.setFunctionHomeObject(rt, home);
     const remap_from = try rt.memory.alloc(core.Atom, 1);
     remap_from[0] = try rt.internAtom("oldPrivate");
-    function.privateRemapFromSlot().* = remap_from;
+    (try function.privateRemapFromSlotEnsured(rt)).* = remap_from;
     const remap_to = try rt.memory.alloc(core.Atom, 1);
     remap_to[0] = try rt.internAtom("newPrivate");
-    function.privateRemapToSlot().* = remap_to;
-    function.functionRealmGlobalSlot().* = home.value().dup();
+    (try function.privateRemapToSlotEnsured(rt)).* = remap_to;
+    (try function.functionRealmGlobalSlot(rt)).* = home.value().dup();
     try function.setFunctionRealmGlobalPtr(rt, home);
 
     try std.testing.expect(function.functionSource() != null);
@@ -2405,7 +2404,7 @@ test "failed new property definition rolls back retained entry" {
     try object.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(3), true, true, true));
 
     try std.testing.expectEqual(@as(usize, 3), object.properties.len);
-    try std.testing.expectEqual(@as(usize, 4), object.property_capacity);
+    try std.testing.expectEqual(@as(usize, 4), object.shape_ref.props.len);
     try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
 
     const retained_refs = retained.header.rc;
@@ -2461,7 +2460,7 @@ test "failed auto-init property definition rolls back retained entry" {
     try object.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(3), true, true, true));
 
     try std.testing.expectEqual(@as(usize, 3), object.properties.len);
-    try std.testing.expectEqual(@as(usize, 4), object.property_capacity);
+    try std.testing.expectEqual(@as(usize, 4), object.shape_ref.props.len);
     try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
@@ -3682,7 +3681,7 @@ test "async continuation function cycle is released by runtime cycle removal" {
     const key = try rt.internAtom("continuation");
     defer rt.atoms.free(key);
 
-    continuation.functionAsyncContinuationSlot().* = promise.value().dup();
+    (try continuation.functionAsyncContinuationSlot(rt)).* = promise.value().dup();
     try promise.defineOwnProperty(rt, key, core.Descriptor.data(continuation.value(), true, true, true));
 
     continuation.value().free(rt);
@@ -5563,7 +5562,7 @@ test "ordinary objects define own data properties and descriptors" {
     defer rt.atoms.free(key);
 
     try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(42), true, true, true));
-    const desc = obj.getOwnProperty(key).?;
+    const desc = obj.getOwnProperty(rt, key).?;
     defer desc.destroy(rt);
     try std.testing.expectEqual(core.descriptor.Kind.data, desc.kind);
     try std.testing.expectEqual(@as(?i32, 42), desc.value.asInt32());
@@ -5613,7 +5612,7 @@ test "accessor descriptors store getter setter placeholders" {
     getter.value().free(rt);
     setter.value().free(rt);
 
-    const desc = obj.getOwnProperty(key).?;
+    const desc = obj.getOwnProperty(rt, key).?;
     defer desc.destroy(rt);
     try std.testing.expectEqual(core.descriptor.Kind.accessor, desc.kind);
     try std.testing.expect(desc.getter.isString());
@@ -5687,7 +5686,7 @@ test "extensibility seal and freeze update descriptor flags" {
     try std.testing.expectError(error.NotExtensible, obj.defineOwnProperty(rt, other, core.Descriptor.data(core.JSValue.int32(2), true, true, true)));
 
     try obj.freeze(rt);
-    const desc = obj.getOwnProperty(key).?;
+    const desc = obj.getOwnProperty(rt, key).?;
     defer desc.destroy(rt);
     try std.testing.expectEqual(false, desc.configurable.?);
     try std.testing.expectEqual(false, desc.writable.?);
@@ -5715,12 +5714,12 @@ test "array length tracks sparse indices and truncation" {
     defer rt.atoms.free(index_1);
 
     try array_obj.defineOwnProperty(rt, index_5, core.Descriptor.data(core.JSValue.int32(5), true, true, true));
-    try std.testing.expectEqual(@as(u32, 6), array_obj.length);
+    try std.testing.expectEqual(@as(u32, 6), array_obj.arrayLength());
     try array_obj.defineOwnProperty(rt, index_1, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
-    try std.testing.expectEqual(@as(u32, 6), array_obj.length);
+    try std.testing.expectEqual(@as(u32, 6), array_obj.arrayLength());
 
     try array_obj.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), false, false, false));
-    try std.testing.expectEqual(@as(u32, 2), array_obj.length);
+    try std.testing.expectEqual(@as(u32, 2), array_obj.arrayLength());
     try std.testing.expect(!array_obj.hasOwnProperty(index_5));
     try std.testing.expect(array_obj.hasOwnProperty(index_1));
     try std.testing.expectError(error.ReadOnly, array_obj.defineOwnProperty(rt, index_5, core.Descriptor.data(core.JSValue.int32(5), true, true, true)));
@@ -5789,23 +5788,25 @@ test "exotic dispatch hooks are called without builtin shortcuts" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const obj = try core.Object.create(rt, core.class.ids.object, null);
-    defer obj.value().free(rt);
-    const exotic = try rt.memory.create(core.object.ExoticMethods);
-    exotic.* = .{
+    const exotic_id = rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(exotic_id, .{ .class_name = "ExoticDispatchHooksForTest" });
+    const exotic = core.object.ExoticMethods{
         .get_own_property = exoticGet,
         .define_own_property = exoticDefine,
         .delete_property = exoticDelete,
         .own_keys = exoticOwnKeys,
     };
-    obj.exotic = exotic;
+    core.Object.installClassExoticMethods(rt, exotic_id, &exotic);
+
+    const obj = try core.Object.create(rt, exotic_id, null);
+    defer obj.value().free(rt);
 
     exotic_define_calls = 0;
     exotic_delete_calls = 0;
     const key = try rt.internAtom("hooked");
     defer rt.atoms.free(key);
 
-    const desc = obj.getOwnProperty(key).?;
+    const desc = obj.getOwnProperty(rt, key).?;
     defer desc.destroy(rt);
     try std.testing.expectEqual(@as(?i32, 99), desc.value.asInt32());
     try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));

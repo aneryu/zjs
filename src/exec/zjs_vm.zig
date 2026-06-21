@@ -690,15 +690,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 }
             },
             op.push_atom_value => {
-                try value_vm.pushAtomValueVm(ctx, stack, function, frame, .{
-                    .global_env = .{
-                        .global = global,
-                        .eval_local_names = eval_local_names,
-                        .eval_var_ref_names = eval_var_ref_names,
-                        .eval_with_object = eval_with_object,
-                    },
-                    .regexp_prototype = constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"),
-                });
+                try value_vm.pushAtomValue(ctx, stack, function, frame);
             },
             op.push_empty_string => try value_vm.pushEmptyString(ctx, stack),
             op.to_propkey => switch (try vm_property_field.toPropKeyVm(ctx, output, global, stack, function, frame, catch_target)) {

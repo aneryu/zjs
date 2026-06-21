@@ -476,9 +476,7 @@ pub const JSValue = extern struct {
             // deinit-phase skip for {module, object, function_bytecode} — the
             // contiguous tail [deinit_skip_min, refcount_max].
             if (rt.gc.phase == .deinit and p >= NanBox.deinit_skip_min) return;
-            if (comptime build_options.zjs_enable_opcode_profile) {
-                if (rt.opcode_profile) |prof| prof.recordValueFree();
-            }
+            if (rt.opcode_profile) |prof| prof.recordValueFree();
             gc.release(rt, ptrFromPayload(gc.Header, self.payloadOf()).?);
             return;
         }
@@ -489,9 +487,7 @@ pub const JSValue = extern struct {
                 else => {},
             }
         }
-        if (comptime build_options.zjs_enable_opcode_profile) {
-            if (rt.opcode_profile) |prof| prof.recordValueFree();
-        }
+        if (rt.opcode_profile) |prof| prof.recordValueFree();
         if (self.refHeader()) |header| gc.release(rt, header);
         if (self.objectHeader()) |header| gc.release(rt, header);
     }

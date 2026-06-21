@@ -407,7 +407,7 @@ pub fn bindingStoreWritableForFastPath(
         const slot = frame.var_refs[binding.idx];
         if (varRefCellFromValue(slot)) |cell| {
             if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return false;
-            const stored = cell.varRefValueSlot().* orelse return false;
+            const stored = cell.varRefValue();
             return !stored.isUninitialized();
         }
         if (slot.isUninitialized()) return false;
@@ -462,7 +462,7 @@ fn varRefGlobalLexicalWritable(
 ) bool {
     if (var_ref_idx >= function.var_ref_names.len) return false;
     const env = call_runtime.existingGlobalLexicalEnv(ctx) orelse return false;
-    const desc = env.getOwnProperty(function.var_ref_names[var_ref_idx]) orelse return false;
+    const desc = env.getOwnProperty(ctx.runtime, function.var_ref_names[var_ref_idx]) orelse return false;
     return desc.kind == .data and (desc.writable orelse false);
 }
 
@@ -643,7 +643,7 @@ pub fn varRefStoreWritableForFastPath(
     const slot = frame.var_refs[store.idx];
     if (varRefCellFromValue(slot)) |cell| {
         if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return false;
-        const stored = cell.varRefValueSlot().* orelse return false;
+        const stored = cell.varRefValue();
         return !stored.isUninitialized();
     }
     if (slot.isUninitialized()) return false;
@@ -730,8 +730,7 @@ fn simpleCapture0PostIncReturn(rt: *core.JSRuntime, captures: []const core.JSVal
     if (args.len != 0 or captures.len == 0) return null;
     const cell = varRefCellFromValue(captures[0]) orelse return null;
     if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return null;
-    const slot = cell.varRefValueSlot();
-    const current_value = slot.* orelse return null;
+    const current_value = cell.varRefValue();
     const current = current_value.asInt32() orelse return null;
     const updated = fastInt32Add(current, 1);
     try cell.setVarRefValue(rt, updated);
@@ -821,7 +820,7 @@ pub fn slotValueBorrowed(slot: core.JSValue) core.JSValue {
     var depth: usize = 0;
     while (depth < 16) : (depth += 1) {
         const cell = varRefCellFromValue(current) orelse return current;
-        current = cell.varRefValueSlot().* orelse return core.JSValue.undefinedValue();
+        current = cell.varRefValue();
     }
     return current;
 }
@@ -1552,7 +1551,7 @@ fn functionHasDynamicScopeBindings(function: *const bytecode.Bytecode, frame: *c
     if (function.var_ref_names.len != 0 or frame.var_refs.len != 0) return true;
     const function_object = objectFromValue(frame.current_function) orelse return false;
     if (function_object.functionCapturesSlot().*.len != 0) return true;
-    if (function_object.functionEvalLocalNamesSlot().*.len != 0) return true;
+    if (function_object.functionEvalLocalNames().len != 0) return true;
     if (function_object.functionEvalParentFunction() != null) return true;
     return false;
 }
@@ -1573,8 +1572,8 @@ fn parentFunctionEvalBindingShadowsGlobal(rt: *core.JSRuntime, frame: *const fra
     const function_object = objectFromValue(frame.current_function) orelse return false;
     const parent_value = function_object.functionEvalParentFunction() orelse return false;
     const parent_object = objectFromValue(parent_value) orelse return false;
-    const names = parent_object.functionEvalLocalNamesSlot().*;
-    const refs = parent_object.functionEvalLocalRefsSlot().*;
+    const names = parent_object.functionEvalLocalNames();
+    const refs = parent_object.functionEvalLocalRefs();
     const count = @min(names.len, refs.len);
     for (names[0..count]) |name| {
         if (call_runtime.atomIdOrNameEql(rt, name, atom_id)) return true;
@@ -1608,9 +1607,9 @@ pub fn frameHasVarRefBinding(function: *const bytecode.Bytecode, frame: *const f
 
 pub fn denseArrayModFieldInt32Increments(rt: *core.JSRuntime, array_value: core.JSValue, field_atom: core.Atom, modulus: usize) ?DenseArrayModFieldIncrements {
     const array_object = objectFromValue(array_value) orelse return null;
-    if (array_object.proxyTarget() != null or array_object.exotic != null) return null;
+    if (array_object.proxyTarget() != null or array_object.hasExoticMethods()) return null;
     if (!array_object.flags.is_array or array_object.arrayElementStorageMode() != .dense) return null;
-    if (modulus > @as(usize, @intCast(array_object.length))) return null;
+    if (modulus > @as(usize, @intCast(array_object.arrayLength()))) return null;
     const elements = array_object.arrayElements();
     if (modulus > elements.len) return null;
     var increments = DenseArrayModFieldIncrements{ .values = undefined, .len = modulus };
@@ -1668,7 +1667,7 @@ fn autoInitCollectionNativeBuiltinMatches(info: core.property.AutoInit, expected
 }
 
 pub fn ownPrototypeEntryIsNativeBuiltinDefault(proto: *const core.Object, atom_id: core.Atom, domain: core.function.NativeBuiltinDomain, expected_id: u32) bool {
-    if (proto.exotic != null) return false;
+    if (proto.hasExoticMethods()) return false;
     for (proto.shapeProps(), 0..) |prop, property_index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
@@ -1683,7 +1682,7 @@ pub fn ownPrototypeEntryIsNativeBuiltinDefault(proto: *const core.Object, atom_i
 }
 
 fn ownPrototypeEntryIsCollectionNativeBuiltinDefault(proto: *const core.Object, atom_id: core.Atom, expected_id: u32, owner_class: core.ClassId) bool {
-    if (proto.exotic != null) return false;
+    if (proto.hasExoticMethods()) return false;
     for (proto.shapeProps(), 0..) |prop, property_index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
@@ -1735,14 +1734,8 @@ pub fn fastDenseArrayElementValue(value: core.JSValue, key: core.JSValue) ?core.
     const index_i32 = key.asInt32() orelse return null;
     if (index_i32 < 0) return null;
     const object = objectFromValue(value) orelse return null;
-    if (object.proxyTarget() != null or object.exotic != null) return null;
-    if (!object.flags.is_array or object.arrayElementStorageMode() != .dense) return null;
     const index: u32 = @intCast(index_i32);
-    const atom_id = core.atom.atomFromUInt32(index);
-    if (object.properties.len != 0 and object.findProperty(atom_id) != null) return null;
-    const elements = object.arrayElements();
-    if (@as(usize, @intCast(index_i32)) >= elements.len) return null;
-    return elements[@intCast(index_i32)].dup();
+    return object.fastArrayElementDup(index);
 }
 
 pub fn fastInt32Add(lhs: i32, rhs: i32) core.JSValue {
@@ -1776,12 +1769,8 @@ pub fn stringFromValue(value: core.JSValue) ?*core.string.String {
     return @fieldParentPtr("header", header);
 }
 
-fn varRefCellFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
-    if (object.class_payload_kind != .var_ref) return null;
-    return object;
+fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
+    return core.VarRef.fromValue(value);
 }
 
 fn readInt(comptime T: type, bytes: []const u8) T {

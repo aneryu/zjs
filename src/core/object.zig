@@ -11,6 +11,7 @@ const profile = @import("profile.zig");
 const runtime_mod = @import("runtime.zig");
 const shape = @import("shape.zig");
 const string = @import("string.zig");
+const var_ref_mod = @import("var_ref.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 const function_bytecode_mod = @import("function_bytecode.zig");
@@ -226,6 +227,7 @@ pub const IteratorPayload = struct {
     zip_keys: ?JSValue = null,
     atom_keys: []atom.Atom = &.{},
     index: usize = 0,
+    length: u32 = 0,
     zip_alive: usize = 0,
     kind: u8 = 0,
     zip_mode: u8 = 0,
@@ -716,18 +718,6 @@ pub const RealmPayload = struct {
     }
 };
 
-pub const ArrayPayload = struct {
-    storage_mode: ArrayStorageMode = .dense,
-    elements: []JSValue = &.{},
-    elements_capacity: usize = 0,
-    realm_global_ptr: ?*Object = null,
-
-    pub fn destroy(self: *ArrayPayload, rt: *JSRuntime) void {
-        destroyValueSliceWithCapacity(rt, &self.elements, &self.elements_capacity);
-        self.storage_mode = .dense;
-    }
-};
-
 pub const PromisePayload = struct {
     result: ?JSValue = null,
     reaction_callback: ?JSValue = null,
@@ -832,12 +822,8 @@ pub const RegExpLegacyStatics = struct {
     }
 };
 
-pub const FunctionPayload = struct {
+pub const FunctionRarePayload = struct {
     source: ?JSValue = null,
-    host_function_kind: i32 = 0,
-    native_function_id: i32 = 0,
-    external_host_function_id: u32 = 0,
-    native_dispatch_name: atom.Atom = atom.null_atom,
     array_builtin_marker: ArrayBuiltinMarker = .none,
     typed_array_builtin_marker: TypedArrayBuiltinMarker = .none,
     array_iterator_kind: u8 = 0,
@@ -856,9 +842,7 @@ pub const FunctionPayload = struct {
     iterator_wrap_method: u8 = 0,
     async_from_sync_unwrap_done: u8 = 0,
     primitive_prototypes: [primitive_prototype_slot_count]?JSValue = @splat(null),
-    bytecode: ?JSValue = null,
     class_fields_init: ?JSValue = null,
-    captures: []JSValue = &.{},
     eval_local_names: []atom.Atom = &.{},
     eval_local_refs: []JSValue = &.{},
     eval_parent_function: ?JSValue = null,
@@ -867,11 +851,9 @@ pub const FunctionPayload = struct {
     arrow_constructor_this: ?JSValue = null,
     arrow_new_target: ?JSValue = null,
     super_constructor: ?JSValue = null,
-    home_object: ?*Object = null,
     private_remap_from: []atom.Atom = &.{},
     private_remap_to: []atom.Atom = &.{},
     realm_global: ?JSValue = null,
-    realm_global_ptr: ?*Object = null,
     proxy_revoke_target: ?JSValue = null,
     promise_capability_slot: ?JSValue = null,
     promise_resolving_target: ?JSValue = null,
@@ -898,14 +880,9 @@ pub const FunctionPayload = struct {
     realm_type_error_constructor: ?JSValue = null,
     regexp_legacy_statics: ?*RegExpLegacyStatics = null,
 
-    pub fn destroy(self: *FunctionPayload, rt: *JSRuntime) void {
+    pub fn destroy(self: *FunctionRarePayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.source);
-        destroyOptionalValue(rt, &self.bytecode);
         destroyOptionalValue(rt, &self.class_fields_init);
-        const native_dispatch_name = self.native_dispatch_name;
-        self.native_dispatch_name = atom.null_atom;
-        rt.atoms.free(native_dispatch_name);
-        destroyValueSlice(rt, &self.captures);
         destroyAtomSlice(rt, &self.eval_local_names);
         destroyValueSlice(rt, &self.eval_local_refs);
         destroyOptionalValue(rt, &self.eval_parent_function);
@@ -914,7 +891,6 @@ pub const FunctionPayload = struct {
         destroyOptionalValue(rt, &self.arrow_constructor_this);
         destroyOptionalValue(rt, &self.arrow_new_target);
         destroyOptionalValue(rt, &self.super_constructor);
-        destroyOptionalObjectRef(rt, &self.home_object);
         destroyAtomSlice(rt, &self.private_remap_from);
         destroyAtomSlice(rt, &self.private_remap_to);
         destroyOptionalValue(rt, &self.realm_global);
@@ -941,6 +917,35 @@ pub const FunctionPayload = struct {
             rt.memory.destroy(RegExpLegacyStatics, legacy);
         }
         destroyOptionalValueSlots(rt, &self.primitive_prototypes);
+        self.* = .{};
+    }
+};
+
+pub const FunctionPayload = struct {
+    host_function_kind: i32 = 0,
+    native_function_id: i32 = 0,
+    external_host_function_id: u32 = 0,
+    native_dispatch_name: atom.Atom = atom.null_atom,
+    typed_array_element_size: u32 = 0,
+    typed_array_kind: u8 = 0,
+    bytecode: ?JSValue = null,
+    captures: []JSValue = &.{},
+    home_object: ?*Object = null,
+    realm_global_ptr: ?*Object = null,
+    rare: ?*FunctionRarePayload = null,
+
+    pub fn destroy(self: *FunctionPayload, rt: *JSRuntime) void {
+        destroyOptionalValue(rt, &self.bytecode);
+        const native_dispatch_name = self.native_dispatch_name;
+        self.native_dispatch_name = atom.null_atom;
+        rt.atoms.free(native_dispatch_name);
+        destroyValueSlice(rt, &self.captures);
+        destroyOptionalObjectRef(rt, &self.home_object);
+        if (self.rare) |rare| {
+            self.rare = null;
+            rare.destroy(rt);
+            rt.memory.destroy(FunctionRarePayload, rare);
+        }
         self.* = .{};
     }
 };
@@ -1036,11 +1041,6 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, payload_kind: class.PayloadKi
             typed.destroy(rt);
             rt.memory.destroy(VarRefPayload, typed);
         },
-        .array => {
-            const typed: *ArrayPayload = @ptrCast(@alignCast(ptr));
-            typed.destroy(rt);
-            rt.memory.destroy(ArrayPayload, typed);
-        },
         .promise => {
             const typed: *PromisePayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
@@ -1065,11 +1065,12 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, payload_kind: class.PayloadKi
     }
 }
 
-pub const ObjectFlags = packed struct(u16) {
+pub const ObjectFlags = packed struct(u32) {
     null_prototype: bool = false,
     extensible: bool = true,
     immutable_prototype: bool = false,
     is_array: bool = false,
+    fast_array: bool = false,
     is_proxy: bool = false,
     is_global: bool = false,
     is_html_dda: bool = false,
@@ -1078,30 +1079,73 @@ pub const ObjectFlags = packed struct(u16) {
     is_with_environment: bool = false,
     is_prototype: bool = false,
     reserved_class_payload_finalizer_slot: bool = false,
+    has_exotic_methods: bool = false,
     /// Set once the object has been assigned a weak id in the runtime's weak
     /// identity registry, so destruction can skip the registry lookup for the
     /// common case of objects that were never weakly referenced.
     has_weak_id: bool = false,
     is_borrowed_reference_holder: bool = false,
-    _padding: u2 = 0,
+    has_property_storage: bool = false,
+    needs_slow_property: bool = false,
+    _padding: u14 = 0,
 };
+
+var test_standard_exotic_methods: [class.ids.init_count]?*const ExoticMethods = @splat(null);
+
+fn classHasExoticMethods(rt: *const JSRuntime, class_id: class.ClassId, class_record: ?class.Record) bool {
+    if (exoticMethodsForClassId(class_id) != null) return true;
+    if (class_record) |record| return record.has_exotic or record.exotic_methods != null;
+    const record = rt.classes.record(class_id) orelse return false;
+    return record.has_exotic or record.exotic_methods != null;
+}
+
+fn classNeedsSlowPropertyAccess(class_id: class.ClassId, has_exotic_methods: bool) bool {
+    if (has_exotic_methods) return true;
+    return switch (class_id) {
+        class.ids.array,
+        class.ids.mapped_arguments,
+        class.ids.module_ns,
+        class.ids.proxy,
+        class.ids.regexp,
+        class.ids.uint8c_array,
+        class.ids.int8_array,
+        class.ids.uint8_array,
+        class.ids.int16_array,
+        class.ids.uint16_array,
+        class.ids.int32_array,
+        class.ids.uint32_array,
+        class.ids.big_int64_array,
+        class.ids.big_uint64_array,
+        class.ids.float16_array,
+        class.ids.float32_array,
+        class.ids.float64_array,
+        class.ids.dataview,
+        => true,
+        else => false,
+    };
+}
+
+fn exoticMethodsForClassId(class_id: class.ClassId) ?*const ExoticMethods {
+    if (builtin.is_test and class_id < test_standard_exotic_methods.len) {
+        if (test_standard_exotic_methods[class_id]) |methods| return methods;
+    }
+    return switch (class_id) {
+        else => null,
+    };
+}
 
 pub const Object = struct {
     header: gc.GCObjectHeader,
-    gc: gc.GcNode = .{},
-    class_id: class.ClassId,
     class_payload: class.Payload = null,
-    class_payload_kind: class.PayloadKind = .none,
-    owner_runtime: *JSRuntime,
     shape_ref: *shape.Shape,
     prototype: ?*Object = null,
-    flags: ObjectFlags = .{},
-    cached_iterator_next: ?JSValue = null,
-    length: u32 = 0,
     properties: []property.Entry = &.{},
-
-    property_capacity: usize = 0,
-    exotic: ?*ExoticMethods = null,
+    array_values: [*]JSValue = undefined,
+    array_count: u32 = 0,
+    array_capacity: u32 = 0,
+    class_id: class.ClassId,
+    flags: ObjectFlags = .{},
+    class_payload_kind: class.PayloadKind = .none,
 
     pub fn expect(val: JSValue) !*Object {
         const header = val.refHeader() orelse return error.TypeError;
@@ -1121,9 +1165,9 @@ pub const Object = struct {
         const class_record = rt.classes.record(class_id);
         const inline_layout = inlineClassPayloadLayout(class_record);
         const self = if (inline_layout) |layout| blk: {
-            const bytes = try rt.memory.allocAlignedBytes(layout.total_size, layout.allocation_alignment);
+            const bytes = try rt.allocRuntimeAlignedBytes(layout.total_size, layout.allocation_alignment);
             break :blk @as(*Object, @ptrCast(@alignCast(bytes.ptr)));
-        } else try rt.memory.create(Object);
+        } else try rt.createRuntime(Object);
         var initialized = false;
         errdefer {
             if (initialized) {
@@ -1140,14 +1184,18 @@ pub const Object = struct {
         // createObjectRootWithPropertyCapacity → ~1:1 shapes + per-object
         // appendProperty/rehashShape). The property VALUE array is still
         // pre-reserved below; only the SHAPE is shared.
-        const shape_ref = try rt.shapes.createObjectRoot(proto_id);
+        const property_capacity = shape.propertyCapacityForNeeded(own_property_capacity);
+        const shape_ref = if (property_capacity == 0)
+            try rt.shapes.createObjectRoot(proto_id)
+        else
+            try rt.shapes.createObjectRootWithPropertyCapacity(proto_id, property_capacity);
         var shape_owned = true;
         errdefer if (shape_owned) rt.shapes.release(shape_ref);
         var property_storage: []property.Entry = &.{};
         var property_storage_owned = false;
         errdefer if (property_storage_owned) rt.memory.free(property.Entry, property_storage);
-        if (own_property_capacity != 0) {
-            property_storage = try rt.memory.alloc(property.Entry, own_property_capacity);
+        if (property_capacity != 0) {
+            property_storage = try rt.allocRuntime(property.Entry, property_capacity);
             property_storage_owned = true;
         }
         var class_payload: class.Payload = null;
@@ -1158,126 +1206,119 @@ pub const Object = struct {
             class.standardPayloadKind(class_id);
         switch (payload_kind) {
             .iterator => {
-                const payload = try rt.memory.create(IteratorPayload);
+                const payload = try rt.createRuntime(IteratorPayload);
                 errdefer rt.memory.destroy(IteratorPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .iterator;
             },
             .collection => {
-                const payload = try rt.memory.create(CollectionPayload);
+                const payload = try rt.createRuntime(CollectionPayload);
                 errdefer rt.memory.destroy(CollectionPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .collection;
             },
             .buffer => {
-                const payload = try rt.memory.create(BufferPayload);
+                const payload = try rt.createRuntime(BufferPayload);
                 errdefer rt.memory.destroy(BufferPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .buffer;
             },
             .typed_array => {
-                const payload = try rt.memory.create(TypedArrayPayload);
+                const payload = try rt.createRuntime(TypedArrayPayload);
                 errdefer rt.memory.destroy(TypedArrayPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .typed_array;
             },
             .regexp => {
-                const payload = try rt.memory.create(RegExpPayload);
+                const payload = try rt.createRuntime(RegExpPayload);
                 errdefer rt.memory.destroy(RegExpPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .regexp;
             },
             .bound_function => {
-                const payload = try rt.memory.create(BoundFunctionPayload);
+                const payload = try rt.createRuntime(BoundFunctionPayload);
                 errdefer rt.memory.destroy(BoundFunctionPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .bound_function;
             },
             .proxy => {
-                const payload = try rt.memory.create(ProxyPayload);
+                const payload = try rt.createRuntime(ProxyPayload);
                 errdefer rt.memory.destroy(ProxyPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .proxy;
             },
             .arguments => {
-                const payload = try rt.memory.create(ArgumentsPayload);
+                const payload = try rt.createRuntime(ArgumentsPayload);
                 errdefer rt.memory.destroy(ArgumentsPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .arguments;
             },
             .object_data => {
-                const payload = try rt.memory.create(ObjectDataPayload);
+                const payload = try rt.createRuntime(ObjectDataPayload);
                 errdefer rt.memory.destroy(ObjectDataPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .object_data;
             },
             .var_ref => {
-                const payload = try rt.memory.create(VarRefPayload);
+                const payload = try rt.createRuntime(VarRefPayload);
                 errdefer rt.memory.destroy(VarRefPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .var_ref;
             },
-            .array => {
-                const payload = try rt.memory.create(ArrayPayload);
-                errdefer rt.memory.destroy(ArrayPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .array;
-            },
             .promise => {
-                const payload = try rt.memory.create(PromisePayload);
+                const payload = try rt.createRuntime(PromisePayload);
                 errdefer rt.memory.destroy(PromisePayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .promise;
             },
             .generator => {
-                const payload = try rt.memory.create(GeneratorPayload);
+                const payload = try rt.createRuntime(GeneratorPayload);
                 errdefer rt.memory.destroy(GeneratorPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .generator;
             },
             .function => {
-                const payload = try rt.memory.create(FunctionPayload);
+                const payload = try rt.createRuntime(FunctionPayload);
                 errdefer rt.memory.destroy(FunctionPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .function;
             },
             .module_namespace => {
-                const payload = try rt.memory.create(ModuleNamespacePayload);
+                const payload = try rt.createRuntime(ModuleNamespacePayload);
                 errdefer rt.memory.destroy(ModuleNamespacePayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .module_namespace;
             },
             .finalization_registry => {
-                const payload = try rt.memory.create(FinalizationRegistryPayload);
+                const payload = try rt.createRuntime(FinalizationRegistryPayload);
                 errdefer rt.memory.destroy(FinalizationRegistryPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .finalization_registry;
             },
             .std_file => {
-                const payload = try rt.memory.create(StdFilePayload);
+                const payload = try rt.createRuntime(StdFilePayload);
                 errdefer rt.memory.destroy(StdFilePayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
                 class_payload_kind = .std_file;
             },
             .disposable_stack => {
-                const payload = try rt.memory.create(DisposableStackPayload);
+                const payload = try rt.createRuntime(DisposableStackPayload);
                 errdefer rt.memory.destroy(DisposableStackPayload, payload);
                 payload.* = .{};
                 class_payload = @ptrCast(payload);
@@ -1304,17 +1345,21 @@ pub const Object = struct {
                 rt.any_prototype_may_have_indexed_properties = true;
             }
         }
+        const has_exotic_methods = classHasExoticMethods(rt, class_id, class_record);
         self.* = .{
             .header = .{ .kind = .object },
             .class_id = class_id,
             .class_payload = class_payload,
             .class_payload_kind = class_payload_kind,
-            .owner_runtime = rt,
-            .flags = .{ .reserved_class_payload_finalizer_slot = reserved_class_payload_finalizer_slot },
+            .flags = .{
+                .reserved_class_payload_finalizer_slot = reserved_class_payload_finalizer_slot,
+                .has_exotic_methods = has_exotic_methods,
+                .needs_slow_property = classNeedsSlowPropertyAccess(class_id, has_exotic_methods),
+                .has_property_storage = property_capacity != 0,
+            },
             .shape_ref = shape_ref,
             .prototype = prototype,
             .properties = property_storage[0..0],
-            .property_capacity = own_property_capacity,
         };
         property_storage_owned = false;
         reserved_class_payload_finalizer_slot = false;
@@ -1368,12 +1413,16 @@ pub const Object = struct {
     pub fn createArray(rt: *JSRuntime, prototype: ?*Object) !*Object {
         const self = try create(rt, class.ids.array, prototype);
         self.flags.is_array = true;
+        self.flags.fast_array = true;
+        self.flags.needs_slow_property = true;
         return self;
     }
 
     pub fn createArrayWithOwnPropertyCapacity(rt: *JSRuntime, prototype: ?*Object, capacity: usize) !*Object {
         const self = try createWithOwnPropertyCapacity(rt, class.ids.array, prototype, capacity);
         self.flags.is_array = true;
+        self.flags.fast_array = true;
+        self.flags.needs_slow_property = true;
         return self;
     }
 
@@ -1381,24 +1430,67 @@ pub const Object = struct {
         return JSValue.object(&self.header);
     }
 
-    pub fn cachedIteratorNextSlot(self: *Object) *?JSValue {
-        return &self.cached_iterator_next;
+    pub fn cachedIteratorNextSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        if (self.cachedIteratorNextSlotIfPresent(rt)) |slot| return slot;
+        const len = rt.cached_iterator_next_entries.len;
+        if (len == rt.cached_iterator_next_entries_capacity) {
+            var next_capacity = if (rt.cached_iterator_next_entries_capacity == 0) @as(usize, 4) else rt.cached_iterator_next_entries_capacity * 2;
+            while (next_capacity < len + 1) : (next_capacity *= 2) {}
+            const next = try rt.allocRuntime(runtime_mod.CachedIteratorNextEntry, next_capacity);
+            errdefer rt.memory.free(runtime_mod.CachedIteratorNextEntry, next);
+            @memcpy(next[0..len], rt.cached_iterator_next_entries);
+            const old_capacity = rt.cached_iterator_next_entries_capacity;
+            const old_entries: []runtime_mod.CachedIteratorNextEntry = if (old_capacity != 0) rt.cached_iterator_next_entries.ptr[0..old_capacity] else rt.cached_iterator_next_entries[0..0];
+            rt.cached_iterator_next_entries = next[0..len];
+            rt.cached_iterator_next_entries_capacity = next_capacity;
+            if (old_capacity != 0) rt.memory.free(runtime_mod.CachedIteratorNextEntry, old_entries);
+        }
+        rt.cached_iterator_next_entries = rt.cached_iterator_next_entries.ptr[0 .. len + 1];
+        rt.cached_iterator_next_entries[len] = .{ .object = self };
+        return &rt.cached_iterator_next_entries[len].value;
     }
 
-    pub fn cachedIteratorNext(self: *const Object) ?JSValue {
-        return self.cached_iterator_next;
+    pub fn cachedIteratorNext(self: *const Object, rt: *JSRuntime) ?JSValue {
+        const slot = self.cachedIteratorNextSlotIfPresent(rt) orelse return null;
+        return slot.*;
     }
 
     pub fn clearCachedIteratorNext(self: *Object, rt: *JSRuntime) void {
-        const old_cached = self.cached_iterator_next;
-        self.cached_iterator_next = null;
+        const index = cachedIteratorNextEntryIndex(rt, self) orelse return;
+        const old_cached = rt.cached_iterator_next_entries[index].value;
+        rt.cached_iterator_next_entries[index].value = null;
+        removeCachedIteratorNextEntryAt(rt, index);
         if (old_cached) |stored| stored.free(rt);
+    }
+
+    fn clearCachedIteratorNextWithoutFree(rt: *JSRuntime, self: *Object) void {
+        const index = cachedIteratorNextEntryIndex(rt, self) orelse return;
+        rt.cached_iterator_next_entries[index].value = null;
+        removeCachedIteratorNextEntryAt(rt, index);
+    }
+
+    fn cachedIteratorNextSlotIfPresent(self: *const Object, rt: *JSRuntime) ?*?JSValue {
+        const index = cachedIteratorNextEntryIndex(rt, self) orelse return null;
+        return &rt.cached_iterator_next_entries[index].value;
+    }
+
+    fn cachedIteratorNextEntryIndex(rt: *const JSRuntime, self: *const Object) ?usize {
+        for (rt.cached_iterator_next_entries, 0..) |entry, index| {
+            if (entry.object == self) return index;
+        }
+        return null;
+    }
+
+    fn removeCachedIteratorNextEntryAt(rt: *JSRuntime, index: usize) void {
+        const last_index = rt.cached_iterator_next_entries.len - 1;
+        if (index != last_index) rt.cached_iterator_next_entries[index] = rt.cached_iterator_next_entries[last_index];
+        rt.cached_iterator_next_entries = rt.cached_iterator_next_entries.ptr[0..last_index];
     }
 
     pub fn ensureSharedLazyNativeFunctionCache(self: *Object, rt: *JSRuntime) !void {
         const payload = try self.ensureRealmPayload(rt);
         if (payload.shared_lazy_native_functions != null) return;
-        const cache = try rt.memory.create([runtime_mod.shared_lazy_native_function_slots]?JSValue);
+        const cache = try rt.createRuntime([runtime_mod.shared_lazy_native_function_slots]?JSValue);
         cache.* = @splat(null);
         payload.shared_lazy_native_functions = cache;
     }
@@ -1406,7 +1498,7 @@ pub const Object = struct {
     pub fn ensureOrdinaryPayload(self: *Object, rt: *JSRuntime) !*OrdinaryPayload {
         if (self.ordinaryPayload()) |payload| return payload;
         std.debug.assert(self.class_payload == null);
-        const payload = try rt.memory.create(OrdinaryPayload);
+        const payload = try rt.createRuntime(OrdinaryPayload);
         payload.* = .{};
         self.class_payload = @ptrCast(payload);
         self.class_payload_kind = .ordinary;
@@ -1423,11 +1515,33 @@ pub const Object = struct {
 
     pub fn ensureRealmPayload(self: *Object, rt: *JSRuntime) !*RealmPayload {
         if (self.realmPayload()) |payload| return payload;
-        const payload = try rt.memory.create(RealmPayload);
+        const payload = try rt.createRuntime(RealmPayload);
         payload.* = .{};
         self.class_payload = @ptrCast(payload);
         self.class_payload_kind = .realm;
         return payload;
+    }
+
+    fn ensureFunctionRarePayload(self: *Object, rt: *JSRuntime) !*FunctionRarePayload {
+        const payload = self.functionPayload() orelse {
+            std.debug.assert(self.class_payload_kind == .function);
+            return error.TypeError;
+        };
+        if (payload.rare) |rare| return rare;
+        const rare = try rt.createRuntime(FunctionRarePayload);
+        rare.* = .{};
+        payload.rare = rare;
+        return rare;
+    }
+
+    fn functionRarePayload(self: *Object) ?*FunctionRarePayload {
+        const payload = self.functionPayload() orelse return null;
+        return payload.rare;
+    }
+
+    fn functionRarePayloadConst(self: *const Object) ?*const FunctionRarePayload {
+        const payload = self.functionPayloadConst() orelse return null;
+        return payload.rare;
     }
 
     pub fn installExternalClassPayload(self: *Object, payload: *anyopaque) void {
@@ -1527,7 +1641,7 @@ pub const Object = struct {
         if (payload.is_stdio) return;
         payload.file = null;
 
-        const job = rt.memory.create(DeferredStdFileClose) catch {
+        const job = rt.createRuntime(DeferredStdFileClose) catch {
             _ = closeStdFileHandle(file, payload.is_popen);
             return;
         };
@@ -1549,17 +1663,17 @@ pub const Object = struct {
         self.enqueueDeferredStdFileClose(rt);
         if (!self.finalizeInlineClassPayload(rt)) self.enqueueClassPayloadFinalizer(rt);
         const old_properties = self.properties;
-        const old_property_capacity = self.property_capacity;
+        const old_property_capacity = self.propertyStorageCapacity();
         const old_shape_props = self.shape_ref.props[0..@min(self.shape_ref.prop_count, old_properties.len)];
         self.properties = &.{};
-        self.property_capacity = 0;
+        self.flags.has_property_storage = false;
         for (old_properties, 0..) |entry, index| {
             const entry_atom = if (index < old_shape_props.len) old_shape_props[index].atom_id else atom.null_atom;
             destroyPropertySlot(rt, entry_atom, entry.slot);
         }
         if (old_property_capacity != 0) rt.memory.free(property.Entry, old_properties.ptr[0..old_property_capacity]);
         self.destroyOrdinaryPayload(rt);
-        self.destroyArrayPayload(rt);
+        self.destroyArrayElements(rt);
         self.destroyBufferPayload(rt);
         self.destroyTypedArrayPayload(rt);
         self.destroyObjectDataPayload(rt);
@@ -1578,15 +1692,7 @@ pub const Object = struct {
         self.destroyRealmPayload(rt);
         self.destroyPromisePayload(rt);
         self.destroyRegExpPayload(rt);
-        if (self.exotic) |ex| {
-            self.exotic = null;
-            rt.memory.destroy(ExoticMethods, ex);
-        }
-        const cached_iterator_next = self.cached_iterator_next;
-        self.cached_iterator_next = null;
-        if (cached_iterator_next) |stored| {
-            if (rt.gc.phase != .deinit) stored.free(rt);
-        }
+        if (rt.gc.phase != .deinit) self.clearCachedIteratorNext(rt) else clearCachedIteratorNextWithoutFree(rt, self);
         const old_prototype = self.prototype;
         self.prototype = null;
         if (old_prototype) |proto| {
@@ -1726,7 +1832,7 @@ pub const Object = struct {
         var read_index: usize = 0;
         while (read_index < rt.borrowed_reference_holders.len) : (read_index += 1) {
             const current = rt.borrowed_reference_holders[read_index];
-            if (current.header.rc != 0 and current.hasBorrowedReferences()) {
+            if (current.header.rc != 0 and current.hasBorrowedReferences(rt)) {
                 if (write_index != read_index) rt.borrowed_reference_holders[write_index] = current;
                 write_index += 1;
                 continue;
@@ -1756,10 +1862,10 @@ pub const Object = struct {
 
     pub fn pruneBorrowedReferenceHolderIfEmpty(self: *Object, rt: *JSRuntime) void {
         if (!self.flags.is_borrowed_reference_holder) return;
-        if (!self.hasBorrowedReferences()) rt.unregisterBorrowedReferenceHolder(self);
+        if (!self.hasBorrowedReferences(rt)) rt.unregisterBorrowedReferenceHolder(self);
     }
 
-    fn hasBorrowedReferences(self: *const Object) bool {
+    fn hasBorrowedReferences(self: *const Object, rt: *JSRuntime) bool {
         if (self.objectDataPayloadConst()) |payload| {
             if (payload.weak_target_identity != null) return true;
         }
@@ -1773,7 +1879,7 @@ pub const Object = struct {
         for (self.properties) |entry| {
             switch (entry.slot) {
                 .auto_init => |id| {
-                    const info = property.autoInitAt(self.owner_runtime, id).*;
+                    const info = property.autoInitAt(rt, id).*;
                     if (info.host_function_realm_global != 0) return true;
                 },
                 else => {},
@@ -1917,7 +2023,6 @@ pub const Object = struct {
         if (self.finalizationRegistryPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
         if (self.stdFilePayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
         if (self.disposableStackPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-        if (self.arrayPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
         if (self.promisePayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
         if (self.generatorPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
         if (self.functionPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
@@ -1943,7 +2048,7 @@ pub const Object = struct {
         }
     }
 
-    pub const post_a_object_size_baseline: usize = 256;
+    pub const post_a_object_size_baseline: usize = 192;
     comptime {
         std.debug.assert(@sizeOf(Object) <= post_a_object_size_baseline / 2);
     }
@@ -1952,6 +2057,68 @@ pub const Object = struct {
         if (self.iteratorPayload()) |payload| return &payload.target;
         std.debug.assert(self.class_payload_kind == .iterator);
         unreachable;
+    }
+
+    pub fn iteratorLengthSlot(self: *Object) *u32 {
+        if (self.iteratorPayload()) |payload| return &payload.length;
+        std.debug.assert(self.class_payload_kind == .iterator);
+        unreachable;
+    }
+
+    pub fn iteratorLength(self: *const Object) u32 {
+        if (self.iteratorPayloadConst()) |payload| return payload.length;
+        return 0;
+    }
+
+    pub fn setIteratorLength(self: *Object, length: u32) void {
+        self.iteratorLengthSlot().* = length;
+    }
+
+    pub fn arrayLengthSlot(self: *Object) *u32 {
+        std.debug.assert(self.flags.is_array);
+        return &self.array_count;
+    }
+
+    pub fn arrayLength(self: *const Object) u32 {
+        return if (self.flags.is_array) self.array_count else 0;
+    }
+
+    pub fn setArrayLength(self: *Object, length: u32) void {
+        std.debug.assert(self.flags.is_array);
+        if (self.flags.fast_array and @as(usize, @intCast(length)) > self.array_capacity) {
+            std.debug.assert(self.array_count == 0);
+            self.flags.fast_array = false;
+        }
+        self.array_count = length;
+    }
+
+    pub fn hasExoticMethods(self: *const Object) bool {
+        return self.flags.has_exotic_methods;
+    }
+
+    pub inline fn needsSlowPropertyAccess(self: *const Object) bool {
+        return self.flags.needs_slow_property;
+    }
+
+    pub fn exoticMethods(self: *const Object, rt: *const JSRuntime) ?*const ExoticMethods {
+        if (!self.flags.has_exotic_methods) return null;
+        return exoticMethodsForClassId(self.class_id) orelse blk: {
+            const record = rt.classes.record(self.class_id) orelse return null;
+            const raw = record.exotic_methods orelse return null;
+            break :blk @ptrCast(@alignCast(raw));
+        };
+    }
+
+    pub fn installClassExoticMethods(rt: *JSRuntime, class_id: class.ClassId, methods: *const ExoticMethods) void {
+        if (!builtin.is_test) @compileError("installClassExoticMethods is only available in tests");
+        if (class_id < class.ids.init_count) {
+            test_standard_exotic_methods[class_id] = methods;
+            return;
+        }
+        if (class_id < rt.classes.records.len) {
+            rt.classes.records[class_id].has_exotic = true;
+            rt.classes.records[class_id].exotic_methods = @ptrCast(methods);
+        }
     }
 
     pub fn iteratorTarget(self: *const Object) ?JSValue {
@@ -2137,7 +2304,7 @@ pub const Object = struct {
         if (next_capacity < 8) next_capacity = 8;
         while (next_capacity < min_capacity) next_capacity *= 2;
 
-        const next = try rt.memory.alloc(CollectionEntry, next_capacity);
+        const next = try rt.allocRuntime(CollectionEntry, next_capacity);
         errdefer rt.memory.free(CollectionEntry, next);
         @memcpy(next[0..entries_slot.*.len], entries_slot.*);
         const old_entries = entries_slot.*;
@@ -2192,7 +2359,7 @@ pub const Object = struct {
         if (next_capacity < 4) next_capacity = 4;
         while (next_capacity < min_capacity) next_capacity *= 2;
 
-        const next = try rt.memory.alloc(WeakCollectionEntry, next_capacity);
+        const next = try rt.allocRuntime(WeakCollectionEntry, next_capacity);
         errdefer rt.memory.free(WeakCollectionEntry, next);
         @memcpy(next[0..entries_slot.*.len], entries_slot.*);
         const old_entries = entries_slot.*;
@@ -2281,7 +2448,7 @@ pub const Object = struct {
         if (next_capacity < 4) next_capacity = 4;
         while (next_capacity < min_capacity) next_capacity *= 2;
 
-        const next = try rt.memory.alloc(FinalizationRegistryCell, next_capacity);
+        const next = try rt.allocRuntime(FinalizationRegistryCell, next_capacity);
         errdefer rt.memory.free(FinalizationRegistryCell, next);
         @memcpy(next[0..payload.cells.len], payload.cells);
         const old_cells = payload.cells;
@@ -2393,7 +2560,7 @@ pub const Object = struct {
         };
         if (payload.resources.len == payload.resource_capacity) {
             const new_capacity = if (payload.resource_capacity == 0) @as(usize, 4) else payload.resource_capacity * 2;
-            const next = try rt.memory.alloc(DisposableResource, new_capacity);
+            const next = try rt.allocRuntime(DisposableResource, new_capacity);
             errdefer rt.memory.free(DisposableResource, next);
             if (payload.resources.len != 0) @memcpy(next[0..payload.resources.len], payload.resources);
             const old_resources = payload.resources;
@@ -2474,7 +2641,7 @@ pub const Object = struct {
     pub fn ensureVarRefPayload(self: *Object, rt: *JSRuntime) !*VarRefPayload {
         if (self.varRefPayload()) |payload| return payload;
         std.debug.assert(self.class_payload == null);
-        const payload = try rt.memory.create(VarRefPayload);
+        const payload = try rt.createRuntime(VarRefPayload);
         payload.* = .{};
         self.class_payload = @ptrCast(payload);
         self.class_payload_kind = .var_ref;
@@ -2559,51 +2726,51 @@ pub const Object = struct {
     }
 
     pub fn setFunctionPromiseCapabilitySlot(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseCapabilitySlotSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseCapabilitySlotSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseResolvingTarget(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseResolvingTargetSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseResolvingTargetSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseResolvingState(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseResolvingStateSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseResolvingStateSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseThenableTarget(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseThenableTargetSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseThenableTargetSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseThenableThis(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseThenableThisSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseThenableThisSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseThenableThen(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseThenableThenSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseThenableThenSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseReactionRecord(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseReactionRecordSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseReactionRecordSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseReactionValue(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseReactionValueSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseReactionValueSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseCombinatorState(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseCombinatorStateSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseCombinatorStateSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseFinallyPayload(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseFinallyPayloadSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseFinallyPayloadSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseFinallyCallback(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseFinallyCallbackSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseFinallyCallbackSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseFinallyConstructor(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, self.functionPromiseFinallyConstructorSlot(), next_value);
+        try self.setOptionalValueSlot(rt, try self.functionPromiseFinallyConstructorSlot(rt), next_value);
     }
 
     pub fn varRefValueSlot(self: *Object) *?JSValue {
@@ -2643,10 +2810,11 @@ pub const Object = struct {
 
     pub fn ensureTypedArrayPayload(self: *Object, rt: *JSRuntime) !void {
         if (self.typedArrayPayload() != null) return;
-        const payload = try rt.memory.create(TypedArrayPayload);
+        const payload = try rt.createRuntime(TypedArrayPayload);
         payload.* = .{};
         self.class_payload = @ptrCast(payload);
         self.class_payload_kind = .typed_array;
+        self.flags.needs_slow_property = true;
     }
 
     pub fn byteStorageSlot(self: *Object) *[]u8 {
@@ -2941,7 +3109,7 @@ pub const Object = struct {
                 return;
             }
 
-            const owned = try rt.memory.alloc(u8, bytecode.len);
+            const owned = try rt.allocRuntime(u8, bytecode.len);
             @memcpy(owned, bytecode);
             const old_bytecode = payload.compiled_bytecode;
             payload.compiled_bytecode = owned;
@@ -2990,10 +3158,12 @@ pub const Object = struct {
 
     pub fn ensureProxyPayload(self: *Object, rt: *JSRuntime) !void {
         if (self.proxyPayload() != null) return;
-        const payload = try rt.memory.create(ProxyPayload);
+        const payload = try rt.createRuntime(ProxyPayload);
         payload.* = .{};
         self.class_payload = @ptrCast(payload);
         self.class_payload_kind = .proxy;
+        self.flags.is_proxy = true;
+        self.flags.needs_slow_property = true;
     }
 
     pub fn proxyTargetSlot(self: *Object) *?JSValue {
@@ -3080,37 +3250,240 @@ pub const Object = struct {
         return target.value().dup();
     }
 
-    pub fn arrayStorageModeSlot(self: *Object) *ArrayStorageMode {
-        if (self.arrayPayload()) |payload| return &payload.storage_mode;
-        std.debug.assert(self.flags.is_array);
-        unreachable;
-    }
-
     pub fn arrayElementStorageMode(self: *const Object) ArrayStorageMode {
-        if (self.arrayPayloadConst()) |payload| return payload.storage_mode;
-        return .dense;
-    }
-
-    pub fn arrayElementsSlot(self: *Object) *[]JSValue {
-        if (self.arrayPayload()) |payload| return &payload.elements;
-        std.debug.assert(self.flags.is_array);
-        unreachable;
+        return if (self.flags.is_array and self.flags.fast_array) .dense else .sparse;
     }
 
     pub fn arrayElements(self: *const Object) []JSValue {
-        if (self.arrayPayloadConst()) |payload| return payload.elements;
-        return &.{};
+        if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return &.{};
+        std.debug.assert(self.array_capacity >= self.array_count);
+        return self.array_values[0..@as(usize, @intCast(self.array_count))];
     }
 
-    pub fn arrayElementsCapacitySlot(self: *Object) *usize {
-        if (self.arrayPayload()) |payload| return &payload.elements_capacity;
-        std.debug.assert(self.flags.is_array);
-        unreachable;
+    fn arrayElementsMut(self: *Object) []JSValue {
+        if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return &.{};
+        std.debug.assert(self.array_capacity >= self.array_count);
+        return self.array_values[0..@as(usize, @intCast(self.array_count))];
+    }
+
+    fn allocatedArrayElements(self: *Object) []JSValue {
+        if (!self.flags.is_array or self.array_capacity == 0) return &.{};
+        return self.array_values[0..@as(usize, @intCast(self.array_capacity))];
     }
 
     pub fn arrayElementsCapacity(self: *const Object) usize {
-        if (self.arrayPayloadConst()) |payload| return payload.elements_capacity;
-        return 0;
+        if (!self.flags.is_array) return 0;
+        return @intCast(self.array_capacity);
+    }
+
+    pub fn isFastArray(self: *const Object) bool {
+        return self.flags.is_array and self.flags.fast_array;
+    }
+
+    pub fn isFastArrayIndexInBounds(self: *const Object, index: u32) bool {
+        return self.isFastArray() and index < self.array_count;
+    }
+
+    pub fn fastArrayElementAt(self: *const Object, index: u32) JSValue {
+        std.debug.assert(self.isFastArrayIndexInBounds(index));
+        return self.array_values[@intCast(index)];
+    }
+
+    pub fn fastArrayElementSlot(self: *Object, index: u32) *JSValue {
+        std.debug.assert(self.isFastArrayIndexInBounds(index));
+        return &self.array_values[@intCast(index)];
+    }
+
+    pub fn fastArrayElementDup(self: *const Object, index: u32) ?JSValue {
+        if (!self.isFastArrayIndexInBounds(index)) return null;
+        return self.array_values[@intCast(index)].dup();
+    }
+
+    pub fn setFastArrayElementDup(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) bool {
+        if (!self.isFastArrayIndexInBounds(index)) return false;
+        const slot = &self.array_values[@intCast(index)];
+        const old = slot.*;
+        slot.* = new_value.dup();
+        old.free(rt);
+        return true;
+    }
+
+    pub fn adoptDenseArrayElementsAssumingEmpty(self: *Object, elements: []JSValue) void {
+        std.debug.assert(self.flags.is_array);
+        std.debug.assert(self.array_count == 0);
+        std.debug.assert(self.array_capacity == 0);
+        self.array_values = elements.ptr;
+        self.array_count = @intCast(elements.len);
+        self.array_capacity = @intCast(elements.len);
+        self.flags.fast_array = true;
+    }
+
+    pub fn clearFastArray(self: *Object) void {
+        if (!self.flags.is_array) return;
+        std.debug.assert(self.array_capacity == 0);
+        self.flags.fast_array = false;
+    }
+
+    pub fn setArraySparseLength(self: *Object, length: u32) void {
+        std.debug.assert(self.flags.is_array);
+        std.debug.assert(self.array_capacity == 0);
+        self.array_count = length;
+        self.flags.fast_array = false;
+    }
+
+    pub fn resetFastArrayEmpty(self: *Object) void {
+        std.debug.assert(self.flags.is_array);
+        std.debug.assert(self.array_capacity == 0);
+        self.array_count = 0;
+        self.flags.fast_array = true;
+    }
+
+    pub fn takeLastFastArrayElement(self: *Object) ?JSValue {
+        if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return null;
+        self.array_count -= 1;
+        return self.array_values[@intCast(self.array_count)];
+    }
+
+    pub fn borrowLastFastArrayElement(self: *Object) ?*JSValue {
+        if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return null;
+        return &self.array_values[@intCast(self.array_count - 1)];
+    }
+
+    pub fn shrinkFastArrayByOne(self: *Object) void {
+        std.debug.assert(self.flags.is_array and self.flags.fast_array and self.array_count != 0);
+        self.array_count -= 1;
+    }
+
+    fn destroyArrayElements(self: *Object, rt: *JSRuntime) void {
+        if (!self.flags.is_array) return;
+        if (self.flags.fast_array) {
+            var index: usize = 0;
+            const count: usize = @intCast(self.array_count);
+            while (index < count) : (index += 1) self.array_values[index].free(rt);
+        } else {
+            std.debug.assert(self.array_capacity == 0);
+        }
+        const allocated = self.allocatedArrayElements();
+        self.array_count = 0;
+        self.array_capacity = 0;
+        self.flags.fast_array = false;
+        if (allocated.len != 0) rt.memory.free(JSValue, allocated);
+    }
+
+    fn freeArrayElementBufferAfterMove(self: *Object, rt: *JSRuntime) void {
+        std.debug.assert(self.flags.is_array);
+        std.debug.assert(!self.flags.fast_array or self.array_count == 0);
+        const allocated = self.allocatedArrayElements();
+        self.array_capacity = 0;
+        self.flags.fast_array = false;
+        if (allocated.len != 0) rt.memory.free(JSValue, allocated);
+    }
+
+    fn ensureArrayBufferCapacity(self: *Object, rt: *JSRuntime, needed_len: usize) !void {
+        const old_capacity: usize = @intCast(self.array_capacity);
+        if (needed_len <= old_capacity) return;
+        var next_capacity = if (old_capacity == 0) @as(usize, 16) else old_capacity + old_capacity / 2;
+        if (next_capacity <= old_capacity) next_capacity = old_capacity + 1;
+        while (next_capacity < needed_len) {
+            const growth = @max(next_capacity / 2, 1);
+            next_capacity += growth;
+        }
+        if (next_capacity > std.math.maxInt(u32)) return error.OutOfMemory;
+        const next = try rt.allocRuntime(JSValue, next_capacity);
+        errdefer rt.memory.free(JSValue, next);
+        if (self.flags.fast_array and self.array_count != 0) {
+            const count: usize = @intCast(self.array_count);
+            @memcpy(next[0..count], self.array_values[0..count]);
+        }
+        const old_allocated = self.allocatedArrayElements();
+        self.array_values = next.ptr;
+        self.array_capacity = @intCast(next_capacity);
+        if (old_allocated.len != 0) rt.memory.free(JSValue, old_allocated);
+    }
+
+    pub fn appendUninitializedFastArraySlot(self: *Object, rt: *JSRuntime) !*JSValue {
+        const index = self.array_count;
+        try self.ensureArrayBufferCapacity(rt, @as(usize, @intCast(index)) + 1);
+        self.array_count = index + 1;
+        self.flags.fast_array = true;
+        return &self.array_values[@intCast(index)];
+    }
+
+    pub fn fastArrayEnsureCapacity(self: *Object, rt: *JSRuntime, needed: u32) !void {
+        try self.ensureArrayBufferCapacity(rt, @intCast(needed));
+    }
+
+    pub fn fastArrayValuesPtr(self: *const Object) ?[*]JSValue {
+        if (!self.isFastArray() or self.array_count == 0) return null;
+        return self.array_values;
+    }
+
+    pub fn fastArrayCount(self: *const Object) u32 {
+        return if (self.isFastArray()) self.array_count else 0;
+    }
+
+    pub fn fastArrayCapacity(self: *const Object) u32 {
+        return if (self.flags.is_array) self.array_capacity else 0;
+    }
+
+    pub fn fastArrayValues(self: *const Object) []JSValue {
+        return self.arrayElements();
+    }
+
+    pub fn fastArrayValuesMut(self: *Object) []JSValue {
+        return self.arrayElementsMut();
+    }
+
+    pub fn arrayElementsForCount(self: *const Object) []const JSValue {
+        if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return &.{};
+        return self.array_values[0..@as(usize, @intCast(self.array_count))];
+    }
+
+    pub fn setFastArrayCountAssumeCapacity(self: *Object, count: u32) void {
+        std.debug.assert(count <= self.array_capacity);
+        self.array_count = count;
+        self.flags.fast_array = true;
+    }
+
+    pub fn fastArraySlotAssumeCapacity(self: *Object, index: u32) *JSValue {
+        std.debug.assert(index < self.array_capacity);
+        return &self.array_values[@intCast(index)];
+    }
+
+    pub fn fastArraySetSparseLength(self: *Object, length: u32) void {
+        self.setArraySparseLength(length);
+    }
+
+    pub fn fastArrayResetEmpty(self: *Object) void {
+        self.resetFastArrayEmpty();
+    }
+
+    pub fn fastArrayAdoptElementsAssumingEmpty(self: *Object, elements: []JSValue) void {
+        self.adoptDenseArrayElementsAssumingEmpty(elements);
+    }
+
+    pub fn fastArrayTakeLast(self: *Object) ?JSValue {
+        return self.takeLastFastArrayElement();
+    }
+
+    pub fn fastArrayBorrowLast(self: *Object) ?*JSValue {
+        return self.borrowLastFastArrayElement();
+    }
+
+    pub fn fastArrayShrinkLast(self: *Object) void {
+        self.shrinkFastArrayByOne();
+    }
+
+    pub fn fastArrayHasIndex(self: *const Object, index: u32) bool {
+        return self.isFastArrayIndexInBounds(index);
+    }
+
+    pub fn fastArrayGetDup(self: *const Object, index: u32) ?JSValue {
+        return self.fastArrayElementDup(index);
+    }
+
+    pub fn fastArraySetDup(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) bool {
+        return self.setFastArrayElementDup(rt, index, new_value);
     }
 
     pub fn promiseResultSlot(self: *Object) *?JSValue {
@@ -3379,14 +3752,12 @@ pub const Object = struct {
         return false;
     }
 
-    pub fn functionSourceSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.source;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionSourceSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).source;
     }
 
     pub fn functionSource(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.source;
+        if (self.functionRarePayloadConst()) |payload| return payload.source;
         return null;
     }
 
@@ -3423,25 +3794,22 @@ pub const Object = struct {
         return 0;
     }
 
-    pub fn functionIteratorWrapMethodSlot(self: *Object) *u8 {
-        if (self.functionPayload()) |payload| return &payload.iterator_wrap_method;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionIteratorWrapMethodSlot(self: *Object, rt: *JSRuntime) !*u8 {
+        return &(try self.ensureFunctionRarePayload(rt)).iterator_wrap_method;
     }
 
     pub fn functionIteratorWrapMethod(self: *const Object) u8 {
-        if (self.functionPayloadConst()) |payload| return payload.iterator_wrap_method;
+        if (self.functionRarePayloadConst()) |payload| return payload.iterator_wrap_method;
         return 0;
     }
 
-    pub fn functionPrimitivePrototypeSlot(self: *Object, slot: PrimitivePrototypeSlot) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.primitive_prototypes[@intFromEnum(slot)];
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPrimitivePrototypeSlot(self: *Object, rt: *JSRuntime, slot: PrimitivePrototypeSlot) !*?JSValue {
+        const payload = try self.ensureFunctionRarePayload(rt);
+        return &payload.primitive_prototypes[@intFromEnum(slot)];
     }
 
     pub fn functionPrimitivePrototype(self: *const Object, slot: PrimitivePrototypeSlot) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.primitive_prototypes[@intFromEnum(slot)];
+        if (self.functionRarePayloadConst()) |payload| return payload.primitive_prototypes[@intFromEnum(slot)];
         return null;
     }
 
@@ -3457,232 +3825,212 @@ pub const Object = struct {
     }
 
     pub fn ensureRegExpLegacyStatics(self: *Object, rt: *JSRuntime) !*RegExpLegacyStatics {
-        if (self.functionPayload()) |payload| {
-            if (payload.regexp_legacy_statics) |legacy| return legacy;
-            const legacy = try rt.memory.create(RegExpLegacyStatics);
-            legacy.* = .{};
-            payload.regexp_legacy_statics = legacy;
-            return legacy;
-        }
-        return error.TypeError;
+        const payload = try self.ensureFunctionRarePayload(rt);
+        if (payload.regexp_legacy_statics) |legacy| return legacy;
+        const legacy = try rt.createRuntime(RegExpLegacyStatics);
+        legacy.* = .{};
+        payload.regexp_legacy_statics = legacy;
+        return legacy;
     }
 
     pub fn regExpLegacyStatics(self: *Object) ?*RegExpLegacyStatics {
-        if (self.functionPayload()) |payload| return payload.regexp_legacy_statics;
+        if (self.functionRarePayload()) |payload| return payload.regexp_legacy_statics;
         return null;
     }
 
     pub fn regExpLegacyStaticsConst(self: *const Object) ?*const RegExpLegacyStatics {
-        if (self.functionPayloadConst()) |payload| return payload.regexp_legacy_statics;
+        if (self.functionRarePayloadConst()) |payload| return payload.regexp_legacy_statics;
         return null;
     }
 
-    pub fn arrayBuiltinMarkerSlot(self: *Object) *ArrayBuiltinMarker {
-        if (self.functionPayload()) |payload| return &payload.array_builtin_marker;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn arrayBuiltinMarkerSlot(self: *Object, rt: *JSRuntime) !*ArrayBuiltinMarker {
+        return &(try self.ensureFunctionRarePayload(rt)).array_builtin_marker;
     }
 
     pub fn arrayBuiltinMarker(self: *const Object) ArrayBuiltinMarker {
-        if (self.functionPayloadConst()) |payload| return payload.array_builtin_marker;
+        if (self.functionRarePayloadConst()) |payload| return payload.array_builtin_marker;
         return .none;
     }
 
     pub fn typedArrayBuiltinMarker(self: *const Object) TypedArrayBuiltinMarker {
-        if (self.functionPayloadConst()) |payload| return payload.typed_array_builtin_marker;
+        if (self.functionRarePayloadConst()) |payload| return payload.typed_array_builtin_marker;
         return .none;
     }
 
     pub fn arrayIteratorKind(self: *const Object) u8 {
-        if (self.functionPayloadConst()) |payload| return payload.array_iterator_kind;
+        if (self.functionRarePayloadConst()) |payload| return payload.array_iterator_kind;
         return 0;
     }
 
     pub fn isIteratorIdentityFunction(self: *const Object) bool {
-        if (self.functionPayloadConst()) |payload| return payload.iterator_identity;
+        if (self.functionRarePayloadConst()) |payload| return payload.iterator_identity;
         return false;
     }
 
     pub fn isArrayIteratorNextFunction(self: *const Object) bool {
-        if (self.functionPayloadConst()) |payload| return payload.array_iterator_next;
+        if (self.functionRarePayloadConst()) |payload| return payload.array_iterator_next;
         return false;
     }
 
     pub fn isThrowTypeErrorIntrinsicFunction(self: *const Object) bool {
-        if (self.functionPayloadConst()) |payload| return payload.throw_type_error_intrinsic;
+        if (self.functionRarePayloadConst()) |payload| return payload.throw_type_error_intrinsic;
         return false;
     }
 
     pub fn isAsyncIteratorAsyncDisposeFunction(self: *const Object) bool {
-        if (self.functionPayloadConst()) |payload| return payload.async_iterator_async_dispose;
+        if (self.functionRarePayloadConst()) |payload| return payload.async_iterator_async_dispose;
         return false;
     }
 
     pub fn isAsyncGeneratorPrototypeMethod(self: *const Object) bool {
-        if (self.functionPayloadConst()) |payload| return payload.async_generator_method;
+        if (self.functionRarePayloadConst()) |payload| return payload.async_generator_method;
         return false;
     }
 
     pub fn iteratorHelperMethod(self: *const Object) u8 {
-        if (self.functionPayloadConst()) |payload| return payload.iterator_helper_method;
+        if (self.functionRarePayloadConst()) |payload| return payload.iterator_helper_method;
         return 0;
     }
 
     pub fn asyncFromSyncIteratorMethod(self: *const Object) u8 {
-        if (self.functionPayloadConst()) |payload| return payload.async_from_sync_iterator_method;
+        if (self.functionRarePayloadConst()) |payload| return payload.async_from_sync_iterator_method;
         return 0;
     }
 
     pub fn disposableStackMethod(self: *const Object) u8 {
-        if (self.functionPayloadConst()) |payload| return payload.disposable_stack_method;
+        if (self.functionRarePayloadConst()) |payload| return payload.disposable_stack_method;
         return 0;
     }
 
     pub fn asyncDisposableStackMethod(self: *const Object) u8 {
-        if (self.functionPayloadConst()) |payload| return payload.async_disposable_stack_method;
+        if (self.functionRarePayloadConst()) |payload| return payload.async_disposable_stack_method;
         return 0;
     }
 
-    pub fn addArrayBuiltinMarker(self: *Object, marker: ArrayBuiltinMarker) bool {
+    pub fn addArrayBuiltinMarker(self: *Object, rt: *JSRuntime, marker: ArrayBuiltinMarker) bool {
         if (marker == .none) return true;
-        if (self.functionPayload()) |payload| return setArrayBuiltinMarker(payload, marker);
-        return false;
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        return setArrayBuiltinMarker(payload, marker);
     }
 
-    pub fn addTypedArrayBuiltinMarker(self: *Object, marker: TypedArrayBuiltinMarker) bool {
+    pub fn addTypedArrayBuiltinMarker(self: *Object, rt: *JSRuntime, marker: TypedArrayBuiltinMarker) bool {
         if (marker == .none) return true;
-        if (self.functionPayload()) |payload| return setTypedArrayBuiltinMarker(payload, marker);
-        return false;
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        return setTypedArrayBuiltinMarker(payload, marker);
     }
 
-    pub fn addArrayIteratorKind(self: *Object, kind: u8) bool {
+    pub fn addArrayIteratorKind(self: *Object, rt: *JSRuntime, kind: u8) bool {
         if (kind == 0) return true;
-        if (self.functionPayload()) |payload| return setArrayIteratorKind(payload, kind);
-        return false;
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        return setArrayIteratorKind(payload, kind);
     }
 
-    pub fn addIteratorIdentityFunction(self: *Object) bool {
-        if (self.functionPayload()) |payload| {
-            payload.iterator_identity = true;
-            return true;
-        }
-        return false;
+    pub fn addIteratorIdentityFunction(self: *Object, rt: *JSRuntime) bool {
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        payload.iterator_identity = true;
+        return true;
     }
 
-    pub fn addArrayIteratorNextFunction(self: *Object) bool {
-        if (self.functionPayload()) |payload| {
-            payload.array_iterator_next = true;
-            return true;
-        }
-        return false;
+    pub fn addArrayIteratorNextFunction(self: *Object, rt: *JSRuntime) bool {
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        payload.array_iterator_next = true;
+        return true;
     }
 
-    pub fn addThrowTypeErrorIntrinsicFunction(self: *Object) bool {
-        if (self.functionPayload()) |payload| {
-            payload.throw_type_error_intrinsic = true;
-            return true;
-        }
-        return false;
+    pub fn addThrowTypeErrorIntrinsicFunction(self: *Object, rt: *JSRuntime) bool {
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        payload.throw_type_error_intrinsic = true;
+        return true;
     }
 
-    pub fn addAsyncIteratorAsyncDisposeFunction(self: *Object) bool {
-        if (self.functionPayload()) |payload| {
-            payload.async_iterator_async_dispose = true;
-            return true;
-        }
-        return false;
+    pub fn addAsyncIteratorAsyncDisposeFunction(self: *Object, rt: *JSRuntime) bool {
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        payload.async_iterator_async_dispose = true;
+        return true;
     }
 
-    pub fn addAsyncGeneratorPrototypeMethod(self: *Object) bool {
-        if (self.functionPayload()) |payload| {
-            payload.async_generator_method = true;
-            return true;
-        }
-        return false;
+    pub fn addAsyncGeneratorPrototypeMethod(self: *Object, rt: *JSRuntime) bool {
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        payload.async_generator_method = true;
+        return true;
     }
 
-    pub fn addIteratorHelperMethod(self: *Object, method_id: u8) bool {
+    pub fn addIteratorHelperMethod(self: *Object, rt: *JSRuntime, method_id: u8) bool {
         if (method_id == 0) return true;
-        if (self.functionPayload()) |payload| {
-            if (payload.iterator_helper_method != 0 and payload.iterator_helper_method != method_id) return false;
-            payload.iterator_helper_method = method_id;
-            return true;
-        }
-        return false;
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        if (payload.iterator_helper_method != 0 and payload.iterator_helper_method != method_id) return false;
+        payload.iterator_helper_method = method_id;
+        return true;
     }
 
-    pub fn addAsyncFromSyncIteratorMethod(self: *Object, method_id: u8) bool {
+    pub fn addAsyncFromSyncIteratorMethod(self: *Object, rt: *JSRuntime, method_id: u8) bool {
         if (method_id == 0) return true;
-        if (self.functionPayload()) |payload| {
-            if (payload.async_from_sync_iterator_method != 0 and payload.async_from_sync_iterator_method != method_id) return false;
-            payload.async_from_sync_iterator_method = method_id;
-            return true;
-        }
-        return false;
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        if (payload.async_from_sync_iterator_method != 0 and payload.async_from_sync_iterator_method != method_id) return false;
+        payload.async_from_sync_iterator_method = method_id;
+        return true;
     }
 
-    pub fn addDisposableStackMethod(self: *Object, method_id: u8) bool {
+    pub fn addDisposableStackMethod(self: *Object, rt: *JSRuntime, method_id: u8) bool {
         if (method_id == 0) return true;
-        if (self.functionPayload()) |payload| return setDisposableStackMethod(payload, method_id);
-        return false;
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        return setDisposableStackMethod(payload, method_id);
     }
 
-    pub fn addAsyncDisposableStackMethod(self: *Object, method_id: u8) bool {
+    pub fn addAsyncDisposableStackMethod(self: *Object, rt: *JSRuntime, method_id: u8) bool {
         if (method_id == 0) return true;
-        if (self.functionPayload()) |payload| return setAsyncDisposableStackMethod(payload, method_id);
-        return false;
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        return setAsyncDisposableStackMethod(payload, method_id);
     }
 
-    pub fn addCollectionMethodOwnerClass(self: *Object, owner_class: class.ClassId) bool {
+    pub fn addCollectionMethodOwnerClass(self: *Object, rt: *JSRuntime, owner_class: class.ClassId) bool {
         if (owner_class == class.invalid_class_id) return true;
-        if (self.functionPayload()) |payload| return setCollectionMethodOwnerClass(payload, owner_class);
-        return false;
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        return setCollectionMethodOwnerClass(payload, owner_class);
     }
 
-    fn setArrayBuiltinMarker(payload: *FunctionPayload, marker: ArrayBuiltinMarker) bool {
+    fn setArrayBuiltinMarker(payload: *FunctionRarePayload, marker: ArrayBuiltinMarker) bool {
         if (payload.array_builtin_marker != .none and payload.array_builtin_marker != marker) return false;
         payload.array_builtin_marker = marker;
         return true;
     }
 
-    fn setTypedArrayBuiltinMarker(payload: *FunctionPayload, marker: TypedArrayBuiltinMarker) bool {
+    fn setTypedArrayBuiltinMarker(payload: *FunctionRarePayload, marker: TypedArrayBuiltinMarker) bool {
         if (payload.typed_array_builtin_marker != .none and payload.typed_array_builtin_marker != marker) return false;
         payload.typed_array_builtin_marker = marker;
         return true;
     }
 
-    fn setArrayIteratorKind(payload: *FunctionPayload, kind: u8) bool {
+    fn setArrayIteratorKind(payload: *FunctionRarePayload, kind: u8) bool {
         if (payload.array_iterator_kind != 0 and payload.array_iterator_kind != kind) return false;
         payload.array_iterator_kind = kind;
         return true;
     }
 
-    fn setDisposableStackMethod(payload: *FunctionPayload, method_id: u8) bool {
+    fn setDisposableStackMethod(payload: *FunctionRarePayload, method_id: u8) bool {
         if (payload.disposable_stack_method != 0 and payload.disposable_stack_method != method_id) return false;
         payload.disposable_stack_method = method_id;
         return true;
     }
 
-    fn setAsyncDisposableStackMethod(payload: *FunctionPayload, method_id: u8) bool {
+    fn setAsyncDisposableStackMethod(payload: *FunctionRarePayload, method_id: u8) bool {
         if (payload.async_disposable_stack_method != 0 and payload.async_disposable_stack_method != method_id) return false;
         payload.async_disposable_stack_method = method_id;
         return true;
     }
 
-    fn setCollectionMethodOwnerClass(payload: *FunctionPayload, owner_class: class.ClassId) bool {
+    fn setCollectionMethodOwnerClass(payload: *FunctionRarePayload, owner_class: class.ClassId) bool {
         if (payload.collection_method_owner_class != class.invalid_class_id and payload.collection_method_owner_class != owner_class) return false;
         payload.collection_method_owner_class = owner_class;
         return true;
     }
 
-    pub fn collectionMethodOwnerClassSlot(self: *Object) *class.ClassId {
-        if (self.functionPayload()) |payload| return &payload.collection_method_owner_class;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn collectionMethodOwnerClassSlot(self: *Object, rt: *JSRuntime) !*class.ClassId {
+        return &(try self.ensureFunctionRarePayload(rt)).collection_method_owner_class;
     }
 
     pub fn collectionMethodOwnerClass(self: *const Object) class.ClassId {
-        if (self.functionPayloadConst()) |payload| return payload.collection_method_owner_class;
+        if (self.functionRarePayloadConst()) |payload| return payload.collection_method_owner_class;
         return class.invalid_class_id;
     }
 
@@ -3699,344 +4047,282 @@ pub const Object = struct {
         return null;
     }
 
-    pub fn functionClassFieldsInitSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.class_fields_init;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionClassFieldsInitSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).class_fields_init;
     }
 
     pub fn functionClassFieldsInit(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.class_fields_init;
+        if (self.functionRarePayloadConst()) |payload| return payload.class_fields_init;
         return null;
     }
 
-    pub fn functionEvalParentFunctionSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.eval_parent_function;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionEvalParentFunctionSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).eval_parent_function;
     }
 
     pub fn functionEvalParentFunction(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.eval_parent_function;
+        if (self.functionRarePayloadConst()) |payload| return payload.eval_parent_function;
         return null;
     }
 
-    pub fn functionImportMetaSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.import_meta;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionImportMetaSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).import_meta;
     }
 
     pub fn functionImportMeta(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.import_meta;
+        if (self.functionRarePayloadConst()) |payload| return payload.import_meta;
         return null;
     }
 
-    pub fn functionProxyRevokeTargetSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.proxy_revoke_target;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionProxyRevokeTargetSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).proxy_revoke_target;
     }
 
     pub fn functionProxyRevokeTarget(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.proxy_revoke_target;
+        if (self.functionRarePayloadConst()) |payload| return payload.proxy_revoke_target;
         return null;
     }
 
-    pub fn functionPromiseCapabilitySlotSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_capability_slot;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseCapabilitySlotSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_capability_slot;
     }
 
     pub fn functionPromiseCapabilitySlot(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_capability_slot;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_capability_slot;
         return null;
     }
 
-    pub fn functionPromiseResolvingTargetSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_resolving_target;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseResolvingTargetSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_resolving_target;
     }
 
     pub fn functionPromiseResolvingTarget(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_resolving_target;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_resolving_target;
         return null;
     }
 
-    pub fn functionPromiseResolvingStateSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_resolving_state;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseResolvingStateSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_resolving_state;
     }
 
     pub fn functionPromiseResolvingState(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_resolving_state;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_resolving_state;
         return null;
     }
 
-    pub fn functionPromiseResolvingRejectSlot(self: *Object) *bool {
-        if (self.functionPayload()) |payload| return &payload.promise_resolving_reject;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseResolvingRejectSlot(self: *Object, rt: *JSRuntime) !*bool {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_resolving_reject;
     }
 
     pub fn functionPromiseResolvingReject(self: *const Object) bool {
-        if (self.functionPayloadConst()) |payload| return payload.promise_resolving_reject;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_resolving_reject;
         return false;
     }
 
-    pub fn functionPromiseThenableTargetSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_thenable_target;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseThenableTargetSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_thenable_target;
     }
 
     pub fn functionPromiseThenableTarget(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_thenable_target;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_thenable_target;
         return null;
     }
 
-    pub fn functionPromiseThenableThisSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_thenable_this;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseThenableThisSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_thenable_this;
     }
 
     pub fn functionPromiseThenableThis(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_thenable_this;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_thenable_this;
         return null;
     }
 
-    pub fn functionPromiseThenableThenSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_thenable_then;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseThenableThenSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_thenable_then;
     }
 
     pub fn functionPromiseThenableThen(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_thenable_then;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_thenable_then;
         return null;
     }
 
-    pub fn functionPromiseReactionRecordSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_reaction_record;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseReactionRecordSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_reaction_record;
     }
 
     pub fn functionPromiseReactionRecord(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_reaction_record;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_reaction_record;
         return null;
     }
 
-    pub fn functionPromiseReactionValueSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_reaction_value;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseReactionValueSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_reaction_value;
     }
 
     pub fn functionPromiseReactionValue(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_reaction_value;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_reaction_value;
         return null;
     }
 
-    pub fn functionPromiseReactionIsRejectedSlot(self: *Object) *bool {
-        if (self.functionPayload()) |payload| return &payload.promise_reaction_is_rejected;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseReactionIsRejectedSlot(self: *Object, rt: *JSRuntime) !*bool {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_reaction_is_rejected;
     }
 
     pub fn functionPromiseReactionIsRejected(self: *const Object) bool {
-        if (self.functionPayloadConst()) |payload| return payload.promise_reaction_is_rejected;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_reaction_is_rejected;
         return false;
     }
 
-    pub fn functionPromiseCombinatorStateSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_combinator_state;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseCombinatorStateSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_combinator_state;
     }
 
     pub fn functionPromiseCombinatorState(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_combinator_state;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_combinator_state;
         return null;
     }
 
-    pub fn functionPromiseCombinatorModeSlot(self: *Object) *u8 {
-        if (self.functionPayload()) |payload| return &payload.promise_combinator_mode;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseCombinatorModeSlot(self: *Object, rt: *JSRuntime) !*u8 {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_combinator_mode;
     }
 
     pub fn functionPromiseCombinatorMode(self: *const Object) u8 {
-        if (self.functionPayloadConst()) |payload| return payload.promise_combinator_mode;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_combinator_mode;
         return 0;
     }
 
-    pub fn functionPromiseCombinatorIndexSlot(self: *Object) *u32 {
-        if (self.functionPayload()) |payload| return &payload.promise_combinator_index;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseCombinatorIndexSlot(self: *Object, rt: *JSRuntime) !*u32 {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_combinator_index;
     }
 
     pub fn functionPromiseCombinatorIndex(self: *const Object) u32 {
-        if (self.functionPayloadConst()) |payload| return payload.promise_combinator_index;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_combinator_index;
         return 0;
     }
 
-    pub fn functionPromiseCombinatorCalledSlot(self: *Object) *bool {
-        if (self.functionPayload()) |payload| return &payload.promise_combinator_called;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseCombinatorCalledSlot(self: *Object, rt: *JSRuntime) !*bool {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_combinator_called;
     }
 
     pub fn functionPromiseCombinatorCalled(self: *const Object) bool {
-        if (self.functionPayloadConst()) |payload| return payload.promise_combinator_called;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_combinator_called;
         return false;
     }
 
-    pub fn functionPromiseFinallyPayloadSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_finally_payload;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseFinallyPayloadSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_finally_payload;
     }
 
     pub fn functionPromiseFinallyPayload(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_finally_payload;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_finally_payload;
         return null;
     }
 
-    pub fn functionPromiseFinallyCallbackSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_finally_callback;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseFinallyCallbackSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_finally_callback;
     }
 
     pub fn functionPromiseFinallyCallback(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_finally_callback;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_finally_callback;
         return null;
     }
 
-    pub fn functionPromiseFinallyConstructorSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.promise_finally_constructor;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseFinallyConstructorSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_finally_constructor;
     }
 
     pub fn functionPromiseFinallyConstructor(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.promise_finally_constructor;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_finally_constructor;
         return null;
     }
 
-    pub fn functionPromiseFinallyModeSlot(self: *Object) *u8 {
-        if (self.functionPayload()) |payload| return &payload.promise_finally_mode;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionPromiseFinallyModeSlot(self: *Object, rt: *JSRuntime) !*u8 {
+        return &(try self.ensureFunctionRarePayload(rt)).promise_finally_mode;
     }
 
     pub fn functionPromiseFinallyMode(self: *const Object) u8 {
-        if (self.functionPayloadConst()) |payload| return payload.promise_finally_mode;
+        if (self.functionRarePayloadConst()) |payload| return payload.promise_finally_mode;
         return 0;
     }
 
-    pub fn functionAsyncDisposeStackSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.async_dispose_stack;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionAsyncDisposeStackSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).async_dispose_stack;
     }
 
     pub fn functionAsyncDisposeStack(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.async_dispose_stack;
+        if (self.functionRarePayloadConst()) |payload| return payload.async_dispose_stack;
         return null;
     }
 
-    pub fn functionAsyncDisposeRejectedSlot(self: *Object) *bool {
-        if (self.functionPayload()) |payload| return &payload.async_dispose_rejected;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionAsyncDisposeRejectedSlot(self: *Object, rt: *JSRuntime) !*bool {
+        return &(try self.ensureFunctionRarePayload(rt)).async_dispose_rejected;
     }
 
     pub fn functionAsyncDisposeRejected(self: *const Object) bool {
-        if (self.functionPayloadConst()) |payload| return payload.async_dispose_rejected;
+        if (self.functionRarePayloadConst()) |payload| return payload.async_dispose_rejected;
         return false;
     }
 
-    pub fn functionAsyncContinuationSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.async_function_continuation;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionAsyncContinuationSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).async_function_continuation;
     }
 
     pub fn functionAsyncContinuation(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.async_function_continuation;
+        if (self.functionRarePayloadConst()) |payload| return payload.async_function_continuation;
         return null;
     }
 
-    pub fn functionAsyncContinuationRejectedSlot(self: *Object) *bool {
-        if (self.functionPayload()) |payload| return &payload.async_function_rejected;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionAsyncContinuationRejectedSlot(self: *Object, rt: *JSRuntime) !*bool {
+        return &(try self.ensureFunctionRarePayload(rt)).async_function_rejected;
     }
 
     pub fn functionAsyncContinuationRejected(self: *const Object) bool {
-        if (self.functionPayloadConst()) |payload| return payload.async_function_rejected;
+        if (self.functionRarePayloadConst()) |payload| return payload.async_function_rejected;
         return false;
     }
 
-    pub fn functionAsyncFromSyncUnwrapDoneSlot(self: *Object) *u8 {
-        if (self.functionPayload()) |payload| return &payload.async_from_sync_unwrap_done;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionAsyncFromSyncUnwrapDoneSlot(self: *Object, rt: *JSRuntime) !*u8 {
+        return &(try self.ensureFunctionRarePayload(rt)).async_from_sync_unwrap_done;
     }
 
     pub fn functionAsyncFromSyncUnwrapDone(self: *const Object) u8 {
-        if (self.functionPayloadConst()) |payload| return payload.async_from_sync_unwrap_done;
+        if (self.functionRarePayloadConst()) |payload| return payload.async_from_sync_unwrap_done;
         return 0;
     }
 
-    pub fn functionRealmTypeErrorConstructorSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.realm_type_error_constructor;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionRealmTypeErrorConstructorSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).realm_type_error_constructor;
     }
 
     pub fn functionRealmTypeErrorConstructor(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.realm_type_error_constructor;
+        if (self.functionRarePayloadConst()) |payload| return payload.realm_type_error_constructor;
         return null;
     }
 
-    pub fn functionArrowConstructorThisSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.arrow_constructor_this;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionArrowConstructorThisSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).arrow_constructor_this;
     }
 
     pub fn functionArrowConstructorThis(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.arrow_constructor_this;
+        if (self.functionRarePayloadConst()) |payload| return payload.arrow_constructor_this;
         return null;
     }
 
-    pub fn functionArrowNewTargetSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.arrow_new_target;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionArrowNewTargetSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).arrow_new_target;
     }
 
     pub fn functionArrowNewTarget(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.arrow_new_target;
+        if (self.functionRarePayloadConst()) |payload| return payload.arrow_new_target;
         return null;
     }
 
-    pub fn functionSuperConstructorSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.super_constructor;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionSuperConstructorSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).super_constructor;
     }
 
     pub fn functionSuperConstructor(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.super_constructor;
+        if (self.functionRarePayloadConst()) |payload| return payload.super_constructor;
         return null;
     }
 
@@ -4053,40 +4339,38 @@ pub const Object = struct {
         return &.{};
     }
 
-    pub fn functionEvalLocalNamesSlot(self: *Object) *[]atom.Atom {
-        if (self.functionPayload()) |payload| return &payload.eval_local_names;
+    pub fn functionEvalLocalNamesSlot(self: *Object, rt: *JSRuntime) !*[]atom.Atom {
+        if (self.class_payload_kind == .function) return &(try self.ensureFunctionRarePayload(rt)).eval_local_names;
         if (self.generatorPayload()) |payload| return &payload.eval_local_names;
         std.debug.assert(self.class_payload_kind == .function or self.class_payload_kind == .generator);
         unreachable;
     }
 
     pub fn functionEvalLocalNames(self: *const Object) []atom.Atom {
-        if (self.functionPayloadConst()) |payload| return payload.eval_local_names;
+        if (self.functionRarePayloadConst()) |payload| return payload.eval_local_names;
         if (self.generatorPayloadConst()) |payload| return payload.eval_local_names;
         return &.{};
     }
 
-    pub fn functionEvalLocalRefsSlot(self: *Object) *[]JSValue {
-        if (self.functionPayload()) |payload| return &payload.eval_local_refs;
+    pub fn functionEvalLocalRefsSlot(self: *Object, rt: *JSRuntime) !*[]JSValue {
+        if (self.class_payload_kind == .function) return &(try self.ensureFunctionRarePayload(rt)).eval_local_refs;
         if (self.generatorPayload()) |payload| return &payload.eval_local_refs;
         std.debug.assert(self.class_payload_kind == .function or self.class_payload_kind == .generator);
         unreachable;
     }
 
     pub fn functionEvalLocalRefs(self: *const Object) []JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.eval_local_refs;
+        if (self.functionRarePayloadConst()) |payload| return payload.eval_local_refs;
         if (self.generatorPayloadConst()) |payload| return payload.eval_local_refs;
         return &.{};
     }
 
-    pub fn functionLexicalThisSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.lexical_this;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
+    pub fn functionLexicalThisSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        return &(try self.ensureFunctionRarePayload(rt)).lexical_this;
     }
 
     pub fn functionLexicalThis(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.lexical_this;
+        if (self.functionRarePayloadConst()) |payload| return payload.lexical_this;
         return null;
     }
 
@@ -4116,41 +4400,41 @@ pub const Object = struct {
 
     pub fn privateRemapFromSlot(self: *Object) *[]atom.Atom {
         if (self.ordinaryPayload()) |payload| return &payload.private_remap_from;
-        if (self.functionPayload()) |payload| return &payload.private_remap_from;
+        if (self.functionRarePayload()) |payload| return &payload.private_remap_from;
         std.debug.assert(self.class_payload_kind == .ordinary or self.class_payload_kind == .function);
         unreachable;
     }
 
     pub fn privateRemapFromSlotEnsured(self: *Object, rt: *JSRuntime) !*[]atom.Atom {
         if (self.ordinaryPayload()) |payload| return &payload.private_remap_from;
-        if (self.functionPayload()) |payload| return &payload.private_remap_from;
+        if (self.class_payload_kind == .function) return &(try self.ensureFunctionRarePayload(rt)).private_remap_from;
         const payload = try self.ensureOrdinaryPayload(rt);
         return &payload.private_remap_from;
     }
 
     pub fn privateRemapFrom(self: *const Object) []atom.Atom {
         if (self.ordinaryPayloadConst()) |payload| return payload.private_remap_from;
-        if (self.functionPayloadConst()) |payload| return payload.private_remap_from;
+        if (self.functionRarePayloadConst()) |payload| return payload.private_remap_from;
         return &.{};
     }
 
     pub fn privateRemapToSlot(self: *Object) *[]atom.Atom {
         if (self.ordinaryPayload()) |payload| return &payload.private_remap_to;
-        if (self.functionPayload()) |payload| return &payload.private_remap_to;
+        if (self.functionRarePayload()) |payload| return &payload.private_remap_to;
         std.debug.assert(self.class_payload_kind == .ordinary or self.class_payload_kind == .function);
         unreachable;
     }
 
     pub fn privateRemapToSlotEnsured(self: *Object, rt: *JSRuntime) !*[]atom.Atom {
         if (self.ordinaryPayload()) |payload| return &payload.private_remap_to;
-        if (self.functionPayload()) |payload| return &payload.private_remap_to;
+        if (self.class_payload_kind == .function) return &(try self.ensureFunctionRarePayload(rt)).private_remap_to;
         const payload = try self.ensureOrdinaryPayload(rt);
         return &payload.private_remap_to;
     }
 
     pub fn privateRemapTo(self: *const Object) []atom.Atom {
         if (self.ordinaryPayloadConst()) |payload| return payload.private_remap_to;
-        if (self.functionPayloadConst()) |payload| return payload.private_remap_to;
+        if (self.functionRarePayloadConst()) |payload| return payload.private_remap_to;
         return &.{};
     }
 
@@ -4246,7 +4530,7 @@ pub const Object = struct {
 
     fn capturedStackSiteCount(sites_value: JSValue) usize {
         const sites = objectFromValue(sites_value) orelse return 0;
-        return if (sites.flags.is_array) @intCast(sites.length) else 0;
+        return if (sites.flags.is_array) @intCast(sites.arrayLength()) else 0;
     }
 
     pub fn promiseReactionOnFulfilledSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
@@ -4438,22 +4722,21 @@ pub const Object = struct {
         return 0;
     }
 
-    pub fn functionRealmGlobalSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.realm_global;
+    pub fn functionRealmGlobalSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        if (self.class_payload_kind == .function) return &(try self.ensureFunctionRarePayload(rt)).realm_global;
         if (self.boundFunctionPayload()) |payload| return &payload.realm_global;
         std.debug.assert(self.class_payload_kind == .function or self.class_payload_kind == .bound_function);
         unreachable;
     }
 
     pub fn functionRealmGlobal(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.realm_global;
+        if (self.functionRarePayloadConst()) |payload| return payload.realm_global;
         if (self.boundFunctionPayloadConst()) |payload| return payload.realm_global;
         return null;
     }
 
     pub fn functionRealmGlobalPtrSlot(self: *Object) *?*Object {
         if (self.ordinaryPayload()) |payload| return &payload.realm_global_ptr;
-        if (self.arrayPayload()) |payload| return &payload.realm_global_ptr;
         if (self.objectDataPayload()) |payload| return &payload.realm_global_ptr;
         if (self.iteratorPayload()) |payload| return &payload.realm_global_ptr;
         if (self.collectionPayload()) |payload| return &payload.realm_global_ptr;
@@ -4501,7 +4784,6 @@ pub const Object = struct {
 
     pub fn functionRealmGlobalPtr(self: *const Object) ?*Object {
         if (self.ordinaryPayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.arrayPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.objectDataPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.iteratorPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.collectionPayloadConst()) |payload| return payload.realm_global_ptr;
@@ -4816,24 +5098,6 @@ pub const Object = struct {
         rt.memory.destroy(VarRefPayload, payload);
     }
 
-    fn arrayPayload(self: *Object) ?*ArrayPayload {
-        if (self.class_payload_kind != .array) return null;
-        return @ptrCast(@alignCast(self.class_payload.?));
-    }
-
-    fn arrayPayloadConst(self: *const Object) ?*const ArrayPayload {
-        if (self.class_payload_kind != .array) return null;
-        return @ptrCast(@alignCast(self.class_payload.?));
-    }
-
-    fn destroyArrayPayload(self: *Object, rt: *JSRuntime) void {
-        const payload = self.arrayPayload() orelse return;
-        self.class_payload = null;
-        self.class_payload_kind = .none;
-        payload.destroy(rt);
-        rt.memory.destroy(ArrayPayload, payload);
-    }
-
     fn promisePayload(self: *Object) ?*PromisePayload {
         if (self.class_payload_kind != .promise) return null;
         return @ptrCast(@alignCast(self.class_payload.?));
@@ -4916,7 +5180,7 @@ pub const Object = struct {
         for (payload.names, 0..) |name, idx| {
             if (name != atom_id or idx >= payload.cells.len) continue;
             const cell = varRefCellFromValue(payload.cells[idx]) orelse return JSValue.undefinedValue();
-            return if (cell.varRefValueSlot().*) |stored| stored.dup() else JSValue.undefinedValue();
+            return cell.varRefValue().dup();
         }
         return null;
     }
@@ -4948,6 +5212,10 @@ pub const Object = struct {
                 if (fb.class_fields_init) |*stored| visitor.visitValue(stored);
                 for (fb.cpool) |*stored| visitor.visitValue(stored);
             },
+            .var_ref => {
+                const ref: *var_ref_mod.VarRef = @alignCast(@fieldParentPtr("header", header));
+                visitor.visitValue(ref.varRefValueSlot());
+            },
             else => {},
         }
     }
@@ -4957,7 +5225,7 @@ pub const Object = struct {
 
         pub fn visitValue(self: DecrefVisitor, val: *JSValue) void {
             if (val.refHeader()) |h| {
-                if (h.kind == .object or h.kind == .function_bytecode) {
+                if (h.kind == .object or h.kind == .function_bytecode or h.kind == .var_ref) {
                     self.visitHeader(h);
                 }
             } else if (val.objectHeader()) |h| {
@@ -4999,7 +5267,7 @@ pub const Object = struct {
 
         pub fn visitValue(self: ScanIncrefVisitor, val: *JSValue) void {
             if (val.refHeader()) |h| {
-                if (h.kind == .object or h.kind == .function_bytecode) {
+                if (h.kind == .object or h.kind == .function_bytecode or h.kind == .var_ref) {
                     self.visitHeader(h);
                 }
             } else if (val.objectHeader()) |h| {
@@ -5043,7 +5311,7 @@ pub const Object = struct {
 
         pub fn visitValue(self: ScanRestoreVisitor, val: *JSValue) void {
             if (val.refHeader()) |h| {
-                if (h.kind == .object or h.kind == .function_bytecode) {
+                if (h.kind == .object or h.kind == .function_bytecode or h.kind == .var_ref) {
                     self.visitHeader(h);
                 }
             } else if (val.objectHeader()) |h| {
@@ -5079,55 +5347,39 @@ pub const Object = struct {
         }
     };
 
-    fn unlinkNodeFromList(head: *?*gc.GcNode, tail: *?*gc.GcNode, node: *gc.GcNode) void {
-        if (node.prev) |prev| {
-            prev.next = node.next;
-        } else {
-            head.* = node.next;
-        }
-        if (node.next) |next| {
-            next.prev = node.prev;
-        } else {
-            tail.* = node.prev;
-        }
-        node.prev = null;
-        node.next = null;
-    }
-
-    fn linkNodeToList(head: *?*gc.GcNode, tail: *?*gc.GcNode, node: *gc.GcNode) void {
-        node.prev = tail.*;
-        node.next = null;
-        if (tail.*) |t| {
-            t.next = node;
-        } else {
-            head.* = node;
-        }
-        tail.* = node;
-    }
-
     pub fn destroyRuntimeCyclesWithValueRoots(rt: *JSRuntime, roots: ?*const runtime_mod.ValueRootFrame) ObjectGraphError!usize {
         rt.gc.stats.collections += 1;
 
+        var garbage_headers = std.ArrayList(*gc.GCObjectHeader).empty;
+        try garbage_headers.ensureTotalCapacity(rt.memory.persistent_allocator, rt.gc.liveCount());
+        defer garbage_headers.deinit(rt.memory.persistent_allocator);
+
+        defer {
+            var gc_iter = rt.gc.objectIterator();
+            while (gc_iter.next()) |h| {
+                h.flags.mark = false;
+                h.flags.cycle_visited = false;
+                h.flags.cycle_preserved = false;
+            }
+        }
+
         // Phase 1: gc_decref
         {
-            var current = rt.gc.gc_obj_list_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
+            var gc_iter = rt.gc.objectIterator();
+            while (gc_iter.next()) |h| {
                 h.flags.mark = true;
             }
 
-            current = rt.gc.gc_obj_list_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
+            gc_iter = rt.gc.objectIterator();
+            while (gc_iter.next()) |h| {
                 traceChildren(rt, h, DecrefVisitor{ .rt = rt });
             }
         }
 
         // Phase 2: gc_scan
         {
-            var current = rt.gc.gc_obj_list_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
+            var gc_iter = rt.gc.objectIterator();
+            while (gc_iter.next()) |h| {
                 if (h.rc > 0 and h.flags.mark) {
                     h.flags.mark = false;
                     traceChildren(rt, h, ScanIncrefVisitor{ .rt = rt });
@@ -5135,38 +5387,19 @@ pub const Object = struct {
             }
         }
 
-        // Phase 3: move dead cycles to tmp_head
-        var tmp_head: ?*gc.GcNode = null;
-        var tmp_tail: ?*gc.GcNode = null;
-        defer {
-            var current = tmp_head;
-            while (current) |node| {
-                const next = node.next;
-                const h = gc.headerFromGcNode(node);
-                unlinkNodeFromList(&tmp_head, &tmp_tail, node);
-                linkNodeToList(&rt.gc.gc_obj_list_head, &rt.gc.gc_obj_list_tail, node);
-                h.flags.mark = false;
-                current = next;
-            }
-        }
+        // Phase 3: snapshot dead-cycle candidates. The registry keeps all
+        // candidates until destruction; `mark` distinguishes garbage from live
+        // entries for the rest of this round.
         {
-            var current = rt.gc.gc_obj_list_head;
-            while (current) |node| {
-                const next = node.next;
-                const h = gc.headerFromGcNode(node);
-                if (h.flags.mark) {
-                    unlinkNodeFromList(&rt.gc.gc_obj_list_head, &rt.gc.gc_obj_list_tail, node);
-                    linkNodeToList(&tmp_head, &tmp_tail, node);
-                }
-                current = next;
+            var gc_iter = rt.gc.objectIterator();
+            while (gc_iter.next()) |h| {
+                if (h.flags.mark) garbage_headers.appendAssumeCapacity(h);
             }
         }
 
-        // Phase 3b: restore refcounts of all objects in tmp_head (to be deleted)
+        // Phase 3b: restore refcounts of all objects to be deleted.
         {
-            var current = tmp_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
+            for (garbage_headers.items) |h| {
                 traceChildren(rt, h, ScanRestoreVisitor{ .rt = rt });
             }
         }
@@ -5179,23 +5412,12 @@ pub const Object = struct {
         // Free/garbage membership is derived as (cycle_visited and !cycle_preserved).
         var preserved_count: usize = 0;
         {
-            var current = rt.gc.gc_obj_list_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
-                if (h.kind == .object) {
+            var gc_iter = rt.gc.objectIterator();
+            while (gc_iter.next()) |h| {
+                if (h.kind == .object or h.kind == .var_ref) {
                     h.flags.cycle_visited = true;
-                    h.flags.cycle_preserved = true;
-                    preserved_count += 1;
-                }
-            }
-        }
-        {
-            var current = tmp_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
-                if (h.kind == .object) {
-                    h.flags.cycle_visited = true;
-                    h.flags.cycle_preserved = false;
+                    h.flags.cycle_preserved = !h.flags.mark;
+                    if (h.flags.cycle_preserved) preserved_count += 1;
                 }
             }
         }
@@ -5204,7 +5426,7 @@ pub const Object = struct {
         defer symbol_roots.deinit();
         try seedSymbolRootsFromRuntimeHeldValues(rt, roots, &symbol_roots);
 
-        try scanPreservedWeakAndFinalizationEdges(rt, tmp_head, &symbol_roots, &preserved_count);
+        try scanPreservedWeakAndFinalizationEdges(rt, &symbol_roots, &preserved_count);
 
         const ResurrectHelper = struct {
             pub fn scanAndPreserveValue(
@@ -5212,6 +5434,7 @@ pub const Object = struct {
                 preserved_bytecodes: *ObjectVisitSet,
                 symbol_roots_set: *SymbolRootSet,
                 object_worklist: *std.ArrayList(*Object),
+                var_ref_worklist: *std.ArrayList(*var_ref_mod.VarRef),
                 bytecode_worklist: *std.ArrayList(*FunctionBytecode),
                 val: JSValue,
             ) ObjectGraphError!void {
@@ -5220,7 +5443,13 @@ pub const Object = struct {
                     if (obj.header.flags.cycle_visited and !obj.header.flags.cycle_preserved) {
                         obj.header.flags.cycle_preserved = true;
                         try object_worklist.append(runtime.memory.persistent_allocator, obj);
-                        runtime.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
+                        runtime.gc.recordMarkStackDepth(object_worklist.items.len + var_ref_worklist.items.len + bytecode_worklist.items.len);
+                    }
+                } else if (var_ref_mod.VarRef.fromValue(val)) |ref| {
+                    if (ref.header.flags.cycle_visited and !ref.header.flags.cycle_preserved) {
+                        ref.header.flags.cycle_preserved = true;
+                        try var_ref_worklist.append(runtime.memory.persistent_allocator, ref);
+                        runtime.gc.recordMarkStackDepth(object_worklist.items.len + var_ref_worklist.items.len + bytecode_worklist.items.len);
                     }
                 } else if (functionBytecodeFromValue(val)) |const_fb| {
                     const fb = @constCast(const_fb);
@@ -5228,7 +5457,7 @@ pub const Object = struct {
                     const entry = try preserved_bytecodes.getOrPut(addr);
                     if (!entry.found_existing) {
                         try bytecode_worklist.append(runtime.memory.persistent_allocator, fb);
-                        runtime.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
+                        runtime.gc.recordMarkStackDepth(object_worklist.items.len + var_ref_worklist.items.len + bytecode_worklist.items.len);
                     }
                 }
             }
@@ -5238,14 +5467,15 @@ pub const Object = struct {
                 preserved_bytecodes: *ObjectVisitSet,
                 symbol_roots_set: *SymbolRootSet,
                 object_worklist: *std.ArrayList(*Object),
+                var_ref_worklist: *std.ArrayList(*var_ref_mod.VarRef),
                 bytecode_worklist: *std.ArrayList(*FunctionBytecode),
                 fb: *FunctionBytecode,
             ) ObjectGraphError!void {
                 if (fb.class_fields_init) |val| {
-                    try scanAndPreserveValue(runtime, preserved_bytecodes, symbol_roots_set, object_worklist, bytecode_worklist, val);
+                    try scanAndPreserveValue(runtime, preserved_bytecodes, symbol_roots_set, object_worklist, var_ref_worklist, bytecode_worklist, val);
                 }
                 for (fb.cpool) |val| {
-                    try scanAndPreserveValue(runtime, preserved_bytecodes, symbol_roots_set, object_worklist, bytecode_worklist, val);
+                    try scanAndPreserveValue(runtime, preserved_bytecodes, symbol_roots_set, object_worklist, var_ref_worklist, bytecode_worklist, val);
                 }
             }
         };
@@ -5255,6 +5485,7 @@ pub const Object = struct {
             preserved_bytecodes: *ObjectVisitSet,
             symbol_roots_set: *SymbolRootSet,
             object_worklist: *std.ArrayList(*Object),
+            var_ref_worklist: *std.ArrayList(*var_ref_mod.VarRef),
             bytecode_worklist: *std.ArrayList(*FunctionBytecode),
             err: ?ObjectGraphError = null,
 
@@ -5264,7 +5495,7 @@ pub const Object = struct {
                     if (obj.header.flags.cycle_visited and !obj.header.flags.cycle_preserved) {
                         obj.header.flags.cycle_preserved = true;
                         try self.object_worklist.append(self.rt.memory.persistent_allocator, obj);
-                        self.rt.gc.recordMarkStackDepth(self.object_worklist.items.len + self.bytecode_worklist.items.len);
+                        self.rt.gc.recordMarkStackDepth(self.object_worklist.items.len + self.var_ref_worklist.items.len + self.bytecode_worklist.items.len);
                     }
                 }
             }
@@ -5275,6 +5506,7 @@ pub const Object = struct {
                     self.preserved_bytecodes,
                     self.symbol_roots_set,
                     self.object_worklist,
+                    self.var_ref_worklist,
                     self.bytecode_worklist,
                     val_ptr.*,
                 );
@@ -5301,77 +5533,90 @@ pub const Object = struct {
         var object_worklist = &rt.gc.object_worklist;
         object_worklist.clearRetainingCapacity();
 
+        var var_ref_worklist = &rt.gc.var_ref_worklist;
+        var_ref_worklist.clearRetainingCapacity();
+
         var bytecode_worklist = &rt.gc.bytecode_worklist;
         bytecode_worklist.clearRetainingCapacity();
 
-        // Initialize object worklist with all objects currently preserved. At this
-        // point preserved objects live either on the live list (all of them) or on
-        // the garbage list (resurrected via weak/finalization edges, not yet moved).
+        // Initialize object worklist with all objects currently preserved.
         {
-            const list_heads = [2]?*gc.GcNode{ rt.gc.gc_obj_list_head, tmp_head };
-            for (list_heads) |list_head| {
-                var current = list_head;
-                while (current) |node| : (current = node.next) {
-                    const h = gc.headerFromGcNode(node);
-                    if (h.kind == .object and h.flags.cycle_preserved) {
-                        const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                        try object_worklist.append(rt.memory.persistent_allocator, obj);
-                        rt.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
-                    }
+            var gc_iter = rt.gc.objectIterator();
+            while (gc_iter.next()) |h| {
+                if (h.kind == .object and h.flags.cycle_preserved) {
+                    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
+                    try object_worklist.append(rt.memory.persistent_allocator, obj);
+                    rt.gc.recordMarkStackDepth(object_worklist.items.len + var_ref_worklist.items.len + bytecode_worklist.items.len);
+                } else if (h.kind == .var_ref and h.flags.cycle_preserved) {
+                    const ref: *var_ref_mod.VarRef = @alignCast(@fieldParentPtr("header", h));
+                    try var_ref_worklist.append(rt.memory.persistent_allocator, ref);
+                    rt.gc.recordMarkStackDepth(object_worklist.items.len + var_ref_worklist.items.len + bytecode_worklist.items.len);
                 }
             }
         }
 
         // Fixed-point transitive resurrection loop
-        while (object_worklist.items.len > 0 or bytecode_worklist.items.len > 0) {
+        while (object_worklist.items.len > 0 or var_ref_worklist.items.len > 0 or bytecode_worklist.items.len > 0) {
             while (object_worklist.items.len > 0) {
                 const obj = object_worklist.pop().?;
-                rt.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
+                rt.gc.recordMarkStackDepth(object_worklist.items.len + var_ref_worklist.items.len + bytecode_worklist.items.len);
                 var visitor = ObjectResurrectVisitor{
                     .rt = rt,
                     .preserved_bytecodes = preserved_bytecodes,
                     .symbol_roots_set = &symbol_roots,
                     .object_worklist = object_worklist,
+                    .var_ref_worklist = var_ref_worklist,
                     .bytecode_worklist = bytecode_worklist,
                 };
                 try obj.traceChildEdgesFallible(rt, &visitor);
             }
 
+            while (var_ref_worklist.items.len > 0) {
+                const ref = var_ref_worklist.pop().?;
+                rt.gc.recordMarkStackDepth(object_worklist.items.len + var_ref_worklist.items.len + bytecode_worklist.items.len);
+                try ResurrectHelper.scanAndPreserveValue(
+                    rt,
+                    preserved_bytecodes,
+                    &symbol_roots,
+                    object_worklist,
+                    var_ref_worklist,
+                    bytecode_worklist,
+                    ref.varRefValue(),
+                );
+            }
+
             while (bytecode_worklist.items.len > 0) {
                 const fb = bytecode_worklist.pop().?;
-                rt.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
+                rt.gc.recordMarkStackDepth(object_worklist.items.len + var_ref_worklist.items.len + bytecode_worklist.items.len);
                 try ResurrectHelper.scanBytecodeChildObjectsAndBytecodes(
                     rt,
                     preserved_bytecodes,
                     &symbol_roots,
                     object_worklist,
+                    var_ref_worklist,
                     bytecode_worklist,
                     fb,
                 );
             }
         }
 
-        // Move newly-preserved objects and bytecodes back to live list
+        // Mark newly-preserved objects and bytecodes as live again.
         {
-            var current = tmp_head;
-            while (current) |node| {
-                const next = node.next;
-                const h = gc.headerFromGcNode(node);
+            for (garbage_headers.items) |h| {
                 if (h.kind == .object) {
                     if (h.flags.cycle_preserved) {
-                        unlinkNodeFromList(&tmp_head, &tmp_tail, node);
-                        linkNodeToList(&rt.gc.gc_obj_list_head, &rt.gc.gc_obj_list_tail, node);
+                        h.flags.mark = false;
+                    }
+                } else if (h.kind == .var_ref) {
+                    if (h.flags.cycle_preserved) {
                         h.flags.mark = false;
                     }
                 } else if (h.kind == .function_bytecode) {
                     const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                     if (preserved_bytecodes.contains(@intFromPtr(fb))) {
-                        unlinkNodeFromList(&tmp_head, &tmp_tail, node);
-                        linkNodeToList(&rt.gc.gc_obj_list_head, &rt.gc.gc_obj_list_tail, node);
                         h.flags.mark = false;
                     }
                 }
-                current = next;
             }
         }
 
@@ -5382,10 +5627,9 @@ pub const Object = struct {
         var free_internal_bytecodes = ObjectVisitSet.init(rt.memory.allocator);
         defer free_internal_bytecodes.deinit();
         {
-            var current = tmp_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
+            for (garbage_headers.items) |h| {
                 if (h.kind == .function_bytecode) {
+                    if (!h.flags.mark) continue;
                     const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                     try free_internal_bytecodes.put(@intFromPtr(fb), {});
                 }
@@ -5398,21 +5642,28 @@ pub const Object = struct {
         // and guard release may destroy nodes. The object worklist is empty here,
         // so reuse its buffer.
         std.debug.assert(object_worklist.items.len == 0);
+        std.debug.assert(var_ref_worklist.items.len == 0);
         {
-            var current = rt.gc.gc_obj_list_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
+            var gc_iter = rt.gc.objectIterator();
+            while (gc_iter.next()) |h| {
                 if (h.kind == .object and h.flags.cycle_preserved) {
                     const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                     try object_worklist.append(rt.memory.persistent_allocator, obj);
+                } else if (h.kind == .var_ref and h.flags.cycle_preserved) {
+                    const ref: *var_ref_mod.VarRef = @alignCast(@fieldParentPtr("header", h));
+                    try var_ref_worklist.append(rt.memory.persistent_allocator, ref);
                 }
             }
         }
         const preserved_objects: []const *Object = object_worklist.items;
+        const preserved_var_refs: []const *var_ref_mod.VarRef = var_ref_worklist.items;
 
         // Temporarily increment ref counts of all preserved objects and bytecodes
         // to prevent them from being destroyed/freed during weak entries sweeping.
         for (preserved_objects) |current| {
+            current.header.rc += 1;
+        }
+        for (preserved_var_refs) |current| {
             current.header.rc += 1;
         }
         {
@@ -5446,6 +5697,13 @@ pub const Object = struct {
                 gc.release(rt, &current.header);
             }
         }
+        for (preserved_var_refs) |current| {
+            current.header.rc -= 1;
+            if (current.header.rc == 0) {
+                current.header.rc = 1;
+                gc.release(rt, &current.header);
+            }
+        }
         {
             var iterator = preserved_bytecodes.keyIterator();
             while (iterator.next()) |address| {
@@ -5460,10 +5718,8 @@ pub const Object = struct {
 
         var garbage_count: usize = 0;
         {
-            var current = tmp_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
-                if (h.kind == .object) garbage_count += 1;
+            for (garbage_headers.items) |h| {
+                if ((h.kind == .object or h.kind == .var_ref) and h.flags.mark) garbage_count += 1;
             }
         }
 
@@ -5472,35 +5728,32 @@ pub const Object = struct {
         defer rt.gc.phase = old_phase;
 
         if (garbage_count == 0) {
-            var current = tmp_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
+            for (garbage_headers.items) |h| {
                 if (h.kind == .function_bytecode) {
+                    if (!h.flags.mark) continue;
                     const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                     clearFunctionBytecodeReferencesToVisited(rt, fb, &free_internal_bytecodes);
                 }
             }
 
-            current = tmp_head;
-            while (current) |node| {
-                const next = node.next;
-                const h = gc.headerFromGcNode(node);
+            for (garbage_headers.items) |h| {
                 if (h.kind == .function_bytecode) {
-                    unlinkNodeFromList(&tmp_head, &tmp_tail, node);
+                    if (!h.flags.mark) continue;
                     rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
                     function_bytecode_mod.destroyFromHeader(rt, h);
                 }
-                current = next;
             }
             return 0;
         }
 
-        var current_garbage = tmp_head;
-        while (current_garbage) |node| : (current_garbage = node.next) {
-            const h = gc.headerFromGcNode(node);
+        for (garbage_headers.items) |h| {
+            if (!h.flags.mark) continue;
             if (h.kind == .object) {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                 try obj.clearReferencesToVisited(rt, &free_internal_bytecodes);
+            } else if (h.kind == .var_ref) {
+                const ref: *var_ref_mod.VarRef = @alignCast(@fieldParentPtr("header", h));
+                clearValueReferenceToVisited(rt, ref.varRefValueSlot(), &free_internal_bytecodes);
             } else if (h.kind == .function_bytecode) {
                 const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                 clearFunctionBytecodeReferencesToVisited(rt, fb, &free_internal_bytecodes);
@@ -5509,18 +5762,17 @@ pub const Object = struct {
 
         const freed = garbage_count;
 
-        current_garbage = tmp_head;
-        while (current_garbage) |node| {
-            const next = node.next;
-            const h = gc.headerFromGcNode(node);
-            unlinkNodeFromList(&tmp_head, &tmp_tail, node);
+        for (garbage_headers.items) |h| {
+            if (!h.flags.mark) continue;
             if (h.kind == .object) {
                 destroyFromHeader(rt, h);
+            } else if (h.kind == .var_ref) {
+                rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
+                var_ref_mod.VarRef.destroyFromHeader(rt, h);
             } else if (h.kind == .function_bytecode) {
                 rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
                 function_bytecode_mod.destroyFromHeader(rt, h);
             }
-            current_garbage = next;
         }
 
         return freed;
@@ -5530,9 +5782,8 @@ pub const Object = struct {
         var candidates = ObjectVisitSet.init(rt.memory.allocator);
         defer candidates.deinit();
 
-        var current = rt.gc.gc_obj_list_head;
-        while (current) |node| : (current = node.next) {
-            const h = gc.headerFromGcNode(node);
+        var gc_iter = rt.gc.objectIterator();
+        while (gc_iter.next()) |h| {
             const function_bytecode = functionBytecodeFromGcHeader(h) orelse continue;
             candidates.put(@intFromPtr(function_bytecode), {}) catch return;
         }
@@ -5578,17 +5829,12 @@ pub const Object = struct {
     }
 
     fn releaseFunctionBytecodeGuards(rt: *JSRuntime, candidates: *const ObjectVisitSet) void {
-        var current = rt.gc.gc_obj_list_tail;
-        while (current) |node| {
-            const prev = node.prev;
-            const h = gc.headerFromGcNode(node);
-            const fb_ptr = if (h.kind == .function_bytecode) @as(*FunctionBytecode, @alignCast(@fieldParentPtr("header", h))) else null;
-            if (fb_ptr) |fb| {
-                if (candidates.contains(@intFromPtr(fb))) {
-                    gc.release(rt, h);
-                }
+        var iterator = candidates.keyIterator();
+        while (iterator.next()) |address| {
+            const function_bytecode: *FunctionBytecode = @ptrFromInt(address.*);
+            if (rt.gc.containsHeader(&function_bytecode.header)) {
+                gc.release(rt, &function_bytecode.header);
             }
-            current = prev;
         }
     }
 
@@ -5798,7 +6044,9 @@ pub const Object = struct {
                 }
             }
         }
-        try Helper.traceOptValue(visitor, &self.cached_iterator_next);
+        if (self.cachedIteratorNextSlotIfPresent(rt)) |slot| {
+            try Helper.traceOptValue(visitor, slot);
+        }
         // Property key atoms (including symbol keys) live in the shape;
         // visit them from there. Visitors only read symbol atoms (set
         // insertion / no-op), so revisiting a shared shape from several
@@ -5850,46 +6098,48 @@ pub const Object = struct {
             try Helper.traceOptValue(visitor, &payload.data);
         }
         if (self.functionPayload()) |payload| {
-            try Helper.traceOptValue(visitor, &payload.source);
             try Helper.traceOptValue(visitor, &payload.bytecode);
-            try Helper.traceOptValue(visitor, &payload.class_fields_init);
             for (payload.captures) |*stored| try Helper.callVisitValue(visitor, stored);
-            for (payload.eval_local_refs) |*stored| try Helper.callVisitValue(visitor, stored);
-            try Helper.traceOptValue(visitor, &payload.eval_parent_function);
-            try Helper.traceOptValue(visitor, &payload.import_meta);
-            try Helper.traceOptValue(visitor, &payload.lexical_this);
-            try Helper.traceOptValue(visitor, &payload.arrow_constructor_this);
-            try Helper.traceOptValue(visitor, &payload.arrow_new_target);
-            try Helper.traceOptValue(visitor, &payload.super_constructor);
             try Helper.callVisitObject(visitor, &payload.home_object);
-            try Helper.traceOptValue(visitor, &payload.realm_global);
-            for (&payload.primitive_prototypes) |*slot| {
-                try Helper.traceOptValue(visitor, slot);
-            }
-            try Helper.traceOptValue(visitor, &payload.proxy_revoke_target);
-            try Helper.traceOptValue(visitor, &payload.promise_capability_slot);
-            try Helper.traceOptValue(visitor, &payload.promise_resolving_target);
-            try Helper.traceOptValue(visitor, &payload.promise_resolving_state);
-            try Helper.traceOptValue(visitor, &payload.promise_thenable_target);
-            try Helper.traceOptValue(visitor, &payload.promise_thenable_this);
-            try Helper.traceOptValue(visitor, &payload.promise_thenable_then);
-            try Helper.traceOptValue(visitor, &payload.promise_reaction_record);
-            try Helper.traceOptValue(visitor, &payload.promise_reaction_value);
-            try Helper.traceOptValue(visitor, &payload.promise_combinator_state);
-            try Helper.traceOptValue(visitor, &payload.promise_finally_payload);
-            try Helper.traceOptValue(visitor, &payload.promise_finally_callback);
-            try Helper.traceOptValue(visitor, &payload.promise_finally_constructor);
-            try Helper.traceOptValue(visitor, &payload.async_dispose_stack);
-            try Helper.traceOptValue(visitor, &payload.async_function_continuation);
-            try Helper.traceOptValue(visitor, &payload.realm_type_error_constructor);
-            if (payload.regexp_legacy_statics) |legacy| {
-                try Helper.traceOptValue(visitor, &legacy.input);
-                try Helper.traceOptValue(visitor, &legacy.last_match);
-                try Helper.traceOptValue(visitor, &legacy.last_paren);
-                try Helper.traceOptValue(visitor, &legacy.left_context);
-                try Helper.traceOptValue(visitor, &legacy.right_context);
-                for (&legacy.captures) |*slot| {
+            if (payload.rare) |rare| {
+                try Helper.traceOptValue(visitor, &rare.source);
+                try Helper.traceOptValue(visitor, &rare.class_fields_init);
+                for (rare.eval_local_refs) |*stored| try Helper.callVisitValue(visitor, stored);
+                try Helper.traceOptValue(visitor, &rare.eval_parent_function);
+                try Helper.traceOptValue(visitor, &rare.import_meta);
+                try Helper.traceOptValue(visitor, &rare.lexical_this);
+                try Helper.traceOptValue(visitor, &rare.arrow_constructor_this);
+                try Helper.traceOptValue(visitor, &rare.arrow_new_target);
+                try Helper.traceOptValue(visitor, &rare.super_constructor);
+                try Helper.traceOptValue(visitor, &rare.realm_global);
+                for (&rare.primitive_prototypes) |*slot| {
                     try Helper.traceOptValue(visitor, slot);
+                }
+                try Helper.traceOptValue(visitor, &rare.proxy_revoke_target);
+                try Helper.traceOptValue(visitor, &rare.promise_capability_slot);
+                try Helper.traceOptValue(visitor, &rare.promise_resolving_target);
+                try Helper.traceOptValue(visitor, &rare.promise_resolving_state);
+                try Helper.traceOptValue(visitor, &rare.promise_thenable_target);
+                try Helper.traceOptValue(visitor, &rare.promise_thenable_this);
+                try Helper.traceOptValue(visitor, &rare.promise_thenable_then);
+                try Helper.traceOptValue(visitor, &rare.promise_reaction_record);
+                try Helper.traceOptValue(visitor, &rare.promise_reaction_value);
+                try Helper.traceOptValue(visitor, &rare.promise_combinator_state);
+                try Helper.traceOptValue(visitor, &rare.promise_finally_payload);
+                try Helper.traceOptValue(visitor, &rare.promise_finally_callback);
+                try Helper.traceOptValue(visitor, &rare.promise_finally_constructor);
+                try Helper.traceOptValue(visitor, &rare.async_dispose_stack);
+                try Helper.traceOptValue(visitor, &rare.async_function_continuation);
+                try Helper.traceOptValue(visitor, &rare.realm_type_error_constructor);
+                if (rare.regexp_legacy_statics) |legacy| {
+                    try Helper.traceOptValue(visitor, &legacy.input);
+                    try Helper.traceOptValue(visitor, &legacy.last_match);
+                    try Helper.traceOptValue(visitor, &legacy.last_paren);
+                    try Helper.traceOptValue(visitor, &legacy.left_context);
+                    try Helper.traceOptValue(visitor, &legacy.right_context);
+                    for (&legacy.captures) |*slot| {
+                        try Helper.traceOptValue(visitor, slot);
+                    }
                 }
             }
         }
@@ -6247,6 +6497,14 @@ pub const Object = struct {
             try scanPreservedObjects(rt, symbol_roots, preserved_count, child);
             return;
         }
+        if (var_ref_mod.VarRef.fromValue(stored)) |ref| {
+            if (ref.header.flags.cycle_visited and !ref.header.flags.cycle_preserved) {
+                ref.header.flags.cycle_preserved = true;
+                preserved_count.* += 1;
+            }
+            try scanPreservedValueObject(rt, symbol_roots, preserved_count, ref.varRefValue());
+            return;
+        }
         const function_bytecode = functionBytecodeFromValue(stored) orelse return;
         try scanPreservedFunctionBytecodeChildObjects(rt, symbol_roots, preserved_count, function_bytecode);
     }
@@ -6263,39 +6521,32 @@ pub const Object = struct {
 
     fn scanPreservedWeakEdges(
         rt: *JSRuntime,
-        tmp_head: ?*gc.GcNode,
         symbol_roots: *SymbolRootSet,
         preserved_count: *usize,
     ) ObjectGraphError!void {
         var changed = true;
         while (changed) {
             changed = false;
-            // Preserved objects live on the live list or (if resurrected via
-            // weak/finalization edges and not yet moved back) the garbage list.
-            const list_heads = [2]?*gc.GcNode{ rt.gc.gc_obj_list_head, tmp_head };
-            for (list_heads) |list_head| {
-                var node_it = list_head;
-                while (node_it) |node| : (node_it = node.next) {
-                    const h = gc.headerFromGcNode(node);
-                    if (h.kind != .object or !h.flags.cycle_preserved) continue;
-                    const current: *Object = @alignCast(@fieldParentPtr("header", h));
-                    for (current.weakCollectionEntries()) |entry| {
-                        if (!weakEntryKeyIsPreserved(rt, symbol_roots, entry.key_identity)) continue;
-                        const before = preserved_count.*;
-                        const before_symbols = symbol_roots.count();
-                        try scanPreservedValueObject(rt, symbol_roots, preserved_count, entry.value);
-                        if (preserved_count.* != before or symbol_roots.count() != before_symbols) changed = true;
-                    }
-                    for (current.finalizationRegistryCells()) |entry| {
-                        if (!entry.isActive()) continue;
-                        const target_identity = entry.target_identity orelse continue;
-                        if (!weakEntryKeyIsPreserved(rt, symbol_roots, target_identity)) continue;
-                        const before = preserved_count.*;
-                        const before_symbols = symbol_roots.count();
-                        try scanPreservedValueObject(rt, symbol_roots, preserved_count, entry.held_value);
-                        try scanPreservedValueObject(rt, symbol_roots, preserved_count, entry.unregister_token);
-                        if (preserved_count.* != before or symbol_roots.count() != before_symbols) changed = true;
-                    }
+            var gc_iter = rt.gc.objectIterator();
+            while (gc_iter.next()) |h| {
+                if (h.kind != .object or !h.flags.cycle_preserved) continue;
+                const current: *Object = @alignCast(@fieldParentPtr("header", h));
+                for (current.weakCollectionEntries()) |entry| {
+                    if (!weakEntryKeyIsPreserved(rt, symbol_roots, entry.key_identity)) continue;
+                    const before = preserved_count.*;
+                    const before_symbols = symbol_roots.count();
+                    try scanPreservedValueObject(rt, symbol_roots, preserved_count, entry.value);
+                    if (preserved_count.* != before or symbol_roots.count() != before_symbols) changed = true;
+                }
+                for (current.finalizationRegistryCells()) |entry| {
+                    if (!entry.isActive()) continue;
+                    const target_identity = entry.target_identity orelse continue;
+                    if (!weakEntryKeyIsPreserved(rt, symbol_roots, target_identity)) continue;
+                    const before = preserved_count.*;
+                    const before_symbols = symbol_roots.count();
+                    try scanPreservedValueObject(rt, symbol_roots, preserved_count, entry.held_value);
+                    try scanPreservedValueObject(rt, symbol_roots, preserved_count, entry.unregister_token);
+                    if (preserved_count.* != before or symbol_roots.count() != before_symbols) changed = true;
                 }
             }
         }
@@ -6303,14 +6554,13 @@ pub const Object = struct {
 
     fn scanPreservedWeakAndFinalizationEdges(
         rt: *JSRuntime,
-        tmp_head: ?*gc.GcNode,
         symbol_roots: *SymbolRootSet,
         preserved_count: *usize,
     ) ObjectGraphError!void {
         while (true) {
             const before_objects = preserved_count.*;
             const before_symbols = symbol_roots.count();
-            try scanPreservedWeakEdges(rt, tmp_head, symbol_roots, preserved_count);
+            try scanPreservedWeakEdges(rt, symbol_roots, preserved_count);
             try queueFinalizationCleanupJobs(rt, symbol_roots, preserved_count);
             if (preserved_count.* == before_objects and symbol_roots.count() == before_symbols) return;
         }
@@ -6321,16 +6571,13 @@ pub const Object = struct {
         symbol_roots: *SymbolRootSet,
         preserved_count: *usize,
     ) ObjectGraphError!void {
-        var current_node = rt.gc.gc_obj_list_head;
-        while (current_node) |node| {
-            const next = node.next;
-            const header = gc.headerFromGcNode(node);
+        var gc_iter = rt.gc.objectIterator();
+        while (gc_iter.next()) |header| {
             if (header.kind == .object) {
                 const current: *Object = @alignCast(@fieldParentPtr("header", header));
                 if (header.flags.cycle_preserved) {
                     const finalization_payload = current.finalizationRegistryPayload() orelse {
                         current.pruneBorrowedReferenceHolderIfEmpty(rt);
-                        current_node = next;
                         continue;
                     };
                     var cell_index: usize = 0;
@@ -6355,7 +6602,6 @@ pub const Object = struct {
                     }
                 }
             }
-            current_node = next;
         }
     }
 
@@ -6559,6 +6805,10 @@ pub const Object = struct {
         return child.header.flags.cycle_visited and !child.header.flags.cycle_preserved;
     }
 
+    inline fn headerIsCycleGarbage(header: *const gc.Header) bool {
+        return header.flags.cycle_visited and !header.flags.cycle_preserved;
+    }
+
     fn clearReferencesToVisited(
         self: *Object,
         rt: *JSRuntime,
@@ -6636,9 +6886,7 @@ pub const Object = struct {
             return;
         }
         const cell = varRefCellFromValue(stored.*) orelse return;
-        if (cell.varRefValueSlot().*) |cell_value| {
-            if (valueReferencesVisited(cell_value)) cell.varRefValueSlot().* = JSValue.undefinedValue();
-        }
+        if (valueReferencesVisited(cell.varRefValue())) cell.varRefValueSlot().* = JSValue.undefinedValue();
     }
 
     fn clearFunctionBytecodeReferencesToVisited(
@@ -6651,8 +6899,9 @@ pub const Object = struct {
     }
 
     fn valueReferencesVisited(stored: JSValue) bool {
-        const child = objectFromValue(stored) orelse return false;
-        return objectIsCycleGarbage(child);
+        if (objectFromValue(stored)) |child| return objectIsCycleGarbage(child);
+        if (var_ref_mod.VarRef.fromValue(stored)) |ref| return headerIsCycleGarbage(&ref.header);
+        return false;
     }
 
     fn functionBytecodeFromValue(stored: JSValue) ?*FunctionBytecode {
@@ -6678,17 +6927,13 @@ pub const Object = struct {
         var changed = true;
         while (changed) {
             changed = false;
-            var current_node = rt.gc.gc_obj_list_head;
-            while (current_node) |node| {
-                const next = node.next;
-                const header = gc.headerFromGcNode(node);
+            var gc_iter = rt.gc.objectIterator();
+            while (gc_iter.next()) |header| {
                 const function_bytecode = functionBytecodeFromGcHeader(header) orelse {
-                    current_node = next;
                     continue;
                 };
                 const address = @intFromPtr(function_bytecode);
                 if (candidates.contains(address)) {
-                    current_node = next;
                     continue;
                 }
 
@@ -6696,13 +6941,11 @@ pub const Object = struct {
                     (try countFunctionBytecodeRefsFromVisitedObjects(rt, function_bytecode, visited)) +
                     countFunctionBytecodeRefsFromFunctionBytecodes(function_bytecode, candidates);
                 if (internal_refs == 0) {
-                    current_node = next;
                     continue;
                 }
 
                 try candidates.put(address, {});
                 changed = true;
-                current_node = next;
             }
         }
     }
@@ -6778,7 +7021,7 @@ pub const Object = struct {
         function_bytecode: *const FunctionBytecode,
     ) ObjectGraphError!usize {
         var count: usize = 0;
-        count += countOptionalFunctionBytecodeRef(self.cached_iterator_next, function_bytecode);
+        count += countOptionalFunctionBytecodeRef(self.cachedIteratorNext(rt), function_bytecode);
         for (self.properties) |entry| count += countSlotFunctionBytecodeRefs(entry.slot, function_bytecode);
         if (self.realmPayloadConst()) |payload| {
             if (payload.shared_lazy_native_functions) |cache| {
@@ -6851,7 +7094,7 @@ pub const Object = struct {
         count += countOptionalFunctionBytecodeRef(self.functionArrowNewTarget(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionSuperConstructor(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionRealmGlobal(), function_bytecode);
-        if (self.functionPayloadConst()) |payload| {
+        if (self.functionRarePayloadConst()) |payload| {
             for (payload.primitive_prototypes) |stored| count += countOptionalFunctionBytecodeRef(stored, function_bytecode);
             if (payload.regexp_legacy_statics) |legacy| {
                 count += countOptionalFunctionBytecodeRef(legacy.input, function_bytecode);
@@ -6887,7 +7130,9 @@ pub const Object = struct {
         count += countOptionalFunctionBytecodeRef(self.generatorCurrentFunction(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.generatorYieldStarIterator(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.generatorAsyncPromise(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.varRefValue(), function_bytecode);
+        if (self.varRefPayloadConst()) |payload| {
+            if (payload.value) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
+        }
         for (self.argumentsVarRefs()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.proxyTarget(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.proxyHandler(), function_bytecode);
@@ -6990,8 +7235,8 @@ pub const Object = struct {
         return self.flags.immutable_prototype;
     }
 
-    pub fn getOwnProperty(self: *const Object, atom_id: atom.Atom) ?descriptor.Descriptor {
-        if (self.exotic) |methods| {
+    pub fn getOwnProperty(self: *const Object, rt: *JSRuntime, atom_id: atom.Atom) ?descriptor.Descriptor {
+        if (self.exoticMethods(rt)) |methods| {
             if (methods.get_own_property) |hook| {
                 if (hook(@constCast(self), atom_id)) |desc| return desc;
             }
@@ -7000,7 +7245,7 @@ pub const Object = struct {
             return descriptor.Descriptor.data(stored, true, true, false);
         }
         if (self.flags.is_array and atom_id == atom.ids.length) {
-            return descriptor.Descriptor.data(arrayLengthValue(self.length), self.flags.length_writable, false, false);
+            return descriptor.Descriptor.data(arrayLengthValue(self.arrayLength()), self.flags.length_writable, false, false);
         }
         if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex) {
             if (self.regexpLastIndex()) |stored| return descriptor.Descriptor.data(stored.dup(), self.regexpLastIndexWritable(), false, false);
@@ -7016,7 +7261,7 @@ pub const Object = struct {
             // materialization the slot is `.data` or `.accessor` and
             // re-reads are ordinary fast-path loads.
             if (entry.slot == .auto_init) {
-                const info = property.autoInitAt(self.owner_runtime, entry.slot.auto_init).*;
+                const info = property.autoInit(entry.slot.auto_init).*;
                 // `materializeAutoInit` returns a fresh ref for
                 // `getProperty` semantics. On success the slot is promoted
                 // and `fromSlot` dups the stored value(s). On OOM the
@@ -7067,7 +7312,7 @@ pub const Object = struct {
     pub fn getProperty(self: *const Object, atom_id: atom.Atom) JSValue {
         profile.recordPropLookup(self.flags.is_global);
         if (self.moduleNamespaceBindingValue(atom_id)) |stored| return stored;
-        if (self.flags.is_array and atom_id == atom.ids.length) return arrayLengthValue(self.length);
+        if (self.flags.is_array and atom_id == atom.ids.length) return arrayLengthValue(self.arrayLength());
         if (self.findProperty(atom_id)) |index| {
             const entry = self.properties[index];
             return switch (entry.slot) {
@@ -7083,7 +7328,7 @@ pub const Object = struct {
                 // gives us a writable handle without changing every
                 // caller. Matches QuickJS's `JS_AutoInitProperty` which
                 // also mutates the property record in place on read.
-                .auto_init => |id| materializeAutoInit(@constCast(self), index, property.autoInitAt(self.owner_runtime, id).*),
+                .auto_init => |id| materializeAutoInit(@constCast(self), index, property.autoInit(id).*),
                 .deleted => JSValue.undefinedValue(),
             };
         }
@@ -7207,7 +7452,7 @@ pub const Object = struct {
         if (index >= self.properties.len) return error.IncompatibleDescriptor;
         const entry = self.properties[index];
         if (entry.slot != .auto_init) return;
-        const info = property.autoInitAt(self.owner_runtime, entry.slot.auto_init).*;
+        const info = property.autoInit(entry.slot.auto_init).*;
         const transient = materializeAutoInit(self, index, info);
         transient.free(info.rt);
         if (self.properties[index].slot == .auto_init) return error.OutOfMemory;
@@ -7320,13 +7565,13 @@ pub const Object = struct {
             }
         }
         if (apply_markers) {
-            applyAutoInitArrayBuiltinMarker(function_value, info.array_builtin_marker);
-            applyAutoInitTypedArrayBuiltinMarker(function_value, info.typed_array_builtin_marker);
-            applyAutoInitArrayIteratorKind(function_value, info.array_iterator_kind);
-            applyAutoInitIteratorIdentity(function_value, info.iterator_identity);
-            applyAutoInitCollectionMethodOwner(function_value, info.collection_method_owner_class);
-            applyAutoInitDisposableStackMethod(function_value, info.disposable_stack_method);
-            applyAutoInitAsyncDisposableStackMethod(function_value, info.async_disposable_stack_method);
+            applyAutoInitArrayBuiltinMarker(info.rt, function_value, info.array_builtin_marker);
+            applyAutoInitTypedArrayBuiltinMarker(info.rt, function_value, info.typed_array_builtin_marker);
+            applyAutoInitArrayIteratorKind(info.rt, function_value, info.array_iterator_kind);
+            applyAutoInitIteratorIdentity(info.rt, function_value, info.iterator_identity);
+            applyAutoInitCollectionMethodOwner(info.rt, function_value, info.collection_method_owner_class);
+            applyAutoInitDisposableStackMethod(info.rt, function_value, info.disposable_stack_method);
+            applyAutoInitAsyncDisposableStackMethod(info.rt, function_value, info.async_disposable_stack_method);
         }
         // Self-wire `[[Prototype]]` to Function.prototype. The lazy
         // install path skips the eager
@@ -7403,53 +7648,53 @@ pub const Object = struct {
         return unscopables_value;
     }
 
-    fn applyAutoInitArrayBuiltinMarker(function_value: JSValue, marker: ArrayBuiltinMarker) void {
+    fn applyAutoInitArrayBuiltinMarker(rt: *JSRuntime, function_value: JSValue, marker: ArrayBuiltinMarker) void {
         if (marker == .none) return;
         const header = function_value.refHeader() orelse return;
         const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addArrayBuiltinMarker(marker);
+        _ = function_object.addArrayBuiltinMarker(rt, marker);
     }
 
-    fn applyAutoInitTypedArrayBuiltinMarker(function_value: JSValue, marker: TypedArrayBuiltinMarker) void {
+    fn applyAutoInitTypedArrayBuiltinMarker(rt: *JSRuntime, function_value: JSValue, marker: TypedArrayBuiltinMarker) void {
         if (marker == .none) return;
         const header = function_value.refHeader() orelse return;
         const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addTypedArrayBuiltinMarker(marker);
+        _ = function_object.addTypedArrayBuiltinMarker(rt, marker);
     }
 
-    fn applyAutoInitArrayIteratorKind(function_value: JSValue, kind: u8) void {
+    fn applyAutoInitArrayIteratorKind(rt: *JSRuntime, function_value: JSValue, kind: u8) void {
         if (kind == 0) return;
         const header = function_value.refHeader() orelse return;
         const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addArrayIteratorKind(kind);
+        _ = function_object.addArrayIteratorKind(rt, kind);
     }
 
-    fn applyAutoInitIteratorIdentity(function_value: JSValue, is_identity: bool) void {
+    fn applyAutoInitIteratorIdentity(rt: *JSRuntime, function_value: JSValue, is_identity: bool) void {
         if (!is_identity) return;
         const header = function_value.refHeader() orelse return;
         const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addIteratorIdentityFunction();
+        _ = function_object.addIteratorIdentityFunction(rt);
     }
 
-    fn applyAutoInitCollectionMethodOwner(function_value: JSValue, owner_class: class.ClassId) void {
+    fn applyAutoInitCollectionMethodOwner(rt: *JSRuntime, function_value: JSValue, owner_class: class.ClassId) void {
         if (owner_class == class.invalid_class_id) return;
         const header = function_value.refHeader() orelse return;
         const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addCollectionMethodOwnerClass(owner_class);
+        _ = function_object.addCollectionMethodOwnerClass(rt, owner_class);
     }
 
-    fn applyAutoInitDisposableStackMethod(function_value: JSValue, method_id: u8) void {
+    fn applyAutoInitDisposableStackMethod(rt: *JSRuntime, function_value: JSValue, method_id: u8) void {
         if (method_id == 0) return;
         const header = function_value.refHeader() orelse return;
         const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addDisposableStackMethod(method_id);
+        _ = function_object.addDisposableStackMethod(rt, method_id);
     }
 
-    fn applyAutoInitAsyncDisposableStackMethod(function_value: JSValue, method_id: u8) void {
+    fn applyAutoInitAsyncDisposableStackMethod(rt: *JSRuntime, function_value: JSValue, method_id: u8) void {
         if (method_id == 0) return;
         const header = function_value.refHeader() orelse return;
         const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addAsyncDisposableStackMethod(method_id);
+        _ = function_object.addAsyncDisposableStackMethod(rt, method_id);
     }
 
     fn materializeHostFunctionAutoInit(info: property.AutoInit) ?JSValue {
@@ -7670,7 +7915,7 @@ pub const Object = struct {
     }
 
     pub fn getOwnDataObjectBorrowed(self: *const Object, atom_id: atom.Atom) ?*Object {
-        if (self.exotic != null) return null;
+        if (self.hasExoticMethods()) return null;
         if (self.findProperty(atom_id)) |index| {
             if (self.propFlagsAt(index).accessor) return null;
             return switch (self.properties[index].slot) {
@@ -7682,7 +7927,7 @@ pub const Object = struct {
     }
 
     pub fn getOwnDataPropertyLookup(self: *const Object, atom_id: atom.Atom) ?DataPropertyLookup {
-        if (self.exotic != null) return null;
+        if (self.hasExoticMethods()) return null;
         if (self.findProperty(atom_id)) |index| {
             if (self.propFlagsAt(index).accessor) return null;
             return switch (self.properties[index].slot) {
@@ -7694,7 +7939,7 @@ pub const Object = struct {
     }
 
     pub fn getOwnDataPropertyValueAt(self: *const Object, index: usize, atom_id: atom.Atom) ?JSValue {
-        if (self.exotic != null or index >= self.shapeProps().len) return null;
+        if (self.hasExoticMethods() or index >= self.shapeProps().len) return null;
         const prop = self.shape_ref.props[index];
         const prop_flags = property.Flags.fromBits(prop.flags);
         if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.accessor) return null;
@@ -7705,17 +7950,11 @@ pub const Object = struct {
     }
 
     pub fn getDenseArrayElementValue(self: *const Object, index: u32) ?JSValue {
-        if (!self.flags.is_array or self.arrayElementStorageMode() != .dense) return null;
-        const atom_id = atom.atomFromUInt32(index);
-        if (self.properties.len != 0 and self.findProperty(atom_id) != null) return null;
-        const element_index: usize = @intCast(index);
-        const elements = self.arrayElements();
-        if (element_index >= elements.len) return null;
-        return elements[element_index].dup();
+        return self.fastArrayElementDup(index);
     }
 
     pub fn defineOwnProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
-        if (self.exotic) |methods| {
+        if (self.exoticMethods(rt)) |methods| {
             if (methods.define_own_property) |hook| {
                 if (!hook(self, atom_id, desc)) return error.IncompatibleDescriptor;
                 return;
@@ -7738,11 +7977,11 @@ pub const Object = struct {
 
         if (self.flags.is_array) {
             if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| {
-                if (index >= self.length and !self.flags.length_writable) return error.ReadOnly;
-                const old_length = self.length;
-                if (index > old_length) try self.convertDenseArrayElementsToSparseProperties(rt);
+                if (index >= self.arrayLength() and !self.flags.length_writable) return error.ReadOnly;
+                const old_length = self.arrayLength();
+                if (self.flags.fast_array) try self.convertDenseArrayElementsToSparseProperties(rt);
                 try self.defineOrdinaryOwnProperty(rt, atom_id, actual_desc);
-                if (index >= old_length) self.length = index + 1;
+                if (index >= old_length) self.setArrayLength(index + 1);
                 self.updateArrayStorageMode(index);
                 return;
             }
@@ -7770,7 +8009,7 @@ pub const Object = struct {
     /// caller's responsibility to keep this fast (asserting it would
     /// reintroduce the O(n) scan we are trying to avoid).
     pub fn defineOwnPropertyAssumingNew(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
-        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
@@ -7784,7 +8023,7 @@ pub const Object = struct {
     /// semantics out of the path for fixed metadata properties such as RegExp
     /// match-array `index`, `input`, and `groups`.
     pub fn defineOwnNonIndexPropertyAssumingNew(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
-        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!(self.flags.is_array and atom_id == atom.ids.length));
         std.debug.assert(array.arrayIndexFromAtom(&rt.atoms, atom_id) == null);
         std.debug.assert(self.class_id != class.ids.regexp or atom_id != atom.ids.lastIndex or self.regexpLastIndex() == null);
@@ -7794,7 +8033,7 @@ pub const Object = struct {
     }
 
     pub fn defineRegExpMatchMetadataPropertiesAssumingNew(self: *Object, rt: *JSRuntime, match_index: i32, input_value: JSValue, groups_value: JSValue) !void {
-        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(self.flags.is_array);
         std.debug.assert(self.flags.extensible);
 
@@ -7808,7 +8047,7 @@ pub const Object = struct {
     }
 
     pub fn defineJsonParseDataProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !void {
-        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id == class.ids.object);
         std.debug.assert(self.flags.extensible);
@@ -7830,18 +8069,17 @@ pub const Object = struct {
     }
 
     pub fn reserveOwnPropertyCapacityAssumingPlain(self: *Object, rt: *JSRuntime, needed: usize) !void {
-        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
-        if (needed <= self.property_capacity and rt.shapes.hasReservedOwnPropertyCapacity(self.shape_ref, needed)) return;
+        if (needed <= self.propertyStorageCapacity() and rt.shapes.hasReservedOwnPropertyCapacity(self.shape_ref, needed)) return;
         // Bulk install paths build fresh ordinary objects. Once capacity is
         // reserved, keep their shapes unique and append in place instead of
         // creating a transition node per property.
         try self.ensureUniqueShapeForMutation(rt);
         try self.ensurePropertyCapacity(rt, needed);
-        try rt.shapes.reserveProperties(self.shape_ref, needed);
         try rt.shapes.reservePropertyHash(self.shape_ref, needed);
     }
 
@@ -7908,7 +8146,7 @@ pub const Object = struct {
         native_builtin_id: i32,
         shared_native_cache_slot: u8,
     ) !void {
-        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
@@ -7944,7 +8182,7 @@ pub const Object = struct {
         native_builtin_id: i32,
         shared_native_cache_slot: u8,
     ) !void {
-        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!(self.flags.is_array and atom_id == atom.ids.length));
         std.debug.assert(array.arrayIndexFromAtom(&rt.atoms, atom_id) == null);
         std.debug.assert(self.class_id != class.ids.regexp or atom_id != atom.ids.lastIndex or self.regexpLastIndex() == null);
@@ -7976,7 +8214,7 @@ pub const Object = struct {
         getter_native_builtin_id: i32,
     ) !void {
         std.debug.assert(flags.accessor);
-        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
@@ -8011,7 +8249,7 @@ pub const Object = struct {
         std.debug.assert(flags.accessor);
         std.debug.assert(setter_length > 0);
         std.debug.assert(setter_native_builtin_id >= 0);
-        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
@@ -8076,7 +8314,7 @@ pub const Object = struct {
         flags: property.Flags,
         realm_global: *Object,
     ) !void {
-        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
@@ -8100,7 +8338,7 @@ pub const Object = struct {
     ) !void {
         std.debug.assert(host_function_kind != 0);
         std.debug.assert(external_host_function_id == 0 or host_function_kind == host_function.ids.external_host);
-        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.flags.extensible);
         try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
@@ -8120,7 +8358,7 @@ pub const Object = struct {
         flags: property.Flags,
         realm_global: *Object,
     ) !void {
-        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
@@ -8147,7 +8385,7 @@ pub const Object = struct {
             kind == .json_namespace or
             kind == .reflect_namespace or
             kind == .atomics_namespace);
-        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
@@ -8167,7 +8405,7 @@ pub const Object = struct {
         atom_id: atom.Atom,
         flags: property.Flags,
     ) !void {
-        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(self.flags.extensible);
         try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
             .name = "[Symbol.unscopables]",
@@ -8184,7 +8422,7 @@ pub const Object = struct {
         name: []const u8,
         flags: property.Flags,
     ) !void {
-        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
@@ -8205,7 +8443,7 @@ pub const Object = struct {
         constant_value: i32,
         flags: property.Flags,
     ) !void {
-        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
@@ -8225,7 +8463,7 @@ pub const Object = struct {
         bytes: []const u8,
         flags: property.Flags,
     ) !void {
-        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
@@ -8245,7 +8483,7 @@ pub const Object = struct {
         flags: property.Flags,
         realm_global: *Object,
     ) !void {
-        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
@@ -8317,7 +8555,7 @@ pub const Object = struct {
     ) !void {
         std.debug.assert(host_function_kind != 0);
         std.debug.assert(external_host_function_id == 0 or host_function_kind == host_function.ids.external_host);
-        std.debug.assert(self.exotic == null);
+        std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
@@ -8348,113 +8586,91 @@ pub const Object = struct {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt) and proto.hasProperty(atom_id)) return false;
         }
 
-        const element_slot = &self.arrayElementsSlot().*[@intCast(index)];
-        const old_value = element_slot.*;
-        element_slot.* = new_value.dup();
-        old_value.free(rt);
-        return true;
+        return self.setFastArrayElementDup(rt, index, new_value);
     }
 
     pub fn appendDenseArrayIndex(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (!self.flags.is_array or index != self.length or !self.flags.length_writable) return false;
-        if (self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
+        if (!self.flags.is_array or index != self.arrayLength() or !self.flags.length_writable) return false;
+        if (self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
         if (!self.flags.extensible) return false;
         if (self.properties.len != 0 and self.findProperty(atom_id) != null) return false;
         if (self.prototype) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt) and proto.hasProperty(atom_id)) return false;
         }
 
-        const element_index: usize = @intCast(index);
-        if (element_index != self.arrayElements().len) return false;
-        try self.ensureArrayElementCapacity(rt, index + 1);
-        const elements = self.arrayElementsSlot();
-        elements.* = elements.*.ptr[0 .. element_index + 1];
-        const element_slot = &elements.*[element_index];
+        if (index != self.array_count) return false;
+        const element_slot = try self.appendUninitializedFastArraySlot(rt);
         element_slot.* = new_value.dup();
         self.markIndexedProperties(rt);
-        self.length = index + 1;
         return true;
     }
 
     pub fn initDenseArrayIndexZeroAssumingEmpty(self: *Object, rt: *JSRuntime, new_value: JSValue) !void {
         std.debug.assert(self.flags.is_array);
-        std.debug.assert(self.length == 0);
+        std.debug.assert(self.arrayLength() == 0);
         std.debug.assert(self.flags.length_writable);
         std.debug.assert(self.flags.extensible);
         std.debug.assert(self.arrayElements().len == 0);
         std.debug.assert(self.arrayElementsCapacity() == 0);
 
-        const elements = try rt.memory.alloc(JSValue, 1);
-        errdefer rt.memory.free(JSValue, elements);
-        elements[0] = new_value.dup();
-        self.arrayElementsSlot().* = elements[0..1];
-        self.arrayElementsCapacitySlot().* = 1;
+        const element_slot = try self.appendUninitializedFastArraySlot(rt);
+        element_slot.* = new_value.dup();
         self.markIndexedProperties(rt);
-        self.length = 1;
     }
 
     pub fn appendDenseArrayLiteralIndex(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !bool {
-        if (!self.flags.is_array or index != self.length or !self.flags.length_writable) return false;
+        if (!self.flags.is_array or index != self.arrayLength() or !self.flags.length_writable) return false;
         if (!self.flags.extensible) return false;
 
-        const element_index: usize = @intCast(index);
-        if (element_index != self.arrayElements().len) return false;
-        try self.ensureArrayElementCapacity(rt, index + 1);
-        const elements = self.arrayElementsSlot();
-        elements.* = elements.*.ptr[0 .. element_index + 1];
-        const element_slot = &elements.*[element_index];
+        if (index != self.array_count) return false;
+        const element_slot = try self.appendUninitializedFastArraySlot(rt);
         element_slot.* = new_value.dup();
         self.markIndexedProperties(rt);
-        self.length = index + 1;
         return true;
     }
 
     pub fn initDenseArrayLiteralValuesAssumingEmpty(self: *Object, rt: *JSRuntime, values: []const JSValue) !bool {
         if (!self.flags.is_array or !self.flags.length_writable or !self.flags.extensible) return false;
-        if (self.length != 0 or self.properties.len != 0) return false;
+        if (self.arrayLength() != 0 or self.properties.len != 0) return false;
         if (self.arrayElementStorageMode() != .dense) return false;
         if (values.len > array.max_array_length) return false;
 
-        try self.ensureArrayElementCapacity(rt, @intCast(values.len));
-        const elements = self.arrayElementsSlot();
-        elements.* = elements.*.ptr[0..values.len];
+        try self.ensureArrayElementCapacity(rt, values.len);
+        self.setFastArrayCountAssumeCapacity(@intCast(values.len));
         for (values, 0..) |item, index| {
-            const element_slot = &elements.*[index];
+            const element_slot = &self.array_values[index];
             element_slot.* = item.dup();
         }
         if (values.len != 0) self.markIndexedProperties(rt);
-        self.length = @intCast(values.len);
         return true;
     }
 
     pub fn appendDenseArrayInt32Range(self: *Object, rt: *JSRuntime, start: u32, limit: u32) !bool {
-        if (!self.flags.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
-        if (start != self.length or start >= limit or !self.flags.length_writable or !self.flags.extensible) return false;
+        if (!self.flags.is_array or self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
+        if (start != self.arrayLength() or start >= limit or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.prototype) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
         }
 
         const start_index: usize = @intCast(start);
         const limit_index: usize = @intCast(limit);
-        const elements = self.arrayElementsSlot();
-        if (start_index != elements.*.len) return false;
+        if (start != self.array_count) return false;
 
-        try self.ensureArrayElementCapacity(rt, limit);
-        elements.* = elements.*.ptr[0..limit_index];
+        try self.ensureArrayElementCapacity(rt, limit_index);
+        self.setFastArrayCountAssumeCapacity(limit);
         self.markIndexedProperties(rt);
-        self.length = limit;
 
         var index = start_index;
         while (index < limit_index) : (index += 1) {
-            elements.*[index] = JSValue.int32(@intCast(index));
+            self.array_values[index] = JSValue.int32(@intCast(index));
         }
         return true;
     }
 
     pub fn appendDenseArrayInt32ValueRange(self: *Object, rt: *JSRuntime, start_index: u32, start_value: i32, count: u32) !bool {
         if (count == 0) return true;
-        if (!self.flags.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
-        if (start_index != self.length or !self.flags.length_writable or !self.flags.extensible) return false;
+        if (!self.flags.is_array or self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
+        if (start_index != self.arrayLength() or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.prototype) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
         }
@@ -8468,20 +8684,18 @@ pub const Object = struct {
 
         const start_element: usize = @intCast(start_index);
         const limit_element: usize = @intCast(limit);
-        const elements = self.arrayElementsSlot();
-        if (start_element != elements.*.len) return false;
+        if (start_element != self.array_count) return false;
 
-        try self.ensureArrayElementCapacity(rt, limit);
-        elements.* = elements.*.ptr[0..limit_element];
+        try self.ensureArrayElementCapacity(rt, limit_element);
+        self.setFastArrayCountAssumeCapacity(limit);
         self.markIndexedProperties(rt);
-        self.length = limit;
 
         var offset: u32 = 0;
         while (offset < count) : (offset += 1) {
             const index = start_element + @as(usize, @intCast(offset));
             const element_delta: i32 = @intCast(offset);
             const element_value = start_value + element_delta;
-            elements.*[index] = JSValue.int32(element_value);
+            self.array_values[index] = JSValue.int32(element_value);
         }
         return true;
     }
@@ -8489,8 +8703,8 @@ pub const Object = struct {
     pub fn appendDenseArrayInt32MulAndMaskRange(self: *Object, rt: *JSRuntime, start_index: u32, limit: u32, multiplier: i32, mask: i32) !bool {
         if (start_index >= limit) return true;
         if (multiplier < 0 or mask < 0) return false;
-        if (!self.flags.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
-        if (start_index != self.length or !self.flags.length_writable or !self.flags.extensible) return false;
+        if (!self.flags.is_array or self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
+        if (start_index != self.arrayLength() or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.prototype) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
         }
@@ -8503,20 +8717,18 @@ pub const Object = struct {
 
         const start_element: usize = @intCast(start_index);
         const limit_element: usize = @intCast(limit);
-        const elements = self.arrayElementsSlot();
-        if (start_element != elements.*.len) return false;
+        if (start_element != self.array_count) return false;
 
-        try self.ensureArrayElementCapacity(rt, limit);
-        elements.* = elements.*.ptr[0..limit_element];
+        try self.ensureArrayElementCapacity(rt, limit_element);
+        self.setFastArrayCountAssumeCapacity(limit);
         self.markIndexedProperties(rt);
-        self.length = limit;
 
         var index = start_element;
         while (index < limit_element) : (index += 1) {
             const product_exact = @as(i128, @intCast(index)) * @as(i128, multiplier);
             const product: i32 = @truncate(product_exact);
             const element_value = product & mask;
-            elements.*[index] = JSValue.int32(element_value);
+            self.array_values[index] = JSValue.int32(element_value);
         }
         return true;
     }
@@ -8526,14 +8738,13 @@ pub const Object = struct {
         if (limit > @as(u32, @intCast(std.math.maxInt(i32)))) return false;
         if (mask > atom.max_int_atom) return false;
         if (!self.flags.is_array or !self.flags.length_writable) return false;
-        if (self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
+        if (self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
         if (self.prototype) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
         }
 
-        const elements = self.arrayElementsSlot();
         const mask_index: usize = @intCast(mask);
-        if (mask_index >= elements.*.len) return false;
+        if (mask_index >= self.array_count) return false;
 
         var guard_index: u32 = 0;
         while (guard_index <= mask) : (guard_index += 1) {
@@ -8545,7 +8756,7 @@ pub const Object = struct {
         var value_index = start;
         while (value_index < limit) : (value_index += 1) {
             const element_index: usize = @intCast(value_index & mask);
-            const element_slot = &elements.*[element_index];
+            const element_slot = &self.array_values[element_index];
             const old = element_slot.*;
             const new_value = JSValue.int32(@intCast(value_index));
             element_slot.* = new_value;
@@ -8556,33 +8767,31 @@ pub const Object = struct {
 
     pub fn reserveDenseArrayElements(self: *Object, rt: *JSRuntime, needed: u32) !void {
         if (!self.flags.is_array) return;
-        try self.ensureArrayElementCapacity(rt, needed);
+        try self.ensureArrayElementCapacity(rt, @intCast(needed));
     }
 
     pub fn defineDenseArrayDataProperty(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !bool {
-        if (!self.flags.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
+        if (!self.flags.is_array or self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
         const atom_id = atom.atomFromUInt32(index);
         if (self.findProperty(atom_id) != null) return false;
 
         const element_index: usize = @intCast(index);
-        const elements = self.arrayElementsSlot();
-        if (element_index > elements.*.len) return false;
-        const appended = element_index == elements.*.len;
+        if (element_index > self.array_count) return false;
+        const appended = element_index == self.array_count;
         if (appended) {
             if (!self.flags.extensible) return false;
-            if (index >= self.length and !self.flags.length_writable) return false;
-            if (index != self.length) return false;
-            try self.ensureArrayElementCapacity(rt, index + 1);
-            elements.* = elements.*.ptr[0 .. element_index + 1];
+            if (index >= self.arrayLength() and !self.flags.length_writable) return false;
+            if (index != self.arrayLength()) return false;
+            try self.ensureArrayElementCapacity(rt, element_index + 1);
+            self.setFastArrayCountAssumeCapacity(index + 1);
         }
 
         const next_value = new_value.dup();
         errdefer next_value.free(rt);
-        const element_slot = &elements.*[element_index];
+        const element_slot = &self.array_values[element_index];
         const old = if (appended) JSValue.undefinedValue() else element_slot.*;
         element_slot.* = next_value;
         self.markIndexedProperties(rt);
-        if (index >= self.length) self.length = index + 1;
         if (!appended) old.free(rt);
         return true;
     }
@@ -8606,33 +8815,31 @@ pub const Object = struct {
 
     pub fn canDefineDenseArrayDataPropertiesUnchecked(self: Object) bool {
         return self.flags.is_array and
-            self.exotic == null and
+            !self.hasExoticMethods() and
             self.arrayElementStorageMode() == .dense and
-            self.arrayElements().len == @as(usize, @intCast(self.length)) and
+            self.flags.fast_array and
             self.flags.extensible and
             self.properties.len == 0;
     }
 
     pub fn defineDenseArrayDataPropertyUnchecked(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !void {
         std.debug.assert(self.canDefineDenseArrayDataPropertiesUnchecked());
-        std.debug.assert(index < self.length or self.flags.length_writable);
+        std.debug.assert(index < self.arrayLength() or self.flags.length_writable);
 
         const element_index: usize = @intCast(index);
-        const elements = self.arrayElementsSlot();
-        if (element_index > elements.*.len) return;
-        const appended = element_index == elements.*.len;
+        if (element_index > self.array_count) return;
+        const appended = element_index == self.array_count;
         if (appended) {
-            try self.ensureArrayElementCapacity(rt, index + 1);
-            elements.* = elements.*.ptr[0 .. element_index + 1];
+            try self.ensureArrayElementCapacity(rt, element_index + 1);
+            self.setFastArrayCountAssumeCapacity(index + 1);
         }
 
         const next_value = new_value.dup();
         errdefer next_value.free(rt);
-        const element_slot = &elements.*[element_index];
+        const element_slot = &self.array_values[element_index];
         const old = if (appended) JSValue.undefinedValue() else element_slot.*;
         element_slot.* = next_value;
         self.markIndexedProperties(rt);
-        if (index >= self.length) self.length = index + 1;
         if (!appended) old.free(rt);
     }
 
@@ -8731,7 +8938,7 @@ pub const Object = struct {
     }
 
     pub inline fn setOwnDataPropertyAtForLexicalSync(self: *Object, rt: *JSRuntime, index: usize, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (self.exotic != null or index >= self.shapeProps().len) return false;
+        if (self.hasExoticMethods() or index >= self.shapeProps().len) return false;
         const prop = self.shape_ref.props[index];
         const prop_flags = property.Flags.fromBits(prop.flags);
         if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.accessor) return false;
@@ -8763,7 +8970,7 @@ pub const Object = struct {
     }
 
     pub inline fn setOwnDataPropertyAtForLexicalSyncOwned(self: *Object, rt: *JSRuntime, index: usize, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (self.exotic != null or index >= self.shapeProps().len) return false;
+        if (self.hasExoticMethods() or index >= self.shapeProps().len) return false;
         const prop = self.shape_ref.props[index];
         const prop_flags = property.Flags.fromBits(prop.flags);
         if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.accessor) return false;
@@ -8821,7 +9028,7 @@ pub const Object = struct {
     }
 
     fn defineNewOwnDataPropertyForSimpleSetKnownNoOwn(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (self.exotic != null or self.proxyTarget() != null or self.flags.is_global or self.flags.is_with_environment) return false;
+        if (self.hasExoticMethods() or self.proxyTarget() != null or self.flags.is_global or self.flags.is_with_environment) return false;
         if (!self.flags.extensible) return false;
         if (self.class_id == class.ids.module_ns or self.class_id == class.ids.regexp or self.class_id == class.ids.mapped_arguments) return false;
         if (isTypedArrayObjectForSetFastPath(self)) return false;
@@ -8830,7 +9037,7 @@ pub const Object = struct {
 
         var prototype = self.prototype;
         while (prototype) |proto| {
-            if (proto.exotic != null or proto.proxyTarget() != null) return false;
+            if (proto.hasExoticMethods() or proto.proxyTarget() != null) return false;
             if (isTypedArrayObjectForSetFastPath(proto)) return false;
             if (proto.findProperty(atom_id) != null) return false;
             prototype = proto.prototype;
@@ -8881,7 +9088,7 @@ pub const Object = struct {
     }
 
     pub fn deleteProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom) bool {
-        if (self.exotic) |methods| {
+        if (self.exoticMethods(rt)) |methods| {
             if (methods.delete_property) |hook| return hook(self, atom_id);
         }
         if (self.flags.is_array and atom_id == atom.ids.length) return false;
@@ -8904,7 +9111,7 @@ pub const Object = struct {
     }
 
     pub fn ownKeys(self: Object, rt: *JSRuntime) OwnKeysError![]atom.Atom {
-        if (self.exotic) |methods| {
+        if (self.exoticMethods(rt)) |methods| {
             if (methods.own_keys) |hook| return try hook(@constCast(&self), rt);
         }
         if (self.class_id == class.ids.module_ns) {
@@ -9043,11 +9250,11 @@ pub const Object = struct {
         }
         const target_len = new_len.?;
         if (!self.flags.length_writable) {
-            if (target_len != self.length or (desc.writable orelse false)) return error.IncompatibleDescriptor;
+            if (target_len != self.arrayLength() or (desc.writable orelse false)) return error.IncompatibleDescriptor;
         }
-        if (target_len > self.length and !self.flags.length_writable) return error.ReadOnly;
-        if (target_len > self.length) try self.convertDenseArrayElementsToSparseProperties(rt);
-        if (target_len < self.length) {
+        if (target_len > self.arrayLength() and !self.flags.length_writable) return error.ReadOnly;
+        if (target_len > self.arrayLength()) try self.convertDenseArrayElementsToSparseProperties(rt);
+        if (target_len < self.arrayLength()) {
             var i = self.properties.len;
             while (i > 0) {
                 i -= 1;
@@ -9057,7 +9264,7 @@ pub const Object = struct {
                 if (index >= target_len and !self.deleteProperty(rt, prop_atom)) {
                     const adjusted_len = index + 1;
                     self.truncateArrayElements(rt, adjusted_len);
-                    self.length = adjusted_len;
+                    self.setArrayLength(adjusted_len);
                     self.recomputeArrayStorageMode(rt);
                     if (desc.writable == false) self.flags.length_writable = false;
                     return error.IncompatibleDescriptor;
@@ -9065,7 +9272,7 @@ pub const Object = struct {
             }
         }
         self.truncateArrayElements(rt, target_len);
-        self.length = target_len;
+        self.setArrayLength(target_len);
         self.recomputeArrayStorageMode(rt);
         if (desc.writable) |writable| self.flags.length_writable = writable;
     }
@@ -9097,86 +9304,62 @@ pub const Object = struct {
     }
 
     pub fn truncateArrayElements(self: *Object, rt: *JSRuntime, new_len: u32) void {
-        const elements = self.arrayElementsSlot();
-        const len: usize = @min(@as(usize, @intCast(new_len)), elements.*.len);
-        while (elements.*.len > len) {
-            const index = elements.*.len - 1;
-            const old = elements.*[index];
-            elements.* = elements.*.ptr[0..index];
+        if (!self.flags.is_array or !self.flags.fast_array) return;
+        const len: usize = @min(@as(usize, @intCast(new_len)), self.array_count);
+        while (self.array_count > len) {
+            self.array_count -= 1;
+            const old = self.array_values[@intCast(self.array_count)];
             old.free(rt);
         }
     }
 
     pub fn convertDenseArrayElementsToSparseProperties(self: *Object, rt: *JSRuntime) !void {
-        if (!self.flags.is_array) return;
+        if (!self.flags.is_array or !self.flags.fast_array) return;
+        const old_length = self.array_count;
         const elements = self.arrayElements();
         for (elements, 0..) |stored, index| {
             const atom_id = atom.atomFromUInt32(@intCast(index));
             if (self.findProperty(atom_id) != null) continue;
             try self.addProperty(rt, atom_id, descriptor.Descriptor.data(stored, true, true, true));
         }
-        destroyValueSliceWithCapacity(rt, self.arrayElementsSlot(), self.arrayElementsCapacitySlot());
-        self.arrayStorageModeSlot().* = .sparse;
+        for (elements) |stored| stored.free(rt);
+        self.array_count = 0;
+        self.freeArrayElementBufferAfterMove(rt);
+        self.array_count = old_length;
     }
 
     fn denseArrayElement(self: *const Object, atom_id: atom.Atom) ?JSValue {
-        if (!self.flags.is_array) return null;
+        if (!self.flags.is_array or !self.flags.fast_array) return null;
         if (!atom.isTaggedInt(atom_id)) return null;
-        const index: usize = @intCast(atom.atomToUInt32(atom_id));
-        if (index >= self.arrayElements().len) return null;
-        return self.arrayElements()[index];
+        const index = atom.atomToUInt32(atom_id);
+        if (index >= self.array_count) return null;
+        return self.array_values[@intCast(index)];
     }
 
     fn hasDenseArrayElement(self: *const Object, index: u32) bool {
-        const element_index: usize = @intCast(index);
-        return element_index < self.arrayElements().len;
+        return self.isFastArrayIndexInBounds(index);
     }
 
     fn setDenseArrayElement(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !bool {
         if (!self.flags.is_array) return false;
-        const element_index: usize = @intCast(index);
-        const elements = self.arrayElementsSlot();
-        if (element_index >= elements.*.len) return false;
-        const next_value = new_value.dup();
-        errdefer next_value.free(rt);
-        const element_slot = &elements.*[element_index];
-        const old = element_slot.*;
-        element_slot.* = next_value;
+        if (!self.setFastArrayElementDup(rt, index, new_value)) return false;
         self.markIndexedProperties(rt);
-        old.free(rt);
         return true;
     }
 
-    fn ensureArrayElementCapacity(self: *Object, rt: *JSRuntime, needed: u32) !void {
-        const needed_len: usize = @intCast(needed);
-        const elements = self.arrayElementsSlot();
-        const capacity = self.arrayElementsCapacitySlot();
-        if (needed_len <= capacity.*) return;
-        var next_capacity = if (capacity.* == 0) @as(usize, 16) else capacity.* + capacity.* / 2;
-        if (next_capacity <= capacity.*) next_capacity = capacity.* + 1;
-        while (next_capacity < needed_len) {
-            const growth = @max(next_capacity / 2, 1);
-            next_capacity += growth;
-        }
-        const next = try rt.memory.alloc(JSValue, next_capacity);
-        errdefer rt.memory.free(JSValue, next);
-        @memcpy(next[0..elements.*.len], elements.*);
-        const old_capacity = capacity.*;
-        const old_elements: []JSValue = if (old_capacity != 0) elements.*.ptr[0..old_capacity] else elements.*[0..0];
-        elements.* = next[0..elements.*.len];
-        capacity.* = next_capacity;
-        if (old_capacity != 0) rt.memory.free(JSValue, old_elements);
+    fn ensureArrayElementCapacity(self: *Object, rt: *JSRuntime, needed_len: usize) !void {
+        try self.ensureArrayBufferCapacity(rt, needed_len);
     }
 
     fn updateArrayStorageMode(self: *Object, index: u32) void {
         if (!self.flags.is_array) return;
         _ = index;
-        self.arrayStorageModeSlot().* = .sparse;
+        self.flags.fast_array = false;
     }
 
     fn recomputeArrayStorageMode(self: *Object, rt: *JSRuntime) void {
         if (!self.flags.is_array) return;
-        self.arrayStorageModeSlot().* = if (self.arrayElements().len == @as(usize, @intCast(self.length))) .dense else .sparse;
+        self.flags.fast_array = self.array_capacity >= self.array_count;
         for (self.shapeProps()) |prop| {
             if (property.Flags.fromBits(prop.flags).deleted) continue;
             const index = array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;
@@ -9194,17 +9377,19 @@ pub const Object = struct {
         errdefer if (slot_owned) destroyPropertySlot(rt, atom_id, slot);
 
         const old_len = self.properties.len;
-        const old_capacity = self.property_capacity;
+        const old_capacity = self.propertyStorageCapacity();
         const old_properties: []property.Entry = if (old_capacity != 0) self.properties.ptr[0..old_capacity] else self.properties[0..0];
+        const old_has_property_storage = self.flags.has_property_storage;
+        var current_capacity = old_capacity;
         var grew_properties = false;
         if (old_len + 1 > old_capacity) {
-            var next_capacity = if (old_capacity == 0) @as(usize, 4) else old_capacity * 2;
-            while (next_capacity < old_len + 1) : (next_capacity *= 2) {}
-            const next = try rt.memory.alloc(property.Entry, next_capacity);
+            const next_capacity = shape.propertyCapacityForNeeded(old_len + 1);
+            const next = try rt.allocRuntime(property.Entry, next_capacity);
             errdefer rt.memory.free(property.Entry, next);
             @memcpy(next[0..old_len], self.properties);
             self.properties = next[0..old_len];
-            self.property_capacity = next_capacity;
+            self.flags.has_property_storage = true;
+            current_capacity = next_capacity;
             grew_properties = true;
         }
 
@@ -9220,17 +9405,18 @@ pub const Object = struct {
             self.properties = self.properties.ptr[0..old_len];
             self.flags.may_have_indexed_properties = old_may_have_indexed_properties;
             if (grew_properties) {
-                const new_properties = self.properties.ptr[0..self.property_capacity];
+                const new_properties = self.properties.ptr[0..current_capacity];
                 self.properties = old_properties[0..old_len];
-                self.property_capacity = old_capacity;
+                self.flags.has_property_storage = old_has_property_storage;
                 rt.memory.free(property.Entry, new_properties);
             }
         };
 
-        if (array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) {
+        const array_index = array.arrayIndexFromAtom(&rt.atoms, atom_id);
+        if (array_index != null) {
             self.markIndexedProperties(rt);
         }
-        try self.adoptShapeForNewProperty(rt, atom_id, entry_flags.bits());
+        try self.adoptShapeForNewProperty(rt, atom_id, entry_flags.bits(), current_capacity, array_index);
         if (grew_properties and old_capacity != 0) rt.memory.free(property.Entry, old_properties);
         inserted = false;
     }
@@ -9247,13 +9433,15 @@ pub const Object = struct {
         rt.shapes.release(old_shape);
     }
 
-    fn adoptShapeForNewProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, flags: u6) !void {
-        if (array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) {
+    fn adoptShapeForNewProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, flags: u6, property_capacity: usize, array_index: ?u32) !void {
+        if (array_index != null) {
             try self.ensureUniqueShapeForMutation(rt);
+            try rt.shapes.reserveProperties(self.shape_ref, property_capacity);
             try rt.shapes.addProperty(self.shape_ref, atom_id, flags);
             return;
         }
         if (!self.shapeNeedsMutationCopy()) {
+            try rt.shapes.reserveProperties(self.shape_ref, property_capacity);
             try rt.shapes.addProperty(self.shape_ref, atom_id, flags);
             return;
         }
@@ -9264,17 +9452,21 @@ pub const Object = struct {
     }
 
     fn ensurePropertyCapacity(self: *Object, rt: *JSRuntime, needed: usize) !void {
-        if (needed <= self.property_capacity) return;
-        var next_capacity = if (self.property_capacity == 0) @as(usize, 4) else self.property_capacity * 2;
-        while (next_capacity < needed) : (next_capacity *= 2) {}
-        const next = try rt.memory.alloc(property.Entry, next_capacity);
+        const old_capacity = self.propertyStorageCapacity();
+        if (needed <= old_capacity) return;
+        const next_capacity = shape.propertyCapacityForNeeded(needed);
+        const next = try rt.allocRuntime(property.Entry, next_capacity);
         errdefer rt.memory.free(property.Entry, next);
         @memcpy(next[0..self.properties.len], self.properties);
-        const old_capacity = self.property_capacity;
         const old_properties: []property.Entry = if (old_capacity != 0) self.properties.ptr[0..old_capacity] else self.properties[0..0];
+        try rt.shapes.reserveProperties(self.shape_ref, next_capacity);
         self.properties = next[0..self.properties.len];
-        self.property_capacity = next_capacity;
+        self.flags.has_property_storage = true;
         if (old_capacity != 0) rt.memory.free(property.Entry, old_properties);
+    }
+
+    fn propertyStorageCapacity(self: *const Object) usize {
+        return if (self.flags.has_property_storage) self.shape_ref.props.len else 0;
     }
 
     fn replaceProperty(self: *Object, rt: *JSRuntime, index: usize, desc: descriptor.Descriptor) !void {
@@ -9305,11 +9497,78 @@ pub const Object = struct {
         return property.Flags.fromBits(self.shape_ref.props[index].flags);
     }
 
+    pub const OwnDataPropertyFastLookup = struct {
+        index: usize,
+        flags: property.Flags,
+        value: JSValue,
+    };
+
+    pub const OwnDataPropertyFastResult = union(enum) {
+        value: OwnDataPropertyFastLookup,
+        missing,
+        slow,
+    };
+
+    pub const WritableOwnDataPropertyFastLookup = struct {
+        index: usize,
+        flags: property.Flags,
+        value: *JSValue,
+    };
+
+    const PropertyProbe = struct {
+        index: usize,
+        prop: shape.Property,
+    };
+
     /// Shape-side metadata records matching `self.properties` by index.
     /// Clamped to the entry count so a partially appended property
     /// (entry pushed, shape not yet transitioned) is never exposed.
     pub inline fn shapeProps(self: *const Object) []const shape.Property {
         return self.shape_ref.props[0..@min(self.shape_ref.prop_count, self.properties.len)];
+    }
+
+    fn findPropertyProbeTrusted(self: *const Object, atom_id: atom.Atom) ?PropertyProbe {
+        const prop_count = self.shape_ref.prop_count;
+        std.debug.assert(prop_count <= self.properties.len);
+        const props = self.shape_ref.props.ptr;
+        if (self.shape_ref.hasPropertyHash()) {
+            var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
+            while (shape_index != shape.no_property_index) {
+                const index: usize = @intCast(shape_index);
+                std.debug.assert(index < prop_count);
+                const prop = props[index];
+                shape_index = prop.hash_next;
+                const flags = property.Flags.fromBits(prop.flags);
+                if (prop.atom_id == atom_id and !flags.deleted) return .{ .index = index, .prop = prop };
+            }
+            return null;
+        }
+        for (self.shape_ref.props[0..prop_count], 0..) |prop, index| {
+            const flags = property.Flags.fromBits(prop.flags);
+            if (prop.atom_id == atom_id and !flags.deleted) return .{ .index = index, .prop = prop };
+        }
+        return null;
+    }
+
+    pub fn findOwnDataPropertyFast(self: *const Object, atom_id: atom.Atom) OwnDataPropertyFastResult {
+        const lookup = self.findPropertyProbeTrusted(atom_id) orelse return .missing;
+        const flags = property.Flags.fromBits(lookup.prop.flags);
+        if (flags.accessor) return .slow;
+        return switch (self.properties[lookup.index].slot) {
+            .data => |stored| .{ .value = .{ .index = lookup.index, .flags = flags, .value = stored } },
+            .auto_init, .accessor, .deleted => .slow,
+        };
+    }
+
+    pub fn findWritableOwnDataPropertyFast(self: *Object, atom_id: atom.Atom) ?WritableOwnDataPropertyFastLookup {
+        const lookup = self.findPropertyProbeTrusted(atom_id) orelse return null;
+        const flags = property.Flags.fromBits(lookup.prop.flags);
+        if (flags.accessor or !flags.writable) return null;
+        const entry = &self.properties[lookup.index];
+        return switch (entry.slot) {
+            .data => |*stored| .{ .index = lookup.index, .flags = flags, .value = stored },
+            .auto_init, .accessor, .deleted => null,
+        };
     }
 
     pub fn findProperty(self: *const Object, atom_id: atom.Atom) ?usize {
@@ -9397,7 +9656,7 @@ pub const Object = struct {
         const mapped = refs[slot_index];
         if (mapped.isUninitialized()) return null;
         if (varRefCellFromValue(mapped)) |cell| {
-            return if (cell.varRefValueSlot().*) |stored| stored.dup() else JSValue.undefinedValue();
+            return cell.varRefValue().dup();
         }
         return mapped.dup();
     }
@@ -9746,16 +10005,12 @@ fn arrayLengthStringNumber(rt: *JSRuntime, value: JSValue) !f64 {
     return std.fmt.parseFloat(f64, trimmed) catch std.math.nan(f64);
 }
 
-fn varRefCellFromValue(value: JSValue) ?*Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    const object: *Object = @fieldParentPtr("header", header);
-    if (object.varRefPayload() == null) return null;
-    return object;
+fn varRefCellFromValue(value: JSValue) ?*var_ref_mod.VarRef {
+    return var_ref_mod.VarRef.fromValue(value);
 }
 
 fn appendAtom(rt: *JSRuntime, keys: *[]atom.Atom, atom_id: atom.Atom) OwnKeysError!void {
-    const next = try rt.memory.alloc(atom.Atom, keys.*.len + 1);
+    const next = try rt.allocRuntime(atom.Atom, keys.*.len + 1);
     errdefer rt.memory.free(atom.Atom, next);
     @memcpy(next[0..keys.*.len], keys.*);
     next[keys.*.len] = rt.atoms.dup(atom_id);
@@ -9857,7 +10112,7 @@ pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode) !JSVal
     var out_index: u32 = 0;
     for (owned_keys) |key| {
         if (rt.atoms.kind(key) == .symbol) continue;
-        const desc = object.getOwnProperty(key) orelse continue;
+        const desc = object.getOwnProperty(rt, key) orelse continue;
         defer desc.destroy(rt);
         if (!(desc.enumerable orelse false)) continue;
         element_val = switch (mode) {

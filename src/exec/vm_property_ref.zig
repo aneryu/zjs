@@ -34,7 +34,7 @@ const setGlobalWritableDataStoreForFastPathOwned = property_ic.setGlobalWritable
 
 const op = bytecode.opcode.op;
 
-pub fn withGetOrDelete(
+pub noinline fn withGetOrDelete(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -134,7 +134,7 @@ pub fn withGetOrDelete(
     return .done;
 }
 
-pub fn makeSlotRef(
+pub noinline fn makeSlotRef(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -153,7 +153,7 @@ pub fn makeSlotRef(
         },
         op.make_arg_ref => blk: {
             if (idx >= frame.args.len) return error.InvalidBytecode;
-            break :blk try slot_ops.ensureVarRefCell(ctx, &frame.args[idx]);
+            break :blk try slot_ops.ensureFrameVarRefCell(ctx, frame, &frame.args[idx]);
         },
         op.make_var_ref_ref => blk: {
             try frame_mod.ensureVarRefsCapacity(ctx, frame, idx);
@@ -235,7 +235,7 @@ pub fn makeVarRef(
     try stack.push(key_value);
 }
 
-pub fn makeVarRefVm(
+pub noinline fn makeVarRefVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -312,7 +312,7 @@ pub fn getRefValue(
     try stack.pushOwned(value);
 }
 
-pub fn getRefValueVm(
+pub noinline fn getRefValueVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -379,7 +379,7 @@ pub fn putRefValue(
     result.free(ctx.runtime);
 }
 
-pub fn putRefValueVm(
+pub noinline fn putRefValueVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -395,7 +395,7 @@ pub fn putRefValueVm(
     return .done;
 }
 
-pub fn withPut(
+pub noinline fn withPut(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -426,7 +426,7 @@ pub fn withPut(
     return .done;
 }
 
-pub fn deleteVar(
+pub noinline fn deleteVar(
     ctx: *core.JSContext,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -448,7 +448,7 @@ pub fn deleteVar(
     }
 }
 
-pub fn deletePropertyVm(
+pub noinline fn deletePropertyVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,

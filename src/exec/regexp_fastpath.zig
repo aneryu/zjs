@@ -341,7 +341,7 @@ pub fn qjsRegExpTestMethod(
         break :blk value;
     };
     const exec_atom = core.atom.predefinedId("exec", .string) orelse return error.TypeError;
-    if (qjsRegExpPrototypeMethodIsDefault(receiver_object, exec_atom, @intFromEnum(method_ids.regexp.PrototypeMethod.exec))) {
+    if (qjsRegExpPrototypeMethodIsDefault(ctx.runtime, receiver_object, exec_atom, @intFromEnum(method_ids.regexp.PrototypeMethod.exec))) {
         if (try qjsRegExpTestFastNoResult(ctx, receiver_object, string_value)) |matched| {
             return core.JSValue.boolean(matched);
         }
