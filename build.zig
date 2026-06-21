@@ -9,11 +9,12 @@ pub fn build(b: *std.Build) void {
     // the hot-opcode dispatch skips the speculative pattern matchers entirely
     // (used to A/B the per-execution fusion tax on non-matching code).
     const zjs_enable_fusions = b.option(bool, "zjs_enable_fusions", "Enable runtime tryFuse* opcode fusion fast paths") orelse false;
-    // Default flipped after the 30-iter measurement run: compute parity with
-    // the 16-byte layout, ~10% lower RSS on value-dense heaps, slightly
-    // faster startup. The 16-byte representation stays selectable (and
-    // guarded by the test-altrepr step) as the reference layout.
-    const zjs_nan_boxing = b.option(bool, "zjs_nan_boxing", "Use the 8-byte NaN-boxed JSValue representation") orelse true;
+    // Default: the 16-byte (payload+tag) JSValue layout — the portable
+    // reference representation that does not assume a 48-bit virtual address
+    // space. The 8-byte NaN-boxed layout stays selectable (and guarded by the
+    // test-altrepr step); it is lower-RSS / faster on this host but relies on
+    // pointer-tagging assumptions, so it is no longer the default.
+    const zjs_nan_boxing = b.option(bool, "zjs_nan_boxing", "Use the 8-byte NaN-boxed JSValue representation") orelse false;
     // OOM-injection coverage instrumentation (v1): records deduplicated
     // allocation call sites in core/memory.zig. Default off and comptime
     // gated, so the default build's allocation hot path is unchanged.
@@ -574,9 +575,9 @@ pub fn build(b: *std.Build) void {
     // fingerprint). Required for any change touching core/value.zig or
     // value-representation semantics.
     const altrepr_tests = b.addSystemCommand(&.{
-        b.graph.zig_exe, "build", "test", "-Dzjs_nan_boxing=false", "--summary", "all",
+        b.graph.zig_exe, "build", "test", "-Dzjs_nan_boxing=true", "--summary", "all",
     });
-    const altrepr_step = b.step("test-altrepr", "Run the unified tests with the non-default (16-byte) JSValue representation");
+    const altrepr_step = b.step("test-altrepr", "Run the unified tests with the non-default (8-byte NaN-boxed) JSValue representation");
     altrepr_step.dependOn(&altrepr_tests.step);
 
     // User-facing steps to expose

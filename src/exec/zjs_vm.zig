@@ -44,6 +44,7 @@ const array_ops = @import("array_ops.zig");
 const forof_ops = @import("forof_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const value_vm = @import("vm_value.zig");
+const value_ops_mod = @import("value_ops.zig");
 const HostError = exceptions.HostError;
 
 /// True when EITHER register-resident dispatcher routes inline calls off the
@@ -83,6 +84,40 @@ const thread_dispatch = !build_options.zjs_enable_opcode_profile;
 /// loop: function-boundary fall-through and generator single-step
 /// (`entry_stop_before_pc != null`); the caller then does a bare `continue`.
 inline fn nextOpcode(
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    entry_stop_before_pc: ?usize,
+) ?u8 {
+    // qjs-aligned straight-line fetch: no interrupt poll (moved to the branch
+    // opcodes) and NO error union — returns a plain `?u8` so the fetched
+    // opcode stays in a register instead of materializing a `!?u8`
+    // {error,optional,value} struct on the stack each dispatch.
+    if (entry_stop_before_pc != null) return null;
+    if (frame.pc >= function.code.len) return null;
+    const opc = function.code[frame.pc];
+    frame.pc += 1;
+    return opc;
+}
+
+/// Publish the register-resident window back into canonical frame/stack before a
+/// cold opcode (or the prologue) reads them. `reg_ip -> frame.pc` (byte offset),
+/// `reg_sp -> stack.values` (live operand length). The prologue then re-derives
+/// the registers from canonical state on cold re-entry.
+inline fn syncDown(
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    stack: *stack_mod.Stack,
+    reg_ip: [*]const u8,
+    reg_base: [*]core.JSValue,
+    reg_sp: [*]core.JSValue,
+) void {
+    frame.pc = (@intFromPtr(reg_ip) - @intFromPtr(function.code.ptr));
+    stack.values = reg_base[0 .. (@intFromPtr(reg_sp) - @intFromPtr(reg_base)) / @sizeOf(core.JSValue)];
+}
+
+/// Branch-opcode fetch: polls for interrupts (the loop back-edge poll point)
+/// before the threaded fetch. Used by goto / if_* arms.
+inline fn nextOpcodePoll(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     poller: *control_vm.InterruptPoller,
@@ -488,6 +523,20 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
     // (get_loc0..3, binary, get_var, ...) read the *current* opcode, not the
     // stale one the labeled switch was originally entered with.
     var opc: u8 = undefined;
+    // ---- Register-resident hot state (reverse-migrated from dispatchRecursive) ----
+    // `reg_ip` is the C-local instruction pointer LLVM keeps in a register — qjs's
+    // `*pc++`. It mirrors `frame.pc` and is (re)derived as `function.code.ptr +
+    // frame.pc` at the single canonical reload point below (which runs after the
+    // `machine.switched` frame-identity refresh and on every cold re-entry). Hot
+    // arms advance `reg_ip` directly; cold arms publish it back via `frame.pc`.
+    var reg_ip: [*]const u8 = undefined;
+    // Operand-stack window (qjs's `base`/`sp`) + locals pointer (`var_buf`),
+    // register-resident across `continue :sw` threading. Re-derived from
+    // stack.values / frame.locals at the canonical reload point below.
+    var reg_base: [*]core.JSValue = undefined;
+    var reg_sp: [*]core.JSValue = undefined;
+    var reg_var_buf: [*]core.JSValue = undefined;
+    var reg_code_end: [*]const u8 = undefined;
     while (true) {
         if (machine.switched) {
             machine.switched = false;
@@ -530,6 +579,14 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 suspend_on_module_await = false;
             }
         }
+        // Canonical register reload: runs after the switched-block frame refresh and
+        // on every cold (prologue) re-entry. Hot threaded arms (`continue :sw`) skip
+        // the prologue entirely, so they never pay this — they carry the registers live.
+        reg_ip = function.code.ptr + frame.pc;
+        reg_code_end = function.code.ptr + function.code.len;
+        reg_base = stack.values.ptr;
+        reg_sp = stack.values.ptr + stack.values.len;
+        reg_var_buf = frame.locals.ptr;
         if (frame.pc >= function.code.len) {
             if (machine.depth == 0) break;
             const fallthrough_value = stack.peek() orelse core.JSValue.undefinedValue();
@@ -542,50 +599,61 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             if (try gen_async_vm.stopBeforePc(ctx, stack, frame, generator_state, stop_before_pc)) |result| return result;
         }
 
-        opc = function.code[frame.pc];
+        opc = reg_ip[0];
+        reg_ip += 1;
         frame.pc += 1;
         const opcode_profile_scope = profile_vm.enterOpcode(ctx.runtime, opc);
         defer opcode_profile_scope.deinit();
         sw: switch (opc) {
             // ---- Push constants ----
             op.push_i32 => {
-                try value_vm.pushInt32Operand(stack, function, frame);
                 if (comptime thread_dispatch) {
-                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
-                    continue;
+                    // qjs-aligned: `sp[0] = int32(imm); sp++` inline, bypassing
+                    // the stack-binary fusion prescan (fusion intentionally
+                    // dropped — unfused immediates execute identically).
+                    const value = std.mem.readInt(i32, reg_ip[0..4], .little);
+                    reg_ip += 4;
+                    reg_sp[0] = core.JSValue.int32(value);
+                    reg_sp += 1;
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
                 }
+                try value_vm.pushInt32Operand(stack, function, frame);
             },
-            op.push_bigint_i32 => try value_vm.pushBigIntI32Operand(stack, function, frame),
+            op.push_bigint_i32 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.pushBigIntI32Operand(stack, function, frame); },
             op.push_i16 => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 try value_vm.pushI16OperandVm(ctx, stack, function, frame, .{
                     .global = global,
                     .eval_local_names = eval_local_names,
                     .eval_var_ref_names = eval_var_ref_names,
                     .eval_with_object = eval_with_object,
                 });
+               
             },
-            op.push_i8 => { try value_vm.pushI8Operand(stack, function, frame); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
-            op.push_minus1 => { try value_vm.pushSmallIntMaybeFuse(stack, function, frame, -1); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
-            op.push_0 => { try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 0); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
-            op.push_1 => { try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 1); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
-            op.push_2 => { try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 2); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
-            op.push_3 => { try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 3); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
-            op.push_4 => { try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 4); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
-            op.push_5 => { try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 5); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
-            op.push_6 => { try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 6); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
-            op.push_7 => { try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 7); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
-            op.push_const => try value_vm.pushConst(ctx, stack, function, frame, opc),
-            op.push_const8 => try value_vm.pushConst8(ctx, stack, function, frame, opc),
-            op.private_symbol => try value_vm.pushPrivateSymbol(ctx, stack, function, frame),
-            op.regexp => try regexp_vm.pushLiteral(ctx, stack, constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp")),
-            op.fclosure, op.fclosure8 => switch (try call_vm.closure(ctx, output, global, stack, function, frame, catch_target, opc, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs)) {
+            op.push_i8 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.pushI8Operand(stack, function, frame); },
+            op.push_minus1 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.pushSmallIntMaybeFuse(stack, function, frame, -1); },
+            op.push_0 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 0); },
+            op.push_1 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 1); },
+            op.push_2 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 2); },
+            op.push_3 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 3); },
+            op.push_4 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 4); },
+            op.push_5 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 5); },
+            op.push_6 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 6); },
+            op.push_7 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.pushSmallIntMaybeFuse(stack, function, frame, 7); },
+            op.push_const => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.pushConst(ctx, stack, function, frame, opc); },
+            op.push_const8 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.pushConst8(ctx, stack, function, frame, opc); },
+            op.private_symbol => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.pushPrivateSymbol(ctx, stack, function, frame); },
+            op.regexp => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try regexp_vm.pushLiteral(ctx, stack, constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp")); },
+            op.fclosure, op.fclosure8 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try call_vm.closure(ctx, output, global, stack, function, frame, catch_target, opc, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs)) {
                 .done => {},
                 .continue_loop => continue,
-            },
-            op.undefined => try value_vm.pushUndefined(stack),
-            op.null => try value_vm.pushNull(stack),
-            op.push_false => try value_vm.pushBoolean(stack, false),
-            op.push_true => try value_vm.pushBoolean(stack, true),
+            } },
+            op.undefined => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.pushUndefined(stack); },
+            op.null => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.pushNull(stack); },
+            op.push_false => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.pushBoolean(stack, false); },
+            op.push_true => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.pushBoolean(stack, true); },
 
             // ---- Locals (F10.1b / F10.2 short-forms) ----
             // get_loc / put_loc / set_loc lowered from scope_get_var /
@@ -600,28 +668,19 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             // vm_property_locals.loc()'s 11-arg call + 19-way re-dispatch,
             // mirroring qjs's inlined OP_put_loc0..3.
             op.put_loc0 => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 try slot_ops.execPutLoc(ctx, function, global, frame, stack, 0, 0, opc, sync_global_lexical_locals);
-                if (comptime thread_dispatch) {
-                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
-                    continue;
-                }
             },
             op.put_loc1 => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 try slot_ops.execPutLoc(ctx, function, global, frame, stack, 1, 0, opc, sync_global_lexical_locals);
-                if (comptime thread_dispatch) {
-                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
-                    continue;
-                }
             },
-            op.put_loc2 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, 2, 0, opc, sync_global_lexical_locals),
-            op.put_loc3 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, 3, 0, opc, sync_global_lexical_locals),
+            op.put_loc2 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try slot_ops.execPutLoc(ctx, function, global, frame, stack, 2, 0, opc, sync_global_lexical_locals); },
+            op.put_loc3 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try slot_ops.execPutLoc(ctx, function, global, frame, stack, 3, 0, opc, sync_global_lexical_locals); },
 
             op.get_loc, op.put_loc, op.set_loc, op.get_loc8, op.put_loc8, op.set_loc8, op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3, op.set_loc0, op.set_loc1, op.set_loc2, op.set_loc3, op.get_loc0_loc1 => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 try vm_property_locals.loc(ctx, function, global, frame, stack, opc, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object);
-                if (comptime thread_dispatch) {
-                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
-                    continue;
-                }
             },
 
             // Hot single-byte argument reads inlined into the dispatch (skip
@@ -629,48 +688,29 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             // inlined OP_get_arg0..3. get_arg0 is the 2nd hottest opcode in
             // recursive/call-heavy code (fib).
             op.get_arg0 => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 try slot_ops.execGetArg(ctx, frame, stack, 0, 0, opc);
-                if (comptime thread_dispatch) {
-                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| {
-                        opc = n;
-                        continue :sw n;
-                    }
-                    continue;
-                }
+                
             },
             op.get_arg1 => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 try slot_ops.execGetArg(ctx, frame, stack, 1, 0, opc);
-                if (comptime thread_dispatch) {
-                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| {
-                        opc = n;
-                        continue :sw n;
-                    }
-                    continue;
-                }
+                
             },
             op.get_arg2 => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 try slot_ops.execGetArg(ctx, frame, stack, 2, 0, opc);
-                if (comptime thread_dispatch) {
-                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| {
-                        opc = n;
-                        continue :sw n;
-                    }
-                    continue;
-                }
+                
             },
             op.get_arg3 => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 try slot_ops.execGetArg(ctx, frame, stack, 3, 0, opc);
-                if (comptime thread_dispatch) {
-                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| {
-                        opc = n;
-                        continue :sw n;
-                    }
-                    continue;
-                }
+                
             },
-            op.get_arg, op.put_arg, op.set_arg, op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3, op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 => try vm_property_locals.arg(ctx, function, frame, stack, opc),
+            op.get_arg, op.put_arg, op.set_arg, op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3, op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try vm_property_locals.arg(ctx, function, frame, stack, opc); },
 
             op.get_var_ref, op.get_var_ref_check, op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init, op.set_var_ref, op.get_var_ref0, op.get_var_ref1, op.get_var_ref2, op.get_var_ref3, op.put_var_ref0, op.put_var_ref1, op.put_var_ref2, op.put_var_ref3, op.set_var_ref0, op.set_var_ref1, op.set_var_ref2, op.set_var_ref3 => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try vm_property_locals.varRefVm(ctx, function, global, frame, stack, opc, catch_target, eval_global_var_bindings, is_eval_code, eval_local_names, eval_var_ref_names, eval_with_object)) {
                     .done => {},
                     .continue_loop => continue,
@@ -683,50 +723,109 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             //   get_loc_check: read; throw ReferenceError if in TDZ.
             //   put_loc_check: write; throw ReferenceError if in TDZ.
             //   put_loc_check_init: write + clear TDZ flag.
-            op.set_loc_uninitialized, op.get_loc_check, op.put_loc_check, op.put_loc_check_init => {
+            // qjs-aligned inline fast path: a `get_loc_check` on a plain
+            // (non-refcounted, non-var-ref) initialized slot is just
+            // `sp[0] = var_buf[idx]; sp++` — the same ~10 inline instructions
+            // QuickJS's `OP_get_loc_check` emits. Skips the noinline 12-arg
+            // `checkedLocVm` call (and its per-op fusion matcher entirely;
+            // fusion is intentionally bypassed here). Var-ref / heap / TDZ
+            // slots fall through to the full handler.
+            op.get_loc_check => {
+                if (comptime thread_dispatch) get_loc_check_fast: {
+                    const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
+                    const slot = reg_var_buf[idx];
+                    if (slot.requiresRefCount() or slot.isUninitialized()) break :get_loc_check_fast;
+                    reg_ip += 2;
+                    reg_sp[0] = slot;
+                    reg_sp += 1;
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
+                }
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
+                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object)) {
+                    .done => continue,
+                    .continue_loop => continue,
+                }
+            },
+            // qjs-aligned inline fast path: `var_buf[idx] = sp[-1]; sp--` for a
+            // plain (non-refcounted) initialized, non-const, non-synced slot.
+            // Var-ref / heap / const / TDZ / top-level-global-lexical slots fall
+            // through to the full handler.
+            op.put_loc_check => {
+                if (comptime thread_dispatch) put_loc_check_fast: {
+                    const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
+                    const old_v = reg_var_buf[idx];
+                    if (old_v.requiresRefCount() or old_v.isUninitialized()) break :put_loc_check_fast;
+                    if (idx < function.var_is_const.len and function.var_is_const[idx]) break :put_loc_check_fast;
+                    if (sync_global_lexical_locals) {
+                        if (!frame.global_lexical_sync_checked) break :put_loc_check_fast;
+                        if (idx < frame.global_lexical_sync_slots.len and frame.global_lexical_sync_slots[idx]) break :put_loc_check_fast;
+                    }
+
+                    reg_ip += 2;
+                    reg_sp -= 1;
+                    reg_var_buf[idx] = reg_sp[0];
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
+                }
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
+                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object)) {
+                    .done => continue,
+                    .continue_loop => continue,
+                }
+            },
+            op.set_loc_uninitialized, op.put_loc_check_init => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.push_atom_value => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 try value_vm.pushAtomValue(ctx, stack, function, frame);
+               
             },
-            op.push_empty_string => try value_vm.pushEmptyString(ctx, stack),
-            op.to_propkey => switch (try vm_property_field.toPropKeyVm(ctx, output, global, stack, function, frame, catch_target)) {
+            op.push_empty_string => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.pushEmptyString(ctx, stack); },
+            op.to_propkey => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try vm_property_field.toPropKeyVm(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
-            },
-            op.to_propkey2 => switch (try vm_property_field.toPropKey2Vm(ctx, output, global, stack, function, frame, catch_target)) {
+            } },
+            op.to_propkey2 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try vm_property_field.toPropKey2Vm(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
-            },
-            op.set_name, op.set_name_computed => try vm_property_field.setName(ctx, output, global, stack, function, frame, opc),
+            } },
+            op.set_name, op.set_name_computed => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try vm_property_field.setName(ctx, output, global, stack, function, frame, opc); },
 
             // ---- Stack manipulation ----
-            op.drop => switch (try value_vm.drop(ctx.runtime, stack)) {
+            op.drop => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try value_vm.drop(ctx.runtime, stack)) {
                 .value => {},
                 .catch_target => |target| {
                     catch_target.* = target;
                     continue;
                 },
-            },
-            op.nip_catch => try value_vm.nipCatch(ctx.runtime, stack),
-            op.dup => { try value_vm.dup(ctx, stack, opc); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
-            op.swap => try value_vm.swap(ctx, stack),
+            } },
+            op.nip_catch => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.nipCatch(ctx.runtime, stack); },
+            op.dup => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.dup(ctx, stack, opc); },
+            op.swap => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.swap(ctx, stack); },
 
             // ---- Return ----
             op.@"return" => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 if (machine.depth == 0) return control_vm.returnTop(ctx, stack, frame, generator_state);
                 try machine.popReturn(try control_vm.returnTop(ctx, stack, frame, null));
                 continue;
             },
             op.return_undef => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 if (machine.depth == 0) return control_vm.returnUndefined(ctx, frame, generator_state);
                 try machine.popReturn(try control_vm.returnUndefined(ctx, frame, null));
                 continue;
             },
             op.return_async => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 if (machine.depth == 0) return control_vm.returnTop(ctx, stack, frame, generator_state);
                 try machine.popReturn(try control_vm.returnTop(ctx, stack, frame, null));
                 continue;
@@ -734,14 +833,12 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
 
             // ---- Binary arithmetic ----
             op.add, op.sub, op.mul, op.div, op.mod, op.pow, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 // Inline int32 fast path: replaces binaryVm->binary call frames
                 // and pop/defer-free traffic for the common two-int operand case.
                 // Semantically identical to binary()'s int32 branch (shared
                 // fastBinaryInt32). pow is excluded (no int fast path there).
                 if (opc != op.pow and arith_vm.tryInt32Binary(stack, opc)) {
-                    if (comptime thread_dispatch) {
-                        if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
-                    }
                     continue;
                 }
                 if (fusion_stats.fusions_enabled and opc == op.add) {
@@ -771,24 +868,59 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
 
             // ---- Comparisons ----
-            op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq => {
-                // Inline int32 fast path (mirrors compare()'s int32 branch).
-                if (arith_vm.tryInt32Compare(stack, opc)) {
-                    if (comptime thread_dispatch) {
-                        if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
-                    }
-                    continue;
+            // `op.lt` gets a dedicated arm: it's the hottest comparison (loop
+            // conditions) and a dedicated dispatch-table entry hardcodes `a < b`,
+            // dropping the runtime opcode-family selection qjs avoids by having
+            // one handler per comparison opcode.
+            op.lt => {
+                if (comptime thread_dispatch) lt_fast: {
+
+                    const a = (reg_sp - 2)[0].asInt32() orelse break :lt_fast;
+                    const b = (reg_sp - 1)[0].asInt32() orelse break :lt_fast;
+                    (reg_sp - 2)[0] = core.JSValue.boolean(a < b);
+                    reg_sp -= 1;
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
                 }
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try arith_vm.compareVm(ctx, stack, frame, catch_target, opc, output, global)) {
-                    .done => {},
+                    .done => continue,
                     .continue_loop => continue,
                 }
             },
-            op.in, op.instanceof => switch (try vm_property_field.inOrInstanceof(ctx, output, global, stack, function, frame, catch_target, opc)) {
+            op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq => {
+                if (comptime thread_dispatch) lt_fast: {
+                    // Register-resident int32 compare: `sp[-2] = (sp[-2] ? sp[-1]); sp--`.
+
+                    const a = (reg_sp - 2)[0].asInt32() orelse break :lt_fast;
+                    const b = (reg_sp - 1)[0].asInt32() orelse break :lt_fast;
+                    const r = switch (opc) {
+                        op.lte => a <= b,
+                        op.gt => a > b,
+                        op.gte => a >= b,
+                        op.eq, op.strict_eq => a == b,
+                        op.neq, op.strict_neq => a != b,
+                        else => return error.InvalidBytecode,
+                    };
+                    (reg_sp - 2)[0] = core.JSValue.boolean(r);
+                    reg_sp -= 1;
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
+                }
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
+                switch (try arith_vm.compareVm(ctx, stack, frame, catch_target, opc, output, global)) {
+                    .done => continue,
+                    .continue_loop => continue,
+                }
+            },
+            op.in, op.instanceof => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try vm_property_field.inOrInstanceof(ctx, output, global, stack, function, frame, catch_target, opc)) {
                 .done => {},
                 .continue_loop => continue,
-            },
+            } },
             op.private_in => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try class_vm.privateInVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
@@ -797,123 +929,192 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
 
             // ---- Unary ----
             op.neg, op.plus => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try arith_vm.unaryVm(ctx, stack, frame, catch_target, opc, output, global)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.not => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try arith_vm.bitNotVm(ctx, stack, frame, catch_target, output, global)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
-            op.lnot => try value_vm.logicalNot(ctx.runtime, stack),
+            op.lnot => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.logicalNot(ctx.runtime, stack); },
+            // inc/dec stay grouped: the 2-way `opc == op.inc` discrimination is
+            // a single compare, cheaper than the code-duplication a split costs
+            // (measured: splitting these *added* ~3 insn/iter).
             op.inc, op.dec => {
+                if (comptime thread_dispatch) inc_fast: {
+                    // Register-resident int32 fast path: `sp[-1] ±= 1` in place.
+
+                    const iv = (reg_sp - 1)[0].asInt32() orelse break :inc_fast;
+                    const res = if (opc == op.inc) @addWithOverflow(iv, 1) else @subWithOverflow(iv, 1);
+                    if (res[1] != 0) break :inc_fast;
+                    (reg_sp - 1)[0] = core.JSValue.int32(res[0]);
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
+                }
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try arith_vm.unaryVm(ctx, stack, frame, catch_target, opc, output, global)) {
-                    .done => {},
+                    .done => continue,
                     .continue_loop => continue,
                 }
             },
 
             // ---- Control flow ----
             op.goto => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 if (fusion_stats.fusions_enabled and stop_before_pc == null and fusion_stats.counted(.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch, vm_property_globals.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto, eval_local_names, eval_var_ref_names, eval_with_object))) continue;
                 control_vm.jump32(function, frame);
-                if (comptime thread_dispatch) {
-                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
-                    continue;
-                }
             },
             op.goto16 => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 if (fusion_stats.fusions_enabled and stop_before_pc == null and fusion_stats.counted(.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch, vm_property_globals.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto16, eval_local_names, eval_var_ref_names, eval_with_object))) continue;
                 control_vm.jump16(function, frame);
-                if (comptime thread_dispatch) {
-                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
-                    continue;
-                }
             },
             op.goto8 => {
-                if (fusion_stats.fusions_enabled and stop_before_pc == null and fusion_stats.counted(.tryFuseGoto8LocalLessThanFalseBranch, control_vm.tryFuseGoto8LocalLessThanFalseBranch(function, frame))) continue;
-                if (fusion_stats.fusions_enabled and stop_before_pc == null and fusion_stats.counted(.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch, vm_property_globals.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto8, eval_local_names, eval_var_ref_names, eval_with_object))) continue;
-                control_vm.jump8(function, frame);
                 if (comptime thread_dispatch) {
-                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
-                    continue;
+                    // Threaded path keeps registers live across the jump (like
+                    // if_false8) — no unconditional syncDown; the bare poll only
+                    // matters when an interrupt handler is installed.
+                    const operand_pc = @intFromPtr(reg_ip) - @intFromPtr(function.code.ptr);
+                    const diff: i8 = @bitCast(reg_ip[0]);
+                    reg_ip = function.code.ptr + @as(usize, @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff)));
+                    if (diff < 0) {
+                        // Backward jump (loop): target precedes the operand and
+                        // can never reach code-end — no fall-off check needed.
+                        // A poll that throws re-enters the canonical exception /
+                        // try-catch path, which reads frame.pc and trims
+                        // stack.values — so publish them first. Gated on an
+                        // installed interrupt handler: with none, poll can't throw
+                        // and the loop stays fully register-resident.
+                        if (interrupt_poller.active) {
+                            @branchHint(.unlikely);
+                            syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
+                            try interrupt_poller.poll(ctx.runtime);
+                        }
+                    } else if (@intFromPtr(reg_ip) >= @intFromPtr(reg_code_end)) {
+                        // Forward `goto`-to-end (eval / if-else completion leaves
+                        // code that jumps just past the last instruction): route
+                        // to the canonical fall-off completion path.
+                        syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
+                        continue;
+                    }
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
                 }
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
+                control_vm.jump8(function, frame);
             },
-            op.if_false => try control_vm.branch32(ctx, stack, function, frame, false),
-            op.if_true => try control_vm.branch32(ctx, stack, function, frame, true),
-            op.if_false8 => { try control_vm.branch8(ctx, stack, function, frame, false); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
-            op.if_true8 => { try control_vm.branch8(ctx, stack, function, frame, true); if (comptime thread_dispatch) { if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; } continue; } },
-            op.gosub => try control_vm.gosub(function, frame, stack),
-            op.ret => try control_vm.ret(ctx, function, frame, stack),
+            op.if_false => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try control_vm.branch32(ctx, stack, function, frame, false); },
+            op.if_true => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try control_vm.branch32(ctx, stack, function, frame, true); },
+            op.if_false8 => {
+                if (comptime thread_dispatch) {
+                    const operand_pc = @intFromPtr(reg_ip) - @intFromPtr(function.code.ptr);
+                    const diff: i8 = @bitCast(reg_ip[0]);
+                    reg_ip += 1;
+                    reg_sp -= 1;
+                    const value = reg_sp[0];
+                    const truthy = value.asBool() orelse value_ops_mod.isTruthy(value);
+                    value.free(ctx.runtime);
+                    if (!truthy) {
+                        reg_ip = function.code.ptr + @as(usize, @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff)));
+                        if (diff < 0) {
+                            // Backward branch: target precedes operand, never code-end.
+                            // Sync canonical state before a fallible poll so an
+                            // interrupt's catch/unwind sees live pc+stack (see
+                            // goto8); gated on an installed handler.
+                            if (interrupt_poller.active) {
+                                @branchHint(.unlikely);
+                                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
+                                try interrupt_poller.poll(ctx.runtime);
+                            }
+                        } else if (@intFromPtr(reg_ip) >= @intFromPtr(reg_code_end)) {
+                            // Forward branch-to-end: canonical fall-off completion.
+                            syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
+                            continue;
+                        }
+                    }
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
+                }
+                try control_vm.branch8(ctx, stack, function, frame, false);
+            },
+            op.if_true8 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try control_vm.branch8(ctx, stack, function, frame, true); },
+            op.gosub => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try control_vm.gosub(function, frame, stack); },
+            op.ret => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try control_vm.ret(ctx, function, frame, stack); },
 
             // ---- Variable access ----
-            op.get_var, op.get_var_undef => switch (try vm_property_globals.getVar(ctx, output, global, stack, function, frame, catch_target, opc, sync_global_lexical_locals, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, eval_with_object)) {
-                .done => if (comptime thread_dispatch) {
-                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
-                    continue;
-                },
+            op.get_var, op.get_var_undef => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try vm_property_globals.getVar(ctx, output, global, stack, function, frame, catch_target, opc, sync_global_lexical_locals, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, eval_with_object)) {
+                .done => {},
                 .continue_loop => continue,
-            },
-            op.make_loc_ref, op.make_arg_ref, op.make_var_ref_ref => try vm_property_ref.makeSlotRef(ctx, stack, function, frame, opc),
+            } },
+            op.make_loc_ref, op.make_arg_ref, op.make_var_ref_ref => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try vm_property_ref.makeSlotRef(ctx, stack, function, frame, opc); },
             op.make_var_ref => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try vm_property_ref.makeVarRefVm(ctx, output, global, stack, function, frame, catch_target, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.get_ref_value => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try vm_property_ref.getRefValueVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.put_ref_value => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try vm_property_ref.putRefValueVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
-            op.put_var => switch (try vm_property_globals.putVar(ctx, output, global, stack, function, frame, catch_target, strict_unresolved_get_var, eval_global_var_bindings, is_eval_code, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, eval_with_object)) {
-                .done => if (comptime thread_dispatch) {
-                    if (try nextOpcode(function, frame, &interrupt_poller, ctx.runtime, entry_stop_before_pc)) |n| { opc = n; continue :sw n; }
-                    continue;
-                },
-                .continue_loop => continue,
-            },
-            op.with_get_var, op.with_delete_var, op.with_make_ref, op.with_get_ref, op.with_get_ref_undef => switch (try vm_property_ref.withGetOrDelete(ctx, output, global, stack, function, frame, catch_target, opc)) {
+            op.put_var => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try vm_property_globals.putVar(ctx, output, global, stack, function, frame, catch_target, strict_unresolved_get_var, eval_global_var_bindings, is_eval_code, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, eval_with_object)) {
                 .done => {},
                 .continue_loop => continue,
-            },
-            op.with_put_var => switch (try vm_property_ref.withPut(ctx, output, global, stack, function, frame, catch_target)) {
+            } },
+            op.with_get_var, op.with_delete_var, op.with_make_ref, op.with_get_ref, op.with_get_ref_undef => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try vm_property_ref.withGetOrDelete(ctx, output, global, stack, function, frame, catch_target, opc)) {
                 .done => {},
                 .continue_loop => continue,
-            },
-            op.to_object => switch (try value_vm.toObjectVm(ctx, stack, frame, catch_target, global)) {
+            } },
+            op.with_put_var => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try vm_property_ref.withPut(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
-            },
+            } },
+            op.to_object => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try value_vm.toObjectVm(ctx, stack, frame, catch_target, global)) {
+                .done => {},
+                .continue_loop => continue,
+            } },
 
             // ---- Object properties ----
-            op.get_field, op.get_field2, op.put_field => switch (try vm_property_field.field(ctx, output, global, stack, function, frame, catch_target, opc, sync_global_lexical_locals)) {
+            op.get_field, op.get_field2, op.put_field => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try vm_property_field.field(ctx, output, global, stack, function, frame, catch_target, opc, sync_global_lexical_locals)) {
                 .done => {},
                 .continue_loop => continue,
-            },
+            } },
             op.get_private_field => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try vm_property_private.getPrivateFieldVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.put_private_field => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try vm_property_private.putPrivateFieldVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.define_private_field => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try vm_property_private.definePrivateFieldVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
@@ -921,24 +1122,25 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
 
             // ---- Array elements ----
-            op.get_array_el, op.get_array_el2, op.put_array_el => switch (try vm_property_field.arrayElement(ctx, output, global, stack, function, frame, catch_target, opc)) {
+            op.get_array_el, op.get_array_el2, op.put_array_el => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try vm_property_field.arrayElement(ctx, output, global, stack, function, frame, catch_target, opc)) {
                 .done => {},
                 .continue_loop => continue,
-            },
+            } },
 
             // ---- Super ----
-            op.get_super => try class_vm.getSuper(ctx, stack, frame),
-            op.get_super_value => switch (try class_vm.getSuperValue(ctx, output, global, stack, function, frame, catch_target)) {
+            op.get_super => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try class_vm.getSuper(ctx, stack, frame); },
+            op.get_super_value => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try class_vm.getSuperValue(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
-            },
-            op.put_super_value => switch (try class_vm.putSuperValue(ctx, output, global, stack, function, frame, catch_target)) {
+            } },
+            op.put_super_value => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try class_vm.putSuperValue(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
-            },
+            } },
 
             // ---- Calls ----
             op.call, op.call0, op.call1, op.call2, op.call3 => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try call_vm.call(ctx, output, global, stack, function, frame, catch_target, opc)) {
                     .done => {},
                     .continue_loop => continue,
@@ -970,7 +1172,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     },
                 }
             },
-            op.tail_call => switch (try call_vm.tailCall(ctx, output, global, stack, function, frame, catch_target, machine.depth > 0)) {
+            op.tail_call => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try call_vm.tailCall(ctx, output, global, stack, function, frame, catch_target, machine.depth > 0)) {
                 .handled => continue,
                 .return_value => |value| {
                     if (machine.depth == 0) return value;
@@ -985,8 +1187,8 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     try machine.tailCallReuse(global, stack, request.target, request.region_base, request.argc, request.layout);
                     continue;
                 },
-            },
-            op.eval => switch (try eval_module_vm.directEval(ctx, stack, function, frame, catch_target, output, global, eval_class_field_initializer_flag, eval_parameter_initializer_flag, machine.depth > 0)) {
+            } },
+            op.eval => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try eval_module_vm.directEval(ctx, stack, function, frame, catch_target, output, global, eval_class_field_initializer_flag, eval_parameter_initializer_flag, machine.depth > 0)) {
                 .done => {},
                 .continue_loop => continue,
                 // Non-%eval% callee in tail position: proper tail call via
@@ -995,17 +1197,17 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     try machine.tailCallReuse(global, stack, request.target, request.region_base, request.argc, request.layout);
                     continue;
                 },
-            },
-            op.apply_eval => switch (try eval_module_vm.applyEval(ctx, stack, function, frame, catch_target, output, global, eval_class_field_initializer_flag, eval_parameter_initializer_flag)) {
+            } },
+            op.apply_eval => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try eval_module_vm.applyEval(ctx, stack, function, frame, catch_target, output, global, eval_class_field_initializer_flag, eval_parameter_initializer_flag)) {
                 .done => {},
                 .continue_loop => continue,
-            },
-            op.import => try eval_module_vm.dynamicImport(ctx, output, global, stack, function, frame),
-            op.prepare_call_prop_atom => switch (try call_vm.prepareCallPropAtom(ctx, output, global, stack, function, frame, catch_target)) {
+            } },
+            op.import => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try eval_module_vm.dynamicImport(ctx, output, global, stack, function, frame); },
+            op.prepare_call_prop_atom => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try call_vm.prepareCallPropAtom(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
-            },
-            op.call_prepared => switch (try call_vm.callPrepared(ctx, output, global, stack, function, frame, catch_target, true)) {
+            } },
+            op.call_prepared => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try call_vm.callPrepared(ctx, output, global, stack, function, frame, catch_target, true)) {
                 .done => {},
                 .continue_loop => continue,
                 // Prepared property call to a plain bytecode function: run it as
@@ -1033,8 +1235,8 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                         continue;
                     }
                 },
-            },
-            op.call_method => switch (try call_vm.callMethod(ctx, output, global, stack, function, frame, catch_target, true)) {
+            } },
+            op.call_method => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try call_vm.callMethod(ctx, output, global, stack, function, frame, catch_target, true)) {
                 .done => {},
                 .continue_loop => continue,
                 // Method call to a plain bytecode function: run it as an inline
@@ -1062,8 +1264,8 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                         continue;
                     }
                 },
-            },
-            op.tail_call_method => switch (try call_vm.tailCallMethod(ctx, output, global, stack, function, frame, catch_target, machine.depth > 0)) {
+            } },
+            op.tail_call_method => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try call_vm.tailCallMethod(ctx, output, global, stack, function, frame, catch_target, machine.depth > 0)) {
                 .handled => continue,
                 .return_value => |value| {
                     if (machine.depth == 0) return value;
@@ -1077,44 +1279,48 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     try machine.tailCallReuse(global, stack, request.target, request.region_base, request.argc, request.layout);
                     continue;
                 },
-            },
+            } },
 
             // ---- Object/array literals ----
-            op.object => try literal_vm.object(ctx, stack, global),
-            op.array_from => try literal_vm.arrayFrom(ctx, stack, function, frame, global),
-            op.define_field => switch (try literal_vm.defineField(ctx, output, global, stack, function, frame, catch_target)) {
+            op.object => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try literal_vm.object(ctx, stack, global); },
+            op.array_from => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try literal_vm.arrayFrom(ctx, stack, function, frame, global); },
+            op.define_field => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try literal_vm.defineField(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
-            },
-            op.set_proto => try literal_vm.setProto(ctx, stack),
-            op.set_home_object => try class_vm.setHomeObject(ctx, stack),
+            } },
+            op.set_proto => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try literal_vm.setProto(ctx, stack); },
+            op.set_home_object => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try class_vm.setHomeObject(ctx, stack); },
             op.define_class, op.define_class_computed => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try class_vm.defineClass(ctx, output, global, stack, function, frame, catch_target, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, opc == op.define_class_computed)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
-            op.define_array_el => switch (try literal_vm.defineArrayEl(ctx, output, global, stack, function, frame, catch_target)) {
+            op.define_array_el => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try literal_vm.defineArrayEl(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
-            },
+            } },
             op.define_method => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try class_vm.defineMethod(ctx, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.define_method_computed => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try class_vm.defineMethodComputed(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
-            op.append => switch (try literal_vm.appendSpreadValuesVm(ctx, output, global, stack, opc, frame, catch_target)) {
+            op.append => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try literal_vm.appendSpreadValuesVm(ctx, output, global, stack, opc, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
-            },
+            } },
             op.copy_data_properties => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 const mask = function.code[frame.pc];
                 frame.pc += 1;
                 switch (try literal_vm.copyDataProperties(ctx, output, global, stack, mask, function, frame, catch_target)) {
@@ -1124,17 +1330,18 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
 
             // ---- Generators (F9) ----
-            op.initial_yield => switch (try gen_async_vm.initialYield(ctx, stack, frame, generator_state, stop_on_yield)) {
+            op.initial_yield => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try gen_async_vm.initialYield(ctx, stack, frame, generator_state, stop_on_yield)) {
                 .none => {},
                 .continue_loop => continue,
                 .return_value => |value| return value,
-            },
-            op.yield => switch (try gen_async_vm.yieldValue(ctx, stack, frame, generator_state, stop_on_yield)) {
+            } },
+            op.yield => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try gen_async_vm.yieldValue(ctx, stack, frame, generator_state, stop_on_yield)) {
                 .none => {},
                 .continue_loop => continue,
                 .return_value => |value| return value,
-            },
+            } },
             op.yield_star, op.async_yield_star => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 const yield_star_result = try gen_async_vm.yieldStar(ctx, output, global, stack, function, frame, generator_state, stop_on_yield, catch_target);
                 switch (yield_star_result) {
                     .none => {},
@@ -1143,6 +1350,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 }
             },
             op.await => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 const await_result = try gen_async_vm.awaitValue(ctx, output, global, stack, function, frame, generator_state, suspend_on_module_await, stop_on_yield, catch_target);
                 switch (await_result) {
                     .none => {},
@@ -1152,118 +1360,127 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
 
             // ---- Global variable operations ----
-            op.check_define_var, op.define_var, op.define_func, op.put_var_init => switch (try vm_property_globals.globalDefinition(ctx, global, stack, function, frame, catch_target, opc, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, eval_global_var_bindings, is_eval_code)) {
+            op.check_define_var, op.define_var, op.define_func, op.put_var_init => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try vm_property_globals.globalDefinition(ctx, global, stack, function, frame, catch_target, opc, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, eval_global_var_bindings, is_eval_code)) {
                 .done => {},
                 .continue_loop => continue,
-            },
+            } },
 
             // ---- Special object (prologue) ----
-            op.special_object => try literal_vm.specialObject(ctx, stack, function, frame, global, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs),
+            op.special_object => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try literal_vm.specialObject(ctx, stack, function, frame, global, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs); },
 
             // ---- Typeof ----
-            op.typeof => try value_vm.typeOf(ctx, stack),
-            op.typeof_is_undefined => try value_vm.typeOfIsUndefined(ctx.runtime, stack),
-            op.typeof_is_function => try value_vm.typeOfIsFunction(ctx.runtime, stack),
+            op.typeof => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.typeOf(ctx, stack); },
+            op.typeof_is_undefined => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.typeOfIsUndefined(ctx.runtime, stack); },
+            op.typeof_is_function => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.typeOfIsFunction(ctx.runtime, stack); },
 
             // ---- Throw ----
-            op.throw => switch (try control_vm.throwTop(ctx, output, global, stack, frame, catch_target)) {
+            op.throw => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try control_vm.throwTop(ctx, output, global, stack, frame, catch_target)) {
                 .handled => continue,
-            },
-            op.throw_error => switch (try control_vm.throwErrorVm(ctx, stack, function, frame, catch_target, global)) {
+            } },
+            op.throw_error => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try control_vm.throwErrorVm(ctx, stack, function, frame, catch_target, global)) {
                 .handled => continue,
-            },
-            op.@"catch" => try control_vm.catchTarget(function, frame, stack, catch_target),
+            } },
+            op.@"catch" => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try control_vm.catchTarget(function, frame, stack, catch_target); },
             op.check_ctor => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try call_vm.checkCtorVm(ctx, stack, frame, catch_target, global)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.check_ctor_return => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try call_vm.checkCtorReturnVm(ctx, stack, frame, catch_target, global)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.init_ctor => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try call_vm.initCtorVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.check_brand => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try class_vm.checkBrandVm(ctx, stack, frame, catch_target, global)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.add_brand => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try class_vm.addBrandVm(ctx, stack, frame, catch_target, global)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
-            op.close_loc => try vm_property_locals.closeLoc(ctx, function, frame),
+            op.close_loc => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try vm_property_locals.closeLoc(ctx, function, frame); },
 
             // ---- NOP ----
-            op.nop => control_vm.nop(),
+            op.nop => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); control_vm.nop(); },
 
             // ---- Push this ----
-            op.push_this => switch (try value_vm.pushThisVm(ctx, stack, frame, catch_target, global)) {
+            op.push_this => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try value_vm.pushThisVm(ctx, stack, frame, catch_target, global)) {
                 .done => {},
                 .continue_loop => continue,
-            },
+            } },
 
             // ---- Delete ----
-            op.delete_var => try vm_property_ref.deleteVar(ctx, global, stack, function, frame, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs),
-            op.delete => switch (try vm_property_ref.deletePropertyVm(ctx, output, global, stack, function, frame, catch_target)) {
+            op.delete_var => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try vm_property_ref.deleteVar(ctx, global, stack, function, frame, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs); },
+            op.delete => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try vm_property_ref.deletePropertyVm(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
-            },
+            } },
 
             // ---- Additional stack manipulation ----
-            op.nip => try value_vm.nip(ctx, stack),
-            op.nip1 => try value_vm.nip1(ctx, stack),
-            op.dup1 => try value_vm.dup1(ctx, stack),
-            op.dup2 => try value_vm.dup2(ctx, stack),
-            op.dup3 => try value_vm.dup3(ctx, stack),
-            op.insert2 => try value_vm.insert2(ctx, stack),
-            op.insert3 => try value_vm.insert3(ctx, stack),
-            op.insert4 => try value_vm.insert4(ctx, stack),
-            op.rot3l => try value_vm.rot3l(ctx, stack),
-            op.rot3r => try value_vm.rot3r(ctx, stack),
-            op.rot4l => try value_vm.rot4l(ctx, stack),
-            op.rot5l => try value_vm.rot5l(ctx, stack),
-            op.perm3 => try value_vm.perm3(ctx, stack),
-            op.perm4 => try value_vm.perm4(ctx, stack),
-            op.perm5 => try value_vm.perm5(ctx, stack),
-            op.swap2 => try value_vm.swap2(ctx, stack),
-            op.is_undefined_or_null => try value_vm.isUndefinedOrNull(ctx.runtime, stack),
-            op.is_undefined => try value_vm.isUndefined(ctx.runtime, stack),
-            op.is_null => try value_vm.isNull(ctx.runtime, stack),
-            op.get_length => switch (try literal_vm.getLength(ctx, output, global, stack, function, frame, catch_target)) {
+            op.nip => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.nip(ctx, stack); },
+            op.nip1 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.nip1(ctx, stack); },
+            op.dup1 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.dup1(ctx, stack); },
+            op.dup2 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.dup2(ctx, stack); },
+            op.dup3 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.dup3(ctx, stack); },
+            op.insert2 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.insert2(ctx, stack); },
+            op.insert3 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.insert3(ctx, stack); },
+            op.insert4 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.insert4(ctx, stack); },
+            op.rot3l => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.rot3l(ctx, stack); },
+            op.rot3r => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.rot3r(ctx, stack); },
+            op.rot4l => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.rot4l(ctx, stack); },
+            op.rot5l => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.rot5l(ctx, stack); },
+            op.perm3 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.perm3(ctx, stack); },
+            op.perm4 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.perm4(ctx, stack); },
+            op.perm5 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.perm5(ctx, stack); },
+            op.swap2 => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.swap2(ctx, stack); },
+            op.is_undefined_or_null => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.isUndefinedOrNull(ctx.runtime, stack); },
+            op.is_undefined => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.isUndefined(ctx.runtime, stack); },
+            op.is_null => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try value_vm.isNull(ctx.runtime, stack); },
+            op.get_length => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try literal_vm.getLength(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
-            },
+            } },
             op.post_inc, op.post_dec => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try arith_vm.postUpdateVm(ctx, stack, frame, catch_target, opc, output, global)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.inc_loc, op.dec_loc => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try arith_vm.updateLocalVm(ctx, stack, function, global, frame, catch_target, opc, output, sync_global_lexical_locals)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.add_loc => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try arith_vm.addLocalVm(ctx, stack, function, global, frame, catch_target, output, sync_global_lexical_locals)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.apply => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try call_vm.apply(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
@@ -1271,53 +1488,61 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
 
             // ---- Rest / spread ----
-            op.rest => try literal_vm.rest(ctx, stack, function, frame),
+            op.rest => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try literal_vm.rest(ctx, stack, function, frame); },
 
             // ---- Iterator protocol ----
             op.for_of_start, op.for_await_of_start => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try iter_vm.forOfStartVm(ctx, output, global, stack, function, frame, catch_target, opc == op.for_await_of_start)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.for_in_start => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try iter_vm.forInStartVm(ctx, output, global, stack, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.iterator_next => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try iter_vm.iteratorNextVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.iterator_check_object => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try iter_vm.iteratorCheckObjectVm(ctx, stack, frame, catch_target, global)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.iterator_get_value_done => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try iter_vm.iteratorGetValueDoneVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.iterator_call => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try iter_vm.iteratorCallVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.for_of_next => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try iter_vm.forOfNextVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
-            op.for_in_next => try iter_vm.forInNext(ctx, output, global, stack),
+            op.for_in_next => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); try iter_vm.forInNext(ctx, output, global, stack); },
             op.iterator_close => {
+                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try iter_vm.iteratorCloseVm(ctx, output, global, stack, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
@@ -1325,14 +1550,23 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
 
             // ---- Constructor ----
-            op.call_constructor => switch (try call_vm.constructor(ctx, output, global, stack, function, frame, catch_target)) {
+            op.call_constructor => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try call_vm.constructor(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
-            },
+            } },
 
-            op.invalid => return error.InvalidBytecode,
+            op.invalid => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); return error.InvalidBytecode; },
 
-            else => return error.InvalidBytecode,
+            // Dense 256-entry dispatch table (qjs-aligned: `[OP_COUNT..255] =
+            // &&case_default`). Opcodes 0..250 are all defined; 251..255 are the
+            // only gaps. Listing them explicitly (instead of `else`) makes the
+            // switch exhaustive over u8, so the compiler emits a single dense
+            // jump table with no opcode range check, while still routing invalid
+            // bytecode to error (the contract `src/tests/builtins.zig` asserts).
+            // 246..248 are reserved data-slot fusion opcodes never emitted by
+            // codegen; 251..255 are unused. Both previously fell to `else` —
+            // listing them explicitly preserves that error behavior verbatim.
+            246, 247, 248, 251, 252, 253, 254, 255 => return error.InvalidBytecode,
         }
     }
 

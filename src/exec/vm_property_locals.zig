@@ -265,6 +265,21 @@ pub noinline fn checkedLocVm(
     switch (opc) {
         op.set_loc_uninitialized => {
             frame.setLocalUninitialized(idx);
+            // Mirror the slot's TDZ state in its value tag (lets the dispatch
+            // fast paths test the tag instead of the side bitmap). Free the old
+            // binding first: on block re-entry (loop) the slot may hold the
+            // previous iteration's value/var-ref cell, which a captured closure
+            // still references via its own dup — we only drop the slot's share.
+            // Mirror TDZ in the slot's value tag ONLY for plain slots, so the
+            // dispatch fast paths can test the tag without the side bitmap. A
+            // var-ref cell keeps its identity (captured closures reference it via
+            // their own dup) — its TDZ lives in the cell and is resolved through
+            // the bitmap/varRefSlot slow path, so never overwrite a cell here.
+            const cur_binding = frame.locals[idx];
+            if (slot_ops.varRefCellFromValue(cur_binding) == null) {
+                frame.locals[idx] = core.JSValue.uninitialized();
+                cur_binding.free(ctx.runtime);
+            }
         },
         op.get_loc_check => {
             if (frame.localIsUninitialized(idx)) {

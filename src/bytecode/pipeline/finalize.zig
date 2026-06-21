@@ -128,7 +128,10 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
     const class_instance_fields_off = layout.reserve(atom.Atom, fd.class_instance_fields.len);
     const private_bound_names_off = layout.reserve(atom.Atom, fd.private_bound_names.len);
     const class_private_names_off = layout.reserve(atom.Atom, fd.class_private_names.len);
-    const byte_code_off = layout.reserve(u8, lowered.code.len);
+    // Reserve one extra trailing byte for an `op.return` sentinel (see below):
+    // it lets the register-resident dispatch drop the per-op fall-off-end bounds
+    // check, matching qjs (whose parser terminates every function with a return).
+    const byte_code_off = layout.reserve(u8, lowered.code.len + 1);
     const fusion_cold_off = layout.reserve(u8, lowered.code.len);
     const pc2line_off = layout.reserve(u8, lowered.pc2line_buf.len);
     const source_off = layout.reserve(u8, source_len);
@@ -144,6 +147,13 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
         fb.byte_code = fb_mod.blockSlice(block, u8, byte_code_off, lowered.code.len);
         @memcpy(fb.byte_code, lowered.code);
         fb.byte_code_len = @intCast(lowered.code.len);
+        // Trailing `op.return` sentinel just past the visible code slice. Eval
+        // completion and `goto`-to-end patterns leave code that "falls off" the
+        // end without a terminating return; on fall-off the dispatch reads this
+        // sentinel and returns the stack top — exactly the completion value the
+        // old per-op bounds-checked fall-off path produced. Functions that do
+        // end in a real return hit it first and never observe the sentinel.
+        fb_mod.blockSlice(block, u8, byte_code_off, lowered.code.len + 1)[lowered.code.len] = opcode.op.@"return";
         if (fd.func_kind == .generator or fd.func_kind == .async_generator) {
             fb.generator_body_pc = findGeneratorBodyMarker(lowered.code) orelse 0;
         }
@@ -603,6 +613,12 @@ fn runPhases(
     function.stack_size = try computeStackSizeForCurrentBytecode(function.code);
     try function.allocateIcSlots();
     try function.allocateFusionCold();
+
+    // Defensive fall-off-end backstop for the register-resident dispatch (which
+    // dropped the per-op bounds check): parser output always ends in a cold
+    // terminator, but guarantee a hand-built top-level Bytecode can never run a
+    // hot opcode off the end into heap garbage. Hidden past code.len.
+    try function.ensureTrailingReturnSentinel();
 }
 
 fn computeStackSizeForCurrentBytecode(code: []const u8) !u16 {

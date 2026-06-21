@@ -295,11 +295,20 @@ pub const Bytecode = struct {
             self.code_capacity = 0;
             return;
         }
-        const owned = try self.memory.alloc(u8, bytes.len);
+        // Allocate one extra trailing byte holding an `op.return` sentinel.
+        // qjs-aligned: every real function is terminated by a return, so the
+        // register-resident dispatch carries no per-op fall-off-end bounds
+        // check. Hand-authored test bytecode that omits a terminator reads this
+        // sentinel on fall-off and returns the stack top — exactly the
+        // completion value the old bounds-checked fall-off produced. The
+        // sentinel sits just past the visible `code` slice; terminated
+        // bytecode hits its own return first and never observes it.
+        const owned = try self.memory.alloc(u8, bytes.len + 1);
         errdefer self.memory.free(u8, owned);
-        @memcpy(owned, bytes);
-        self.code = owned;
-        self.code_capacity = bytes.len;
+        @memcpy(owned[0..bytes.len], bytes);
+        owned[bytes.len] = opcode.op.@"return";
+        self.code = owned[0..bytes.len];
+        self.code_capacity = bytes.len + 1;
     }
 
     /// Append bytes to `code` with geometric growth. The visible slice
@@ -309,6 +318,20 @@ pub const Bytecode = struct {
         if (bytes.len == 0) return;
         const tail = try growSliceBy(u8, self.memory, &self.code, &self.code_capacity, bytes.len);
         @memcpy(tail, bytes);
+    }
+
+    /// Ensure a trailing `op.return` sentinel one byte past the visible `code`
+    /// slice without changing `code.len` (mirrors setCode). Defensive backstop
+    /// for the register-resident dispatch's removed fall-off-end bounds check:
+    /// parser-produced code always ends in a cold terminator and never reads it,
+    /// but a hand-built top-level `Bytecode` ending in a hot opcode would
+    /// otherwise read `code[code.len]` (heap garbage) on fall-off.
+    pub fn ensureTrailingReturnSentinel(self: *Bytecode) !void {
+        if (self.code.len == 0) return;
+        const len = self.code.len;
+        _ = try growSliceBy(u8, self.memory, &self.code, &self.code_capacity, 1);
+        self.code = self.code[0..len];
+        self.code.ptr[len] = opcode.op.@"return";
     }
 
     pub fn appendSourceLoc(self: *Bytecode, pc: u32, line_num: i32, col_num: i32) !void {
