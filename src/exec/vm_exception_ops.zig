@@ -284,7 +284,7 @@ pub fn qjsCallSiteMethodById(rt: *core.JSRuntime, object: *core.Object, id: core
 
 pub fn backtraceFunctionNameAtom(ctx: *core.JSContext, fallback: core.Atom, current_function_value: core.JSValue) !core.Atom {
     const function_object = objectFromValue(current_function_value) orelse return ctx.runtime.atoms.dup(fallback);
-    const name_desc = function_object.getOwnProperty(core.atom.ids.name) orelse return ctx.runtime.atoms.dup(core.atom.ids.empty_string);
+    const name_desc = function_object.getOwnProperty(ctx.runtime, core.atom.ids.name) orelse return ctx.runtime.atoms.dup(core.atom.ids.empty_string);
     defer name_desc.destroy(ctx.runtime);
     if (name_desc.kind != .data or !name_desc.value.isString()) return ctx.runtime.atoms.dup(core.atom.ids.empty_string);
 

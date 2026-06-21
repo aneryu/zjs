@@ -178,7 +178,7 @@ pub fn constructBuiltinSuperConstructor(
 
 pub fn currentArrowLexicalSuperThis(rt: *core.JSRuntime, frame: *frame_mod.Frame) ?core.JSValue {
     const current_object = currentArrowFunctionObject(frame) orelse return null;
-    if (current_object.functionLexicalThisSlot().*) |this_value| return slotValueDup(this_value);
+    if (current_object.functionLexicalThis()) |this_value| return slotValueDup(this_value);
     _ = rt;
     return null;
 }
@@ -195,15 +195,15 @@ pub fn setCurrentArrowLexicalThis(ctx: *core.JSContext, frame: *frame_mod.Frame,
         value.free(ctx.runtime);
         return;
     };
-    if (current_object.functionLexicalThisSlot().*) |slot| {
+    if (current_object.functionLexicalThis()) |slot| {
         if (varRefCellFromValue(slot)) |cell| {
             try cell.setVarRefValue(ctx.runtime, value);
             return;
         }
-        try current_object.setOptionalValueSlot(ctx.runtime, current_object.functionLexicalThisSlot(), value);
+        try current_object.setOptionalValueSlot(ctx.runtime, try current_object.functionLexicalThisSlot(ctx.runtime), value);
         return;
     }
-    try current_object.setOptionalValueSlot(ctx.runtime, current_object.functionLexicalThisSlot(), value);
+    try current_object.setOptionalValueSlot(ctx.runtime, try current_object.functionLexicalThisSlot(ctx.runtime), value);
 }
 
 pub fn isCurrentSuperConstructor(ctx: *core.JSContext, frame: *frame_mod.Frame, func: core.JSValue) bool {
@@ -211,7 +211,7 @@ pub fn isCurrentSuperConstructor(ctx: *core.JSContext, frame: *frame_mod.Frame, 
     if (!frame.current_function.isObject()) return false;
     const current_object = property_ops.expectObject(frame.current_function) catch return false;
     const super_constructor = current_object.functionSuperConstructor() orelse return false;
-    if (current_object.functionLexicalThisSlot().* == null) {
+    if (current_object.functionLexicalThis() == null) {
         if (current_object.getPrototype()) |prototype| {
             if (sameObjectIdentity(prototype.value(), func)) return true;
         }
@@ -237,7 +237,7 @@ pub fn initializeClassInstanceElements(
     }
     try initializeClassInstanceFields(ctx.runtime, instance, fb.class_instance_fields, remap_object);
     const init_function = if (constructor_object) |object|
-        object.functionClassFieldsInitSlot().*
+        object.functionClassFieldsInit()
     else
         fb.class_fields_init;
     if (init_function) |initializer| {
@@ -269,7 +269,7 @@ pub fn initializeClassPrivateMethods(rt: *core.JSRuntime, instance: *core.Object
     for (home_object.shapeProps()) |prop| {
         if (rt.atoms.kind(prop.atom_id) != .private) continue;
         if (instance.hasOwnProperty(prop.atom_id)) return error.TypeError;
-        if (home_object.getOwnProperty(prop.atom_id)) |desc| {
+        if (home_object.getOwnProperty(rt, prop.atom_id)) |desc| {
             defer desc.destroy(rt);
             instance.defineOwnProperty(rt, prop.atom_id, desc) catch |err| switch (err) {
                 error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,

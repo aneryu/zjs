@@ -2625,31 +2625,34 @@ test "F4: array literal spread [...a] starts with array_from 0 + push_i32 0" {
     //   push_i32 0         (5)
     //   get_var a          (5)
     //   append             (1)
-    //   drop               (1)
+    //   dup1               (1)
+    //   put_field length   (5)
     var fn_bc = try parseExpr(&env, "[...a]");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 15), fn_bc.code.len);
+    try std.testing.expectEqual(@as(usize, 20), fn_bc.code.len);
     try std.testing.expectEqual(op.array_from, fn_bc.code[0]);
     try std.testing.expectEqual(op.push_i32, fn_bc.code[3]);
     try std.testing.expectEqual(op.append, fn_bc.code[13]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[14]);
+    try std.testing.expectEqual(op.dup1, fn_bc.code[14]);
+    try std.testing.expectEqual(op.put_field, fn_bc.code[15]);
 }
 
 test "F4: array literal mixed spread [a, ...b, c] uses define_array_el+inc" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     // get_var a (5) ; array_from 1 (3) ; push_i32 1 (5) ; get_var b (5) ; append (1) ;
-    // get_var c (5) ; define_array_el (1) ; inc (1) ; drop (1)
+    // get_var c (5) ; define_array_el (1) ; inc (1) ; dup1 (1) ; put_field length (5)
     var fn_bc = try parseExpr(&env, "[a, ...b, c]");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 27), fn_bc.code.len);
+    try std.testing.expectEqual(@as(usize, 32), fn_bc.code.len);
     try std.testing.expectEqual(op.array_from, fn_bc.code[5]);
     try std.testing.expectEqual(op.append, fn_bc.code[18]);
     try std.testing.expectEqual(op.define_array_el, fn_bc.code[24]);
     try std.testing.expectEqual(op.inc, fn_bc.code[25]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[26]);
+    try std.testing.expectEqual(op.dup1, fn_bc.code[26]);
+    try std.testing.expectEqual(op.put_field, fn_bc.code[27]);
 }
 
 test "F4: template with empty middle still emits call_method with correct argc" {

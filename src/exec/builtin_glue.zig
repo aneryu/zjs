@@ -147,7 +147,6 @@ pub fn qjsGlobalIsNaNOrFinite(
     return core.JSValue.boolean(if (is_nan) std.math.isNan(number) else std.math.isFinite(number));
 }
 
-
 pub fn qjsDateToPrimitiveNativeRecord(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -585,7 +584,7 @@ pub fn printHostOutputArgs(rt: *core.JSRuntime, output: ?*std.Io.Writer, args: [
 }
 
 pub fn globalHostOutputAutoInit(rt: *core.JSRuntime, global: *core.Object, atom_id: core.Atom) bool {
-    if (global.exotic != null) return false;
+    if (global.hasExoticMethods()) return false;
     for (global.shapeProps(), 0..) |prop, property_index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;

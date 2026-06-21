@@ -278,14 +278,14 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
                 .inline_value => {
                     const payload_ptr = externalPayload(class_payload) orelse return;
                     callDeinit(payload_ptr);
-                    class_payload.* = .none;
+                    class_payload.* = null;
                 },
                 .external_ptr => |options| switch (options.owner) {
                     .js => {
                         const payload_ptr = externalPayload(class_payload) orelse return;
                         callDeinit(payload_ptr);
                         rt.memory.destroy(Payload, payload_ptr);
-                        class_payload.* = .none;
+                        class_payload.* = null;
                     },
                     .host => {},
                 },
@@ -504,10 +504,8 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
         }
 
         fn externalPayload(class_payload: *core.class.Payload) ?*Payload {
-            return switch (class_payload.*) {
-                .external => |raw| @ptrCast(@alignCast(raw)),
-                .none => null,
-            };
+            const raw = class_payload.* orelse return null;
+            return @ptrCast(@alignCast(raw));
         }
 
         fn callDeinit(data: *Payload) void {
@@ -1243,7 +1241,7 @@ test "JSObject trace hook marks typed payload slots" {
     const binding = try ObjectType.binding(ctx);
 
     var payload = Payload{ .value_slot = core.JSValue.int32(123) };
-    var class_payload = core.class.Payload{ .external = @ptrCast(&payload) };
+    var class_payload: core.class.Payload = @ptrCast(&payload);
 
     const State = struct {
         value_slot: *core.JSValue,

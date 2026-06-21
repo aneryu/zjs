@@ -31,7 +31,6 @@ pub fn main(init: std.process.Init) !void {
     };
     defer summary.deinit(init.gpa);
 
-    dumpFusionStats(init.environ_map);
     dumpHostDispatchStats(init.environ_map);
     try printSummary(io, summary);
     const baseline_gate = config.regression_baseline != null;
@@ -41,22 +40,9 @@ pub fn main(init: std.process.Init) !void {
 }
 
 /// The default execution path evaluates tests in-process, so the engine's
-/// per-fusion hit counters accumulate inside this runner. When built with
-/// `-Dzjs_enable_opcode_profile=true` and `ZJS_FUSION_STATS_FILE` is set,
-/// append the totals so fusion measurement runs can include test262 slices.
-fn dumpFusionStats(environ_map: *std.process.Environ.Map) void {
-    const fusion_stats = test262_root.exec.fusion_stats;
-    if (comptime !fusion_stats.enabled) return;
-    const path = environ_map.get("ZJS_FUSION_STATS_FILE") orelse return;
-    var path_buf: [512:0]u8 = undefined;
-    if (path.len == 0 or path.len >= path_buf.len) return;
-    @memcpy(path_buf[0..path.len], path);
-    path_buf[path.len] = 0;
-    fusion_stats.appendToFile(&path_buf);
-}
-
-/// Same as `dumpFusionStats`, but for the legacy string-name dispatch
-/// counters (`ZJS_HOST_DISPATCH_STATS_FILE`).
+/// per-site dispatch hit counters accumulate inside this runner. When built
+/// with `-Dzjs_enable_opcode_profile=true` and `ZJS_HOST_DISPATCH_STATS_FILE`
+/// is set, append the totals so measurement runs can include test262 slices.
 fn dumpHostDispatchStats(environ_map: *std.process.Environ.Map) void {
     const host_dispatch_stats = test262_root.exec.host_dispatch_stats;
     if (comptime !host_dispatch_stats.enabled) return;

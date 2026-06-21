@@ -220,10 +220,10 @@ pub fn length(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
         const header = value.refHeader() orelse return error.TypeError;
         const object_value: *core.Object = @fieldParentPtr("header", header);
         if (object_value.flags.is_array) {
-            if (object_value.length <= @as(u32, @intCast(std.math.maxInt(i32)))) {
-                return core.JSValue.int32(@intCast(object_value.length));
+            if (object_value.arrayLength() <= @as(u32, @intCast(std.math.maxInt(i32)))) {
+                return core.JSValue.int32(@intCast(object_value.arrayLength()));
             }
-            return core.JSValue.float64(@floatFromInt(object_value.length));
+            return core.JSValue.float64(@floatFromInt(object_value.arrayLength()));
         }
         const length_value = object_value.getProperty(core.atom.ids.length);
         if (!length_value.isUndefined()) return length_value;
@@ -1155,7 +1155,7 @@ fn parseJsNumber(bytes: []const u8) f64 {
 
 fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
     var index: u32 = 0;
-    while (index < object.length) : (index += 1) {
+    while (index < object.arrayLength()) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
         const value = object.getProperty(core.atom.atomFromUInt32(index));
         defer value.free(rt);

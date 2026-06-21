@@ -1,4 +1,3 @@
-const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
@@ -37,7 +36,7 @@ fn constructRegExpRecord(
     return (try builtin_dispatch.callConstructRecord(ctx, null, null, &.{}, null, native_ref, prototype, &args, null, null)) orelse error.TypeError;
 }
 
-pub fn pushLiteral(
+pub noinline fn pushLiteral(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     prototype: ?*core.Object,

@@ -1,6 +1,7 @@
 const class = @import("class.zig");
 const JSValue = @import("value.zig").JSValue;
 const JSRuntime = @import("runtime.zig").JSRuntime;
+const std = @import("std");
 
 pub const Flags = packed struct(u6) {
     writable: bool = false,
@@ -115,11 +116,21 @@ pub const AutoInit = struct {
     shared_native_cache_slot: u8 = 0,
 };
 
+pub const AutoInitRef = struct {
+    rt: *JSRuntime,
+    id: u32,
+};
+
 pub const Slot = union(enum) {
     data: JSValue,
     accessor: Accessor,
-    auto_init: AutoInit,
+    auto_init: AutoInitRef,
     deleted,
+
+    pub inline fn dataValueForFastPath(self: Slot) ?JSValue {
+        if (self != .data) return null;
+        return self.data;
+    }
 
     pub fn destroy(self: Slot, rt: anytype) void {
         switch (self) {
@@ -128,8 +139,8 @@ pub const Slot = union(enum) {
                 entry.getter.free(rt);
                 entry.setter.free(rt);
             },
-            // `auto_init` is metadata-only (name is static lifetime,
-            // length is an int, rt is a borrowed pointer). Nothing to free.
+            // Auto-init metadata is owned by JSRuntime.auto_init_table and
+            // released when the runtime is torn down.
             .auto_init => {},
             .deleted => {},
         }
@@ -142,11 +153,25 @@ pub const Slot = union(enum) {
                 .getter = entry.getter.dup(),
                 .setter = entry.setter.dup(),
             } },
-            .auto_init => |info| .{ .auto_init = info },
+            .auto_init => |id| .{ .auto_init = id },
             .deleted => .deleted,
         };
     }
 };
+
+pub fn internAutoInit(rt: *JSRuntime, info: AutoInit) !AutoInitRef {
+    try rt.auto_init_table.append(rt.memory.allocator, info);
+    return .{ .rt = rt, .id = @intCast(rt.auto_init_table.items.len - 1) };
+}
+
+pub fn autoInitAt(rt: *JSRuntime, ref: AutoInitRef) *AutoInit {
+    std.debug.assert(ref.rt == rt);
+    return autoInit(ref);
+}
+
+pub fn autoInit(ref: AutoInitRef) *AutoInit {
+    return &ref.rt.auto_init_table.items[ref.id];
+}
 
 /// Per-object property storage. Holds only the value side of a
 /// property (QuickJS `JSProperty` model); the key atom and the

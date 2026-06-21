@@ -7,7 +7,7 @@ pub const Cursor = struct {
 
 pub fn nextArrayIndex(cursor: *Cursor, array_object: *core.Object) ?u32 {
     if (cursor.done) return null;
-    if (cursor.index >= array_object.length) {
+    if (cursor.index >= array_object.arrayLength()) {
         cursor.done = true;
         return null;
     }

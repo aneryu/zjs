@@ -1,4 +1,3 @@
-const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
@@ -10,8 +9,6 @@ const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
 const array_ops = @import("array_ops.zig");
-
-const op = bytecode.opcode.op;
 
 pub const ThrowResult = enum {
     handled,
@@ -40,13 +37,13 @@ pub const InterruptPoller = struct {
     }
 };
 
-pub fn returnTop(ctx: *core.JSContext, stack: *stack_mod.Stack, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
+pub noinline fn returnTop(ctx: *core.JSContext, stack: *stack_mod.Stack, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
     if (generator) |generator_object| generator_object.generatorDoneSlot().* = true;
     const value = stack.peek() orelse core.JSValue.undefinedValue();
     return finishFunctionReturn(ctx, frame, value);
 }
 
-pub fn returnUndefined(ctx: *core.JSContext, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
+pub noinline fn returnUndefined(ctx: *core.JSContext, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
     if (generator) |generator_object| generator_object.generatorDoneSlot().* = true;
     return finishFunctionReturn(ctx, frame, core.JSValue.undefinedValue());
 }
@@ -78,10 +75,6 @@ pub fn jump8(function: *const bytecode.Bytecode, frame: *frame_mod.Frame) void {
     frame.pc = relativePc(operand_pc, diff);
 }
 
-pub fn tryFuseGoto8LocalLessThanFalseBranch(function: *const bytecode.Bytecode, frame: *frame_mod.Frame) bool {
-    return fusion_stats.counted(.tryFuseGoto8LocalInt32LessThanFalseBranch, tryFuseGoto8LocalInt32LessThanFalseBranch(function, frame));
-}
-
 pub fn branch32(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, branch_if_true: bool) !void {
     const operand_pc = frame.pc;
     const diff = readInt(i32, function.code[frame.pc..][0..4]);
@@ -106,7 +99,7 @@ pub fn branch8(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const b
     }
 }
 
-pub fn throwTop(
+pub noinline fn throwTop(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -147,7 +140,7 @@ pub fn throwError(function: *const bytecode.Bytecode, frame: *frame_mod.Frame) T
     };
 }
 
-pub fn throwErrorVm(
+pub noinline fn throwErrorVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -160,7 +153,7 @@ pub fn throwErrorVm(
     return err;
 }
 
-pub fn catchTarget(function: *const bytecode.Bytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack, catch_target: *?usize) !void {
+pub noinline fn catchTarget(function: *const bytecode.Bytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack, catch_target: *?usize) !void {
     const operand_pc = frame.pc;
     const diff = readInt(i32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
@@ -190,34 +183,6 @@ pub fn ret(ctx: *core.JSContext, function: *const bytecode.Bytecode, frame: *fra
 
 pub fn nop() void {}
 
-fn tryFuseGoto8LocalInt32LessThanFalseBranch(function: *const bytecode.Bytecode, frame: *frame_mod.Frame) bool {
-    const operand_pc = frame.pc;
-    if (operand_pc >= function.code.len) return false;
-    const diff: i8 = @bitCast(function.code[operand_pc]);
-    if (diff >= 0) return false;
-    const target_pc = relativePc(operand_pc, diff);
-    if (target_pc + 11 > function.code.len) return false;
-
-    const code = function.code;
-    if (code[target_pc] != op.get_loc_check) return false;
-    if (code[target_pc + 3] != op.push_i32) return false;
-    if (code[target_pc + 8] != op.lt) return false;
-    if (code[target_pc + 9] != op.if_false8) return false;
-
-    const idx = readInt(u16, code[target_pc + 1 ..][0..2]);
-    if (idx >= frame.locals.len or idx >= frame.locals_uninit.len) return false;
-    if (frame.localIsUninitialized(idx)) return false;
-    const lhs = frame.locals[idx].asInt32() orelse return false;
-    const rhs = readInt(i32, code[target_pc + 4 ..][0..4]);
-    const branch_operand_pc = target_pc + 10;
-    const branch_diff: i8 = @bitCast(code[branch_operand_pc]);
-    frame.pc = if (lhs < rhs)
-        target_pc + 11
-    else
-        relativePc(branch_operand_pc, branch_diff);
-    return true;
-}
-
 fn relativePc(operand_pc: usize, diff: anytype) usize {
     return @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff));
 }
@@ -237,7 +202,7 @@ fn slotValueBorrow(slot: core.JSValue) core.JSValue {
     var depth: usize = 0;
     while (depth < 16) : (depth += 1) {
         const cell = varRefCellFromValue(current) orelse return current;
-        current = cell.varRefValueSlot().* orelse return core.JSValue.undefinedValue();
+        current = cell.varRefValue();
     }
     return current;
 }
@@ -246,12 +211,8 @@ fn varRefSlotIsUninitialized(slot: core.JSValue) bool {
     return slotValueBorrow(slot).isUninitialized();
 }
 
-fn varRefCellFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
-    if (object.class_payload_kind != .var_ref) return null;
-    return object;
+fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
+    return core.VarRef.fromValue(value);
 }
 
 fn readInt(comptime T: type, bytes: []const u8) T {

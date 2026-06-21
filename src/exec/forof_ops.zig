@@ -101,7 +101,7 @@ pub fn createForInIterator(
         defer rt.atoms.free(source_key);
         try iterator.defineOwnProperty(rt, source_key, core.Descriptor.data(source_val, true, false, true));
     }
-    iterator.length = out_index;
+    iterator.setIteratorLength(out_index);
 
     const index_key = try rt.internAtom("__index");
     defer rt.atoms.free(index_key);
@@ -132,7 +132,7 @@ pub fn createSimpleForInIterator(rt: *core.JSRuntime, object_value: core.JSValue
         }
         iterator.iteratorAtomKeysSlot().* = keys;
     }
-    iterator.length = out_length;
+    iterator.setIteratorLength(out_length);
 
     iterator.iteratorKindSlot().* = iter_vm.simple_for_in_iterator_kind;
     iterator.iteratorIndexSlot().* = 0;
@@ -152,7 +152,7 @@ fn simpleForInEnumerableStringKeyCount(rt: *core.JSRuntime, source: *core.Object
 }
 
 pub fn simpleForInRootCanUseFastPath(rt: *core.JSRuntime, source: *core.Object) bool {
-    if (source.class_id != core.class.ids.object or source.flags.is_proxy or source.exotic != null or source.flags.is_array) return false;
+    if (source.class_id != core.class.ids.object or source.flags.is_proxy or source.hasExoticMethods() or source.flags.is_array) return false;
     if (core.object.isTypedArrayObject(source)) return false;
     if (source.arrayElements().len != 0) return false;
     for (source.shapeProps()) |prop| {
@@ -164,7 +164,7 @@ pub fn simpleForInRootCanUseFastPath(rt: *core.JSRuntime, source: *core.Object) 
 
     var proto = source.getPrototype();
     while (proto) |object| : (proto = object.getPrototype()) {
-        if (object.flags.is_proxy or object.exotic != null) return false;
+        if (object.flags.is_proxy or object.hasExoticMethods()) return false;
         if (core.object.isTypedArrayObject(object)) return false;
         if (object.arrayElements().len != 0) return false;
         for (object.shapeProps()) |prop| {
@@ -189,7 +189,7 @@ pub fn findForOfIteratorIndex(rt: *core.JSRuntime, stack: *const stack_mod.Stack
 
 pub fn isIteratorLikeValue(rt: *core.JSRuntime, value: core.JSValue) bool {
     const object = property_ops.expectObject(value) catch return false;
-    if (object.cachedIteratorNext() != null) return true;
+    if (object.cachedIteratorNext(rt) != null) return true;
     const next_key = rt.internAtom("next") catch return false;
     defer rt.atoms.free(next_key);
     const next_value = object.getProperty(next_key);

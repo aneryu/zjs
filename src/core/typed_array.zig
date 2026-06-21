@@ -937,7 +937,7 @@ fn appendRawString(rt: *JSRuntime, buffer: *std.ArrayList(u8), value: JSValue) !
 
 fn appendArrayString(rt: *JSRuntime, buffer: *std.ArrayList(u8), obj: *Object) AppendStringError!void {
     var index: u32 = 0;
-    while (index < obj.length) : (index += 1) {
+    while (index < obj.arrayLength()) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
         const value = obj.getProperty(atom.atomFromUInt32(index));
         defer value.free(rt);

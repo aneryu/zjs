@@ -365,14 +365,12 @@ fn moduleLocalCell(ctx: *core.JSContext, record: *core.module.ModuleRecord, name
     try record.ensureLocalBinding(name);
     const index = record.findLocalBindingIndex(name) orelse return error.MissingExport;
     if (varRefCellFromValue(record.local_bindings[index].cell) == null) {
-        const object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-        errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
-        try object.initVarRefPayload(ctx.runtime, if (is_lexical) core.JSValue.uninitialized() else core.JSValue.undefinedValue());
-        object.varRefIsConstSlot().* = is_const;
-        record.local_bindings[index].cell = object.value();
+        const cell = try core.VarRef.createClosed(ctx.runtime, if (is_lexical) core.JSValue.uninitialized() else core.JSValue.undefinedValue());
+        cell.varRefIsConstSlot().* = is_const;
+        record.local_bindings[index].cell = cell.valueRef();
     } else if (is_const) {
-        const object = varRefCellFromValue(record.local_bindings[index].cell) orelse return error.TypeError;
-        object.varRefIsConstSlot().* = true;
+        const cell = varRefCellFromValue(record.local_bindings[index].cell) orelse return error.TypeError;
+        cell.varRefIsConstSlot().* = true;
     }
     return record.local_bindings[index].cell.dup();
 }
@@ -417,11 +415,9 @@ fn createVarRefCellWithConst(ctx: *core.JSContext, value: core.JSValue, is_const
     ctx.runtime.active_value_roots = &root_frame;
     defer ctx.runtime.active_value_roots = root_frame.previous;
 
-    const object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
-    try object.initVarRefPayload(ctx.runtime, rooted_value);
-    object.varRefIsConstSlot().* = is_const;
-    return object.value();
+    const cell = try core.VarRef.createClosed(ctx.runtime, rooted_value);
+    cell.varRefIsConstSlot().* = is_const;
+    return cell.valueRef();
 }
 
 test "createVarRefCellWithConst roots direct symbol value while creating cell" {
@@ -442,7 +438,7 @@ test "createVarRefCellWithConst roots direct symbol value while creating cell" {
     const cell = varRefCellFromValue(cell_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    const stored = cell.varRefValueSlot().* orelse return error.TypeError;
+    const stored = cell.varRefValue();
     try std.testing.expect(stored.same(core.JSValue.symbol(symbol_atom)));
     try std.testing.expect(cell.varRefIsConstSlot().*);
 
@@ -707,11 +703,8 @@ fn explicitStarNamespaceTarget(record: *const core.module.ModuleRecord, export_n
     return null;
 }
 
-fn varRefCellFromValue(value: core.JSValue) ?*core.Object {
-    const header = value.refHeader() orelse return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
-    if (object.class_payload_kind != .var_ref) return null;
-    return object;
+fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
+    return core.VarRef.fromValue(value);
 }
 
 fn preloadFileModuleGraphInner(
@@ -906,7 +899,7 @@ pub fn initializeSyntheticFileModule(
 fn moduleBindingInitialized(record: *const core.module.ModuleRecord, name: core.Atom) bool {
     const index = record.findLocalBindingIndex(name) orelse return false;
     if (varRefCellFromValue(record.local_bindings[index].cell)) |cell| {
-        if (cell.varRefValueSlot().*) |stored| return !stored.isUninitialized();
+        return !cell.varRefValue().isUninitialized();
     }
     return false;
 }

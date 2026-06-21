@@ -450,7 +450,7 @@ pub const JSValue = extern struct {
         };
     }
 
-    pub fn dup(self: JSValue) JSValue {
+    pub inline fn dup(self: JSValue) JSValue {
         if (comptime nan_boxing) {
             // All refcounted tags (gc.Header *and* function_bytecode) share one
             // header type (`gc.Header == gc.GCObjectHeader`) and one retain
@@ -469,7 +469,7 @@ pub const JSValue = extern struct {
         return self;
     }
 
-    pub fn free(self: JSValue, rt: anytype) void {
+    pub inline fn free(self: JSValue, rt: anytype) void {
         if (comptime nan_boxing) {
             const p = NanBox.prefixBits(self.repr.bits);
             if (p < NanBox.refcount_min or p > NanBox.refcount_max) return;

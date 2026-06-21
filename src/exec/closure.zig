@@ -759,7 +759,7 @@ fn appendArrayValue(rt: *core.JSRuntime, array: *core.Object, value: core.JSValu
     defer rt.active_value_roots = root_frame.previous;
 
     if (!array.flags.is_array) return error.TypeError;
-    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.length), core.Descriptor.data(rooted_value, true, true, true));
+    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.arrayLength()), core.Descriptor.data(rooted_value, true, true, true));
 }
 
 fn setGlobalMapString(rt: *core.JSRuntime, globals: []globals_mod.Slot, key_int: i32, bytes: []const u8) !void {
@@ -852,17 +852,17 @@ fn assertAndShiftExpected(rt: *core.JSRuntime, globals: []globals_mod.Slot, actu
     const expects_value = try globals_mod.getByName(rt, globals, "expects");
     defer expects_value.free(rt);
     const expects = try core.array.expectArray(expects_value);
-    if (expects.length == 0) return error.JSException;
+    if (expects.arrayLength() == 0) return error.JSException;
     const expected = expects.getProperty(core.atom.atomFromUInt32(0));
     defer expected.free(rt);
     if (!actual.sameValue(expected)) return error.JSException;
     var index: u32 = 1;
-    while (index < expects.length) : (index += 1) {
+    while (index < expects.arrayLength()) : (index += 1) {
         const next = expects.getProperty(core.atom.atomFromUInt32(index));
         defer next.free(rt);
         try expects.defineOwnProperty(rt, core.atom.atomFromUInt32(index - 1), core.Descriptor.data(next, true, true, true));
     }
-    expects.length -= 1;
+    expects.setArrayLength(expects.arrayLength() - 1);
 }
 
 const SetForEachMutation = enum {
@@ -1006,7 +1006,7 @@ fn appendToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: [
     }
     defer array_value.free(rt);
     const array = try core.array.expectArray(array_value);
-    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.length), core.Descriptor.data(rooted_value, true, true, true));
+    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.arrayLength()), core.Descriptor.data(rooted_value, true, true, true));
 }
 
 fn getGlobalObjectProperty(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8) !core.JSValue {

@@ -171,13 +171,13 @@ pub const GCPollMode = enum {
 
 pub const ValueRootSlice = union(enum) {
     mutable: *const []JSValue,
-    /// A register-resident operand window: `base` is the fixed operand-stack
-    /// base for a `callInternal` frame, and `live_len` points at the frame's
-    /// running operand depth (`cur_sp - base`). The GC traces `base[0..live_len.*]`,
-    /// reading the depth through the pointer so a register-resident `sp` stays
-    /// authoritative. Mirrors QuickJS scanning `[stack_buf, cur_sp)` of a frame.
-    /// Used by the recursive-rewrite Stage 2 register-sp; unused before then.
-    windowed: struct { base: [*]JSValue, live_len: *const usize },
+    /// A register-resident operand window. `values` supplies the stack buffer
+    /// pointer (so reallocations made by delegated handlers are visible), while
+    /// `live_len` points at the dispatcher's register-resident operand depth.
+    /// The GC traces `values.*.ptr[0..live_len.*]`, mirroring QuickJS scanning
+    /// `[stack_buf, cur_sp)` without making the slice header the hot-path
+    /// operand-depth authority.
+    windowed: struct { values: *const []JSValue, live_len: *const usize },
 };
 
 pub const ValueRootBuffer = struct {
@@ -528,19 +528,19 @@ pub const NativeCleanupJob = struct {
 pub const DeferredClassPayloadFinalizer = struct {
     class_id: class.ClassId = class.invalid_class_id,
     finalizer: class.PayloadFinalizer,
-    payload: class.Payload = .none,
+    payload: class.Payload = null,
     payload_kind: class.PayloadKind = .none,
     object_identity: usize = 0,
 
     pub fn run(self: *DeferredClassPayloadFinalizer, rt: *JSRuntime) void {
         var payload = self.payload;
-        self.payload = .none;
+        self.payload = null;
         self.finalizer(@ptrCast(rt), @ptrCast(&self.object_identity), &payload);
         object_mod.destroyDetachedClassPayload(rt, self.payload_kind, &payload);
     }
 
     pub fn traceRoots(self: *DeferredClassPayloadFinalizer, rt: *JSRuntime, visitor: *RootVisitor) RootTraceError!void {
-        if (self.payload == .none) return;
+        if (self.payload == null) return;
         const PayloadTraceAdaptor = struct {
             root_visitor: *RootVisitor,
             err: ?RootTraceError = null,
@@ -570,6 +570,11 @@ pub const DeferredClassPayloadFinalizer = struct {
         _ = rt.classes.markPayload(self.class_id, @ptrCast(rt), @ptrCast(&self.object_identity), &self.payload, &payload_visitor);
         if (adaptor.err) |err| return err;
     }
+};
+
+pub const CachedIteratorNextEntry = struct {
+    object: *Object,
+    value: ?JSValue = null,
 };
 
 const RecentTwoUnitString = struct {
@@ -603,6 +608,7 @@ pub const JSRuntime = struct {
     classes: class.Table,
     shapes: shape.Registry,
     modules: module.Registry,
+    auto_init_table: std.ArrayListUnmanaged(property.AutoInit) = .empty,
     materialize_builtin_namespace_cb: ?*const fn (rt: *JSRuntime, global: *Object, kind: property.AutoInitKind) anyerror!?JSValue = null,
     materialize_context_global_cb: ?*const fn (ctx: *context_mod.JSContext) anyerror!*Object = null,
     /// Bootstrap install seam: builds the standard global object. Seeded from the
@@ -724,6 +730,8 @@ pub const JSRuntime = struct {
     opcode_profile: ?*profile.OpcodeProfile = null,
     external_host_functions: []host_function.ExternalRecord = &.{},
     external_host_functions_capacity: usize = 0,
+    cached_iterator_next_entries: []CachedIteratorNextEntry = &.{},
+    cached_iterator_next_entries_capacity: usize = 0,
     /// Static internal-builtin record table, indexed
     /// `[domain][domain-local id]` with the `NativeBuiltinDomain` enum value
     /// as the outer index (slot 0 unused). Built at comptime by
@@ -780,6 +788,7 @@ pub const JSRuntime = struct {
         }
         rt.shapes = shape.Registry.init(&rt.memory, &rt.atoms);
         rt.modules = module.Registry.init(&rt.memory, &rt.atoms);
+        rt.auto_init_table = .empty;
         rt.materialize_builtin_namespace_cb = null;
         rt.materialize_context_global_cb = null;
         rt.install_standard_globals_cb = default_standard_globals_installer;
@@ -853,9 +862,12 @@ pub const JSRuntime = struct {
         rt.opcode_profile = null;
         rt.external_host_functions = &.{};
         rt.external_host_functions_capacity = 0;
+        rt.cached_iterator_next_entries = &.{};
+        rt.cached_iterator_next_entries_capacity = 0;
         rt.internal_builtins = &.{};
         rt.any_prototype_may_have_indexed_properties = false;
         rt.memory.profile_alloc_count = null;
+        rt.memory.enableSmallObjectSlab();
         rt.memory.trigger_gc_fn = JSRuntime.triggerGCOnAllocation;
         rt.memory.trigger_gc_ctx = rt;
     }
@@ -949,6 +961,7 @@ pub const JSRuntime = struct {
         self.borrowed_weak_cleanup_identity_set.deinit(self.memory.allocator);
         self.weak_object_ids.deinit(self.memory.allocator);
         self.weak_id_objects.deinit(self.memory.allocator);
+        self.auto_init_table.deinit(self.memory.allocator);
         self.shapes.deinit();
         self.classes.deinit();
         self.atoms.deinit();
@@ -960,6 +973,7 @@ pub const JSRuntime = struct {
         const external_symbol_roots: []atom.Atom = if (self.external_symbol_roots_capacity != 0) self.external_symbol_roots.ptr[0..self.external_symbol_roots_capacity] else self.external_symbol_roots[0..0];
         const external_value_roots: []JSValue = if (self.external_value_roots_capacity != 0) self.external_value_roots.ptr[0..self.external_value_roots_capacity] else self.external_value_roots[0..0];
         const external_host_functions: []host_function.ExternalRecord = if (self.external_host_functions_capacity != 0) self.external_host_functions.ptr[0..self.external_host_functions_capacity] else self.external_host_functions[0..0];
+        const cached_iterator_next_entries: []CachedIteratorNextEntry = if (self.cached_iterator_next_entries_capacity != 0) self.cached_iterator_next_entries.ptr[0..self.cached_iterator_next_entries_capacity] else self.cached_iterator_next_entries[0..0];
         const deferred_native_cleanups: []NativeCleanupJob = if (self.deferred_native_cleanups_capacity != 0) self.deferred_native_cleanups.ptr[0..self.deferred_native_cleanups_capacity] else self.deferred_native_cleanups[0..0];
         const deferred_class_payload_finalizers: []DeferredClassPayloadFinalizer = if (self.deferred_class_payload_finalizers_capacity != 0) self.deferred_class_payload_finalizers.ptr[0..self.deferred_class_payload_finalizers_capacity] else self.deferred_class_payload_finalizers[0..0];
         self.borrowed_reference_holders = &.{};
@@ -978,6 +992,8 @@ pub const JSRuntime = struct {
         self.external_value_roots_capacity = 0;
         self.external_host_functions = &.{};
         self.external_host_functions_capacity = 0;
+        self.cached_iterator_next_entries = &.{};
+        self.cached_iterator_next_entries_capacity = 0;
         self.deferred_native_cleanups = &.{};
         self.deferred_native_cleanups_capacity = 0;
         self.deferred_class_payload_finalizers = &.{};
@@ -991,8 +1007,10 @@ pub const JSRuntime = struct {
         if (external_symbol_roots.len != 0) self.memory.free(atom.Atom, external_symbol_roots);
         if (external_value_roots.len != 0) self.memory.free(JSValue, external_value_roots);
         if (external_host_functions.len != 0) self.memory.free(host_function.ExternalRecord, external_host_functions);
+        if (cached_iterator_next_entries.len != 0) self.memory.free(CachedIteratorNextEntry, cached_iterator_next_entries);
         if (deferred_native_cleanups.len != 0) self.memory.free(NativeCleanupJob, deferred_native_cleanups);
         if (deferred_class_payload_finalizers.len != 0) self.memory.free(DeferredClassPayloadFinalizer, deferred_class_payload_finalizers);
+        self.memory.deinitSmallObjectSlab();
         if (self.owns_self_allocation) {
             std.debug.assert(self.memory.allocation_count == 1);
             std.debug.assert(self.memory.allocated_bytes == @sizeOf(JSRuntime));
@@ -1006,6 +1024,36 @@ pub const JSRuntime = struct {
         var account = self.memory;
         account.destroy(JSRuntime, self);
         std.debug.assert(!account.hasOutstandingAllocations());
+    }
+
+    pub inline fn allocRuntime(self: *JSRuntime, comptime T: type, count: usize) ![]T {
+        if (count != 0) {
+            const bytes = std.math.mul(usize, @sizeOf(T), count) catch std.math.maxInt(usize);
+            self.requestGCForAllocation(bytes);
+        }
+        return self.memory.allocNoTrigger(T, count);
+    }
+
+    pub inline fn freeRuntime(self: *JSRuntime, comptime T: type, slice: []T) void {
+        self.memory.free(T, slice);
+    }
+
+    pub inline fn createRuntime(self: *JSRuntime, comptime T: type) !*T {
+        self.requestGCForAllocation(@sizeOf(T));
+        return self.memory.createNoTrigger(T);
+    }
+
+    pub inline fn destroyRuntime(self: *JSRuntime, comptime T: type, ptr: *T) void {
+        self.memory.destroy(T, ptr);
+    }
+
+    pub inline fn allocRuntimeAlignedBytes(self: *JSRuntime, byte_count: usize, alignment: std.mem.Alignment) ![]u8 {
+        if (byte_count != 0) self.requestGCForAllocation(byte_count);
+        return self.memory.allocAlignedBytesNoTrigger(byte_count, alignment);
+    }
+
+    pub inline fn freeRuntimeAlignedBytes(self: *JSRuntime, bytes: []u8, alignment: std.mem.Alignment) void {
+        self.memory.freeAlignedBytes(bytes, alignment);
     }
 
     pub fn registerObject(self: *JSRuntime, object: *Object) !void {
@@ -1028,6 +1076,7 @@ pub const JSRuntime = struct {
         if (object.flags.is_borrowed_reference_holder) return;
         try appendRuntimeObject(&self.memory, &self.borrowed_reference_holders, &self.borrowed_reference_holders_capacity, object);
         object.flags.is_borrowed_reference_holder = true;
+        object.flags.needs_slow_property = true;
     }
 
     pub fn borrowedReferenceHolderRegistered(self: *const JSRuntime, object: *Object) bool {
@@ -1155,7 +1204,7 @@ pub const JSRuntime = struct {
             for (current.slices) |root| {
                 switch (root) {
                     .mutable => |values| try visitor.values(values.*),
-                    .windowed => |w| try visitor.values(w.base[0..w.live_len.*]),
+                    .windowed => |w| try visitor.values(w.values.*.ptr[0..w.live_len.*]),
                 }
             }
             frame = current.previous;
@@ -1861,15 +1910,13 @@ pub const JSRuntime = struct {
 
     fn weakReferenceCount(self: JSRuntime) usize {
         var count = self.weak_root_slots.len;
-        var current = self.gc.gc_obj_list_head;
-        while (current) |node| {
-            const header = gc.headerFromGcNode(node);
+        var gc_iter = self.gc.objectIterator();
+        while (gc_iter.next()) |header| {
             if (header.kind == .object) {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", header));
                 count +|= obj.weakCollectionEntries().len;
                 count +|= obj.finalizationRegistryCells().len;
             }
-            current = node.next;
         }
         return count;
     }
@@ -1919,13 +1966,25 @@ pub const JSRuntime = struct {
         _ = self.runObjectCycleRemoval();
     }
 
-    fn triggerGCOnAllocation(ctx: ?*anyopaque, size: usize) void {
-        const self: *JSRuntime = @ptrCast(@alignCast(ctx));
+    pub inline fn requestGCForAllocation(self: *JSRuntime, size: usize) void {
+        if (comptime builtin.is_test) {
+            if (self.memory.trigger_gc_fn) |trigger| {
+                if (trigger != JSRuntime.triggerGCOnAllocation) {
+                    trigger(self.memory.trigger_gc_ctx, size);
+                    return;
+                }
+            }
+        }
         if (self.gc_running) return;
         const total = std.math.add(usize, self.memory.allocated_bytes, size) catch std.math.maxInt(usize);
         if (total > self.malloc_gc_threshold) {
             self.gc.requestGC(.allocation_threshold, .soon);
         }
+    }
+
+    fn triggerGCOnAllocation(ctx: ?*anyopaque, size: usize) void {
+        const self: *JSRuntime = @ptrCast(@alignCast(ctx));
+        self.requestGCForAllocation(size);
     }
 
     fn resetGCThreshold(self: *JSRuntime) void {

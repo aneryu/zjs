@@ -31,7 +31,7 @@ pub fn getPrivateField(
     try stack.pushOwned(value);
 }
 
-pub fn getPrivateFieldVm(
+pub noinline fn getPrivateFieldVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -67,7 +67,7 @@ pub fn putPrivateField(
     result.free(ctx.runtime);
 }
 
-pub fn putPrivateFieldVm(
+pub noinline fn putPrivateFieldVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -103,7 +103,7 @@ pub fn definePrivateField(
     try object_ops.defineClassFieldDataProperty(ctx.runtime, object, atom_id, value);
 }
 
-pub fn definePrivateFieldVm(
+pub noinline fn definePrivateFieldVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,

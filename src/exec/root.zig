@@ -8,8 +8,6 @@ const stack_mod = @import("stack.zig");
 pub const subsystem_name = "exec";
 
 pub const zjs_vm = @import("zjs_vm.zig");
-pub const call_internal = @import("call_internal.zig");
-pub const tailcall_dispatch = @import("tailcall_dispatch.zig");
 pub const frame = @import("frame.zig");
 pub const stack = @import("stack.zig");
 pub const call = @import("call.zig");
@@ -29,7 +27,6 @@ pub const globals = @import("globals.zig");
 pub const closure = @import("closure.zig");
 pub const collection_adapter = @import("collection_adapter.zig");
 pub const call_runtime = @import("call_runtime.zig");
-pub const fusion_stats = @import("vm_fusion_stats.zig");
 pub const host_dispatch_stats = @import("host_dispatch_stats.zig");
 pub const string_ops = @import("string_ops.zig");
 pub const object_ops = @import("object_ops.zig");

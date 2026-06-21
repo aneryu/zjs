@@ -1,4 +1,3 @@
-const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
@@ -194,16 +193,14 @@ pub fn initFrameVarRefs(ctx: *core.JSContext, global: *core.Object, function: *c
     }
     for (function.var_ref_names, 0..) |var_name, idx| {
         const val = call_runtime.globalLexicalValue(ctx, var_name) orelse global.getProperty(var_name);
-        const cell = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-        errdefer core.Object.destroyFromHeader(ctx.runtime, &cell.header);
-        try cell.initVarRefPayload(ctx.runtime, val);
-        owned_refs[idx] = cell.value();
+        const cell = try core.VarRef.createClosed(ctx.runtime, val);
+        owned_refs[idx] = cell.valueRef();
         initialized += 1;
     }
     frame.var_refs = owned_refs;
 }
 
-pub fn closure(
+pub noinline fn closure(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -217,6 +214,8 @@ pub fn closure(
     eval_var_ref_names: []const core.Atom,
     eval_var_refs: []const core.JSValue,
 ) !Step {
+    _ = output;
+    _ = catch_target;
     const index: u32 = if (opc == op.fclosure) blk: {
         const value = readInt(u32, function.code[frame.pc..][0..4]);
         frame.pc += 4;
@@ -226,62 +225,7 @@ pub fn closure(
         frame.pc += 1;
         break :blk value;
     };
-    if (fusion_stats.counted(.tryFuseImmediateSimpleArrayMapClosure, try tryFuseImmediateSimpleArrayMapClosure(ctx, output, global, stack, function, frame, catch_target, index))) |step| return step;
     try collection_vm.pushFunctionClosure(ctx, frame, stack, function, global, index, opc, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs);
-    return .done;
-}
-
-fn tryFuseImmediateSimpleArrayMapClosure(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    index: usize,
-) !?Step {
-    if (frame.pc + 3 > function.code.len) return null;
-    if (function.code[frame.pc] != op.call_method) return null;
-    if (readInt(u16, function.code[frame.pc + 1 ..][0..2]) != 1) return null;
-    if (stack.values.len < 2) return null;
-
-    const callback = function.constants.get(index) orelse return error.InvalidBytecode;
-    defer callback.free(ctx.runtime);
-    const callback_bytecode = call_runtime.functionBytecodeFromValue(callback) orelse return null;
-    if (callback_bytecode.simple_numeric_kind != .arg0_const) return null;
-
-    const receiver = stack.values[stack.values.len - 2];
-    const method = stack.values[stack.values.len - 1];
-    const method_object = object_ops.callableObjectFromValue(method) orelse return null;
-    const native_ref = core.function.decodeNativeBuiltinId(method_object.nativeFunctionIdSlot().*) orelse return null;
-    const map_id = @intFromEnum(method_ids.array.PrototypeMethod.map);
-    if (native_ref.domain != .array or native_ref.id != map_id) return null;
-
-    const args = [_]core.JSValue{callback};
-    if (try collection_vm.qjsArrayMapSimpleNumericArg0DefaultSpeciesFastCall(ctx.runtime, global, receiver, callback)) |fast_value| {
-        errdefer fast_value.free(ctx.runtime);
-        const method_owned = try stack.pop();
-        method_owned.free(ctx.runtime);
-        const receiver_owned = try stack.pop();
-        receiver_owned.free(ctx.runtime);
-        try stack.pushOwned(fast_value);
-        frame.pc += 3;
-        return .done;
-    }
-    const result = collection_vm.qjsArrayPrototypeNativeRecord(ctx, output, global, receiver, method_object, map_id, args[0..], function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
-        return err;
-    };
-    const value = result orelse return null;
-    errdefer value.free(ctx.runtime);
-
-    const method_owned = try stack.pop();
-    method_owned.free(ctx.runtime);
-    const receiver_owned = try stack.pop();
-    receiver_owned.free(ctx.runtime);
-    try stack.pushOwned(value);
-    frame.pc += 3;
     return .done;
 }
 
@@ -394,16 +338,6 @@ pub fn call(
         op.call3 => 3,
         else => unreachable,
     };
-    // Speculative builtin-call fast paths (Math.abs / percent-hex / simple
-    // numeric callee). These are the call-site analogue of the tryFuse*
-    // microbench fast paths and tax every ordinary call when they miss, so they
-    // share the fusion comptime gate (default off): an ordinary bytecode-function
-    // call goes straight to execCall.
-    if (comptime fusion_stats.fusions_enabled) {
-        if (try tryFastMathCall(ctx, stack, argc)) return .done;
-        if (try tryFastSimpleStringCall(ctx, stack, argc)) return .done;
-        if (try tryFastSimpleNumericCall(ctx, stack, argc)) return .done;
-    }
     return switch (try call_runtime.execCall(ctx, stack, function, frame, catch_target, argc, output, global, true)) {
         .done => .done,
         .continue_loop => .continue_loop,
@@ -539,8 +473,7 @@ fn simpleNumericCallResult(rt: *core.JSRuntime, simple: SimpleNumericCallable, a
 fn simpleCapture0PostIncReturn(rt: *core.JSRuntime, capture0_slot: core.JSValue) !core.JSValue {
     const cell = slot_ops.varRefCellFromValue(capture0_slot) orelse return error.NotSimpleNumericCall;
     if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return error.NotSimpleNumericCall;
-    const slot = cell.varRefValueSlot();
-    const current_value = slot.* orelse return error.NotSimpleNumericCall;
+    const current_value = cell.varRefValue();
     const current = current_value.asInt32() orelse return error.NotSimpleNumericCall;
     const updated = fastInt32Add(current, 1);
     try cell.setVarRefValue(rt, updated);
@@ -580,7 +513,7 @@ fn fastInt32Mul(lhs: i32, rhs: i32) core.JSValue {
     return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) * @as(f64, @floatFromInt(rhs)));
 }
 
-pub fn tailCall(
+pub noinline fn tailCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -601,7 +534,7 @@ pub fn tailCall(
     return .{ .return_value = core.JSValue.undefinedValue() };
 }
 
-pub fn prepareCallPropAtom(
+pub noinline fn prepareCallPropAtom(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -669,7 +602,7 @@ fn tryCallPreparedNativeNoArg(
     return .done;
 }
 
-pub fn callPrepared(
+pub noinline fn callPrepared(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -748,7 +681,7 @@ pub fn callPrepared(
     return .done;
 }
 
-pub fn callMethod(
+pub noinline fn callMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -860,8 +793,7 @@ fn simplePreIncVarRef0CallResult(rt: *core.JSRuntime, func: core.JSValue) !?core
     if (captures.len == 0) return null;
     const cell = slot_ops.varRefCellFromValue(captures[0]) orelse return null;
     if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return null;
-    const slot = cell.varRefValueSlot();
-    const current_value = slot.* orelse return null;
+    const current_value = cell.varRefValue();
     const current = current_value.asInt32() orelse return null;
     const updated = fastInt32Add(current, 1);
     try cell.setVarRefValue(rt, updated);
@@ -923,7 +855,7 @@ fn preparePropertyCallTarget(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
 ) !PreparedPropertyTarget {
-    if (cachedPreparedNativeCallTarget(function, site, receiver)) |native| {
+    if (cachedPreparedNativeCallTarget(ctx.runtime, function, site, receiver)) |native| {
         return .{ .native = native };
     }
     if (autoInitNativeTargetForReceiver(ctx.runtime, global, receiver, site.atom_id)) |lookup| {
@@ -941,22 +873,23 @@ fn autoInitNativeTargetForReceiver(
     atom_id: core.Atom,
 ) ?PreparedNativeLookup {
     if (objectFromValue(receiver)) |object| {
-        return autoInitNativeTargetInObjectChain(receiver, object, atom_id);
+        return autoInitNativeTargetInObjectChain(rt, receiver, object, atom_id);
     }
     const prototype = primitivePrototypeForCall(rt, global, receiver) orelse return null;
-    return autoInitNativeTargetInObjectChain(receiver, prototype, atom_id);
+    return autoInitNativeTargetInObjectChain(rt, receiver, prototype, atom_id);
 }
 
 fn autoInitNativeTargetInObjectChain(
+    rt: *core.JSRuntime,
     receiver: core.JSValue,
     start: *core.Object,
     atom_id: core.Atom,
 ) ?PreparedNativeLookup {
     var cursor: ?*core.Object = start;
     while (cursor) |object| {
-        if (object.proxyTarget() != null or object.exotic != null) return null;
+        if (object.proxyTarget() != null or object.hasExoticMethods()) return null;
         if (object.findProperty(atom_id)) |index| {
-            const target = preparedNativeTargetFromAutoInitEntry(receiver, object, index, atom_id) orelse return null;
+            const target = preparedNativeTargetFromAutoInitEntry(rt, receiver, object, index, atom_id) orelse return null;
             return .{ .target = target, .holder = object, .index = index };
         }
         cursor = object.getPrototype();
@@ -965,23 +898,24 @@ fn autoInitNativeTargetInObjectChain(
 }
 
 fn cachedPreparedNativeCallTarget(
+    rt: *core.JSRuntime,
     function: *const bytecode.Bytecode,
     site: bytecode.function.CallSite,
     receiver: core.JSValue,
 ) ?frame_mod.PreparedNativeCallTarget {
     const object = objectFromValue(receiver) orelse return null;
-    if (object.proxyTarget() != null or object.exotic != null) return null;
+    if (object.proxyTarget() != null or object.hasExoticMethods()) return null;
     const slot = function.icSlotForPc(site.prepare_pc) orelse return null;
 
     switch (slot.lookupOwnDataResult(object, site.atom_id)) {
         .hit => |index| {
-            if (preparedNativeTargetFromAutoInitEntry(receiver, object, index, site.atom_id)) |target| return target;
+            if (preparedNativeTargetFromAutoInitEntry(rt, receiver, object, index, site.atom_id)) |target| return target;
         },
         .miss, .invalidated => {},
     }
     switch (slot.lookupProtoDataResult(object, site.atom_id)) {
         .hit => |hit| {
-            if (preparedNativeTargetFromAutoInitEntry(receiver, hit.holder, hit.slot_index, site.atom_id)) |target| return target;
+            if (preparedNativeTargetFromAutoInitEntry(rt, receiver, hit.holder, hit.slot_index, site.atom_id)) |target| return target;
         },
         .miss, .invalidated => {},
     }
@@ -989,18 +923,20 @@ fn cachedPreparedNativeCallTarget(
 }
 
 fn preparedNativeTargetFromAutoInitEntry(
+    rt: *core.JSRuntime,
     receiver: core.JSValue,
     holder: *core.Object,
     index: usize,
     atom_id: core.Atom,
 ) ?frame_mod.PreparedNativeCallTarget {
-    if (holder.proxyTarget() != null or holder.exotic != null) return null;
+    if (holder.proxyTarget() != null or holder.hasExoticMethods()) return null;
     if (index >= holder.shapeProps().len) return null;
     const prop = holder.shapeProps()[index];
     const prop_flags = core.property.Flags.fromBits(prop.flags);
     if (prop_flags.deleted or prop_flags.accessor or prop.atom_id != atom_id) return null;
     return switch (holder.properties[index].slot) {
-        .auto_init => |info| {
+        .auto_init => |id| {
+            const info = core.property.autoInitAt(rt, id).*;
             const native_ref = core.function.decodeNativeBuiltinId(info.native_builtin_id) orelse return null;
             if (!nativeBuiltinSupportedWithoutFunctionObject(receiver, native_ref, info)) return null;
             return .{ .native_ref = native_ref, .auto_init = info };
@@ -1018,8 +954,8 @@ fn installPreparedNativeCallIc(
     index: usize,
 ) void {
     const object = objectFromValue(receiver) orelse return;
-    if (object.proxyTarget() != null or object.exotic != null) return;
-    if (holder.proxyTarget() != null or holder.exotic != null) return;
+    if (object.proxyTarget() != null or object.hasExoticMethods()) return;
+    if (holder.proxyTarget() != null or holder.hasExoticMethods()) return;
     const slot = function.icSlotForPc(site.prepare_pc) orelse return;
     if (holder == object) {
         _ = slot.installOwnData(&rt.shapes, object, site.atom_id, index);
@@ -1212,7 +1148,7 @@ fn dropUnusedCallResult(
     return true;
 }
 
-pub fn tailCallMethod(
+pub noinline fn tailCallMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1328,7 +1264,7 @@ fn fastNativeMethodCall(
     return builtin_dispatch.callInternalRecord(ctx, output, function_global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame);
 }
 
-pub fn apply(
+pub noinline fn apply(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1425,7 +1361,7 @@ pub fn apply(
     return .done;
 }
 
-pub fn constructor(
+pub noinline fn constructor(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1460,23 +1396,6 @@ pub fn constructor(
         top;
     defer if (has_explicit_new_target) new_target.free(ctx.runtime);
     defer func.free(ctx.runtime);
-    const fused_typed_array_result = fusion_stats.counted(.tryFuseTypedArrayFromArrayBufferConstructorSequence, collection_vm.tryFuseTypedArrayFromArrayBufferConstructorSequence(
-        ctx,
-        stack,
-        function,
-        frame,
-        func,
-        new_target,
-        args_buf,
-    )) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
-        return err;
-    };
-    if (fused_typed_array_result) |result| {
-        errdefer result.free(ctx.runtime);
-        try stack.pushOwned(result);
-        return .done;
-    }
     const result = call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, func, args_buf, function, frame, new_target) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
@@ -1501,7 +1420,7 @@ pub fn checkCtor(frame: *frame_mod.Frame) !void {
     if (frame.new_target.isUndefined()) return error.TypeError;
 }
 
-pub fn checkCtorVm(
+pub noinline fn checkCtorVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
@@ -1527,7 +1446,7 @@ pub fn checkCtorReturn(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     }
 }
 
-pub fn checkCtorReturnVm(
+pub noinline fn checkCtorReturnVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
@@ -1565,7 +1484,7 @@ pub fn initCtor(
     try stack.pushOwned(result);
 }
 
-pub fn initCtorVm(
+pub noinline fn initCtorVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,

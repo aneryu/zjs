@@ -835,6 +835,10 @@ pub const AtomTable = struct {
     /// retargeted. Predefined atom ids live below `first_dynamic_atom`
     /// and never enter `entries`, so they are never recycled.
     free_slot_head: EntryIndex = no_free_slot,
+    /// Conservative lower bound for dynamic private atoms. Dynamic slots are
+    /// recycled across atom kinds, so this is intentionally a "might be
+    /// private" range for hot-path rejection, not an exact kind predicate.
+    first_private_dynamic_atom: Atom = std.math.maxInt(Atom),
     /// Lazily materialized strings for predefined string-kind atoms,
     /// indexed by `id - 1`. Same ownership rules as `DynamicAtom.str`;
     /// predefined ids are never recycled, so entries here are released
@@ -1141,6 +1145,9 @@ pub const AtomTable = struct {
                 self.free_slot_head = idx;
             }
             if (index_entry) try self.indexEntry(idx);
+            if (atom_kind == .private and entry.id < self.first_private_dynamic_atom) {
+                self.first_private_dynamic_atom = entry.id;
+            }
             return entry.id;
         }
 
@@ -1156,7 +1163,15 @@ pub const AtomTable = struct {
         });
         errdefer self.entries = self.entries[0..idx];
         if (index_entry) try self.indexEntry(idx);
+        if (atom_kind == .private and id < self.first_private_dynamic_atom) {
+            self.first_private_dynamic_atom = id;
+        }
         return id;
+    }
+
+    pub inline fn mightBePrivate(self: *const AtomTable, atom_id: Atom) bool {
+        if (atom_id == ids.Private_brand) return true;
+        return !isTaggedInt(atom_id) and atom_id >= self.first_private_dynamic_atom;
     }
 
     fn appendEntry(self: *AtomTable, entry: DynamicAtom) !EntryIndex {

@@ -954,7 +954,7 @@ fn printReplValue(rt: *engine.core.Runtime, output: *std.Io.Writer, value: engin
                     break;
                 }
                 const name = rt.atoms.name(key) orelse continue;
-                const desc = object.getOwnProperty(key) orelse continue;
+                const desc = object.getOwnProperty(rt, key) orelse continue;
                 defer desc.destroy(rt);
                 if (desc.enumerable != true) continue;
                 if (printed != 0) try output.writeAll(", ");
