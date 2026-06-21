@@ -16,36 +16,17 @@ pub fn build(b: *std.Build) void {
     // gated, so the default build's allocation hot path is unchanged.
     // `zig build test-oom -Dzjs_oom_coverage=true` prints the count.
     const zjs_oom_coverage = b.option(bool, "zjs_oom_coverage", "Record distinct allocation call sites for the OOM corpus coverage report") orelse false;
-    // Radical recursive rewrite (scratch/perf/ARCH-RECURSIVE-REWRITE.md): route
-    // normal-func_kind JS->JS calls through the recursive register-resident
-    // `callInternal` (pc/sp/var_buf as C-locals) instead of the flattened inline
-    // Machine. Default OFF and comptime-gated while the rewrite is built up
-    // incrementally — the default build keeps the proven flattened dispatchLoop.
-    const zjs_recursive_dispatch = b.option(bool, "zjs_recursive_dispatch", "Use the recursive register-resident callInternal dispatcher (WIP)") orelse false;
-    // Tail-call threaded dispatcher (scratch/perf/TAILCALL-REWRITE.md): each hot
-    // opcode is its own small function; dispatch is `@call(.always_tail)` through
-    // a 256-entry table = a real computed-goto `br`. Proven to match qjs per-opcode
-    // (see the prototype). Default OFF + comptime-gated; when ON the engine module
-    // is built with `-fomit-frame-pointer` (tail-call handlers never `ret`, so the
-    // frame setup LLVM emits is pure overhead — removing it ~doubled the IPC).
-    const zjs_tailcall_dispatch = b.option(bool, "zjs_tailcall_dispatch", "Use the tail-call threaded dispatcher (WIP)") orelse false;
     const engine_options = b.addOptions();
     engine_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
     engine_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
     engine_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     engine_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
-    engine_options.addOption(bool, "zjs_recursive_dispatch", zjs_recursive_dispatch);
-    engine_options.addOption(bool, "zjs_tailcall_dispatch", zjs_tailcall_dispatch);
-    // Omit the frame pointer ONLY when the tail-call dispatcher is on (the
-    // default build keeps frame pointers + the user's gate baselines unchanged).
-    const omit_fp: ?bool = if (zjs_tailcall_dispatch) true else null;
 
     const engine_mod = b.addModule("quickjs_zig_engine", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .omit_frame_pointer = omit_fp,
     });
     engine_mod.addOptions("build_options", engine_options);
 
@@ -53,8 +34,6 @@ pub fn build(b: *std.Build) void {
     plugin_fixture_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
     plugin_fixture_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
     plugin_fixture_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
-    plugin_fixture_options.addOption(bool, "zjs_recursive_dispatch", zjs_recursive_dispatch);
-    plugin_fixture_options.addOption(bool, "zjs_tailcall_dispatch", zjs_tailcall_dispatch);
     plugin_fixture_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     const plugin_fixture_zjs_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
@@ -97,7 +76,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseFast,
         .link_libc = true,
-        .omit_frame_pointer = omit_fp,
     });
     internal_fast_mod.addOptions("build_options", engine_options);
     const zjs_cli_mod = b.createModule(.{
@@ -469,8 +447,6 @@ pub fn build(b: *std.Build) void {
     test_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
     test_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     test_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
-    test_options.addOption(bool, "zjs_recursive_dispatch", zjs_recursive_dispatch);
-    test_options.addOption(bool, "zjs_tailcall_dispatch", zjs_tailcall_dispatch);
     test_options.addOptionPath("runtime_plugin_fixture_path", runtime_plugin_fixture.getEmittedBin());
     test_options.addOptionPath("runtime_empty_plugin_fixture_path", runtime_empty_plugin_fixture.getEmittedBin());
     test_options.addOption([]const u8, "zjs_executable_path", b.getInstallPath(.bin, "zjs"));

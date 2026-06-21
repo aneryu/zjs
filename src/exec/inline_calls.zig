@@ -248,10 +248,10 @@ pub const Machine = struct {
         self.switched = true;
     }
 
-    /// Optimized inline-call frame setup, factored out of `pushFrame` so BOTH
-    /// the Machine and the native-recursion path (`callInternal`, S2a) share the
-    /// zero-copy arg move (`initArgumentsMoved`), eval-binding merge, this-boxing
-    /// and arena carve — NOT the dup-heavy `callFunctionBytecodeModeState` path.
+    /// Optimized inline-call frame setup, factored out of `pushFrame` so the
+    /// Machine shares the zero-copy arg move (`initArgumentsMoved`), eval-binding
+    /// merge, this-boxing and arena carve — NOT the dup-heavy
+    /// `callFunctionBytecodeModeState` path.
     /// The caller owns depth accounting (enterInlineCallDepth / enterCallDepth)
     /// and any push/pop bookkeeping; on error every partially-initialized
     /// resource is released via the errdefers below.

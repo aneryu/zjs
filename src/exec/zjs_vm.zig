@@ -26,8 +26,6 @@ const exception_ops = @import("vm_exception_ops.zig");
 const exceptions = @import("exceptions.zig");
 const gen_async_vm = @import("vm_gen_async.zig");
 const inline_calls = @import("inline_calls.zig");
-const call_internal = @import("call_internal.zig");
-const tailcall_dispatch = @import("tailcall_dispatch.zig");
 const iter_vm = @import("iterator_ops.zig");
 const literal_vm = @import("vm_literal.zig");
 const vm_property_field = @import("vm_property_field.zig");
@@ -45,25 +43,6 @@ const promise_ops = @import("promise_ops.zig");
 const value_vm = @import("vm_value.zig");
 const value_ops_mod = @import("value_ops.zig");
 const HostError = exceptions.HostError;
-
-/// True when EITHER register-resident dispatcher routes inline calls off the
-/// Machine. The inline-call arms below use it as their comptime gate.
-const recurse_or_tailcall_enabled = call_internal.recursive_dispatch_enabled or tailcall_dispatch.tailcall_dispatch_enabled;
-/// Comptime-select the tail-call dispatcher (preferred) or the recursive one for
-/// an inline-eligible callee. Mirrors `call_internal.recurseInlineCall`'s shape.
-inline fn recurseInline(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    request: call_runtime.InlineCallRequest,
-) HostError!call_internal.RecurseOutcome {
-    if (comptime tailcall_dispatch.tailcall_dispatch_enabled)
-        return tailcall_dispatch.recurseInlineCallTC(ctx, output, global, stack, frame, catch_target, request);
-    return call_internal.recurseInlineCall(ctx, output, global, stack, frame, catch_target, request);
-}
 
 const op = bytecode.opcode.op;
 const build_options = @import("build_options");
@@ -1122,30 +1101,12 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     .done => {},
                     .continue_loop => continue,
                     .inline_call => |request| {
-                        if (comptime recurse_or_tailcall_enabled) {
-                            // S2a-v3: near the native cap, absorb deep recursion on
-                            // the Machine (no native growth); else native recurse.
-                            if (call_vm.nativeDepthNearCap(ctx)) {
-                                machine.pushCall(global, stack, request.target, request.region_base, request.argc, request.layout) catch |err| {
-                                    try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
-                                    if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
-                                    return err;
-                                };
-                                continue;
-                            }
-                            // S2a pivot: native recursion instead of an inline Machine frame.
-                            switch (try recurseInline(ctx, output, global, stack, frame, catch_target, request)) {
-                                .value => |v| stack.pushOwnedAssumeCapacity(v),
-                                .caught => continue,
-                            }
-                        } else {
-                            machine.pushCall(global, stack, request.target, request.region_base, request.argc, request.layout) catch |err| {
-                                try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
-                                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
-                                return err;
-                            };
-                            continue;
-                        }
+                        machine.pushCall(global, stack, request.target, request.region_base, request.argc, request.layout) catch |err| {
+                            try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
+                            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
+                            return err;
+                        };
+                        continue;
                     },
                 }
             },
@@ -1190,27 +1151,12 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 // Prepared property call to a plain bytecode function: run it as
                 // an inline frame (receiver becomes `this`), mirroring op.call.
                 .inline_call => |request| {
-                    if (comptime recurse_or_tailcall_enabled) {
-                        if (call_vm.nativeDepthNearCap(ctx)) {
-                            machine.pushCall(global, stack, request.target, request.region_base, request.argc, request.layout) catch |err| {
-                                try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
-                                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
-                                return err;
-                            };
-                            continue;
-                        }
-                        switch (try recurseInline(ctx, output, global, stack, frame, catch_target, request)) {
-                            .value => |v| stack.pushOwnedAssumeCapacity(v),
-                            .caught => continue,
-                        }
-                    } else {
-                        machine.pushCall(global, stack, request.target, request.region_base, request.argc, request.layout) catch |err| {
-                            try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
-                            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
-                            return err;
-                        };
-                        continue;
-                    }
+                    machine.pushCall(global, stack, request.target, request.region_base, request.argc, request.layout) catch |err| {
+                        try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
+                        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
+                        return err;
+                    };
+                    continue;
                 },
             } },
             op.call_method => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try call_vm.callMethod(ctx, output, global, stack, function, frame, catch_target, true)) {
@@ -1219,27 +1165,12 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 // Method call to a plain bytecode function: run it as an inline
                 // frame (receiver becomes `this`), mirroring the op.call leg.
                 .inline_call => |request| {
-                    if (comptime recurse_or_tailcall_enabled) {
-                        if (call_vm.nativeDepthNearCap(ctx)) {
-                            machine.pushCall(global, stack, request.target, request.region_base, request.argc, request.layout) catch |err| {
-                                try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
-                                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
-                                return err;
-                            };
-                            continue;
-                        }
-                        switch (try recurseInline(ctx, output, global, stack, frame, catch_target, request)) {
-                            .value => |v| stack.pushOwnedAssumeCapacity(v),
-                            .caught => continue,
-                        }
-                    } else {
-                        machine.pushCall(global, stack, request.target, request.region_base, request.argc, request.layout) catch |err| {
-                            try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
-                            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
-                            return err;
-                        };
-                        continue;
-                    }
+                    machine.pushCall(global, stack, request.target, request.region_base, request.argc, request.layout) catch |err| {
+                        try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
+                        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
+                        return err;
+                    };
+                    continue;
                 },
             } },
             op.tail_call_method => { syncDown(function, frame, stack, reg_ip, reg_base, reg_sp); switch (try call_vm.tailCallMethod(ctx, output, global, stack, function, frame, catch_target, machine.depth > 0)) {
