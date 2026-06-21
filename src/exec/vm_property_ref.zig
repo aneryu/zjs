@@ -1,6 +1,5 @@
 //! With-statement and reference opcode handlers (make_ref/get_ref_value/put_ref_value/with_*).
 
-const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const core = @import("../core/root.zig");

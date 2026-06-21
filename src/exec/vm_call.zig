@@ -1,4 +1,3 @@
-const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
@@ -215,6 +214,8 @@ pub noinline fn closure(
     eval_var_ref_names: []const core.Atom,
     eval_var_refs: []const core.JSValue,
 ) !Step {
+    _ = output;
+    _ = catch_target;
     const index: u32 = if (opc == op.fclosure) blk: {
         const value = readInt(u32, function.code[frame.pc..][0..4]);
         frame.pc += 4;
@@ -224,62 +225,7 @@ pub noinline fn closure(
         frame.pc += 1;
         break :blk value;
     };
-    if (fusion_stats.counted(.tryFuseImmediateSimpleArrayMapClosure, try tryFuseImmediateSimpleArrayMapClosure(ctx, output, global, stack, function, frame, catch_target, index))) |step| return step;
     try collection_vm.pushFunctionClosure(ctx, frame, stack, function, global, index, opc, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs);
-    return .done;
-}
-
-fn tryFuseImmediateSimpleArrayMapClosure(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    index: usize,
-) !?Step {
-    if (frame.pc + 3 > function.code.len) return null;
-    if (function.code[frame.pc] != op.call_method) return null;
-    if (readInt(u16, function.code[frame.pc + 1 ..][0..2]) != 1) return null;
-    if (stack.values.len < 2) return null;
-
-    const callback = function.constants.get(index) orelse return error.InvalidBytecode;
-    defer callback.free(ctx.runtime);
-    const callback_bytecode = call_runtime.functionBytecodeFromValue(callback) orelse return null;
-    if (callback_bytecode.simple_numeric_kind != .arg0_const) return null;
-
-    const receiver = stack.values[stack.values.len - 2];
-    const method = stack.values[stack.values.len - 1];
-    const method_object = object_ops.callableObjectFromValue(method) orelse return null;
-    const native_ref = core.function.decodeNativeBuiltinId(method_object.nativeFunctionIdSlot().*) orelse return null;
-    const map_id = @intFromEnum(method_ids.array.PrototypeMethod.map);
-    if (native_ref.domain != .array or native_ref.id != map_id) return null;
-
-    const args = [_]core.JSValue{callback};
-    if (try collection_vm.qjsArrayMapSimpleNumericArg0DefaultSpeciesFastCall(ctx.runtime, global, receiver, callback)) |fast_value| {
-        errdefer fast_value.free(ctx.runtime);
-        const method_owned = try stack.pop();
-        method_owned.free(ctx.runtime);
-        const receiver_owned = try stack.pop();
-        receiver_owned.free(ctx.runtime);
-        try stack.pushOwned(fast_value);
-        frame.pc += 3;
-        return .done;
-    }
-    const result = collection_vm.qjsArrayPrototypeNativeRecord(ctx, output, global, receiver, method_object, map_id, args[0..], function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
-        return err;
-    };
-    const value = result orelse return null;
-    errdefer value.free(ctx.runtime);
-
-    const method_owned = try stack.pop();
-    method_owned.free(ctx.runtime);
-    const receiver_owned = try stack.pop();
-    receiver_owned.free(ctx.runtime);
-    try stack.pushOwned(value);
-    frame.pc += 3;
     return .done;
 }
 
@@ -392,16 +338,6 @@ pub fn call(
         op.call3 => 3,
         else => unreachable,
     };
-    // Speculative builtin-call fast paths (Math.abs / percent-hex / simple
-    // numeric callee). These are the call-site analogue of the tryFuse*
-    // microbench fast paths and tax every ordinary call when they miss, so they
-    // share the fusion comptime gate (default off): an ordinary bytecode-function
-    // call goes straight to execCall.
-    if (comptime fusion_stats.fusions_enabled) {
-        if (try tryFastMathCall(ctx, stack, argc)) return .done;
-        if (try tryFastSimpleStringCall(ctx, stack, argc)) return .done;
-        if (try tryFastSimpleNumericCall(ctx, stack, argc)) return .done;
-    }
     return switch (try call_runtime.execCall(ctx, stack, function, frame, catch_target, argc, output, global, true)) {
         .done => .done,
         .continue_loop => .continue_loop,
@@ -1460,23 +1396,6 @@ pub noinline fn constructor(
         top;
     defer if (has_explicit_new_target) new_target.free(ctx.runtime);
     defer func.free(ctx.runtime);
-    const fused_typed_array_result = fusion_stats.counted(.tryFuseTypedArrayFromArrayBufferConstructorSequence, collection_vm.tryFuseTypedArrayFromArrayBufferConstructorSequence(
-        ctx,
-        stack,
-        function,
-        frame,
-        func,
-        new_target,
-        args_buf,
-    )) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
-        return err;
-    };
-    if (fused_typed_array_result) |result| {
-        errdefer result.free(ctx.runtime);
-        try stack.pushOwned(result);
-        return .done;
-    }
     const result = call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, func, args_buf, function, frame, new_target) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;

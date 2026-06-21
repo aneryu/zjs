@@ -1,4 +1,3 @@
-const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const core = @import("../core/root.zig");
@@ -825,12 +824,6 @@ pub fn slotValueBorrowed(slot: core.JSValue) core.JSValue {
     return current;
 }
 
-/// Number of failed match attempts at a bytecode site before the fusion
-/// matchers stop being retried there. Shape-driven fusions match on the
-/// first attempt; the slack covers matchers with runtime preconditions
-/// (e.g. dense-array element kinds) that may stabilize after warm-up.
-pub const fusion_cold_threshold: u8 = 16;
-
 pub const DecodedImmediateInt32 = struct {
     value: i32,
     next_pc: usize,
@@ -1092,96 +1085,6 @@ fn mathFmax(a: f64, b: f64) f64 {
     return if (a < b) b else a;
 }
 
-pub fn tryFuseDroppedLocalPostUpdateGoto8FromGet(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    idx: u16,
-    next_pc: usize,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
-) !bool {
-    if (!allow_loop_tail_fusion) return false;
-    const code = function.code;
-    if (next_pc >= code.len) return false;
-    const update_op = code[next_pc];
-    if (update_op != op.post_inc and update_op != op.post_dec) return false;
-
-    const store = decodeLocalPut(code, next_pc + 1) orelse return false;
-    if (store.idx != idx) return false;
-    if (idx >= frame.locals.len or idx >= frame.locals_uninit.len) return false;
-    if (frame.localIsUninitialized(idx)) return false;
-    if (idx < function.var_is_const.len and function.var_is_const[idx]) return false;
-
-    const drop_pc = store.operand_pc + store.consume;
-    if (drop_pc >= code.len or code[drop_pc] != op.drop) return false;
-    const goto_pc = drop_pc + 1;
-    if (goto_pc + 2 > code.len or code[goto_pc] != op.goto8) return false;
-    const target_pc = backwardGotoTarget(code, goto_pc + 1, op.goto8) orelse return false;
-
-    const old_int = slotValueBorrowed(frame.locals[idx]).asInt32() orelse return false;
-    const updated_int = switch (update_op) {
-        op.post_inc => blk: {
-            const updated = @addWithOverflow(old_int, 1);
-            if (updated[1] != 0) return false;
-            break :blk updated[0];
-        },
-        op.post_dec => blk: {
-            const updated = @subWithOverflow(old_int, 1);
-            if (updated[1] != 0) return false;
-            break :blk updated[0];
-        },
-        else => unreachable,
-    };
-
-    try slot_ops.setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(updated_int));
-    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
-    frame.pc = target_pc;
-    _ = fusion_stats.counted(.tryFuseLocalInt32LessThanArgFalseBranchAtPc, tryFuseLocalInt32LessThanArgFalseBranchAtPc(function, frame, target_pc));
-    return true;
-}
-
-pub fn tryFuseDroppedLocalPostUpdateGoto8AtPc(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    pc: usize,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
-) !bool {
-    const get = decodeLocalGet(function.code, pc) orelse return false;
-    return fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, get.idx, get.next_pc, allow_loop_tail_fusion, sync_global_lexical_locals));
-}
-
-fn tryFuseLocalInt32LessThanArgFalseBranchAtPc(
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    pc: usize,
-) bool {
-    const get = decodeLocalGet(function.code, pc) orelse return false;
-    return fusion_stats.counted(.tryFuseLocalInt32LessThanArgFalseBranchFromGet, tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, get.idx, get.next_pc, get.checked));
-}
-
-pub fn tryFuseLocalInt32LessThanArgFalseBranchFromGet(
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    local_idx: u16,
-    next_pc: usize,
-    checked: bool,
-) bool {
-    const code = function.code;
-    const arg_get = decodeArgGet(code, next_pc) orelse return false;
-    if (arg_get.next_pc >= code.len or code[arg_get.next_pc] != op.lt) return false;
-    const branch = decodeFalseBranch(code, arg_get.next_pc + 1) orelse return false;
-
-    const lhs = (localReadableBorrowed(frame, local_idx, checked) orelse return false).asInt32() orelse return false;
-    const rhs = (argReadableBorrowed(frame, arg_get.idx) orelse return false).asInt32() orelse return false;
-    frame.pc = if (lhs < rhs) branch.true_pc else branch.false_pc;
-    return true;
-}
-
 pub fn backwardGotoTarget(code: []const u8, operand_pc: usize, goto_opc: u8) ?usize {
     const target_i64: i64 = switch (goto_opc) {
         op.goto8 => blk: {
@@ -1324,19 +1227,6 @@ pub fn hasObjectBinding(
 // --- Private-field opcode handlers moved to vm_property_private.zig ---
 const vm_property_private = @import("vm_property_private.zig");
 
-pub fn tryFuseFollowingLocalStringLengthGtConstSliceConstBranch(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    local_idx: u16,
-    sync_global_lexical_locals: bool,
-) !bool {
-    const get = decodeLocalGet(function.code, frame.pc) orelse return false;
-    if (get.checked or get.idx != local_idx) return false;
-    return fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, local_idx, get.next_pc, sync_global_lexical_locals));
-}
-
 const StringSliceConstLocalStore = struct {
     start: usize,
     len: usize,
@@ -1402,40 +1292,6 @@ pub fn storeStringSliceConstLocal(
     }
     try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, decoded.store.idx, sync_global_lexical_locals);
     frame.pc = decoded.store.operand_pc + decoded.store.consume;
-}
-
-pub fn tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    local_idx: u16,
-    length_pc: usize,
-    sync_global_lexical_locals: bool,
-) !bool {
-    const code = function.code;
-    if (length_pc >= code.len or code[length_pc] != op.get_length) return false;
-    const receiver = localReadableBorrowed(frame, local_idx, false) orelse return false;
-    const string_value = stringFromValue(receiver) orelse return false;
-
-    const threshold = immediateInt32Operand(code, length_pc + 1) orelse return false;
-    if (threshold.next_pc + 1 > code.len or code[threshold.next_pc] != op.gt) return false;
-    const branch = decodeFalseBranch(code, threshold.next_pc + 1) orelse return false;
-
-    const body_receiver_get = decodeLocalGet(code, branch.true_pc) orelse return false;
-    if (body_receiver_get.idx != local_idx) return false;
-    if (body_receiver_get.next_pc + 5 > code.len or code[body_receiver_get.next_pc] != op.get_field2) return false;
-    const method_atom = readInt(u32, code[body_receiver_get.next_pc + 1 ..][0..4]);
-    const decoded = decodeStringSliceConstLocalStore(ctx, function, global, frame, receiver, method_atom, body_receiver_get.next_pc + 5) orelse return false;
-    if (decoded.store.idx != local_idx) return false;
-    if (decoded.store.operand_pc + decoded.store.consume != branch.false_pc) return false;
-
-    if (@as(i64, @intCast(string_value.len())) > @as(i64, threshold.value)) {
-        try storeStringSliceConstLocal(ctx, function, global, frame, receiver, decoded, sync_global_lexical_locals);
-    } else {
-        frame.pc = branch.false_pc;
-    }
-    return true;
 }
 
 const StringFromCharCodeInt32Arg = struct {

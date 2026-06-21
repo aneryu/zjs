@@ -1,6 +1,5 @@
 //! Global variable read/write/define opcode handlers and their fused fast paths.
 
-const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const core = @import("../core/root.zig");
@@ -202,104 +201,6 @@ inline fn setCachedGlobalWritableDataAtOwned(
     return true;
 }
 
-fn tryFuseGlobalInductionInt32AddRange(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    accumulator_atom: core.Atom,
-    accumulator_value: core.JSValue,
-    sync_global_lexical_locals: bool,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) !bool {
-    if (ctx.runtime.hasInterruptHandler()) return false;
-    if (!canUseFastGlobalVarLookup(function, accumulator_atom, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    const accumulator = accumulator_value.asInt32() orelse return false;
-    const code = function.code;
-    const body_pc = if (frame.pc >= 5) frame.pc - 5 else return false;
-
-    const induction_get = decodeGlobalDataGet(code, frame.pc) orelse return false;
-    if (induction_get.atom == accumulator_atom) return false;
-    if (!canUseFastGlobalVarLookup(function, induction_get.atom, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (induction_get.next_pc >= code.len or code[induction_get.next_pc] != op.add) return false;
-
-    var store_pc = induction_get.next_pc + 1;
-    var completion_put: ?LocalPut = null;
-    var tail_pc: usize = undefined;
-    if (store_pc < code.len and code[store_pc] == op.dup) {
-        store_pc += 1;
-        const store = decodeGlobalPut(code, store_pc) orelse return false;
-        if (store.atom != accumulator_atom) return false;
-        const completion_tail = decodeOptionalLocalCompletionTail(function, frame, store.next_pc) orelse return false;
-        completion_put = completion_tail.completion_put;
-        tail_pc = completion_tail.tail_pc;
-    } else {
-        const store = decodeGlobalPut(code, store_pc) orelse return false;
-        if (store.atom != accumulator_atom) return false;
-        tail_pc = store.next_pc;
-    }
-    if (!canFuseGlobalDataWrite(function, frame, accumulator_atom, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (!globalWritableDataStoreAvailableForFastPath(ctx.runtime, ctx.lexicals, global, function, store_pc, accumulator_atom)) return false;
-
-    const tail_get = decodeGlobalDataGet(code, tail_pc) orelse return false;
-    if (tail_get.atom != induction_get.atom) return false;
-    if (tail_get.next_pc >= code.len or code[tail_get.next_pc] != op.post_inc) return false;
-    const induction_put_pc = tail_get.next_pc + 1;
-    const induction_put = decodeGlobalPut(code, induction_put_pc) orelse return false;
-    if (induction_put.atom != induction_get.atom) return false;
-    if (induction_put.next_pc >= code.len or code[induction_put.next_pc] != op.drop) return false;
-    if (!canFuseGlobalDataWrite(function, frame, induction_get.atom, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-
-    const goto_pc = induction_put.next_pc + 1;
-    if (goto_pc >= code.len) return false;
-    const condition_pc = backwardGotoTarget(code, goto_pc + 1, code[goto_pc]) orelse return false;
-    const condition_get = decodeGlobalDataGet(code, condition_pc) orelse return false;
-    if (condition_get.atom != induction_get.atom) return false;
-    const limit = immediateInt32Operand(code, condition_get.next_pc) orelse return false;
-    if (limit.next_pc >= code.len or code[limit.next_pc] != op.lt) return false;
-    const branch = decodeFalseBranch(code, limit.next_pc + 1) orelse return false;
-    if (branch.true_pc != body_pc or condition_pc >= body_pc) return false;
-
-    const current_i = globalWritableDataStoreInt32ForFastPath(ctx.runtime, ctx.lexicals, global, function, induction_put_pc, induction_get.atom) orelse return false;
-    if (current_i >= limit.value) {
-        frame.pc = branch.false_pc;
-        return true;
-    }
-    const delta = intRangeDeltaBounds(current_i, limit.value);
-    const min_accumulator = @as(i128, accumulator) + delta.min;
-    const max_accumulator = @as(i128, accumulator) + delta.max;
-    if (!safeIntegerI128(min_accumulator) or !safeIntegerI128(max_accumulator)) return false;
-
-    const final_accumulator = @as(i128, accumulator) + delta.total;
-    const final_value = value_ops.numberToValue(@floatFromInt(final_accumulator));
-    var completion_value: core.JSValue = undefined;
-    var has_completion_value = false;
-    if (completion_put != null) {
-        completion_value = final_value.dup();
-        has_completion_value = true;
-    }
-    if (!setGlobalWritableDataStoreForFastPathOwned(ctx.runtime, ctx.lexicals, global, function, store_pc, accumulator_atom, final_value)) {
-        final_value.free(ctx.runtime);
-        if (has_completion_value) {
-            completion_value.free(ctx.runtime);
-        }
-        return false;
-    }
-    if (has_completion_value) {
-        defer completion_value.free(ctx.runtime);
-        try storeLocalCompletionBorrowedValue(ctx, function, global, frame, completion_put, completion_value, sync_global_lexical_locals);
-    }
-
-    const induction_next = core.JSValue.int32(limit.value);
-    if (!setGlobalWritableDataStoreForFastPathOwned(ctx.runtime, ctx.lexicals, global, function, induction_put_pc, induction_get.atom, induction_next)) {
-        return false;
-    }
-    frame.pc = branch.false_pc;
-    return true;
-}
-
 pub noinline fn getVar(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -352,7 +253,6 @@ pub noinline fn getVar(
             try stack.pushOwned(lex_value);
             return .done;
         }
-        if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputAutoInitAtomCall1, try tryFuseHostOutputAutoInitAtomCall1(ctx, output, global, stack, function, frame, atom_id, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
         if (globalDataPropertyValueForFastPath(ctx.runtime, global, function, site_pc, atom_id)) |value| {
             return try useFastGlobalDataValue(ctx, output, stack, function, global, frame, catch_target, site_pc, atom_id, value, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object);
         }
@@ -478,66 +378,6 @@ fn decodeTypedArrayLengthPrintStore(code: []const u8, pc: usize) ?TypedArrayLeng
     };
 }
 
-fn tryFuseHostOutputAutoInitAtomCall1(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    atom_id: core.Atom,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) !bool {
-    if (atom_id != atom_print) return false;
-    if (!builtin_glue.globalHostOutputAutoInit(ctx.runtime, global, atom_id)) return false;
-    return fusion_stats.counted(.tryFuseHostOutputCall1, try tryFuseHostOutputCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object));
-}
-
-fn tryFuseHostOutputCall1(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) !bool {
-    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputAtomLiteralCall1, try tryFuseHostOutputAtomLiteralCall1(ctx, output, stack, function, frame))) return true;
-    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputStringNumberConstCall1, try tryFuseHostOutputStringNumberConstCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
-    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputStringLocalNumberCall1, try tryFuseHostOutputStringLocalNumberCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
-    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputNumberStaticLiteralCall1, try tryFuseHostOutputNumberStaticLiteralCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
-    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputLocalInt32AddCall1, try tryFuseHostOutputLocalInt32AddCall1(ctx, output, stack, function, frame))) return true;
-    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputLocalSimpleNumericCall0Call1, try tryFuseHostOutputLocalSimpleNumericCall0Call1(ctx, output, stack, function, frame))) return true;
-    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputLocalCall1, try tryFuseHostOutputLocalCall1(ctx, output, stack, function, frame))) return true;
-    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputTypeofLocalCall1, try tryFuseHostOutputTypeofLocalCall1(ctx, output, stack, function, frame))) return true;
-    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputLocalFieldStrictEqUndefinedCall1, try tryFuseHostOutputLocalFieldStrictEqUndefinedCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
-    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputLocalImmediateCompareCall1, try tryFuseHostOutputLocalImmediateCompareCall1(ctx, output, stack, function, frame))) return true;
-    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputLocalLengthCall1, try tryFuseHostOutputLocalLengthCall1(ctx, output, stack, function, frame))) return true;
-    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputLocalFieldCall1, try tryFuseHostOutputLocalFieldCall1(ctx, output, stack, function, frame))) return true;
-    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseHostOutputLocalDenseElementCall1, try tryFuseHostOutputLocalDenseElementCall1(ctx, output, stack, function, frame))) return true;
-    return false;
-}
-
-fn tryFuseHostOutputAtomLiteralCall1(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-) !bool {
-    if (frame.pc + 6 > function.code.len) return false;
-    if (function.code[frame.pc] != op.push_atom_value or function.code[frame.pc + 5] != op.call1) return false;
-
-    const arg_atom = readInt(u32, function.code[frame.pc + 1 ..][0..4]);
-    try printHostOutputAtomLiteral(ctx.runtime, output, arg_atom);
-    try finishUndefinedCallResult(stack, function, frame, frame.pc + 6);
-    return true;
-}
-
 fn printHostOutputAtomLiteral(rt: *core.JSRuntime, output: ?*std.Io.Writer, atom_id: core.Atom) !void {
     const writer = output orelse return;
     if (core.atom.isTaggedInt(atom_id)) {
@@ -546,337 +386,6 @@ fn printHostOutputAtomLiteral(rt: *core.JSRuntime, output: ?*std.Io.Writer, atom
     }
     try writer.writeAll(rt.atoms.name(atom_id) orelse "");
     try writer.writeByte('\n');
-}
-
-fn tryFuseHostOutputStringNumberConstCall1(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) !bool {
-    const pc = frame.pc;
-    const code = function.code;
-    if (pc + 5 > code.len) return false;
-    const callee_op = code[pc];
-    if (callee_op != op.get_var and callee_op != op.get_var_undef) return false;
-    const callee_atom = readInt(u32, code[pc + 1 ..][0..4]);
-    if (callee_atom != atom_string) return false;
-    if (!canUseFastGlobalVarLookup(function, callee_atom, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (call_runtime.globalLexicalValue(ctx, callee_atom)) |lex_value| {
-        lex_value.free(ctx.runtime);
-        return false;
-    }
-    const callee = globalDataPropertyValueForFastPath(ctx.runtime, global, function, pc, callee_atom) orelse return false;
-    if (!isStringConstructorValue(callee)) return false;
-
-    const string_arg = stringNumberConstArgAt(function, pc + 5) orelse return false;
-    if (string_arg.next_pc >= code.len or code[string_arg.next_pc] != op.call1) return false;
-
-    try printHostOutputStringifiedNumber(output, string_arg.value);
-    try finishUndefinedCallResult(stack, function, frame, string_arg.next_pc + 1);
-    return true;
-}
-
-fn tryFuseHostOutputStringLocalNumberCall1(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) !bool {
-    const pc = frame.pc;
-    const code = function.code;
-    if (pc + 5 > code.len) return false;
-    const callee_op = code[pc];
-    if (callee_op != op.get_var and callee_op != op.get_var_undef) return false;
-    const callee_atom = readInt(u32, code[pc + 1 ..][0..4]);
-    if (callee_atom != atom_string) return false;
-    if (!canUseFastGlobalVarLookup(function, callee_atom, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (call_runtime.globalLexicalValue(ctx, callee_atom)) |lex_value| {
-        lex_value.free(ctx.runtime);
-        return false;
-    }
-    const callee = globalDataPropertyValueForFastPath(ctx.runtime, global, function, pc, callee_atom) orelse return false;
-    if (!isStringConstructorValue(callee)) return false;
-
-    const local_get = decodeLocalGet(code, pc + 5) orelse return false;
-    if (local_get.next_pc + 1 >= code.len or code[local_get.next_pc] != op.call1 or code[local_get.next_pc + 1] != op.call1) return false;
-    const input = localReadableBorrowed(frame, local_get.idx, local_get.checked) orelse return false;
-    if (input.asInt32() == null and input.asFloat64() == null) return false;
-
-    try printHostOutputStringifiedNumber(output, input);
-    try finishUndefinedCallResult(stack, function, frame, local_get.next_pc + 2);
-    return true;
-}
-
-fn tryFuseHostOutputNumberStaticLiteralCall1(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) !bool {
-    const pc = frame.pc;
-    const code = function.code;
-    if (pc + 10 > code.len) return false;
-    const callee_op = code[pc];
-    if (callee_op != op.get_var and callee_op != op.get_var_undef) return false;
-    const callee_atom = readInt(u32, code[pc + 1 ..][0..4]);
-    if (callee_atom != atom_number) return false;
-    if (!canUseFastGlobalVarLookup(function, callee_atom, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (call_runtime.globalLexicalValue(ctx, callee_atom)) |lex_value| {
-        lex_value.free(ctx.runtime);
-        return false;
-    }
-
-    const field_pc = pc + 5;
-    if (code[field_pc] != op.get_field2) return false;
-    const method_atom = readInt(u32, code[field_pc + 1 ..][0..4]);
-    const number_value = globalDataOrAutoInitValueForReadFastPath(ctx.runtime, global, function, pc, callee_atom) orelse return false;
-    defer number_value.deinit(ctx.runtime);
-    const native_ref = functionOwnNativeBuiltinRefForFastPath(function, field_pc, ctx.runtime, number_value.value, method_atom) orelse return false;
-    if (native_ref.domain != .number) return false;
-    const parsed = numberStaticLiteralResultAt(ctx.runtime, function, native_ref.id, field_pc + 5) orelse return false;
-    if (parsed.next_pc >= code.len or code[parsed.next_pc] != op.call1) return false;
-
-    const result = value_ops.numberToValue(parsed.number);
-    try printHostOutputStringifiedNumber(output, result);
-    result.free(ctx.runtime);
-    try finishUndefinedCallResult(stack, function, frame, parsed.next_pc + 1);
-    return true;
-}
-
-fn tryFuseHostOutputLocalInt32AddCall1(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-) !bool {
-    const code = function.code;
-    const lhs_get = decodeLocalGet(code, frame.pc) orelse return false;
-    const rhs_get = decodeLocalGet(code, lhs_get.next_pc) orelse return false;
-    const add_pc = rhs_get.next_pc;
-    if (add_pc + 1 >= code.len or code[add_pc] != op.add or code[add_pc + 1] != op.call1) return false;
-
-    const lhs_value = localReadableBorrowed(frame, lhs_get.idx, lhs_get.checked) orelse return false;
-    const rhs_value = localReadableBorrowed(frame, rhs_get.idx, rhs_get.checked) orelse return false;
-    const lhs = lhs_value.asInt32() orelse return false;
-    const rhs = rhs_value.asInt32() orelse return false;
-    const result = fastInt32Add(lhs, rhs);
-    defer result.free(ctx.runtime);
-
-    try printHostOutputStringifiedNumber(output, result);
-    try finishUndefinedCallResult(stack, function, frame, add_pc + 2);
-    return true;
-}
-
-fn tryFuseHostOutputLocalCall1(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-) !bool {
-    const code = function.code;
-    const local_get = decodeLocalGet(code, frame.pc) orelse return false;
-    if (local_get.next_pc >= code.len or code[local_get.next_pc] != op.call1) return false;
-
-    const value = localReadableBorrowed(frame, local_get.idx, local_get.checked) orelse return false;
-    try builtin_glue.printHostOutputArgs(ctx.runtime, output, &.{value});
-    try finishUndefinedCallResult(stack, function, frame, local_get.next_pc + 1);
-    return true;
-}
-
-fn tryFuseHostOutputLocalSimpleNumericCall0Call1(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-) !bool {
-    const code = function.code;
-    const local_get = decodeLocalGet(code, frame.pc) orelse return false;
-    if (local_get.next_pc + 2 > code.len or code[local_get.next_pc] != op.call0 or code[local_get.next_pc + 1] != op.call1) return false;
-
-    const callable = localReadableBorrowed(frame, local_get.idx, local_get.checked) orelse return false;
-    const result = try simpleNumericFunctionResult(ctx.runtime, callable, &.{}) orelse return false;
-    defer result.free(ctx.runtime);
-
-    try builtin_glue.printHostOutputArgs(ctx.runtime, output, &.{result});
-    try finishUndefinedCallResult(stack, function, frame, local_get.next_pc + 2);
-    return true;
-}
-
-fn tryFuseHostOutputTypeofLocalCall1(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-) !bool {
-    const code = function.code;
-    const local_get = decodeLocalGet(code, frame.pc) orelse return false;
-    if (local_get.next_pc >= code.len or code[local_get.next_pc] != op.typeof) return false;
-    const call_pc = local_get.next_pc + 1;
-    if (call_pc >= code.len or code[call_pc] != op.call1) return false;
-
-    const value = localReadableBorrowed(frame, local_get.idx, local_get.checked) orelse return false;
-    const type_name = try value_ops.typeOf(ctx.runtime, value);
-    defer type_name.free(ctx.runtime);
-    try builtin_glue.printHostOutputArgs(ctx.runtime, output, &.{type_name});
-    try finishUndefinedCallResult(stack, function, frame, call_pc + 1);
-    return true;
-}
-
-fn tryFuseHostOutputLocalFieldStrictEqUndefinedCall1(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) !bool {
-    _ = global;
-    const code = function.code;
-    const local_get = decodeLocalGet(code, frame.pc) orelse return false;
-    if (local_get.next_pc + 5 > code.len or code[local_get.next_pc] != op.get_field) return false;
-    const field_atom = readInt(u32, code[local_get.next_pc + 1 ..][0..4]);
-    const undefined_pc = local_get.next_pc + 5;
-    if (undefined_pc + 6 > code.len) return false;
-    const undefined_op = code[undefined_pc];
-    if (undefined_op != op.get_var and undefined_op != op.get_var_undef) return false;
-    if (readInt(u32, code[undefined_pc + 1 ..][0..4]) != core.atom.ids.undefined_) return false;
-    const cmp_pc = undefined_pc + 5;
-    const cmp_op = code[cmp_pc];
-    if (cmp_op != op.strict_eq and cmp_op != op.strict_neq) return false;
-    const call_pc = cmp_pc + 1;
-    if (call_pc >= code.len or code[call_pc] != op.call1) return false;
-    if (!canUseFastGlobalUndefinedLookup(function, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (call_runtime.globalLexicalValue(ctx, core.atom.ids.undefined_)) |lex_value| {
-        lex_value.free(ctx.runtime);
-        return false;
-    }
-
-    const receiver = localReadableBorrowed(frame, local_get.idx, local_get.checked) orelse return false;
-    const is_undefined = ordinaryDataPropertyIsUndefinedForFastPath(ctx.runtime, receiver, field_atom) orelse return false;
-    const result_value = core.JSValue.boolean(if (cmp_op == op.strict_eq) is_undefined else !is_undefined);
-    try builtin_glue.printHostOutputArgs(ctx.runtime, output, &.{result_value});
-    try finishUndefinedCallResult(stack, function, frame, call_pc + 1);
-    return true;
-}
-
-fn tryFuseHostOutputLocalImmediateCompareCall1(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-) !bool {
-    const code = function.code;
-    const local_get = decodeLocalGet(code, frame.pc) orelse return false;
-    const rhs = immediateInt32Operand(code, local_get.next_pc) orelse return false;
-    if (rhs.next_pc >= code.len) return false;
-    const cmp_op = code[rhs.next_pc];
-    if (cmp_op != op.lt and cmp_op != op.lte and cmp_op != op.gt and cmp_op != op.gte and cmp_op != op.eq and cmp_op != op.neq and cmp_op != op.strict_eq and cmp_op != op.strict_neq) return false;
-    const call_pc = rhs.next_pc + 1;
-    if (call_pc >= code.len or code[call_pc] != op.call1) return false;
-
-    const lhs_value = localReadableBorrowed(frame, local_get.idx, local_get.checked) orelse return false;
-    const lhs = value_ops.numberValue(lhs_value) orelse return false;
-    const rhs_number: f64 = @floatFromInt(rhs.value);
-    const result = switch (cmp_op) {
-        op.lt => lhs < rhs_number,
-        op.lte => lhs <= rhs_number,
-        op.gt => lhs > rhs_number,
-        op.gte => lhs >= rhs_number,
-        op.eq, op.strict_eq => lhs == rhs_number,
-        op.neq, op.strict_neq => lhs != rhs_number,
-        else => unreachable,
-    };
-    const result_value = core.JSValue.boolean(result);
-    try builtin_glue.printHostOutputArgs(ctx.runtime, output, &.{result_value});
-    try finishUndefinedCallResult(stack, function, frame, call_pc + 1);
-    return true;
-}
-
-fn tryFuseHostOutputLocalLengthCall1(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-) !bool {
-    const code = function.code;
-    const local_get = decodeLocalGet(code, frame.pc) orelse return false;
-    if (local_get.next_pc >= code.len or code[local_get.next_pc] != op.get_length) return false;
-    const call_pc = local_get.next_pc + 1;
-    if (call_pc >= code.len or code[call_pc] != op.call1) return false;
-
-    const receiver = localReadableBorrowed(frame, local_get.idx, local_get.checked) orelse return false;
-    const length = fastLengthValue(ctx.runtime, receiver) catch return false;
-    try builtin_glue.printHostOutputArgs(ctx.runtime, output, &.{length});
-    try finishUndefinedCallResult(stack, function, frame, call_pc + 1);
-    return true;
-}
-
-fn tryFuseHostOutputLocalFieldCall1(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-) !bool {
-    const code = function.code;
-    const local_get = decodeLocalGet(code, frame.pc) orelse return false;
-    if (local_get.next_pc + 6 > code.len or code[local_get.next_pc] != op.get_field) return false;
-    const field_atom = readInt(u32, code[local_get.next_pc + 1 ..][0..4]);
-    const call_pc = local_get.next_pc + 5;
-    if (code[call_pc] != op.call1) return false;
-
-    const receiver = localReadableBorrowed(frame, local_get.idx, local_get.checked) orelse return false;
-    const value = ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, receiver, field_atom) orelse return false;
-    try builtin_glue.printHostOutputArgs(ctx.runtime, output, &.{value});
-    try finishUndefinedCallResult(stack, function, frame, call_pc + 1);
-    return true;
-}
-
-fn tryFuseHostOutputLocalDenseElementCall1(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-) !bool {
-    const code = function.code;
-    const local_get = decodeLocalGet(code, frame.pc) orelse return false;
-    const key_operand = immediateInt32Operand(code, local_get.next_pc) orelse return false;
-    if (key_operand.next_pc >= code.len or code[key_operand.next_pc] != op.get_array_el) return false;
-    const call_pc = key_operand.next_pc + 1;
-    if (call_pc >= code.len or code[call_pc] != op.call1) return false;
-
-    const receiver = localReadableBorrowed(frame, local_get.idx, local_get.checked) orelse return false;
-    const value = fastDenseArrayElementValue(receiver, core.JSValue.int32(key_operand.value)) orelse return false;
-    defer value.free(ctx.runtime);
-    try builtin_glue.printHostOutputArgs(ctx.runtime, output, &.{value});
-    try finishUndefinedCallResult(stack, function, frame, call_pc + 1);
-    return true;
 }
 
 fn globalDataOrAutoInitValueForReadFastPath(
@@ -919,43 +428,27 @@ fn useFastGlobalDataValue(
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
 ) !Step {
-    if (atom_id == atom_print and isHostOutputFunctionValue(ctx.runtime, value) and
-        fusion_stats.counted(.tryFuseHostOutputCall1, try tryFuseHostOutputCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
-    if (atom_id == atom_date and fusion_stats.counted(.tryFuseGlobalDateNowCall, try tryFuseGlobalDateNowCall(ctx, stack, function, frame, value))) return .done;
-    if (atom_id == atom_string and fusion_stats.counted(.tryFuseGlobalStringCall1NumberConst, try tryFuseGlobalStringCall1NumberConst(ctx.runtime, stack, function, frame, value))) return .done;
-    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseGlobalInductionInt32AddRange, try tryFuseGlobalInductionInt32AddRange(ctx, function, global, frame, atom_id, value, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
+    _ = ctx;
+    _ = output;
+    _ = global;
+    _ = catch_target;
+    _ = site_pc;
+    _ = atom_id;
+    _ = sync_global_lexical_locals;
+    _ = eval_local_names;
+    _ = eval_var_ref_names;
+    _ = eval_with_object;
     const value_int = value.asInt32();
     if (value_int != null) {
-        if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseGlobalDataInt32CompareFalseBranch, tryFuseGlobalDataInt32CompareFalseBranch(function, frame, value))) return .done;
-        if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseGlobalDataInt32ImmediateBinary, try tryFuseGlobalDataInt32ImmediateBinary(ctx, global, stack, function, frame, atom_id, value, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
     }
     if (value_int != null or value.asShortBigInt() != null) {
-        if (nextOpIsPostUpdate(function, frame) and
-            fusion_stats.counted(.tryFuseDroppedGlobalDataPostUpdateFromValue, try tryFuseDroppedGlobalDataPostUpdateFromValue(ctx, global, function, frame, site_pc, atom_id, value))) return .done;
     } else {
         if (value.isString()) {
-            if (fusion_stats.counted(.tryFuseGlobalStringPercentHexAddStore, try tryFuseGlobalStringPercentHexAddStore(ctx, function, global, frame, value, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) |step| return step;
         } else if (nextOpCanStartGlobalUriCall1(function, frame)) {
-            if (fusion_stats.counted(.tryFuseGlobalUriCall1, try tryFuseGlobalUriCall1(ctx, stack, function, frame, catch_target, global, value, eval_local_names, eval_var_ref_names, eval_with_object))) |step| return step;
         }
     }
     try stack.push(value);
     return .done;
-}
-
-fn tryFuseGlobalStringCall1NumberConst(
-    rt: *core.JSRuntime,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    callee: core.JSValue,
-) !bool {
-    if (!isStringConstructorValue(callee)) return false;
-    const result = stringNumberConstCall1At(rt, function, frame.pc) orelse return false;
-    errdefer result.value.free(rt);
-    try stack.pushOwned(result.value);
-    frame.pc = result.next_pc;
-    return true;
 }
 
 fn stringNumberConstArgAt(function: *const bytecode.Bytecode, pc: usize) ?StringNumberConstArg {
@@ -1055,105 +548,6 @@ fn nextOpIsPostUpdate(function: *const bytecode.Bytecode, frame: *const frame_mo
     return function.code[frame.pc] == op.post_inc or function.code[frame.pc] == op.post_dec;
 }
 
-fn tryFuseDroppedGlobalDataPostUpdateFromValue(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    site_pc: usize,
-    atom_id: core.Atom,
-    old: core.JSValue,
-) !bool {
-    if (frame.pc + 7 > function.code.len) return false;
-    const update_op = function.code[frame.pc];
-    if (update_op != op.post_inc and update_op != op.post_dec) return false;
-    if (function.code[frame.pc + 1] != op.put_var) return false;
-    if (function.code[frame.pc + 6] != op.drop) return false;
-    const store_atom = readInt(u32, function.code[frame.pc + 2 ..][0..4]);
-    if (store_atom != atom_id) return false;
-
-    const updated = blk: {
-        if (old.asInt32()) |old_int| {
-            break :blk switch (update_op) {
-                op.post_inc => fastInt32Add(old_int, 1),
-                op.post_dec => fastInt32Sub(old_int, 1),
-                else => unreachable,
-            };
-        }
-        if (old.asShortBigInt()) |old_bigint| {
-            if (value_ops.shortBigIntUnary(update_op, old_bigint)) |fast| break :blk fast;
-        }
-        return false;
-    };
-    errdefer updated.free(ctx.runtime);
-    if (!setGlobalDataPropertyForFastPath(ctx.runtime, global, function, site_pc, atom_id, updated)) {
-        updated.free(ctx.runtime);
-        return false;
-    }
-    const updated_int_for_branch = updated.asInt32();
-    frame.pc += 7;
-    updated.free(ctx.runtime);
-    if (updated_int_for_branch) |updated_int| {
-        _ = fusion_stats.counted(.tryFuseFollowingGlobalInt32Goto16Condition, tryFuseFollowingGlobalInt32Goto16Condition(ctx, function, frame, atom_id, updated_int));
-    }
-    return true;
-}
-
-fn tryFuseFollowingGlobalInt32Goto16Condition(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    atom_id: core.Atom,
-    lhs: i32,
-) bool {
-    if (ctx.runtime.hasInterruptHandler()) return false;
-    const code = function.code;
-    if (frame.pc + 3 > code.len or code[frame.pc] != op.goto16) return false;
-    const goto_operand_pc = frame.pc + 1;
-    const goto_diff = readInt(i16, code[goto_operand_pc..][0..2]);
-    const target_pc_i64 = @as(i64, @intCast(goto_operand_pc)) + @as(i64, goto_diff);
-    if (target_pc_i64 < 0) return false;
-    const target_pc: usize = @intCast(target_pc_i64);
-    if (target_pc + 10 > code.len) return false;
-    const read_op = code[target_pc];
-    if (read_op != op.get_var and read_op != op.get_var_undef) return false;
-    const read_atom = readInt(u32, code[target_pc + 1 ..][0..4]);
-    if (read_atom != atom_id) return false;
-    const rhs = immediateInt32Operand(code, target_pc + 5) orelse return false;
-    if (rhs.next_pc >= code.len) return false;
-    const cmp_op = code[rhs.next_pc];
-    const result = switch (cmp_op) {
-        op.lt => lhs < rhs.value,
-        op.lte => lhs <= rhs.value,
-        op.gt => lhs > rhs.value,
-        op.gte => lhs >= rhs.value,
-        else => return false,
-    };
-    const branch_pc = rhs.next_pc + 1;
-    if (branch_pc >= code.len) return false;
-    switch (code[branch_pc]) {
-        op.if_false8 => {
-            if (branch_pc + 2 > code.len) return false;
-            const operand_pc = branch_pc + 1;
-            const diff: i8 = @bitCast(code[operand_pc]);
-            const false_pc_i64 = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
-            if (false_pc_i64 < 0) return false;
-            frame.pc = if (result) operand_pc + 1 else @intCast(false_pc_i64);
-            return true;
-        },
-        op.if_false => {
-            if (branch_pc + 5 > code.len) return false;
-            const operand_pc = branch_pc + 1;
-            const diff = readInt(i32, code[operand_pc..][0..4]);
-            const false_pc_i64 = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
-            if (false_pc_i64 < 0) return false;
-            frame.pc = if (result) operand_pc + 4 else @intCast(false_pc_i64);
-            return true;
-        },
-        else => return false,
-    }
-}
-
 fn fastGlobalDataValueForAtomAtPcNoProfile(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
@@ -1185,130 +579,6 @@ fn nextOpCanStartGlobalUriCall1(function: *const bytecode.Bytecode, frame: *cons
     };
 }
 
-fn tryFuseGlobalDateNowCall(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    receiver: core.JSValue,
-) !bool {
-    const pc = frame.pc;
-    const code = function.code;
-    if (pc + 8 > code.len or code[pc] != op.get_field2) return false;
-    if (code[pc + 5] != op.call_method) return false;
-    if (readInt(u16, code[pc + 6 ..][0..2]) != 0) return false;
-
-    const atom_id = readInt(u32, code[pc + 1 ..][0..4]);
-    const native_ref = functionOwnNativeBuiltinRefForFastPath(function, pc, ctx.runtime, receiver, atom_id) orelse return false;
-    if (native_ref.domain != .date or native_ref.id != @intFromEnum(method_ids.date.StaticMethod.now)) return false;
-
-    // `Date.now()` fast path: route the static body through the record table's
-    // func-object-free arm (the `now` record needs no receiver/realm) instead of
-    // naming the builtin from exec.
-    const result = (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, core.JSValue.undefinedValue(), native_ref, &.{}, null, null)) orelse return false;
-    errdefer result.free(ctx.runtime);
-    try stack.pushOwned(result);
-    frame.pc = pc + 8;
-    return true;
-}
-
-fn tryFuseGlobalUriCall1(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    global: *core.Object,
-    callee: core.JSValue,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) !?Step {
-    const function_object = objectFromValue(callee) orelse return null;
-    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return null;
-    if (native_ref.domain != .uri) return null;
-
-    const call_arg = try uriCall1StringArgument(ctx, function, frame, global) orelse return null;
-    defer if (call_arg.owned) call_arg.value.free(ctx.runtime);
-
-    if (fusion_stats.counted(.tryFuseUriDecodeSingleFourByteStrictEqFromCharCode, try tryFuseUriDecodeSingleFourByteStrictEqFromCharCode(ctx, stack, function, frame, catch_target, global, native_ref.id, call_arg.value, call_arg.next_pc, eval_local_names, eval_var_ref_names, eval_with_object))) |step| return step;
-
-    // `call_arg.value` is always a string here (see `uriCall1StringArgument`),
-    // so route the already-coerced argument through the `.uri` record on the
-    // bare-runtime primitive path (`global = null`) — the same body the
-    // retired direct `builtins.uri.call` reached, without re-coercion.
-    const result = (builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, core.JSValue.undefinedValue(), native_ref, &.{call_arg.value}, null, null) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
-        return err;
-    }) orelse return null;
-    errdefer result.free(ctx.runtime);
-    try stack.pushOwned(result);
-    frame.pc = call_arg.next_pc;
-    return .done;
-}
-
-fn tryFuseGlobalDataInt32CompareFalseBranch(
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    value: core.JSValue,
-) bool {
-    const lhs = value.asInt32() orelse return false;
-    const immediate = immediateInt32Operand(function.code, frame.pc) orelse return false;
-    if (immediate.next_pc + 2 > function.code.len) return false;
-    const cmp_op = function.code[immediate.next_pc];
-    const result = int32ImmediateCompare(lhs, cmp_op, immediate.value) orelse return false;
-    const branch_pc = immediate.next_pc + 1;
-    const branch_op = function.code[branch_pc];
-    switch (branch_op) {
-        op.if_false8 => {
-            if (branch_pc + 2 > function.code.len) return false;
-            const operand_pc = branch_pc + 1;
-            const diff: i8 = @bitCast(function.code[operand_pc]);
-            frame.pc = if (result)
-                operand_pc + 1
-            else
-                @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff));
-            return true;
-        },
-        op.if_false => {
-            if (branch_pc + 5 > function.code.len) return false;
-            const operand_pc = branch_pc + 1;
-            const diff = readInt(i32, function.code[operand_pc..][0..4]);
-            frame.pc = if (result)
-                operand_pc + 4
-            else
-                @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff));
-            return true;
-        },
-        else => return false,
-    }
-}
-
-pub fn tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    goto_opc: u8,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) bool {
-    const operand_pc = frame.pc;
-    const target_pc = backwardGotoTarget(function.code, operand_pc, goto_opc) orelse return false;
-    const global_get = decodeGlobalDataGet(function.code, target_pc) orelse return false;
-    if (!canUseInstalledGlobalDataIc(ctx, function, global_get.atom, frame, eval_local_names, eval_var_ref_names, eval_with_object, global)) return false;
-    const lhs_value = globalDataPropertyValueForFastPath(ctx.runtime, global, function, target_pc, global_get.atom) orelse return false;
-    const lhs = lhs_value.asInt32() orelse return false;
-
-    const immediate = immediateInt32Operand(function.code, global_get.next_pc) orelse return false;
-    if (immediate.next_pc >= function.code.len) return false;
-    const result = int32ImmediateCompare(lhs, function.code[immediate.next_pc], immediate.value) orelse return false;
-    const branch = decodeFalseBranch(function.code, immediate.next_pc + 1) orelse return false;
-    frame.pc = if (result) branch.true_pc else branch.false_pc;
-    return true;
-}
-
 fn int32ImmediateCompare(lhs: i32, cmp_op: u8, rhs: i32) ?bool {
     return switch (cmp_op) {
         op.lt => lhs < rhs,
@@ -1317,83 +587,6 @@ fn int32ImmediateCompare(lhs: i32, cmp_op: u8, rhs: i32) ?bool {
         op.gte => lhs >= rhs,
         else => null,
     };
-}
-
-fn tryFuseGlobalDataInt32ImmediateBinary(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    source_atom: core.Atom,
-    value: core.JSValue,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) !bool {
-    var current = value.asInt32() orelse return false;
-    const source_value = current;
-    var pc = frame.pc;
-    var consumed = false;
-    while (true) {
-        const immediate = immediateInt32Operand(function.code, pc) orelse break;
-        if (immediate.next_pc >= function.code.len) break;
-        const result = fastInt32ImmediateBinary(function.code[immediate.next_pc], current, immediate.value) orelse break;
-        consumed = true;
-        pc = immediate.next_pc + 1;
-        current = result.asInt32() orelse {
-            frame.pc = pc;
-            try pushImmediateBinaryResultMaybeFuseStackBinaryOrGlobalStore(ctx, global, stack, function, frame, result, eval_local_names, eval_var_ref_names, eval_with_object);
-            return true;
-        };
-    }
-    if (!consumed) return false;
-    frame.pc = pc;
-    if (fusion_stats.counted(.tryFuseGlobalDataValueStore, tryFuseGlobalDataValueStore(ctx, global, function, frame, core.JSValue.int32(current), eval_local_names, eval_var_ref_names, eval_with_object))) |stored| {
-        if (stored.atom != source_atom) {
-            _ = fusion_stats.counted(.tryFuseFollowingSameGlobalDataInt32ImmediateBinaryStore, tryFuseFollowingSameGlobalDataInt32ImmediateBinaryStore(ctx, global, function, frame, source_atom, source_value, eval_local_names, eval_var_ref_names, eval_with_object));
-        }
-        return true;
-    }
-    try pushImmediateBinaryResultMaybeFuseStackBinaryOrGlobalStore(ctx, global, stack, function, frame, core.JSValue.int32(current), eval_local_names, eval_var_ref_names, eval_with_object);
-    return true;
-}
-
-pub fn tryFuseGlobalInt32PrefixTermsStore(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    start_pc: usize,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) bool {
-    const start = immediateInt32Operand(function.code, start_pc) orelse return false;
-    var current = start.value;
-    var pc = start.next_pc;
-    var consumed_global_term = false;
-
-    while (tryFoldImmediateInt32At(function.code, &pc, &current)) |result| {
-        current = result.asInt32() orelse return false;
-    }
-    while (tryFoldFollowingImmediateInt32Term(function.code, &pc, &current)) |result| {
-        current = result.asInt32() orelse return false;
-    }
-    while (tryFoldFollowingGlobalInt32Term(ctx, global, function, frame, &pc, &current, eval_local_names, eval_var_ref_names, eval_with_object)) |result| {
-        current = result.asInt32() orelse return false;
-        consumed_global_term = true;
-    }
-    if (!consumed_global_term) return false;
-
-    const saved_pc = frame.pc;
-    frame.pc = pc;
-    if (fusion_stats.counted(.tryFuseGlobalDataValueStore, tryFuseGlobalDataValueStore(ctx, global, function, frame, core.JSValue.int32(current), eval_local_names, eval_var_ref_names, eval_with_object))) |stored| {
-        while (fusion_stats.counted(.tryFuseFollowingSameGlobalDataInt32ImmediateBinaryStore, tryFuseFollowingSameGlobalDataInt32ImmediateBinaryStore(ctx, global, function, frame, stored.atom, current, eval_local_names, eval_var_ref_names, eval_with_object))) {}
-        return true;
-    }
-    frame.pc = saved_pc;
-    return false;
 }
 
 fn tryFoldImmediateInt32At(code: []const u8, pc: *usize, current: *const i32) ?core.JSValue {
@@ -1441,63 +634,6 @@ fn tryFoldFollowingGlobalInt32Term(
     return result;
 }
 
-fn tryFuseFollowingSameGlobalDataInt32ImmediateBinaryStore(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    source_atom: core.Atom,
-    source_value: i32,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) bool {
-    const start_pc = frame.pc;
-    const source_get = decodeGlobalDataGet(function.code, start_pc) orelse return false;
-    if (source_get.atom != source_atom) return false;
-    const borrowed = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, start_pc, source_atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return false;
-    const current_source = borrowed.asInt32() orelse return false;
-    if (current_source != source_value) return false;
-
-    var current = source_value;
-    var pc = source_get.next_pc;
-    var consumed = false;
-    while (true) {
-        const immediate = immediateInt32Operand(function.code, pc) orelse break;
-        if (immediate.next_pc >= function.code.len) break;
-        const result = fastInt32ImmediateBinary(function.code[immediate.next_pc], current, immediate.value) orelse break;
-        current = result.asInt32() orelse return false;
-        consumed = true;
-        pc = immediate.next_pc + 1;
-    }
-    if (!consumed) return false;
-
-    frame.pc = pc;
-    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseGlobalDataValueStore, tryFuseGlobalDataValueStore(ctx, global, function, frame, core.JSValue.int32(current), eval_local_names, eval_var_ref_names, eval_with_object)) != null) return true;
-    frame.pc = start_pc;
-    return false;
-}
-
-fn tryFuseGlobalDataValueStore(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    value: core.JSValue,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) ?StoredGlobalDataValue {
-    const rt = ctx.runtime;
-    if (frame.pc + 5 > function.code.len or function.code[frame.pc] != op.put_var) return null;
-    const store_pc = frame.pc;
-    const atom_id = readInt(u32, function.code[frame.pc + 1 ..][0..4]);
-    if (!canFuseGlobalDataWrite(function, frame, atom_id, eval_local_names, eval_var_ref_names, eval_with_object)) return null;
-    if (!setGlobalWritableDataStoreForFastPathOwned(rt, ctx.lexicals, global, function, store_pc, atom_id, value)) return null;
-    frame.pc += 5;
-    return .{ .atom = atom_id };
-}
-
 fn pushImmediateBinaryResultMaybeFuseStackBinaryOrGlobalStore(
     ctx: *core.JSContext,
     global: *core.Object,
@@ -1509,6 +645,10 @@ fn pushImmediateBinaryResultMaybeFuseStackBinaryOrGlobalStore(
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
 ) !void {
+    _ = global;
+    _ = eval_local_names;
+    _ = eval_var_ref_names;
+    _ = eval_with_object;
     const rhs = rhs_value.asInt32() orelse {
         try stack.pushOwned(rhs_value);
         return;
@@ -1520,9 +660,6 @@ fn pushImmediateBinaryResultMaybeFuseStackBinaryOrGlobalStore(
                     const lhs_owned = try stack.pop();
                     defer lhs_owned.free(ctx.runtime);
                     frame.pc += 1;
-                    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseGlobalDataValueStore, tryFuseGlobalDataValueStore(ctx, global, function, frame, result, eval_local_names, eval_var_ref_names, eval_with_object)) != null) {
-                        return;
-                    }
                     try stack.pushOwned(result);
                     return;
                 }
@@ -1530,99 +667,6 @@ fn pushImmediateBinaryResultMaybeFuseStackBinaryOrGlobalStore(
         }
     }
     try stack.pushOwned(rhs_value);
-}
-
-fn tryFuseGlobalUriFourByteDecodeCountRange(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    prefix_value: core.JSValue,
-    sync_global_lexical_locals: bool,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) !bool {
-    if (ctx.runtime.hasInterruptHandler()) return false;
-    const prefix_string = stringFromValue(prefix_value) orelse return false;
-    // Cheap length probe first: borrowLatin1 on a rope would flatten it.
-    if (prefix_string.len() != 9) return false;
-    const prefix_bytes = prefix_string.borrowLatin1() orelse return false;
-    if (prefix_bytes.len != 9 or prefix_bytes[0] != '%' or prefix_bytes[3] != '%' or prefix_bytes[6] != '%') return false;
-    const byte0 = percentHexByte(prefix_bytes[1], prefix_bytes[2]) orelse return false;
-    const byte1 = percentHexByte(prefix_bytes[4], prefix_bytes[5]) orelse return false;
-    const byte2 = percentHexByte(prefix_bytes[7], prefix_bytes[8]) orelse return false;
-    if (byte0 != 0xf0 or byte1 != 0xa0 or byte2 < 0x80 or byte2 > 0xbf) return false;
-
-    const plan = decodeUriFourByteRangePlan(ctx, function, global, frame, eval_local_names, eval_var_ref_names, eval_with_object) orelse return false;
-    const current_b3_value = fastGlobalDataValueForAtomAtPcNoProfile(ctx, function, global, frame, plan.index_b3_get_pc, plan.index_b3_atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return false;
-    const current_b3 = current_b3_value.asInt32() orelse return false;
-    if (current_b3 != byte2) return false;
-
-    const current_b4 = globalWritableDataStoreInt32ForFastPath(ctx.runtime, ctx.lexicals, global, function, plan.induction_put_pc, plan.induction_atom) orelse return false;
-    if (current_b4 < 0x80 or current_b4 > plan.limit or plan.limit > 0xbf) return false;
-    const iteration_count_i64 = @as(i64, plan.limit) - @as(i64, current_b4) + 1;
-    if (iteration_count_i64 <= 0 or iteration_count_i64 > std.math.maxInt(i32)) return false;
-    const iteration_count: i32 = @intCast(iteration_count_i64);
-
-    const count_current = globalWritableDataStoreInt32ForFastPath(ctx.runtime, ctx.lexicals, global, function, plan.count_put_pc, plan.count_atom) orelse return false;
-    const count_next_overflow = @addWithOverflow(count_current, iteration_count);
-    if (count_next_overflow[1] != 0) return false;
-    const count_next = count_next_overflow[0];
-
-    const final_b4 = plan.limit;
-    const codepoint: i32 =
-        (@as(i32, byte0 & 0x07) * 0x40000) +
-        (@as(i32, byte1 & 0x3f) * 0x1000) +
-        (@as(i32, byte2 & 0x3f) * 0x40) +
-        (final_b4 & 0x3f);
-    if (codepoint < 0x10000 or codepoint > 0x10ffff) return false;
-    const pair = string_ops.surrogatePairFromCodePoint(@intCast(codepoint));
-    const low: i32 = @intCast(pair.low);
-    const high: i32 = @intCast(pair.high);
-    const final_induction = @addWithOverflow(final_b4, 1);
-    if (final_induction[1] != 0) return false;
-
-    if (!globalWritableDataStoreAvailableForFastPath(ctx.runtime, ctx.lexicals, global, function, plan.string_store_pc, plan.string_store_atom)) return false;
-    if (!globalWritableDataStoreAvailableForFastPath(ctx.runtime, ctx.lexicals, global, function, plan.index_put_pc, plan.index_atom)) return false;
-    if (!globalWritableDataStoreAvailableForFastPath(ctx.runtime, ctx.lexicals, global, function, plan.low_put_pc, plan.low_atom)) return false;
-    if (!globalWritableDataStoreAvailableForFastPath(ctx.runtime, ctx.lexicals, global, function, plan.high_put_pc, plan.high_atom)) return false;
-    if (!globalWritableDataStoreAvailableForFastPath(ctx.runtime, ctx.lexicals, global, function, plan.count_put_pc, plan.count_atom)) return false;
-    if (!globalWritableDataStoreAvailableForFastPath(ctx.runtime, ctx.lexicals, global, function, plan.induction_put_pc, plan.induction_atom)) return false;
-
-    const suffix_string = try ctx.runtime.percentHexString(@intCast(final_b4));
-    const suffix_bytes = suffix_string.borrowLatin1() orelse return false;
-    const final_string = try core.string.String.createLatin1Concat(ctx.runtime, prefix_bytes, suffix_bytes);
-    var final_string_owned = true;
-    errdefer if (final_string_owned) final_string.value().free(ctx.runtime);
-    if (!setGlobalWritableDataStoreForFastPathOwned(ctx.runtime, ctx.lexicals, global, function, plan.string_store_pc, plan.string_store_atom, final_string.value())) {
-        final_string.value().free(ctx.runtime);
-        return false;
-    }
-    final_string_owned = false;
-    if (!setGlobalWritableDataStoreForFastPathOwned(ctx.runtime, ctx.lexicals, global, function, plan.index_put_pc, plan.index_atom, core.JSValue.int32(codepoint))) return false;
-    if (!setGlobalWritableDataStoreForFastPathOwned(ctx.runtime, ctx.lexicals, global, function, plan.low_put_pc, plan.low_atom, core.JSValue.int32(low))) return false;
-    if (!setGlobalWritableDataStoreForFastPathOwned(ctx.runtime, ctx.lexicals, global, function, plan.high_put_pc, plan.high_atom, core.JSValue.int32(high))) return false;
-    if (!setGlobalWritableDataStoreForFastPathOwned(ctx.runtime, ctx.lexicals, global, function, plan.count_put_pc, plan.count_atom, core.JSValue.int32(count_next))) return false;
-    if (!setGlobalWritableDataStoreForFastPathOwned(ctx.runtime, ctx.lexicals, global, function, plan.induction_put_pc, plan.induction_atom, core.JSValue.int32(final_induction[0]))) return false;
-    if (plan.high_completion_put) |completion_put| {
-        try slot_ops.setSlotValue(ctx, &frame.locals[completion_put.idx], core.JSValue.undefinedValue());
-        try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion_put.idx, sync_global_lexical_locals);
-    }
-    if (plan.branch_completion_put) |completion_put| {
-        try slot_ops.setSlotValue(ctx, &frame.locals[completion_put.idx], core.JSValue.undefinedValue());
-        try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion_put.idx, sync_global_lexical_locals);
-    }
-    if (plan.count_completion_put) |completion_put| {
-        try slot_ops.setSlotValue(ctx, &frame.locals[completion_put.idx], core.JSValue.int32(count_next - 1));
-        try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion_put.idx, sync_global_lexical_locals);
-    }
-    if (plan.induction_completion_put) |completion_put| {
-        try slot_ops.setSlotValue(ctx, &frame.locals[completion_put.idx], core.JSValue.int32(final_b4));
-        try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion_put.idx, sync_global_lexical_locals);
-    }
-    frame.pc = plan.exit_pc;
-    return true;
 }
 
 fn decodeUriFourByteRangePlan(
@@ -1806,114 +850,6 @@ fn percentHexNibble(byte: u8) ?u8 {
     return unicode_lib.asciiUpperHexDigitValueByte(byte);
 }
 
-fn tryFuseGlobalStringPercentHexAddStore(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    lhs: core.JSValue,
-    sync_global_lexical_locals: bool,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) !?Step {
-    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseGlobalUriFourByteDecodeCountRange, try tryFuseGlobalUriFourByteDecodeCountRange(ctx, function, global, frame, lhs, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
-
-    const callee_get = decodeVarRefGet(function.code, frame.pc) orelse return null;
-    const callee = varRefReadableBorrowed(frame, callee_get.idx) orelse return null;
-    if (simpleStringCallableKind(callee) != .percent_hex_byte) return null;
-
-    const arg_get = decodeGlobalDataGet(function.code, callee_get.next_pc) orelse return null;
-    const arg_value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, callee_get.next_pc, arg_get.atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
-    const arg_i32 = arg_value.asInt32() orelse return null;
-
-    const call_pc = arg_get.next_pc;
-    if (call_pc + 2 > function.code.len or function.code[call_pc] != op.call1 or function.code[call_pc + 1] != op.add) return null;
-    const store_pc = call_pc + 2;
-    const store = decodeGlobalPut(function.code, store_pc) orelse return null;
-    if (!canFuseGlobalDataWrite(function, frame, store.atom, eval_local_names, eval_var_ref_names, eval_with_object)) return null;
-    if (!globalWritableDataStoreAvailableForFastPath(ctx.runtime, ctx.lexicals, global, function, store_pc, store.atom)) return null;
-
-    const lhs_string = stringFromValue(lhs) orelse return null;
-    // Rope lhs: let the generic add path chain another rope node instead of
-    // flattening it here.
-    if (lhs_string.isRope()) return null;
-    const lhs_bytes = lhs_string.borrowLatin1() orelse return null;
-
-    const suffix_string = try ctx.runtime.percentHexString(@truncate(@as(u32, @bitCast(arg_i32))));
-    const suffix_bytes = suffix_string.borrowLatin1() orelse return null;
-    const updated_string = try core.string.String.createLatin1Concat(ctx.runtime, lhs_bytes, suffix_bytes);
-    var updated_owned = true;
-    errdefer if (updated_owned) updated_string.value().free(ctx.runtime);
-    if (!setGlobalWritableDataStoreForFastPathOwned(ctx.runtime, ctx.lexicals, global, function, store_pc, store.atom, updated_string.value())) {
-        updated_string.value().free(ctx.runtime);
-        return null;
-    }
-    updated_owned = false;
-
-    frame.pc = store.next_pc;
-    _ = fusion_stats.counted(.tryFuseGlobalInt32PrefixTermsStore, tryFuseGlobalInt32PrefixTermsStore(ctx, global, function, frame, frame.pc, eval_local_names, eval_var_ref_names, eval_with_object));
-    return .done;
-}
-
-pub fn tryFuseAtomPercentHexGlobalStringStore(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) !bool {
-    if (frame.pc + 4 > function.code.len) return false;
-    const prefix_atom = readInt(u32, function.code[frame.pc..][0..4]);
-    var prefix_buf: [16]u8 = undefined;
-    const prefix = atomAsciiText(ctx.runtime, prefix_atom, &prefix_buf) orelse return false;
-    return fusion_stats.counted(.tryFusePercentHexGlobalStringStoreAfterPrefix, try tryFusePercentHexGlobalStringStoreAfterPrefix(ctx, global, function, frame, prefix, frame.pc + 4, eval_local_names, eval_var_ref_names, eval_with_object));
-}
-
-fn tryFusePercentHexGlobalStringStoreAfterPrefix(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    prefix: []const u8,
-    callee_pc: usize,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) !bool {
-    const callee_get = decodeVarRefGet(function.code, callee_pc) orelse return false;
-    const callee = varRefReadableBorrowed(frame, callee_get.idx) orelse return false;
-    if (simpleStringCallableKind(callee) != .percent_hex_byte) return false;
-
-    const arg_get = decodeGlobalDataGet(function.code, callee_get.next_pc) orelse return false;
-    const arg_value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, callee_get.next_pc, arg_get.atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return false;
-    const arg_i32 = arg_value.asInt32() orelse return false;
-
-    const call_pc = arg_get.next_pc;
-    if (call_pc + 2 > function.code.len or function.code[call_pc] != op.call1 or function.code[call_pc + 1] != op.add) return false;
-    const store_pc = call_pc + 2;
-    const store = decodeGlobalPut(function.code, store_pc) orelse return false;
-    if (!canFuseGlobalDataWrite(function, frame, store.atom, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (!globalWritableDataStoreAvailableForFastPath(ctx.runtime, ctx.lexicals, global, function, store_pc, store.atom)) return false;
-
-    const suffix_string = try ctx.runtime.percentHexString(@truncate(@as(u32, @bitCast(arg_i32))));
-    const suffix_bytes = suffix_string.borrowLatin1() orelse return false;
-    const updated_string = try core.string.String.createLatin1Concat(ctx.runtime, prefix, suffix_bytes);
-    var updated_owned = true;
-    errdefer if (updated_owned) updated_string.value().free(ctx.runtime);
-    if (!setGlobalWritableDataStoreForFastPathOwned(ctx.runtime, ctx.lexicals, global, function, store_pc, store.atom, updated_string.value())) {
-        updated_string.value().free(ctx.runtime);
-        return false;
-    }
-    updated_owned = false;
-
-    frame.pc = store.next_pc;
-    _ = fusion_stats.counted(.tryFuseGlobalInt32PrefixTermsStore, tryFuseGlobalInt32PrefixTermsStore(ctx, global, function, frame, frame.pc, eval_local_names, eval_var_ref_names, eval_with_object));
-    return true;
-}
-
 fn fastInt32ImmediateBinary(opcode_id: u8, lhs: i32, rhs: i32) ?core.JSValue {
     return switch (opcode_id) {
         op.add => fastInt32Add(lhs, rhs),
@@ -1925,57 +861,6 @@ fn fastInt32ImmediateBinary(opcode_id: u8, lhs: i32, rhs: i32) ?core.JSValue {
         op.xor => core.JSValue.int32(lhs ^ rhs),
         else => null,
     };
-}
-
-fn tryFuseUriDecodeSingleFourByteStrictEqFromCharCode(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    global: *core.Object,
-    uri_mode: u32,
-    argument: core.JSValue,
-    after_uri_call_pc: usize,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) !?Step {
-    if (uri_mode != 3 and uri_mode != 4) return null;
-    const code = function.code;
-    var pc = after_uri_call_pc;
-    if (pc + 11 > code.len) return null;
-    const string_op = code[pc];
-    if (string_op != op.get_var and string_op != op.get_var_undef) return null;
-    const string_atom = readInt(u32, code[pc + 1 ..][0..4]);
-    if (string_atom != atom_string) return null;
-    const string_ctor = fastGlobalDataValueForAtomAtPcNoProfile(ctx, function, global, frame, pc, string_atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
-    pc += 5;
-
-    if (pc + 5 > code.len or code[pc] != op.get_field2) return null;
-    const method_atom = readInt(u32, code[pc + 1 ..][0..4]);
-    const native_ref = functionOwnNativeBuiltinRefForFastPath(function, pc, ctx.runtime, string_ctor, method_atom) orelse return null;
-    if (native_ref.domain != .string or native_ref.id != @intFromEnum(method_ids.string.StaticMethod.from_char_code)) return null;
-    pc += 5;
-
-    const high_arg = uriStrictEqIntArg(ctx, function, global, frame, pc, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
-    const low_arg = uriStrictEqIntArg(ctx, function, global, frame, high_arg.next_pc, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
-    const call_pc = low_arg.next_pc;
-    if (call_pc + 4 > code.len or code[call_pc] != op.call_method) return null;
-    if (readInt(u16, code[call_pc + 1 ..][0..2]) != 2) return null;
-    const strict_eq_pc = call_pc + 3;
-    if (code[strict_eq_pc] != op.strict_eq) return null;
-
-    const units = core.uri.decodeSingleFourByteEscapeUnits(argument) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
-        return err;
-    } orelse return null;
-    const expected_high: u16 = @intCast(@as(u32, @bitCast(high_arg.value)) & 0xffff);
-    const expected_low: u16 = @intCast(@as(u32, @bitCast(low_arg.value)) & 0xffff);
-    const matched = units.high == expected_high and units.low == expected_low;
-    try stack.pushOwned(core.JSValue.boolean(matched));
-    frame.pc = strict_eq_pc + 1;
-    return .done;
 }
 
 fn uriStrictEqIntArg(

@@ -1,4 +1,3 @@
-const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
@@ -478,7 +477,6 @@ pub noinline fn getLength(
 ) !Step {
     const value = try stack.pop();
     defer value.free(ctx.runtime);
-    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseArrayLengthLessThanFalseBranch, tryFuseArrayLengthLessThanFalseBranch(ctx.runtime, stack, function, frame, value))) return .done;
     const length = object_ops.getValueProperty(ctx, output, global, value, core.atom.ids.length, function, frame) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
@@ -486,33 +484,6 @@ pub noinline fn getLength(
     errdefer length.free(ctx.runtime);
     try stack.pushOwned(length);
     return .done;
-}
-
-fn tryFuseArrayLengthLessThanFalseBranch(
-    rt: *core.JSRuntime,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    value: core.JSValue,
-) bool {
-    if (frame.pc + 3 > function.code.len) return false;
-    if (function.code[frame.pc] != op.lt or function.code[frame.pc + 1] != op.if_false8) return false;
-    const array_object = object_ops.objectFromValue(value) orelse return false;
-    if (!array_object.flags.is_array or array_object.proxyTarget() != null) return false;
-    const lhs = stack.peekBorrowed() orelse return false;
-    const lhs_int = lhs.asInt32() orelse return false;
-
-    const lhs_owned = stack.pop() catch return false;
-    lhs_owned.free(rt);
-    const operand_pc = frame.pc + 2;
-    const diff: i8 = @bitCast(function.code[operand_pc]);
-    const lhs_number: f64 = @floatFromInt(lhs_int);
-    const rhs_number: f64 = @floatFromInt(array_object.arrayLength());
-    frame.pc = if (lhs_number < rhs_number)
-        frame.pc + 3
-    else
-        @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff));
-    return true;
 }
 
 pub noinline fn rest(

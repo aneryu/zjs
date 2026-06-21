@@ -1,4 +1,3 @@
-const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
@@ -6,7 +5,6 @@ const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
-const vm_property_globals = @import("vm_property_globals.zig");
 const call_runtime = @import("call_runtime.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
@@ -61,7 +59,8 @@ pub fn pushI16OperandVm(
     frame: *frame_mod.Frame,
     fast_paths: GlobalFastPathEnv,
 ) !void {
-    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseGlobalInt32PrefixTermsStore, vm_property_globals.tryFuseGlobalInt32PrefixTermsStore(ctx, fast_paths.global, function, frame, frame.pc - 1, fast_paths.eval_local_names, fast_paths.eval_var_ref_names, fast_paths.eval_with_object))) return;
+    _ = ctx;
+    _ = fast_paths;
     try pushI16Operand(stack, function, frame);
 }
 

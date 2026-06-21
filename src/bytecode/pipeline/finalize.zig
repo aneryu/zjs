@@ -132,7 +132,6 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
     // it lets the register-resident dispatch drop the per-op fall-off-end bounds
     // check, matching qjs (whose parser terminates every function with a return).
     const byte_code_off = layout.reserve(u8, lowered.code.len + 1);
-    const fusion_cold_off = layout.reserve(u8, lowered.code.len);
     const pc2line_off = layout.reserve(u8, lowered.pc2line_buf.len);
     const source_off = layout.reserve(u8, source_len);
     const var_is_lexical_off = layout.reserve(bool, fd.vars.len);
@@ -157,9 +156,6 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
         if (fd.func_kind == .generator or fd.func_kind == .async_generator) {
             fb.generator_body_pc = findGeneratorBodyMarker(lowered.code) orelse 0;
         }
-        const fusion_cold = fb_mod.blockSlice(block, u8, fusion_cold_off, lowered.code.len);
-        @memset(fusion_cold, 0);
-        fb.fusion_cold = fusion_cold;
     }
     if (lowered.atom_operands.len > 0) {
         const atom_operands = fb_mod.blockSlice(block, atom.Atom, atom_operands_off, lowered.atom_operands.len);
@@ -612,7 +608,6 @@ fn runPhases(
     // Phase 3c: compute_stack_size over resolved QuickJS-format bytecode.
     function.stack_size = try computeStackSizeForCurrentBytecode(function.code);
     try function.allocateIcSlots();
-    try function.allocateFusionCold();
 
     // Defensive fall-off-end backstop for the register-resident dispatch (which
     // dropped the per-op bounds check): parser output always ends in a cold

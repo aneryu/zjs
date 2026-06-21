@@ -7,7 +7,6 @@
 //! The dispatcher handles QuickJS-format opcodes emitted by the parser after
 //! the bytecode pipeline has removed temporary opcodes.
 
-const fusion_stats = @import("vm_fusion_stats.zig");
 const builtin = @import("builtin");
 const std = @import("std");
 
@@ -841,26 +840,6 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 if (opc != op.pow and arith_vm.tryInt32Binary(stack, opc)) {
                     continue;
                 }
-                if (fusion_stats.fusions_enabled and opc == op.add) {
-                    // Fusion failures (string-append OOM in particular) must
-                    // reach the frame's catch handler just like the unfused
-                    // `binaryVm` path would.
-                    const fused_local_append = arith_vm.tryFuseLocalStringAppend(ctx, stack, function, global, frame, sync_global_lexical_locals) catch |err| {
-                        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
-                        return err;
-                    };
-                    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseLocalStringAppend, fused_local_append)) continue;
-                    const fused_global_append = arith_vm.tryFuseGlobalStringAppend(ctx, stack, function, global, frame, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object) catch |err| {
-                        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
-                        return err;
-                    };
-                    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseGlobalStringAppend, fused_global_append)) continue;
-                    const fused_global_add = arith_vm.tryFuseGlobalDataAdd(ctx, stack, function, global, frame, eval_local_names, eval_var_ref_names, eval_with_object) catch |err| {
-                        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
-                        return err;
-                    };
-                    if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseGlobalDataAdd, fused_global_add)) continue;
-                }
                 switch (try arith_vm.binaryVm(ctx, stack, frame, catch_target, opc, output, global)) {
                     .done => {},
                     .continue_loop => continue,
@@ -968,12 +947,10 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             // ---- Control flow ----
             op.goto => {
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                if (fusion_stats.fusions_enabled and stop_before_pc == null and fusion_stats.counted(.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch, vm_property_globals.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto, eval_local_names, eval_var_ref_names, eval_with_object))) continue;
                 control_vm.jump32(function, frame);
             },
             op.goto16 => {
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                if (fusion_stats.fusions_enabled and stop_before_pc == null and fusion_stats.counted(.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch, vm_property_globals.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto16, eval_local_names, eval_var_ref_names, eval_with_object))) continue;
                 control_vm.jump16(function, frame);
             },
             op.goto8 => {

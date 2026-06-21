@@ -1,4 +1,3 @@
-const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
@@ -535,70 +534,6 @@ pub fn constructArrayBufferNativeRecord(
         }
     }
     return try qjsArrayBufferConstructWithPrototype(ctx, output, global, args, prototype, shared);
-}
-
-pub fn tryFuseTypedArrayFromArrayBufferConstructorSequence(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    array_buffer_constructor: core.JSValue,
-    array_buffer_new_target: core.JSValue,
-    args: []const core.JSValue,
-) !?core.JSValue {
-    if (args.len != 1) return null;
-    if (!array_buffer_constructor.sameValue(array_buffer_new_target)) return null;
-    if (frame.pc + 3 > function.code.len) return null;
-    if (function.code[frame.pc] != op.call_constructor) return null;
-    if (readInt(u16, function.code[frame.pc + 1 ..][0..2]) != 1) return null;
-    if (stack.values.len < 2) return null;
-
-    const outer_constructor = stack.values[stack.values.len - 2];
-    const outer_new_target = stack.values[stack.values.len - 1];
-    if (!outer_constructor.sameValue(outer_new_target)) return null;
-
-    const buffer_constructor_object = callableObjectFromValue(array_buffer_constructor) orelse return null;
-    const native_ref = core.function.decodeNativeBuiltinId(buffer_constructor_object.nativeFunctionIdSlot().*) orelse return null;
-    if (native_ref.domain != .buffer) return null;
-    const shared = switch (native_ref.id) {
-        @intFromEnum(method_ids.buffer.ConstructorMethod.array_buffer) => false,
-        @intFromEnum(method_ids.buffer.ConstructorMethod.shared_array_buffer) => true,
-        else => return null,
-    };
-
-    const typed_array_constructor_object = callableObjectFromValue(outer_constructor) orelse return null;
-    const element_size_u32 = typed_array_constructor_object.typedArrayElementSize();
-    const element_kind = typed_array_constructor_object.typedArrayKind();
-    if (element_size_u32 == 0 or element_kind == 0) return null;
-
-    const byte_length_i32 = args[0].asInt32() orelse return null;
-    if (byte_length_i32 < 0) return null;
-    const byte_length: usize = @intCast(byte_length_i32);
-    const element_size: usize = @intCast(element_size_u32);
-    if (byte_length % element_size != 0) return null;
-    const typed_length = @divExact(byte_length, element_size);
-    if (typed_length > @as(usize, @intCast(std.math.maxInt(u32)))) return null;
-
-    const buffer_prototype = buffer_constructor_object.getOwnDataObjectBorrowed(core.atom.ids.prototype) orelse return null;
-    const typed_array_prototype = typed_array_constructor_object.getOwnDataObjectBorrowed(core.atom.ids.prototype) orelse return null;
-
-    const backing_buffer = if (shared)
-        try core.typed_array.sharedArrayBufferConstructLength(ctx.runtime, byte_length, null, buffer_prototype)
-    else
-        try core.typed_array.arrayBufferConstructLength(ctx.runtime, byte_length, null, buffer_prototype);
-    var backing_buffer_owned = true;
-    errdefer if (backing_buffer_owned) backing_buffer.free(ctx.runtime);
-    const backing_buffer_object = objectFromValue(backing_buffer) orelse return error.TypeError;
-    backing_buffer_owned = false;
-    const result = try core.typed_array.typedArrayConstructFullBufferOwned(ctx.runtime, element_size_u32, element_kind, backing_buffer, backing_buffer_object, typed_array_prototype);
-    errdefer result.free(ctx.runtime);
-
-    const dropped_new_target = try stack.pop();
-    const dropped_constructor = try stack.pop();
-    frame.pc += 3;
-    dropped_new_target.free(ctx.runtime);
-    dropped_constructor.free(ctx.runtime);
-    return result;
 }
 
 pub const TypedArrayLengthPrintStore = struct {

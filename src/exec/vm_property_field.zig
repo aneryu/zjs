@@ -1,6 +1,5 @@
 //! Property field and array-element opcode handlers (get/put_field, get/put_array_el, in/instanceof, to_prop_key).
 
-const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const core = @import("../core/root.zig");
@@ -271,6 +270,7 @@ pub noinline fn field(
     opc: u8,
     sync_global_lexical_locals: bool,
 ) !Step {
+    _ = sync_global_lexical_locals;
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
     switch (opc) {
@@ -310,15 +310,8 @@ pub noinline fn field(
             stack.pushOwnedAssumeCapacity(value);
         },
         op.get_field2 => {
-            const site_pc = frame.pc - 5;
             const obj = try stackValueFromTop(stack, 0);
             defer obj.free(ctx.runtime);
-            if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseRegExpTestConstStringFromField2, try tryFuseRegExpTestConstStringFromField2(ctx, function, frame, stack, obj, atom_id))) return .done;
-            if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseNumberStaticLiteralCallFromField2, try tryFuseNumberStaticLiteralCallFromField2(ctx, output, function, frame, stack, obj, atom_id, site_pc))) return .done;
-            if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseMathMinMaxPrimitiveCallFromField2, try tryFuseMathMinMaxPrimitiveCallFromField2(ctx, function, frame, stack, obj, atom_id))) return .done;
-            if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseStringFromCharCodeInt32CallFromField2, try tryFuseStringFromCharCodeInt32CallFromField2(ctx, function, frame, stack, obj, atom_id, site_pc))) return .done;
-            if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseStringSliceConstLocalStoreFromField2, try tryFuseStringSliceConstLocalStoreFromField2(ctx, function, global, frame, stack, obj, atom_id, sync_global_lexical_locals))) return .done;
-            if (fusion_stats.fusions_enabled and fusion_stats.counted(.tryFuseArrayPushCallFromField2, try tryFuseArrayPushCallFromField2(ctx, function, global, frame, stack, obj, atom_id, sync_global_lexical_locals))) return .done;
             if (qjsGetFieldFast(ctx.runtime, obj, atom_id)) |value| {
                 stack.pushAssumeCapacity(value);
                 return .done;
@@ -449,84 +442,6 @@ fn setArrayLengthForPutFieldFastPath(
     return true;
 }
 
-fn tryFuseMathMinMaxPrimitiveCallFromField2(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
-    receiver: core.JSValue,
-    atom_id: core.Atom,
-) !bool {
-    const method = ownDataPropertyValueMaterializedForFastPath(ctx.runtime, receiver, atom_id) orelse return false;
-    const method_object = objectFromValue(method) orelse return false;
-    const native_ref = core.function.decodeNativeBuiltinId(method_object.nativeFunctionIdSlot().*) orelse return false;
-    if (native_ref.domain != .math) return false;
-    const is_max = switch (native_ref.id) {
-        7 => false,
-        8 => true,
-        else => return false,
-    };
-
-    const arg0 = borrowedSimpleCallArg(frame, function, frame.pc) orelse return false;
-    const arg1 = borrowedSimpleCallArg(frame, function, arg0.next_pc) orelse return false;
-    const code = function.code;
-    if (arg1.next_pc + 3 > code.len or code[arg1.next_pc] != op.call_method) return false;
-    if (readInt(u16, code[arg1.next_pc + 1 ..][0..2]) != 2) return false;
-
-    const result_number = mathMinMaxPrimitive2(arg0.value, arg1.value, is_max) orelse return false;
-    const dropped_receiver = try stack.pop();
-    dropped_receiver.free(ctx.runtime);
-    const result = value_ops.numberToValue(result_number);
-    errdefer result.free(ctx.runtime);
-    try stack.pushOwned(result);
-    frame.pc = arg1.next_pc + 3;
-    return true;
-}
-
-fn tryFuseStringFromCharCodeInt32CallFromField2(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
-    receiver: core.JSValue,
-    atom_id: core.Atom,
-    site_pc: usize,
-) !bool {
-    const native_ref = functionOwnNativeBuiltinRefForFastPath(function, site_pc, ctx.runtime, receiver, atom_id) orelse return false;
-    if (native_ref.domain != .string or native_ref.id != @intFromEnum(method_ids.string.StaticMethod.from_char_code)) return false;
-
-    const argument = stringFromCharCodeInt32Arg(function, frame, frame.pc) orelse return false;
-    const code = function.code;
-    if (argument.next_pc + 3 > code.len or code[argument.next_pc] != op.call_method) return false;
-    if (readInt(u16, code[argument.next_pc + 1 ..][0..2]) != 1) return false;
-
-    const dropped_receiver = try stack.pop();
-    dropped_receiver.free(ctx.runtime);
-    const result = try stringFromCharCodeInt32Value(ctx.runtime, argument.value);
-    errdefer result.free(ctx.runtime);
-    try stack.pushOwned(result);
-    frame.pc = argument.next_pc + 3;
-    return true;
-}
-
-fn tryFuseStringSliceConstLocalStoreFromField2(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
-    receiver: core.JSValue,
-    atom_id: core.Atom,
-    sync_global_lexical_locals: bool,
-) !bool {
-    const decoded = decodeStringSliceConstLocalStore(ctx, function, global, frame, receiver, atom_id, frame.pc) orelse return false;
-    if (stack.values.len == 0) return false;
-    try storeStringSliceConstLocal(ctx, function, global, frame, receiver, decoded, sync_global_lexical_locals);
-    const receiver_owned = try stack.pop();
-    receiver_owned.free(ctx.runtime);
-    return true;
-}
-
 fn stringFromCharCodeInt32Value(rt: *core.JSRuntime, code: i32) !core.JSValue {
     const unit: u16 = @intCast(@as(u32, @bitCast(code)) & 0xffff);
     if (unit <= 0xff) {
@@ -535,71 +450,6 @@ fn stringFromCharCodeInt32Value(rt: *core.JSRuntime, code: i32) !core.JSValue {
         return (try core.string.String.createAscii(rt, &.{byte})).value();
     }
     return (try core.string.String.createUtf16(rt, &.{unit})).value();
-}
-
-fn tryFuseNumberStaticLiteralCallFromField2(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
-    receiver: core.JSValue,
-    atom_id: core.Atom,
-    site_pc: usize,
-) !bool {
-    const pc = frame.pc;
-    const native_ref = functionOwnNativeBuiltinRefForFastPath(function, site_pc, ctx.runtime, receiver, atom_id) orelse return false;
-    if (native_ref.domain != .number) return false;
-
-    const code = function.code;
-    const number_static = method_ids.number.StaticMethod;
-    const number_parse = core.number;
-    var call_end_pc: usize = undefined;
-    const result_number = switch (native_ref.id) {
-        @intFromEnum(number_static.parse_int) => blk: {
-            if (pc + 5 > code.len or code[pc] != op.push_atom_value) return false;
-            const string_atom = readInt(u32, code[pc + 1 ..][0..4]);
-            var atom_buf: [10]u8 = undefined;
-            const text = atomAsciiText(ctx.runtime, string_atom, &atom_buf) orelse return false;
-            const radix_operand = immediateInt32Operand(code, pc + 5) orelse return false;
-            if (radix_operand.next_pc + 3 > code.len or code[radix_operand.next_pc] != op.call_method) return false;
-            if (readInt(u16, code[radix_operand.next_pc + 1 ..][0..2]) != 2) return false;
-            call_end_pc = radix_operand.next_pc + 3;
-            break :blk number_parse.parseIntLatin1Bytes(text, radix_operand.value);
-        },
-        @intFromEnum(number_static.parse_float) => blk: {
-            if (pc + 8 > code.len or code[pc] != op.push_atom_value) return false;
-            const string_atom = readInt(u32, code[pc + 1 ..][0..4]);
-            var atom_buf: [10]u8 = undefined;
-            const text = atomAsciiText(ctx.runtime, string_atom, &atom_buf) orelse return false;
-            const call_pc = pc + 5;
-            if (code[call_pc] != op.call_method) return false;
-            if (readInt(u16, code[call_pc + 1 ..][0..2]) != 1) return false;
-            call_end_pc = call_pc + 3;
-            break :blk number_parse.parseFloatLatin1Bytes(text);
-        },
-        else => return false,
-    };
-
-    const dropped_receiver = try stack.pop();
-    dropped_receiver.free(ctx.runtime);
-    const result = value_ops.numberToValue(result_number);
-    errdefer result.free(ctx.runtime);
-    if (call_end_pc < code.len and code[call_end_pc] == op.call1 and stack.values.len >= 1) {
-        const outer_callee = try stackValueFromTop(stack, 0);
-        defer outer_callee.free(ctx.runtime);
-        if (isHostOutputFunctionValue(ctx.runtime, outer_callee)) {
-            const dropped_callee = try stack.pop();
-            dropped_callee.free(ctx.runtime);
-            defer result.free(ctx.runtime);
-            try builtin_glue.printHostOutputArgs(ctx.runtime, output, &.{result});
-            try finishUndefinedCallResult(stack, function, frame, call_end_pc + 1);
-            return true;
-        }
-    }
-    try stack.pushOwned(result);
-    frame.pc = call_end_pc;
-    return true;
 }
 
 pub noinline fn arrayElement(
@@ -781,80 +631,6 @@ fn putInt32TypedArrayElementFast(rt: *core.JSRuntime, obj: core.JSValue, key: co
     if (index >= fixed_len) return true;
     const offset = byte_offset + @as(usize, index) * 4;
     std.mem.writeInt(i32, bytes[offset..][0..4], value_int, .little);
-    return true;
-}
-
-fn tryFuseRegExpTestConstStringFromField2(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
-    receiver: core.JSValue,
-    method_atom: core.Atom,
-) !bool {
-    if (!value_ops.atomNameEql(ctx.runtime, method_atom, "test")) return false;
-    const code = function.code;
-    const pc = frame.pc;
-    if (pc + 8 > code.len) return false;
-    if (code[pc] != op.push_atom_value) return false;
-    const input_atom = readInt(u32, code[pc + 1 ..][0..4]);
-    if (code[pc + 5] != op.call_method or readInt(u16, code[pc + 6 ..][0..2]) != 1) return false;
-
-    const regexp_object = objectFromValue(receiver) orelse return false;
-    if (regexp_object.class_id != core.class.ids.regexp) return false;
-    if (!fastRegExpPrototypeMethodIsDefault(ctx.runtime, receiver, method_atom, @intFromEnum(method_ids.regexp.PrototypeMethod.test_))) return false;
-
-    const input_value = (try atomStringValueForFastPath(ctx.runtime, input_atom)) orelse return false;
-    defer input_value.free(ctx.runtime);
-    const matched = try regexp_fastpath.qjsRegExpTestFastNoResult(ctx, regexp_object, input_value) orelse return false;
-
-    const stacked_receiver = try stack.pop();
-    stacked_receiver.free(ctx.runtime);
-    const next_pc = pc + 8;
-    try stack.pushOwned(core.JSValue.boolean(matched));
-    frame.pc = next_pc;
-    return true;
-}
-
-fn tryFuseArrayPushCallFromField2(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
-    receiver: core.JSValue,
-    method_atom: core.Atom,
-    sync_global_lexical_locals: bool,
-) !bool {
-    if (!value_ops.atomNameEql(ctx.runtime, method_atom, "push")) return false;
-    if (!fastArrayPrototypeMethodIsDefault(receiver, method_atom, @intFromEnum(method_ids.array.PrototypeMethod.push))) return false;
-
-    const object = objectFromValue(receiver) orelse return false;
-    if (object.proxyTarget() != null or object.hasExoticMethods()) return false;
-    if (object.arrayLength() >= core.array.max_array_length) return false;
-
-    const code = function.code;
-    const call_arg = borrowedSimpleCallArg(frame, function, frame.pc) orelse return false;
-    const call_pc = call_arg.next_pc;
-    if (call_pc + 3 > code.len or code[call_pc] != op.call_method) return false;
-    if (readInt(u16, code[call_pc + 1 ..][0..2]) != 1) return false;
-
-    const index = object.arrayLength();
-    if (!try object.appendDenseArrayIndex(ctx.runtime, index, core.atom.atomFromUInt32(index), call_arg.value)) return false;
-    const result = array_ops.lengthIndexValue(index + 1);
-
-    const stacked_receiver = try stack.pop();
-    stacked_receiver.free(ctx.runtime);
-
-    const after_call_pc = call_pc + 3;
-    if (decodeOptionalLocalCompletionTail(function, frame, after_call_pc)) |completion_tail| {
-        try storeLocalCompletionBorrowedValue(ctx, function, global, frame, completion_tail.completion_put, result, sync_global_lexical_locals);
-        frame.pc = completion_tail.tail_pc;
-        return true;
-    }
-
-    try stack.pushOwned(result);
-    frame.pc = after_call_pc;
     return true;
 }
 

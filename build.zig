@@ -5,10 +5,6 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const zjs_enable_ic = b.option(bool, "zjs_enable_ic", "Enable shape-keyed inline caches") orelse true;
     const zjs_enable_opcode_profile = b.option(bool, "zjs_enable_opcode_profile", "Enable per-opcode profiling scopes") orelse false;
-    // Hand-written runtime `tryFuse*` multi-instruction fast paths. When off,
-    // the hot-opcode dispatch skips the speculative pattern matchers entirely
-    // (used to A/B the per-execution fusion tax on non-matching code).
-    const zjs_enable_fusions = b.option(bool, "zjs_enable_fusions", "Enable runtime tryFuse* opcode fusion fast paths") orelse false;
     // Default: the 16-byte (payload+tag) JSValue layout — the portable
     // reference representation that does not assume a 48-bit virtual address
     // space. The 8-byte NaN-boxed layout stays selectable (and guarded by the
@@ -36,7 +32,6 @@ pub fn build(b: *std.Build) void {
     const engine_options = b.addOptions();
     engine_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
     engine_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
-    engine_options.addOption(bool, "zjs_enable_fusions", zjs_enable_fusions);
     engine_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     engine_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     engine_options.addOption(bool, "zjs_recursive_dispatch", zjs_recursive_dispatch);
@@ -57,7 +52,6 @@ pub fn build(b: *std.Build) void {
     const plugin_fixture_options = b.addOptions();
     plugin_fixture_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
     plugin_fixture_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
-    plugin_fixture_options.addOption(bool, "zjs_enable_fusions", zjs_enable_fusions);
     plugin_fixture_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     plugin_fixture_options.addOption(bool, "zjs_recursive_dispatch", zjs_recursive_dispatch);
     plugin_fixture_options.addOption(bool, "zjs_tailcall_dispatch", zjs_tailcall_dispatch);
@@ -473,7 +467,6 @@ pub fn build(b: *std.Build) void {
     const test_options = b.addOptions();
     test_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
     test_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
-    test_options.addOption(bool, "zjs_enable_fusions", zjs_enable_fusions);
     test_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     test_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     test_options.addOption(bool, "zjs_recursive_dispatch", zjs_recursive_dispatch);

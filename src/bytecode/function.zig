@@ -170,11 +170,6 @@ pub const Bytecode = struct {
     ic_slots: []ic.Slot = &.{},
     ic_site_ids: []usize = &.{},
     ic_sites: []IcSite = &.{},
-    /// Per-pc saturating fail counters for the VM fusion matchers. Once a
-    /// site reaches the threshold the matchers stop being retried there.
-    /// Empty when not allocated (matchers then always run, the pre-cache
-    /// behavior). Mutated through the slice at runtime like `ic_slots`.
-    fusion_cold: []u8 = &.{},
     direct_call_sites: []DirectCallSite = &.{},
     direct_call_sites_capacity: usize = 0,
     call_sites: []CallSite = &.{},
@@ -223,22 +218,7 @@ pub const Bytecode = struct {
         self.deinitIcSlots(rt);
         self.deinitDirectCallSites();
         self.deinitCallSites();
-        self.deinitFusionCold();
         if (owns_pc2line_buf and pc2line_buf.len != 0) self.memory.free(u8, pc2line_buf);
-    }
-
-    pub fn allocateFusionCold(self: *Bytecode) !void {
-        self.deinitFusionCold();
-        if (self.code.len == 0) return;
-        const map = try self.memory.alloc(u8, self.code.len);
-        @memset(map, 0);
-        self.fusion_cold = map;
-    }
-
-    fn deinitFusionCold(self: *Bytecode) void {
-        const map = self.fusion_cold;
-        self.fusion_cold = &.{};
-        if (map.len != 0) self.memory.free(u8, map);
     }
 
     pub fn allocateIcSlots(self: *Bytecode) !void {
@@ -508,7 +488,6 @@ pub fn asBytecodeView(fb: *const FunctionBytecode, rt: *runtime.JSRuntime) Bytec
         .ic_site_ids = fb.ic_site_ids,
         .ic_sites = fb.ic_sites,
         .call_sites = fb.call_sites,
-        .fusion_cold = fb.fusion_cold,
         .constants = .{ .memory = &rt.memory, .atoms = &rt.atoms, .values = fb.cpool },
     };
 }
