@@ -1018,6 +1018,173 @@ test "forward-ref lexical captured through nested closure still honors TDZ befor
     try std.testing.expectEqual(@as(i32, 2), result.asInt32().?);
 }
 
+test "global closure get before top-level lexical initialization honors TDZ" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var let_output_buffer: [64]u8 = undefined;
+    var let_output = std.Io.Writer.fixed(&let_output_buffer);
+    const let_result = try js.evalWithOutput(
+        \\function f() { return x + 1; }
+        \\try { f(); print("no"); } catch (e) { print(e.name); }
+        \\let x;
+    , &let_output);
+    defer let_result.free(js.runtime);
+    try std.testing.expect(let_result.isUndefined());
+    try std.testing.expectEqualStrings("ReferenceError\n", let_output.buffered());
+
+    var const_output_buffer: [64]u8 = undefined;
+    var const_output = std.Io.Writer.fixed(&const_output_buffer);
+    const const_result = try js.evalWithOutput(
+        \\function f() { return y + 1; }
+        \\try { f(); print("no"); } catch (e) { print(e.name); }
+        \\const y = 1;
+    , &const_output);
+    defer const_result.free(js.runtime);
+    try std.testing.expect(const_result.isUndefined());
+    try std.testing.expectEqualStrings("ReferenceError\n", const_output.buffered());
+}
+
+test "global closure set before top-level lexical initialization honors TDZ" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function f() { x = 1; }
+        \\try { f(); print("no"); } catch (e) { print(e.name); }
+        \\let x;
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("ReferenceError\n", output.buffered());
+}
+
+test "global closure update before top-level lexical initialization honors TDZ" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function f() { x++; }
+        \\try { f(); print("no"); } catch (e) { print(e.name); }
+        \\let x;
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("ReferenceError\n", output.buffered());
+}
+
+test "Annex B block function updates existing global function binding" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\{
+        \\  function f() { return "inner declaration"; }
+        \\}
+        \\function f() {
+        \\  return "outer declaration";
+        \\}
+        \\print(f());
+    , &output);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("inner declaration\n", output.buffered());
+}
+
+test "Annex B eval block function updates global function binding mirrors" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var direct_output_buffer: [64]u8 = undefined;
+    var direct_output = std.Io.Writer.fixed(&direct_output_buffer);
+    const direct_result = try js.evalWithOutput(
+        \\{
+        \\  function f() { return "first declaration"; }
+        \\}
+        \\eval('{ function f() { return "second declaration"; } }');
+        \\print(f());
+    , &direct_output);
+    defer direct_result.free(js.runtime);
+    try std.testing.expect(direct_result.isUndefined());
+    try std.testing.expectEqualStrings("second declaration\n", direct_output.buffered());
+
+    var indirect_output_buffer: [64]u8 = undefined;
+    var indirect_output = std.Io.Writer.fixed(&indirect_output_buffer);
+    const indirect_result = try js.evalWithOutput(
+        \\(0, eval)('{ function g() { return "inner declaration"; } } print(g()); function g() { return "outer declaration"; }');
+    , &indirect_output);
+    defer indirect_result.free(js.runtime);
+    try std.testing.expect(indirect_result.isUndefined());
+    try std.testing.expectEqualStrings("inner declaration\n", indirect_output.buffered());
+}
+
+test "Annex B direct eval global function does not block later script lexical declaration" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const eval_result = try js.eval(
+        \\eval('if (true) { function test262Fn() {} }');
+    );
+    defer eval_result.free(js.runtime);
+    try std.testing.expect(eval_result.isUndefined());
+
+    const lexical_result = try js.eval(
+        \\let test262Fn = 1;
+    );
+    defer lexical_result.free(js.runtime);
+    try std.testing.expect(lexical_result.isUndefined());
+
+    var output_buffer: [16]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const read_result = try js.evalWithOutput(
+        \\print(test262Fn);
+    , &output);
+    defer read_result.free(js.runtime);
+    try std.testing.expect(read_result.isUndefined());
+    try std.testing.expectEqualStrings("1\n", output.buffered());
+}
+
+test "sloppy global assignment creates deletable object property" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var this_output_buffer: [64]u8 = undefined;
+    var this_output = std.Io.Writer.fixed(&this_output_buffer);
+    const this_result = try js.evalWithOutput(
+        \\x = 1;
+        \\print(delete this.x);
+        \\print(Object.prototype.hasOwnProperty.call(this, "x"));
+    , &this_output);
+    defer this_result.free(js.runtime);
+    try std.testing.expect(this_result.isUndefined());
+    try std.testing.expectEqualStrings("true\nfalse\n", this_output.buffered());
+
+    var global_output_buffer: [64]u8 = undefined;
+    var global_output = std.Io.Writer.fixed(&global_output_buffer);
+    const global_result = try js.evalWithOutput(
+        \\y = 1;
+        \\print(delete globalThis.y);
+        \\print(Object.prototype.hasOwnProperty.call(globalThis, "y"));
+    , &global_output);
+    defer global_result.free(js.runtime);
+    try std.testing.expect(global_result.isUndefined());
+    try std.testing.expectEqualStrings("true\nfalse\n", global_output.buffered());
+}
+
 test "forward-ref top-level lexical threads through three closure levels" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -3110,11 +3277,13 @@ test "vm collection constructors use registered prototype methods" {
     defer function.deinit(rt);
     const map_atom = try rt.internAtom("Map");
     defer rt.atoms.free(map_atom);
-    var bytes: [8]u8 = undefined;
+    var bytes: [6]u8 = undefined;
     bytes[0] = op.get_var;
-    std.mem.writeInt(u32, bytes[1..5], map_atom, .little);
-    bytes[5] = op.call_constructor;
-    std.mem.writeInt(u16, bytes[6..8], 0, .little);
+    std.mem.writeInt(u16, bytes[1..3], 0, .little);
+    bytes[3] = op.call_constructor;
+    std.mem.writeInt(u16, bytes[4..6], 0, .little);
+    function.var_ref_names = try rt.memory.alloc(core.Atom, 1);
+    function.var_ref_names[0] = rt.atoms.dup(map_atom);
     try function.setCode(&bytes);
 
     var vm_instance = engine.exec.Vm.init(ctx);
@@ -3716,7 +3885,11 @@ test "vm call handler accepts allocator-backed argument lists" {
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
     try bytes.append(rt.memory.allocator, op.get_var);
-    try bytes.appendSlice(rt.memory.allocator, std.mem.asBytes(&print_key));
+    var print_ref: [2]u8 = undefined;
+    std.mem.writeInt(u16, &print_ref, 0, .little);
+    try bytes.appendSlice(rt.memory.allocator, &print_ref);
+    function.var_ref_names = try rt.memory.alloc(core.Atom, 1);
+    function.var_ref_names[0] = rt.atoms.dup(print_key);
     var arg: i32 = 1;
     while (arg <= 40) : (arg += 1) {
         try bytes.append(rt.memory.allocator, op.push_i32);
@@ -4780,6 +4953,35 @@ test "host commonjs wrapper passes directory dirname" {
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("", stream.buffered());
+}
+
+test "module graph evaluates block var declarations as module bindings" {
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+    const registry = engine.builtins.registry;
+    registry.registerStandardGlobalsDefault();
+    js.runtime.install_standard_globals_cb = registry.installStandardGlobals;
+    js.runtime.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+
+    var output_buffer: [128]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileModuleGraphWithOutput(
+        \\if (true) {
+        \\  var proto = {};
+        \\  print(typeof proto);
+        \\  print(proto !== null);
+        \\}
+    ,
+        &output,
+        "block-var-module.mjs",
+        std.testing.io,
+        std.testing.allocator,
+        2048,
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("object\ntrue\n", output.buffered());
 }
 
 test "import bytes module creates immutable ArrayBuffer backing store" {

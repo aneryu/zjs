@@ -93,8 +93,7 @@ fn isAtomLabelU8Op(op_id: u8) bool {
         op_id == opcode.op.with_put_var or
         op_id == opcode.op.with_delete_var or
         op_id == opcode.op.with_make_ref or
-        op_id == opcode.op.with_get_ref or
-        op_id == opcode.op.with_get_ref_undef;
+        op_id == opcode.op.with_get_ref;
 }
 
 const ShortSlotForm = struct {
@@ -205,34 +204,6 @@ fn loweredInstrSize(code: []const u8, pc: usize, use_short_opcodes: bool) usize 
         if (selectShortSlot(op, idx)) |form| return form.size;
     }
     return instrSize(op);
-}
-
-const GetLocShort = struct {
-    idx: u2,
-    size: usize,
-};
-
-fn getLocShort(code: []const u8, pc: usize, use_short_opcodes: bool) ?GetLocShort {
-    if (!use_short_opcodes or pc >= code.len) return null;
-    const op = code[pc];
-    if (op >= opcode.op.get_loc0 and op <= opcode.op.get_loc3) {
-        return .{ .idx = @intCast(op - opcode.op.get_loc0), .size = 1 };
-    }
-    if (op == opcode.op.get_loc and pc + 3 <= code.len) {
-        const idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little);
-        if (idx < 4) return .{ .idx = @intCast(idx), .size = 3 };
-    }
-    return null;
-}
-
-fn getLoc0Loc1PairSize(code: []const u8, pc: usize, use_short_opcodes: bool) ?usize {
-    const first = getLocShort(code, pc, use_short_opcodes) orelse return null;
-    if (first.idx != 0) return null;
-    const second_pc = pc + first.size;
-    if (hasJumpTargetTo(code, second_pc)) return null;
-    const second = getLocShort(code, second_pc, use_short_opcodes) orelse return null;
-    if (second.idx != 1) return null;
-    return first.size + second.size;
 }
 
 fn undefinedDropPairSize(code: []const u8, pc: usize) ?usize {
@@ -448,8 +419,6 @@ fn computeLayout(ctx: *const JSContext, positions: []usize, sizes: []usize, use_
                 0
             else if (redundantReturnUndefSize(code, pc) != null)
                 0
-            else if (getLoc0Loc1PairSize(code, pc, use_short_opcodes) != null)
-                1
             else if (matchAddLocPeephole(code, pc)) |_|
                 loweredInstrSize(code, pc + 3, use_short_opcodes) + 2
             else if (isAtomLabelU8Op(op))
@@ -463,7 +432,7 @@ fn computeLayout(ctx: *const JSContext, positions: []usize, sizes: []usize, use_
 
             sizes[pc] = new_size;
             if (old_size != new_size) changed = true;
-            const next_pc = pc + (undefinedDropPairSize(code, pc) orelse (redundantReturnUndefSize(code, pc) orelse (getLoc0Loc1PairSize(code, pc, use_short_opcodes) orelse (if (matchAddLocPeephole(code, pc)) |p| p.total_size else in_size))));
+            const next_pc = pc + (undefinedDropPairSize(code, pc) orelse (redundantReturnUndefSize(code, pc) orelse (if (matchAddLocPeephole(code, pc)) |p| p.total_size else in_size)));
             var boundary_pc = pc + 1;
             while (boundary_pc <= next_pc and boundary_pc < positions.len) : (boundary_pc += 1) {
                 positions[boundary_pc] = out_pc + new_size;
@@ -668,10 +637,6 @@ pub fn run(ctx: *JSContext) !void {
             i += pair_size;
         } else if (redundantReturnUndefSize(func.code, i)) |return_size| {
             i += return_size;
-        } else if (getLoc0Loc1PairSize(func.code, i, use_short_opcodes)) |pair_size| {
-            output[out_idx] = opcode.op.get_loc0_loc1;
-            out_idx += 1;
-            i += pair_size;
         } else if (matchAddLocPeephole(func.code, i)) |p| {
             try emitLoweredInstruction(func.code, i + 3, output, &out_idx, use_short_opcodes);
             output[out_idx] = opcode.op.add_loc;

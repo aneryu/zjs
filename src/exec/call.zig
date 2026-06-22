@@ -42,9 +42,15 @@ fn hostResult(result: anytype) HostError!switch (@typeInfo(@TypeOf(result))) {
     return result catch |err| return @errorCast(err);
 }
 
-fn restoreEvalGlobalLexicals(ctx: *core.JSContext, global: *core.Object, saved_lexicals: ?*core.Object) !void {
-    defer ctx.lexicals = saved_lexicals;
-    try global.setGlobalLexicals(ctx.runtime, ctx.lexicals);
+fn restoreEvalGlobalLexicals(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    saved_lexicals: ?*core.Object,
+    keep_active_lexicals: bool,
+) !void {
+    const active_lexicals = ctx.lexicals;
+    try global.setGlobalLexicals(ctx.runtime, active_lexicals);
+    ctx.lexicals = if (keep_active_lexicals) active_lexicals else saved_lexicals;
 }
 
 pub fn returnThis(this_value: core.JSValue) core.JSValue {
@@ -3344,6 +3350,7 @@ pub fn qjsEvalGlobalScriptSource(
 
     const context_global = ctx.global;
     const use_global_lexicals = context_global == null or context_global.? != global;
+    const keep_active_lexicals = context_global == null;
     const saved_lexicals = ctx.lexicals;
     if (use_global_lexicals) ctx.lexicals = global.globalLexicals();
 
@@ -3359,7 +3366,7 @@ pub fn qjsEvalGlobalScriptSource(
 
     if (use_global_lexicals) {
         var rooted_result = result catch |err| {
-            try restoreEvalGlobalLexicals(ctx, global, saved_lexicals);
+            try restoreEvalGlobalLexicals(ctx, global, saved_lexicals, keep_active_lexicals);
             return err;
         };
         errdefer rooted_result.free(ctx.runtime);
@@ -3372,7 +3379,7 @@ pub fn qjsEvalGlobalScriptSource(
         };
         ctx.runtime.active_value_roots = &root_frame;
         defer ctx.runtime.active_value_roots = root_frame.previous;
-        try restoreEvalGlobalLexicals(ctx, global, saved_lexicals);
+        try restoreEvalGlobalLexicals(ctx, global, saved_lexicals, keep_active_lexicals);
         return rooted_result;
     }
     return result;

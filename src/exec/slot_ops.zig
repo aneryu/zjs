@@ -16,13 +16,18 @@ const object_ops = @import("object_ops.zig");
 const atomIdOrNameEql = call_runtime.atomIdOrNameEql;
 const ensureVarRefsCapacity = frame_mod.ensureVarRefsCapacity;
 const existingGlobalLexicalEnv = call_runtime.existingGlobalLexicalEnv;
+const existingGlobalLexicalEnvForGlobal = call_runtime.existingGlobalLexicalEnvForGlobal;
 const globalLexicalHas = call_runtime.globalLexicalHas;
+const globalLexicalHasForGlobal = call_runtime.globalLexicalHasForGlobal;
+const globalLexicalValue = call_runtime.globalLexicalValue;
+const globalLexicalValueForGlobal = call_runtime.globalLexicalValueForGlobal;
 const handleCatchableRuntimeError = call_runtime.handleCatchableRuntimeError;
 const isFunctionLikeClass = call_runtime.isFunctionLikeClass;
 const pushSlotValue = array_ops.pushSlotValue;
 const pushSlotValueAssumeCapacity = array_ops.pushSlotValueAssumeCapacity;
 const sameObjectIdentity = object_ops.sameObjectIdentity;
 const setGlobalLexicalValue = call_runtime.setGlobalLexicalValue;
+const setGlobalLexicalValueForGlobal = call_runtime.setGlobalLexicalValueForGlobal;
 const throwTdzReference = exception_ops.throwTdzReference;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
 
@@ -66,6 +71,7 @@ pub noinline fn execPutLoc(
     _ = opc;
     // idx < var_count == frame.locals.len by construction (see execGetLoc).
     const value = try stack.pop();
+    if (try assignDirectEvalGlobalVarLocalSlot(ctx, global, function, idx, &frame.locals[idx], value)) return;
     try setSlotValue(ctx, &frame.locals[idx], value);
     if (idx < frame.locals_uninit.len and idx < function.var_is_lexical.len and function.var_is_lexical[idx]) {
         frame.clearLocalUninitialized(idx);
@@ -89,11 +95,34 @@ pub fn execSetLoc(
     // idx < var_count == frame.locals.len by construction (see execGetLoc).
     const value = stack.peek() orelse return error.StackUnderflow;
     defer value.free(ctx.runtime);
+    if (try assignDirectEvalGlobalVarLocalSlot(ctx, global, function, idx, &frame.locals[idx], value.dup())) return;
     try setSlotValue(ctx, &frame.locals[idx], value.dup());
     if (idx < frame.locals_uninit.len and idx < function.var_is_lexical.len and function.var_is_lexical[idx]) {
         frame.clearLocalUninitialized(idx);
     }
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+}
+
+fn assignDirectEvalGlobalVarLocalSlot(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    function: *const bytecode.Bytecode,
+    idx: usize,
+    slot: *core.JSValue,
+    value: core.JSValue,
+) !bool {
+    const atom_id = call_runtime.directEvalGlobalVarLocalAtom(ctx.runtime, function, idx, slot.*) orelse return false;
+    defer value.free(ctx.runtime);
+
+    if (!try global.setOwnWritableDataProperty(ctx.runtime, atom_id, value)) {
+        if (!global.hasOwnProperty(atom_id)) {
+            try defineGlobalFunctionBindingValue(ctx.runtime, global, atom_id, value, true);
+        }
+    }
+
+    const next_value = global.getProperty(atom_id);
+    try setSlotValue(ctx, slot, next_value);
+    return true;
 }
 
 pub fn syncTopLevelGlobalLexicalLocal(
@@ -111,13 +140,13 @@ pub fn syncTopLevelGlobalLexicalLocal(
     if (idx < frame.global_lexical_sync_indices.len) {
         const property_index = frame.global_lexical_sync_indices[idx];
         if (property_index != frame_mod.no_global_lexical_sync_index) {
-            const env = frame.global_lexical_sync_env orelse existingGlobalLexicalEnv(ctx) orelse return;
+            const env = frame.global_lexical_sync_env orelse existingGlobalLexicalEnvForGlobal(ctx, global) orelse return;
             if (try env.setOwnDataPropertyAtForLexicalSync(ctx.runtime, property_index, atom_id, slotValueBorrow(frame.locals[idx]))) return;
         }
     }
     const value = slotValueDup(frame.locals[idx]);
     defer value.free(ctx.runtime);
-    _ = try setGlobalLexicalValue(ctx, atom_id, value);
+    _ = try setGlobalLexicalValueForGlobal(ctx, global, atom_id, value);
 }
 
 pub fn ensureGlobalLexicalSyncSlots(
@@ -128,7 +157,13 @@ pub fn ensureGlobalLexicalSyncSlots(
 ) !bool {
     _ = global;
     if (frame.global_lexical_sync_checked) return frame.global_lexical_sync_slots.len != 0;
-    const env = existingGlobalLexicalEnv(ctx) orelse return false;
+    const env = existingGlobalLexicalEnv(ctx) orelse {
+        // No global lexical env exists => this frame has no lexical slot to
+        // mirror. Latch so the put_loc_check fast path stops re-probing (and
+        // re-entering the noinline slow handler) on every iteration.
+        frame.global_lexical_sync_checked = true;
+        return false;
+    };
     frame.global_lexical_sync_env = env;
     const count = @min(function.var_names.len, function.var_is_lexical.len);
     if (count == 0) {
@@ -144,6 +179,14 @@ pub fn ensureGlobalLexicalSyncSlots(
     var has_sync_slot = false;
     for (function.var_names[0..count], 0..) |atom_id, idx| {
         if (!function.var_is_lexical[idx]) continue;
+        // Only a top-level (scope_level == 0) lexical binding mirrors the
+        // global lexical cell. A block-level shadower (scope_level > 0) that
+        // shares a name with a top-level `let`/`const` is a distinct frame
+        // local and must NOT write through to the global cell. Mirrors qjs,
+        // where a block `let` is `add_scope_var` (a pure frame local) with no
+        // tie to the JS_CLOSURE_GLOBAL_DECL cell (quickjs.c:24380 define_var
+        // gates global on scope_level == body_scope).
+        if (idx < function.var_scope_level.len and function.var_scope_level[idx] != 0) continue;
         if (!env.hasOwnProperty(atom_id)) continue;
         if (env.getOwnDataPropertyLookup(atom_id)) |lookup| {
             indices[idx] = lookup.index;
@@ -237,6 +280,7 @@ pub fn execGetVarRef(
 
 pub fn execGetVarRefMaybeTdz(
     ctx: *core.JSContext,
+    function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     idx: u16,
@@ -246,6 +290,36 @@ pub fn execGetVarRefMaybeTdz(
 ) !bool {
     frame.pc += consume;
     if (idx >= frame.var_refs.len) try ensureVarRefsCapacity(ctx, frame, idx);
+    if (idx < function.var_ref_names.len) {
+        const atom_id = function.var_ref_names[idx];
+        // Only a genuine top-level global_decl var-ref (qjs JS_CLOSURE_GLOBAL_DECL)
+        // reads through the global lexical cell by name. A captured block/loop
+        // lexical (.ref/.local) that merely shares a name must fall through to the
+        // real frame.var_refs cell below so its TDZ check is honored — otherwise a
+        // same-named outer top-level `let` shadows the captured per-iteration TDZ slot.
+        const is_global_decl_ref = idx < function.var_ref_is_global_decl.len and function.var_ref_is_global_decl[idx];
+        if (is_global_decl_ref) {
+            if (globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| {
+                if (lexical_value.isUninitialized()) {
+                    lexical_value.free(ctx.runtime);
+                    const err = throwTdzReference(ctx);
+                    if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
+                        return true;
+                    }
+                    return err;
+                }
+                errdefer lexical_value.free(ctx.runtime);
+                try stack.pushOwned(lexical_value);
+                return false;
+            }
+        }
+        if (call_runtime.closureVarIsNonLexicalGlobalSentinel(function, idx)) {
+            const value = global.getProperty(atom_id);
+            errdefer value.free(ctx.runtime);
+            try stack.pushOwned(value);
+            return false;
+        }
+    }
     const slot = frame.var_refs[idx];
     if (varRefCellFromValue(slot)) |cell| {
         if (cell.varRefIsDeletedSlot().*) {
@@ -338,11 +412,18 @@ pub fn execPutVarRef(
     }
     if (opc == op.put_var_ref_check and idx < function.var_ref_names.len) {
         const atom_id = function.var_ref_names[idx];
-        if (globalLexicalHas(ctx, atom_id)) {
-            _ = setGlobalLexicalValue(ctx, atom_id, value) catch |err| {
+        if (globalLexicalHasForGlobal(ctx, global, atom_id)) {
+            _ = setGlobalLexicalValueForGlobal(ctx, global, atom_id, value) catch |err| {
                 value.free(ctx.runtime);
                 return err;
             };
+            return;
+        }
+        if (call_runtime.closureVarIsNonLexicalGlobalSentinel(function, idx)) {
+            errdefer value.free(ctx.runtime);
+            try publishTopLevelFunctionVarRef(ctx.runtime, function, global, frame, idx, value, eval_global_var_bindings, is_eval_code);
+            try property_ops.setProperty(ctx.runtime, global, atom_id, value);
+            value.free(ctx.runtime);
             return;
         }
     }

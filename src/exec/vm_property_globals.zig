@@ -79,6 +79,7 @@ const fastStringPrototypeMethodIsDefault = property_vm.fastStringPrototypeMethod
 const finishUndefinedCallResult = property_vm.finishUndefinedCallResult;
 const frameHasVarRefBinding = property_vm.frameHasVarRefBinding;
 const functionFrameBindingShadowsGlobal = property_vm.functionFrameBindingShadowsGlobal;
+const globalVarAtom = property_vm.globalVarAtom;
 const hasObjectBinding = property_vm.hasObjectBinding;
 const immediateInt32Operand = property_vm.immediateInt32Operand;
 const intRangeDeltaBounds = property_vm.intRangeDeltaBounds;
@@ -96,6 +97,7 @@ const storeLocalCompletionBorrowedValue = property_vm.storeLocalCompletionBorrow
 const stringFromCharCodeInt32Arg = property_vm.stringFromCharCodeInt32Arg;
 const stringFromValue = property_vm.stringFromValue;
 const varRefReadableBorrowed = property_vm.varRefReadableBorrowed;
+const varRefReadableBorrowedForFastPath = property_vm.varRefReadableBorrowedForFastPath;
 
 const functionOwnNativeBuiltinRefForFastPath = property_ic.functionOwnNativeBuiltinRefForFastPath;
 const globalDataPropertyValueForFastPath = property_ic.globalDataPropertyValueForFastPath;
@@ -169,7 +171,7 @@ inline fn cachedGlobalDataValue(
     if (index >= global.properties.len) return null;
     return switch (global.properties[index].slot) {
         .data => |stored| stored,
-        .auto_init, .accessor, .deleted => null,
+        .var_ref, .auto_init, .accessor, .deleted => null,
     };
 }
 
@@ -193,7 +195,7 @@ inline fn setCachedGlobalWritableDataAtOwned(
     const entry = &global.properties[index];
     switch (entry.slot) {
         .data => {},
-        .auto_init, .accessor, .deleted => return false,
+        .var_ref, .auto_init, .accessor, .deleted => return false,
     }
     const old_slot = entry.slot;
     entry.slot = .{ .data = value };
@@ -218,8 +220,9 @@ pub noinline fn getVar(
     eval_with_object: core.JSValue,
 ) !Step {
     const site_pc = frame.pc - 1;
-    const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
-    frame.pc += 4;
+    const ref_idx = readInt(u16, function.code[frame.pc..][0..2]);
+    const atom_id = globalVarAtom(function, ref_idx) orelse return error.InvalidBytecode;
+    frame.pc += 2;
     const opcode_profile = ctx.runtime.opcode_profile;
     if (opcode_profile == null) {
         if (cachedGlobalDataValue(function, global, site_pc, atom_id)) |value| {
@@ -232,7 +235,7 @@ pub noinline fn getVar(
         core.profile.recordGlobalLookup();
     }
     if (atom_id == core.atom.ids.undefined_ and canUseFastGlobalUndefinedLookup(function, frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
-        if (call_runtime.globalLexicalValue(ctx, atom_id)) |lex_value| {
+        if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lex_value| {
             lex_value.free(ctx.runtime);
         } else {
             try stack.pushOwned(core.JSValue.undefinedValue());
@@ -243,7 +246,7 @@ pub noinline fn getVar(
         return try useFastGlobalDataValue(ctx, output, stack, function, global, frame, catch_target, site_pc, atom_id, value, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object);
     }
     if (canUseFastGlobalVarLookup(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
-        if (call_runtime.globalLexicalValue(ctx, atom_id)) |lex_value| {
+        if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lex_value| {
             if (lex_value.isUninitialized()) {
                 lex_value.free(ctx.runtime);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
@@ -269,7 +272,7 @@ pub noinline fn getVar(
                 }
                 break :value slot_value;
             }
-            if (call_runtime.lookupFrameVarRef(ctx.runtime, function, frame, atom_id)) |slot_value| {
+            if (call_runtime.lookupFrameVarRef(ctx, global, function, frame, atom_id)) |slot_value| {
                 if (slot_value.isUninitialized()) {
                     slot_value.free(ctx.runtime);
                     if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
@@ -300,7 +303,7 @@ pub noinline fn getVar(
                 }
                 break :value slot_value;
             }
-            if (call_runtime.lookupFrameVarRef(ctx.runtime, function, frame, atom_id)) |slot_value| {
+            if (call_runtime.lookupFrameVarRef(ctx, global, function, frame, atom_id)) |slot_value| {
                 if (slot_value.isUninitialized()) {
                     slot_value.free(ctx.runtime);
                     if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
@@ -321,7 +324,7 @@ pub noinline fn getVar(
         if (atom_id == core.atom.ids.arguments and eval_ops.directEvalShouldExposeImplicitArguments(frame)) {
             break :value try object_ops.frameArgumentsObject(ctx, global, frame);
         }
-        if (call_runtime.globalLexicalValue(ctx, atom_id)) |lex_value| {
+        if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lex_value| {
             if (lex_value.isUninitialized()) {
                 lex_value.free(ctx.runtime);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
@@ -406,7 +409,7 @@ fn globalDataOrAutoInitValueForReadFastPath(
         return switch (global.properties[property_index].slot) {
             .data => |stored| .{ .value = stored, .owned = false },
             .auto_init => .{ .value = global.getProperty(atom_id), .owned = true },
-            .accessor, .deleted => null,
+            .var_ref, .accessor, .deleted => null,
         };
     }
     return null;
@@ -560,7 +563,7 @@ fn fastGlobalDataValueForAtomAtPcNoProfile(
     eval_with_object: core.JSValue,
 ) ?core.JSValue {
     if (!canUseFastGlobalVarLookup(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return null;
-    if (call_runtime.globalLexicalValue(ctx, atom_id)) |lexical_value| {
+    if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
     }
@@ -574,7 +577,7 @@ fn nextOpCanStartGlobalUriCall1(function: *const bytecode.Bytecode, frame: *cons
         op.push_atom_value => frame.pc + 6 <= code.len and code[frame.pc + 5] == op.call1,
         op.get_var_ref, op.get_var_ref_check => frame.pc + 4 <= code.len and code[frame.pc + 3] == op.call1,
         op.get_var_ref0, op.get_var_ref1, op.get_var_ref2, op.get_var_ref3 => frame.pc + 1 <= code.len and code[frame.pc + 1] == op.call1,
-        op.get_var, op.get_var_undef => frame.pc + 6 <= code.len and code[frame.pc + 5] == op.call1,
+        op.get_var, op.get_var_undef => frame.pc + 4 <= code.len and code[frame.pc + 3] == op.call1,
         else => false,
     };
 }
@@ -621,7 +624,7 @@ fn tryFoldFollowingGlobalInt32Term(
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
 ) ?core.JSValue {
-    const get = decodeGlobalDataGet(function.code, pc.*) orelse return null;
+    const get = decodeGlobalDataGet(function, pc.*) orelse return null;
     const value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, pc.*, get.atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
     var rhs_value = value.asInt32() orelse return null;
     var rhs_pc = get.next_pc;
@@ -680,14 +683,14 @@ fn decodeUriFourByteRangePlan(
 ) ?UriFourByteRangePlan {
     const code = function.code;
     const callee_get = decodeVarRefGet(code, frame.pc) orelse return null;
-    const callee = varRefReadableBorrowed(frame, callee_get.idx) orelse return null;
+    const callee = varRefReadableBorrowedForFastPath(function, frame, callee_get.idx) orelse return null;
     if (simpleStringCallableKind(callee) != .percent_hex_byte) return null;
 
-    const induction_get = decodeGlobalDataGet(code, callee_get.next_pc) orelse return null;
+    const induction_get = decodeGlobalDataGet(function, callee_get.next_pc) orelse return null;
     var pc = induction_get.next_pc;
     if (pc + 2 > code.len or code[pc] != op.call1 or code[pc + 1] != op.add) return null;
     const string_store_pc = pc + 2;
-    const string_store = decodeGlobalPut(code, string_store_pc) orelse return null;
+    const string_store = decodeGlobalPut(function, string_store_pc) orelse return null;
     pc = string_store.next_pc;
 
     pc = expectImmediateInt32(code, pc, 240) orelse return null;
@@ -702,24 +705,24 @@ fn decodeUriFourByteRangePlan(
     pc = expectOp(code, pc, op.mul) orelse return null;
     pc = expectOp(code, pc, op.add) orelse return null;
     const index_b3_get_pc = pc;
-    const index_b3_get = decodeGlobalDataGet(code, pc) orelse return null;
+    const index_b3_get = decodeGlobalDataGet(function, pc) orelse return null;
     pc = index_b3_get.next_pc;
     pc = expectImmediateInt32(code, pc, 0x3f) orelse return null;
     pc = expectOp(code, pc, op.@"and") orelse return null;
     pc = expectImmediateInt32(code, pc, 0x40) orelse return null;
     pc = expectOp(code, pc, op.mul) orelse return null;
     pc = expectOp(code, pc, op.add) orelse return null;
-    const index_b4_get = decodeGlobalDataGet(code, pc) orelse return null;
+    const index_b4_get = decodeGlobalDataGet(function, pc) orelse return null;
     if (index_b4_get.atom != induction_get.atom) return null;
     pc = index_b4_get.next_pc;
     pc = expectImmediateInt32(code, pc, 0x3f) orelse return null;
     pc = expectOp(code, pc, op.@"and") orelse return null;
     pc = expectOp(code, pc, op.add) orelse return null;
     const index_put_pc = pc;
-    const index_put = decodeGlobalPut(code, pc) orelse return null;
+    const index_put = decodeGlobalPut(function, pc) orelse return null;
     pc = index_put.next_pc;
 
-    const low_index_get = decodeGlobalDataGet(code, pc) orelse return null;
+    const low_index_get = decodeGlobalDataGet(function, pc) orelse return null;
     if (low_index_get.atom != index_put.atom) return null;
     pc = low_index_get.next_pc;
     pc = expectImmediateInt32(code, pc, 0x10000) orelse return null;
@@ -729,10 +732,10 @@ fn decodeUriFourByteRangePlan(
     pc = expectImmediateInt32(code, pc, 0xdc00) orelse return null;
     pc = expectOp(code, pc, op.add) orelse return null;
     const low_put_pc = pc;
-    const low_put = decodeGlobalPut(code, pc) orelse return null;
+    const low_put = decodeGlobalPut(function, pc) orelse return null;
     pc = low_put.next_pc;
 
-    const high_index_get = decodeGlobalDataGet(code, pc) orelse return null;
+    const high_index_get = decodeGlobalDataGet(function, pc) orelse return null;
     if (high_index_get.atom != index_put.atom) return null;
     pc = high_index_get.next_pc;
     pc = expectImmediateInt32(code, pc, 0x10000) orelse return null;
@@ -744,23 +747,23 @@ fn decodeUriFourByteRangePlan(
     pc = expectImmediateInt32(code, pc, 0xd800) orelse return null;
     pc = expectOp(code, pc, op.add) orelse return null;
     const high_put_pc = pc;
-    const high_put = decodeGlobalPut(code, pc) orelse return null;
+    const high_put = decodeGlobalPut(function, pc) orelse return null;
     pc = high_put.next_pc;
     const high_completion_tail = decodeOptionalUndefinedLocalCompletionTail(function, frame, pc) orelse return null;
     pc = high_completion_tail.tail_pc;
 
-    const uri_get = decodeGlobalDataGet(code, pc) orelse return null;
+    const uri_get = decodeGlobalDataGet(function, pc) orelse return null;
     const uri_callee = fastGlobalDataValueForAtomAtPcNoProfile(ctx, function, global, frame, pc, uri_get.atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
     const uri_object = objectFromValue(uri_callee) orelse return null;
     const uri_native_ref = core.function.decodeNativeBuiltinId(uri_object.nativeFunctionIdSlot().*) orelse return null;
     if (uri_native_ref.domain != .uri or (uri_native_ref.id != 3 and uri_native_ref.id != 4)) return null;
     pc = uri_get.next_pc;
-    const uri_arg_get = decodeGlobalDataGet(code, pc) orelse return null;
+    const uri_arg_get = decodeGlobalDataGet(function, pc) orelse return null;
     if (uri_arg_get.atom != string_store.atom) return null;
     pc = uri_arg_get.next_pc;
     pc = expectOp(code, pc, op.call1) orelse return null;
 
-    const string_get = decodeGlobalDataGet(code, pc) orelse return null;
+    const string_get = decodeGlobalDataGet(function, pc) orelse return null;
     if (string_get.atom != atom_string) return null;
     const string_ctor = fastGlobalDataValueForAtomAtPcNoProfile(ctx, function, global, frame, pc, string_get.atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
     pc = string_get.next_pc;
@@ -768,10 +771,10 @@ fn decodeUriFourByteRangePlan(
     const native_ref = functionOwnNativeBuiltinRefForFastPath(function, pc, ctx.runtime, string_ctor, method.atom) orelse return null;
     if (native_ref.domain != .string or native_ref.id != @intFromEnum(method_ids.string.StaticMethod.from_char_code)) return null;
     pc = method.next_pc;
-    const high_get = decodeGlobalDataGet(code, pc) orelse return null;
+    const high_get = decodeGlobalDataGet(function, pc) orelse return null;
     if (high_get.atom != high_put.atom) return null;
     pc = high_get.next_pc;
-    const low_get = decodeGlobalDataGet(code, pc) orelse return null;
+    const low_get = decodeGlobalDataGet(function, pc) orelse return null;
     if (low_get.atom != low_put.atom) return null;
     pc = low_get.next_pc;
     if (pc + 4 > code.len or code[pc] != op.call_method or readInt(u16, code[pc + 1 ..][0..2]) != 2) return null;
@@ -780,25 +783,25 @@ fn decodeUriFourByteRangePlan(
     const eq_branch = decodeFalseBranch(code, pc) orelse return null;
 
     const branch_completion_tail = decodeOptionalUndefinedLocalCompletionTail(function, frame, eq_branch.true_pc) orelse return null;
-    const count_get = decodeGlobalDataGet(code, branch_completion_tail.tail_pc) orelse return null;
+    const count_get = decodeGlobalDataGet(function, branch_completion_tail.tail_pc) orelse return null;
     if (count_get.next_pc >= code.len or code[count_get.next_pc] != op.post_inc) return null;
     const count_put_pc = count_get.next_pc + 1;
-    const count_put = decodeGlobalPut(code, count_put_pc) orelse return null;
+    const count_put = decodeGlobalPut(function, count_put_pc) orelse return null;
     if (count_put.atom != count_get.atom) return null;
     const count_tail = decodeOptionalLocalCompletionTail(function, frame, count_put.next_pc) orelse return null;
     if (count_tail.tail_pc != eq_branch.false_pc) return null;
 
-    const tail_get = decodeGlobalDataGet(code, eq_branch.false_pc) orelse return null;
+    const tail_get = decodeGlobalDataGet(function, eq_branch.false_pc) orelse return null;
     if (tail_get.atom != induction_get.atom) return null;
     if (tail_get.next_pc >= code.len or code[tail_get.next_pc] != op.post_inc) return null;
     const induction_put_pc = tail_get.next_pc + 1;
-    const induction_put = decodeGlobalPut(code, induction_put_pc) orelse return null;
+    const induction_put = decodeGlobalPut(function, induction_put_pc) orelse return null;
     if (induction_put.atom != induction_get.atom) return null;
     const induction_tail = decodeOptionalLocalCompletionTail(function, frame, induction_put.next_pc) orelse return null;
     const goto_pc = induction_tail.tail_pc;
     if (goto_pc >= code.len) return null;
     const condition_pc = backwardGotoTarget(code, goto_pc + 1, code[goto_pc]) orelse return null;
-    const condition_get = decodeGlobalDataGet(code, condition_pc) orelse return null;
+    const condition_get = decodeGlobalDataGet(function, condition_pc) orelse return null;
     if (condition_get.atom != induction_get.atom) return null;
     const limit = immediateInt32Operand(code, condition_get.next_pc) orelse return null;
     if (limit.next_pc >= code.len or code[limit.next_pc] != op.lte) return null;
@@ -885,31 +888,32 @@ fn uriStrictEqIntArg(
             return .{ .value = value.asInt32() orelse return null, .next_pc = pc + 3 };
         },
         op.get_var, op.get_var_undef => {
-            if (pc + 5 > code.len) return null;
-            const atom_id = readInt(u32, code[pc + 1 ..][0..4]);
+            if (pc + 3 > code.len) return null;
+            const ref_idx = readInt(u16, code[pc + 1 ..][0..2]);
+            const atom_id = globalVarAtom(function, ref_idx) orelse return null;
             const value = fastGlobalDataValueForAtomAtPcNoProfile(ctx, function, global, frame, pc, atom_id, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
-            return .{ .value = value.asInt32() orelse return null, .next_pc = pc + 5 };
+            return .{ .value = value.asInt32() orelse return null, .next_pc = pc + 3 };
         },
         op.get_var_ref, op.get_var_ref_check => {
             if (pc + 3 > code.len) return null;
             const idx = readInt(u16, code[pc + 1 ..][0..2]);
-            const value = varRefReadableBorrowed(frame, idx) orelse return null;
+            const value = varRefReadableBorrowedForFastPath(function, frame, idx) orelse return null;
             return .{ .value = value.asInt32() orelse return null, .next_pc = pc + 3 };
         },
         op.get_var_ref0 => {
-            const value = varRefReadableBorrowed(frame, 0) orelse return null;
+            const value = varRefReadableBorrowedForFastPath(function, frame, 0) orelse return null;
             return .{ .value = value.asInt32() orelse return null, .next_pc = pc + 1 };
         },
         op.get_var_ref1 => {
-            const value = varRefReadableBorrowed(frame, 1) orelse return null;
+            const value = varRefReadableBorrowedForFastPath(function, frame, 1) orelse return null;
             return .{ .value = value.asInt32() orelse return null, .next_pc = pc + 1 };
         },
         op.get_var_ref2 => {
-            const value = varRefReadableBorrowed(frame, 2) orelse return null;
+            const value = varRefReadableBorrowedForFastPath(function, frame, 2) orelse return null;
             return .{ .value = value.asInt32() orelse return null, .next_pc = pc + 1 };
         },
         op.get_var_ref3 => {
-            const value = varRefReadableBorrowed(frame, 3) orelse return null;
+            const value = varRefReadableBorrowedForFastPath(function, frame, 3) orelse return null;
             return .{ .value = value.asInt32() orelse return null, .next_pc = pc + 1 };
         },
         else => {
@@ -944,9 +948,10 @@ fn uriCall1StringArgument(
         op.get_var_ref2 => return uriCall1VarRefStringArgument(frame, 2, frame.pc + 2),
         op.get_var_ref3 => return uriCall1VarRefStringArgument(frame, 3, frame.pc + 2),
         op.get_var, op.get_var_undef => {
-            if (frame.pc + 6 > code.len or code[frame.pc + 5] != op.call1) return null;
-            const atom_id = readInt(u32, code[frame.pc + 1 ..][0..4]);
-            return uriCall1GlobalStringArgument(ctx, function, frame, global, atom_id, frame.pc, frame.pc + 6);
+            if (frame.pc + 4 > code.len or code[frame.pc + 3] != op.call1) return null;
+            const ref_idx = readInt(u16, code[frame.pc + 1 ..][0..2]);
+            const atom_id = globalVarAtom(function, ref_idx) orelse return null;
+            return uriCall1GlobalStringArgument(ctx, function, frame, global, atom_id, frame.pc, frame.pc + 4);
         },
         else => return null,
     }
@@ -976,7 +981,7 @@ fn uriCall1GlobalStringArgument(
 ) ?UriCall1Argument {
     if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return null;
     if (frameHasVarRefBinding(function, frame, atom_id)) return null;
-    if (call_runtime.globalLexicalValue(ctx, atom_id)) |value| {
+    if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |value| {
         value.free(ctx.runtime);
         return null;
     }
@@ -1002,13 +1007,14 @@ pub noinline fn putVar(
     eval_var_refs: []const core.JSValue,
     eval_with_object: core.JSValue,
 ) !Step {
-    const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
-    frame.pc += 4;
+    const ref_idx = readInt(u16, function.code[frame.pc..][0..2]);
+    const atom_id = globalVarAtom(function, ref_idx) orelse return error.InvalidBytecode;
+    frame.pc += 2;
     const opcode_profile = ctx.runtime.opcode_profile;
     if (opcode_profile != null) core.profile.recordGlobalLookup();
     const value = try stack.pop();
     if (opcode_profile == null) {
-        const site_pc = frame.pc - 5;
+        const site_pc = frame.pc - 3;
         if (cachedGlobalDataSlotIndex(function, global, site_pc, atom_id)) |index| {
             if (inactiveGlobalOverlayState(ctx, function, frame, atom_id, eval_local_names, eval_var_ref_names, eval_with_object) and
                 setCachedGlobalWritableDataAtOwned(ctx.runtime, global, atom_id, index, value))
@@ -1032,14 +1038,15 @@ pub noinline fn putVar(
             return .continue_loop;
         }
     }
-    if (try call_runtime.setNamedSlotValue(ctx, eval_local_names, eval_local_slots, atom_id, value)) return .continue_loop;
+    if (try assignDirectEvalGlobalNamedSlot(ctx, global, function, eval_local_names, eval_local_slots, atom_id, value)) return .continue_loop;
+    if (try call_runtime.setNamedSlotValue(ctx, global, eval_local_names, eval_local_slots, atom_id, value)) return .continue_loop;
     if (!frame.eval_var_refs_republished) {
         if (call_runtime.setNamedVarRefValue(ctx, eval_var_ref_names, eval_var_refs, atom_id, value, runtime_strict or strict_unresolved_get_var, false) catch |err| {
             if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         }) return .continue_loop;
     }
-    if (try call_runtime.setNamedSlotValue(ctx, frame.eval_local_names, frame.eval_local_slots, atom_id, value)) return .continue_loop;
+    if (try call_runtime.setNamedSlotValue(ctx, global, frame.eval_local_names, frame.eval_local_slots, atom_id, value)) return .continue_loop;
     if (call_runtime.setNamedVarRefValue(ctx, frame.eval_var_ref_names, frame.eval_var_refs, atom_id, value, runtime_strict or strict_unresolved_get_var, false) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
@@ -1050,12 +1057,13 @@ pub noinline fn putVar(
         if (old_value) |stored| stored.free(ctx.runtime);
         return .continue_loop;
     }
-    const updated_global_lexical = call_runtime.setGlobalLexicalValue(ctx, atom_id, value) catch |err| {
+    const updated_global_lexical = call_runtime.setGlobalLexicalValueForGlobal(ctx, global, atom_id, value) catch |err| {
         value.free(ctx.runtime);
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     if (updated_global_lexical) {
+        try syncFrameVarRefMirror(ctx, function, frame, atom_id, value);
         value.free(ctx.runtime);
         return .continue_loop;
     }
@@ -1076,13 +1084,14 @@ pub noinline fn putVar(
     if (is_eval_code and
         eval_global_var_bindings and
         !runtime_strict and
-        evalFunctionDeclaresGlobalVar(function, atom_id) and
+        evalFunctionDeclaresGlobalVar(ctx.runtime, function, atom_id) and
         globalOwnAccessorWithoutSetter(ctx.runtime, global, atom_id))
     {
         value.free(ctx.runtime);
         return .continue_loop;
     }
     if (try global.setOwnWritableDataProperty(ctx.runtime, atom_id, value)) {
+        try syncFrameVarRefMirror(ctx, function, frame, atom_id, value);
         value.free(ctx.runtime);
         return .continue_loop;
     }
@@ -1097,7 +1106,36 @@ pub noinline fn putVar(
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
+    try syncFrameVarRefMirror(ctx, function, frame, atom_id, value);
     return .done;
+}
+
+fn assignDirectEvalGlobalNamedSlot(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    function: *const bytecode.Bytecode,
+    names: []const core.Atom,
+    slots: []core.JSValue,
+    atom_id: core.Atom,
+    value: core.JSValue,
+) !bool {
+    if (!value_ops.atomNameEql(ctx.runtime, function.name, "<eval>")) return false;
+    if (!evalFunctionDeclaresGlobalVar(ctx.runtime, function, atom_id)) return false;
+
+    for (names, 0..) |name, idx| {
+        if (!call_runtime.atomIdOrNameEql(ctx.runtime, name, atom_id) or idx >= slots.len) continue;
+        if (!slot_ops.evalLocalSlotIsEvalVarCell(slots[idx])) continue;
+        defer value.free(ctx.runtime);
+        if (!try global.setOwnWritableDataProperty(ctx.runtime, atom_id, value)) {
+            if (!global.hasOwnProperty(atom_id)) {
+                try slot_ops.defineGlobalFunctionBindingValue(ctx.runtime, global, atom_id, value, true);
+            }
+        }
+        const next_value = global.getProperty(atom_id);
+        try slot_ops.setSlotValue(ctx, &slots[idx], next_value);
+        return true;
+    }
+    return false;
 }
 
 fn globalOwnRejectedNonStrictSet(global: *core.Object, atom_id: core.Atom) bool {
@@ -1108,12 +1146,12 @@ fn globalOwnRejectedNonStrictSet(global: *core.Object, atom_id: core.Atom) bool 
         if (prop_flags.accessor) {
             return switch (global.properties[property_index].slot) {
                 .accessor => |accessor| accessor.setter.isUndefined(),
-                .data, .auto_init, .deleted => false,
+                .var_ref, .data, .auto_init, .deleted => false,
             };
         }
         return switch (global.properties[property_index].slot) {
             .data => !prop_flags.writable,
-            .auto_init, .accessor, .deleted => false,
+            .var_ref, .auto_init, .accessor, .deleted => false,
         };
     }
     return false;
@@ -1121,8 +1159,15 @@ fn globalOwnRejectedNonStrictSet(global: *core.Object, atom_id: core.Atom) bool 
 
 fn globalWritableDataWriteFastOwned(ctx: *core.JSContext, global: *core.Object, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, atom_id: core.Atom, value: core.JSValue) !bool {
     const rt = ctx.runtime;
-    const site_pc = frame.pc - 5;
+    const site_pc = frame.pc - 3;
     return setGlobalWritableDataStoreForFastPathOwned(rt, ctx.lexicals, global, function, site_pc, atom_id, value);
+}
+
+fn syncFrameVarRefMirror(ctx: *core.JSContext, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, atom_id: core.Atom, value: core.JSValue) !void {
+    var frame_ref_value = value.dup();
+    if (!try call_runtime.setFrameVarRefValue(ctx, function, frame, atom_id, frame_ref_value)) {
+        frame_ref_value.free(ctx.runtime);
+    }
 }
 
 fn numberStaticLiteralResultAt(
@@ -1194,16 +1239,10 @@ fn canUseFastGlobalUndefinedLookup(
     return true;
 }
 
-fn evalFunctionDeclaresGlobalVar(function: *const bytecode.Bytecode, atom_id: core.Atom) bool {
-    var pc: usize = 0;
-    while (pc + 6 <= function.code.len) : (pc += 1) {
-        const opc = function.code[pc];
-        if (opc != op.check_define_var and opc != op.define_var) continue;
-        const declared_atom = readInt(u32, function.code[pc + 1 ..][0..4]);
-        if (declared_atom != atom_id) continue;
-        const flags = function.code[pc + 5];
-        const is_lexical = (flags & (1 << 7)) != 0;
-        if (!is_lexical) return true;
+fn evalFunctionDeclaresGlobalVar(rt: *core.JSRuntime, function: *const bytecode.Bytecode, atom_id: core.Atom) bool {
+    for (function.global_vars) |gv| {
+        if (gv.is_lexical) continue;
+        if (call_runtime.atomIdOrNameEql(rt, gv.var_name, atom_id)) return true;
     }
     return false;
 }
@@ -1212,6 +1251,122 @@ fn globalOwnAccessorWithoutSetter(rt: *core.JSRuntime, global: *core.Object, ato
     const desc = global.getOwnProperty(rt, atom_id) orelse return false;
     defer desc.destroy(rt);
     return desc.kind == .accessor and desc.setter.isUndefined();
+}
+
+fn globalVarIsFunction(gv: core.function_bytecode.GlobalVar) bool {
+    return gv.cpool_idx >= 0 or gv.force_init;
+}
+
+fn shouldSkipRuntimeStrictGlobalFunctionVar(
+    function: *const bytecode.Bytecode,
+    is_eval_code: bool,
+    gv: core.function_bytecode.GlobalVar,
+) bool {
+    return function.flags.runtime_strict and !is_eval_code and globalVarIsFunction(gv);
+}
+
+fn validateGlobalVarDeclaration(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    function: *const bytecode.Bytecode,
+    gv: core.function_bytecode.GlobalVar,
+    is_eval_code: bool,
+) !void {
+    if (shouldSkipRuntimeStrictGlobalFunctionVar(function, is_eval_code, gv)) return;
+
+    const atom_id = gv.var_name;
+    const has_global_lexical = call_runtime.globalLexicalHasForGlobal(ctx, global, atom_id);
+    if (global.getOwnProperty(ctx.runtime, atom_id)) |desc| {
+        defer desc.destroy(ctx.runtime);
+        if (gv.is_lexical) {
+            if (desc.configurable != true) return error.SyntaxError;
+        } else if (globalVarIsFunction(gv) and desc.configurable != true) {
+            if (desc.kind == .accessor or desc.writable != true or desc.enumerable != true) return error.TypeError;
+        }
+    } else if (!gv.is_lexical and !global.isExtensible()) {
+        return error.TypeError;
+    }
+    if (has_global_lexical) return error.SyntaxError;
+}
+
+fn defineGlobalVarDeclaration(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    gv: core.function_bytecode.GlobalVar,
+    is_eval_code: bool,
+    eval_local_names: []const core.Atom,
+    eval_local_slots: []core.JSValue,
+    eval_var_ref_names: []const core.Atom,
+    eval_var_refs: []const core.JSValue,
+) !void {
+    const atom_id = gv.var_name;
+    if (gv.cpool_idx >= 0) {
+        const cpool_idx: usize = @intCast(gv.cpool_idx);
+        const function_value = function.constants.get(cpool_idx) orelse return error.InvalidBytecode;
+        defer function_value.free(ctx.runtime);
+        const func_val = try object_ops.createBytecodeFunctionObject(ctx, frame, function, global, function_value, atom_id, op.fclosure8, true, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, &.{});
+        defer func_val.free(ctx.runtime);
+
+        var local_value = func_val.dup();
+        const updated_frame_local = try call_runtime.setFrameLocalValue(ctx, function, frame, atom_id, local_value);
+        if (!updated_frame_local) local_value.free(ctx.runtime);
+        var frame_ref_value = func_val.dup();
+        if (!try call_runtime.setFrameVarRefValue(ctx, function, frame, atom_id, frame_ref_value)) frame_ref_value.free(ctx.runtime);
+        var eval_local_value = func_val.dup();
+        const updated_eval_local = try call_runtime.setNamedSlotValue(ctx, global, eval_local_names, eval_local_slots, atom_id, eval_local_value);
+        if (!updated_eval_local) eval_local_value.free(ctx.runtime);
+        var eval_ref_value = func_val.dup();
+        const updated_eval_ref = try call_runtime.setNamedVarRefValue(ctx, eval_var_ref_names, eval_var_refs, atom_id, eval_ref_value, function.flags.is_strict, true);
+        if (!updated_eval_ref) eval_ref_value.free(ctx.runtime);
+
+        if (function.flags.runtime_strict and !is_eval_code) return;
+        try slot_ops.defineGlobalFunctionBindingValue(ctx.runtime, global, atom_id, func_val, gv.is_configurable);
+        return;
+    }
+
+    if (shouldSkipRuntimeStrictGlobalFunctionVar(function, is_eval_code, gv)) return;
+
+    if (gv.is_lexical) {
+        // qjs js_closure_define_global_var PASS2: create the shared ctx.lexicals
+        // VARREF cell and alias it into frame.var_refs for a top-level script
+        // let/const (.global_decl var-ref). Falls back to a plain lexical data
+        // property for module/eval paths.
+        if (!try call_runtime.defineGlobalDeclLexicalCell(ctx, function, frame, atom_id, gv.is_const)) {
+            try call_runtime.defineGlobalLexicalValue(ctx, global, atom_id, core.JSValue.uninitialized(), gv.is_const);
+        }
+    } else if (!global.hasOwnProperty(atom_id)) {
+        const desc = core.Descriptor.data(core.JSValue.undefinedValue(), true, true, gv.is_configurable);
+        const define_result = if (!global.hasExoticMethods() and !global.flags.is_array and global.isExtensible())
+            global.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, desc)
+        else
+            global.defineOwnProperty(ctx.runtime, atom_id, desc);
+        define_result catch |err| switch (err) {
+            error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
+            else => return err,
+        };
+    }
+}
+
+pub fn instantiateGlobalVarDeclarations(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    is_eval_code: bool,
+    eval_local_names: []const core.Atom,
+    eval_local_slots: []core.JSValue,
+    eval_var_ref_names: []const core.Atom,
+    eval_var_refs: []const core.JSValue,
+) !void {
+    if (function.global_vars.len == 0) return;
+    for (function.global_vars) |gv| {
+        try validateGlobalVarDeclaration(ctx, global, function, gv, is_eval_code);
+    }
+    for (function.global_vars) |gv| {
+        try defineGlobalVarDeclaration(ctx, global, function, frame, gv, is_eval_code, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs);
+    }
 }
 
 fn fastLengthValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
@@ -1242,124 +1397,12 @@ pub noinline fn globalDefinition(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     opc: u8,
-    eval_local_names: []const core.Atom,
-    eval_local_slots: []core.JSValue,
-    eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
-    eval_global_var_bindings: bool,
-    is_eval_code: bool,
 ) !Step {
     switch (opc) {
-        op.check_define_var => {
-            const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
-            const flags = function.code[frame.pc + 4];
-            frame.pc += 5;
-            const is_lexical = (flags & (1 << 7)) != 0;
-            const is_function_var = (flags & (1 << 6)) != 0;
-            if (function.flags.runtime_strict and !is_eval_code and is_function_var) return .done;
-            const has_global_lexical = call_runtime.globalLexicalHas(ctx, atom_id);
-            var has_own_global_property = false;
-            if (global.getOwnProperty(ctx.runtime, atom_id)) |desc| {
-                has_own_global_property = true;
-                defer desc.destroy(ctx.runtime);
-                if (is_lexical) {
-                    if (desc.configurable != true) return error.SyntaxError;
-                } else if (is_function_var and desc.configurable != true) {
-                    if (desc.kind == .accessor or desc.writable != true or desc.enumerable != true) return error.TypeError;
-                }
-            } else if (!is_lexical and !global.isExtensible()) {
-                return error.TypeError;
-            }
-            if (has_global_lexical) return error.SyntaxError;
-            if (function.global_var_names.len == 1 and frame.pc + 6 <= function.code.len and function.code[frame.pc] == op.define_var) {
-                const define_atom = readInt(u32, function.code[frame.pc + 1 ..][0..4]);
-                const define_flags = function.code[frame.pc + 5];
-                if (define_atom == atom_id and define_flags == flags) {
-                    const is_const = (flags & (1 << 4)) != 0;
-                    if (is_lexical) {
-                        try call_runtime.defineGlobalLexicalValue(ctx, global, atom_id, core.JSValue.uninitialized(), is_const);
-                    } else if (!has_own_global_property) {
-                        const configurable = (flags & (1 << 5)) != 0;
-                        const define_desc = core.Descriptor.data(core.JSValue.undefinedValue(), true, true, configurable);
-                        if (!global.hasExoticMethods() and !global.flags.is_array and global.isExtensible()) {
-                            try global.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, define_desc);
-                        } else if (!global.hasOwnProperty(atom_id)) {
-                            global.defineOwnProperty(ctx.runtime, atom_id, define_desc) catch |err| switch (err) {
-                                error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-                                else => return err,
-                            };
-                        }
-                    }
-                    frame.pc += 6;
-                    if (is_lexical and frame.pc + 3 <= function.code.len and function.code[frame.pc] == op.set_loc_uninitialized) {
-                        const local_idx = readInt(u16, function.code[frame.pc + 1 ..][0..2]);
-                        if (local_idx >= frame.locals.len or local_idx >= frame.locals_uninit.len) return error.InvalidBytecode;
-                        frame.setLocalUninitialized(local_idx);
-                        frame.pc += 3;
-                    }
-                }
-            }
-        },
-        op.define_var => {
-            const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
-            const flags = function.code[frame.pc + 4];
-            frame.pc += 5;
-            const is_lexical = (flags & (1 << 7)) != 0;
-            const is_const = (flags & (1 << 4)) != 0;
-            const is_function_var = (flags & (1 << 6)) != 0;
-            if (function.flags.runtime_strict and !is_eval_code and is_function_var) return .done;
-            if (is_lexical) {
-                try call_runtime.defineGlobalLexicalValue(ctx, global, atom_id, core.JSValue.uninitialized(), is_const);
-            } else if (!global.hasOwnProperty(atom_id)) {
-                const configurable = (flags & (1 << 5)) != 0;
-                const desc = core.Descriptor.data(core.JSValue.undefinedValue(), true, true, configurable);
-                const define_result = if (!global.hasExoticMethods() and !global.flags.is_array and global.isExtensible())
-                    global.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, desc)
-                else
-                    global.defineOwnProperty(ctx.runtime, atom_id, desc);
-                define_result catch |err| switch (err) {
-                    error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-                    else => return err,
-                };
-            }
-        },
-        op.define_func => {
-            const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
-            const flags = function.code[frame.pc + 4];
-            frame.pc += 5;
-            const func_val = try stack.pop();
-            defer func_val.free(ctx.runtime);
-            const configurable = (flags & (1 << 5)) != 0;
-            const global_function_binding = (flags & (1 << 4)) != 0;
-            var local_value = func_val.dup();
-            const updated_frame_local = try call_runtime.setFrameLocalValue(ctx, function, frame, atom_id, local_value);
-            if (!updated_frame_local) local_value.free(ctx.runtime);
-            var frame_ref_value = func_val.dup();
-            if (!try call_runtime.setFrameVarRefValue(ctx, function, frame, atom_id, frame_ref_value)) frame_ref_value.free(ctx.runtime);
-            var eval_local_value = func_val.dup();
-            const updated_eval_local = try call_runtime.setNamedSlotValue(ctx, eval_local_names, eval_local_slots, atom_id, eval_local_value);
-            if (!updated_eval_local) eval_local_value.free(ctx.runtime);
-            var eval_ref_value = func_val.dup();
-            const updated_eval_ref = try call_runtime.setNamedVarRefValue(ctx, eval_var_ref_names, eval_var_refs, atom_id, eval_ref_value, function.flags.is_strict, true);
-            if (!updated_eval_ref) eval_ref_value.free(ctx.runtime);
-            if (is_eval_code and !eval_global_var_bindings) return .continue_loop;
-            if (global_function_binding) {
-                try slot_ops.defineGlobalFunctionBindingValue(ctx.runtime, global, atom_id, func_val, configurable);
-            } else if (global.hasOwnProperty(atom_id)) {
-                global.setProperty(ctx.runtime, atom_id, func_val) catch |err| switch (err) {
-                    error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-                    else => return err,
-                };
-            } else {
-                global.defineOwnProperty(ctx.runtime, atom_id, core.Descriptor.data(func_val, true, true, configurable)) catch |err| switch (err) {
-                    error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-                    else => return err,
-                };
-            }
-        },
         op.put_var_init => {
-            const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
-            frame.pc += 4;
+            const ref_idx = readInt(u16, function.code[frame.pc..][0..2]);
+            const atom_id = globalVarAtom(function, ref_idx) orelse return error.InvalidBytecode;
+            frame.pc += 2;
             const value = try stack.pop();
             var value_owned = true;
             defer if (value_owned) value.free(ctx.runtime);
@@ -1372,7 +1415,7 @@ pub noinline fn globalDefinition(
                     value_owned = false;
                     return .continue_loop;
                 }
-                const updated_global_lexical = call_runtime.setGlobalLexicalValue(ctx, atom_id, value) catch |err| {
+                const updated_global_lexical = call_runtime.setGlobalLexicalValueForGlobal(ctx, global, atom_id, value) catch |err| {
                     if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 };

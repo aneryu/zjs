@@ -805,7 +805,31 @@ fn countOpcodeRecursive(function: *const engine.bytecode.Bytecode, opcode: u8) u
 }
 
 fn expectOpcode(code: []const u8, opcode: u8) !void {
-    try std.testing.expect(std.mem.indexOfScalar(u8, code, opcode) != null);
+    try std.testing.expect(countOpcode(code, opcode) > 0);
+}
+
+fn expectOpcodeSequence(code: []const u8, expected: []const u8) !void {
+    var pc: usize = 0;
+    for (expected) |opcode_id| {
+        try std.testing.expect(pc < code.len);
+        try std.testing.expectEqual(opcode_id, code[pc]);
+        const size = engine.bytecode.opcode.sizeOf(opcode_id);
+        try std.testing.expect(size != 0);
+        pc += size;
+    }
+    try std.testing.expectEqual(code.len, pc);
+}
+
+fn readU16AtOpcode(code: []const u8, op_offset: usize) u16 {
+    return std.mem.readInt(u16, code[op_offset + 1 ..][0..2], .little);
+}
+
+fn readConstIndexAtOpcode(code: []const u8, op_offset: usize) u32 {
+    return switch (code[op_offset]) {
+        op.push_const8, op.fclosure8 => code[op_offset + 1],
+        op.push_const, op.fclosure => readU32(code, op_offset + 1),
+        else => unreachable,
+    };
 }
 
 fn expectOpcodeRecursive(function: *const engine.bytecode.Bytecode, opcode: u8) !void {
@@ -940,29 +964,46 @@ fn readI32(bytes: []const u8, offset: usize) i32 {
 
 fn readRelTarget32(bytes: []const u8, op_offset: usize) usize {
     const operand_offset = op_offset + 1;
-    const diff = readI32(bytes, operand_offset);
+    const diff: i64 = switch (engine.bytecode.opcode.formatOf(bytes[op_offset])) {
+        .label8 => @as(i64, std.mem.readInt(i8, bytes[operand_offset..][0..1], .little)),
+        .label16 => @as(i64, std.mem.readInt(i16, bytes[operand_offset..][0..2], .little)),
+        .label => @as(i64, readI32(bytes, operand_offset)),
+        else => unreachable,
+    };
     return @intCast(@as(i64, @intCast(operand_offset)) + @as(i64, diff));
 }
 
 fn countOpcode(code: []const u8, opcode: u8) usize {
     var count: usize = 0;
-    for (code) |byte| {
-        if (byte == opcode) count += 1;
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const opcode_id = code[pc];
+        if (opcode_id == opcode) count += 1;
+        const size = engine.bytecode.opcode.sizeOf(opcode_id);
+        if (size == 0) break;
+        pc += size;
     }
     return count;
 }
 
+fn hasAnyOpcode(code: []const u8, opcodes: []const u8) bool {
+    for (opcodes) |opcode_id| {
+        if (countOpcode(code, opcode_id) > 0) return true;
+    }
+    return false;
+}
+
 // ---- F4 first slice -------------------------------------------------
 
-test "F4: number literal lowers to push_i32 for small integers" {
+test "F4: number literal lowers to short integer form" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "42");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 5), fn_bc.code.len);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[0]);
-    try std.testing.expectEqual(@as(i32, 42), readI32(fn_bc.code, 1));
+    try std.testing.expectEqual(@as(usize, 2), fn_bc.code.len);
+    try std.testing.expectEqual(op.push_i8, fn_bc.code[0]);
+    try std.testing.expectEqual(@as(u8, 42), fn_bc.code[1]);
 }
 
 test "F4: number literal with non-integer value lowers to push_const" {
@@ -971,9 +1012,9 @@ test "F4: number literal with non-integer value lowers to push_const" {
     var fn_bc = try parseExpr(&env, "3.5");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 5), fn_bc.code.len);
-    try std.testing.expectEqual(op.push_const, fn_bc.code[0]);
-    const idx = readU32(fn_bc.code, 1);
+    try std.testing.expectEqual(@as(usize, 2), fn_bc.code.len);
+    try std.testing.expectEqual(op.push_const8, fn_bc.code[0]);
+    const idx = readConstIndexAtOpcode(fn_bc.code, 0);
     const value = fn_bc.constants.get(idx).?;
     defer value.free(env.rt);
     try std.testing.expectApproxEqAbs(@as(f64, 3.5), value.asFloat64().?, 0.0001);
@@ -985,9 +1026,9 @@ test "F4: large bigint literal lowers to constant pool value" {
     var fn_bc = try parseExpr(&env, "0x100000000n");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 5), fn_bc.code.len);
-    try std.testing.expectEqual(op.push_const, fn_bc.code[0]);
-    const idx = readU32(fn_bc.code, 1);
+    try std.testing.expectEqual(@as(usize, 2), fn_bc.code.len);
+    try std.testing.expectEqual(op.push_const8, fn_bc.code[0]);
+    const idx = readConstIndexAtOpcode(fn_bc.code, 0);
     const value = fn_bc.constants.get(idx).?;
     defer value.free(env.rt);
     try std.testing.expect(value.isBigInt());
@@ -1016,9 +1057,11 @@ test "F4: identifier reads global via get_var" {
     var fn_bc = try parseExpr(&env, "x");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 5), fn_bc.code.len);
+    try std.testing.expectEqual(@as(usize, 3), fn_bc.code.len);
     try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(@as(usize, 1), fn_bc.atom_operands.len);
+    try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 0));
+    try std.testing.expectEqual(@as(usize, 0), fn_bc.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 1), fn_bc.var_ref_names.len);
 }
 
 test "F4: parseExprBinary level 1 (mul/div/mod)" {
@@ -1027,13 +1070,7 @@ test "F4: parseExprBinary level 1 (mul/div/mod)" {
     var fn_bc = try parseExpr(&env, "2 * 3");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: push_i32 2 ; push_i32 3 ; mul
-    try std.testing.expectEqual(@as(usize, 11), fn_bc.code.len);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[0]);
-    try std.testing.expectEqual(@as(i32, 2), readI32(fn_bc.code, 1));
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[5]);
-    try std.testing.expectEqual(@as(i32, 3), readI32(fn_bc.code, 6));
-    try std.testing.expectEqual(op.mul, fn_bc.code[10]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.push_2, op.push_3, op.mul });
 }
 
 test "F4: parseExprBinary level 2 (add/sub) is left-associative" {
@@ -1042,13 +1079,7 @@ test "F4: parseExprBinary level 2 (add/sub) is left-associative" {
     var fn_bc = try parseExpr(&env, "1 + 2 - 3");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: push_i32 1 ; push_i32 2 ; add ; push_i32 3 ; sub
-    try std.testing.expectEqual(@as(usize, 17), fn_bc.code.len);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[0]);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[5]);
-    try std.testing.expectEqual(op.add, fn_bc.code[10]);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[11]);
-    try std.testing.expectEqual(op.sub, fn_bc.code[16]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.push_1, op.push_2, op.add, op.push_3, op.sub });
 }
 
 test "F4: precedence — multiplication before addition" {
@@ -1057,13 +1088,7 @@ test "F4: precedence — multiplication before addition" {
     var fn_bc = try parseExpr(&env, "1 + 2 * 3");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: push_i32 1 ; push_i32 2 ; push_i32 3 ; mul ; add
-    try std.testing.expectEqual(@as(usize, 17), fn_bc.code.len);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[0]);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[5]);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[10]);
-    try std.testing.expectEqual(op.mul, fn_bc.code[15]);
-    try std.testing.expectEqual(op.add, fn_bc.code[16]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.push_1, op.push_2, op.push_3, op.mul, op.add });
 }
 
 test "F4: parentheses override precedence" {
@@ -1072,10 +1097,7 @@ test "F4: parentheses override precedence" {
     var fn_bc = try parseExpr(&env, "(1 + 2) * 3");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: push_i32 1 ; push_i32 2 ; add ; push_i32 3 ; mul
-    try std.testing.expectEqual(@as(usize, 17), fn_bc.code.len);
-    try std.testing.expectEqual(op.add, fn_bc.code[10]);
-    try std.testing.expectEqual(op.mul, fn_bc.code[16]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.push_1, op.push_2, op.add, op.push_3, op.mul });
 }
 
 test "F4: comparison operators map to op.lt/op.lte/op.eq/op.strict_eq" {
@@ -1151,10 +1173,10 @@ test "F4: typeof identifier uses get_var_undef + typeof" {
     var fn_bc = try parseExpr(&env, "typeof x");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: get_var_undef <atom> ; typeof
-    try std.testing.expectEqual(@as(usize, 6), fn_bc.code.len);
+    try std.testing.expectEqual(@as(usize, 4), fn_bc.code.len);
     try std.testing.expectEqual(op.get_var_undef, fn_bc.code[0]);
-    try std.testing.expectEqual(op.typeof, fn_bc.code[5]);
+    try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 0));
+    try std.testing.expectEqual(op.typeof, fn_bc.code[3]);
 }
 
 test "F4: typeof optional chain parses full chain" {
@@ -1172,11 +1194,7 @@ test "F4: void evaluates and discards then pushes undefined" {
     var fn_bc = try parseExpr(&env, "void 0");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: push_i32 0 ; drop ; undefined
-    try std.testing.expectEqual(@as(usize, 7), fn_bc.code.len);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[0]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[5]);
-    try std.testing.expectEqual(op.undefined, fn_bc.code[6]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.push_0, op.drop, op.undefined });
 }
 
 test "M3.1 F4: strict eval and arguments update targets are rejected" {
@@ -1201,21 +1219,8 @@ test "F4: logical && uses dup + if_false short-circuit" {
     var fn_bc = try parseExpr(&env, "x && y");
     defer fn_bc.deinit(env.rt);
 
-    // Expect:
-    //   get_var x          (5)
-    //   dup                (1)
-    //   if_false L_skip    (5)
-    //   drop               (1)
-    //   get_var y          (5)
-    //   L_skip:            (target)
-    try std.testing.expectEqual(@as(usize, 17), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.dup, fn_bc.code[5]);
-    try std.testing.expectEqual(op.if_false, fn_bc.code[6]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[11]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[12]);
-    // The if_false target should be one byte past the last get_var.
-    const target = readRelTarget32(fn_bc.code, 6);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.if_false8, op.drop, op.get_var });
+    const target = readRelTarget32(fn_bc.code, 4);
     try std.testing.expectEqual(fn_bc.code.len, target);
 }
 
@@ -1225,7 +1230,9 @@ test "F4: logical || uses dup + if_true short-circuit" {
     var fn_bc = try parseExpr(&env, "x || y");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(op.if_true, fn_bc.code[6]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.if_true8, op.drop, op.get_var });
+    const target = readRelTarget32(fn_bc.code, 4);
+    try std.testing.expectEqual(fn_bc.code.len, target);
 }
 
 test "F4: nullish coalescing ?? uses is_undefined_or_null gate" {
@@ -1234,10 +1241,9 @@ test "F4: nullish coalescing ?? uses is_undefined_or_null gate" {
     var fn_bc = try parseExpr(&env, "x ?? y");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: get_var x ; dup ; is_undefined_or_null ; if_false L ; drop ; get_var y ; L:
-    try std.testing.expectEqual(op.dup, fn_bc.code[5]);
-    try std.testing.expectEqual(op.is_undefined_or_null, fn_bc.code[6]);
-    try std.testing.expectEqual(op.if_false, fn_bc.code[7]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.get_var });
+    const target = readRelTarget32(fn_bc.code, 5);
+    try std.testing.expectEqual(fn_bc.code.len, target);
 }
 
 test "M3.1 F4: nullish coalescing chains and rejects direct logical mixing" {
@@ -1302,23 +1308,11 @@ test "F4: ternary cond ? a : b emits if_false + goto skeleton" {
     var fn_bc = try parseExpr(&env, "a ? b : c");
     defer fn_bc.deinit(env.rt);
 
-    // Layout (lengths):
-    //   get_var a       5
-    //   if_false L_else 5
-    //   get_var b       5
-    //   goto    L_end   5
-    // L_else:
-    //   get_var c       5
-    // L_end:
-    try std.testing.expectEqual(@as(usize, 25), fn_bc.code.len);
-    try std.testing.expectEqual(op.if_false, fn_bc.code[5]);
-    try std.testing.expectEqual(op.goto, fn_bc.code[15]);
-    // L_else points just past the goto operand
-    const else_target = readRelTarget32(fn_bc.code, 5);
-    try std.testing.expectEqual(@as(usize, 20), else_target);
-    // L_end points to end of bytecode
-    const end_target = readRelTarget32(fn_bc.code, 15);
-    try std.testing.expectEqual(@as(usize, 25), end_target);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.if_false8, op.get_var, op.goto8, op.get_var });
+    const else_target = readRelTarget32(fn_bc.code, 3);
+    try std.testing.expectEqual(@as(usize, 10), else_target);
+    const end_target = readRelTarget32(fn_bc.code, 8);
+    try std.testing.expectEqual(fn_bc.code.len, end_target);
 }
 
 test "F4: simple assignment x = 1 emits push ; dup ; put_var (KEEP_TOP)" {
@@ -1327,14 +1321,7 @@ test "F4: simple assignment x = 1 emits push ; dup ; put_var (KEEP_TOP)" {
     var fn_bc = try parseExpr(&env, "x = 1");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: push_i32 1 ; dup ; put_var x
-    // Mirrors QuickJS `put_lvalue` PUT_LVALUE_KEEP_TOP for OP_scope_get_var
-    // (`quickjs.c:25479`), which emits an OP_dup before the put so the
-    // assignment expression's value remains on the stack.
-    try std.testing.expectEqual(@as(usize, 11), fn_bc.code.len);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[0]);
-    try std.testing.expectEqual(op.dup, fn_bc.code[5]);
-    try std.testing.expectEqual(op.put_var, fn_bc.code[6]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.push_1, op.dup, op.put_var });
 }
 
 test "F4: compound assignment x += 1 emits get_var ; rhs ; add ; dup ; put_var" {
@@ -1343,13 +1330,7 @@ test "F4: compound assignment x += 1 emits get_var ; rhs ; add ; dup ; put_var" 
     var fn_bc = try parseExpr(&env, "x += 1");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: get_var x ; push_i32 1 ; add ; dup ; put_var x
-    try std.testing.expectEqual(@as(usize, 17), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[5]);
-    try std.testing.expectEqual(op.add, fn_bc.code[10]);
-    try std.testing.expectEqual(op.dup, fn_bc.code[11]);
-    try std.testing.expectEqual(op.put_var, fn_bc.code[12]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.push_1, op.add, op.dup, op.put_var });
 }
 
 test "F4: comma operator drops left, keeps right" {
@@ -1358,11 +1339,7 @@ test "F4: comma operator drops left, keeps right" {
     var fn_bc = try parseExpr(&env, "1, 2");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: push_i32 1 ; drop ; push_i32 2
-    try std.testing.expectEqual(@as(usize, 11), fn_bc.code.len);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[0]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[5]);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[6]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.push_1, op.drop, op.push_2 });
 }
 
 test "F4: member access a.b emits get_var + get_field" {
@@ -1371,10 +1348,7 @@ test "F4: member access a.b emits get_var + get_field" {
     var fn_bc = try parseExpr(&env, "a.b");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: get_var a ; get_field b
-    try std.testing.expectEqual(@as(usize, 10), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_field, fn_bc.code[5]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field });
 }
 
 test "F4: index access a[i] emits get_var ; get_var ; get_array_el" {
@@ -1383,11 +1357,7 @@ test "F4: index access a[i] emits get_var ; get_var ; get_array_el" {
     var fn_bc = try parseExpr(&env, "a[i]");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: get_var a ; get_var i ; get_array_el
-    try std.testing.expectEqual(@as(usize, 11), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[5]);
-    try std.testing.expectEqual(op.get_array_el, fn_bc.code[10]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_var, op.get_array_el });
 }
 
 // ---- F4 slice 2 -----------------------------------------------------
@@ -1398,13 +1368,7 @@ test "F4: nested assignment 1 + (a = b) preserves the leading push" {
     var fn_bc = try parseExpr(&env, "1 + (a = b)");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: push_i32 1 ; get_var b ; dup ; put_var a ; add
-    try std.testing.expectEqual(@as(usize, 17), fn_bc.code.len);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[5]);
-    try std.testing.expectEqual(op.dup, fn_bc.code[10]);
-    try std.testing.expectEqual(op.put_var, fn_bc.code[11]);
-    try std.testing.expectEqual(op.add, fn_bc.code[16]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.push_1, op.get_var, op.dup, op.put_var, op.add });
 }
 
 test "F4: string literal lowers to push_atom_value" {
@@ -1434,13 +1398,8 @@ test "F4: array literal lowers to push elements ; array_from N" {
     var fn_bc = try parseExpr(&env, "[1, 2, 3]");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: push_i32 1 ; push_i32 2 ; push_i32 3 ; array_from 3
-    try std.testing.expectEqual(@as(usize, 18), fn_bc.code.len);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[0]);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[5]);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[10]);
-    try std.testing.expectEqual(op.array_from, fn_bc.code[15]);
-    const argc = std.mem.readInt(u16, fn_bc.code[16..18], .little);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.push_1, op.push_2, op.push_3, op.array_from });
+    const argc = readU16AtOpcode(fn_bc.code, 3);
     try std.testing.expectEqual(@as(u16, 3), argc);
 }
 
@@ -1462,8 +1421,8 @@ test "F4: trailing comma in array literal is allowed" {
     var fn_bc = try parseExpr(&env, "[1, 2,]");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(op.array_from, fn_bc.code[10]);
-    const argc = std.mem.readInt(u16, fn_bc.code[11..13], .little);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.push_1, op.push_2, op.array_from });
+    const argc = readU16AtOpcode(fn_bc.code, 2);
     try std.testing.expectEqual(@as(u16, 2), argc);
 }
 
@@ -1473,18 +1432,7 @@ test "F4: object literal { a: 1, b: 2 } lowers to object + define_field" {
     var fn_bc = try parseExpr(&env, "{ a: 1, b: 2 }");
     defer fn_bc.deinit(env.rt);
 
-    // Expect:
-    //   object              (1)
-    //   push_i32 1          (5)
-    //   define_field a      (5)
-    //   push_i32 2          (5)
-    //   define_field b      (5)
-    try std.testing.expectEqual(@as(usize, 21), fn_bc.code.len);
-    try std.testing.expectEqual(op.object, fn_bc.code[0]);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[1]);
-    try std.testing.expectEqual(op.define_field, fn_bc.code[6]);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[11]);
-    try std.testing.expectEqual(op.define_field, fn_bc.code[16]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.object, op.push_1, op.define_field, op.push_2, op.define_field });
 }
 
 test "F4: empty object literal emits object" {
@@ -1506,11 +1454,7 @@ test "F4: shorthand object property { x } emits get_var x ; define_field x" {
     var fn_bc = try parseExpr(&env, "{ x }");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: object ; get_var x ; define_field x
-    try std.testing.expectEqual(@as(usize, 11), fn_bc.code.len);
-    try std.testing.expectEqual(op.object, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[1]);
-    try std.testing.expectEqual(op.define_field, fn_bc.code[6]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.object, op.get_var, op.define_field });
 }
 
 test "M3.1 F4: computed object property emits define_array_el" {
@@ -1626,6 +1570,28 @@ test "M3.1 F4: for-await close keeps body statement source location" {
     try std.testing.expectEqual(@as(i32, 7), col_num);
 }
 
+test "M3.1 F4: parser emits QuickJS line_num temp and finalize strips it" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "x;");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    try std.testing.expect(function.code.len >= engine.bytecode.opcode.sizeOfPhase1(op.line_num));
+    try std.testing.expectEqual(op.line_num, function.code[0]);
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, function.code[1..5], .little));
+
+    try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
+    try std.testing.expect(std.mem.indexOfScalar(u8, function.code, op.line_num) == null);
+}
+
 test "M3.1 F4: computed object method emits define_method_computed" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -1700,7 +1666,7 @@ test "M3.1 F4: computed object key accepts logical and assignment" {
     var fn_bc = try parseExpr(&env, "{ [x &&= 1]: 2 }");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expect(std.mem.indexOfScalar(u8, fn_bc.code, op.if_false) != null);
+    try std.testing.expect(hasAnyOpcode(fn_bc.code, &.{ op.if_false, op.if_false8 }));
     try std.testing.expect(std.mem.indexOfScalar(u8, fn_bc.code, op.define_array_el) != null);
 }
 
@@ -1710,7 +1676,7 @@ test "M3.1 F4: computed object key accepts logical or assignment" {
     var fn_bc = try parseExpr(&env, "{ [x ||= 1]: 2 }");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expect(std.mem.indexOfScalar(u8, fn_bc.code, op.if_true) != null);
+    try std.testing.expect(hasAnyOpcode(fn_bc.code, &.{ op.if_true, op.if_true8 }));
     try std.testing.expect(std.mem.indexOfScalar(u8, fn_bc.code, op.define_array_el) != null);
 }
 
@@ -1720,8 +1686,8 @@ test "M3.1 F4: computed object key accepts indexed logical assignment" {
     var fn_bc = try parseExpr(&env, "{ [a[0] ||= 1]: 2 }");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expect(std.mem.indexOfScalar(u8, fn_bc.code, op.dup2) != null);
-    try std.testing.expect(std.mem.indexOfScalar(u8, fn_bc.code, op.if_true) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, fn_bc.code, op.get_array_el3) != null);
+    try std.testing.expect(hasAnyOpcode(fn_bc.code, &.{ op.if_true, op.if_true8 }));
     try std.testing.expect(std.mem.indexOfScalar(u8, fn_bc.code, op.define_array_el) != null);
 }
 
@@ -1741,14 +1707,7 @@ test "F4: simple call f(a, b) emits get_var ; args ; call argc" {
     var fn_bc = try parseExpr(&env, "f(a, b)");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: get_var f ; get_var a ; get_var b ; call 2
-    try std.testing.expectEqual(@as(usize, 18), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[5]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[10]);
-    try std.testing.expectEqual(op.call, fn_bc.code[15]);
-    const argc = std.mem.readInt(u16, fn_bc.code[16..18], .little);
-    try std.testing.expectEqual(@as(u16, 2), argc);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_var, op.get_var, op.call2 });
 }
 
 test "F4: zero-arg call f() emits call 0" {
@@ -1757,24 +1716,17 @@ test "F4: zero-arg call f() emits call 0" {
     var fn_bc = try parseExpr(&env, "f()");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 8), fn_bc.code.len);
-    try std.testing.expectEqual(op.call, fn_bc.code[5]);
-    const argc = std.mem.readInt(u16, fn_bc.code[6..8], .little);
-    try std.testing.expectEqual(@as(u16, 0), argc);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.call0 });
 }
 
-test "F4: method call obj.m(x) uses prepare_call_prop_atom + call_prepared" {
+test "F4: method call obj.m(x) uses get_field2 + call_method" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "obj.m(x)");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: get_var obj ; prepare_call_prop_atom m ; get_var x ; call_prepared 1
-    try std.testing.expectEqual(@as(usize, 18), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.prepare_call_prop_atom, fn_bc.code[5]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[10]);
-    try std.testing.expectEqual(op.call_prepared, fn_bc.code[15]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field2, op.get_var, op.call_method });
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 11));
 }
 
 test "F4: indexed call obj[k](x) uses get_array_el2 + call_method" {
@@ -1783,13 +1735,8 @@ test "F4: indexed call obj[k](x) uses get_array_el2 + call_method" {
     var fn_bc = try parseExpr(&env, "obj[k](x)");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: get_var obj ; get_var k ; get_array_el2 ; get_var x ; call_method 1
-    try std.testing.expectEqual(@as(usize, 19), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[5]);
-    try std.testing.expectEqual(op.get_array_el2, fn_bc.code[10]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[11]);
-    try std.testing.expectEqual(op.call_method, fn_bc.code[16]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_var, op.get_array_el2, op.get_var, op.call_method });
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 10));
 }
 
 test "F4: new X(a) emits get_var X ; dup ; get_var a ; call_constructor 1" {
@@ -1798,13 +1745,8 @@ test "F4: new X(a) emits get_var X ; dup ; get_var a ; call_constructor 1" {
     var fn_bc = try parseExpr(&env, "new X(a)");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 14), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.dup, fn_bc.code[5]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[6]);
-    try std.testing.expectEqual(op.call_constructor, fn_bc.code[11]);
-    const argc = std.mem.readInt(u16, fn_bc.code[12..14], .little);
-    try std.testing.expectEqual(@as(u16, 1), argc);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.get_var, op.call_constructor });
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 7));
 }
 
 test "F4: bare new X (no args) emits call_constructor 0" {
@@ -1813,12 +1755,8 @@ test "F4: bare new X (no args) emits call_constructor 0" {
     var fn_bc = try parseExpr(&env, "new X");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 9), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.dup, fn_bc.code[5]);
-    try std.testing.expectEqual(op.call_constructor, fn_bc.code[6]);
-    const argc = std.mem.readInt(u16, fn_bc.code[7..9], .little);
-    try std.testing.expectEqual(@as(u16, 0), argc);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.call_constructor });
+    try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 4));
 }
 
 test "F4: postfix x++ emits get_var ; post_inc ; put_var" {
@@ -1827,11 +1765,7 @@ test "F4: postfix x++ emits get_var ; post_inc ; put_var" {
     var fn_bc = try parseExpr(&env, "x++");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: get_var x ; post_inc ; put_var x
-    try std.testing.expectEqual(@as(usize, 11), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.post_inc, fn_bc.code[5]);
-    try std.testing.expectEqual(op.put_var, fn_bc.code[6]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.post_inc, op.put_var });
 }
 
 test "F4: postfix x-- emits get_var ; post_dec ; put_var" {
@@ -1840,7 +1774,7 @@ test "F4: postfix x-- emits get_var ; post_dec ; put_var" {
     var fn_bc = try parseExpr(&env, "x--");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(op.post_dec, fn_bc.code[5]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.post_dec, op.put_var });
 }
 
 test "F4: prefix ++x emits get_var ; inc ; dup ; put_var" {
@@ -1849,12 +1783,7 @@ test "F4: prefix ++x emits get_var ; inc ; dup ; put_var" {
     var fn_bc = try parseExpr(&env, "++x");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: get_var x ; inc ; dup ; put_var x
-    try std.testing.expectEqual(@as(usize, 12), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.inc, fn_bc.code[5]);
-    try std.testing.expectEqual(op.dup, fn_bc.code[6]);
-    try std.testing.expectEqual(op.put_var, fn_bc.code[7]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.inc, op.dup, op.put_var });
 }
 
 test "F4: prefix --x emits get_var ; dec ; dup ; put_var" {
@@ -1863,8 +1792,7 @@ test "F4: prefix --x emits get_var ; dec ; dup ; put_var" {
     var fn_bc = try parseExpr(&env, "--x");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(op.dec, fn_bc.code[5]);
-    try std.testing.expectEqual(op.dup, fn_bc.code[6]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dec, op.dup, op.put_var });
 }
 
 test "F4: delete unresolvable identifier emits delete_var" {
@@ -1883,10 +1811,16 @@ test "F4: delete a.b emits get_var a ; push_atom_value b ; delete" {
     var fn_bc = try parseExpr(&env, "delete a.b");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 11), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.push_atom_value, fn_bc.code[5]);
-    try std.testing.expectEqual(op.delete, fn_bc.code[10]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.push_atom_value, op.delete });
+}
+
+test "F4: delete a.b.length rewrites optimized length load" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "delete a.b.length");
+    defer fn_bc.deinit(env.rt);
+
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field, op.push_atom_value, op.delete });
 }
 
 test "F4: delete a[i] emits get_var a ; get_var i ; delete" {
@@ -1895,10 +1829,7 @@ test "F4: delete a[i] emits get_var a ; get_var i ; delete" {
     var fn_bc = try parseExpr(&env, "delete a[i]");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 11), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[5]);
-    try std.testing.expectEqual(op.delete, fn_bc.code[10]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_var, op.delete });
 }
 
 test "F4: delete on a non-reference yields drop ; push_true" {
@@ -1918,10 +1849,7 @@ test "F4: chained call f(a)(b) emits two call ops" {
     var fn_bc = try parseExpr(&env, "f(a)(b)");
     defer fn_bc.deinit(env.rt);
 
-    // get_var f ; get_var a ; call 1 ; get_var b ; call 1
-    try std.testing.expectEqual(@as(usize, 21), fn_bc.code.len);
-    try std.testing.expectEqual(op.call, fn_bc.code[10]);
-    try std.testing.expectEqual(op.call, fn_bc.code[18]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_var, op.call1, op.get_var, op.call1 });
 }
 
 // ---- F4 slice 3: member-target assign + update ----------------------
@@ -1932,13 +1860,7 @@ test "F4: dotted assignment a.b = v emits get_var ; rhs ; insert2 ; put_field" {
     var fn_bc = try parseExpr(&env, "a.b = v");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: get_var a ; get_var v ; insert2 ; put_field b
-    // Mirrors QuickJS PUT_LVALUE_KEEP_TOP for OP_get_field (`quickjs.c:25494`).
-    try std.testing.expectEqual(@as(usize, 16), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[5]);
-    try std.testing.expectEqual(op.insert2, fn_bc.code[10]);
-    try std.testing.expectEqual(op.put_field, fn_bc.code[11]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_var, op.insert2, op.put_field });
 }
 
 test "F4: indexed assignment a[i] = v emits get_var ; key ; rhs ; insert3 ; put_array_el" {
@@ -1947,14 +1869,7 @@ test "F4: indexed assignment a[i] = v emits get_var ; key ; rhs ; insert3 ; put_
     var fn_bc = try parseExpr(&env, "a[i] = v");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: get_var a ; get_var i ; get_var v ; insert3 ; put_array_el
-    // Mirrors PUT_LVALUE_KEEP_TOP for OP_get_array_el (`quickjs.c:25520`).
-    try std.testing.expectEqual(@as(usize, 17), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[5]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[10]);
-    try std.testing.expectEqual(op.insert3, fn_bc.code[15]);
-    try std.testing.expectEqual(op.put_array_el, fn_bc.code[16]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_var, op.get_var, op.insert3, op.put_array_el });
 }
 
 test "F4: compound dotted assignment a.b += v rewrites get_field to get_field2" {
@@ -1963,14 +1878,7 @@ test "F4: compound dotted assignment a.b += v rewrites get_field to get_field2" 
     var fn_bc = try parseExpr(&env, "a.b += v");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: get_var a ; get_field2 b ; get_var v ; add ; insert2 ; put_field b
-    try std.testing.expectEqual(@as(usize, 22), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_field2, fn_bc.code[5]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[10]);
-    try std.testing.expectEqual(op.add, fn_bc.code[15]);
-    try std.testing.expectEqual(op.insert2, fn_bc.code[16]);
-    try std.testing.expectEqual(op.put_field, fn_bc.code[17]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field2, op.get_var, op.add, op.insert2, op.put_field });
 }
 
 test "F4: compound indexed assignment a[i] += v keeps QuickJS indexed lvalue shape" {
@@ -1979,18 +1887,7 @@ test "F4: compound indexed assignment a[i] += v keeps QuickJS indexed lvalue sha
     var fn_bc = try parseExpr(&env, "a[i] += v");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: get_var a ; get_var i ; to_propkey2 ; dup2 ; get_array_el ;
-    // get_var v ; add ; insert3 ; put_array_el
-    try std.testing.expectEqual(@as(usize, 21), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[5]);
-    try std.testing.expectEqual(op.to_propkey2, fn_bc.code[10]);
-    try std.testing.expectEqual(op.dup2, fn_bc.code[11]);
-    try std.testing.expectEqual(op.get_array_el, fn_bc.code[12]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[13]);
-    try std.testing.expectEqual(op.add, fn_bc.code[18]);
-    try std.testing.expectEqual(op.insert3, fn_bc.code[19]);
-    try std.testing.expectEqual(op.put_array_el, fn_bc.code[20]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_var, op.get_array_el3, op.get_var, op.add, op.insert3, op.put_array_el });
 }
 
 test "F4: postfix dotted a.b++ emits get_field2 ; post_inc ; perm3 ; put_field" {
@@ -1999,14 +1896,7 @@ test "F4: postfix dotted a.b++ emits get_field2 ; post_inc ; perm3 ; put_field" 
     var fn_bc = try parseExpr(&env, "a.b++");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: get_var a ; get_field2 b ; post_inc ; perm3 ; put_field b
-    // Mirrors PUT_LVALUE_KEEP_SECOND for OP_get_field (`quickjs.c:25497`).
-    try std.testing.expectEqual(@as(usize, 17), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_field2, fn_bc.code[5]);
-    try std.testing.expectEqual(op.post_inc, fn_bc.code[10]);
-    try std.testing.expectEqual(op.perm3, fn_bc.code[11]);
-    try std.testing.expectEqual(op.put_field, fn_bc.code[12]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field2, op.post_inc, op.perm3, op.put_field });
 }
 
 test "F4: postfix indexed a[i]-- emits QuickJS indexed lvalue read ; post_dec ; perm4 ; put_array_el" {
@@ -2015,18 +1905,7 @@ test "F4: postfix indexed a[i]-- emits QuickJS indexed lvalue read ; post_dec ; 
     var fn_bc = try parseExpr(&env, "a[i]--");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: get_var a ; get_var i ; to_propkey2 ; dup2 ; get_array_el ;
-    // post_dec ; perm4 ; put_array_el
-    // Mirrors PUT_LVALUE_KEEP_SECOND for OP_get_array_el (`quickjs.c:25523`).
-    try std.testing.expectEqual(@as(usize, 16), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[5]);
-    try std.testing.expectEqual(op.to_propkey2, fn_bc.code[10]);
-    try std.testing.expectEqual(op.dup2, fn_bc.code[11]);
-    try std.testing.expectEqual(op.get_array_el, fn_bc.code[12]);
-    try std.testing.expectEqual(op.post_dec, fn_bc.code[13]);
-    try std.testing.expectEqual(op.perm4, fn_bc.code[14]);
-    try std.testing.expectEqual(op.put_array_el, fn_bc.code[15]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_var, op.get_array_el3, op.post_dec, op.perm4, op.put_array_el });
 }
 
 test "F4: prefix ++a.b emits get_field2 ; inc ; insert2 ; put_field" {
@@ -2035,13 +1914,7 @@ test "F4: prefix ++a.b emits get_field2 ; inc ; insert2 ; put_field" {
     var fn_bc = try parseExpr(&env, "++a.b");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: get_var a ; get_field2 b ; inc ; insert2 ; put_field b
-    try std.testing.expectEqual(@as(usize, 17), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_field2, fn_bc.code[5]);
-    try std.testing.expectEqual(op.inc, fn_bc.code[10]);
-    try std.testing.expectEqual(op.insert2, fn_bc.code[11]);
-    try std.testing.expectEqual(op.put_field, fn_bc.code[12]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field2, op.inc, op.insert2, op.put_field });
 }
 
 test "F4: prefix --a[i] emits QuickJS indexed lvalue read ; dec ; insert3 ; put_array_el" {
@@ -2050,17 +1923,7 @@ test "F4: prefix --a[i] emits QuickJS indexed lvalue read ; dec ; insert3 ; put_
     var fn_bc = try parseExpr(&env, "--a[i]");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: get_var a ; get_var i ; to_propkey2 ; dup2 ; get_array_el ;
-    // dec ; insert3 ; put_array_el
-    try std.testing.expectEqual(@as(usize, 16), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[5]);
-    try std.testing.expectEqual(op.to_propkey2, fn_bc.code[10]);
-    try std.testing.expectEqual(op.dup2, fn_bc.code[11]);
-    try std.testing.expectEqual(op.get_array_el, fn_bc.code[12]);
-    try std.testing.expectEqual(op.dec, fn_bc.code[13]);
-    try std.testing.expectEqual(op.insert3, fn_bc.code[14]);
-    try std.testing.expectEqual(op.put_array_el, fn_bc.code[15]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_var, op.get_array_el3, op.dec, op.insert3, op.put_array_el });
 }
 
 test "F4: dotted assign value remains on stack via insert2 (chained)" {
@@ -2082,17 +1945,9 @@ test "F4: array hole [1, , 3] emits sparse define_field for present elements" {
     var fn_bc = try parseExpr(&env, "[1, , 3]");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: push_i32 1 ; array_from 1 ; push_i32 3 ; define_field "2" ; set length 3.
-    try std.testing.expectEqual(@as(usize, 29), fn_bc.code.len);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[0]);
-    try std.testing.expectEqual(op.array_from, fn_bc.code[5]);
-    const argc = std.mem.readInt(u16, fn_bc.code[6..8], .little);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.push_1, op.array_from, op.push_3, op.define_field, op.dup, op.push_3, op.put_field });
+    const argc = readU16AtOpcode(fn_bc.code, 1);
     try std.testing.expectEqual(@as(u16, 1), argc);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[8]);
-    try std.testing.expectEqual(op.define_field, fn_bc.code[13]);
-    try std.testing.expectEqual(op.dup, fn_bc.code[18]);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[19]);
-    try std.testing.expectEqual(op.put_field, fn_bc.code[24]);
 }
 
 test "F4: leading hole [, 1] emits sparse define_field at index 1" {
@@ -2101,16 +1956,9 @@ test "F4: leading hole [, 1] emits sparse define_field at index 1" {
     var fn_bc = try parseExpr(&env, "[, 1]");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: array_from 0 ; push_i32 1 ; define_field "1" ; set length 2.
-    try std.testing.expectEqual(@as(usize, 24), fn_bc.code.len);
-    try std.testing.expectEqual(op.array_from, fn_bc.code[0]);
-    const argc = std.mem.readInt(u16, fn_bc.code[1..3], .little);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.array_from, op.push_1, op.define_field, op.dup, op.push_2, op.put_field });
+    const argc = readU16AtOpcode(fn_bc.code, 0);
     try std.testing.expectEqual(@as(u16, 0), argc);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[3]);
-    try std.testing.expectEqual(op.define_field, fn_bc.code[8]);
-    try std.testing.expectEqual(op.dup, fn_bc.code[13]);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[14]);
-    try std.testing.expectEqual(op.put_field, fn_bc.code[19]);
 }
 
 test "F4: consecutive holes [, , 1] emits sparse define_field at index 2" {
@@ -2119,16 +1967,9 @@ test "F4: consecutive holes [, , 1] emits sparse define_field at index 2" {
     var fn_bc = try parseExpr(&env, "[, , 1]");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: array_from 0 ; push_i32 1 ; define_field "2" ; set length 3.
-    try std.testing.expectEqual(@as(usize, 24), fn_bc.code.len);
-    try std.testing.expectEqual(op.array_from, fn_bc.code[0]);
-    const argc = std.mem.readInt(u16, fn_bc.code[1..3], .little);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.array_from, op.push_1, op.define_field, op.dup, op.push_3, op.put_field });
+    const argc = readU16AtOpcode(fn_bc.code, 0);
     try std.testing.expectEqual(@as(u16, 0), argc);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[3]);
-    try std.testing.expectEqual(op.define_field, fn_bc.code[8]);
-    try std.testing.expectEqual(op.dup, fn_bc.code[13]);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[14]);
-    try std.testing.expectEqual(op.put_field, fn_bc.code[19]);
 }
 
 test "F4: multi-level delete a.b.c rewrites only the last get_field" {
@@ -2137,12 +1978,7 @@ test "F4: multi-level delete a.b.c rewrites only the last get_field" {
     var fn_bc = try parseExpr(&env, "delete a.b.c");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: get_var a ; get_field b ; push_atom_value c ; delete
-    try std.testing.expectEqual(@as(usize, 16), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_field, fn_bc.code[5]);
-    try std.testing.expectEqual(op.push_atom_value, fn_bc.code[10]);
-    try std.testing.expectEqual(op.delete, fn_bc.code[15]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field, op.push_atom_value, op.delete });
 }
 
 test "F4: multi-level delete a.b[i] truncates the trailing get_array_el" {
@@ -2151,12 +1987,7 @@ test "F4: multi-level delete a.b[i] truncates the trailing get_array_el" {
     var fn_bc = try parseExpr(&env, "delete a.b[i]");
     defer fn_bc.deinit(env.rt);
 
-    // Expect: get_var a ; get_field b ; get_var i ; delete
-    try std.testing.expectEqual(@as(usize, 16), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_field, fn_bc.code[5]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[10]);
-    try std.testing.expectEqual(op.delete, fn_bc.code[15]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field, op.get_var, op.delete });
 }
 
 test "F4: delete on a postfix update result evaluates and returns true" {
@@ -2177,33 +2008,11 @@ test "F4: optional chain a?.b emits inline chain_test + normal get_field" {
     var fn_bc = try parseExpr(&env, "a?.b");
     defer fn_bc.deinit(env.rt);
 
-    // Expected (mirror `quickjs.c:26158` optional_chain_test):
-    //   get_var a              (5)
-    //   dup                    (1)
-    //   is_undefined_or_null   (1)
-    //   if_false NEXT          (5)   -- jump past chain-exit prelude
-    //   drop                   (1)   -- drop_count = 1 for member access
-    //   undefined              (1)
-    //   goto CHAIN_EXIT        (5)   -- patched at chain end
-    //   NEXT:                  (here, target of if_false above)
-    //   get_field b            (5)
-    //   CHAIN_EXIT:            (here, target of goto above)
-    try std.testing.expectEqual(@as(usize, 24), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.dup, fn_bc.code[5]);
-    try std.testing.expectEqual(op.is_undefined_or_null, fn_bc.code[6]);
-    try std.testing.expectEqual(op.if_false, fn_bc.code[7]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[12]);
-    try std.testing.expectEqual(op.undefined, fn_bc.code[13]);
-    try std.testing.expectEqual(op.goto, fn_bc.code[14]);
-    try std.testing.expectEqual(op.get_field, fn_bc.code[19]);
-
-    // The if_false target should be NEXT (offset 19 — the get_field).
-    const next_target = readRelTarget32(fn_bc.code, 7);
-    try std.testing.expectEqual(@as(usize, 19), next_target);
-    // The goto target should be CHAIN_EXIT (end of bytecode = 24).
-    const exit_target = readRelTarget32(fn_bc.code, 14);
-    try std.testing.expectEqual(@as(usize, 24), exit_target);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.get_field });
+    const next_target = readRelTarget32(fn_bc.code, 5);
+    try std.testing.expectEqual(@as(usize, 11), next_target);
+    const exit_target = readRelTarget32(fn_bc.code, 9);
+    try std.testing.expectEqual(fn_bc.code.len, exit_target);
 }
 
 test "F4: optional chain a?.[i] emits inline chain_test + get_array_el" {
@@ -2212,13 +2021,7 @@ test "F4: optional chain a?.[i] emits inline chain_test + get_array_el" {
     var fn_bc = try parseExpr(&env, "a?.[i]");
     defer fn_bc.deinit(env.rt);
 
-    // get_var a (5) ; chain_test (14) ; get_var i (5) ; get_array_el (1)
-    try std.testing.expectEqual(@as(usize, 25), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.dup, fn_bc.code[5]);
-    try std.testing.expectEqual(op.goto, fn_bc.code[14]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[19]);
-    try std.testing.expectEqual(op.get_array_el, fn_bc.code[24]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.get_var, op.get_array_el });
 }
 
 test "F4: optional chain a?.b.c — chain test only at the ?. site" {
@@ -2227,15 +2030,9 @@ test "F4: optional chain a?.b.c — chain test only at the ?. site" {
     var fn_bc = try parseExpr(&env, "a?.b.c");
     defer fn_bc.deinit(env.rt);
 
-    // get_var a (5) ; chain_test (14) ; get_field b (5) ; get_field c (5)
-    try std.testing.expectEqual(@as(usize, 29), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.dup, fn_bc.code[5]);
-    try std.testing.expectEqual(op.get_field, fn_bc.code[19]);
-    try std.testing.expectEqual(op.get_field, fn_bc.code[24]);
-    // CHAIN_EXIT is the end of bytecode.
-    const exit_target = readRelTarget32(fn_bc.code, 14);
-    try std.testing.expectEqual(@as(usize, 29), exit_target);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.get_field, op.get_field });
+    const exit_target = readRelTarget32(fn_bc.code, 9);
+    try std.testing.expectEqual(fn_bc.code.len, exit_target);
 }
 
 test "F4: a?.b?.c emits two chain_tests sharing a common chain exit" {
@@ -2244,14 +2041,15 @@ test "F4: a?.b?.c emits two chain_tests sharing a common chain exit" {
     var fn_bc = try parseExpr(&env, "a?.b?.c");
     defer fn_bc.deinit(env.rt);
 
-    // Layout: get_var a ; chain_test1 ; get_field b ; chain_test2 ; get_field c
-    //          5         + 14          + 5            + 14         + 5  = 43
-    try std.testing.expectEqual(@as(usize, 43), fn_bc.code.len);
-    // Both goto operands target the same chain end.
-    const exit_target_1 = readRelTarget32(fn_bc.code, 14);
-    const exit_target_2 = readRelTarget32(fn_bc.code, 33);
+    try expectOpcodeSequence(fn_bc.code, &.{
+        op.get_var,   op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8,
+        op.get_field, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8,
+        op.get_field,
+    });
+    const exit_target_1 = readRelTarget32(fn_bc.code, 9);
+    const exit_target_2 = readRelTarget32(fn_bc.code, 22);
     try std.testing.expectEqual(exit_target_1, exit_target_2);
-    try std.testing.expectEqual(@as(usize, 43), exit_target_1);
+    try std.testing.expectEqual(fn_bc.code.len, exit_target_1);
 }
 
 test "F4: optional call a?.() emits chain_test + plain call" {
@@ -2260,21 +2058,9 @@ test "F4: optional call a?.() emits chain_test + plain call" {
     var fn_bc = try parseExpr(&env, "a?.()");
     defer fn_bc.deinit(env.rt);
 
-    // Expected: get_var a (5) ; chain_test (14) ; call 0 (3)
-    try std.testing.expectEqual(@as(usize, 22), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.dup, fn_bc.code[5]);
-    try std.testing.expectEqual(op.is_undefined_or_null, fn_bc.code[6]);
-    try std.testing.expectEqual(op.if_false, fn_bc.code[7]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[12]);
-    try std.testing.expectEqual(op.undefined, fn_bc.code[13]);
-    try std.testing.expectEqual(op.goto, fn_bc.code[14]);
-    try std.testing.expectEqual(op.call, fn_bc.code[19]);
-    const argc = std.mem.readInt(u16, fn_bc.code[20..22], .little);
-    try std.testing.expectEqual(@as(u16, 0), argc);
-    // Chain exit lands at end of bytecode (after the call).
-    const exit_target = readRelTarget32(fn_bc.code, 14);
-    try std.testing.expectEqual(@as(usize, 22), exit_target);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.call0 });
+    const exit_target = readRelTarget32(fn_bc.code, 9);
+    try std.testing.expectEqual(fn_bc.code.len, exit_target);
 }
 
 test "F4: method-on-opt-chain obj?.b(x) uses get_field2 + call_method" {
@@ -2283,15 +2069,57 @@ test "F4: method-on-opt-chain obj?.b(x) uses get_field2 + call_method" {
     var fn_bc = try parseExpr(&env, "obj?.b(x)");
     defer fn_bc.deinit(env.rt);
 
-    // Expected: get_var obj (5) ; chain_test (14) ; get_field2 b (5) ;
-    //           get_var x (5) ; call_method 1 (3) = 32
-    try std.testing.expectEqual(@as(usize, 32), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_field2, fn_bc.code[19]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[24]);
-    try std.testing.expectEqual(op.call_method, fn_bc.code[29]);
-    const argc = std.mem.readInt(u16, fn_bc.code[30..32], .little);
-    try std.testing.expectEqual(@as(u16, 1), argc);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.get_field2, op.get_var, op.call_method });
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 19));
+}
+
+test "F4: parenthesized optional member call preserves receiver" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "(obj?.b)()");
+    defer fn_bc.deinit(env.rt);
+
+    try expectOpcodeSequence(fn_bc.code, &.{
+        op.get_var,
+        op.dup,
+        op.is_undefined_or_null,
+        op.if_false8,
+        op.drop,
+        op.undefined,
+        op.undefined,
+        op.goto8,
+        op.get_field2,
+        op.call_method,
+    });
+    try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, fn_bc.code.len - 3));
+}
+
+test "F4: optional call after parenthesized optional member keeps balanced exits" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "(obj?.b)?.()");
+    defer fn_bc.deinit(env.rt);
+
+    try expectOpcodeSequence(fn_bc.code, &.{
+        op.get_var,
+        op.dup,
+        op.is_undefined_or_null,
+        op.if_false8,
+        op.drop,
+        op.undefined,
+        op.undefined,
+        op.goto8,
+        op.get_field2,
+        op.dup,
+        op.is_undefined_or_null,
+        op.if_false8,
+        op.drop,
+        op.drop,
+        op.undefined,
+        op.goto8,
+        op.call_method,
+    });
+    try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, fn_bc.code.len - 3));
 }
 
 test "F4: optional chain accepts keyword property names" {
@@ -2316,14 +2144,8 @@ test "F4: indexed-call-on-opt-chain obj?.[k](x) uses get_array_el2 + call_method
     var fn_bc = try parseExpr(&env, "obj?.[k](x)");
     defer fn_bc.deinit(env.rt);
 
-    // get_var obj (5) ; chain_test (14) ; get_var k (5) ; get_array_el2 (1) ;
-    // get_var x (5) ; call_method 1 (3) = 33
-    try std.testing.expectEqual(@as(usize, 33), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[19]);
-    try std.testing.expectEqual(op.get_array_el2, fn_bc.code[24]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[25]);
-    try std.testing.expectEqual(op.call_method, fn_bc.code[30]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.get_var, op.get_array_el2, op.get_var, op.call_method });
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 18));
 }
 
 // ---- F4 finish: tagged templates -----------------------------------
@@ -2334,18 +2156,9 @@ test "F4: tagged template tag`hello` emits singleton template-object + call 1" {
     var fn_bc = try parseExpr(&env, "tag`hello`");
     defer fn_bc.deinit(env.rt);
 
-    // get_var tag (5) ; cooked array_from (8) ; raw array_from (8) ;
-    // define_field raw (5) ; call 1 (3) = 29
-    try std.testing.expectEqual(@as(usize, 29), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.push_atom_value, fn_bc.code[5]);
-    try std.testing.expectEqual(op.array_from, fn_bc.code[10]);
-    try std.testing.expectEqual(op.push_atom_value, fn_bc.code[13]);
-    try std.testing.expectEqual(op.array_from, fn_bc.code[18]);
-    try std.testing.expectEqual(op.define_field, fn_bc.code[21]);
-    try std.testing.expectEqual(op.call, fn_bc.code[26]);
-    const argc = std.mem.readInt(u16, fn_bc.code[27..29], .little);
-    try std.testing.expectEqual(@as(u16, 1), argc);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.push_atom_value, op.array_from, op.push_atom_value, op.array_from, op.define_field, op.call1 });
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 8));
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 16));
 }
 
 test "F4: tagged template tag`a${x}b` includes substitutions in argc" {
@@ -2354,14 +2167,7 @@ test "F4: tagged template tag`a${x}b` includes substitutions in argc" {
     var fn_bc = try parseExpr(&env, "tag`a${x}b`");
     defer fn_bc.deinit(env.rt);
 
-    // get_var tag (5) ; undefined (1) ; get_var x (5) ; call 2 (3) = 14
-    try std.testing.expectEqual(@as(usize, 14), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.undefined, fn_bc.code[5]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[6]);
-    try std.testing.expectEqual(op.call, fn_bc.code[11]);
-    const argc = std.mem.readInt(u16, fn_bc.code[12..14], .little);
-    try std.testing.expectEqual(@as(u16, 2), argc);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.undefined, op.get_var, op.call2 });
 }
 
 test "F4: tagged template on member access obj.tag`hello` rewrites to call_method" {
@@ -2370,17 +2176,10 @@ test "F4: tagged template on member access obj.tag`hello` rewrites to call_metho
     var fn_bc = try parseExpr(&env, "obj.tag`hello`");
     defer fn_bc.deinit(env.rt);
 
-    // get_var obj (5) ; get_field2 tag (5) ; cooked array_from (8) ;
-    // raw array_from (8) ; define_field raw (5) ; call_method 1 (3) = 34
-    try std.testing.expectEqual(@as(usize, 34), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_field2, fn_bc.code[5]);
-    try std.testing.expectEqual(op.push_atom_value, fn_bc.code[10]);
-    try std.testing.expectEqual(op.array_from, fn_bc.code[15]);
-    try std.testing.expectEqual(op.push_atom_value, fn_bc.code[18]);
-    try std.testing.expectEqual(op.array_from, fn_bc.code[23]);
-    try std.testing.expectEqual(op.define_field, fn_bc.code[26]);
-    try std.testing.expectEqual(op.call_method, fn_bc.code[31]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field2, op.push_atom_value, op.array_from, op.push_atom_value, op.array_from, op.define_field, op.call_method });
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 13));
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 21));
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 29));
 }
 
 test "F4: tagged template tag`a${x}b${y}c` argc = 3 (template + 2 subs)" {
@@ -2389,9 +2188,7 @@ test "F4: tagged template tag`a${x}b${y}c` argc = 3 (template + 2 subs)" {
     var fn_bc = try parseExpr(&env, "tag`a${x}b${y}c`");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(op.call, fn_bc.code[fn_bc.code.len - 3]);
-    const argc = std.mem.readInt(u16, fn_bc.code[fn_bc.code.len - 2 ..][0..2], .little);
-    try std.testing.expectEqual(@as(u16, 3), argc);
+    try std.testing.expectEqual(op.call3, fn_bc.code[fn_bc.code.len - 1]);
 }
 
 test "F4: optional call without chain receiver a?.()(b) — chain only on first call" {
@@ -2401,15 +2198,9 @@ test "F4: optional call without chain receiver a?.()(b) — chain only on first 
     var fn_bc = try parseExpr(&env, "a?.()(b)");
     defer fn_bc.deinit(env.rt);
 
-    // Expected: get_var a (5) ; chain_test (14) ; call 0 (3) ; get_var b (5) ; call 1 (3)
-    try std.testing.expectEqual(@as(usize, 30), fn_bc.code.len);
-    try std.testing.expectEqual(op.call, fn_bc.code[19]);
-    try std.testing.expectEqual(op.call, fn_bc.code[27]);
-    // The first call's chain_exit lands AFTER all subsequent ops too —
-    // the entire chain (including the trailing `(b)`) is governed by the
-    // single chain exit.
-    const exit_target = readRelTarget32(fn_bc.code, 14);
-    try std.testing.expectEqual(@as(usize, 30), exit_target);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.call0, op.get_var, op.call1 });
+    const exit_target = readRelTarget32(fn_bc.code, 9);
+    try std.testing.expectEqual(fn_bc.code.len, exit_target);
 }
 
 // ---- F4 slice 5: template literals -----------------------------------
@@ -2437,23 +2228,11 @@ test "F4: empty template `` lowers to push_empty_string" {
 test "F4: simple template with one substitution uses get_field2 concat + call_method" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
-    // `a${b}c` lowers to:
-    //   push_atom_value "a"   (5)
-    //   get_field2 concat     (5)
-    //   get_var b             (5)
-    //   push_atom_value "c"   (5)
-    //   call_method 2         (3)
     var fn_bc = try parseExpr(&env, "`a${b}c`");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 23), fn_bc.code.len);
-    try std.testing.expectEqual(op.push_atom_value, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_field2, fn_bc.code[5]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[10]);
-    try std.testing.expectEqual(op.push_atom_value, fn_bc.code[15]);
-    try std.testing.expectEqual(op.call_method, fn_bc.code[20]);
-    const argc = std.mem.readInt(u16, fn_bc.code[21..23], .little);
-    try std.testing.expectEqual(@as(u16, 2), argc);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.push_atom_value, op.get_field2, op.get_var, op.push_atom_value, op.call_method });
+    try std.testing.expectEqual(@as(u16, 2), readU16AtOpcode(fn_bc.code, 18));
 }
 
 test "F4: empty-head template `${b}` skips middle/tail empty strings" {
@@ -2469,13 +2248,8 @@ test "F4: empty-head template `${b}` skips middle/tail empty strings" {
     var fn_bc = try parseExpr(&env, "`${b}`");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 14), fn_bc.code.len);
-    try std.testing.expectEqual(op.push_empty_string, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_field2, fn_bc.code[1]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[6]);
-    try std.testing.expectEqual(op.call_method, fn_bc.code[11]);
-    const argc = std.mem.readInt(u16, fn_bc.code[12..14], .little);
-    try std.testing.expectEqual(@as(u16, 1), argc);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.push_empty_string, op.get_field2, op.get_var, op.call_method });
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 9));
 }
 
 test "F4: template with two substitutions accumulates argc correctly" {
@@ -2492,10 +2266,8 @@ test "F4: template with two substitutions accumulates argc correctly" {
     var fn_bc = try parseExpr(&env, "`a${b}c${d}e`");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 33), fn_bc.code.len);
-    try std.testing.expectEqual(op.call_method, fn_bc.code[30]);
-    const argc = std.mem.readInt(u16, fn_bc.code[31..33], .little);
-    try std.testing.expectEqual(@as(u16, 4), argc);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.push_atom_value, op.get_field2, op.get_var, op.push_atom_value, op.get_var, op.push_atom_value, op.call_method });
+    try std.testing.expectEqual(@as(u16, 4), readU16AtOpcode(fn_bc.code, 26));
 }
 
 // ---- F4 slice 6: spread in calls and arrays --------------------------
@@ -2503,59 +2275,22 @@ test "F4: template with two substitutions accumulates argc correctly" {
 test "F4: spread call f(...x) emits array_from + apply 0" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
-    // Expected:
-    //   get_var f          (5)
-    //   array_from 0       (3)  -- no leading args
-    //   push_i32 0         (5)  -- initial idx
-    //   get_var x          (5)
-    //   append             (1)
-    //   drop               (1)  -- drop idx
-    //   undefined          (1)
-    //   swap               (1)
-    //   apply 0            (3)  -- 0 = not new
     var fn_bc = try parseExpr(&env, "f(...x)");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 25), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.array_from, fn_bc.code[5]);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[8]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[13]);
-    try std.testing.expectEqual(op.append, fn_bc.code[18]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[19]);
-    try std.testing.expectEqual(op.undefined, fn_bc.code[20]);
-    try std.testing.expectEqual(op.swap, fn_bc.code[21]);
-    try std.testing.expectEqual(op.apply, fn_bc.code[22]);
-    const is_new = std.mem.readInt(u16, fn_bc.code[23..25], .little);
-    try std.testing.expectEqual(@as(u16, 0), is_new);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.array_from, op.push_0, op.get_var, op.append, op.drop, op.undefined, op.swap, op.apply });
+    try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 14));
 }
 
 test "F4: mixed spread call f(a, ...b) starts array_from with leading count" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
-    // Expected:
-    //   get_var f          (5)
-    //   get_var a          (5)
-    //   array_from 1       (3)  -- 1 leading arg
-    //   push_i32 1         (5)
-    //   get_var b          (5)
-    //   append             (1)
-    //   drop               (1)
-    //   undefined          (1)
-    //   swap               (1)
-    //   apply 0            (3)
     var fn_bc = try parseExpr(&env, "f(a, ...b)");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 30), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[5]);
-    try std.testing.expectEqual(op.array_from, fn_bc.code[10]);
-    const argc = std.mem.readInt(u16, fn_bc.code[11..13], .little);
-    try std.testing.expectEqual(@as(u16, 1), argc);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[13]);
-    try std.testing.expectEqual(op.append, fn_bc.code[23]);
-    try std.testing.expectEqual(op.apply, fn_bc.code[27]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_var, op.array_from, op.push_1, op.get_var, op.append, op.drop, op.undefined, op.swap, op.apply });
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 6));
+    try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 17));
 }
 
 test "F4: trailing element after spread uses define_array_el + inc" {
@@ -2577,11 +2312,7 @@ test "F4: trailing element after spread uses define_array_el + inc" {
     var fn_bc = try parseExpr(&env, "f(...a, b)");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 32), fn_bc.code.len);
-    try std.testing.expectEqual(op.append, fn_bc.code[18]);
-    try std.testing.expectEqual(op.define_array_el, fn_bc.code[24]);
-    try std.testing.expectEqual(op.inc, fn_bc.code[25]);
-    try std.testing.expectEqual(op.apply, fn_bc.code[29]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.array_from, op.push_0, op.get_var, op.append, op.get_var, op.define_array_el, op.inc, op.drop, op.undefined, op.swap, op.apply });
 }
 
 test "F4: method call with spread obj.m(...x) uses perm3 + apply 0" {
@@ -2600,10 +2331,7 @@ test "F4: method call with spread obj.m(...x) uses perm3 + apply 0" {
     var fn_bc = try parseExpr(&env, "obj.m(...x)");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 29), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_field2, fn_bc.code[5]);
-    try std.testing.expectEqual(op.perm3, fn_bc.code[25]);
-    try std.testing.expectEqual(op.apply, fn_bc.code[26]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field2, op.array_from, op.push_0, op.get_var, op.append, op.drop, op.perm3, op.apply });
 }
 
 test "F4: new with spread new X(...args) uses apply with is_new=1" {
@@ -2620,39 +2348,19 @@ test "F4: new with spread new X(...args) uses apply with is_new=1" {
 test "F4: array literal spread [...a] starts with array_from 0 + push_i32 0" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
-    // Expected:
-    //   array_from 0       (3)
-    //   push_i32 0         (5)
-    //   get_var a          (5)
-    //   append             (1)
-    //   dup1               (1)
-    //   put_field length   (5)
     var fn_bc = try parseExpr(&env, "[...a]");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 20), fn_bc.code.len);
-    try std.testing.expectEqual(op.array_from, fn_bc.code[0]);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[3]);
-    try std.testing.expectEqual(op.append, fn_bc.code[13]);
-    try std.testing.expectEqual(op.dup1, fn_bc.code[14]);
-    try std.testing.expectEqual(op.put_field, fn_bc.code[15]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.array_from, op.push_0, op.get_var, op.append, op.dup1, op.put_field });
 }
 
 test "F4: array literal mixed spread [a, ...b, c] uses define_array_el+inc" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
-    // get_var a (5) ; array_from 1 (3) ; push_i32 1 (5) ; get_var b (5) ; append (1) ;
-    // get_var c (5) ; define_array_el (1) ; inc (1) ; dup1 (1) ; put_field length (5)
     var fn_bc = try parseExpr(&env, "[a, ...b, c]");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 32), fn_bc.code.len);
-    try std.testing.expectEqual(op.array_from, fn_bc.code[5]);
-    try std.testing.expectEqual(op.append, fn_bc.code[18]);
-    try std.testing.expectEqual(op.define_array_el, fn_bc.code[24]);
-    try std.testing.expectEqual(op.inc, fn_bc.code[25]);
-    try std.testing.expectEqual(op.dup1, fn_bc.code[26]);
-    try std.testing.expectEqual(op.put_field, fn_bc.code[27]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.array_from, op.push_1, op.get_var, op.append, op.get_var, op.define_array_el, op.inc, op.dup1, op.put_field });
 }
 
 test "F4: template with empty middle still emits call_method with correct argc" {
@@ -2668,11 +2376,8 @@ test "F4: template with empty middle still emits call_method with correct argc" 
     var fn_bc = try parseExpr(&env, "`${b}${c}`");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 19), fn_bc.code.len);
-    try std.testing.expectEqual(op.push_empty_string, fn_bc.code[0]);
-    try std.testing.expectEqual(op.call_method, fn_bc.code[16]);
-    const argc = std.mem.readInt(u16, fn_bc.code[17..19], .little);
-    try std.testing.expectEqual(@as(u16, 2), argc);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.push_empty_string, op.get_field2, op.get_var, op.get_var, op.call_method });
+    try std.testing.expectEqual(@as(u16, 2), readU16AtOpcode(fn_bc.code, 12));
 }
 
 // ---- F5: Statement parsing tests -------------------------------------
@@ -2692,11 +2397,7 @@ test "F5: block statement" {
     var fn_bc = try parseStatement(&env, "{ x; y; }");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 12), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[5]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[6]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[11]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.drop, op.get_var, op.drop });
 }
 
 test "F5: return statement without value" {
@@ -2715,9 +2416,7 @@ test "F5: return statement with value" {
     var fn_bc = try parseFunctionBodyStatement(&env, "return x;");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 6), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.@"return", fn_bc.code[5]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.@"return" });
 }
 
 test "F5: return conditional branch emission only applies to comma tail operand" {
@@ -2738,15 +2437,24 @@ test "F5: return conditional branch emission preserves tail calls" {
     try std.testing.expectEqual(@as(usize, 2), countOpcode(fn_bc.code, op.tail_call));
 }
 
+test "F5: tail call scan handles push_empty_string overlap" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseFunctionBodyStatement(&env, "return f(\"\");");
+    defer fn_bc.deinit(env.rt);
+
+    try expectOpcode(fn_bc.code, op.push_empty_string);
+    try expectOpcode(fn_bc.code, op.tail_call);
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.call));
+}
+
 test "F5: throw statement" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "throw x;");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 6), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.throw, fn_bc.code[5]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.throw });
 }
 
 test "F5: if statement without else" {
@@ -2755,14 +2463,9 @@ test "F5: if statement without else" {
     var fn_bc = try parseStatement(&env, "if (x) y;");
     defer fn_bc.deinit(env.rt);
 
-    // get_var x ; if_false → past_then ; get_var y ; drop
-    try std.testing.expectEqual(@as(usize, 16), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.if_false, fn_bc.code[5]); // After get_var x
-    const if_false_target = readRelTarget32(fn_bc.code, 5);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.if_false8, op.get_var, op.drop });
+    const if_false_target = readRelTarget32(fn_bc.code, 3);
     try std.testing.expectEqual(fn_bc.code.len, if_false_target);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[10]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[15]);
 }
 
 test "F5: if statement with else" {
@@ -2771,20 +2474,11 @@ test "F5: if statement with else" {
     var fn_bc = try parseStatement(&env, "if (x) y; else z;");
     defer fn_bc.deinit(env.rt);
 
-    // get_var x ; if_false → else ; get_var y ; drop ; goto → end ;
-    // get_var z ; drop
-    try std.testing.expectEqual(@as(usize, 27), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.if_false, fn_bc.code[5]);
-    const if_false_target = readRelTarget32(fn_bc.code, 5);
-    try std.testing.expectEqual(@as(usize, 21), if_false_target);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[10]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[15]);
-    try std.testing.expectEqual(op.goto, fn_bc.code[16]);
-    const goto_target = readRelTarget32(fn_bc.code, 16);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.if_false8, op.get_var, op.drop, op.goto8, op.get_var, op.drop });
+    const if_false_target = readRelTarget32(fn_bc.code, 3);
+    try std.testing.expectEqual(@as(usize, 11), if_false_target);
+    const goto_target = readRelTarget32(fn_bc.code, 9);
     try std.testing.expectEqual(fn_bc.code.len, goto_target);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[21]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[26]);
 }
 
 test "F5: while statement" {
@@ -2793,20 +2487,14 @@ test "F5: while statement" {
     var fn_bc = try parseStatement(&env, "while (x) y;");
     defer fn_bc.deinit(env.rt);
 
-    // top: get_var x ; if_false → end ; get_var y ; drop ; goto → top
-    try std.testing.expectEqual(@as(usize, 21), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.if_false8, op.get_var, op.drop, op.goto8 });
     // Last instruction must be a backward goto to offset 0 (loop top).
-    const last_goto = fn_bc.code.len - 5;
-    try std.testing.expectEqual(op.goto, fn_bc.code[last_goto]);
+    const last_goto = fn_bc.code.len - engine.bytecode.opcode.sizeOf(op.goto8);
+    try std.testing.expectEqual(op.goto8, fn_bc.code[last_goto]);
     const back_target = readRelTarget32(fn_bc.code, last_goto);
     try std.testing.expectEqual(@as(usize, 0), back_target);
-    // The if_false at offset 5 (after get_var x) must point past end.
-    try std.testing.expectEqual(op.if_false, fn_bc.code[5]);
-    const if_false_target = readRelTarget32(fn_bc.code, 5);
+    const if_false_target = readRelTarget32(fn_bc.code, 3);
     try std.testing.expectEqual(fn_bc.code.len, if_false_target);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[10]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[15]);
 }
 
 test "F5: do-while statement" {
@@ -2815,12 +2503,17 @@ test "F5: do-while statement" {
     var fn_bc = try parseStatement(&env, "do { y; } while (x);");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 16), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[5]);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[6]);
-    try std.testing.expectEqual(op.if_true, fn_bc.code[11]);
-    try std.testing.expectEqual(@as(usize, 0), readRelTarget32(fn_bc.code, 11));
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.drop, op.get_var, op.if_true8 });
+    try std.testing.expectEqual(@as(usize, 0), readRelTarget32(fn_bc.code, 7));
+}
+
+test "F5: for update moves optional chain code with atom operands" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "for (; true; obj?.a?.[touched++]) ;");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expectEqual(@as(usize, 2), countOpcode(fn_bc.code, op.is_undefined_or_null));
 }
 
 test "F5: expression statement" {
@@ -2829,9 +2522,7 @@ test "F5: expression statement" {
     var fn_bc = try parseStatement(&env, "x;");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 6), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[5]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.drop });
 }
 
 test "F5: labelled break crossing switch drops discriminant" {
@@ -2923,9 +2614,9 @@ test "F5: var declaration without initializer" {
     var fn_bc = try parseStatement(&env, "var x;");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 12), fn_bc.code.len);
-    try std.testing.expectEqual(op.check_define_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.define_var, fn_bc.code[6]);
+    try std.testing.expectEqual(@as(usize, 0), fn_bc.code.len);
+    try std.testing.expectEqual(@as(usize, 1), fn_bc.global_vars.len);
+    try std.testing.expect(!fn_bc.global_vars[0].is_lexical);
 }
 
 test "F5: var declaration with initializer" {
@@ -2934,14 +2625,13 @@ test "F5: var declaration with initializer" {
     var fn_bc = try parseStatement(&env, "var x = 1;");
     defer fn_bc.deinit(env.rt);
 
-    // Top-level `var` is a global object binding: the pipeline emits
-    // QuickJS-shaped all-check/all-define global declaration prologue
-    // before the initializer write.
-    try std.testing.expectEqual(@as(usize, 22), fn_bc.code.len);
-    try std.testing.expectEqual(op.check_define_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.define_var, fn_bc.code[6]);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[12]);
-    try std.testing.expectEqual(op.put_var, fn_bc.code[fn_bc.code.len - 5]);
+    // Top-level `var` declaration metadata lives on FunctionBytecode; only the
+    // initializer write remains in the QuickJS-format code stream.
+    try std.testing.expectEqual(@as(usize, 4), fn_bc.code.len);
+    try std.testing.expectEqual(@as(usize, 1), fn_bc.global_vars.len);
+    try std.testing.expect(!fn_bc.global_vars[0].is_lexical);
+    try std.testing.expectEqual(op.push_1, fn_bc.code[0]);
+    try std.testing.expectEqual(op.put_var, fn_bc.code[fn_bc.code.len - 3]);
 }
 
 test "F5: module-ref var initializer consumes value unless next statement reuses binding" {
@@ -2950,8 +2640,8 @@ test "F5: module-ref var initializer consumes value unless next statement reuses
     var fn_bc = try parseModuleRefStatement(&env, "var x = 1; y;");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[0]);
-    try std.testing.expectEqual(op.put_var_ref0, fn_bc.code[5]);
+    try std.testing.expectEqual(op.push_1, fn_bc.code[0]);
+    try std.testing.expectEqual(op.put_var_ref0, fn_bc.code[1]);
 }
 
 test "F5: module-ref var initializer preserves value for immediate same-name expression" {
@@ -2960,8 +2650,8 @@ test "F5: module-ref var initializer preserves value for immediate same-name exp
     var fn_bc = try parseModuleRefStatement(&env, "var x = 1; x;");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[0]);
-    try std.testing.expectEqual(op.set_var_ref0, fn_bc.code[5]);
+    try std.testing.expectEqual(op.push_1, fn_bc.code[0]);
+    try std.testing.expectEqual(op.set_var_ref0, fn_bc.code[1]);
 }
 
 test "F5: let declaration" {
@@ -2970,19 +2660,16 @@ test "F5: let declaration" {
     var fn_bc = try parseStatement(&env, "let x;");
     defer fn_bc.deinit(env.rt);
 
-    // F10.1c + TDZ: top-level `let x;` now participates in the
-    // global declaration check/define prologue, then initializes its
-    // local lexical slot:
-    //   check_define_var x, lexical
-    //   define_var x, lexical
+    // F10.1c + TDZ: top-level `let x;` records declaration metadata on
+    // FunctionBytecode, then initializes its local lexical slot:
     //   set_loc_uninitialized 0  (3 bytes - TDZ prologue)
     //   undefined                 (1 byte)
     //   put_loc_check_init 0      (clears TDZ flag)
-    try std.testing.expectEqual(op.check_define_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.define_var, fn_bc.code[6]);
-    try std.testing.expectEqual(op.set_loc_uninitialized, fn_bc.code[12]);
-    try std.testing.expectEqual(op.undefined, fn_bc.code[15]);
-    try std.testing.expectEqual(op.put_loc_check_init, fn_bc.code[16]);
+    try std.testing.expectEqual(@as(usize, 1), fn_bc.global_vars.len);
+    try std.testing.expect(fn_bc.global_vars[0].is_lexical);
+    try std.testing.expectEqual(op.set_loc_uninitialized, fn_bc.code[0]);
+    try std.testing.expectEqual(op.undefined, fn_bc.code[3]);
+    try std.testing.expectEqual(op.put_loc_check_init, fn_bc.code[4]);
 }
 
 test "F5: let declaration with initializer" {
@@ -2991,15 +2678,14 @@ test "F5: let declaration with initializer" {
     var fn_bc = try parseStatement(&env, "let x = 1;");
     defer fn_bc.deinit(env.rt);
 
-    // F10.1c + TDZ: `let x = 1;` lowers to a global declaration
-    // check/define prologue followed by:
+    // F10.1c + TDZ: `let x = 1;` lowers to declaration metadata plus:
     //   set_loc_uninitialized 0  (TDZ prologue)
     //   push_i32 1
     //   put_loc_check_init 0
-    try std.testing.expectEqual(op.check_define_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.define_var, fn_bc.code[6]);
-    try std.testing.expectEqual(op.set_loc_uninitialized, fn_bc.code[12]);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[15]);
+    try std.testing.expectEqual(@as(usize, 1), fn_bc.global_vars.len);
+    try std.testing.expect(fn_bc.global_vars[0].is_lexical);
+    try std.testing.expectEqual(op.set_loc_uninitialized, fn_bc.code[0]);
+    try std.testing.expectEqual(op.push_1, fn_bc.code[3]);
     try std.testing.expectEqual(op.put_loc_check_init, fn_bc.code[fn_bc.code.len - 3]);
 }
 
@@ -3017,10 +2703,11 @@ test "F5: const declaration with initializer" {
 
     // F10.1c + TDZ: const lowers same as let with init, except the
     // final store keeps the TDZ checked-init form.
-    try std.testing.expectEqual(op.check_define_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.define_var, fn_bc.code[6]);
-    try std.testing.expectEqual(op.set_loc_uninitialized, fn_bc.code[12]);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[15]);
+    try std.testing.expectEqual(@as(usize, 1), fn_bc.global_vars.len);
+    try std.testing.expect(fn_bc.global_vars[0].is_lexical);
+    try std.testing.expect(fn_bc.global_vars[0].is_const);
+    try std.testing.expectEqual(op.set_loc_uninitialized, fn_bc.code[0]);
+    try std.testing.expectEqual(op.push_1, fn_bc.code[3]);
     try std.testing.expectEqual(op.put_loc_check_init, fn_bc.code[fn_bc.code.len - 3]);
 }
 
@@ -3030,15 +2717,12 @@ test "F5: multiple var declarations" {
     var fn_bc = try parseStatement(&env, "var x = 1, y = 2;");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 44), fn_bc.code.len);
-    try std.testing.expectEqual(op.check_define_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.check_define_var, fn_bc.code[6]);
-    try std.testing.expectEqual(op.define_var, fn_bc.code[12]);
-    try std.testing.expectEqual(op.define_var, fn_bc.code[18]);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[24]);
-    try std.testing.expectEqual(op.put_var, fn_bc.code[29]);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[34]);
-    try std.testing.expectEqual(op.put_var, fn_bc.code[39]);
+    try std.testing.expectEqual(@as(usize, 8), fn_bc.code.len);
+    try std.testing.expectEqual(@as(usize, 2), fn_bc.global_vars.len);
+    try std.testing.expectEqual(op.push_1, fn_bc.code[0]);
+    try std.testing.expectEqual(op.put_var, fn_bc.code[1]);
+    try std.testing.expectEqual(op.push_2, fn_bc.code[4]);
+    try std.testing.expectEqual(op.put_var, fn_bc.code[5]);
 }
 
 test "F5: directive prologue with 'use strict'" {
@@ -3047,9 +2731,7 @@ test "F5: directive prologue with 'use strict'" {
     var fn_bc = try parseStatement(&env, "{ \"use strict\"; x; }");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 6), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[5]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.drop });
 }
 
 test "M3.1 F4: strict object setter rejects eval and arguments parameters" {
@@ -3066,9 +2748,7 @@ test "F5: directive prologue with multiple directives" {
     var fn_bc = try parseStatement(&env, "{ \"use strict\"; \"other directive\"; x; }");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 6), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[5]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.drop });
 }
 
 test "F5: directive prologue with ASI" {
@@ -3077,9 +2757,7 @@ test "F5: directive prologue with ASI" {
     var fn_bc = try parseStatement(&env, "{ \"use strict\"\n x; }");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 6), fn_bc.code.len);
-    try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[5]);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.drop });
 }
 
 // ---- F6 function parsing tests -----------------------------------------
@@ -3097,6 +2775,22 @@ test "F6: simple function declaration" {
     try std.testing.expect(!child.is_arrow_function);
     try std.testing.expectEqual(@as(usize, 0), child.arg_names.len);
     try expectOpcode(child.byte_code, op.return_undef);
+}
+
+test "F6: line_num before explicit return does not add implicit return" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var fn_bc = try parseStatementWithTopLevelChildren(&env,
+        \\function foo() {
+        \\  return 1;
+        \\}
+    );
+    defer fn_bc.deinit(env.rt);
+
+    const child = try expectFunctionConstant(&fn_bc, 0);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(child.byte_code, op.@"return"));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(child.byte_code, op.return_undef));
 }
 
 test "F6: function declaration with parameters" {
@@ -3390,6 +3084,19 @@ test "F7: super() constructor call" {
     try expectOpcode(ctor.byte_code, op.call_method);
 }
 
+test "F7: derived constructor this read lowers to get_loc_checkthis" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatementWithTopLevelChildren(&env, "class C extends B { constructor() { super(); return this; } }");
+    defer fn_bc.deinit(env.rt);
+
+    const ctor = try expectFunctionConstant(&fn_bc, 0);
+    try std.testing.expect(ctor.is_derived_class_constructor);
+    try expectOpcode(ctor.byte_code, op.get_loc_checkthis);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(ctor.byte_code, op.@"return"));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(ctor.byte_code, op.return_undef));
+}
+
 test "F7: super() rejected in base constructor" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -3486,6 +3193,34 @@ test "F7: private setter in class" {
 
     try expectOpcode(fn_bc.code, op.define_class);
     try expectOpcodeRecursive(&fn_bc, op.define_method);
+}
+
+test "F7: private name in uses scope temp before resolver" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "class C { #x; m(o) { return #x in o; } }");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+    state.top_level_functions_as_children = true;
+
+    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    var saw_temp = false;
+    for (state.function_def.child_list) |child| {
+        if (std.mem.indexOfScalar(u8, child.byte_code, op.scope_in_private_field) != null) {
+            saw_temp = true;
+            break;
+        }
+    }
+    try std.testing.expect(saw_temp);
+
+    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.rt);
+    try expectOpcodeRecursive(&function, op.private_in);
 }
 
 test "F7: class with extends (derived constructor)" {
@@ -4165,7 +3900,12 @@ test "TS: Function Overload Signatures Are Skipped" {
         \\function g(x: any): any { return x; }
     );
     defer bytecode.deinit(env.rt);
-    try std.testing.expect(bytecode.code.len > 0);
+    try std.testing.expectEqual(@as(usize, 0), bytecode.code.len);
+    try std.testing.expectEqual(@as(usize, 1), bytecode.global_vars.len);
+    try std.testing.expect(bytecode.global_vars[0].cpool_idx >= 0);
+    try std.testing.expectEqual(@as(usize, 1), bytecode.constants.values.len);
+    const child = try expectFunctionConstant(&bytecode, @intCast(bytecode.global_vars[0].cpool_idx));
+    try expectAtomName(&env, child.func_name, "g");
 }
 
 test "TS: Class Method Overload Signatures Are Skipped" {
@@ -4466,6 +4206,26 @@ test "script parse mode emits bytecode metadata without AST execution" {
     try std.testing.expectEqual(@as(usize, 0), parsed.function.constants.values.len);
 }
 
+test "script top-level lexical captured before declaration uses checked var ref" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt,
+        \\function f() { return x + 1; }
+        \\let x;
+    , .{ .mode = .script, .filename = "global-closure-tdz.js" });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    // Top-level script `let x` is a single global VarRef cell (.global_decl,
+    // top_level_lexical_as_global_ref); the inner `f` forward-captures it as a
+    // `.ref` closure var aliasing that cell (was `.local` under the pre-single-cell
+    // frame-slot model). The capture still lowers to the TDZ-checked var-ref op.
+    try expectFunctionClosureRecursive(rt, &parsed.function, "x", function_def.ClosureType.ref);
+    try std.testing.expect(countOpcodeRecursive(&parsed.function, qop.get_var_ref_check) >= 1);
+}
+
 test "assignment target scan ignores atom operand bytes" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -4504,9 +4264,7 @@ test "print calls emit global lookup generic call and receiver-preserving proper
     var get_var_count: usize = 0;
     var get_prop_count: usize = 0;
     var call_count: usize = 0;
-    var prepared_call_count: usize = 0;
-    var call_prepared_count: usize = 0;
-    var legacy_call_prop_count: usize = 0;
+    var call_method_count: usize = 0;
     var mul_index: ?usize = null;
     var add_index: ?usize = null;
     var i: usize = 0;
@@ -4517,17 +4275,13 @@ test "print calls emit global lookup generic call and receiver-preserving proper
         if (op_val == engine.bytecode.opcode.op.get_var) get_var_count += 1;
         if (op_val == engine.bytecode.opcode.op.get_field) get_prop_count += 1;
         if (op_val == engine.bytecode.opcode.op.call) call_count += 1;
-        if (op_val == engine.bytecode.opcode.op.prepare_call_prop_atom) prepared_call_count += 1;
-        if (op_val == engine.bytecode.opcode.op.call_prepared) call_prepared_count += 1;
-        if (op_val == engine.bytecode.opcode.op.call_method) legacy_call_prop_count += 1;
+        if (op_val == engine.bytecode.opcode.op.call_method) call_method_count += 1;
         i += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), get_var_count);
     try std.testing.expectEqual(@as(usize, 0), get_prop_count);
     try std.testing.expect(call_count + countOpcode(parsed.function.code, engine.bytecode.opcode.op.call1) >= 1);
-    try std.testing.expectEqual(@as(usize, 1), prepared_call_count);
-    try std.testing.expectEqual(@as(usize, 1), call_prepared_count);
-    try std.testing.expectEqual(@as(usize, 0), legacy_call_prop_count);
+    try std.testing.expectEqual(@as(usize, 1), call_method_count);
     try std.testing.expect(mul_index != null);
     try std.testing.expect(add_index != null);
     try std.testing.expect(mul_index.? < add_index.?);
@@ -4544,13 +4298,12 @@ test "simple variable assignments emit var bytecode" {
     try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
 
     var get_var_count: usize = 0;
-    var define_var_count: usize = 0;
     for (parsed.function.code) |op_val| {
         if (op_val == engine.bytecode.opcode.op.get_var) get_var_count += 1;
-        if (op_val == engine.bytecode.opcode.op.define_var) define_var_count += 1;
     }
     try std.testing.expect(get_var_count >= 1);
-    try std.testing.expect(define_var_count <= 2);
+    try std.testing.expectEqual(@as(usize, 1), parsed.function.global_vars.len);
+    try std.testing.expect(parsed.function.global_vars[0].is_lexical);
 }
 
 test "quick parser emits compound assignment and update statements" {
@@ -4563,9 +4316,9 @@ test "quick parser emits compound assignment and update statements" {
     try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
 
     const add_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.add) + countOpcode(parsed.function.code, engine.bytecode.opcode.op.add_loc);
-    const define_var_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.define_var);
     try std.testing.expect(add_count >= 1);
-    try std.testing.expect(define_var_count <= 3);
+    try std.testing.expectEqual(@as(usize, 1), parsed.function.global_vars.len);
+    try std.testing.expect(parsed.function.global_vars[0].is_lexical);
 }
 
 test "quick parser emits arithmetic compound assignment operators" {
@@ -4779,7 +4532,7 @@ test "quick parser lowers supported Date helpers to receiver-preserving property
     try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
     try std.testing.expect(countCalls(parsed.function.code) >= 4);
     try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_constructor) >= 1);
-    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_prepared) >= 2);
+    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method) >= 2);
 }
 
 test "quick parser lowers supported RegExp helpers to receiver-preserving property calls" {
@@ -4795,12 +4548,10 @@ test "quick parser lowers supported RegExp helpers to receiver-preserving proper
 
     try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
     try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_constructor) >= 1);
-    const receiver_call_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_prepared) +
-        countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method);
-    try std.testing.expect(receiver_call_count >= 3);
+    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method) >= 3);
 }
 
-test "prepared call lowering preserves RegExp literal fuse while preparing cached RegExp calls" {
+test "RegExp property calls keep QuickJS call_method bytecode" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -4812,8 +4563,8 @@ test "prepared call lowering preserves RegExp literal fuse while preparing cache
     defer cached.deinit();
 
     try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, cached.parse_path);
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(cached.function.code, engine.bytecode.opcode.op.prepare_call_prop_atom));
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(cached.function.code, engine.bytecode.opcode.op.call_prepared));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(cached.function.code, engine.bytecode.opcode.op.get_field2));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(cached.function.code, engine.bytecode.opcode.op.call_method));
 
     var literal = try frontend.parser.parse(
         rt,
@@ -4823,8 +4574,7 @@ test "prepared call lowering preserves RegExp literal fuse while preparing cache
     defer literal.deinit();
 
     try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, literal.parse_path);
-    try std.testing.expectEqual(@as(usize, 0), countOpcode(literal.function.code, engine.bytecode.opcode.op.prepare_call_prop_atom));
-    try std.testing.expectEqual(@as(usize, 0), countOpcode(literal.function.code, engine.bytecode.opcode.op.call_prepared));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(literal.function.code, engine.bytecode.opcode.op.get_field2));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(literal.function.code, engine.bytecode.opcode.op.call_method));
 }
 
@@ -4871,7 +4621,7 @@ test "quick parser lowers supported Promise helpers to receiver-preserving prope
 
     try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
     try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_constructor) >= 1);
-    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_prepared) >= 4);
+    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method) >= 4);
 }
 
 test "quick parser lowers supported collection helpers to receiver-preserving property calls" {
@@ -4909,7 +4659,7 @@ test "quick parser lowers supported collection helpers to receiver-preserving pr
 
     try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
     try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_constructor) >= 4);
-    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_prepared) >= 16);
+    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method) >= 16);
 }
 
 test "template interpolation emits string concatenation" {
@@ -4936,10 +4686,8 @@ test "simple arrays emit receiver-preserving property calls" {
     const new_array_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.array_from);
     const get_index_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_array_el);
     const map_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_field) +
-        countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_field2) +
-        countOpcode(parsed.function.code, engine.bytecode.opcode.op.prepare_call_prop_atom);
-    const call_prop_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_prepared) +
-        countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method);
+        countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_field2);
+    const call_prop_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method);
     try std.testing.expectEqual(@as(usize, 1), new_array_count);
     try std.testing.expectEqual(@as(usize, 1), get_index_count);
     try std.testing.expect(map_count >= 1 or call_prop_count >= 1);
@@ -4997,10 +4745,54 @@ test "test262 frontmatter does not affect quick parser behavior" {
     try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
     try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_var));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_field));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_field2));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(parsed.function.code, engine.bytecode.opcode.op.call));
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.opcode.op.prepare_call_prop_atom));
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_prepared));
-    try std.testing.expectEqual(@as(usize, 0), countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method));
+}
+
+test "test262 prelude frontmatter parses nested private methods after line_num temp" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const source =
+        \\function prelude() {}
+        \\if (typeof $262 === "object" && typeof $262.evalScript !== "function") {
+        \\  $262.evalScript = function(source) { return (0, eval)(source); };
+        \\}
+        \\/*---
+        \\description: Value when private name describes a method
+        \\info: |
+        \\  7. Let privateName be ? GetValue(privateNameBinding).
+        \\  8. Assert: privateName is a Private Name.
+        \\  [...]
+        \\features: [class-methods-private, class-fields-private-in]
+        \\---*/
+        \\let Child;
+        \\let parentCount = 0;
+        \\let childCount = 0;
+        \\class Parent {
+        \\  #parent() {
+        \\    parentCount += 1;
+        \\  }
+        \\  static init() {
+        \\    Child = class {
+        \\      #child() {
+        \\        childCount += 1;
+        \\      }
+        \\      static isNameIn(value) {
+        \\        return #child in value;
+        \\      }
+        \\    };
+        \\  }
+        \\}
+    ;
+    var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "metadata-private-methods.js" });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(@as(usize, 0), countOpcodeRecursive(&parsed.function, qop.line_num));
+    try std.testing.expect(countOpcodeRecursive(&parsed.function, qop.private_in) >= 1);
 }
 
 test "arrow early errors reject non-simple strict and invalid rest parameters" {
@@ -5451,6 +5243,26 @@ test "module parser allows duplicate top-level var declarations" {
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
+}
+
+test "module parser hoists block var declarations to module var refs" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "if (true) { var proto = {}; proto; }", .{ .mode = .module, .filename = "block-var-module.js" });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    var found = false;
+    for (parsed.function.closure_var) |cv| {
+        const name = rt.atoms.name(cv.var_name) orelse continue;
+        if (std.mem.eql(u8, name, "proto")) {
+            try std.testing.expectEqual(function_def.ClosureType.module_decl, cv.closure_type);
+            try std.testing.expect(!cv.is_lexical);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
 }
 
 test "parser accepts dynamic import call expressions" {

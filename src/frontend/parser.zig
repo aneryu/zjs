@@ -170,6 +170,9 @@ fn compileQjsProgram(
     state.function_def.is_strict_mode = options.mode == .module or effective_strict;
     state.function_def.is_indirect_eval = options.mode == .eval_indirect;
     state.top_level_functions_as_children = true;
+    // Script top-level let/const become global VarRef cells (qjs JS_CLOSURE_GLOBAL_DECL):
+    // single-storage in ctx.lexicals, shared into frame.var_refs by pointer.
+    state.top_level_lexical_as_global_ref = options.mode == .script;
     state.eval_global_var_bindings = (options.eval_global_var_bindings or options.mode == .eval_indirect) and
         !((options.mode == .eval_direct or options.mode == .eval_indirect) and effective_strict);
     state.function_def.persist_global_lexical = false;

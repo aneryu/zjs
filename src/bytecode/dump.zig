@@ -121,14 +121,6 @@ fn printOperands(
                 try writer.print(" {d}", .{v});
             }
         },
-        .u32x2 => {
-            if (body.len >= 9) {
-                const a = std.mem.readInt(u32, body[1..][0..4], .little);
-                const b = std.mem.readInt(u32, body[5..][0..4], .little);
-                try writer.print(" {d},{d}", .{ a, b });
-            }
-        },
-
         .atom => {
             try writeAtomOperand(writer, bc, atom_idx);
         },

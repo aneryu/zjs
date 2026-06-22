@@ -1890,7 +1890,7 @@ fn qjsJsonAppendSimpleObject(
         }
         const child_value = switch (object.properties[property_index].slot) {
             .data => |stored| stored,
-            .auto_init, .accessor, .deleted => {
+            .var_ref, .auto_init, .accessor, .deleted => {
                 buffer.shrinkRetainingCapacity(start);
                 return .fallback;
             },

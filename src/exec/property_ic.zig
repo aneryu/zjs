@@ -462,7 +462,7 @@ fn fastOwnOrdinaryDataPropertyLookupForObject(object: *core.Object, atom_id: cor
     if (object.propFlagsAt(index).accessor) return .slow;
     return switch (object.properties[index].slot) {
         .data => |stored| .{ .value = .{ .index = index, .value = stored } },
-        .auto_init, .accessor => .slow,
+        .var_ref, .auto_init, .accessor => .slow,
         .deleted => .missing,
     };
 }
@@ -562,7 +562,7 @@ fn fastOwnOrdinaryDataPropertyBorrowedValue(object: *core.Object, atom_id: core.
     if (object.propFlagsAt(index).accessor) return .slow;
     return switch (object.properties[index].slot) {
         .data => |stored| .{ .value = stored },
-        .auto_init, .accessor => .slow,
+        .var_ref, .auto_init, .accessor => .slow,
         .deleted => .missing,
     };
 }
@@ -625,7 +625,7 @@ fn globalOwnDataPropertyBorrowedLookup(global: *core.Object, atom_id: core.Atom)
         if (prop_flags.accessor) return null;
         return switch (global.properties[index].slot) {
             .data => |stored| .{ .index = index, .value = stored },
-            .auto_init, .accessor, .deleted => null,
+            .var_ref, .auto_init, .accessor, .deleted => null,
         };
     }
     return null;
@@ -851,7 +851,7 @@ fn dataSlotAt(object: *core.Object, index: usize, atom_id: core.Atom) ?DataSlot 
     const entry = &object.properties[index];
     return switch (entry.slot) {
         .data => |*stored| .{ .entry = entry, .value = stored },
-        .auto_init, .accessor, .deleted => null,
+        .var_ref, .auto_init, .accessor, .deleted => null,
     };
 }
 

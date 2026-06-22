@@ -70,16 +70,7 @@ pub const VarScope = struct {
 
 pub const ClosureVar = function_bytecode.ClosureVar;
 
-/// Mirrors `JSGlobalVar` (`quickjs.c:21364`).
-pub const GlobalVar = struct {
-    cpool_idx: i32, // index in the constant pool for hoisted function definition
-    force_init: bool = false,
-    is_configurable: bool = false,
-    is_lexical: bool = false, // global let/const definition
-    is_const: bool = false, // const definition
-    scope_level: i32, // scope of definition
-    var_name: atom.Atom,
-};
+pub const GlobalVar = function_bytecode.GlobalVar;
 
 /// Mirrors `RelocEntry` (`quickjs.c:21374`).
 pub const RelocEntry = struct {

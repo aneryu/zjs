@@ -974,8 +974,8 @@ test "zjs args accept perf json flag for eval and files only" {
 
 test "zjs perf json opcode profile includes counters and rows" {
     var profile = zjs.OpcodeProfile{};
-    profile.recordOpcode(56, 17);
-    profile.recordOpcode(189, 5);
+    profile.recordOpcode(engine.bytecode.opcode.op.get_var, 17);
+    profile.recordOpcode(engine.bytecode.opcode.op.push_i16, 5);
     profile.recordValueDup();
     profile.recordValueFree();
     profile.recordGlobalLookup();

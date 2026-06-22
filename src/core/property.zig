@@ -1,6 +1,7 @@
 const class = @import("class.zig");
 const JSValue = @import("value.zig").JSValue;
 const JSRuntime = @import("runtime.zig").JSRuntime;
+const VarRef = @import("var_ref.zig").VarRef;
 const std = @import("std");
 
 pub const Flags = packed struct(u6) {
@@ -125,6 +126,11 @@ pub const Slot = union(enum) {
     data: JSValue,
     accessor: Accessor,
     auto_init: AutoInitRef,
+    // QuickJS `JS_PROP_VARREF`: the property slot HOLDS the cell pointer
+    // (qjs `pr->u.var_ref`). Reads/writes of such a property auto-deref
+    // `cell.pvalue`. Used for top-level lexical (`let`/`const`) bindings on
+    // the global lexical env object, shared by pointer with frame.var_refs.
+    var_ref: *VarRef,
     deleted,
 
     pub inline fn dataValueForFastPath(self: Slot) ?JSValue {
@@ -142,6 +148,9 @@ pub const Slot = union(enum) {
             // Auto-init metadata is owned by JSRuntime.auto_init_table and
             // released when the runtime is torn down.
             .auto_init => {},
+            // The slot holds one ref on the cell (qjs add_property ref_count++);
+            // release it (qjs free_property VARREF branch -> free_var_ref).
+            .var_ref => |cell| cell.valueRef().free(rt),
             .deleted => {},
         }
     }
@@ -154,6 +163,10 @@ pub const Slot = union(enum) {
                 .setter = entry.setter.dup(),
             } },
             .auto_init => |id| .{ .auto_init = id },
+            .var_ref => |cell| blk: {
+                _ = cell.valueRef().dup();
+                break :blk .{ .var_ref = cell };
+            },
             .deleted => .deleted,
         };
     }

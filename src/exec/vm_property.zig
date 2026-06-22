@@ -195,21 +195,22 @@ pub fn borrowedSimpleCallable(
     if (pc >= function.code.len) return null;
     const code = function.code;
     return switch (code[pc]) {
-        op.get_var_ref0 => if (varRefReadableBorrowed(frame, 0)) |value| .{ .value = value, .next_pc = pc + 1 } else null,
-        op.get_var_ref1 => if (varRefReadableBorrowed(frame, 1)) |value| .{ .value = value, .next_pc = pc + 1 } else null,
-        op.get_var_ref2 => if (varRefReadableBorrowed(frame, 2)) |value| .{ .value = value, .next_pc = pc + 1 } else null,
-        op.get_var_ref3 => if (varRefReadableBorrowed(frame, 3)) |value| .{ .value = value, .next_pc = pc + 1 } else null,
+        op.get_var_ref0 => if (varRefReadableBorrowedForFastPath(function, frame, 0)) |value| .{ .value = value, .next_pc = pc + 1 } else null,
+        op.get_var_ref1 => if (varRefReadableBorrowedForFastPath(function, frame, 1)) |value| .{ .value = value, .next_pc = pc + 1 } else null,
+        op.get_var_ref2 => if (varRefReadableBorrowedForFastPath(function, frame, 2)) |value| .{ .value = value, .next_pc = pc + 1 } else null,
+        op.get_var_ref3 => if (varRefReadableBorrowedForFastPath(function, frame, 3)) |value| .{ .value = value, .next_pc = pc + 1 } else null,
         op.get_var_ref, op.get_var_ref_check => blk: {
             if (pc + 3 > code.len) return null;
             const idx = readInt(u16, code[pc + 1 ..][0..2]);
-            const value = varRefReadableBorrowed(frame, idx) orelse return null;
+            const value = varRefReadableBorrowedForFastPath(function, frame, idx) orelse return null;
             break :blk .{ .value = value, .next_pc = pc + 3 };
         },
         op.get_var, op.get_var_undef => blk: {
-            if (pc + 5 > code.len) return null;
-            const atom_id = readInt(u32, code[pc + 1 ..][0..4]);
+            if (pc + 3 > code.len) return null;
+            const ref_idx = readInt(u16, code[pc + 1 ..][0..2]);
+            const atom_id = globalVarAtom(function, ref_idx) orelse return null;
             const value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, pc, atom_id, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
-            break :blk .{ .value = value, .next_pc = pc + 5 };
+            break :blk .{ .value = value, .next_pc = pc + 3 };
         },
         else => if (decodeLocalGet(code, pc)) |get| blk: {
             const value = localReadableBorrowed(frame, get.idx, get.checked) orelse return null;
@@ -400,7 +401,6 @@ pub fn bindingStoreWritableForFastPath(
     frame: *frame_mod.Frame,
     binding: BindingPut,
 ) bool {
-    _ = global;
     if (binding.is_var_ref) {
         if (binding.idx >= frame.var_refs.len) return false;
         const slot = frame.var_refs[binding.idx];
@@ -411,7 +411,7 @@ pub fn bindingStoreWritableForFastPath(
         }
         if (slot.isUninitialized()) return false;
         if (binding.idx < function.var_ref_is_const.len and function.var_ref_is_const[binding.idx]) return false;
-        if (binding.opc == op.put_var_ref_check and binding.idx < function.var_ref_names.len and call_runtime.globalLexicalHas(ctx, function.var_ref_names[binding.idx])) return false;
+        if (binding.opc == op.put_var_ref_check and binding.idx < function.var_ref_names.len and call_runtime.globalLexicalHasForGlobal(ctx, global, function.var_ref_names[binding.idx])) return false;
         return true;
     }
     if (binding.idx >= frame.locals.len or binding.idx >= frame.locals_uninit.len) return false;
@@ -523,11 +523,18 @@ pub fn decodeBindingPut(code: []const u8, pc: usize) ?BindingPut {
     return null;
 }
 
-pub fn decodeGlobalPut(code: []const u8, pc: usize) ?GlobalBindingPut {
-    if (pc + 5 > code.len or code[pc] != op.put_var) return null;
+pub fn globalVarAtom(function: *const bytecode.Bytecode, idx: u16) ?core.Atom {
+    if (idx >= function.var_ref_names.len) return null;
+    return function.var_ref_names[idx];
+}
+
+pub fn decodeGlobalPut(function: *const bytecode.Bytecode, pc: usize) ?GlobalBindingPut {
+    const code = function.code;
+    if (pc + 3 > code.len or code[pc] != op.put_var) return null;
+    const ref_idx = readInt(u16, code[pc + 1 ..][0..2]);
     return .{
-        .atom = readInt(u32, code[pc + 1 ..][0..4]),
-        .next_pc = pc + 5,
+        .atom = globalVarAtom(function, ref_idx) orelse return null,
+        .next_pc = pc + 3,
     };
 }
 
@@ -559,7 +566,7 @@ pub fn borrowedSimpleCallArg(frame: *const frame_mod.Frame, function: *const byt
     const code = function.code;
     if (decodeVarRefGet(code, pc)) |get| {
         return .{
-            .value = varRefReadableBorrowed(frame, get.idx) orelse return null,
+            .value = varRefReadableBorrowedForFastPath(function, frame, get.idx) orelse return null,
             .next_pc = get.next_pc,
         };
     }
@@ -609,10 +616,11 @@ pub fn borrowedSimpleCallArgWithContext(
     if (pc >= function.code.len) return null;
     const code = function.code;
     if (code[pc] == op.get_var or code[pc] == op.get_var_undef) {
-        if (pc + 5 > code.len) return null;
-        const atom_id = readInt(u32, code[pc + 1 ..][0..4]);
+        if (pc + 3 > code.len) return null;
+        const ref_idx = readInt(u16, code[pc + 1 ..][0..2]);
+        const atom_id = globalVarAtom(function, ref_idx) orelse return null;
         const value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, pc, atom_id, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
-        return .{ .value = value, .next_pc = pc + 5 };
+        return .{ .value = value, .next_pc = pc + 3 };
     }
     return borrowedSimpleCallArg(frame, function, pc);
 }
@@ -630,6 +638,11 @@ pub fn varRefReadableBorrowed(frame: *const frame_mod.Frame, idx: u16) ?core.JSV
     return slot;
 }
 
+pub fn varRefReadableBorrowedForFastPath(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, idx: u16) ?core.JSValue {
+    if (call_runtime.closureVarIsNonLexicalGlobalSentinel(function, idx)) return null;
+    return varRefReadableBorrowed(frame, idx);
+}
+
 pub fn varRefStoreWritableForFastPath(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
@@ -637,7 +650,6 @@ pub fn varRefStoreWritableForFastPath(
     frame: *frame_mod.Frame,
     store: VarRefPut,
 ) bool {
-    _ = global;
     if (store.idx >= frame.var_refs.len) return false;
     const slot = frame.var_refs[store.idx];
     if (varRefCellFromValue(slot)) |cell| {
@@ -647,7 +659,7 @@ pub fn varRefStoreWritableForFastPath(
     }
     if (slot.isUninitialized()) return false;
     if (store.opc == op.put_var_ref_check) {
-        if (store.idx < function.var_ref_names.len and call_runtime.globalLexicalHas(ctx, function.var_ref_names[store.idx])) return false;
+        if (store.idx < function.var_ref_names.len and call_runtime.globalLexicalHasForGlobal(ctx, global, function.var_ref_names[store.idx])) return false;
         if (store.idx < function.var_ref_is_const.len and function.var_ref_is_const[store.idx]) return false;
     }
     return true;
@@ -950,7 +962,7 @@ pub fn fastGlobalDataValueForAtomAtPc(
     eval_with_object: core.JSValue,
 ) ?core.JSValue {
     if (!canUseFastGlobalVarLookup(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return null;
-    if (call_runtime.globalLexicalValue(ctx, atom_id)) |lexical_value| {
+    if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
     }
@@ -970,7 +982,7 @@ pub fn fastInstalledGlobalDataValueForAtomAtPc(
 ) ?core.JSValue {
     if (!canUseInstalledGlobalDataIc(ctx, function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object, global)) return null;
     if (!frame.current_function.isUndefined() and functionFrameBindingShadowsGlobal(ctx.runtime, function, frame, atom_id)) return null;
-    if (call_runtime.globalLexicalValue(ctx, atom_id)) |lexical_value| {
+    if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
     }
@@ -1201,13 +1213,15 @@ pub const UriStrictEqBranch = struct {
 // --- With-statement and reference opcode handlers moved to vm_property_ref.zig ---
 const vm_property_ref = @import("vm_property_ref.zig");
 
-pub fn decodeGlobalDataGet(code: []const u8, pc: usize) ?GlobalBindingGet {
-    if (pc + 5 > code.len) return null;
+pub fn decodeGlobalDataGet(function: *const bytecode.Bytecode, pc: usize) ?GlobalBindingGet {
+    const code = function.code;
+    if (pc + 3 > code.len) return null;
     const opc = code[pc];
     if (opc != op.get_var and opc != op.get_var_undef) return null;
+    const ref_idx = readInt(u16, code[pc + 1 ..][0..2]);
     return .{
-        .atom = readInt(u32, code[pc + 1 ..][0..4]),
-        .next_pc = pc + 5,
+        .atom = globalVarAtom(function, ref_idx) orelse return null,
+        .next_pc = pc + 3,
     };
 }
 

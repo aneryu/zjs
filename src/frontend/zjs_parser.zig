@@ -50,6 +50,11 @@ const atom_class_fields_init: Atom = 120; // "<class_fields_init>"
 const shared_iterator_close_marker: u8 = 255;
 const direct_iterator_close_marker: u8 = 254;
 
+const SourcePosition = struct {
+    line_num: u32,
+    col_num: u32,
+};
+
 pub const Error = lexer_mod.Error || error{
     UnexpectedToken,
     InvalidLhs,
@@ -292,6 +297,7 @@ pub const ParseState = struct {
     last_token_end_offset: usize = 0,
     last_token_line_num: u32 = 1,
     last_token_col_num: u32 = 1,
+    last_opcode_source_offset: ?u32 = null,
     /// Block environment stack for break/continue/finally tracking.
     top_break: ?*BlockEnv = null,
     /// Current scope level (for lexical declarations).
@@ -364,7 +370,7 @@ pub const ParseState = struct {
     /// **Default is `true`** for parser output that still needs finalization.
     /// Callers run `bytecode.pipeline.finalize.run` after parsing to
     /// lower the temp opcodes to their final shapes. The pipeline:
-    ///   * shrinks scope_get_var (7 bytes) → get_var (5 bytes), and
+    ///   * shrinks scope_get_var (7 bytes) → get_var (3 bytes), and
     ///     equivalents for scope_put_var / scope_get_var_undef;
     ///   * drops enter_scope / leave_scope / OP_label entirely;
     ///   * patches every absolute u32 jump operand using an
@@ -386,6 +392,7 @@ pub const ParseState = struct {
     /// Keep this opt-in so existing expression/unit-test paths retain their
     /// current local-slot behavior until full module/eval semantics land.
     top_level_lexical_as_module_ref: bool = false,
+    top_level_lexical_as_global_ref: bool = false,
     top_level_functions_as_children: bool = false,
     eval_global_var_bindings: bool = false,
     eval_annex_b_blocked_function_names: []const Atom = &.{},
@@ -733,6 +740,15 @@ pub const ParseState = struct {
         return null;
     }
 
+    /// qjs find_lexical_global_var (quickjs.c:24078): a global_vars entry with
+    /// is_lexical set (a top-level let/const declared as JS_CLOSURE_GLOBAL_DECL).
+    fn findLexicalGlobalVar(self: *ParseState, name: Atom) bool {
+        for (self.cur_func().global_vars) |gv| {
+            if (gv.var_name == name and gv.is_lexical) return true;
+        }
+        return false;
+    }
+
     fn ensureFunctionScopeVar(self: *ParseState, name: Atom) Error!u16 {
         if (self.scopeHasVar(0, name)) {
             if (self.findFunctionScopeVar(name)) |idx| return idx;
@@ -778,6 +794,26 @@ pub const ParseState = struct {
             .scope_level = 0,
             .var_name = name,
         }) catch return error.OutOfMemory;
+    }
+
+    fn assignPendingGlobalFunctionVarCpool(self: *ParseState, fd: *function_def_mod.FunctionDef, name: Atom, cpool_idx: u16) bool {
+        _ = self;
+        var idx = fd.global_vars.len;
+        while (idx > 0) {
+            idx -= 1;
+            const gv = &fd.global_vars[idx];
+            if (gv.var_name != name or gv.is_lexical or !gv.force_init or gv.cpool_idx >= 0) continue;
+            gv.cpool_idx = @intCast(cpool_idx);
+            return true;
+        }
+        return false;
+    }
+
+    fn emitGlobalScopePutVar(self: *ParseState, atom_id: Atom) Error!void {
+        // `scope_level = -1` is a resolver-only sentinel for Annex B global
+        // function binding updates: bypass block/function locals and lower to
+        // final `put_var`.
+        try self.emitOpAtomU16(opcode.op.scope_put_var, atom_id, std.math.maxInt(u16));
     }
 
     fn currentBlockDecls(self: *ParseState) ?*BlockScopeDecls {
@@ -1512,6 +1548,41 @@ pub const ParseState = struct {
         try self.appendBytesAt(&bytes, line_num, col_num);
     }
 
+    fn sourceOffsetForLineCol(self: *const ParseState, line_num: u32, col_num: u32) u32 {
+        if (line_num <= 1 and col_num <= 1) return 0;
+        var line: u32 = 1;
+        var col: u32 = 1;
+        for (self.lex.source, 0..) |byte, index| {
+            if (line == line_num and col == col_num) return @intCast(index);
+            if (byte == '\n') {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        return @intCast(self.lex.source.len);
+    }
+
+    fn emitSourcePos(self: *ParseState, line_num: u32, col_num: u32) Error!void {
+        if (!self.emit_phase1_temp) return;
+        const source_offset = self.sourceOffsetForLineCol(line_num, col_num);
+        if (self.last_opcode_source_offset) |last| {
+            if (last == source_offset) return;
+        }
+        var bytes: [5]u8 = undefined;
+        bytes[0] = opcode.op.line_num;
+        std.mem.writeInt(u32, bytes[1..5], source_offset, .little);
+        try self.appendBytesNoSource(&bytes);
+        self.last_opcode_source_offset = source_offset;
+    }
+
+    fn currentSourcePosition(self: *ParseState) SourcePosition {
+        const loc_line = if (self.last_token_line_num >= self.token.line_num) self.last_token_line_num else self.token.line_num;
+        const loc_col = if (loc_line == self.last_token_line_num) self.last_token_col_num else self.token.col_num;
+        return .{ .line_num = loc_line, .col_num = loc_col };
+    }
+
     fn emitFClosure8(self: *ParseState, idx: u8) Error!void {
         // Phase-1 temporary opcodes overlap the short-opcode range that
         // contains fclosure8. Keep parser output in the wide form until
@@ -1618,8 +1689,10 @@ pub const ParseState = struct {
         std.mem.writeInt(u32, bytes[1..5], atom_id, .little);
         std.mem.writeInt(u32, bytes[5..9], label, .little);
         bytes[9] = u8_val;
+        const loc = self.currentSourcePosition();
+        _ = try self.emitSourcePosAndLoc(loc.line_num, loc.col_num);
         const label_offset = self.currentCodeLen() + 5;
-        try self.appendBytes(&bytes);
+        try self.appendBytesNoSource(&bytes);
         return label_offset;
     }
 
@@ -1628,7 +1701,16 @@ pub const ParseState = struct {
         if (self.emit_phase1_temp) {
             try self.emitOpAtomU16(opcode.op.scope_get_var, atom_id, @intCast(self.scope_level));
         } else {
-            try self.emitOpAtom(opcode.op.get_var, atom_id);
+            try self.emitGlobalVarOp(opcode.op.get_var, atom_id);
+        }
+    }
+
+    fn emitScopeGetVarCheckThis(self: *ParseState, atom_id: Atom) Error!void {
+        try self.ensureClosureVar(atom_id);
+        if (self.emit_phase1_temp) {
+            try self.emitOpAtomU16(opcode.op.scope_get_var_checkthis, atom_id, @intCast(self.scope_level));
+        } else {
+            try self.emitGlobalVarOp(opcode.op.get_var, atom_id);
         }
     }
 
@@ -1637,7 +1719,7 @@ pub const ParseState = struct {
         if (self.emit_phase1_temp) {
             try self.emitOpAtomU16(opcode.op.scope_put_var, atom_id, @intCast(self.scope_level));
         } else {
-            try self.emitOpAtom(opcode.op.put_var, atom_id);
+            try self.emitGlobalVarOp(opcode.op.put_var, atom_id);
         }
     }
 
@@ -1665,7 +1747,7 @@ pub const ParseState = struct {
         if (self.emit_phase1_temp) {
             try self.emitOpAtomU16(opcode.op.scope_get_var_undef, atom_id, @intCast(self.scope_level));
         } else {
-            try self.emitOpAtom(opcode.op.get_var_undef, atom_id);
+            try self.emitGlobalVarOp(opcode.op.get_var_undef, atom_id);
         }
     }
 
@@ -1678,9 +1760,7 @@ pub const ParseState = struct {
         if (self.emit_phase1_temp) {
             try self.emitOpAtomU16(opcode.op.scope_put_var_init, atom_id, @intCast(self.scope_level));
         } else {
-            // Direct emission path (no pipeline): use the plain
-            // `put_var_init` 5-byte form.
-            try self.emitOpAtom(opcode.op.put_var_init, atom_id);
+            try self.emitGlobalVarOp(opcode.op.put_var_init, atom_id);
         }
     }
 
@@ -1702,7 +1782,11 @@ pub const ParseState = struct {
 
     fn emitThisValue(self: *ParseState) Error!void {
         if (try self.ensureThisLocal()) |_| {
-            try self.emitScopeGetVar(atom_this);
+            if (self.cur_func().is_derived_class_constructor) {
+                try self.emitScopeGetVarCheckThis(atom_this);
+            } else {
+                try self.emitScopeGetVar(atom_this);
+            }
         } else {
             try self.emitOp(opcode.op.push_this);
         }
@@ -1823,6 +1907,37 @@ pub const ParseState = struct {
             if (cv.var_name == atom_id) return @intCast(idx);
         }
         return null;
+    }
+
+    fn findGlobalClosureVarIndex(fd: *const function_def_mod.FunctionDef, atom_id: Atom) ?u16 {
+        for (fd.closure_var, 0..) |cv, idx| {
+            if (cv.var_name != atom_id) continue;
+            switch (cv.closure_type) {
+                .global, .global_ref, .global_decl, .module_decl, .module_import => return @intCast(idx),
+                else => {},
+            }
+        }
+        return null;
+    }
+
+    fn ensureGlobalClosureVarIndex(self: *ParseState, atom_id: Atom) Error!u16 {
+        const fd = self.cur_func();
+        if (findGlobalClosureVarIndex(fd, atom_id)) |idx| return idx;
+        const idx = fd.addClosureVar(.{
+            .closure_type = .global,
+            .is_lexical = false,
+            .is_const = false,
+            .var_kind = .normal,
+            .var_idx = 0,
+            .var_name = atom_id,
+        }) catch return Error.OutOfMemory;
+        if (idx < 0 or idx > std.math.maxInt(u16)) return Error.UnexpectedToken;
+        return @intCast(idx);
+    }
+
+    fn emitGlobalVarOp(self: *ParseState, op_id: u8, atom_id: Atom) Error!void {
+        const ref_idx = try self.ensureGlobalClosureVarIndex(atom_id);
+        try self.emitOpU16(op_id, ref_idx);
     }
 
     fn functionDefUsesAtom(fd: *const function_def_mod.FunctionDef, atom_id: Atom) bool {
@@ -2015,9 +2130,8 @@ pub const ParseState = struct {
     }
 
     fn appendBytes(self: *ParseState, bytes: []const u8) Error!void {
-        const loc_line = if (self.last_token_line_num >= self.token.line_num) self.last_token_line_num else self.token.line_num;
-        const loc_col = if (loc_line == self.last_token_line_num) self.last_token_col_num else self.token.col_num;
-        try self.appendBytesAt(bytes, loc_line, loc_col);
+        const loc = self.currentSourcePosition();
+        try self.appendBytesAt(bytes, loc.line_num, loc.col_num);
     }
 
     fn appendBytesNoSource(self: *ParseState, bytes: []const u8) Error!void {
@@ -2028,14 +2142,24 @@ pub const ParseState = struct {
         }
     }
 
-    fn appendBytesAt(self: *ParseState, bytes: []const u8, line_num: u32, col_num: u32) Error!void {
+    fn emitSourcePosAndLoc(self: *ParseState, line_num: u32, col_num: u32) Error!usize {
+        try self.emitSourcePos(line_num, col_num);
         if (self.emit_to_function_def) {
             const pc: u32 = @intCast(self.cur_func().byte_code.len);
             try self.cur_func().appendSourceLoc(pc, @intCast(line_num), @intCast(col_num));
-            try self.cur_func().appendByteCode(bytes);
+            return pc;
         } else {
             const pc: u32 = @intCast(self.function.code.len);
             try self.function.appendSourceLoc(pc, @intCast(line_num), @intCast(col_num));
+            return pc;
+        }
+    }
+
+    fn appendBytesAt(self: *ParseState, bytes: []const u8, line_num: u32, col_num: u32) Error!void {
+        _ = try self.emitSourcePosAndLoc(line_num, col_num);
+        if (self.emit_to_function_def) {
+            try self.cur_func().appendByteCode(bytes);
+        } else {
             // Emit to Bytecode object's code buffer (legacy behavior).
             try self.function.appendCode(bytes);
         }
@@ -2068,7 +2192,7 @@ pub const ParseState = struct {
 
     fn appendMovedCodeWithAtoms(self: *ParseState, code: []u8, atoms: []const Atom, old_base: usize) Error!void {
         try rebaseMovedBytecodeLabels(code, atoms, old_base, self.currentCodeLen());
-        try self.appendBytes(code);
+        try self.appendBytesNoSource(code);
         try self.appendAtomOperands(atoms);
     }
 
@@ -2756,12 +2880,7 @@ fn emitLogicalAssign(
             try s.emitOp(opcode.op.perm4);
             try s.emitOp(opcode.op.put_super_value);
         },
-        .indexed => |i| {
-            try s.truncateCode(i.code_pos);
-            try s.emitOp(opcode.op.to_propkey2);
-            try s.emitOp(opcode.op.dup2);
-            try s.emitOp(opcode.op.get_array_el);
-        },
+        .indexed => |i| s.currentCode()[i.code_pos] = opcode.op.get_array_el3,
         .with_ref => {},
         .invalid_call, .none => return Error.InvalidAssignmentTarget,
     }
@@ -2864,7 +2983,7 @@ fn emitLogicalNoAssignCleanup(s: *ParseState, shape: LhsShape, result_needed: bo
 const LhsShape = union(enum) {
     none,
     invalid_call,
-    /// `get_var <atom>` (5 bytes) — depth 0 reference.
+    /// `get_var <var_ref>` (3 bytes) — depth 0 reference.
     var_ref: struct { atom: Atom, code_pos: usize },
     /// `get_field <atom>` (5 bytes) — depth 1 reference. Compound assign
     /// rewrites this in place to `get_field2`.
@@ -2872,7 +2991,7 @@ const LhsShape = union(enum) {
     /// `get_super; <prop>; get_super_value` — depth 2 super reference.
     super_dotted: struct { code_pos: usize },
     /// `get_array_el` (1 byte) — depth 2 reference. Compound/update
-    /// rewrites this to `to_propkey2; dup2; get_array_el`.
+    /// rewrites this in place to `get_array_el3`.
     indexed: struct { code_pos: usize },
     /// `with_get_ref <atom> ... fallback get_var <atom>` — depth 2
     /// reference where the base is either the with object or undefined.
@@ -2900,21 +3019,28 @@ fn classifyLhs(
             if (atom_id == ident) return .{ .with_ref = .{ .atom = ident } };
         }
     }
-    // var_ref: exactly `get_var <atom>` (5 bytes) or `scope_get_var <atom> <u16>` (7 bytes) was added.
+    // var_ref: exactly `get_var <var_ref>` (3 bytes) or `scope_get_var <atom> <u16>` (7 bytes) was added.
     if (saved_atom) |ident| {
-        const final_pos = if (code.len >= pre_lhs_code_len + 5) code.len - 5 else pre_lhs_code_len;
+        const final_pos = if (code.len >= pre_lhs_code_len + 3) code.len - 3 else pre_lhs_code_len;
         const temp_pos = if (code.len >= pre_lhs_code_len + 7) code.len - 7 else pre_lhs_code_len;
-        const is_final = code.len >= pre_lhs_code_len + 5 and code[final_pos] == opcode.op.get_var;
+        const is_final = code.len >= pre_lhs_code_len + 3 and code[final_pos] == opcode.op.get_var;
         const is_temp = code.len >= pre_lhs_code_len + 7 and code[temp_pos] == opcode.op.scope_get_var;
-        const code_pos = if (is_final) final_pos else temp_pos;
-        const atom_operands = if (s.emit_to_function_def) s.cur_func().atom_operands else s.function.atom_operands;
-        const atom_operand_matches =
-            (atom_operands.len > pre_lhs_atom_len and
-                atom_operands[atom_operands.len - 1] == ident);
-        if ((is_final or is_temp) and atom_operand_matches) {
-            const emitted = std.mem.readInt(u32, code[code_pos + 1 ..][0..4], .little);
-            if (@as(Atom, emitted) == ident) {
-                return .{ .var_ref = .{ .atom = ident, .code_pos = code_pos } };
+        if (is_final) {
+            const ref_idx = std.mem.readInt(u16, code[final_pos + 1 ..][0..2], .little);
+            const fd = s.cur_func();
+            if (ref_idx < fd.closure_var.len and fd.closure_var[ref_idx].var_name == ident) {
+                return .{ .var_ref = .{ .atom = ident, .code_pos = final_pos } };
+            }
+        } else if (is_temp) {
+            const atom_operands = if (s.emit_to_function_def) s.cur_func().atom_operands else s.function.atom_operands;
+            const atom_operand_matches =
+                (atom_operands.len > pre_lhs_atom_len and
+                    atom_operands[atom_operands.len - 1] == ident);
+            if (atom_operand_matches) {
+                const emitted = std.mem.readInt(u32, code[temp_pos + 1 ..][0..4], .little);
+                if (@as(Atom, emitted) == ident) {
+                    return .{ .var_ref = .{ .atom = ident, .code_pos = temp_pos } };
+                }
             }
         }
     }
@@ -3103,7 +3229,7 @@ fn evalClosureBindingIsConfigurable(s: *ParseState, owner_index: usize, cv: func
     const owner = s.funcAtVirtualIndex(owner_index);
     switch (cv.closure_type) {
         .local => {
-            if (owner_index == 0) return false;
+            if (owner_index == 0) return s.eval_delete_bindings and evalDeleteBindingIsConfigurable(cv.is_lexical, cv.var_kind);
             const parent = s.funcAtVirtualIndex(owner_index - 1);
             if (cv.var_idx >= parent.vars.len) return false;
             const v = parent.vars[cv.var_idx];
@@ -3115,10 +3241,16 @@ fn evalClosureBindingIsConfigurable(s: *ParseState, owner_index: usize, cv: func
             if (cv.var_idx >= parent.closure_var.len) return false;
             return evalClosureBindingIsConfigurable(s, owner_index - 1, parent.closure_var[cv.var_idx]);
         },
-        .global_decl, .global, .module_decl => {
-            return owner.is_eval and evalDeleteBindingIsConfigurable(cv.is_lexical, cv.var_kind);
+        // `.module_decl` belongs in the configurable group: an eval top-level
+        // function declaration is recorded as a `.module_decl` (is_lexical,
+        // var_kind=.function_decl), and `delete x` on it must return true
+        // (configurable) per non-strict eval semantics. Genuine ES-module
+        // top-level decls never reach here (modules are always strict, and
+        // owner.is_eval is false). Matches ours/322af2f.
+        .global_decl, .global, .global_ref, .module_decl => {
+            return (owner.is_eval or s.eval_delete_bindings) and evalDeleteBindingIsConfigurable(cv.is_lexical, cv.var_kind);
         },
-        .arg, .global_ref, .module_import => return false,
+        .arg, .module_import => return false,
     }
 }
 
@@ -3515,7 +3647,7 @@ fn emitPutWithRefKeep(s: *ParseState, atom_id: Atom, keep: WithRefKeep) Error!vo
     try patchAbsoluteTarget(s, fallback);
 }
 
-/// Rewrite the trailing `get_field` / `get_array_el` to its `*2` form
+/// Rewrite the trailing `get_field` / `get_array_el` to its keep form
 /// so the receiver stays on the stack for compound or update lowering.
 /// Var-refs need a fresh `get_var` re-emission and are handled by the
 /// caller; this helper handles only the depth-1/2 cases.
@@ -3523,12 +3655,7 @@ fn rewriteToGetForm2(s: *ParseState, shape: LhsShape) Error!void {
     const code = s.currentCode();
     switch (shape) {
         .dotted => |d| code[d.code_pos] = opcode.op.get_field2,
-        .indexed => |i| {
-            try s.truncateCode(i.code_pos);
-            try s.emitOp(opcode.op.to_propkey2);
-            try s.emitOp(opcode.op.dup2);
-            try s.emitOp(opcode.op.get_array_el);
-        },
+        .indexed => |i| code[i.code_pos] = opcode.op.get_array_el3,
         .super_dotted => |d| {
             try s.truncateCode(d.code_pos);
             try s.emitOp(opcode.op.to_propkey);
@@ -3774,7 +3901,7 @@ pub fn parseLogicalAndOr(s: *ParseState, op_kind: tok.TokenKind, flags: ParseFla
 }
 
 /// `js_parse_expr_binary` (`quickjs.c:27049`). Pratt-style with hand
-/// rolled level table. Levels 1..8 covered (private-name `in` deferred).
+/// rolled level table. Levels 1..8 covered, including private-name `in`.
 pub fn parseExprBinary(s: *ParseState, level: u8, flags: ParseFlags) Error!void {
     if (level == 0) {
         return parseUnary(s, ParseFlags{
@@ -3799,8 +3926,7 @@ pub fn parseExprBinary(s: *ParseState, level: u8, flags: ParseFlags) Error!void 
             return Error.UnexpectedToken;
         }
         try parseExprBinary(s, level - 1, flags);
-        try s.emitOpAtom(opcode.op.private_symbol, retained_private_atom);
-        try s.emitOp(opcode.op.private_in);
+        try s.emitOpAtomU16(opcode.op.scope_in_private_field, retained_private_atom, @intCast(s.scope_level));
         return;
     }
     try parseExprBinary(s, level - 1, flags);
@@ -4324,15 +4450,15 @@ fn parseDelete(s: *ParseState, flags: ParseFlags) Error!void {
     const pre_lhs_code_len = s.currentCodeLen();
     const pre_lhs_atom_len = s.currentAtomOperandLen();
     try parseUnary(s, .{ .pow_allowed = false, .in_accepted = flags.in_accepted });
-    const shape = classifyLhs(s, pre_lhs_code_len, pre_lhs_atom_len, saved_atom);
-    if (lhsShapeIsPrivateReference(s, shape)) return Error.UnexpectedToken;
     const code_after_lhs = s.currentCode();
-    if (shape == .none and code_after_lhs.len > pre_lhs_code_len and code_after_lhs[code_after_lhs.len - 1] == opcode.op.get_length) {
+    if (code_after_lhs.len > pre_lhs_code_len and code_after_lhs[code_after_lhs.len - 1] == opcode.op.get_length) {
         try s.truncateCode(code_after_lhs.len - 1);
         try s.emitOpAtom(opcode.op.push_atom_value, atom_module.ids.length);
         try s.emitOp(opcode.op.delete);
         return;
     }
+    const shape = classifyLhs(s, pre_lhs_code_len, pre_lhs_atom_len, saved_atom);
+    if (lhsShapeIsPrivateReference(s, shape)) return Error.UnexpectedToken;
     if (shape == .none and saved_atom != null and atomNameEquals(s, saved_atom.?, "arguments") and !hasCurrentFunctionBinding(s, saved_atom.?)) {
         try s.truncateCode(pre_lhs_code_len);
         try s.truncateAtomOperands(pre_lhs_atom_len);
@@ -4458,7 +4584,7 @@ fn promoteTrailingOptionalChainExitForMethodCall(s: *ParseState) Error!void {
 fn insertByteInCurrentCode(s: *ParseState, index: usize, byte: u8) Error!void {
     const old_len = s.currentCodeLen();
     if (index > old_len) return Error.UnexpectedToken;
-    try s.appendBytes(&.{byte});
+    try s.appendBytesNoSource(&.{byte});
     var code = s.currentCode();
     if (code.len != old_len + 1) return Error.UnexpectedToken;
     std.mem.copyBackwards(u8, code[index + 1 ..], code[index..old_len]);
@@ -4467,28 +4593,19 @@ fn insertByteInCurrentCode(s: *ParseState, index: usize, byte: u8) Error!void {
 
 fn adjustJumpTargetsAfterInsert(s: *ParseState, insert_at: usize, delta: u32) Error!void {
     var code = s.currentCode();
+    const atoms = s.currentAtomOperands();
     var pc: usize = 0;
+    var atom_index: usize = 0;
     while (pc < code.len) {
         const op_id = code[pc];
-        const size = opcode.sizeOf(op_id);
+        const instr = parserPhaseInstruction(code, atoms, pc, atom_index);
+        const size = instr.size;
         if (size == 0 or pc + size > code.len) return Error.UnexpectedToken;
-        if (op_id == opcode.op.if_false or
-            op_id == opcode.op.if_true or
-            op_id == opcode.op.goto or
-            op_id == opcode.op.@"catch")
-        {
-            const target = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-            if (target >= insert_at) std.mem.writeInt(u32, code[pc + 1 ..][0..4], target + delta, .little);
-        } else if (op_id == opcode.op.with_get_var or
-            op_id == opcode.op.with_put_var or
-            op_id == opcode.op.with_delete_var or
-            op_id == opcode.op.with_make_ref or
-            op_id == opcode.op.with_get_ref or
-            op_id == opcode.op.with_get_ref_undef)
-        {
-            const target = std.mem.readInt(u32, code[pc + 5 ..][0..4], .little);
-            if (target >= insert_at) std.mem.writeInt(u32, code[pc + 5 ..][0..4], target + delta, .little);
+        if (parserPhaseLabelOperandOffset(op_id, pc, instr.is_temp)) |offset| {
+            const target = std.mem.readInt(u32, code[offset..][0..4], .little);
+            if (target >= insert_at) std.mem.writeInt(u32, code[offset..][0..4], target + delta, .little);
         }
+        if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
         pc += size;
     }
 }
@@ -5594,9 +5711,10 @@ fn parsePrimary(s: *ParseState, flags: ParseFlags) Error!void {
                 try parseExpr2(s, forceResultNeeded(flags));
                 const parenthesized_had_comma = s.last_expr_had_comma;
                 const parenthesized_had_branchy_tail = s.last_expr_was_short_circuit_or_cond;
+                const parenthesized_had_optional_chain = s.last_lhs_had_optional_chain;
                 try expectPunct(s, ')');
                 if (!parenthesized_had_comma and
-                    !parenthesized_had_branchy_tail and
+                    (!parenthesized_had_branchy_tail or parenthesized_had_optional_chain) and
                     (s.peekKind() == @as(tok.TokenKind, @intCast('(')) or optionalCallFollows(s)))
                 {
                     if (try rewriteTrailingMemberReferenceForCall(s)) {
@@ -6447,8 +6565,10 @@ fn emitForwardJump(s: *ParseState, op_id: u8) Error!usize {
     var bytes: [5]u8 = undefined;
     bytes[0] = op_id;
     std.mem.writeInt(u32, bytes[1..5], 0, .little);
+    const loc = s.currentSourcePosition();
+    _ = try s.emitSourcePosAndLoc(loc.line_num, loc.col_num);
     const operand_offset = s.currentCodeLen() + 1;
-    try s.appendBytes(&bytes);
+    try s.appendBytesNoSource(&bytes);
     return operand_offset;
 }
 
@@ -6468,7 +6588,9 @@ fn emitBackwardJump(s: *ParseState, op_id: u8, target: u32) Error!void {
     var bytes: [5]u8 = undefined;
     bytes[0] = op_id;
     std.mem.writeInt(u32, bytes[1..5], target, .little);
-    try s.appendBytes(&bytes);
+    const loc = s.currentSourcePosition();
+    _ = try s.emitSourcePosAndLoc(loc.line_num, loc.col_num);
+    try s.appendBytesNoSource(&bytes);
 }
 
 fn emitBackwardJumpNoSource(s: *ParseState, op_id: u8, target: u32) Error!void {
@@ -6492,6 +6614,7 @@ fn parserPhaseAtomTempInstruction(code: []const u8, atoms: []const Atom, pc: usi
         opcode.op.scope_delete_var,
         opcode.op.scope_get_ref,
         opcode.op.scope_put_var_init,
+        opcode.op.scope_get_var_checkthis,
         opcode.op.scope_get_private_field,
         opcode.op.scope_get_private_field2,
         opcode.op.scope_put_private_field,
@@ -6508,6 +6631,17 @@ fn parserPhaseAtomTempInstruction(code: []const u8, atoms: []const Atom, pc: usi
 
 fn parserPhaseInstruction(code: []const u8, atoms: []const Atom, pc: usize, atom_index: usize) ParserPhaseInstruction {
     if (parserPhaseAtomTempInstruction(code, atoms, pc, atom_index)) |temp_instr| return temp_instr;
+    const op_id = code[pc];
+    switch (op_id) {
+        opcode.op.enter_scope,
+        opcode.op.leave_scope,
+        opcode.op.label,
+        opcode.op.get_array_el_opt_chain,
+        opcode.op.set_class_name,
+        opcode.op.line_num,
+        => return .{ .size = opcode.sizeOfPhase1(op_id), .is_temp = true },
+        else => {},
+    }
     return .{ .size = opcode.sizeOf(code[pc]) };
 }
 
@@ -6520,6 +6654,7 @@ fn parserPhaseInstructionHasAtom(op_id: u8, is_temp: bool) bool {
         opcode.op.scope_make_ref,
         opcode.op.scope_get_ref,
         opcode.op.scope_put_var_init,
+        opcode.op.scope_get_var_checkthis,
         opcode.op.scope_get_private_field,
         opcode.op.scope_get_private_field2,
         opcode.op.scope_put_private_field,
@@ -6723,7 +6858,7 @@ fn expressionStatementKeepsCompletion(s: *const ParseState) bool {
 }
 
 fn caseCanFallthrough(s: *ParseState) bool {
-    const op_id = lastOpcode(s.currentCode()) orelse return true;
+    const op_id = lastOpcode(s.currentCode(), s.currentAtomOperands()) orelse return true;
     return switch (op_id) {
         opcode.op.goto,
         opcode.op.@"return",
@@ -6735,45 +6870,41 @@ fn caseCanFallthrough(s: *ParseState) bool {
     };
 }
 
-fn lastOpcode(code: []const u8) ?u8 {
+fn lastOpcode(code: []const u8, atoms: []const Atom) ?u8 {
+    return lastParserPhaseOpcode(code, atoms, false);
+}
+
+fn lastNonCleanupOpcode(code: []const u8, atoms: []const Atom) ?u8 {
+    return lastParserPhaseOpcode(code, atoms, true);
+}
+
+fn lastParserPhaseOpcode(code: []const u8, atoms: []const Atom, skip_cleanup: bool) ?u8 {
     var pc: usize = 0;
+    var atom_index: usize = 0;
     var last: ?u8 = null;
     while (pc < code.len) {
         const op_id = code[pc];
-        const size = opcode.sizeOf(op_id);
+        const instr = parserPhaseInstruction(code, atoms, pc, atom_index);
+        const size: usize = instr.size;
         if (size == 0 or pc + size > code.len) return null;
-        last = op_id;
+        if (op_id != opcode.op.line_num and
+            !(skip_cleanup and (op_id == opcode.op.leave_scope or op_id == opcode.op.close_loc)))
+        {
+            last = op_id;
+        }
+        if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
         pc += size;
     }
     return last;
 }
 
-fn lastNonCleanupOpcode(code: []const u8) ?u8 {
+fn hasJumpToCurrentEnd(code: []const u8, atoms: []const Atom, include_conditional: bool) bool {
     var pc: usize = 0;
-    var last: ?u8 = null;
+    var atom_index: usize = 0;
     while (pc < code.len) {
         const op_id = code[pc];
-        const size = opcode.sizeOf(op_id);
-        if (size == 0 or pc + size > code.len) return null;
-        if (op_id != opcode.op.leave_scope and op_id != opcode.op.close_loc) last = op_id;
-        pc += size;
-    }
-    return last;
-}
-
-fn hasJumpToCurrentEnd(code: []const u8, include_conditional: bool) bool {
-    var pc: usize = 0;
-    while (pc < code.len) {
-        const op_id = code[pc];
-        // `scope_make_ref` embeds a label operand this scan does not
-        // track, and id 192 is ambiguous in phase-1 streams
-        // (`push_empty_string` vs `scope_in_private_field`). Answer
-        // conservatively in both cases.
-        if (op_id == opcode.op.scope_make_ref or op_id == opcode.op.scope_in_private_field) return true;
-        // This scan runs on Phase 1 code, before temporary opcodes are
-        // resolved: size through the phase-1 view. If the walk cannot
-        // prove the path is linear, answer conservatively.
-        const size = opcode.sizeOfPhase1(op_id);
+        const instr = parserPhaseInstruction(code, atoms, pc, atom_index);
+        const size: usize = instr.size;
         if (size == 0 or pc + size > code.len) return true;
         if (op_id == opcode.op.goto or
             (include_conditional and (op_id == opcode.op.if_false or op_id == opcode.op.if_true)))
@@ -6781,16 +6912,17 @@ fn hasJumpToCurrentEnd(code: []const u8, include_conditional: bool) bool {
             const target = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
             if (target == code.len) return true;
         }
+        if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
         pc += size;
     }
     return false;
 }
 
-fn functionNeedsImplicitReturn(code: []const u8) bool {
-    const op_id = lastNonCleanupOpcode(code) orelse return true;
+fn functionNeedsImplicitReturn(code: []const u8, atoms: []const Atom) bool {
+    const op_id = lastNonCleanupOpcode(code, atoms) orelse return true;
     return switch (op_id) {
         opcode.op.@"return", opcode.op.return_undef, opcode.op.return_async, opcode.op.tail_call, opcode.op.tail_call_method => false,
-        opcode.op.throw => hasJumpToCurrentEnd(code, false),
+        opcode.op.throw => hasJumpToCurrentEnd(code, atoms, false),
         else => true,
     };
 }
@@ -8246,6 +8378,7 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
                 // Parse the update while still inside the parenthesized
                 // for-head, then move its emitted bytes after the body.
                 const update_start = s.currentCodeLen();
+                const update_atom_start = s.currentAtomOperandLen();
                 if (s.peekKind() != ')') {
                     // Parse the update clause in result-DISCARDED mode (qjs
                     // parses the for-update with no result), mirroring the
@@ -8263,13 +8396,26 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
                     }
                 }
                 const update_code = s.currentCode()[update_start..];
+                const update_atoms = s.currentAtomOperands()[update_atom_start..];
                 var saved_update: []u8 = &.{};
                 if (update_code.len != 0) {
                     saved_update = try s.function.memory.alloc(u8, update_code.len);
                     @memcpy(saved_update, update_code);
                 }
                 defer if (saved_update.len != 0) s.function.memory.free(u8, saved_update);
+                var saved_update_atoms: []Atom = &.{};
+                if (update_atoms.len != 0) {
+                    saved_update_atoms = try s.function.memory.alloc(Atom, update_atoms.len);
+                    for (update_atoms, saved_update_atoms) |atom_id, *slot| {
+                        slot.* = s.function.atoms.dup(atom_id);
+                    }
+                }
+                defer if (saved_update_atoms.len != 0) {
+                    for (saved_update_atoms) |atom_id| s.function.atoms.free(atom_id);
+                    s.function.memory.free(Atom, saved_update_atoms);
+                };
                 try s.truncateCode(update_start);
+                try s.truncateAtomOperands(update_atom_start);
                 try s.expectToken(')');
                 if (for_scope_pushed) {
                     if (s.last_var_decl_atom) |atom_id| {
@@ -8287,8 +8433,7 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
                 if (label_frame) |idx| try s.patchLabelContinues(idx);
                 if (for_scope_pushed and for_using_stack_loc == null) try s.emitCloseCurrentScopeLexicals();
                 if (saved_update.len != 0) {
-                    try relocateMovedJumpTargets(saved_update, update_start, s.currentCodeLen());
-                    try s.appendBytes(saved_update);
+                    try s.appendMovedCodeWithAtoms(saved_update, saved_update_atoms, update_start);
                 }
 
                 // Back-edge to the top.
@@ -9365,12 +9510,15 @@ fn parseVar(s: *ParseState, var_tok: tok.TokenKind, export_decl: bool, parse_fla
             {
                 return Error.UnexpectedToken;
             }
+            const module_top_level_var = !is_lexical and s.top_level_lexical_as_module_ref and s.cur_func_stack.len == 0;
+            const module_top_level_lexical = is_lexical and s.top_level_lexical_as_module_ref and s.scope_level == 0;
+            const module_top_level_decl = module_top_level_var or module_top_level_lexical;
             if (!is_lexical) {
                 try s.registerBlockVarDeclaration(atom_id);
                 if (findCurrentScopeVar(s, atom_id)) |existing_idx| {
                     if (s.cur_func().vars[existing_idx].is_lexical) return Error.UnexpectedToken;
                 }
-                if (s.top_level_lexical_as_module_ref and s.scope_level == 0) {
+                if (module_top_level_var) {
                     if (ParseState.findClosureVarIndex(s.cur_func(), atom_id)) |existing_ref_idx| {
                         if (s.cur_func().closure_var[existing_ref_idx].is_lexical) return Error.UnexpectedToken;
                     }
@@ -9378,7 +9526,7 @@ fn parseVar(s: *ParseState, var_tok: tok.TokenKind, export_decl: bool, parse_fla
             } else {
                 try s.registerBlockLexicalDeclaration(atom_id);
                 if (findCurrentScopeVar(s, atom_id) != null) return Error.UnexpectedToken;
-                if (s.top_level_lexical_as_module_ref and s.scope_level == 0 and ParseState.findClosureVarIndex(s.cur_func(), atom_id) != null) {
+                if (module_top_level_lexical and ParseState.findClosureVarIndex(s.cur_func(), atom_id) != null) {
                     return Error.UnexpectedToken;
                 }
                 if (s.scope_level == 1 and s.cur_func().findArg(atom_id) >= 0) {
@@ -9395,7 +9543,7 @@ fn parseVar(s: *ParseState, var_tok: tok.TokenKind, export_decl: bool, parse_fla
             // `var`, QuickJS hoists to scope 0 (`add_func_var_def`
             // / `add_arguments_var`); for `let`/`const` the current
             // lexical scope is correct.
-            if (s.top_level_lexical_as_module_ref and s.scope_level == 0) {
+            if (module_top_level_decl) {
                 if (!is_lexical) {
                     top_level_var_ref_idx = ParseState.findClosureVarIndex(s.cur_func(), atom_id);
                 }
@@ -9411,6 +9559,29 @@ fn parseVar(s: *ParseState, var_tok: tok.TokenKind, export_decl: bool, parse_fla
                     top_level_var_ref_idx = @intCast(ref_idx);
                     try s.retrofitForwardTopLevelModuleCapture(s.cur_func(), atom_id, top_level_var_ref_idx.?, is_lexical, is_const, .normal);
                 }
+            } else if (s.top_level_lexical_as_global_ref and s.scope_level == 0 and is_lexical and s.cur_func_stack.len == 0 and !s.is_eval) {
+                // Script top-level let/const → single global VarRef cell (qjs
+                // JS_CLOSURE_GLOBAL_DECL). No addScopeVar (no frame slot); keep
+                // addGlobalVar so check_define_var/define_var still emit (the
+                // redeclaration gate). The cell is created at instantiation.
+                if (top_level_var_ref_idx == null) {
+                    const ref_idx = try s.cur_func().addClosureVar(.{
+                        .closure_type = .global_decl,
+                        .is_lexical = true,
+                        .is_const = is_const,
+                        .var_kind = .normal,
+                        .var_idx = @intCast(s.cur_func().closure_var.len),
+                        .var_name = atom_id,
+                    });
+                    top_level_var_ref_idx = @intCast(ref_idx);
+                    try s.retrofitForwardTopLevelModuleCapture(s.cur_func(), atom_id, top_level_var_ref_idx.?, true, is_const, .normal);
+                }
+                // Emit check_define_var/define_var (qjs JS_CheckDefineGlobalVar
+                // PASS1 redeclaration gate + js_closure_define_global_var PASS2
+                // cell create). The cell is created by define_var AFTER the
+                // check, binding into frame.var_refs (initFrameVarRefs only
+                // reserves a placeholder, preserving qjs check-before-create).
+                try s.addGlobalVar(atom_id, true, is_const);
             } else if (is_lexical) {
                 local_lexical_idx = @intCast(try s.addScopeVar(atom_id, .normal, true, is_const));
                 try s.retrofitForwardLocalFunctionCapture(s.cur_func(), atom_id, local_lexical_idx.?);
@@ -10619,9 +10790,7 @@ fn parseForInOf(s: *ParseState, is_for_await: bool) Error!void {
     try patchForwardJump(s, next_jump_off);
     if (is_for_of) {
         if (is_for_await) {
-            try s.emitOpNoSource(opcode.op.dup3);
-            try s.emitOpNoSource(opcode.op.drop);
-            try s.emitOpU16NoSource(opcode.op.call_method, 0);
+            try s.emitOpNoSource(opcode.op.for_await_of_next);
             try s.emitOpNoSource(opcode.op.await);
             try s.emitOpNoSource(opcode.op.iterator_get_value_done);
         } else {
@@ -11017,6 +11186,7 @@ fn parseFunctionParamsAndBody(s: *ParseState, func_kind: ParseFunctionKind, sour
     const parent_fd = s.cur_func();
     const capture_child = s.cur_func_stack.len > 0 or s.top_level_functions_as_children;
     const saved_emit_to_function_def = s.emit_to_function_def;
+    const saved_last_opcode_source_offset = s.last_opcode_source_offset;
     const saved_scope_level = s.scope_level;
     const saved_is_eval = s.is_eval;
     const saved_eval_ret_idx = s.eval_ret_idx;
@@ -11044,6 +11214,7 @@ fn parseFunctionParamsAndBody(s: *ParseState, func_kind: ParseFunctionKind, sour
     errdefer if (child_pushed) {
         s.discardCurrentFunction();
         s.emit_to_function_def = saved_emit_to_function_def;
+        s.last_opcode_source_offset = saved_last_opcode_source_offset;
         s.scope_level = saved_scope_level;
         s.is_eval = saved_is_eval;
         s.eval_ret_idx = saved_eval_ret_idx;
@@ -11204,7 +11375,14 @@ fn parseFunctionParamsAndBody(s: *ParseState, func_kind: ParseFunctionKind, sour
                     }
                 }
 
-                const visible_lexical_blocking_annex_b = s.visibleLexicalScopeVar(name) != null;
+                // qjs find_lexical_decl (quickjs.c:24099): in global script/eval
+                // code a top-level let/const lives in global_vars
+                // (JS_CLOSURE_GLOBAL_DECL), not in fd->vars; find_lexical_global_var
+                // consults it so Annex B B.3.3 block functions skip hoisting when a
+                // top-level lexical collides. Required since
+                // top_level_lexical_as_global_ref moves these out of scope vars.
+                const visible_lexical_blocking_annex_b =
+                    s.visibleLexicalScopeVar(name) != null or s.findLexicalGlobalVar(name);
                 const function_body_scope: i32 = if (s.cur_func_stack.len > 0) 1 else 0;
                 const is_block_level_function_decl = parent_fd.scope_level > function_body_scope;
                 const name_blocks_annex_b_parameter_rule =
@@ -11311,6 +11489,7 @@ fn parseFunctionParamsAndBody(s: *ParseState, func_kind: ParseFunctionKind, sour
         child_owned_before_push = false;
         child_pushed = true;
         s.emit_to_function_def = true;
+        s.last_opcode_source_offset = null;
         s.scope_level = 0;
         s.is_eval = false;
         s.eval_ret_idx = -1;
@@ -11539,7 +11718,7 @@ fn parseFunctionParamsAndBody(s: *ParseState, func_kind: ParseFunctionKind, sour
     control_boundary_active = false;
     if (capture_child) {
         const code = s.currentCode();
-        const needs_return = functionNeedsImplicitReturn(code);
+        const needs_return = functionNeedsImplicitReturn(code, s.currentAtomOperands());
         if (needs_return) {
             if (func_kind == .async) {
                 try s.emitOp(opcode.op.undefined);
@@ -11573,6 +11752,7 @@ fn parseFunctionParamsAndBody(s: *ParseState, func_kind: ParseFunctionKind, sour
             s.discardFunctionDef(child_ptr);
         };
         s.emit_to_function_def = saved_emit_to_function_def;
+        s.last_opcode_source_offset = saved_last_opcode_source_offset;
         s.scope_level = saved_scope_level;
         s.is_eval = saved_is_eval;
         s.eval_ret_idx = saved_eval_ret_idx;
@@ -11599,9 +11779,11 @@ fn parseFunctionParamsAndBody(s: *ParseState, func_kind: ParseFunctionKind, sour
             try s.emitFClosure8(@intCast(child_cpool_idx));
             s.last_anonymous_function_expr = s.pending_function_name == null;
         } else if (emit_child_decl_global_inline and !emit_child_decl_inline) {
-            try s.emitFClosure8(@intCast(child_cpool_idx));
             const name = s.pending_function_name orelse s.function.name;
-            try s.emitOpAtomU8(opcode.op.define_func, name, (1 << 5) | (1 << 4));
+            if (!s.assignPendingGlobalFunctionVarCpool(parent_fd, name, child_cpool_idx)) {
+                try s.emitFClosure8(@intCast(child_cpool_idx));
+                try s.emitGlobalScopePutVar(name);
+            }
         } else if (emit_child_decl_inline) {
             if (child_decl_skip_init) return;
             std.debug.assert(child_decl_var_idx >= 0);
@@ -11618,10 +11800,13 @@ fn parseFunctionParamsAndBody(s: *ParseState, func_kind: ParseFunctionKind, sour
             }
             if (emit_child_decl_global_inline) {
                 const name = s.pending_function_name orelse s.function.name;
-                try s.emitOpAtomU8(opcode.op.define_func, name, 0);
+                try s.emitGlobalScopePutVar(name);
             }
         } else if (keep_child_value) {
             s.skip_next_ident_get = s.pending_function_name;
+        } else if (child_ptr.emit_top_level_closure_init) {
+            const name = s.pending_function_name orelse s.function.name;
+            _ = s.assignPendingGlobalFunctionVarCpool(parent_fd, name, child_cpool_idx);
         }
         if (s.namespace_export) {
             if (s.current_namespace_atom) |ns_atom| {
@@ -11647,6 +11832,7 @@ fn parseArrowFunction(s: *ParseState, func_kind: ParseFunctionKind, source_start
     const parent_fd = s.cur_func();
     const capture_child = s.cur_func_stack.len > 0 or s.top_level_functions_as_children;
     const saved_emit_to_function_def = s.emit_to_function_def;
+    const saved_last_opcode_source_offset = s.last_opcode_source_offset;
     const saved_scope_level = s.scope_level;
     const saved_is_eval = s.is_eval;
     const saved_eval_ret_idx = s.eval_ret_idx;
@@ -11671,6 +11857,7 @@ fn parseArrowFunction(s: *ParseState, func_kind: ParseFunctionKind, source_start
     errdefer if (child_pushed) {
         s.discardCurrentFunction();
         s.emit_to_function_def = saved_emit_to_function_def;
+        s.last_opcode_source_offset = saved_last_opcode_source_offset;
         s.scope_level = saved_scope_level;
         s.is_eval = saved_is_eval;
         s.eval_ret_idx = saved_eval_ret_idx;
@@ -11715,6 +11902,7 @@ fn parseArrowFunction(s: *ParseState, func_kind: ParseFunctionKind, source_start
         child_owned_before_push = false;
         child_pushed = true;
         s.emit_to_function_def = true;
+        s.last_opcode_source_offset = null;
         s.scope_level = 0;
         s.is_eval = false;
         s.eval_ret_idx = -1;
@@ -11934,7 +12122,7 @@ fn parseArrowFunction(s: *ParseState, func_kind: ParseFunctionKind, source_start
         try parseBlock(s);
         if (capture_child) {
             const code = s.currentCode();
-            const needs_return = functionNeedsImplicitReturn(code);
+            const needs_return = functionNeedsImplicitReturn(code, s.currentAtomOperands());
             if (needs_return) {
                 if (is_async) {
                     try s.emitOp(opcode.op.undefined);
@@ -11966,6 +12154,7 @@ fn parseArrowFunction(s: *ParseState, func_kind: ParseFunctionKind, source_start
             s.discardFunctionDef(child_ptr);
         };
         s.emit_to_function_def = saved_emit_to_function_def;
+        s.last_opcode_source_offset = saved_last_opcode_source_offset;
         s.scope_level = saved_scope_level;
         s.is_eval = saved_is_eval;
         s.eval_ret_idx = saved_eval_ret_idx;
@@ -12004,24 +12193,20 @@ const TrailingScan = struct { last_op_index: usize, jump_to_end: bool };
 
 /// Decode the current (Phase 1) code linearly to find the last
 /// instruction boundary and whether any jump targets the current end.
-/// Sizes come from the phase-1 metadata view (`opcode.sizeOfPhase1`),
-/// which resolves the temp/short id overlap to the temp forms the
-/// parser actually emits. Returns null when the stream cannot be
-/// decoded, keeping tail-call rewriting disabled.
-fn scanTrailingCode(code: []const u8, include_conditional: bool) ?TrailingScan {
+/// Use the parser-phase decoder so temp opcodes sharing ids with final
+/// short forms (`push_empty_string` / private-field temps, line_num /
+/// get_loc1, etc.) are sized from the byte stream plus atom operand
+/// stream, not from the opcode id alone. Returns null when the stream
+/// cannot be decoded, keeping tail-call rewriting disabled.
+fn scanTrailingCode(code: []const u8, atoms: []const Atom, include_conditional: bool) ?TrailingScan {
     var pc: usize = 0;
+    var atom_index: usize = 0;
     var last_op_index: usize = 0;
     var jump_to_end = false;
     while (pc < code.len) {
         const op_id = code[pc];
-        // `scope_make_ref` embeds a label operand this scan does not
-        // track; bail out rather than miss a jump to the current end.
-        if (op_id == opcode.op.scope_make_ref) return null;
-        // Id 192 is ambiguous in phase-1 streams (`push_empty_string`
-        // short form vs `scope_in_private_field` temp); it cannot be
-        // sized from the id alone.
-        if (op_id == opcode.op.scope_in_private_field) return null;
-        const size: usize = opcode.sizeOfPhase1(op_id);
+        const instr = parserPhaseInstruction(code, atoms, pc, atom_index);
+        const size: usize = instr.size;
         if (size == 0 or pc + size > code.len) return null;
         if (op_id == opcode.op.goto or
             (include_conditional and (op_id == opcode.op.if_false or op_id == opcode.op.if_true)))
@@ -12030,6 +12215,7 @@ fn scanTrailingCode(code: []const u8, include_conditional: bool) ?TrailingScan {
             if (target == code.len) jump_to_end = true;
         }
         last_op_index = pc;
+        if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
         pc += size;
     }
     return .{ .last_op_index = last_op_index, .jump_to_end = jump_to_end };
@@ -12038,7 +12224,7 @@ fn scanTrailingCode(code: []const u8, include_conditional: bool) ?TrailingScan {
 fn rewriteTrailingCallAsTailCall(s: *ParseState) TrailingCallRewrite {
     var code = s.currentCode();
     if (code.len < 3) return .none;
-    const scan = scanTrailingCode(code, true) orelse return .none;
+    const scan = scanTrailingCode(code, s.currentAtomOperands(), true) orelse return .none;
     // The trailing call opcode must be a real instruction boundary; a raw
     // `code[len - 3]` probe can hit operand payload bytes (e.g. push_i32).
     if (scan.last_op_index != code.len - 3) return .none;
@@ -12192,6 +12378,7 @@ const ParserSnapshot = struct {
     last_token_end_offset: usize,
     last_token_line_num: u32,
     last_token_col_num: u32,
+    last_opcode_source_offset: ?u32,
     code_len: usize,
     atom_len: usize,
     features: std.EnumSet(Feature),
@@ -12216,6 +12403,7 @@ fn takeParserSnapshot(s: *ParseState) ParserSnapshot {
         .last_token_end_offset = s.last_token_end_offset,
         .last_token_line_num = s.last_token_line_num,
         .last_token_col_num = s.last_token_col_num,
+        .last_opcode_source_offset = s.last_opcode_source_offset,
         .code_len = s.currentCodeLen(),
         .atom_len = s.currentAtomOperandLen(),
         .features = s.features,
@@ -12279,6 +12467,7 @@ fn restoreParserSnapshot(s: *ParseState, snapshot: ParserSnapshot) Error!void {
     s.last_token_end_offset = snapshot.last_token_end_offset;
     s.last_token_line_num = snapshot.last_token_line_num;
     s.last_token_col_num = snapshot.last_token_col_num;
+    s.last_opcode_source_offset = snapshot.last_opcode_source_offset;
     try s.truncateCode(snapshot.code_len);
     try s.truncateAtomOperands(snapshot.atom_len);
     s.features = snapshot.features;
@@ -14292,6 +14481,7 @@ fn emitInstancePublicFieldInitializer(s: *ParseState, atom_id: Atom, has_initial
     const init_fd = parent_fd.child_list[child_index];
 
     const saved_emit_to_function_def = s.emit_to_function_def;
+    const saved_last_opcode_source_offset = s.last_opcode_source_offset;
     const saved_scope_level = s.scope_level;
     const saved_is_strict = s.is_strict;
     const saved_lex_is_strict = s.lex.is_strict_mode;
@@ -14304,6 +14494,7 @@ fn emitInstancePublicFieldInitializer(s: *ParseState, atom_id: Atom, has_initial
 
     try s.pushFunction(init_fd);
     s.emit_to_function_def = true;
+    s.last_opcode_source_offset = null;
     s.scope_level = 0;
     s.is_strict = true;
     s.lex.is_strict_mode = true;
@@ -14315,6 +14506,7 @@ fn emitInstancePublicFieldInitializer(s: *ParseState, atom_id: Atom, has_initial
     errdefer {
         _ = s.popFunction();
         s.emit_to_function_def = saved_emit_to_function_def;
+        s.last_opcode_source_offset = saved_last_opcode_source_offset;
         s.scope_level = saved_scope_level;
         s.is_strict = saved_is_strict;
         s.lex.is_strict_mode = saved_lex_is_strict;
@@ -14343,6 +14535,7 @@ fn emitInstancePublicFieldInitializer(s: *ParseState, atom_id: Atom, has_initial
 
     _ = s.popFunction();
     s.emit_to_function_def = saved_emit_to_function_def;
+    s.last_opcode_source_offset = saved_last_opcode_source_offset;
     s.scope_level = saved_scope_level;
     s.is_strict = saved_is_strict;
     s.lex.is_strict_mode = saved_lex_is_strict;
@@ -14711,6 +14904,7 @@ fn emitInstanceComputedPublicFieldInitializer(s: *ParseState, key_atom: Atom, ha
     const init_fd = parent_fd.child_list[child_index];
 
     const saved_emit_to_function_def = s.emit_to_function_def;
+    const saved_last_opcode_source_offset = s.last_opcode_source_offset;
     const saved_scope_level = s.scope_level;
     const saved_is_strict = s.is_strict;
     const saved_lex_is_strict = s.lex.is_strict_mode;
@@ -14723,6 +14917,7 @@ fn emitInstanceComputedPublicFieldInitializer(s: *ParseState, key_atom: Atom, ha
 
     try s.pushFunction(init_fd);
     s.emit_to_function_def = true;
+    s.last_opcode_source_offset = null;
     s.scope_level = 0;
     s.is_strict = true;
     s.lex.is_strict_mode = true;
@@ -14734,6 +14929,7 @@ fn emitInstanceComputedPublicFieldInitializer(s: *ParseState, key_atom: Atom, ha
     errdefer {
         _ = s.popFunction();
         s.emit_to_function_def = saved_emit_to_function_def;
+        s.last_opcode_source_offset = saved_last_opcode_source_offset;
         s.scope_level = saved_scope_level;
         s.is_strict = saved_is_strict;
         s.lex.is_strict_mode = saved_lex_is_strict;
@@ -14763,6 +14959,7 @@ fn emitInstanceComputedPublicFieldInitializer(s: *ParseState, key_atom: Atom, ha
 
     _ = s.popFunction();
     s.emit_to_function_def = saved_emit_to_function_def;
+    s.last_opcode_source_offset = saved_last_opcode_source_offset;
     s.scope_level = saved_scope_level;
     s.is_strict = saved_is_strict;
     s.lex.is_strict_mode = saved_lex_is_strict;

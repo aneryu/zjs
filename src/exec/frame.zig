@@ -13,27 +13,6 @@ const stack_mod = @import("stack.zig");
 
 pub const no_global_lexical_sync_index: usize = std.math.maxInt(usize);
 
-pub const PreparedNativeCallTarget = struct {
-    native_ref: core.function.NativeBuiltinRef,
-    auto_init: ?core.property.AutoInit = null,
-};
-
-pub const PreparedCallTarget = struct {
-    site_id: u16,
-    stack_depth: usize,
-    payload: Payload,
-
-    pub const Payload = union(enum) {
-        value: usize,
-        native: PreparedNativeCallTarget,
-    };
-};
-
-pub const PreparedCallTargetOwned = union(enum) {
-    value: JSValue,
-    native: PreparedNativeCallTarget,
-};
-
 pub const EvalVarRefSnapshot = struct {
     names: []Atom = &.{},
     refs: runtime.ValueRootBuffer = .{},
@@ -67,7 +46,7 @@ pub const EvalVarRefSnapshot = struct {
 pub const FrameRootScope = struct {
     rt: ?*JSRuntime = null,
     values: [4]runtime.ValueRootValue = undefined,
-    slices: [8]runtime.ValueRootSlice = undefined,
+    slices: [7]runtime.ValueRootSlice = undefined,
     frame: runtime.ValueRootFrame = .{},
 
     pub fn init(self: *FrameRootScope, rt: *JSRuntime, stack: *stack_mod.Stack, exec_frame: *Frame, eval_var_refs: *EvalVarRefSnapshot) void {
@@ -82,7 +61,6 @@ pub const FrameRootScope = struct {
         var_refs: bool = true,
         eval_local_slots: bool = true,
         eval_var_refs: bool = true,
-        prepared_call_values: bool = true,
     };
 
     pub fn initWithOptions(
@@ -127,10 +105,6 @@ pub const FrameRootScope = struct {
         }
         if (options.eval_var_refs) {
             self.slices[slice_count] = eval_var_refs.rootSlice();
-            slice_count += 1;
-        }
-        if (options.prepared_call_values) {
-            self.slices[slice_count] = .{ .mutable = &exec_frame.prepared_call_values };
             slice_count += 1;
         }
         self.frame = .{
@@ -216,8 +190,6 @@ pub const Frame = struct {
     inline_args: [4]JSValue = undefined,
     inline_original_args: [4]JSValue = undefined,
     inline_var_refs: [4]JSValue = undefined,
-    inline_prepared_call_targets: [4]PreparedCallTarget = undefined,
-    inline_prepared_call_values: [4]JSValue = undefined,
     locals_on_heap: bool = false,
     locals_uninit_on_heap: bool = false,
     args_on_heap: bool = false,
@@ -230,12 +202,6 @@ pub const Frame = struct {
     eval_var_ref_names: []const Atom = &.{},
     eval_var_refs: []JSValue = &.{},
     eval_var_refs_republished: bool = false,
-    prepared_call_targets: []PreparedCallTarget = &.{},
-    prepared_call_values: []JSValue = &.{},
-    prepared_call_target_capacity: usize = 0,
-    prepared_call_value_capacity: usize = 0,
-    prepared_call_targets_on_heap: bool = false,
-    prepared_call_values_on_heap: bool = false,
     /// Per-slot TDZ flag mirroring QuickJS's `JS_UNINITIALIZED`
     /// sentinel: `true` means the slot is in the temporal dead
     /// zone; reads via `get_loc_check` / `put_loc_check` throw
@@ -475,7 +441,6 @@ pub const Frame = struct {
         if (current_function_owned) current_function.free(rt);
         if (new_target_owned) new_target.free(rt);
         if (arguments_object) |value| value.free(rt);
-        self.clearPreparedCallTargets(rt);
 
         self.releaseOwnedStorage(account, rt);
         self.eval_local_names = &.{};
@@ -499,12 +464,6 @@ pub const Frame = struct {
         const locals_uninit = self.locals_uninit;
         const global_lexical_sync_slots = self.global_lexical_sync_slots;
         const global_lexical_sync_indices = self.global_lexical_sync_indices;
-        const prepared_call_targets = self.prepared_call_targets;
-        const prepared_call_values = self.prepared_call_values;
-        const prepared_call_target_capacity = self.prepared_call_target_capacity;
-        const prepared_call_value_capacity = self.prepared_call_value_capacity;
-        const prepared_call_targets_on_heap = self.prepared_call_targets_on_heap;
-        const prepared_call_values_on_heap = self.prepared_call_values_on_heap;
 
         self.locals = &.{};
         self.args = &.{};
@@ -522,12 +481,6 @@ pub const Frame = struct {
         self.global_lexical_sync_slots = &.{};
         self.global_lexical_sync_indices = &.{};
         self.global_lexical_sync_checked = false;
-        self.prepared_call_targets = &.{};
-        self.prepared_call_values = &.{};
-        self.prepared_call_target_capacity = 0;
-        self.prepared_call_value_capacity = 0;
-        self.prepared_call_targets_on_heap = false;
-        self.prepared_call_values_on_heap = false;
 
         releaseValueSlice(rt, locals);
         releaseValueSlice(rt, args);
@@ -541,8 +494,6 @@ pub const Frame = struct {
         if (locals_uninit.len != 0 and locals_uninit_on_heap) account.free(bool, locals_uninit);
         if (global_lexical_sync_slots.len != 0) account.free(bool, global_lexical_sync_slots);
         if (global_lexical_sync_indices.len != 0) account.free(usize, global_lexical_sync_indices);
-        if (prepared_call_targets_on_heap and prepared_call_target_capacity != 0) account.free(PreparedCallTarget, prepared_call_targets.ptr[0..prepared_call_target_capacity]);
-        if (prepared_call_values_on_heap and prepared_call_value_capacity != 0) account.free(JSValue, prepared_call_values.ptr[0..prepared_call_value_capacity]);
     }
 
     pub fn findOpenVarRef(self: *Frame, slot: *JSValue) ?*core.VarRef {
@@ -581,133 +532,6 @@ pub const Frame = struct {
             ref.valueRef().free(rt);
             current = next;
         }
-    }
-
-    pub fn pushPreparedNativeCall(
-        self: *Frame,
-        account: *memory.MemoryAccount,
-        site_id: u16,
-        stack_depth: usize,
-        native: PreparedNativeCallTarget,
-    ) !void {
-        try self.ensurePreparedCallTargetCapacity(account, self.prepared_call_targets.len + 1);
-        const idx = self.prepared_call_targets.len;
-        self.prepared_call_targets = self.prepared_call_targets.ptr[0 .. idx + 1];
-        self.prepared_call_targets[idx] = .{
-            .site_id = site_id,
-            .stack_depth = stack_depth,
-            .payload = .{ .native = native },
-        };
-    }
-
-    pub fn pushPreparedValueCall(
-        self: *Frame,
-        account: *memory.MemoryAccount,
-        site_id: u16,
-        stack_depth: usize,
-        value: JSValue,
-    ) !void {
-        try self.ensurePreparedCallTargetCapacity(account, self.prepared_call_targets.len + 1);
-        try self.ensurePreparedCallValueCapacity(account, self.prepared_call_values.len + 1);
-        const value_idx = self.prepared_call_values.len;
-        self.prepared_call_values = self.prepared_call_values.ptr[0 .. value_idx + 1];
-        self.prepared_call_values[value_idx] = value;
-        const target_idx = self.prepared_call_targets.len;
-        self.prepared_call_targets = self.prepared_call_targets.ptr[0 .. target_idx + 1];
-        self.prepared_call_targets[target_idx] = .{
-            .site_id = site_id,
-            .stack_depth = stack_depth,
-            .payload = .{ .value = value_idx },
-        };
-    }
-
-    pub fn popPreparedCallTarget(self: *Frame) ?PreparedCallTargetOwned {
-        if (self.prepared_call_targets.len == 0) return null;
-        const target = self.prepared_call_targets[self.prepared_call_targets.len - 1];
-        self.prepared_call_targets = self.prepared_call_targets.ptr[0 .. self.prepared_call_targets.len - 1];
-        return switch (target.payload) {
-            .native => |native| .{ .native = native },
-            .value => |value_idx| blk: {
-                std.debug.assert(value_idx + 1 == self.prepared_call_values.len);
-                const value = self.prepared_call_values[value_idx];
-                self.prepared_call_values[value_idx] = JSValue.undefinedValue();
-                self.prepared_call_values = self.prepared_call_values.ptr[0..value_idx];
-                break :blk .{ .value = value };
-            },
-        };
-    }
-
-    pub fn dropPreparedCallsForCatchDepth(self: *Frame, rt: anytype, stack_depth: usize) void {
-        while (self.prepared_call_targets.len != 0) {
-            const target = self.prepared_call_targets[self.prepared_call_targets.len - 1];
-            if (target.stack_depth < stack_depth) break;
-            const owned = self.popPreparedCallTarget() orelse break;
-            switch (owned) {
-                .value => |value| value.free(rt),
-                .native => {},
-            }
-        }
-    }
-
-    pub fn clearPreparedCallTargets(self: *Frame, rt: anytype) void {
-        while (self.popPreparedCallTarget()) |owned| {
-            switch (owned) {
-                .value => |value| value.free(rt),
-                .native => {},
-            }
-        }
-    }
-
-    fn ensurePreparedCallTargetCapacity(self: *Frame, account: *memory.MemoryAccount, needed: usize) !void {
-        const capacity = if (self.prepared_call_targets_on_heap) self.prepared_call_target_capacity else self.inline_prepared_call_targets.len;
-        if (needed <= capacity) {
-            if (self.prepared_call_targets.len == 0 and !self.prepared_call_targets_on_heap) {
-                self.prepared_call_targets = self.inline_prepared_call_targets[0..0];
-            }
-            return;
-        }
-        if (needed <= self.inline_prepared_call_targets.len and !self.prepared_call_targets_on_heap) {
-            if (self.prepared_call_targets.len == 0) self.prepared_call_targets = self.inline_prepared_call_targets[0..0];
-            return;
-        }
-        var next_capacity = if (capacity == 0) @as(usize, 8) else capacity * 2;
-        if (next_capacity < needed) next_capacity = needed;
-        const next = try account.alloc(PreparedCallTarget, next_capacity);
-        errdefer account.free(PreparedCallTarget, next);
-        @memcpy(next[0..self.prepared_call_targets.len], self.prepared_call_targets);
-        const old = self.prepared_call_targets;
-        const old_on_heap = self.prepared_call_targets_on_heap;
-        const old_capacity = self.prepared_call_target_capacity;
-        self.prepared_call_targets = next[0..old.len];
-        self.prepared_call_target_capacity = next_capacity;
-        self.prepared_call_targets_on_heap = true;
-        if (old_on_heap and old_capacity != 0) account.free(PreparedCallTarget, old.ptr[0..old_capacity]);
-    }
-
-    fn ensurePreparedCallValueCapacity(self: *Frame, account: *memory.MemoryAccount, needed: usize) !void {
-        const capacity = if (self.prepared_call_values_on_heap) self.prepared_call_value_capacity else self.inline_prepared_call_values.len;
-        if (needed <= capacity) {
-            if (self.prepared_call_values.len == 0 and !self.prepared_call_values_on_heap) {
-                self.prepared_call_values = self.inline_prepared_call_values[0..0];
-            }
-            return;
-        }
-        if (needed <= self.inline_prepared_call_values.len and !self.prepared_call_values_on_heap) {
-            if (self.prepared_call_values.len == 0) self.prepared_call_values = self.inline_prepared_call_values[0..0];
-            return;
-        }
-        var next_capacity = if (capacity == 0) @as(usize, 8) else capacity * 2;
-        if (next_capacity < needed) next_capacity = needed;
-        const next = try account.alloc(JSValue, next_capacity);
-        errdefer account.free(JSValue, next);
-        @memcpy(next[0..self.prepared_call_values.len], self.prepared_call_values);
-        const old = self.prepared_call_values;
-        const old_on_heap = self.prepared_call_values_on_heap;
-        const old_capacity = self.prepared_call_value_capacity;
-        self.prepared_call_values = next[0..old.len];
-        self.prepared_call_value_capacity = next_capacity;
-        self.prepared_call_values_on_heap = true;
-        if (old_on_heap and old_capacity != 0) account.free(JSValue, old.ptr[0..old_capacity]);
     }
 
     pub fn setLocalUninitialized(self: *Frame, index: usize) void {

@@ -75,6 +75,16 @@ pub const Descriptor = struct {
             // before reaching `fromSlot`). Reaching this arm would
             // mean a `.data`-shaped entry was promised but the slot
             // is still a placeholder.
+            // JS_PROP_VARREF surfaces as a data descriptor over the cell value
+            // (qjs exposes global lexicals via *pr->u.var_ref->pvalue).
+            .var_ref => |cell| .{
+                .kind = .data,
+                .value = cell.varRefValue().dup(),
+                .value_present = true,
+                .writable = !cell.is_const,
+                .enumerable = flags.enumerable,
+                .configurable = flags.configurable,
+            },
             .auto_init => unreachable,
             .deleted => .{},
         };

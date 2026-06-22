@@ -177,8 +177,6 @@ test "final view resolves short forms in the temp overlap range" {
     try std.testing.expectEqual(@as(u8, 2), sizeOf(op.fclosure8));
     try std.testing.expectEqual(@as(u8, 2), sizeOf(op.get_loc8));
     try std.testing.expectEqual(Format.loc8, formatOf(op.set_loc8));
-    try std.testing.expectEqual(@as(u8, 1), sizeOf(op.get_loc0_loc1));
-    try std.testing.expectEqual(@as(u8, 2), nPushOf(op.get_loc0_loc1));
     // Unclaimed ids report no entry.
     try std.testing.expectEqual(@as(u8, 0), sizeOf(255));
     try std.testing.expectEqualStrings("", nameOf(255));
@@ -193,7 +191,7 @@ test "phase-1 view resolves temp forms in the overlap range" {
     try std.testing.expectEqual(@as(u8, 11), sizeOfPhase1(op.scope_make_ref));
     try std.testing.expectEqual(@as(u8, 7), sizeOfPhase1(op.scope_in_private_field));
     try std.testing.expectEqual(@as(u8, 5), sizeOfPhase1(op.get_field_opt_chain));
-    try std.testing.expectEqual(@as(u8, 9), sizeOfPhase1(op.source_loc));
+    try std.testing.expectEqual(@as(u8, 5), sizeOfPhase1(op.line_num));
     try std.testing.expectEqualStrings("scope_get_var", nameOfPhase1(op.scope_get_var));
     try std.testing.expectEqual(Format.atom_u16, formatOfPhase1(op.scope_get_var));
     try std.testing.expectEqual(Format.atom_label_u16, formatOfPhase1(op.scope_make_ref));

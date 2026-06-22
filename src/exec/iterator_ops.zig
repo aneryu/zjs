@@ -443,6 +443,47 @@ pub noinline fn iteratorCheckObjectVm(
     return .done;
 }
 
+pub fn forAwaitOfNext(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+) !void {
+    if (stack.values.len < 3) return error.StackUnderflow;
+    const record_index = stack.values.len - 3;
+    const marker_index = stack.values.len - 1;
+    const iterator_value = stack.values[record_index].dup();
+    defer iterator_value.free(ctx.runtime);
+    const next_method = stack.values[record_index + 1].dup();
+    defer next_method.free(ctx.runtime);
+
+    const marker = stack.values[marker_index];
+    stack.values[marker_index] = core.JSValue.undefinedValue();
+    marker.free(ctx.runtime);
+
+    const result = try call_runtime.callValueOrBytecode(ctx, output, global, iterator_value, next_method, &.{}, function, frame);
+    errdefer result.free(ctx.runtime);
+    try stack.pushOwned(result);
+}
+
+pub noinline fn forAwaitOfNextVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+) !Step {
+    forAwaitOfNext(ctx, output, global, stack, function, frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
+}
+
 pub fn iteratorGetValueDone(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -452,22 +493,27 @@ pub fn iteratorGetValueDone(
     frame: *frame_mod.Frame,
 ) !void {
     try stack.reserveAdditional(1);
+    if (stack.values.len < 2) return error.StackUnderflow;
     const object_value = try stack.pop();
     defer object_value.free(ctx.runtime);
     _ = try property_ops.expectObject(object_value);
 
-    const value_key = core.atom.predefinedId("value", .string) orelse return error.TypeError;
     const done_key = core.atom.predefinedId("done", .string) orelse return error.TypeError;
-    const value = try object_ops.getValueProperty(ctx, output, global, object_value, value_key, function, frame);
-    const done = object_ops.getValueProperty(ctx, output, global, object_value, done_key, function, frame) catch |err| {
-        value.free(ctx.runtime);
-        return err;
-    };
-    errdefer value.free(ctx.runtime);
+    const done = try object_ops.getValueProperty(ctx, output, global, object_value, done_key, function, frame);
     defer done.free(ctx.runtime);
+    const done_bool = coercion_ops.valueTruthy(done);
+
+    const value_key = core.atom.predefinedId("value", .string) orelse return error.TypeError;
+    const value = try object_ops.getValueProperty(ctx, output, global, object_value, value_key, function, frame);
+    errdefer value.free(ctx.runtime);
+
+    const marker_index = stack.values.len - 1;
+    const old_marker = stack.values[marker_index];
+    stack.values[marker_index] = core.JSValue.int32(for_await_record_marker);
+    old_marker.free(ctx.runtime);
 
     stack.pushOwnedAssumeCapacity(value);
-    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(coercion_ops.valueTruthy(done)));
+    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(done_bool));
 }
 
 pub noinline fn iteratorGetValueDoneVm(

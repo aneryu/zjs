@@ -63,7 +63,6 @@ pub fn compute(bytecode: []const u8, options: Options) Error!u16 {
         if (op == 0) return error.InvalidOpcode;
         _ = options;
         const meta = metadataFor(op) orelse return error.InvalidOpcode;
-        const name = meta.name;
         const pos_next = pos + meta.size;
         if (pos_next > bytecode.len) return error.BytecodeOverflow;
 
@@ -81,7 +80,9 @@ pub fn compute(bytecode: []const u8, options: Options) Error!u16 {
             else => {},
         }
 
-        if (stack_len < n_pop) return error.StackUnderflow;
+        if (stack_len < n_pop) {
+            return error.StackUnderflow;
+        }
         const new_stack_i32: i32 = @as(i32, stack_len) - @as(i32, @intCast(n_pop)) + @as(i32, meta.n_push);
         if (new_stack_i32 < 0) return error.StackUnderflow;
         if (new_stack_i32 > JS_STACK_SIZE_MAX) return error.StackOverflow;
@@ -91,6 +92,7 @@ pub fn compute(bytecode: []const u8, options: Options) Error!u16 {
         // Dispatch on opcode name (we don't have the OP_* enum exposed
         // generically). Using name comparison is fine: the table is
         // small and this code runs once per function.
+        const name = meta.name;
         if (eq(name, "return") or eq(name, "return_undef") or eq(name, "return_async") or
             eq(name, "throw") or eq(name, "throw_error") or
             eq(name, "tail_call") or eq(name, "tail_call_method") or
@@ -136,7 +138,7 @@ pub fn compute(bytecode: []const u8, options: Options) Error!u16 {
             const target = relTarget(pos, 5, diff);
             try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len + 1, catch_pos);
             // fall through.
-        } else if (op == opcode.op.with_make_ref or op == opcode.op.with_get_ref or op == opcode.op.with_get_ref_undef) {
+        } else if (op == opcode.op.with_make_ref or op == opcode.op.with_get_ref) {
             const diff = std.mem.readInt(i32, bytecode[pos + 5 ..][0..4], .little);
             const target = relTarget(pos, 5, diff);
             try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len + 2, catch_pos);
@@ -326,15 +328,18 @@ test "stack_size: indexed method call QuickJS shape is strict-computable" {
     const op = opcode.op;
 
     // get_var obj ; get_var key ; get_array_el2 ; get_var arg ; call_method 1 ; drop ; return_undef
-    var bc = [_]u8{0} ** 21;
+    var bc = [_]u8{0} ** 15;
     bc[0] = op.get_var;
-    bc[5] = op.get_var;
-    bc[10] = op.get_array_el2;
-    bc[11] = op.get_var;
-    bc[16] = op.call_method;
-    std.mem.writeInt(u16, bc[17..19], 1, .little);
-    bc[19] = op.drop;
-    bc[20] = op.return_undef;
+    std.mem.writeInt(u16, bc[1..3], 0, .little);
+    bc[3] = op.get_var;
+    std.mem.writeInt(u16, bc[4..6], 1, .little);
+    bc[6] = op.get_array_el2;
+    bc[7] = op.get_var;
+    std.mem.writeInt(u16, bc[8..10], 2, .little);
+    bc[10] = op.call_method;
+    std.mem.writeInt(u16, bc[11..13], 1, .little);
+    bc[13] = op.drop;
+    bc[14] = op.return_undef;
 
     const result = try compute(&bc, .{});
     try std.testing.expectEqual(@as(u16, 3), result);
@@ -343,19 +348,21 @@ test "stack_size: indexed method call QuickJS shape is strict-computable" {
 test "stack_size: indexed compound assignment QuickJS shape is strict-computable" {
     const op = opcode.op;
 
-    // get_var obj ; get_var key ; to_propkey2 ; dup2 ; get_array_el ;
-    // get_var rhs ; add ; put_array_el ; return_undef
-    var bc = [_]u8{0} ** 22;
+    // get_var obj ; get_var key ; get_array_el3 ;
+    // get_var rhs ; add ; insert3 ; put_array_el ; undefined ; return
+    var bc = [_]u8{0} ** 15;
     bc[0] = op.get_var;
-    bc[5] = op.get_var;
-    bc[10] = op.to_propkey2;
-    bc[11] = op.dup2;
-    bc[12] = op.get_array_el;
-    bc[13] = op.get_var;
-    bc[18] = op.add;
-    bc[19] = op.put_array_el;
-    bc[20] = op.undefined;
-    bc[21] = op.@"return";
+    std.mem.writeInt(u16, bc[1..3], 0, .little);
+    bc[3] = op.get_var;
+    std.mem.writeInt(u16, bc[4..6], 1, .little);
+    bc[6] = op.get_array_el3;
+    bc[7] = op.get_var;
+    std.mem.writeInt(u16, bc[8..10], 2, .little);
+    bc[10] = op.add;
+    bc[11] = op.insert3;
+    bc[12] = op.put_array_el;
+    bc[13] = op.undefined;
+    bc[14] = op.@"return";
 
     const result = try compute(&bc, .{});
     try std.testing.expectEqual(@as(u16, 4), result);
@@ -379,15 +386,16 @@ test "stack_size: bare new expression QuickJS shape is strict-computable" {
     const op = opcode.op;
 
     // get_var X ; dup ; call_constructor 0 ; drop ; return_undef
-    var bc = [_]u8{0} ** 15;
+    var bc = [_]u8{0} ** 9;
     bc[0] = op.get_var;
-    bc[5] = op.dup;
-    bc[6] = op.call_constructor;
-    std.mem.writeInt(u16, bc[7..9], 0, .little);
-    bc[9] = op.drop;
-    bc[10] = op.return_undef;
+    std.mem.writeInt(u16, bc[1..3], 0, .little);
+    bc[3] = op.dup;
+    bc[4] = op.call_constructor;
+    std.mem.writeInt(u16, bc[5..7], 0, .little);
+    bc[7] = op.drop;
+    bc[8] = op.return_undef;
 
-    const result = try compute(bc[0..11], .{});
+    const result = try compute(&bc, .{});
     try std.testing.expectEqual(@as(u16, 2), result);
 }
 

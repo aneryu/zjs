@@ -887,7 +887,7 @@ pub fn qjsStringFromCodePointDenseArray(rt: *core.JSRuntime, array: *core.Object
             // those only appear for builtin method tables installed via
             // `defineAutoInitProperty` -- but the switch must be
             // exhaustive after the auto-init slot variant was added.
-            .accessor, .auto_init, .deleted => return null,
+            .var_ref, .accessor, .auto_init, .deleted => return null,
         };
         const number = value_ops.numberValue(value) orelse return null;
         const code_point = validStringCodePoint(number) orelse return error.RangeError;

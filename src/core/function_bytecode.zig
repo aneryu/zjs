@@ -64,6 +64,17 @@ pub const ClosureVar = struct {
     var_name: atom.Atom,
 };
 
+/// Mirrors `JSGlobalVar` (`quickjs.c:713`).
+pub const GlobalVar = struct {
+    cpool_idx: i32,
+    force_init: bool = false,
+    is_configurable: bool = false,
+    is_lexical: bool = false,
+    is_const: bool = false,
+    scope_level: i32,
+    var_name: atom.Atom,
+};
+
 pub const SimpleNumericKind = enum(u8) {
     none,
     arg0_const,
@@ -142,10 +153,15 @@ pub const FunctionBytecode = struct {
     var_names: []atom.Atom = &.{},
     var_is_lexical: []bool = &.{},
     var_is_const: []bool = &.{},
+    // Lexical scope level per local slot (parallels var_is_lexical). Distinguishes
+    // a top-level (scope_level == 0) lexical from a block-level shadower.
+    var_scope_level: []i32 = &.{},
     var_ref_names: []atom.Atom = &.{},
     var_ref_is_lexical: []bool = &.{},
     var_ref_is_const: []bool = &.{},
+    var_ref_is_global_decl: []bool = &.{},
     global_var_names: []atom.Atom = &.{},
+    global_vars: []GlobalVar = &.{},
 
     // Metadata (quickjs.c:785-792)
     func_name: atom.Atom,
@@ -220,10 +236,17 @@ pub const FunctionBytecode = struct {
         releaseAtomSlice(self.atoms, self.memory, &self.var_names, owned);
         releaseSlice(bool, self.memory, &self.var_is_lexical, owned);
         releaseSlice(bool, self.memory, &self.var_is_const, owned);
+        releaseSlice(i32, self.memory, &self.var_scope_level, owned);
         releaseAtomSlice(self.atoms, self.memory, &self.var_ref_names, owned);
         releaseSlice(bool, self.memory, &self.var_ref_is_lexical, owned);
         releaseSlice(bool, self.memory, &self.var_ref_is_const, owned);
+        releaseSlice(bool, self.memory, &self.var_ref_is_global_decl, owned);
         releaseAtomSlice(self.atoms, self.memory, &self.global_var_names, owned);
+
+        const global_vars = self.global_vars;
+        self.global_vars = &.{};
+        for (global_vars) |*gv| self.atoms.free(gv.var_name);
+        if (owned and global_vars.len != 0) self.memory.free(GlobalVar, global_vars);
 
         const vardefs = self.vardefs;
         self.vardefs = &.{};
@@ -284,10 +307,13 @@ pub const FunctionBytecode = struct {
         bytes = addSliceBytes(bytes, atom.Atom, self.var_names.len);
         bytes = addSliceBytes(bytes, bool, self.var_is_lexical.len);
         bytes = addSliceBytes(bytes, bool, self.var_is_const.len);
+        bytes = addSliceBytes(bytes, i32, self.var_scope_level.len);
         bytes = addSliceBytes(bytes, atom.Atom, self.var_ref_names.len);
         bytes = addSliceBytes(bytes, bool, self.var_ref_is_lexical.len);
         bytes = addSliceBytes(bytes, bool, self.var_ref_is_const.len);
+        bytes = addSliceBytes(bytes, bool, self.var_ref_is_global_decl.len);
         bytes = addSliceBytes(bytes, atom.Atom, self.global_var_names.len);
+        bytes = addSliceBytes(bytes, GlobalVar, self.global_vars.len);
         bytes = addSliceBytes(bytes, VarDef, self.vardefs.len);
         bytes = addSliceBytes(bytes, ClosureVar, self.closure_var.len);
         bytes = addSliceBytes(bytes, atom.Atom, self.class_instance_fields.len);

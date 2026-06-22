@@ -95,7 +95,8 @@ pub fn closeForAwaitIteratorForPendingError(
     const index = findForOfIteratorIndex(ctx.runtime, stack) catch return;
     const iterator_value = stack.values[index].dup();
     defer iterator_value.free(ctx.runtime);
-    _ = property_ops.expectObject(iterator_value) catch return;
+    const iterator = property_ops.expectObject(iterator_value) catch return;
+    if (iterator.class_id != core.class.ids.async_from_sync_iterator) return;
 
     const pending_exception = if (ctx.hasException()) ctx.takeException() else null;
     defer if (pending_exception) |value| value.free(ctx.runtime);

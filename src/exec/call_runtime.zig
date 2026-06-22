@@ -265,7 +265,6 @@ pub fn tryCatchInFrame(
     const restored = (try array_ops.popCatchMarker(ctx.runtime, stack)) orelse null;
     stack.pushOwnedAssumeCapacity(catch_value);
     catch_value_owned = false;
-    frame.dropPreparedCallsForCatchDepth(ctx.runtime, stack.values.len);
     frame.pc = target;
     catch_target.* = restored;
     return true;
@@ -3645,17 +3644,39 @@ pub fn isIteratorIdentityFunction(rt: *core.JSRuntime, function_object: *core.Ob
 
 pub fn globalLexicalEnv(ctx: *core.JSContext) !*core.Object {
     if (ctx.lexicals) |env| return env;
+    if (ctx.global) |global| {
+        if (global.globalLexicals()) |env| {
+            ctx.lexicals = env;
+            return env;
+        }
+    }
     const env = try core.Object.create(ctx.runtime, core.class.ids.object, null);
     ctx.lexicals = env;
     return env;
 }
 
 pub fn existingGlobalLexicalEnv(ctx: *core.JSContext) ?*core.Object {
-    return ctx.lexicals;
+    if (ctx.lexicals) |env| return env;
+    if (ctx.global) |global| return global.globalLexicals();
+    return null;
+}
+
+pub fn existingGlobalLexicalEnvForGlobal(ctx: *core.JSContext, global: *core.Object) ?*core.Object {
+    if (ctx.lexicals) |env| return env;
+    if (global.globalLexicals()) |env| return env;
+    if (ctx.global) |context_global| {
+        if (context_global != global) return context_global.globalLexicals();
+    }
+    return null;
 }
 
 pub fn globalLexicalHas(ctx: *core.JSContext, atom_id: core.Atom) bool {
     const env = existingGlobalLexicalEnv(ctx) orelse return false;
+    return env.hasOwnProperty(atom_id);
+}
+
+pub fn globalLexicalHasForGlobal(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom) bool {
+    const env = existingGlobalLexicalEnvForGlobal(ctx, global) orelse return false;
     return env.hasOwnProperty(atom_id);
 }
 
@@ -3670,6 +3691,47 @@ pub fn globalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom) ?core.JSValu
     return env.getProperty(atom_id);
 }
 
+/// Return a fresh ref to the VarRef cell backing a top-level lexical binding
+/// in ctx.lexicals (qjs JS_PROP_VARREF slot -> pr->u.var_ref). The caller owns
+/// the returned ref. Returns null if the binding is absent or not a cell slot
+/// (so callers fall back to the legacy data-property path).
+pub fn globalLexicalCell(ctx: *core.JSContext, atom_id: core.Atom) ?core.JSValue {
+    const env = existingGlobalLexicalEnv(ctx) orelse return null;
+    const index = env.findProperty(atom_id) orelse return null;
+    return switch (env.properties[index].slot) {
+        .var_ref => |cell| cell.valueRef().dup(),
+        else => null,
+    };
+}
+
+/// Create-or-fetch the VarRef cell for a top-level lexical in ctx.lexicals,
+/// stored as a JS_PROP_VARREF slot (qjs js_closure_define_global_var). Returns
+/// a fresh ref the caller owns (for frame.var_refs[idx]). The slot holds its
+/// own ref; the cell starts uninitialized (TDZ) like qjs js_create_var_ref.
+pub fn ensureGlobalLexicalCell(ctx: *core.JSContext, atom_id: core.Atom, is_const: bool) !core.JSValue {
+    const env = try globalLexicalEnv(ctx);
+    if (env.findProperty(atom_id)) |index| {
+        switch (env.properties[index].slot) {
+            .var_ref => |cell| return cell.valueRef().dup(),
+            else => {},
+        }
+    }
+    const rt = ctx.runtime;
+    const cell = try core.VarRef.createClosed(rt, core.JSValue.uninitialized());
+    errdefer cell.valueRef().free(rt);
+    cell.varRefIsConstSlot().* = is_const;
+    cell.is_lexical = true;
+    try env.appendPreparedPropertyEntry(rt, atom_id, core.property.Flags.data(!is_const, false, false), .{ .var_ref = cell });
+    return cell.valueRef().dup();
+}
+
+pub fn globalLexicalValueForGlobal(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom) ?core.JSValue {
+    const env = existingGlobalLexicalEnvForGlobal(ctx, global) orelse return null;
+    if (env.getOwnDataPropertyValue(atom_id)) |value| return value;
+    if (!env.hasOwnProperty(atom_id)) return null;
+    return env.getProperty(atom_id);
+}
+
 pub fn defineGlobalLexicalValue(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom, value: core.JSValue, is_const: bool) !void {
     const env = try globalLexicalEnv(ctx);
     if (!env.hasOwnProperty(atom_id)) {
@@ -3679,8 +3741,62 @@ pub fn defineGlobalLexicalValue(ctx: *core.JSContext, global: *core.Object, atom
     }
 }
 
+/// qjs js_closure_define_global_var PASS2 for a top-level script let/const:
+/// run by the define_var opcode AFTER check_define_var (PASS1) has passed.
+/// Creates the single ctx.lexicals VARREF cell and rebinds frame.var_refs[idx]
+/// to alias it (replacing the TDZ placeholder initFrameVarRefs reserved), so
+/// the frame and the global lexical share one cell. Returns true if the atom is
+/// a .global_decl var-ref in this frame (handled here); false otherwise (caller
+/// falls back to defineGlobalLexicalValue for module/eval data-property paths).
+pub fn defineGlobalDeclLexicalCell(
+    ctx: *core.JSContext,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    atom_id: core.Atom,
+    is_const: bool,
+) !bool {
+    for (function.var_ref_names, 0..) |name, idx| {
+        if (name != atom_id) continue;
+        if (idx >= function.var_ref_is_global_decl.len or !function.var_ref_is_global_decl[idx]) return false;
+        const cell_value = try ensureGlobalLexicalCell(ctx, atom_id, is_const);
+        if (idx >= frame.var_refs.len) {
+            try frame_mod.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
+        }
+        const old_slot = frame.var_refs[idx];
+        frame.var_refs[idx] = cell_value;
+        old_slot.free(ctx.runtime);
+        return true;
+    }
+    return false;
+}
+
 pub fn setGlobalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom, value: core.JSValue) !bool {
     const env = existingGlobalLexicalEnv(ctx) orelse return false;
+    if (env.findProperty(atom_id)) |index| {
+        switch (env.properties[index].slot) {
+            // qjs JS_SetPropertyInternal VARREF: write through cell->pvalue,
+            // const guarded by cell->is_const. Shared cell => no write loss.
+            .var_ref => |cell| {
+                if (cell.is_const) return error.TypeError;
+                try cell.setVarRefValue(ctx.runtime, value.dup());
+                return true;
+            },
+            else => {},
+        }
+    }
+    if (!env.hasOwnProperty(atom_id)) return false;
+    const rt = ctx.runtime;
+    if (initializeGlobalLexicalValue(rt, env, atom_id, value)) return true;
+    if (try env.setOwnWritableDataProperty(rt, atom_id, value)) return true;
+    env.setProperty(rt, atom_id, value) catch |err| switch (err) {
+        error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
+        else => return err,
+    };
+    return true;
+}
+
+pub fn setGlobalLexicalValueForGlobal(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom, value: core.JSValue) !bool {
+    const env = existingGlobalLexicalEnvForGlobal(ctx, global) orelse return false;
     if (!env.hasOwnProperty(atom_id)) return false;
     const rt = ctx.runtime;
     if (initializeGlobalLexicalValue(rt, env, atom_id, value)) return true;
@@ -3709,6 +3825,11 @@ pub fn initializeGlobalLexicalValue(rt: *core.JSRuntime, env: *core.Object, atom
                 const old_value = stored.*;
                 stored.* = next;
                 old_value.free(rt);
+                return true;
+            },
+            .var_ref => |cell| {
+                if (!cell.varRefValue().isUninitialized()) return false;
+                cell.setVarRefValue(rt, value.dup()) catch return false;
                 return true;
             },
             else => return false,
@@ -3764,7 +3885,7 @@ pub fn looksLikeStatementFunctionKeyword(source: []const u8, keyword_index: usiz
 }
 
 pub fn canDeclareGlobalFunction(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom, ignore_global_lexical: bool) bool {
-    if (!ignore_global_lexical and globalLexicalHas(ctx, atom_id)) return false;
+    if (!ignore_global_lexical and globalLexicalHasForGlobal(ctx, global, atom_id)) return false;
     const rt = ctx.runtime;
     const desc = global.getOwnProperty(rt, atom_id) orelse return global.isExtensible();
     defer desc.destroy(rt);
@@ -4201,7 +4322,21 @@ pub fn createDirectEvalVisibleLocalBindings(
         const atom_id = caller_function.var_names[local_index];
         if (atom_id == core.atom.null_atom) continue;
         if (eval_ops.directEvalVisibleBindingExists(ctx.runtime, names[0..initialized], atom_id)) continue;
+        // A top-level (scope 0) `let`/`const` is promoted into the global
+        // lexical environment (a `.global_decl` closure var-ref), so its frame
+        // local slot is only a hoisting placeholder — exposing it as an eval
+        // binding would shadow the live global-lexical cell with an empty slot.
+        // Skip it so direct eval resolves through the global lexical env. A
+        // block-scoped (`scope_level > 0`) lexical that merely shares the name
+        // is a genuine shadowing binding and must be exposed, inner-first,
+        // mirroring qjs `add_eval_variables` capturing `fd->scopes[scope_level]`
+        // lexicals ahead of the scope-0 globals (quickjs.c:33700-33733).
+        const local_scope_level = if (local_index < caller_function.var_scope_level.len)
+            caller_function.var_scope_level[local_index]
+        else
+            0;
         if (eval_global_var_bindings and
+            local_scope_level == 0 and
             globalLexicalHas(ctx, atom_id) and
             eval_ops.directEvalVisibleLocalNameCount(ctx.runtime, caller_function.var_names[0..local_count], atom_id) == 1)
         {
@@ -4210,6 +4345,11 @@ pub fn createDirectEvalVisibleLocalBindings(
         names[initialized] = ctx.runtime.atoms.dup(atom_id);
         initialized_names += 1;
         slots[initialized] = try slot_ops.ensureFrameVarRefCell(ctx, caller_frame, &caller_frame.locals[local_index]);
+        if (local_index < caller_function.var_is_const.len and caller_function.var_is_const[local_index]) {
+            if (slot_ops.varRefCellFromValue(slots[initialized])) |cell| {
+                cell.varRefIsConstSlot().* = true;
+            }
+        }
         initialized += 1;
         rooted_slots = slots[0..initialized];
     }
@@ -4336,10 +4476,15 @@ pub fn directEvalVarDeclarationNames(
             if (directEvalSourceHasLexicalDeclarationName(rt, source, atom_id)) continue;
             if (!functionHasNonLexicalLocal(rt, function, atom_id)) n += 1;
         }
+        for (function.global_vars, 0..) |gv, idx| {
+            if (!directEvalGlobalVarNeedsRef(rt, global, function, source, function_decl_names, gv, idx, eval_global_var_bindings)) continue;
+            n += 1;
+        }
         if (simple_var_name != core.atom.null_atom and
             simple_var_name != eval_ret_atom and
             (!eval_global_var_bindings or directEvalGlobalDataVarNeedsTemporaryRef(rt, global, simple_var_name)) and
             !functionHasNonLexicalLocal(rt, function, simple_var_name) and
+            !functionHasNonLexicalGlobalVar(rt, function, simple_var_name) and
             !array_ops.atomSliceContains(rt, function_decl_names, simple_var_name) and
             !directEvalSourceHasLexicalDeclarationName(rt, source, simple_var_name))
         {
@@ -4369,10 +4514,16 @@ pub fn directEvalVarDeclarationNames(
         names[out_idx] = rt.atoms.dup(atom_id);
         out_idx += 1;
     }
+    for (function.global_vars, 0..) |gv, idx| {
+        if (!directEvalGlobalVarNeedsRef(rt, global, function, source, function_decl_names, gv, idx, eval_global_var_bindings)) continue;
+        names[out_idx] = rt.atoms.dup(gv.var_name);
+        out_idx += 1;
+    }
     if (simple_var_name != core.atom.null_atom and
         simple_var_name != eval_ret_atom and
         (!eval_global_var_bindings or directEvalGlobalDataVarNeedsTemporaryRef(rt, global, simple_var_name)) and
         !functionHasNonLexicalLocal(rt, function, simple_var_name) and
+        !functionHasNonLexicalGlobalVar(rt, function, simple_var_name) and
         !array_ops.atomSliceContains(rt, function_decl_names, simple_var_name) and
         !directEvalSourceHasLexicalDeclarationName(rt, source, simple_var_name))
     {
@@ -4380,6 +4531,41 @@ pub fn directEvalVarDeclarationNames(
         out_idx += 1;
     }
     return names;
+}
+
+fn directEvalGlobalVarNeedsRef(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    function: *const bytecode.Bytecode,
+    source: []const u8,
+    function_decl_names: []const core.Atom,
+    gv: core.function_bytecode.GlobalVar,
+    global_var_index: usize,
+    eval_global_var_bindings: bool,
+) bool {
+    const atom_id = gv.var_name;
+    if (atom_id == core.atom.null_atom) return false;
+    if (atom_id == eval_ret_atom) return false;
+    if (gv.is_lexical) return false;
+    if (directEvalSourceHasLexicalDeclarationName(rt, source, atom_id)) return false;
+    if (functionHasNonLexicalLocal(rt, function, atom_id)) return false;
+    if (array_ops.atomSliceContains(rt, function_decl_names, atom_id)) return false;
+    if (priorDirectEvalGlobalVarMatches(rt, function, global_var_index, atom_id)) return false;
+    if (gv.force_init) return true;
+    return eval_global_var_bindings and directEvalVarDeclarationShouldCreateRef(rt, global, atom_id);
+}
+
+fn priorDirectEvalGlobalVarMatches(
+    rt: *core.JSRuntime,
+    function: *const bytecode.Bytecode,
+    end_index: usize,
+    atom_id: core.Atom,
+) bool {
+    for (function.global_vars[0..end_index]) |gv| {
+        if (gv.is_lexical) continue;
+        if (atomIdOrNameEql(rt, gv.var_name, atom_id)) return true;
+    }
+    return false;
 }
 
 pub fn directEvalVarNameIsNonLeadingFunctionCallerArg(
@@ -4467,6 +4653,33 @@ pub fn functionHasNonLexicalLocal(rt: *core.JSRuntime, function: *const bytecode
     return false;
 }
 
+fn functionHasNonLexicalGlobalVar(rt: *core.JSRuntime, function: *const bytecode.Bytecode, atom_id: core.Atom) bool {
+    for (function.global_vars) |gv| {
+        if (gv.is_lexical) continue;
+        if (atomIdOrNameEql(rt, gv.var_name, atom_id)) return true;
+    }
+    return false;
+}
+
+pub fn directEvalGlobalVarLocalAtom(
+    rt: *core.JSRuntime,
+    function: *const bytecode.Bytecode,
+    idx: usize,
+    slot: core.JSValue,
+) ?core.Atom {
+    if (!value_ops.atomNameEql(rt, function.name, "<eval>")) return null;
+    if (idx >= function.var_names.len) return null;
+    if (idx < function.var_is_lexical.len and function.var_is_lexical[idx]) return null;
+    if (!slot_ops.evalLocalSlotIsEvalVarCell(slot)) return null;
+
+    const atom_id = function.var_names[idx];
+    for (function.global_vars) |gv| {
+        if (gv.is_lexical) continue;
+        if (atomIdOrNameEql(rt, gv.var_name, atom_id)) return atom_id;
+    }
+    return null;
+}
+
 pub fn publishDirectEvalVarRefs(
     ctx: *core.JSContext,
     global: *core.Object,
@@ -4503,8 +4716,24 @@ pub fn publishDirectEvalVarRefs(
             refs[index].dup();
         defer value.free(ctx.runtime);
         if (directEvalGlobalVarPublishBlocked(ctx.runtime, global, names[index])) continue;
-        try slot_ops.defineGlobalFunctionBindingValue(ctx.runtime, global, names[index], value, true);
+        try publishDirectEvalGlobalVarRef(ctx, global, names[index], value);
+        if (caller_frame) |frame| {
+            var frame_value = value.dup();
+            if (!try setFrameVarRefValue(ctx, frame.function, frame, names[index], frame_value)) {
+                frame_value.free(ctx.runtime);
+            }
+        }
     }
+}
+
+fn publishDirectEvalGlobalVarRef(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    atom_id: core.Atom,
+    value: core.JSValue,
+) !void {
+    if (try global.setOwnWritableDataProperty(ctx.runtime, atom_id, value)) return;
+    try slot_ops.defineGlobalFunctionBindingValue(ctx.runtime, global, atom_id, value, true);
 }
 
 pub fn directEvalGlobalVarPublishBlocked(rt: *core.JSRuntime, global: *core.Object, atom_id: core.Atom) bool {
@@ -4529,9 +4758,15 @@ pub fn directEvalGlobalDataVarNeedsTemporaryRef(rt: *core.JSRuntime, global: *co
     return desc.kind == .data and desc.writable != true;
 }
 
-fn restoreEvalGlobalLexicals(ctx: *core.JSContext, global: *core.Object, saved_lexicals: ?*core.Object) !void {
-    defer ctx.lexicals = saved_lexicals;
-    try global.setGlobalLexicals(ctx.runtime, ctx.lexicals);
+fn restoreEvalGlobalLexicals(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    saved_lexicals: ?*core.Object,
+    keep_active_lexicals: bool,
+) !void {
+    const active_lexicals = ctx.lexicals;
+    try global.setGlobalLexicals(ctx.runtime, active_lexicals);
+    ctx.lexicals = if (keep_active_lexicals) active_lexicals else saved_lexicals;
 }
 
 pub fn indirectEval(
@@ -4548,6 +4783,7 @@ pub fn indirectEval(
 
     const context_global = ctx.global;
     const use_global_lexicals = context_global == null or context_global.? != eval_global;
+    const keep_active_lexicals = context_global == null;
     const saved_lexicals = ctx.lexicals;
     if (use_global_lexicals) ctx.lexicals = eval_global.globalLexicals();
 
@@ -4568,7 +4804,7 @@ pub fn indirectEval(
 
     if (use_global_lexicals) {
         var rooted_result = result catch |err| {
-            try restoreEvalGlobalLexicals(ctx, eval_global, saved_lexicals);
+            try restoreEvalGlobalLexicals(ctx, eval_global, saved_lexicals, keep_active_lexicals);
             return err;
         };
         errdefer rooted_result.free(ctx.runtime);
@@ -4581,7 +4817,7 @@ pub fn indirectEval(
         };
         ctx.runtime.active_value_roots = &root_frame;
         defer ctx.runtime.active_value_roots = root_frame.previous;
-        try restoreEvalGlobalLexicals(ctx, eval_global, saved_lexicals);
+        try restoreEvalGlobalLexicals(ctx, eval_global, saved_lexicals, keep_active_lexicals);
         return rooted_result;
     }
     return result;
@@ -4627,10 +4863,7 @@ pub fn evalSimpleCallerExpression(
     if (string_ops.simpleEvalStringLiteral(ctx.runtime, trimmed)) |value| return value;
     if (std.mem.eql(u8, trimmed, "this")) return eval_ops.directEvalThisValue(ctx.runtime, caller_function, caller_frame).dup();
     if (std.mem.startsWith(u8, trimmed, "delete ")) {
-        const ident = std.mem.trim(u8, trimmed["delete ".len..], " \t\r\n");
-        if (isSimpleIdentifierName(ident) and callerFunctionHasBinding(ctx.runtime, caller_function, frame, ident)) {
-            return core.JSValue.boolean(false);
-        }
+        _ = frame;
         return null;
     }
     if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq| {
@@ -4726,7 +4959,8 @@ pub fn functionHasFrameBinding(
         if (binding == atom_id or atomNamesEqual(rt, binding, atom_id)) return true;
     }
     const ref_count = @min(function.var_ref_names.len, frame.var_refs.len);
-    for (function.var_ref_names[0..ref_count]) |binding| {
+    for (function.var_ref_names[0..ref_count], 0..) |binding, idx| {
+        if (slot_ops.varRefSlotIsUninitialized(frame.var_refs[idx]) and closureVarIsNonLexicalGlobalSentinel(function, idx)) continue;
         if (binding == atom_id or atomNamesEqual(rt, binding, atom_id)) return true;
     }
     return false;
@@ -5091,6 +5325,21 @@ pub fn runGeneratorParameterInit(
         nested.var_ref_names = try ctx.runtime.memory.alloc(core.Atom, fb.var_ref_names.len);
         for (fb.var_ref_names, 0..) |atom_id, idx| {
             nested.var_ref_names[idx] = ctx.runtime.atoms.dup(atom_id);
+        }
+    }
+    if (fb.var_ref_is_lexical.len > 0) {
+        nested.var_ref_is_lexical = try ctx.runtime.memory.alloc(bool, fb.var_ref_is_lexical.len);
+        @memcpy(nested.var_ref_is_lexical, fb.var_ref_is_lexical);
+    }
+    if (fb.var_ref_is_const.len > 0) {
+        nested.var_ref_is_const = try ctx.runtime.memory.alloc(bool, fb.var_ref_is_const.len);
+        @memcpy(nested.var_ref_is_const, fb.var_ref_is_const);
+    }
+    if (fb.closure_var.len > 0) {
+        nested.closure_var = try ctx.runtime.memory.alloc(bytecode.function_def.ClosureVar, fb.closure_var.len);
+        for (fb.closure_var, 0..) |cv, idx| {
+            nested.closure_var[idx] = cv;
+            nested.closure_var[idx].var_name = ctx.runtime.atoms.dup(cv.var_name);
         }
     }
     for (fb.cpool) |value| {
@@ -7328,8 +7577,30 @@ pub fn isBlockedByUnscopables(
     return coercion_ops.valueTruthy(blocked);
 }
 
-pub fn lookupFrameVarRef(rt: *core.JSRuntime, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, atom_id: core.Atom) ?core.JSValue {
-    return lookupNamedVarRef(rt, function.var_ref_names, frame.var_refs, atom_id);
+pub fn lookupFrameVarRef(ctx: *core.JSContext, global: *core.Object, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, atom_id: core.Atom) ?core.JSValue {
+    const rt = ctx.runtime;
+    const count = @min(function.var_ref_names.len, frame.var_refs.len);
+    for (function.var_ref_names[0..count], 0..) |name, idx| {
+        if (!atomIdOrNameEql(rt, name, atom_id)) continue;
+        if (closureVarIsNonLexicalGlobalSentinel(function, idx)) {
+            if (globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| return lexical_value;
+            continue;
+        }
+        if (slot_ops.varRefSlotIsDeleted(frame.var_refs[idx])) return core.JSValue.uninitialized();
+        const value = slot_ops.slotValueDup(frame.var_refs[idx]);
+        return value;
+    }
+    return null;
+}
+
+pub fn closureVarIsNonLexicalGlobalSentinel(function: *const bytecode.Bytecode, idx: usize) bool {
+    if (idx >= function.closure_var.len) return false;
+    const cv = function.closure_var[idx];
+    if (cv.is_lexical) return false;
+    return switch (cv.closure_type) {
+        .global, .global_ref, .global_decl => true,
+        else => false,
+    };
 }
 
 pub fn lookupFrameLocalValue(rt: *core.JSRuntime, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, atom_id: core.Atom) ?core.JSValue {
@@ -7426,6 +7697,24 @@ pub fn deleteEvalBinding(
     return null;
 }
 
+pub fn deleteDirectEvalGlobalVarLocalBinding(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    atom_id: core.Atom,
+) ?bool {
+    const count = @min(function.var_names.len, frame.locals.len);
+    for (function.var_names[0..count], 0..) |name, idx| {
+        if (!atomIdOrNameEql(rt, name, atom_id)) continue;
+        _ = directEvalGlobalVarLocalAtom(rt, function, idx, frame.locals[idx]) orelse return null;
+        const deleted = if (global.hasProperty(atom_id)) global.deleteProperty(rt, atom_id) else true;
+        if (deleted) _ = deleteVarRefSlot(rt, frame.locals[idx]);
+        return deleted;
+    }
+    return null;
+}
+
 pub fn deleteFrameLocalBinding(
     rt: *core.JSRuntime,
     function: *const bytecode.Bytecode,
@@ -7503,9 +7792,16 @@ pub fn initializeEvalFrameLocals(
     }
 }
 
-pub fn setNamedSlotValue(ctx: *core.JSContext, names: []const core.Atom, slots: []core.JSValue, atom_id: core.Atom, value: core.JSValue) !bool {
+pub fn setNamedSlotValue(ctx: *core.JSContext, global: *core.Object, names: []const core.Atom, slots: []core.JSValue, atom_id: core.Atom, value: core.JSValue) !bool {
     for (names, 0..) |name, idx| {
         if (!atomIdOrNameEql(ctx.runtime, name, atom_id) or idx >= slots.len) continue;
+        if (slot_ops.varRefCellFromValue(slots[idx])) |cell| {
+            if (cell.varRefIsConstSlot().*) {
+                value.free(ctx.runtime);
+                _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
+                return error.TypeError;
+            }
+        }
         try slot_ops.setSlotValue(ctx, &slots[idx], value);
         return true;
     }

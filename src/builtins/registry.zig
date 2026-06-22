@@ -2865,6 +2865,7 @@ fn wireNativeFunctionPropertyPrototypesWithProto(rt: *core.JSRuntime, target: *c
             },
             // Auto-init placeholders self-wire on materialization.
             .auto_init => {},
+            .var_ref => {},
             .deleted => {},
         }
     }

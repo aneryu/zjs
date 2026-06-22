@@ -36,10 +36,6 @@ pub const RegionLayout = enum {
     plain,
     /// `[receiver, callable, args...]` — method call; receiver becomes `this`.
     method,
-    /// `[receiver, args..., callable]` — prepared property call: the callable
-    /// was resolved off-stack (a prepared IC target) and pushed back on top,
-    /// receiver becomes `this`. Only valid for non-tail `pushCall`.
-    prepared,
 };
 
 pub const InlineTarget = struct {
@@ -225,16 +221,6 @@ pub const Machine = struct {
             values: []core.JSValue,
             has_receiver: bool,
         },
-        /// Prepared property call still live on the caller's operand stack as
-        /// `[receiver, args..., callable]`: the callable (an off-stack prepared
-        /// IC target) was pushed back on top so it stays rooted until the frame
-        /// duplicates it. Frame setup pops+frees the callable, drops the
-        /// receiver (now the frame's `this`), and moves the args.
-        prepared: struct {
-            stack: *stack_mod.Stack,
-            region_base: usize,
-            argc: u16,
-        },
     };
 
     /// Push an inline call frame for `target`. Shared between plain inline
@@ -376,7 +362,6 @@ pub const Machine = struct {
             .var_refs = frame_var_refs.len != 0 or entry.view.var_ref_names.len != 0,
             .eval_local_slots = false,
             .eval_var_refs = need_eval_var_refs,
-            .prepared_call_values = true,
         });
         errdefer entry.frame_roots.deinit();
 
@@ -434,7 +419,6 @@ pub const Machine = struct {
         return switch (source) {
             .stack_region => |region| &region.stack.values[region.region_base + @as(usize, @intFromBool(region.has_receiver))],
             .moved => |moved| &moved.values[if (moved.has_receiver) 1 else 0],
-            .prepared => |region| &region.stack.values[region.region_base + 1 + @as(usize, region.argc)],
         };
     }
 
@@ -442,7 +426,6 @@ pub const Machine = struct {
         return switch (source) {
             .stack_region => |region| if (region.has_receiver) &region.stack.values[region.region_base] else null,
             .moved => |moved| if (moved.has_receiver) &moved.values[0] else null,
-            .prepared => |region| &region.stack.values[region.region_base],
         };
     }
 
@@ -454,7 +437,7 @@ pub const Machine = struct {
 
     fn sourceHasStackRegion(source: ArgsSource) bool {
         return switch (source) {
-            .stack_region, .prepared => true,
+            .stack_region => true,
             .moved => false,
         };
     }
@@ -463,7 +446,6 @@ pub const Machine = struct {
         return switch (source) {
             .stack_region => |region| region.argc,
             .moved => |moved| moved.values.len - if (moved.has_receiver) @as(usize, 2) else @as(usize, 1),
-            .prepared => |region| region.argc,
         };
     }
 
@@ -474,7 +456,6 @@ pub const Machine = struct {
                 break :blk region.stack.values[args_start..][0..region.argc];
             },
             .moved => |moved| moved.values[if (moved.has_receiver) 2 else 1..],
-            .prepared => |region| region.stack.values[region.region_base + 1 ..][0..region.argc],
         };
     }
 
@@ -483,7 +464,7 @@ pub const Machine = struct {
         if (argc == 0) return false;
         if (@max(argc, @as(usize, @intCast(function.arg_count))) != argc) return false;
         return switch (source) {
-            .stack_region, .prepared => true,
+            .stack_region => true,
             .moved => false,
         };
     }
@@ -505,7 +486,6 @@ pub const Machine = struct {
     fn cleanupStackSource(rt: *core.JSRuntime, source: ArgsSource) void {
         switch (source) {
             .stack_region => |region| call_runtime.popOwnedStackRegion(rt, region.stack, region.region_base),
-            .prepared => |region| call_runtime.popOwnedStackRegion(rt, region.stack, region.region_base),
             .moved => {},
         }
     }
@@ -515,11 +495,6 @@ pub const Machine = struct {
             .stack_region => |region| {
                 if (region.has_receiver) freeSourceSlot(rt, &region.stack.values[region.region_base]);
                 freeSourceSlot(rt, &region.stack.values[region.region_base + @as(usize, @intFromBool(region.has_receiver))]);
-                region.stack.values = region.stack.values.ptr[0..region.region_base];
-            },
-            .prepared => |region| {
-                freeSourceSlot(rt, &region.stack.values[region.region_base]);
-                freeSourceSlot(rt, &region.stack.values[region.region_base + 1 + @as(usize, region.argc)]);
                 region.stack.values = region.stack.values.ptr[0..region.region_base];
             },
             .moved => {},
@@ -583,11 +558,6 @@ pub const Machine = struct {
                 .argc = argc,
                 .has_receiver = layout == .method,
             } },
-            .prepared => .{ .prepared = .{
-                .stack = caller_stack,
-                .region_base = region_base,
-                .argc = argc,
-            } },
         });
     }
 
@@ -611,10 +581,6 @@ pub const Machine = struct {
         layout: RegionLayout,
     ) HostError!void {
         std.debug.assert(self.depth > 0);
-        // Tail calls are never the off-stack prepared shape; only op.call /
-        // op.call_method get rewritten to the prepared IC path, and those are
-        // not tail positions.
-        std.debug.assert(layout != .prepared);
         const has_receiver = layout == .method;
         const rt = self.ctx.runtime;
 

@@ -14,7 +14,6 @@ const function_def_mod = @import("../function_def.zig");
 const opcode = @import("../opcode.zig");
 const resolve_variables = @import("resolve_variables.zig");
 const resolve_labels = @import("resolve_labels.zig");
-const prepared_calls = @import("prepared_calls.zig");
 const pc2line = @import("pc2line.zig");
 const stack_size = @import("stack_size.zig");
 const JSValue = @import("../../core/value.zig").JSValue;
@@ -125,6 +124,7 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
     const var_names_off = layout.reserve(atom.Atom, fd.vars.len);
     const var_ref_names_off = layout.reserve(atom.Atom, fd.closure_var.len);
     const global_var_names_off = layout.reserve(atom.Atom, fd.global_vars.len);
+    const global_vars_off = layout.reserve(function_def_mod.GlobalVar, fd.global_vars.len);
     const class_instance_fields_off = layout.reserve(atom.Atom, fd.class_instance_fields.len);
     const private_bound_names_off = layout.reserve(atom.Atom, fd.private_bound_names.len);
     const class_private_names_off = layout.reserve(atom.Atom, fd.class_private_names.len);
@@ -136,8 +136,10 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
     const source_off = layout.reserve(u8, source_len);
     const var_is_lexical_off = layout.reserve(bool, fd.vars.len);
     const var_is_const_off = layout.reserve(bool, fd.vars.len);
+    const var_scope_level_off = layout.reserve(i32, fd.vars.len);
     const var_ref_is_lexical_off = layout.reserve(bool, fd.closure_var.len);
     const var_ref_is_const_off = layout.reserve(bool, fd.closure_var.len);
+    const var_ref_is_global_decl_off = layout.reserve(bool, fd.closure_var.len);
     fb.block = try fd.memory.allocAlignedBytes(layout.size, fb_mod.block_alignment);
     const block = fb.block;
 
@@ -181,14 +183,17 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
         const var_names = fb_mod.blockSlice(block, atom.Atom, var_names_off, fd.vars.len);
         const var_is_lexical = fb_mod.blockSlice(block, bool, var_is_lexical_off, fd.vars.len);
         const var_is_const = fb_mod.blockSlice(block, bool, var_is_const_off, fd.vars.len);
-        for (fd.vars, var_names, var_is_lexical, var_is_const) |v, *name, *is_lexical, *is_const| {
+        const var_scope_level = fb_mod.blockSlice(block, i32, var_scope_level_off, fd.vars.len);
+        for (fd.vars, var_names, var_is_lexical, var_is_const, var_scope_level) |v, *name, *is_lexical, *is_const, *scope_level| {
             name.* = fd.atoms.dup(v.var_name);
             is_lexical.* = v.is_lexical;
             is_const.* = v.is_const;
+            scope_level.* = v.scope_level;
         }
         fb.var_names = var_names;
         fb.var_is_lexical = var_is_lexical;
         fb.var_is_const = var_is_const;
+        fb.var_scope_level = var_scope_level;
 
         const vardefs = fb_mod.blockSlice(block, function_def_mod.VarDef, vardefs_off, fd.vars.len);
         @memcpy(vardefs, fd.vars);
@@ -201,14 +206,17 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
         const var_ref_names = fb_mod.blockSlice(block, atom.Atom, var_ref_names_off, fd.closure_var.len);
         const var_ref_is_lexical = fb_mod.blockSlice(block, bool, var_ref_is_lexical_off, fd.closure_var.len);
         const var_ref_is_const = fb_mod.blockSlice(block, bool, var_ref_is_const_off, fd.closure_var.len);
-        for (fd.closure_var, var_ref_names, var_ref_is_lexical, var_ref_is_const) |cv, *name, *is_lexical, *is_const| {
+        const var_ref_is_global_decl = fb_mod.blockSlice(block, bool, var_ref_is_global_decl_off, fd.closure_var.len);
+        for (fd.closure_var, var_ref_names, var_ref_is_lexical, var_ref_is_const, var_ref_is_global_decl) |cv, *name, *is_lexical, *is_const, *is_global_decl| {
             name.* = fd.atoms.dup(cv.var_name);
             is_lexical.* = cv.is_lexical;
             is_const.* = cv.is_const;
+            is_global_decl.* = cv.closure_type == .global_decl;
         }
         fb.var_ref_names = var_ref_names;
         fb.var_ref_is_lexical = var_ref_is_lexical;
         fb.var_ref_is_const = var_ref_is_const;
+        fb.var_ref_is_global_decl = var_ref_is_global_decl;
 
         const closure_var = fb_mod.blockSlice(block, function_def_mod.ClosureVar, closure_var_off, fd.closure_var.len);
         @memcpy(closure_var, fd.closure_var);
@@ -220,6 +228,13 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
         const global_var_names = fb_mod.blockSlice(block, atom.Atom, global_var_names_off, fd.global_vars.len);
         for (fd.global_vars, global_var_names) |gv, *out| out.* = fd.atoms.dup(gv.var_name);
         fb.global_var_names = global_var_names;
+
+        const global_vars = fb_mod.blockSlice(block, function_def_mod.GlobalVar, global_vars_off, fd.global_vars.len);
+        for (fd.global_vars, global_vars) |gv, *out| {
+            out.* = gv;
+            out.var_name = fd.atoms.dup(gv.var_name);
+        }
+        fb.global_vars = global_vars;
     }
     if (fd.class_instance_fields.len > 0) {
         const fields = fb_mod.blockSlice(block, atom.Atom, class_instance_fields_off, fd.class_instance_fields.len);
@@ -528,10 +543,9 @@ pub fn run(function: *bytecode_function.Bytecode) !void {
 /// Also processes child FunctionDefs recursively.
 pub fn runWithFunctionDef(
     function: *bytecode_function.Bytecode,
-    fd: ?*const function_def_mod.FunctionDef,
+    fd: ?*function_def_mod.FunctionDef,
 ) !void {
-    // const FD: caller cannot mutate, pass through as-is.
-    try runPhases(function, fd, null);
+    try runPhases(function, fd, fd);
     if (fd) |def| try syncFunctionDefCpool(function, def);
 }
 
@@ -557,11 +571,15 @@ fn runPhases(
     fd_mut: ?*function_def_mod.FunctionDef,
 ) !void {
     // Phase 2: resolve_variables (with optional FunctionDef).
-    var resolve_ctx = if (fd) |def|
+    var resolve_ctx = if (fd_mut) |def|
         resolve_variables.JSContext.initWithFunctionDef(function, def)
     else
         resolve_variables.JSContext.init(function);
-    try resolve_variables.run(&resolve_ctx);
+    resolve_variables.run(&resolve_ctx) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidBytecode, error.NoFunctionDef, error.NoParentScope => return error.InvalidBytecode,
+        error.ClosureVarNotFound => return error.ClosureVarNotFound,
+    };
 
     // Peephole: fuse `get_locN; inc/dec; put_locN` triples into a single
     // `inc_loc`/`dec_loc` (mirrors QuickJS OP_inc_loc). Runs after
@@ -599,8 +617,6 @@ fn runPhases(
         try syncBytecodeGlobalVarNames(function, def);
         try removeUncapturedCloseLoc(function, def);
     }
-
-    try prepared_calls.run(function);
 
     // Phase 3b: pc2line from remapped Bytecode source slots.
     try encodePc2Line(function);
@@ -943,18 +959,25 @@ fn syncBytecodeVarNames(function: *bytecode_function.Bytecode, fd: *const functi
         function.var_is_const = &.{};
         function.memory.free(bool, var_is_const);
     }
+    if (function.var_scope_level.len != 0) {
+        const var_scope_level = function.var_scope_level;
+        function.var_scope_level = &.{};
+        function.memory.free(i32, var_scope_level);
+    }
     if (fd.vars.len == 0) return;
 
     const metadata = try copyVarNameMetadata(function.memory, function.atoms, fd.vars);
     function.var_names = metadata.names;
     function.var_is_lexical = metadata.is_lexical;
     function.var_is_const = metadata.is_const;
+    function.var_scope_level = metadata.scope_level;
 }
 
 const VarNameMetadata = struct {
     names: []atom.Atom,
     is_lexical: []bool,
     is_const: []bool,
+    scope_level: []i32,
 };
 
 fn copyVarNameMetadata(memory: anytype, atoms: *atom.AtomTable, vars: []const function_def_mod.VarDef) !VarNameMetadata {
@@ -968,15 +991,18 @@ fn copyVarNameMetadata(memory: anytype, atoms: *atom.AtomTable, vars: []const fu
     errdefer memory.free(bool, is_lexical);
     const is_const = try memory.alloc(bool, vars.len);
     errdefer memory.free(bool, is_const);
+    const scope_level = try memory.alloc(i32, vars.len);
+    errdefer memory.free(i32, scope_level);
 
     for (vars, 0..) |v, idx| {
         names[idx] = atoms.dup(v.var_name);
         is_lexical[idx] = v.is_lexical;
         is_const[idx] = v.is_const;
+        scope_level[idx] = v.scope_level;
         initialized += 1;
     }
 
-    return .{ .names = names, .is_lexical = is_lexical, .is_const = is_const };
+    return .{ .names = names, .is_lexical = is_lexical, .is_const = is_const, .scope_level = scope_level };
 }
 
 fn syncBytecodeVarRefNames(function: *bytecode_function.Bytecode, fd: *const function_def_mod.FunctionDef) !void {
@@ -996,26 +1022,49 @@ fn syncBytecodeVarRefNames(function: *bytecode_function.Bytecode, fd: *const fun
         function.var_ref_is_const = &.{};
         function.memory.free(bool, var_ref_is_const);
     }
+    if (function.var_ref_is_global_decl.len != 0) {
+        const var_ref_is_global_decl = function.var_ref_is_global_decl;
+        function.var_ref_is_global_decl = &.{};
+        function.memory.free(bool, var_ref_is_global_decl);
+    }
+    if (function.closure_var.len != 0) {
+        const closure_var = function.closure_var;
+        function.closure_var = &.{};
+        for (closure_var) |*cv| function.atoms.free(cv.var_name);
+        function.memory.free(function_def_mod.ClosureVar, closure_var);
+    }
     if (fd.closure_var.len == 0) return;
     const names = try function.memory.alloc(atom.Atom, fd.closure_var.len);
     errdefer function.memory.free(atom.Atom, names);
     const is_lexical = try function.memory.alloc(bool, fd.closure_var.len);
     errdefer function.memory.free(bool, is_lexical);
     const is_const = try function.memory.alloc(bool, fd.closure_var.len);
+    const is_global_decl = try function.memory.alloc(bool, fd.closure_var.len);
+    const closure_var = try function.memory.alloc(function_def_mod.ClosureVar, fd.closure_var.len);
     var initialized: usize = 0;
+    var initialized_closure: usize = 0;
     errdefer {
         for (names[0..initialized]) |atom_id| function.atoms.free(atom_id);
         function.memory.free(bool, is_const);
+        function.memory.free(bool, is_global_decl);
+        for (closure_var[0..initialized_closure]) |*cv| function.atoms.free(cv.var_name);
+        function.memory.free(function_def_mod.ClosureVar, closure_var);
     }
     for (fd.closure_var, 0..) |cv, idx| {
         names[idx] = fd.atoms.dup(cv.var_name);
         is_lexical[idx] = cv.is_lexical;
         is_const[idx] = cv.is_const;
+        is_global_decl[idx] = cv.closure_type == .global_decl;
+        closure_var[idx] = cv;
+        closure_var[idx].var_name = fd.atoms.dup(cv.var_name);
         initialized += 1;
+        initialized_closure += 1;
     }
     function.var_ref_names = names;
     function.var_ref_is_lexical = is_lexical;
     function.var_ref_is_const = is_const;
+    function.var_ref_is_global_decl = is_global_decl;
+    function.closure_var = closure_var;
 }
 
 fn syncBytecodeGlobalVarNames(function: *bytecode_function.Bytecode, fd: *const function_def_mod.FunctionDef) !void {
@@ -1025,10 +1074,33 @@ fn syncBytecodeGlobalVarNames(function: *bytecode_function.Bytecode, fd: *const 
         for (global_var_names) |atom_id| function.atoms.free(atom_id);
         function.memory.free(atom.Atom, global_var_names);
     }
+    if (function.global_vars.len != 0) {
+        const global_vars = function.global_vars;
+        function.global_vars = &.{};
+        for (global_vars) |*gv| function.atoms.free(gv.var_name);
+        function.memory.free(function_def_mod.GlobalVar, global_vars);
+    }
     if (fd.global_vars.len == 0) return;
     function.global_var_names = try function.memory.alloc(atom.Atom, fd.global_vars.len);
+    var initialized_names: usize = 0;
+    errdefer {
+        for (function.global_var_names[0..initialized_names]) |atom_id| function.atoms.free(atom_id);
+        function.memory.free(atom.Atom, function.global_var_names);
+        function.global_var_names = &.{};
+    }
+    function.global_vars = try function.memory.alloc(function_def_mod.GlobalVar, fd.global_vars.len);
+    var initialized_vars: usize = 0;
+    errdefer {
+        for (function.global_vars[0..initialized_vars]) |*gv| function.atoms.free(gv.var_name);
+        function.memory.free(function_def_mod.GlobalVar, function.global_vars);
+        function.global_vars = &.{};
+    }
     for (fd.global_vars, 0..) |gv, idx| {
         function.global_var_names[idx] = fd.atoms.dup(gv.var_name);
+        initialized_names += 1;
+        function.global_vars[idx] = gv;
+        function.global_vars[idx].var_name = fd.atoms.dup(gv.var_name);
+        initialized_vars += 1;
     }
 }
 

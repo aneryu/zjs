@@ -806,7 +806,7 @@ pub fn typedArrayArrayLikeOwnDataFastPathUsable(source_object: *core.Object, fir
         if (prop.atom_id != core.atom.atomFromUInt32(@intCast(index)) or prop_flags.deleted or prop_flags.accessor) return false;
         switch (source_object.properties[property_index].slot) {
             .data => |stored| if (stored.isObject()) return false,
-            .auto_init, .accessor, .deleted => return false,
+            .var_ref, .auto_init, .accessor, .deleted => return false,
         }
     }
     return true;

@@ -1128,7 +1128,7 @@ test "Engine direct eval after with uses global var binding" {
     try std.testing.expectEqualStrings("11 1 11 3 7 10\n", stream.buffered());
 }
 
-test "Engine direct eval var shadows readonly global property" {
+test "Engine direct eval var preserves readonly global property" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -1142,7 +1142,28 @@ test "Engine direct eval var shadows readonly global property" {
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("inside 2 1\nafter 1 1\n", stream.buffered());
+    try std.testing.expectEqualStrings("inside 1 1\nafter 1 1\n", stream.buffered());
+}
+
+test "Engine direct eval updates top-level lexical bindings" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let evalTopLevelLexical;
+        \\eval("evalTopLevelLexical = 1; print(evalTopLevelLexical);");
+        \\print(evalTopLevelLexical, globalThis.evalTopLevelLexical);
+        \\const evalTopLevelConst = 2;
+        \\try { eval("evalTopLevelConst = 3;"); } catch (e) { print(e.name); }
+        \\print(evalTopLevelConst);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1\n1 undefined\nTypeError\n2\n", stream.buffered());
 }
 
 test "Engine direct eval var bindings stay in caller function scope" {
@@ -1173,6 +1194,27 @@ test "Engine direct eval var bindings stay in caller function scope" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("ordinary inside outside\nordinaryAfter outside\nparam inside inside inside outside\n", stream.buffered());
+}
+
+test "Engine direct eval var refs do not shadow global callees" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function testcase() {
+        \\  var x = "local";
+        \\  eval("var y = 'evalvar'; print('after var', y);");
+        \\  print("done");
+        \\}
+        \\testcase();
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("after var evalvar\ndone\n", stream.buffered());
 }
 
 test "Engine function global data IC preserves binding guards" {

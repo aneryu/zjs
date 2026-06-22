@@ -6061,6 +6061,14 @@ pub const Object = struct {
                     try Helper.callVisitValue(visitor, &stored_accessor.getter);
                     try Helper.callVisitValue(visitor, &stored_accessor.setter);
                 },
+                // JS_PROP_VARREF: the slot owns a ref on a cell (global lexical
+                // bindings). Visit it so GC keeps the cell alive; without this a
+                // cell only reachable through ctx.lexicals would be collected
+                // (UAF). Visitors read the value by value, so a stack temp is safe.
+                .var_ref => |cell| {
+                    var cell_value = cell.valueRef();
+                    try Helper.callVisitValue(visitor, &cell_value);
+                },
                 else => {},
             }
         }
@@ -7329,6 +7337,10 @@ pub const Object = struct {
                 // caller. Matches QuickJS's `JS_AutoInitProperty` which
                 // also mutates the property record in place on read.
                 .auto_init => |id| materializeAutoInit(@constCast(self), index, property.autoInit(id).*),
+                // JS_PROP_VARREF: auto-deref the cell (qjs JS_GetPropertyInternal
+                // 8281-8285). TDZ (uninitialized) is surfaced to the caller; the
+                // dedicated getVar path does the ReferenceError throw.
+                .var_ref => |cell| cell.varRefValue().dup(),
                 .deleted => JSValue.undefinedValue(),
             };
         }
@@ -7920,7 +7932,7 @@ pub const Object = struct {
             if (self.propFlagsAt(index).accessor) return null;
             return switch (self.properties[index].slot) {
                 .data => |stored| objectFromValue(stored),
-                .auto_init, .accessor, .deleted => null,
+                .var_ref, .auto_init, .accessor, .deleted => null,
             };
         }
         return null;
@@ -7932,7 +7944,7 @@ pub const Object = struct {
             if (self.propFlagsAt(index).accessor) return null;
             return switch (self.properties[index].slot) {
                 .data => |stored| .{ .index = index, .value = stored.dup() },
-                .auto_init, .accessor, .deleted => null,
+                .var_ref, .auto_init, .accessor, .deleted => null,
             };
         }
         return null;
@@ -7945,7 +7957,7 @@ pub const Object = struct {
         if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.accessor) return null;
         return switch (self.properties[index].slot) {
             .data => |stored| stored.dup(),
-            .auto_init, .accessor, .deleted => null,
+            .var_ref, .auto_init, .accessor, .deleted => null,
         };
     }
 
@@ -8923,6 +8935,9 @@ pub const Object = struct {
                             return true;
                         }
                     },
+                    // VARREF slots are written through the cell via putVar, never
+                    // here; refuse the fast path so we never overwrite the slot.
+                    .var_ref => return false,
                     .auto_init, .accessor, .deleted => {},
                 }
             }
@@ -8965,7 +8980,7 @@ pub const Object = struct {
                 old.free(rt);
                 return true;
             },
-            .auto_init, .accessor, .deleted => return false,
+            .var_ref, .auto_init, .accessor, .deleted => return false,
         }
     }
 
@@ -8984,7 +8999,7 @@ pub const Object = struct {
                 old.free(rt);
                 return true;
             },
-            .auto_init, .accessor, .deleted => return false,
+            .var_ref, .auto_init, .accessor, .deleted => return false,
         }
     }
 
@@ -9008,6 +9023,9 @@ pub const Object = struct {
                             return true;
                         }
                     },
+                    // VARREF slots are written through the cell via putVar, never
+                    // here; refuse the fast path so we never overwrite the slot.
+                    .var_ref => return false,
                     .auto_init, .accessor, .deleted => {},
                 }
             }
@@ -9372,7 +9390,7 @@ pub const Object = struct {
         try self.appendPreparedPropertyEntry(rt, atom_id, flagsFromDescriptor(desc), slot);
     }
 
-    fn appendPreparedPropertyEntry(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
+    pub fn appendPreparedPropertyEntry(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
         var slot_owned = true;
         errdefer if (slot_owned) destroyPropertySlot(rt, atom_id, slot);
 
@@ -9556,7 +9574,7 @@ pub const Object = struct {
         if (flags.accessor) return .slow;
         return switch (self.properties[lookup.index].slot) {
             .data => |stored| .{ .value = .{ .index = lookup.index, .flags = flags, .value = stored } },
-            .auto_init, .accessor, .deleted => .slow,
+            .var_ref, .auto_init, .accessor, .deleted => .slow,
         };
     }
 
@@ -9567,7 +9585,7 @@ pub const Object = struct {
         const entry = &self.properties[lookup.index];
         return switch (entry.slot) {
             .data => |*stored| .{ .index = lookup.index, .flags = flags, .value = stored },
-            .auto_init, .accessor, .deleted => null,
+            .var_ref, .auto_init, .accessor, .deleted => null,
         };
     }
 
@@ -9732,7 +9750,7 @@ pub fn destroyPropertySlot(rt: *JSRuntime, atom_id: atom.Atom, slot: property.Sl
                     if (rt.atoms.kind(brand_atom) == .private) rt.atoms.free(brand_atom);
                 }
             },
-            .accessor, .auto_init, .deleted => {},
+            .var_ref, .accessor, .auto_init, .deleted => {},
         }
     }
     slot.destroy(rt);
@@ -9916,6 +9934,7 @@ fn mergeDescriptor(current_flags: property.Flags, current_slot: property.Slot, d
             // way to hit this with a placeholder) materializes first
             // through the same getProperty path.
             .auto_init => desc,
+            .var_ref => desc,
             .deleted => desc,
         },
         .data => descriptor.Descriptor.data(
