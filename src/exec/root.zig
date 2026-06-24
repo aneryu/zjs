@@ -2,7 +2,7 @@ const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
 const core = @import("../core/root.zig");
-const globals_mod = @import("globals.zig");
+const globals_mod = core.global_slots;
 const stack_mod = @import("stack.zig");
 
 pub const subsystem_name = "exec";
@@ -20,10 +20,9 @@ pub const eval = @import("eval_entry.zig");
 pub const eval_entry = @import("eval_entry.zig");
 pub const module = @import("module.zig");
 pub const module_graph = @import("module_graph.zig");
-pub const promise = @import("promise.zig");
-pub const jobs = @import("jobs.zig");
+pub const jobs = @import("../core/jobs.zig");
 pub const value_ops = @import("value_ops.zig");
-pub const globals = @import("globals.zig");
+pub const globals = core.global_slots;
 pub const closure = @import("closure.zig");
 pub const collection_adapter = @import("collection_adapter.zig");
 pub const call_runtime = @import("call_runtime.zig");

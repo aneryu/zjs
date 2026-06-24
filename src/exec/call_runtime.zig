@@ -56,7 +56,7 @@ const slot_ops = @import("slot_ops.zig");
 const eval_ops = @import("eval_ops.zig");
 
 // --- Reflect/Atomics dispatch selectors are exec-owned (VM-natured) ---
-const reflect_dispatch = @import("reflect_dispatch.zig");
+const reflect_dispatch = core.host_function.builtin_method_ids.reflect;
 const atomics_wait = @import("atomics_wait.zig");
 
 pub const InlineCallRequest = struct {
