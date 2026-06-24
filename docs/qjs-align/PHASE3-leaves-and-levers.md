@@ -5,28 +5,18 @@
 
 ## A. GC-无关忠实对齐
 
+✅ **已落地于 `e8c852b`**：删冗余 findProperty（rank 5）、fast-array realloc（rank 6）、Array.push 多参（rank 12）、arith int32 window（rank 7）、bothInt 单测试（rank 10）、string hash 懒算（rank 8）、JS→C kind-switch（rank 11）、parser peephole jump-threading + 常量折叠（rank 13）。
+
+仍待办：
+
 | 项 | 现状 → qjs | 锚点 |
 |---|---|---|
-| **属性槽 16B**（rank 4） | 40B tagged-union(enum) → 16B untagged，变体经 shape flags（JS_PROP_TMASK）派生 | property.zig:125-134 vs quickjs.c:947-963 |
-| **删冗余 findProperty**（rank 5） | set→create 路径 2 次 findProperty → 1 次（thread first-miss 进 createOwnDataProperty）；保 public defineOwnProperty 重扫 | object.zig:8858/8880/9240 vs quickjs.c:9705 |
-| **fast-array realloc**（rank 6） | alloc+memcpy+free → realloc/remap（slab-eligible 块保 copy+free 回退） | object.zig:3382 vs quickjs.c:9524-9538 |
-| **Array.push 多参**（rank 12） | args.len==1 守卫 → argc 参数 expand-once + tight store loop | array_ops.zig:2792 vs quickjs.c:42761-42789 |
-| **arith window**（rank 7） | add/sub… 无条件 syncDown → 接上**已写零调用**的 `tryInt32BinaryWindow`、int32 fast path 不 syncDown | vm_arith.zig:175 vs quickjs.c:19696-19709 |
-| **bothInt 单测试**（rank 10） | 两次 asInt32 orelse → `(a.tag|b.tag)==0` 单测试 | vm_arith.zig:167-212 vs quickjs.h:284 |
-| **string hash 懒算**（rank 8） | create/concat 即时 O(n) 算 hash → 懒到 intern 时（注意 in-place append 链 self.hash 须先物化） | string.zig:123/149/340… vs quickjs.c:3200 |
-| **JS→C kind-switch**（rank 11） | ~20 项线性探测梯 → 函数对象创建期定的 kind-tag switch | call_runtime.zig:478 vs quickjs.c:17816-17824 |
-| **parser peephole**（rank 13，编译期） | 补 jump-threading + push_i32+if_false/true 常量折叠 + push_i32+neg 折叠 + skip-dead-past-goto（修 resolve_labels.zig:69-70 过期注释） | resolve_labels.zig vs quickjs.c:35197-35223 |
+| **属性槽 16B**（rank 4，**DEFERRED**：侵入性大，shape-flags 派生 kind 引发深度 test-infra 级联，codex 未收敛，messy 态在 git stash） | 40B tagged-union(enum) → 16B untagged，变体经 shape flags（JS_PROP_TMASK）派生 | property.zig:125-134 vs quickjs.c:947-963 |
 | **热 opcode 寄存器驻留**（rank 14，依赖 A 的 property fast-path） | ~166 syncDown+out-of-line 臂中，把 prop_write/create/array_push/get_field happy path 提为寄存器驻留（非全部，避 I-cache 炸） | — |
 
-## B. 赢回退（回退到 qjs 结构）
+## B. 赢回退（回退到 qjs 结构）✅ 已落地于 `e8c852b`
 
-| 项 | 回退 | 备注 |
-|---|---|---|
-| 小 shape 线性扫 | ≤4 属性线性扫 → qjs always-build-hash | 行为等价 |
-| 双 shape-transition | per-parent 链 + 全局 root-intern → qjs 单 `find_hashed_shape_prop` | 注意：审计曾称二者"索引不同东西"——**回退前查证**该说法，确认全局 hash 能否覆盖 per-parent transition cache 的语义 |
-| **string-off-cycle-list**（codex 更正 2026-06-23） | qjs **有** rope（`JS_TAG_STRING_ROPE`/`JSStringRope`，refcount-only 不上 gc_obj_list，图无环）→ 把 zjs string/rope/.slice **移出环收集器 gc list** → refcount-only、极小头，对齐 qjs；**保留 rope（不 revert）** | 解开 keystone S1 延后的 24B-header 耦合；.slice 的 dangling-borrow「风险」落实时查证 |
-
-（注：dup-proto 回退、SHAPE 入 gc_obj_list 已并入 keystone **S4b**。）
+小 shape 线性扫 → always-build-hash；双 shape-transition → 单 `find_hashed_shape_prop`（全局 hash 覆盖 per-parent 语义已验证）；string/rope/.slice 移出环收集器 gc list（refcount-only、极小头，**保留 rope 不 revert**，对齐 qjs）。（dup-proto 回退、SHAPE 入 gc_obj_list 已并入 keystone **S4b**。）
 
 ## C. 大杠杆（高侵入，flag-gated，逐阶段 0/49775 把关）
 

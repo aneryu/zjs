@@ -1,8 +1,8 @@
 # Inline Cache Wiring for zjs Property + Global Access — Implementation Design
 
-## TL;DR for the implementer
+## TL;DR
 
-The IC is **already built and enabled** (`build.zig:6` `zjs_enable_ic = true`). The slot storage, PC->slot mapping, shape-version guard state machine, and IC-aware lookup/install helpers all exist and are unit-tested. **The property-field opcodes simply do not call them.** Your job is wiring, not invention. This makes it the highest-confidence, lowest-risk perf lever in the tree — but a wiring mistake that defeats a guard = wrong value = test262 regression, so every stage re-runs the full gate triad.
+The IC is built and enabled (`build.zig` `zjs_enable_ic = true`). **S1 (get_field/get_field2) and S2 (put_field) are LANDED in `e8c852b`** — the field opcodes now probe the IC before the slow chain (property read 3.4x→2.57x, write →2.79x). **Remaining: S3** (global / top-level-lexical stable-cell IC + retire `global_lexical_sync`) and **S4** (poly/mega validation). A wiring mistake that defeats a guard = wrong value = test262 regression, so every remaining stage re-runs the full gate triad.
 
 ## What exists (read these before touching anything)
 
@@ -14,7 +14,7 @@ The IC is **already built and enabled** (`build.zig:6` `zjs_enable_ic = true`). 
   - `dataPropertyValueForFastPath(function, site_pc, rt, receiver, atom_id)` (`:68`) — gates via `cacheableNamedDataObject`, checks IC (own at `:82` + proto at `:83`), on miss does `fastOwnOrdinaryDataPropertyLookupForObject` + `installOwnDataIcForObject` (`:88-94`) and one-level proto + `installProtoDataIcForObject` (`:95-101`). Returns borrowed value.
   - `setObjectDataPropertyForPutFieldFastPath(rt, function, site_pc, receiver, atom_id, value)` (`:218`) — IC-hit write + install-after-write.
   - `cachedOwnDataPropertyLookupForObject` (`:259`) -> `ownDataPropertyBorrowedAt` -> `dataSlotAt` (`:846`) revalidates atom_id + flags at the cached index.
-- `src/exec/vm_property_field.zig` — `field()` (`:225`): get_field (`:240`), get_field2 (`:275`), put_field (`:306`). Today these call `qjsGetFieldFast` (`:329`, full `findOwnDataPropertyFast` proto walk) and `ordinaryDataPropertyValueOrUndefinedForFastPath` (`property_ic.zig:596` -> `ordinaryDataPropertyLookup:570`, full `findProperty` hash walk per access) — **NEITHER takes site_pc, NEITHER touches the IC.**
+- `src/exec/vm_property_field.zig` — `field()`: get_field, get_field2, put_field. **As of `e8c852b` (S1/S2) these probe the IC first** (`dataPropertyValueForFastPath` / `setObjectDataPropertyForPutFieldFastPath` with `site_pc`), falling to `qjsGetFieldFast` (full `findOwnDataPropertyFast` proto walk) only on miss. (Pre-S1 they bypassed the IC entirely — that is the gap S1/S2 closed.)
 - `src/exec/vm_property_globals.zig` — `getVar` (`:206`) is **already IC-wired**: `site_pc = frame.pc - 1` (`:222`), `cachedGlobalDataValue` (`:228`/`:164`), `fastInstalledGlobalDataValueForAtomAtPc` (`:245`), `globalDataPropertyValueForFastPath` (`:259`). Covers `var`-globals (data props on the global object).
 
 ## Diagnosis (confirmed by reading the code)
@@ -35,17 +35,10 @@ Note `global_read_loop` uses `var x` (data prop) and **already hits** the existi
 
 ## Staged plan (each stage independently gateable)
 
-### S0 — pre-flight baseline (no code change)
-Confirm IC on; run the opcode profiler on prop_read_mono (expect get_field IC hits = 0 today, proving the bypass) and global_read_loop (expect IC hits, proving the var-global IC works). Record pinned cpu19/pmuv3_1 numbers for prop_read_mono, prop_read_poly3, proto_read, global_read, global_read_loop, prop_read, array_read. Gates must be green at HEAD: test262 0/49775, test 1223, force-GC 1223.
+### S0 / S1 / S2 — ✅ LANDED in `e8c852b`
+get_field / get_field2 read IC + put_field write IC are wired in `vm_property_field.zig`: the arm captures `site_pc = frame.pc - 1`, probes `dataPropertyValueForFastPath` / `setObjectDataPropertyForPutFieldFastPath` before the slow chain, and inlines the monomorphic hit into the dispatch arm (`zjs_vm.zig`). put_field transfers value ownership (`value_consumed`). Result: prop_read_mono 3.41x→2.57x, write →2.79x; var-global global_read_loop unchanged. Implementation in git history.
 
-### S1 — get_field / get_field2 read IC (monomorphic) — the big win
-In `field()` (`vm_property_field.zig`): capture `const site_pc = frame.pc - 1;` at the TOP, before `frame.pc += 4`. In the get_field and get_field2 arms, insert `property_ic.dataPropertyValueForFastPath(function, site_pc, ctx.runtime, receiver, atom_id)` as the FIRST probe (before `qjsGetFieldFast`). On hit -> `replaceTopBorrowed` (get_field) / push borrowed (get_field2), return `.done`. On null -> fall through to the EXACT current chain unchanged. Export `dataPropertyValueForFastPath` if not already `pub`. Keep `qjsGetFieldFast`/`ordinary*` as the post-IC fallback (they handle the by-class-name global resolution for null-self-proto arrays). No change to function.zig (slots already allocated).
-**Expected**: prop_read_mono 3.41x -> ~1.0-1.3x; proto_read improves (one-level proto IC); prop_read improves.
-
-### S2 — put_field write IC
-In the put_field arm: thread the same `site_pc`; before `qjsPutFieldFast`, call `property_ic.setObjectDataPropertyForPutFieldFastPath(ctx.runtime, function, site_pc, obj, atom_id, value)`. On true set `value_consumed = true`, return `.done`; on false fall through unchanged. New-property adds (shape transition) are NOT same-shape hits — they bump version and refill next access.
-
-### S3 — global / top-level-lexical stable-cell IC + retire global_lexical_sync
+### S3 — global / top-level-lexical stable-cell IC + retire global_lexical_sync (PENDING)
 The `let g` site lives in `ctx.lexicals` (an Object with a Shape). Add a `cachedGlobalLexicalCellValue` path in `getVar` after `cachedGlobalDataValue`, keyed on `ctx.lexicals.shape_ref` (pointer+version)+atom, caching the lexical **index only** (reuse `ic.Slot`/`installOwnData` against the lexicals object). On hit: deref the cell, run TDZ check (`isUninitialized()` -> ReferenceError), push. Gate on `inactiveGlobalOverlayState`. Then, as the LAST step (own gate run): retire `global_lexical_sync` — delete `frame.global_lexical_sync_*`, `ensureGlobalLexicalSyncSlots` (slot_ops.zig:146), `syncTopLevelGlobalLexicalLocal` (slot_ops.zig:124), the `sync_global_lexical_locals` plumbing, and the frame.deinit cleanup (the single-cell write path from da34bc1 covers writes). If test262 drops, revert just the removal and keep the read IC.
 **Expected**: global_read 4.46x -> ~1.0-1.5x; var-global global_read_loop unchanged.
 

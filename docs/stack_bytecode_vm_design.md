@@ -55,8 +55,10 @@ QuickJS-format bytecode，VM loop 逐 opcode dispatch，并把具体 opcode fami
 - `compute_stack_size` style stack-depth validation in
   `src/bytecode/pipeline/stack_size.zig`。
 - `pc2line_buf` and `source_loc_slots` for diagnostics/backtrace location。
-- `ValueRootFrame` and `FrameRootScope` for explicit VM-root tracing。
-- frame-local ownership teardown through `Frame.deinit` and related snapshots。
+- `ValueRootFrame` for explicit host/boundary value-root tracing (VM running
+  frames no longer use a per-frame root scope; their operand stack/locals/args/
+  var_refs are `FrameSlab`-owned and kept live by refcount-on-push)。
+- frame-local ownership teardown through `Frame.deinit` and the `FrameSlab` carve。
 - property IC slots attached to `Bytecode`。
 - shape/version-guarded own/prototype data-property IC in `property_ic.zig`。
 - `core.OpcodeProfile` counters for opcode time/counts, slow paths and IC events。
