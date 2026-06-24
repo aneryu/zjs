@@ -20,15 +20,19 @@ tax (~2–2.5×) and is **not** a faithful target.
 | inline float64 arith fast path | `a7b7256` | float add/sub/mul/div/mod 3.4–5.1×→2.3–2.5× (+ Math loops) |
 | Array indexOf/includes/lastIndexOf dense scan | `69e2183` | indexOf 13.56×→1.35×, includes 5.81×→0.94× |
 | iterator-result predefined value/done atoms | `9e4029e` | per-step intern dropped (generators/iterators) |
-| instanceof ordinary check (no Descriptor, direct proto walk) | _gating_ | 3.64×→3.39× (residual is broad tax — see note) |
+| instanceof ordinary check (no Descriptor, direct proto walk) | `d3edbc6` | 3.64×→3.39× (residual is broad tax — see note) |
+| string-method resolution → comptime atom-id bitset | `e30ecef` | per-access name+eql chain dropped (charCodeAt 3.63×→3.36×) |
+| **Map/Set for-of result-object-free fast step** | `be06930` | **Map.values 21.22×→1.78×, Set 19.8×→1.81×** |
 
 ## ⏭ Tractable next (bounded, localized — good follow-ups)
 
-- **cloneShape single-block copy** (4.5×; delete / defineProperty attr change /
-  setPrototype). zjs `cloneShape` (shape.zig:492): 2 allocs + `@memset` + element-wise
-  prop copy + hash re-link loop. qjs `js_clone_shape` (quickjs.c:5268): single malloc +
-  memcpy of props AND hash table. Fix: when `bucket_count` matches, `@memcpy` source.props
-  + source.hash_buckets and only re-dup the atoms (skip the `linkPropertyHash` rebuild).
+- **cloneShape single-block copy** (~~4.5×~~): ATTEMPTED + REVERTED. The verbatim-copy
+  fast path (memcpy props + hash, re-dup atoms only) was implemented and verified correct
+  (test262 0/49775), but showed **zero measurable benefit** — the clone is always a tiny
+  fraction of any realistic delete/defineProperty/setProto loop; the 4.5× is dominated by
+  object *creation* (the property adds), not cloneShape. Not worth the branch complexity.
+  Re-attempt only if a profile shows cloneShape as a real bottleneck (e.g. delete-churn on
+  large shared shapes). The faithful target stands (qjs js_clone_shape quickjs.c:5268).
 - **Existence/enumerable-only own-property probe** (hasOwnProperty 2.44×, Object.keys/
   values/entries 1.81×, Object.assign 2.92×). These materialize a full Descriptor
   (DupValue + destroy) per key when only "does it exist" / "is it enumerable" is needed.
@@ -50,12 +54,14 @@ tax (~2–2.5×) and is **not** a faithful target.
 
 ## 🔶 Medium-deep (need new fast-path machinery, but self-contained)
 
-- **Built-in-iterator for-of fast path** (Map.values 21×, Set 19.8×, generator 17.8×,
-  Map entries 6.6×). zjs for-of always allocates a `{value,done}` result object per step
-  (collection.zig:777-838 / iterator_ops.zig:2318). qjs `JS_IteratorNext2` (quickjs.c:16548)
-  calls the iterator's native `next` returning `value` + `*pdone`, no result object. Fix: add
-  `fastMapSetForOfNext` / generator branch alongside `fastArrayForOfNext` (iterator_ops.zig:636),
-  reading the collection/generator state directly. **Highest-ratio remaining cluster.**
+- **Built-in-iterator for-of fast path** — Map/Set key/value SHIPPED (`be06930`,
+  `fastMapSetForOfNext`). REMAINING: (a) Map `entries` / key_value kind (6.6×) still builds a
+  pair array via the generic path — extend the fast step with a reserve-then-build-pair (the
+  pair components are GC-safe via the collection; reserve the 2 stack slots BEFORE the
+  createArray so no GC sits between pair creation and push). (b) **generator for-of** (17.8×):
+  the generator `next` resume builds a result object AND the generator frame is re-allocated
+  per step — the result-object part could get a similar fast step, but the frame realloc is
+  the deep frame frontier. qjs `JS_IteratorNext2` quickjs.c:16548.
 - **Array.from / map / filter / slice fast-array output & source** (Array.from 15.5×,
   map 2.2×, filter 4.0×, slice 3.0×). Output arrays are built with per-element
   `defineOwnProperty(atomFromUInt32(i))` (shape append per element); qjs writes dense fast

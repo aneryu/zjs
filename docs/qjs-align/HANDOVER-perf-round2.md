@@ -1,5 +1,18 @@
 # Handover — qjs-faithful perf alignment round 2 (2026-06-24)
 
+> **2026-06-25 round-3 addendum.** On top of the round-2 commits below, a measurement-driven
+> sweep (`docs/qjs-align/DIVERGENCE-CATALOG.md`, 28 faithful divergences found) shipped **9 more
+> faithful slices**, each gated test262 0/49775 + 1223 + force-GC:
+> `b20d5b4` method-dispatch cascade hoist (`o.m()` 4.43×→2.30×) · `18a2610` lazy
+> function.prototype (closure 5.68×→3.90×) · `40b928f` typeof interned atom (3.45×→2.27×) ·
+> `a7b7256` inline float64 arith fast path (3.4–5.1×→2.3–2.5×) · `69e2183` Array
+> indexOf/includes/lastIndexOf dense scan (indexOf 13.56×→1.35×) · `9e4029e` iterator-result
+> predefined atoms · `d3edbc6` ordinaryHasInstance leaner · `e30ecef` string-method atom
+> bitset · **`be06930` Map/Set for-of result-object-free (21.22×→1.78×)**. One attempt
+> (cloneShape verbatim copy) was implemented, verified, then reverted — correct but zero
+> measurable benefit. Remaining frontiers + corrected tractability estimates are in the
+> CATALOG. **Benchmarking hazard (below) bit hard — always `zig build zjs` before `perf`.**
+
 Branch `qjs-faithful-perf-round2` (linear on top of main `9fc72eb`), 4 commits, each gated
 `test262 0/49775` + `zig build test` 1223 + force-GC 1223:
 
