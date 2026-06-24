@@ -49,8 +49,12 @@ Phase 3  叶子：GC-无关忠实对齐 + 余下赢回退 + global-var 稳定 ce
 - `QJS-FAITHFUL-ALIGN.md`（本文件）— 原则 + 验收门 + 相结构总图 + 各相状态。
 - `docs/qjs-align/` — **仍活跃的待办规格**（Phase 1 的施工蓝图 KEYSTONE + S1–S5 + Phase 2 规格已随 `e8c852b` 落地并退役，留存于 git 历史）：
   - `INLINE-CACHE-PLAN.md` — IC：get/put_field 已落地，剩 S3 global-IC stable-cell + S4 poly/mega。
-  - `GLOBAL-VARREF-PLAN.md` — 大杠杆 global var_ref 多根因（1.85× 已证、33 回归待逐根因攻、v2 patch 留存）。
+  - `GLOBAL-VARREF-PLAN.md` — ✅ 已落地（见 round-2 handover）。
   - `PHASE3-leaves-and-levers.md` — 余下叶子 + 大杠杆登记。
+  - **`HANDOVER-perf-round2.md`（2026-06-24 收口，本轮总入口）** — 4 commit（global var_ref 7×→2.35× · add_loc 融合累加 2.4×→1.3× · 全局绑定即权威 全局==局部）+ 方法论纠偏（对照 qjs 实现抹平偏离、perf 是结果）+ 关键事实（qjs 此机 16 字节非 8、NaN-boxing 是伪命题且预存编译失败）+ 剩余两深前沿。分支 `qjs-faithful-perf-round2`（叠 main 9fc72eb）。
+  - `HANDOVER-global-varref.md` — global var_ref 下沉 + 33 回归 4 阶段修复细节。
+  - `DISPATCH-TAX-FINDINGS.md` — 广谱 dispatch 税定性（结构已对齐；残差=跳转表基址未提升 ~26% + LLVM-vs-gcc op-body ~74%，非忠实可抹平）+ add_loc 融合。
+  - `CALL-MACHINERY-QJS.md` / `FRAME-STRUCTURAL-ALIGN.md` — 帧模型偏离剖析（剩余最大单项，多周/高风险，需先出分步门控计划）。
 
 ---
 
