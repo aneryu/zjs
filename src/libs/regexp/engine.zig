@@ -116,6 +116,7 @@ const BacktrackState = struct {
     pc: usize,
     capture_start: usize,
     capture_len: usize,
+    captures_null: bool,
     stack_start: usize,
 };
 
@@ -152,10 +153,13 @@ const JSContext = struct {
     ) !void {
         if (stack_len > max_stack) return error.BytecodeCorrupt;
         const capture_slots = captureSlotCount(self.capture_count);
+        const captures_null = capturesAllNull(captures, capture_slots);
         const capture_start = self.capture_snapshots.items.len;
         const stack_start = self.stack_snapshots.items.len;
-        try self.capture_snapshots.appendSlice(self.allocator, captures[0..capture_slots]);
-        errdefer self.capture_snapshots.shrinkRetainingCapacity(capture_start);
+        if (!captures_null) {
+            try self.capture_snapshots.appendSlice(self.allocator, captures[0..capture_slots]);
+            errdefer self.capture_snapshots.shrinkRetainingCapacity(capture_start);
+        }
         try self.stack_snapshots.appendSlice(self.allocator, stack[0..stack_len]);
         errdefer self.stack_snapshots.shrinkRetainingCapacity(stack_start);
         const state = BacktrackState{
@@ -165,7 +169,8 @@ const JSContext = struct {
             .cpos = cpos,
             .pc = pc,
             .capture_start = capture_start,
-            .capture_len = capture_slots,
+            .capture_len = if (captures_null) 0 else capture_slots,
+            .captures_null = captures_null,
             .stack_start = stack_start,
         };
         try self.state_stack.append(self.allocator, state);
@@ -192,7 +197,13 @@ const JSContext = struct {
         cpos: *usize,
         restore_captures: bool,
     ) void {
-        if (restore_captures) @memcpy(captures[0..state.capture_len], self.capture_snapshots.items[state.capture_start..][0..state.capture_len]);
+        if (restore_captures) {
+            if (state.captures_null) {
+                @memset(captures[0..captureSlotCount(self.capture_count)], null);
+            } else {
+                @memcpy(captures[0..state.capture_len], self.capture_snapshots.items[state.capture_start..][0..state.capture_len]);
+            }
+        }
         stack_len.* = state.stack_len;
         @memcpy(stack[0..state.stack_len], self.stack_snapshots.items[state.stack_start..][0..state.stack_len]);
         pc.* = state.pc;
@@ -323,6 +334,13 @@ fn initCaptures(captures: *[max_captures * 2]?usize, capture_count: usize) void 
     @memset(captures[0..captureSlotCount(capture_count)], null);
 }
 
+fn capturesAllNull(captures: *const [max_captures * 2]?usize, capture_slots: usize) bool {
+    for (captures[0..capture_slots]) |capture| {
+        if (capture != null) return false;
+    }
+    return true;
+}
+
 const CharRead = struct {
     code_point: u21,
     next: usize,
@@ -386,7 +404,7 @@ pub fn exec(allocator: std.mem.Allocator, bytecode: []const u8, input: Input, st
     };
     defer ctx.deinit();
 
-    if (hasSearchPrefix(bytecode, header)) {
+    if (shouldUseManualSearchLoop(bytecode, header, input, start_index)) {
         return try execSearchLoop(&ctx, bytecode, header, start_index);
     }
 
@@ -429,7 +447,7 @@ pub fn testMatch(allocator: std.mem.Allocator, bytecode: []const u8, input: Inpu
     };
     defer ctx.deinit();
 
-    if (hasSearchPrefix(bytecode, header)) {
+    if (shouldUseManualSearchLoop(bytecode, header, input, start_index)) {
         return try testSearchLoop(&ctx, header, start_index);
     }
 
@@ -895,6 +913,17 @@ fn parseHeader(bytecode: []const u8) !Header {
 
 const search_prefix_len = 11;
 const search_prefix_goto_offset: u32 = @bitCast(@as(i32, -11));
+// QuickJS runs the generated split/any/goto search prefix directly in the VM.
+// Keep short inputs on that path, but use the older explicit loop for long
+// scans until this VM has QuickJS-style capture undo records instead of heavier
+// per-state capture snapshots.
+const manual_search_loop_threshold = 512;
+
+fn shouldUseManualSearchLoop(bytecode: []const u8, header: Header, input: Input, start_index: usize) bool {
+    if (!hasSearchPrefix(bytecode, header)) return false;
+    const input_len = input.len();
+    return input_len > start_index and input_len - start_index > manual_search_loop_threshold;
+}
 
 fn hasSearchPrefix(bytecode: []const u8, header: Header) bool {
     if ((header.flags & flags.sticky) != 0) return false;

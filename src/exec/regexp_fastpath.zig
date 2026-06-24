@@ -100,7 +100,6 @@ const reflectConstructPrototypeVm = object_ops.reflectConstructPrototypeVm;
 const regExpLegacyNoCaptureSliceValue = array_ops.regExpLegacyNoCaptureSliceValue;
 const regExpPrototypeFromGlobal = object_ops.regExpPrototypeFromGlobal;
 const regexpInternalStringValue = string_ops.regexpInternalStringValue;
-const regexpSourceUsesZigPropertyFallback = object_ops.regexpSourceUsesZigPropertyFallback;
 const replaceRegExpLegacySlot = string_ops.replaceRegExpLegacySlot;
 const sameObjectIdentity = object_ops.sameObjectIdentity;
 const setValuePropertyStrict = object_ops.setValuePropertyStrict;
@@ -113,7 +112,6 @@ const simpleClassSequenceAtomMatches = string_ops.simpleClassSequenceAtomMatches
 const simpleClassSequenceMatchPattern = string_ops.simpleClassSequenceMatchPattern;
 const simpleLatin1LiteralPlusLiteralMatch = string_ops.simpleLatin1LiteralPlusLiteralMatch;
 const simpleUnicodeLiteralMatch = string_ops.simpleUnicodeLiteralMatch;
-const simpleUnicodePropertyRunTestFast = object_ops.simpleUnicodePropertyRunTestFast;
 const stringAtomId = string_ops.stringAtomId;
 const stringCodePointAt = string_ops.stringCodePointAt;
 const stringLengthIndex = string_ops.stringLengthIndex;
@@ -374,28 +372,23 @@ pub fn qjsRegExpTestFastNoResult(
         const is_sticky = std.mem.indexOfScalar(u8, flags, 'y') != null;
         if (is_global or is_sticky) return null;
 
-        if (!regexpSourceUsesZigPropertyFallback(borrowed.source, flags)) {
-            if (simpleLatin1LiteralPlusLiteralMatch(borrowed.source, flags, string_value)) |matched| {
-                return matched;
-            }
-            if (nativeFunctionMatcherUnicodeClassAsciiResult(borrowed.source, flags, string_value, 0)) |matched| {
-                return matched;
-            }
-            const full_unicode = regExpFlagsContain(flags, 'u') or regExpFlagsContain(flags, 'v');
-            if (full_unicode and parseUnicodeAstralSpecialSource(borrowed.source) != null) {
-                return unicodeAstralSpecialMatch(borrowed.source, string_value, 0, false, true) != null;
-            }
-            if (full_unicode and std.mem.eql(u8, borrowed.source, "^\\S$")) {
-                return anchoredSingleNonWhitespaceMatches(string_value, true);
-            }
-            if (full_unicode and singleLowSurrogateLiteralSource(borrowed.source) != null) {
-                return unicodeLowSurrogateLiteralMatch(borrowed.source, string_value, 0, false) != null;
-            }
-            if (full_unicode) {
-                if (simpleUnicodePropertyRunTestFast(borrowed.source, flags, string_value)) |matched| {
-                    return matched;
-                }
-            }
+        if (simpleLatin1LiteralPlusLiteralMatch(borrowed.source, flags, string_value)) |matched| {
+            return matched;
+        }
+        if (nativeFunctionMatcherUnicodeClassAsciiResult(borrowed.source, flags, string_value, 0)) |matched| {
+            return matched;
+        }
+        const full_unicode = regExpFlagsContain(flags, 'u') or regExpFlagsContain(flags, 'v');
+        if (full_unicode and parseUnicodeAstralSpecialSource(borrowed.source) != null) {
+            return unicodeAstralSpecialMatch(borrowed.source, string_value, 0, false, true) != null;
+        }
+        if (full_unicode and std.mem.eql(u8, borrowed.source, "^\\S$")) {
+            return anchoredSingleNonWhitespaceMatches(string_value, true);
+        }
+        if (full_unicode and singleLowSurrogateLiteralSource(borrowed.source) != null) {
+            return unicodeLowSurrogateLiteralMatch(borrowed.source, string_value, 0, false) != null;
+        }
+        if (!full_unicode or !sourceContainsUnicodePropertyEscape(borrowed.source)) {
             if (simpleClassEscapeTestFast(borrowed.source, flags, string_value)) |matched| {
                 return matched;
             }
@@ -433,7 +426,6 @@ pub fn qjsRegExpTestFastNoResult(
     const is_global = std.mem.indexOfScalar(u8, flags, 'g') != null;
     const is_sticky = std.mem.indexOfScalar(u8, flags, 'y') != null;
     if (is_global or is_sticky) return null;
-    if (regexpSourceUsesZigPropertyFallback(borrowed.source, flags)) return null;
     if (!bytesAreAscii(borrowed.source)) return null;
 
     if (regexp_object.regexpCompiledBytecode().len == 0) {
@@ -456,6 +448,19 @@ pub fn simpleClassEscapeTestFast(source: []const u8, flags: []const u8, string_v
     if (!isSimpleStringClassEscapeSource(source)) return null;
     if (regExpFlagsContain(flags, 'i')) return null;
     return findStringClassEscapeMatch(string_value, source, 0) != null;
+}
+
+fn sourceContainsUnicodePropertyEscape(source: []const u8) bool {
+    var index: usize = 0;
+    while (index + 2 < source.len) : (index += 1) {
+        if (source[index] == '\\' and
+            (source[index + 1] == 'p' or source[index + 1] == 'P') and
+            source[index + 2] == '{')
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 pub fn simpleAsciiLiteralTestFast(source: []const u8, flags: []const u8, string_value: core.JSValue) ?bool {
@@ -1007,9 +1012,6 @@ pub fn qjsRegExpExecResult(
         return core.JSValue.nullValue();
     }
 
-    if (regexpSourceUsesZigPropertyFallback(source.items, flags.items)) {
-        return try qjsRegExpExecPropertyFallback(ctx, output, global, regexp_value, source.items, flags.items, string_value, use_last_index, is_global, is_sticky, has_indices, input_len, start_index, caller_function, caller_frame);
-    }
     const full_unicode = regExpFlagsContain(flags.items, 'u') or regExpFlagsContain(flags.items, 'v');
     if (nativeFunctionMatcherUnicodeClassAsciiResult(source.items, flags.items, string_value, start_index)) |matched| {
         if (!matched) return core.JSValue.nullValue();

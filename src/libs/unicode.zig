@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const data = @import("unicode/data.zig");
+const names = @import("unicode/names.zig");
 
 pub const emoji = @import("unicode/emoji.zig");
 pub const emoji_data = @import("unicode/emoji_data.zig");
@@ -422,7 +423,7 @@ pub fn propertyRangesAlloc(
         try generalCategory(allocator, value)
     else if (value.len == 0) blk: {
         break :blk generalCategory(allocator, name) catch |err| switch (err) {
-            error.InvalidProperty => try unicodeProperty(allocator, name),
+            error.InvalidProperty => try unicodeProp(allocator, name),
             else => return err,
         };
     } else return error.InvalidProperty;
@@ -1127,47 +1128,12 @@ fn pointBelongsToBoundary(ranges: []const CodePointRange, point: u21) bool {
     return false;
 }
 
-fn findName(name_table: []const u8, name: []const u8) ?usize {
-    var p: usize = 0;
-    var pos: usize = 0;
-    while (p < name_table.len and name_table[p] != 0) : (pos += 1) {
-        while (p < name_table.len) {
-            const start = p;
-            while (p < name_table.len and name_table[p] != 0 and name_table[p] != ',') : (p += 1) {}
-            if (std.mem.eql(u8, name_table[start..p], name)) return pos;
-            if (p >= name_table.len or name_table[p] == 0) break;
-            p += 1;
-        }
-        while (p < name_table.len and name_table[p] != 0) : (p += 1) {}
-        if (p < name_table.len) p += 1;
-    }
-    return null;
-}
-
-fn gcMask(comptime name: []const u8) u32 {
-    return @as(u32, 1) << @intCast(@field(data.GC, name));
-}
-
 fn generalCategory(allocator: std.mem.Allocator, name: []const u8) UnicodeError!RangeSet {
-    const gc_idx = findName(data.unicode_gc_name_table[0..], name) orelse return error.InvalidProperty;
-    const gc_mask_table = [_]u32{
-        gcMask("Lu") | gcMask("Ll") | gcMask("Lt"),
-        gcMask("Lu") | gcMask("Ll") | gcMask("Lt") | gcMask("Lm") | gcMask("Lo"),
-        gcMask("Mn") | gcMask("Mc") | gcMask("Me"),
-        gcMask("Nd") | gcMask("Nl") | gcMask("No"),
-        gcMask("Sm") | gcMask("Sc") | gcMask("Sk") | gcMask("So"),
-        gcMask("Pc") | gcMask("Pd") | gcMask("Ps") | gcMask("Pe") | gcMask("Pi") | gcMask("Pf") | gcMask("Po"),
-        gcMask("Zs") | gcMask("Zl") | gcMask("Zp"),
-        gcMask("Cc") | gcMask("Cf") | gcMask("Cs") | gcMask("Co") | gcMask("Cn"),
-    };
-    const mask = if (gc_idx <= data.GC.Co)
-        @as(u32, 1) << @intCast(gc_idx)
-    else
-        gc_mask_table[gc_idx - data.GC.LC];
-    return try generalCategoryMask(allocator, mask);
+    const gc_idx = names.gcIndex(name) orelse return error.InvalidProperty;
+    return try unicodeGeneralCategory1(allocator, names.gcMaskByIndex(gc_idx));
 }
 
-fn generalCategoryMask(allocator: std.mem.Allocator, gc_mask: u32) std.mem.Allocator.Error!RangeSet {
+fn unicodeGeneralCategory1(allocator: std.mem.Allocator, gc_mask: u32) std.mem.Allocator.Error!RangeSet {
     var cr = RangeSet.init(allocator);
     errdefer cr.deinit();
     var p: usize = 0;
@@ -1195,12 +1161,12 @@ fn generalCategoryMask(allocator: std.mem.Allocator, gc_mask: u32) std.mem.Alloc
         var c0 = c;
         c += n + 1;
         if (v == 31) {
-            const upper_lower = gc_mask & (gcMask("Lu") | gcMask("Ll"));
+            const upper_lower = gc_mask & (names.gcBit("Lu") | names.gcBit("Ll"));
             if (upper_lower != 0) {
-                if (upper_lower == (gcMask("Lu") | gcMask("Ll"))) {
+                if (upper_lower == (names.gcBit("Lu") | names.gcBit("Ll"))) {
                     try cr.addInterval(c0, c);
                 } else {
-                    if ((gc_mask & gcMask("Ll")) != 0) c0 += 1;
+                    if ((gc_mask & names.gcBit("Ll")) != 0) c0 += 1;
                     while (c0 < c) : (c0 += 2) try cr.addInterval(c0, c0 + 1);
                 }
             }
@@ -1211,7 +1177,7 @@ fn generalCategoryMask(allocator: std.mem.Allocator, gc_mask: u32) std.mem.Alloc
     return cr;
 }
 
-fn propTableRanges(allocator: std.mem.Allocator, prop_idx: usize) UnicodeError!RangeSet {
+fn unicodeProp1(allocator: std.mem.Allocator, prop_idx: usize) UnicodeError!RangeSet {
     if (prop_idx >= data.unicode_prop_table.len) return error.InvalidProperty;
     const table = data.unicode_prop_table[prop_idx];
     var cr = RangeSet.init(allocator);
@@ -1248,7 +1214,17 @@ const CASE_U = 1 << 0;
 const CASE_L = 1 << 1;
 const CASE_F = 1 << 2;
 
-fn unicodeCaseRanges(allocator: std.mem.Allocator, case_mask: u32) std.mem.Allocator.Error!RangeSet {
+const PropOp = union(enum) {
+    gc: u32,
+    prop: usize,
+    case_mask: u32,
+    op_union,
+    op_inter,
+    op_xor,
+    op_invert,
+};
+
+fn unicodeCase1(allocator: std.mem.Allocator, case_mask: u32) std.mem.Allocator.Error!RangeSet {
     var cr = RangeSet.init(allocator);
     errdefer cr.deinit();
     if (case_mask == 0) return cr;
@@ -1292,9 +1268,62 @@ fn unicodeCaseRanges(allocator: std.mem.Allocator, case_mask: u32) std.mem.Alloc
     return cr;
 }
 
-fn unicodeProperty(allocator: std.mem.Allocator, name: []const u8) UnicodeError!RangeSet {
-    const found = findName(data.unicode_prop_name_table[0..], name) orelse return error.InvalidProperty;
-    const prop_idx = found + data.Prop.ASCII_Hex_Digit;
+fn unicodePropOps(allocator: std.mem.Allocator, comptime ops: []const PropOp) UnicodeError!RangeSet {
+    var stack: [4]RangeSet = undefined;
+    var stack_len: usize = 0;
+    errdefer {
+        var i: usize = 0;
+        while (i < stack_len) : (i += 1) stack[i].deinit();
+    }
+
+    inline for (ops) |op| {
+        switch (op) {
+            .gc => |mask| {
+                std.debug.assert(stack_len < stack.len);
+                stack[stack_len] = try unicodeGeneralCategory1(allocator, mask);
+                stack_len += 1;
+            },
+            .prop => |prop_idx| {
+                std.debug.assert(stack_len < stack.len);
+                stack[stack_len] = try unicodeProp1(allocator, prop_idx);
+                stack_len += 1;
+            },
+            .case_mask => |mask| {
+                std.debug.assert(stack_len < stack.len);
+                stack[stack_len] = try unicodeCase1(allocator, mask);
+                stack_len += 1;
+            },
+            .op_union => {
+                std.debug.assert(stack_len >= 2);
+                try stack[stack_len - 2].unionWith(&stack[stack_len - 1]);
+                stack[stack_len - 1].deinit();
+                stack_len -= 1;
+            },
+            .op_inter => {
+                std.debug.assert(stack_len >= 2);
+                try stack[stack_len - 2].intersectWith(&stack[stack_len - 1]);
+                stack[stack_len - 1].deinit();
+                stack_len -= 1;
+            },
+            .op_xor => {
+                std.debug.assert(stack_len >= 2);
+                try stack[stack_len - 2].xorWith(&stack[stack_len - 1]);
+                stack[stack_len - 1].deinit();
+                stack_len -= 1;
+            },
+            .op_invert => {
+                std.debug.assert(stack_len >= 1);
+                try stack[stack_len - 1].invert();
+            },
+        }
+    }
+
+    std.debug.assert(stack_len == 1);
+    return stack[0];
+}
+
+fn unicodeProp(allocator: std.mem.Allocator, name: []const u8) UnicodeError!RangeSet {
+    const prop_idx = names.propIndex(name) orelse return error.InvalidProperty;
 
     switch (prop_idx) {
         data.Prop.ASCII => {
@@ -1309,119 +1338,107 @@ fn unicodeProperty(allocator: std.mem.Allocator, name: []const u8) UnicodeError!
             try cr.addInterval(0, unicode_limit);
             return cr;
         },
-        data.Prop.Assigned => {
-            var cr = try generalCategoryMask(allocator, gcMask("Cn"));
-            errdefer cr.deinit();
-            try cr.invert();
-            return cr;
-        },
-        data.Prop.Math => return try unionGcProp(allocator, gcMask("Sm"), data.Prop.Other_Math),
-        data.Prop.Lowercase => return try unionGcProp(allocator, gcMask("Ll"), data.Prop.Other_Lowercase),
-        data.Prop.Uppercase => return try unionGcProp(allocator, gcMask("Lu"), data.Prop.Other_Uppercase),
-        data.Prop.Cased => {
-            var cr = try generalCategoryMask(allocator, gcMask("Lu") | gcMask("Ll") | gcMask("Lt"));
-            errdefer cr.deinit();
-            var upper = try propTableRanges(allocator, data.Prop.Other_Uppercase);
-            defer upper.deinit();
-            try cr.unionWith(&upper);
-            var lower = try propTableRanges(allocator, data.Prop.Other_Lowercase);
-            defer lower.deinit();
-            try cr.unionWith(&lower);
-            return cr;
-        },
-        data.Prop.Alphabetic => {
-            var cr = try generalCategoryMask(allocator, gcMask("Lu") | gcMask("Ll") | gcMask("Lt") | gcMask("Lm") | gcMask("Lo") | gcMask("Nl"));
-            errdefer cr.deinit();
-            var upper = try propTableRanges(allocator, data.Prop.Other_Uppercase);
-            defer upper.deinit();
-            try cr.unionWith(&upper);
-            var lower = try propTableRanges(allocator, data.Prop.Other_Lowercase);
-            defer lower.deinit();
-            try cr.unionWith(&lower);
-            var alpha = try propTableRanges(allocator, data.Prop.Other_Alphabetic);
-            defer alpha.deinit();
-            try cr.unionWith(&alpha);
-            return cr;
-        },
-        data.Prop.Grapheme_Base => {
-            var cr = try generalCategoryMask(allocator, gcMask("Cc") | gcMask("Cf") | gcMask("Cs") | gcMask("Co") | gcMask("Cn") | gcMask("Zl") | gcMask("Zp") | gcMask("Me") | gcMask("Mn"));
-            errdefer cr.deinit();
-            var other = try propTableRanges(allocator, data.Prop.Other_Grapheme_Extend);
-            defer other.deinit();
-            try cr.unionWith(&other);
-            try cr.invert();
-            return cr;
-        },
-        data.Prop.Grapheme_Extend => return try unionGcProp(allocator, gcMask("Me") | gcMask("Mn"), data.Prop.Other_Grapheme_Extend),
-        data.Prop.XID_Start => return try xidProperty(allocator, true),
-        data.Prop.XID_Continue => return try xidProperty(allocator, false),
-        data.Prop.Changes_When_Uppercased => return try unicodeCaseRanges(allocator, CASE_U),
-        data.Prop.Changes_When_Lowercased => return try unicodeCaseRanges(allocator, CASE_L),
-        data.Prop.Changes_When_Casemapped => return try unicodeCaseRanges(allocator, CASE_U | CASE_L | CASE_F),
-        data.Prop.Changes_When_Titlecased => return try xorCaseProp(allocator, CASE_U, data.Prop.Changes_When_Titlecased1),
-        data.Prop.Changes_When_Casefolded => return try xorCaseProp(allocator, CASE_F, data.Prop.Changes_When_Casefolded1),
-        data.Prop.Changes_When_NFKC_Casefolded => return try xorCaseProp(allocator, CASE_F, data.Prop.Changes_When_NFKC_Casefolded1),
-        data.Prop.ID_Continue => {
-            var cr = try propTableRanges(allocator, data.Prop.ID_Start);
-            errdefer cr.deinit();
-            var cont = try propTableRanges(allocator, data.Prop.ID_Continue1);
-            defer cont.deinit();
-            try cr.xorWith(&cont);
-            return cr;
-        },
-        else => return try propTableRanges(allocator, prop_idx),
+        data.Prop.Assigned => return try unicodePropOps(allocator, &.{
+            .{ .gc = names.gcBit("Cn") },
+            .op_invert,
+        }),
+        data.Prop.Math => return try unicodePropOps(allocator, &.{
+            .{ .gc = names.gcBit("Sm") },
+            .{ .prop = data.Prop.Other_Math },
+            .op_union,
+        }),
+        data.Prop.Lowercase => return try unicodePropOps(allocator, &.{
+            .{ .gc = names.gcBit("Ll") },
+            .{ .prop = data.Prop.Other_Lowercase },
+            .op_union,
+        }),
+        data.Prop.Uppercase => return try unicodePropOps(allocator, &.{
+            .{ .gc = names.gcBit("Lu") },
+            .{ .prop = data.Prop.Other_Uppercase },
+            .op_union,
+        }),
+        data.Prop.Cased => return try unicodePropOps(allocator, &.{
+            .{ .gc = names.gcBit("Lu") | names.gcBit("Ll") | names.gcBit("Lt") },
+            .{ .prop = data.Prop.Other_Uppercase },
+            .op_union,
+            .{ .prop = data.Prop.Other_Lowercase },
+            .op_union,
+        }),
+        data.Prop.Alphabetic => return try unicodePropOps(allocator, &.{
+            .{ .gc = names.gcBit("Lu") | names.gcBit("Ll") | names.gcBit("Lt") | names.gcBit("Lm") | names.gcBit("Lo") | names.gcBit("Nl") },
+            .{ .prop = data.Prop.Other_Uppercase },
+            .op_union,
+            .{ .prop = data.Prop.Other_Lowercase },
+            .op_union,
+            .{ .prop = data.Prop.Other_Alphabetic },
+            .op_union,
+        }),
+        data.Prop.Grapheme_Base => return try unicodePropOps(allocator, &.{
+            .{ .gc = names.gcBit("Cc") | names.gcBit("Cf") | names.gcBit("Cs") | names.gcBit("Co") | names.gcBit("Cn") | names.gcBit("Zl") | names.gcBit("Zp") | names.gcBit("Me") | names.gcBit("Mn") },
+            .{ .prop = data.Prop.Other_Grapheme_Extend },
+            .op_union,
+            .op_invert,
+        }),
+        data.Prop.Grapheme_Extend => return try unicodePropOps(allocator, &.{
+            .{ .gc = names.gcBit("Me") | names.gcBit("Mn") },
+            .{ .prop = data.Prop.Other_Grapheme_Extend },
+            .op_union,
+        }),
+        data.Prop.XID_Start => return try unicodePropOps(allocator, &.{
+            .{ .gc = names.gcBit("Lu") | names.gcBit("Ll") | names.gcBit("Lt") | names.gcBit("Lm") | names.gcBit("Lo") | names.gcBit("Nl") },
+            .{ .prop = data.Prop.Other_ID_Start },
+            .op_union,
+            .{ .prop = data.Prop.Pattern_Syntax },
+            .{ .prop = data.Prop.Pattern_White_Space },
+            .op_union,
+            .{ .prop = data.Prop.XID_Start1 },
+            .op_union,
+            .op_invert,
+            .op_inter,
+        }),
+        data.Prop.XID_Continue => return try unicodePropOps(allocator, &.{
+            .{ .gc = names.gcBit("Lu") | names.gcBit("Ll") | names.gcBit("Lt") | names.gcBit("Lm") | names.gcBit("Lo") | names.gcBit("Nl") | names.gcBit("Mn") | names.gcBit("Mc") | names.gcBit("Nd") | names.gcBit("Pc") },
+            .{ .prop = data.Prop.Other_ID_Start },
+            .op_union,
+            .{ .prop = data.Prop.Other_ID_Continue },
+            .op_union,
+            .{ .prop = data.Prop.Pattern_Syntax },
+            .{ .prop = data.Prop.Pattern_White_Space },
+            .op_union,
+            .{ .prop = data.Prop.XID_Continue1 },
+            .op_union,
+            .op_invert,
+            .op_inter,
+        }),
+        data.Prop.Changes_When_Uppercased => return try unicodeCase1(allocator, CASE_U),
+        data.Prop.Changes_When_Lowercased => return try unicodeCase1(allocator, CASE_L),
+        data.Prop.Changes_When_Casemapped => return try unicodeCase1(allocator, CASE_U | CASE_L | CASE_F),
+        data.Prop.Changes_When_Titlecased => return try unicodePropOps(allocator, &.{
+            .{ .case_mask = CASE_U },
+            .{ .prop = data.Prop.Changes_When_Titlecased1 },
+            .op_xor,
+        }),
+        data.Prop.Changes_When_Casefolded => return try unicodePropOps(allocator, &.{
+            .{ .case_mask = CASE_F },
+            .{ .prop = data.Prop.Changes_When_Casefolded1 },
+            .op_xor,
+        }),
+        data.Prop.Changes_When_NFKC_Casefolded => return try unicodePropOps(allocator, &.{
+            .{ .case_mask = CASE_F },
+            .{ .prop = data.Prop.Changes_When_NFKC_Casefolded1 },
+            .op_xor,
+        }),
+        data.Prop.ID_Continue => return try unicodePropOps(allocator, &.{
+            .{ .prop = data.Prop.ID_Start },
+            .{ .prop = data.Prop.ID_Continue1 },
+            .op_xor,
+        }),
+        else => return try unicodeProp1(allocator, prop_idx),
     }
-}
-
-fn unionGcProp(allocator: std.mem.Allocator, mask: u32, prop_idx: usize) UnicodeError!RangeSet {
-    var cr = try generalCategoryMask(allocator, mask);
-    errdefer cr.deinit();
-    var prop = try propTableRanges(allocator, prop_idx);
-    defer prop.deinit();
-    try cr.unionWith(&prop);
-    return cr;
-}
-
-fn xidProperty(allocator: std.mem.Allocator, start: bool) UnicodeError!RangeSet {
-    const base_mask = if (start)
-        gcMask("Lu") | gcMask("Ll") | gcMask("Lt") | gcMask("Lm") | gcMask("Lo") | gcMask("Nl")
-    else
-        gcMask("Lu") | gcMask("Ll") | gcMask("Lt") | gcMask("Lm") | gcMask("Lo") | gcMask("Nl") | gcMask("Mn") | gcMask("Mc") | gcMask("Nd") | gcMask("Pc");
-    var allowed = try generalCategoryMask(allocator, base_mask);
-    errdefer allowed.deinit();
-    var other_start = try propTableRanges(allocator, data.Prop.Other_ID_Start);
-    defer other_start.deinit();
-    try allowed.unionWith(&other_start);
-    if (!start) {
-        var other_continue = try propTableRanges(allocator, data.Prop.Other_ID_Continue);
-        defer other_continue.deinit();
-        try allowed.unionWith(&other_continue);
-    }
-
-    var excluded = try propTableRanges(allocator, data.Prop.Pattern_Syntax);
-    defer excluded.deinit();
-    var pattern_ws = try propTableRanges(allocator, data.Prop.Pattern_White_Space);
-    defer pattern_ws.deinit();
-    try excluded.unionWith(&pattern_ws);
-    var xid_extra = try propTableRanges(allocator, if (start) data.Prop.XID_Start1 else data.Prop.XID_Continue1);
-    defer xid_extra.deinit();
-    try excluded.unionWith(&xid_extra);
-    try excluded.invert();
-    try allowed.intersectWith(&excluded);
-    return allowed;
-}
-
-fn xorCaseProp(allocator: std.mem.Allocator, case_mask: u32, prop_idx: usize) UnicodeError!RangeSet {
-    var cr = try unicodeCaseRanges(allocator, case_mask);
-    errdefer cr.deinit();
-    var prop = try propTableRanges(allocator, prop_idx);
-    defer prop.deinit();
-    try cr.xorWith(&prop);
-    return cr;
 }
 
 fn scriptRanges(allocator: std.mem.Allocator, script_name: []const u8, is_ext: bool) UnicodeError!RangeSet {
-    const script_idx = scriptIndex(script_name) orelse return error.InvalidProperty;
+    const script_idx = names.scriptIndex(script_name) orelse return error.InvalidProperty;
     const is_common = script_idx == data.Script.Common or script_idx == data.Script.Inherited;
 
     var base = RangeSet.init(allocator);
@@ -1442,16 +1459,15 @@ fn scriptRanges(allocator: std.mem.Allocator, script_name: []const u8, is_ext: b
             p += 2;
             n += 96 + (1 << 12);
         }
-        const v: u32 = if (typ == 0) 0 else blk: {
-            const value = data.unicode_script_table[p];
-            p += 1;
-            break :blk value;
-        };
         const c1 = c + n + 1;
-        if (v == script_idx) try base.addInterval(c, c1);
+        if (typ != 0) {
+            const v = data.unicode_script_table[p];
+            p += 1;
+            if (v == script_idx or script_idx == data.Script.Unknown) try base.addInterval(c, c1);
+        }
         c = c1;
     }
-    if (script_idx == data.Script.Unknown) try base.addInterval(c, unicode_limit);
+    if (script_idx == data.Script.Unknown) try base.invert();
 
     if (!is_ext) return base;
 
@@ -1497,12 +1513,6 @@ fn scriptRanges(allocator: std.mem.Allocator, script_name: []const u8, is_ext: b
         try base.unionWith(&ext);
     }
     return base;
-}
-
-fn scriptIndex(script_name: []const u8) ?u32 {
-    if (std.mem.eql(u8, script_name, "Unknown") or std.mem.eql(u8, script_name, "Zzzz")) return data.Script.Unknown;
-    const found = findName(data.unicode_script_name_table[0..], script_name) orelse return null;
-    return @intCast(found + data.Script.Unknown + 1);
 }
 
 test "unicode functionality" {
@@ -1558,6 +1568,42 @@ test "unicode functionality" {
     try std.testing.expect(rangesContain(unknown_script_ext_ranges, 0x0e01f0));
     try std.testing.expect(rangesContain(unknown_script_ext_ranges, 0x10ffff));
     try std.testing.expect(!rangesContain(unknown_script_ext_ranges, 0x03c0));
+}
+
+test "regexp unicode shortcut matches range builder boundaries" {
+    const expressions = [_][]const u8{
+        "ASCII",
+        "Any",
+        "Assigned",
+        "Math",
+        "Lowercase",
+        "Uppercase",
+        "Cased",
+        "Alphabetic",
+        "Grapheme_Base",
+        "Grapheme_Extend",
+        "ID_Start",
+        "ID_Continue",
+        "XID_Start",
+        "XID_Continue",
+        "Changes_When_Uppercased",
+        "Changes_When_Lowercased",
+        "Changes_When_Casemapped",
+        "Changes_When_Titlecased",
+        "Changes_When_Casefolded",
+        "Changes_When_NFKC_Casefolded",
+        "gc=Lu",
+        "General_Category=L",
+        "Script=Greek",
+        "Script_Extensions=Greek",
+        "Script=Unknown",
+        "Script_Extensions=Unknown",
+        "Script_Extensions=Inherited",
+    };
+
+    for (expressions) |expr| {
+        try expectRegexpShortcutMatchesRangeBuilder(expr);
+    }
 }
 
 test "unicode surrogate range helpers cover boundaries" {
@@ -1830,4 +1876,34 @@ fn rangesContain(ranges: []const CodePointRange, code_point: u21) bool {
         if (code_point >= range.lo and code_point < range.hi) return true;
     }
     return false;
+}
+
+fn expectRegexpShortcutMatchesRangeBuilder(expr: []const u8) !void {
+    const ranges = try propertyRangesAlloc(std.testing.allocator, expr, false);
+    defer std.testing.allocator.free(ranges);
+
+    try expectRegexpShortcutPointMatchesRanges(expr, ranges, 0);
+    try expectRegexpShortcutPointMatchesRanges(expr, ranges, 0x2e2f);
+    try expectRegexpShortcutPointMatchesRanges(expr, ranges, max_code_point);
+
+    for (ranges) |range| {
+        if (range.lo > 0) try expectRegexpShortcutPointMatchesRanges(expr, ranges, range.lo - 1);
+        try expectRegexpShortcutPointMatchesRanges(expr, ranges, range.lo);
+        if (range.hi > 0) try expectRegexpShortcutPointMatchesRanges(expr, ranges, range.hi - 1);
+        if (range.hi <= max_code_point) try expectRegexpShortcutPointMatchesRanges(expr, ranges, range.hi);
+    }
+}
+
+fn expectRegexpShortcutPointMatchesRanges(expr: []const u8, ranges: []const CodePointRange, code_point: u21) !void {
+    const actual = regexp_properties.isUnicodePropertyMatches(code_point, expr);
+    const expected = rangesContain(ranges, code_point);
+    if (actual != expected) {
+        std.debug.print("regexp unicode shortcut mismatch expr={s} code_point=0x{x} actual={} expected={}\n", .{
+            expr,
+            code_point,
+            actual,
+            expected,
+        });
+        return error.TestUnexpectedResult;
+    }
 }

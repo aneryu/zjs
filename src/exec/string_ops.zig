@@ -31,7 +31,6 @@ const SimpleClassAlternationPattern = regexp_fastpath.SimpleClassAlternationPatt
 const SimpleClassPredicate = regexp_fastpath.SimpleClassPredicate;
 const SimpleClassSequenceAtom = regexp_fastpath.SimpleClassSequenceAtom;
 const SimpleClassSequencePattern = regexp_fastpath.SimpleClassSequencePattern;
-const UnicodePropertyRunPattern = object_ops.UnicodePropertyRunPattern;
 const ValueSliceRoot = array_ops.ValueSliceRoot;
 const anchoredBinaryPropertyName = object_ops.anchoredBinaryPropertyName;
 const appendBacktraceFunctionName = error_stack_ops.appendBacktraceFunctionName;
@@ -68,7 +67,6 @@ const defineNativeDataMethod = builtin_glue.defineNativeDataMethod;
 const defineRegExpGroupsProperty = object_ops.defineRegExpGroupsProperty;
 const defineRegExpGroupsPropertyFromValue = object_ops.defineRegExpGroupsPropertyFromValue;
 const errorStackTraceLimit = error_stack_ops.errorStackTraceLimit;
-const exactScriptExtensionsAliasTarget = regexp_properties.exactScriptExtensionsAliasTarget;
 const getIteratorMethod = call_runtime.getIteratorMethod;
 const getValueProperty = object_ops.getValueProperty;
 const hasValueProperty = object_ops.hasValueProperty;
@@ -2279,53 +2277,6 @@ pub fn findPropertyEscapeMatch(source: []const u8, string_value: core.JSValue, s
         },
     }
     return null;
-}
-
-pub fn unicodePropertyRunCodePointMatches(pattern: UnicodePropertyRunPattern, code_point: u21) bool {
-    const matched = switch (pattern.predicate) {
-        .generic => binaryPropertyCodePointMatches(pattern.name, code_point),
-        .greek_script => isUnicodeGreekScriptCodePoint(code_point),
-    };
-    return matched == pattern.positive;
-}
-
-pub fn isUnicodeGreekScriptCodePoint(code_point: u21) bool {
-    return code_point == 0x00037f or
-        code_point == 0x000384 or
-        code_point == 0x000386 or
-        code_point == 0x00038c or
-        code_point == 0x001dbf or
-        code_point == 0x001f59 or
-        code_point == 0x001f5b or
-        code_point == 0x001f5d or
-        code_point == 0x002126 or
-        code_point == 0x00ab65 or
-        code_point == 0x0101a0 or
-        (code_point >= 0x000370 and code_point <= 0x000373) or
-        (code_point >= 0x000375 and code_point <= 0x000377) or
-        (code_point >= 0x00037a and code_point <= 0x00037d) or
-        (code_point >= 0x000388 and code_point <= 0x00038a) or
-        (code_point >= 0x00038e and code_point <= 0x0003a1) or
-        (code_point >= 0x0003a3 and code_point <= 0x0003e1) or
-        (code_point >= 0x0003f0 and code_point <= 0x0003ff) or
-        (code_point >= 0x001d26 and code_point <= 0x001d2a) or
-        (code_point >= 0x001d5d and code_point <= 0x001d61) or
-        (code_point >= 0x001d66 and code_point <= 0x001d6a) or
-        (code_point >= 0x001f00 and code_point <= 0x001f15) or
-        (code_point >= 0x001f18 and code_point <= 0x001f1d) or
-        (code_point >= 0x001f20 and code_point <= 0x001f45) or
-        (code_point >= 0x001f48 and code_point <= 0x001f4d) or
-        (code_point >= 0x001f50 and code_point <= 0x001f57) or
-        (code_point >= 0x001f5f and code_point <= 0x001f7d) or
-        (code_point >= 0x001f80 and code_point <= 0x001fb4) or
-        (code_point >= 0x001fb6 and code_point <= 0x001fc4) or
-        (code_point >= 0x001fc6 and code_point <= 0x001fd3) or
-        (code_point >= 0x001fd6 and code_point <= 0x001fdb) or
-        (code_point >= 0x001fdd and code_point <= 0x001fef) or
-        (code_point >= 0x001ff2 and code_point <= 0x001ff4) or
-        (code_point >= 0x001ff6 and code_point <= 0x001ffe) or
-        (code_point >= 0x010140 and code_point <= 0x01018e) or
-        (code_point >= 0x01d200 and code_point <= 0x01d245);
 }
 
 pub fn findUnicodePropertyOnlyClassMatch(source: []const u8, string_value: core.JSValue, start_index: usize, sticky: bool) ?RegExpMatch {
@@ -4908,21 +4859,8 @@ pub fn isLineTerminatorUnit(unit: u16) bool {
     return unicode_lib.isEcmaLineTerminatorUnit(unit);
 }
 
-// --- Residual RegExp support helpers moved to regexp_fastpath.zig ---
-
 pub fn isEcmaWhitespaceOrLineTerminator(unit: u16) bool {
     return unicode_lib.isEcmaWhitespaceOrLineTerminatorUnit(unit);
-}
-
-pub fn isUnknownScriptName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "Script=Unknown") or
-        std.mem.eql(u8, name, "Script=Zzzz") or
-        std.mem.eql(u8, name, "sc=Unknown") or
-        std.mem.eql(u8, name, "sc=Zzzz") or
-        std.mem.eql(u8, name, "Script_Extensions=Unknown") or
-        std.mem.eql(u8, name, "Script_Extensions=Zzzz") or
-        std.mem.eql(u8, name, "scx=Unknown") or
-        std.mem.eql(u8, name, "scx=Zzzz");
 }
 
 pub fn isAsciiDigitUnit(unit: u16) bool {
