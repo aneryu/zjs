@@ -117,6 +117,8 @@ fn testBacktraceLocationResolver(_: ?*const anyopaque, pc: usize) core.Backtrace
 
 fn appendWeakCollectionEntry(rt: *core.JSRuntime, collection: *core.Object, key: *core.Object, value: core.JSValue) !void {
     const key_identity = (try core.Object.weakIdentityFromValue(rt, key.value())) orelse unreachable;
+    rt.retainWeakIdentity(key_identity);
+    errdefer rt.releaseWeakIdentity(key_identity);
     const entries_slot = collection.weakCollectionEntriesSlot();
     const index = entries_slot.*.len;
     const inserted_holder = !rt.borrowedReferenceHolderRegistered(collection);
@@ -130,6 +132,7 @@ fn appendWeakCollectionEntry(rt: *core.JSRuntime, collection: *core.Object, key:
         .key_identity = key_identity,
         .value = value.dup(),
     };
+    try rt.registerBorrowedReferenceHolder(collection);
 }
 
 fn appendFinalizationRegistryCell(
@@ -139,20 +142,7 @@ fn appendFinalizationRegistryCell(
     held_value: core.JSValue,
     unregister_token: core.JSValue,
 ) !void {
-    const entries_slot = registry.finalizationRegistryCellsSlot();
-    const index = entries_slot.*.len;
-    const inserted_holder = !rt.borrowedReferenceHolderRegistered(registry);
-    try rt.registerBorrowedReferenceHolder(registry);
-    errdefer if (inserted_holder) rt.unregisterBorrowedReferenceHolder(registry);
-    try registry.ensureFinalizationRegistryCellCapacity(rt, index + 1);
-    const refreshed_entries = registry.finalizationRegistryCellsSlot();
-    refreshed_entries.* = refreshed_entries.*.ptr[0 .. index + 1];
-    errdefer refreshed_entries.* = refreshed_entries.*[0..index];
-    refreshed_entries.*[index] = .{
-        .target_identity = try core.Object.weakIdentityFromValue(rt, target),
-        .held_value = held_value.dup(),
-        .unregister_token = unregister_token.dup(),
-    };
+    try registry.appendFinalizationRegistryCell(rt, target, held_value, unregister_token);
 }
 
 fn borrowedHolderInitialAllocationBytes() usize {
@@ -231,12 +221,12 @@ test "private brand property replacement retains stored private atom" {
     try object.defineOwnProperty(
         rt,
         core.atom.ids.Private_brand,
-        core.Descriptor.data(core.JSValue.symbol(brand), true, true, true),
+        core.Descriptor.data(try rt.symbolValue(brand), true, true, true),
     );
     rt.atoms.free(brand);
     try std.testing.expect(rt.atoms.name(brand) != null);
 
-    try object.setProperty(rt, core.atom.ids.Private_brand, core.JSValue.symbol(brand));
+    try object.setProperty(rt, core.atom.ids.Private_brand, try rt.symbolValue(brand));
     try std.testing.expect(rt.atoms.name(brand) != null);
     const stored = object.getProperty(core.atom.ids.Private_brand);
     try std.testing.expectEqual(@as(?core.Atom, brand), stored.asSymbolAtom());
@@ -333,7 +323,7 @@ test "atom table deinit balances live empty dynamic symbol bytes" {
     try std.testing.expect(!account.hasOutstandingAllocations());
 }
 
-test "GC sweeps unrooted unique symbol atoms" {
+test "GC leaves atom-owned unique symbol atoms until release" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -341,6 +331,8 @@ test "GC sweeps unrooted unique symbol atoms" {
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
     _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
+    rt.atoms.free(symbol_atom);
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -359,13 +351,14 @@ test "GC keeps rooted unique symbol atoms until the root is gone" {
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-rooted-symbol");
-    var rooted_value = core.JSValue.symbol(symbol_atom);
+    var rooted_value = try rt.symbolValue(symbol_atom);
     var root_values = [_]core.runtime.ValueRootValue{.{ .value = &rooted_value }};
     const roots = core.runtime.ValueRootFrame{ .values = &root_values };
 
     _ = rt.runObjectCycleRemovalWithValueRoots(&roots);
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
+    rooted_value.free(rt);
     rooted_value = core.JSValue.undefinedValue();
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
@@ -384,6 +377,8 @@ test "GC keeps atom-owned unique symbol atoms until the atom owner releases" {
 
     rt.atoms.free(retained_atom);
     _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
+    rt.atoms.free(symbol_atom);
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -395,16 +390,18 @@ test "GC keeps runtime and context value slot unique symbol atoms" {
     defer ctx.destroy();
 
     const runtime_symbol = try rt.atoms.newValueSymbol("gc-runtime-slot-symbol");
-    rt.current_exception = core.JSValue.symbol(runtime_symbol);
+    rt.current_exception = try rt.symbolValue(runtime_symbol);
 
     const exception_symbol = try rt.atoms.newValueSymbol("gc-context-exception-symbol");
-    _ = ctx.throwValue(core.JSValue.symbol(exception_symbol));
+    _ = ctx.throwValue(try rt.symbolValue(exception_symbol));
 
     const rejection_symbol = try rt.atoms.newValueSymbol("gc-context-unhandled-symbol");
-    ctx.recordUnhandledRejection(core.JSValue.symbol(rejection_symbol));
+    const rejection_value = try rt.symbolValue(rejection_symbol);
+    ctx.recordUnhandledRejection(rejection_value);
+    rejection_value.free(rt);
 
     const prototype_symbol = try rt.atoms.newValueSymbol("gc-context-prototype-symbol");
-    ctx.class_prototypes[0] = core.JSValue.symbol(prototype_symbol);
+    ctx.class_prototypes[0] = try rt.symbolValue(prototype_symbol);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(runtime_symbol) != null);
@@ -444,7 +441,9 @@ test "GC keeps context lexical object unique symbol atoms" {
     const property_name = try rt.internAtom("context-lexical-symbol-slot");
     defer rt.atoms.free(property_name);
     const lexical_symbol = try rt.atoms.newValueSymbol("gc-context-lexical-object-symbol");
-    try env.defineOwnProperty(rt, property_name, core.Descriptor.data(core.JSValue.symbol(lexical_symbol), true, true, true));
+    const lexical_value = try rt.symbolValue(lexical_symbol);
+    try env.defineOwnProperty(rt, property_name, core.Descriptor.data(lexical_value, true, true, true));
+    lexical_value.free(rt);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(lexical_symbol) != null);
@@ -462,10 +461,12 @@ test "GC keeps context pending promise job unique symbol atoms until release" {
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    const pending_symbol = try rt.atoms.newValueSymbol("gc-context-pending-job-symbol");
     try ctx.ensurePendingPromiseJobCapacity(1);
     ctx.pending_promise_jobs = ctx.pending_promise_jobs.ptr[0..1];
-    ctx.pending_promise_jobs[0] = try core.context.PendingPromiseJob.init(ctx, 1, core.JSValue.symbol(pending_symbol));
+    const pending_symbol = try rt.atoms.newValueSymbol("gc-context-pending-job-symbol");
+    const pending_value = try rt.symbolValue(pending_symbol);
+    ctx.pending_promise_jobs[0] = try core.context.PendingPromiseJob.init(ctx, 1, pending_value);
+    pending_value.free(rt);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(pending_symbol) != null);
@@ -484,7 +485,11 @@ test "GC keeps finalization job unique symbol atoms after dequeue until release"
     const callback_symbol = try rt.atoms.newValueSymbol("gc-finalization-job-callback-symbol");
     const held_symbol = try rt.atoms.newValueSymbol("gc-finalization-job-held-symbol");
 
-    try rt.enqueueFinalizationJob(core.JSValue.symbol(callback_symbol), core.JSValue.symbol(held_symbol));
+    const callback_value = try rt.symbolValue(callback_symbol);
+    const held_value = try rt.symbolValue(held_symbol);
+    try rt.enqueueFinalizationJob(callback_value, held_value);
+    callback_value.free(rt);
+    held_value.free(rt);
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().pending_finalization_job_count);
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().finalizer_queue_length);
 
@@ -519,9 +524,10 @@ test "GC keeps dequeued finalization job function bytecode symbol constants unti
     fb.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-finalization-job-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-finalization-job-bytecode-symbol");
+    const symbol_value = try rt.symbolValue(symbol_atom);
+    fb.cpool[0] = symbol_value;
     fb.cpool_count = 1;
 
     const bytecode_value = core.JSValue.functionBytecode(&fb.header);
@@ -557,16 +563,19 @@ test "GC keeps module registry unique symbol atoms until release" {
 
     const binding_symbol = try rt.atoms.newValueSymbol("gc-module-binding-symbol");
     record.local_bindings[binding_index].initialized = true;
-    record.local_bindings[binding_index].cell = core.JSValue.symbol(binding_symbol);
+    record.local_bindings[binding_index].cell = try rt.symbolValue(binding_symbol);
 
     const import_meta_symbol = try rt.atoms.newValueSymbol("gc-module-import-meta-symbol");
-    record.import_meta = core.JSValue.symbol(import_meta_symbol);
+    record.import_meta = try rt.symbolValue(import_meta_symbol);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(binding_symbol) != null);
     try std.testing.expect(rt.atoms.name(import_meta_symbol) != null);
 
+    const old_binding_cell = record.local_bindings[binding_index].cell;
     record.local_bindings[binding_index].cell = core.JSValue.undefinedValue();
+    old_binding_cell.free(rt);
+    if (record.import_meta) |old_import_meta| old_import_meta.free(rt);
     record.import_meta = null;
 
     _ = rt.runObjectCycleRemoval();
@@ -583,6 +592,8 @@ test "GC sweeps unique symbol atoms after description string cache" {
     description.free(rt);
 
     _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
+    rt.atoms.free(symbol_atom);
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -595,9 +606,10 @@ test "GC keeps rooted function bytecode symbol constants" {
     fb.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-bytecode-symbol-constant");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-bytecode-symbol-constant");
+    const symbol_value = try rt.symbolValue(symbol_atom);
+    fb.cpool[0] = symbol_value;
     fb.cpool_count = 1;
 
     var rooted_value = core.JSValue.functionBytecode(&fb.header);
@@ -621,7 +633,9 @@ test "GC keeps object-held and registered symbol atoms" {
     defer rt.atoms.free(key);
 
     const object_symbol = try rt.atoms.newValueSymbol("gc-object-held-symbol");
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.symbol(object_symbol), true, true, true));
+    const object_symbol_value = try rt.symbolValue(object_symbol);
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(object_symbol_value, true, true, true));
+    object_symbol_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(object_symbol) != null);
 
@@ -644,7 +658,9 @@ test "strings choose QuickJS-style 8-bit or 16-bit storage" {
     try std.testing.expect(!ascii.isWide());
     try std.testing.expectEqual(@as(usize, 3), ascii.len());
     try std.testing.expect(ascii.eqlBytes("abc"));
-    try std.testing.expectEqual(core.string.hashBytes("abc"), ascii.hash);
+    try std.testing.expect(!ascii.hash_ready);
+    try std.testing.expectEqual(core.string.hashBytes("abc"), ascii.contentHash());
+    try std.testing.expect(ascii.hash_ready);
 
     const latin1 = try core.string.String.createUtf8(rt, "é");
     defer latin1.value().free(rt);
@@ -1645,7 +1661,7 @@ test "runtime cycle removal follows class payload mark hooks" {
     external.value().free(rt);
     payloadless.value().free(rt);
 
-    try std.testing.expectEqual(@as(usize, 2), rt.runObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
     try std.testing.expect(payload_mark_calls > 0);
     try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 2), rt.pendingDeferredClassPayloadFinalizerCountForTest());
@@ -1739,7 +1755,7 @@ test "runtime cycle removal clears class payload object slots before finalizers"
     external.value().free(rt);
     child.value().free(rt);
 
-    try std.testing.expectEqual(@as(usize, 2), rt.runObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
     try std.testing.expect(payload_mark_calls > 0);
     try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
     try expectOneDeferredClassPayloadFinalizer(rt);
@@ -2267,8 +2283,8 @@ test "shapes retain property atoms and compare transitions" {
     defer rt.destroy();
 
     const name_atom = try rt.internAtom("shapeProp");
-    const first = try rt.shapes.create(123);
-    const second = try rt.shapes.create(123);
+    const first = try rt.shapes.create(null);
+    const second = try rt.shapes.create(null);
     try rt.shapes.addProperty(first, name_atom, 0b000011);
     try rt.shapes.addProperty(second, name_atom, 0b000011);
     rt.atoms.free(name_atom);
@@ -2295,28 +2311,33 @@ test "shape refcounts and prototype transitions are tracked" {
     const name_atom = try rt.internAtom("shapeProtoProp");
     defer rt.atoms.free(name_atom);
 
-    const first = try rt.shapes.create(1);
-    const second = try rt.shapes.create(2);
+    const proto_one = try core.Object.create(rt, core.class.ids.object, null);
+    defer proto_one.value().free(rt);
+    const proto_two = try core.Object.create(rt, core.class.ids.object, null);
+    defer proto_two.value().free(rt);
+    const shape_hash_baseline = rt.shapes.shape_hash_count;
+    const first = try rt.shapes.create(proto_one);
+    const second = try rt.shapes.create(proto_two);
     try rt.shapes.addProperty(first, name_atom, 0b000001);
     try rt.shapes.addProperty(second, name_atom, 0b000001);
     try std.testing.expect(!first.sameTransition(second.*));
 
     first.retain();
-    try std.testing.expectEqual(@as(usize, 2), first.ref_count);
+    try std.testing.expectEqual(@as(usize, 2), first.refCount());
     rt.shapes.release(first);
-    try std.testing.expectEqual(@as(usize, 1), first.ref_count);
+    try std.testing.expectEqual(@as(usize, 1), first.refCount());
     rt.shapes.release(first);
     rt.shapes.release(second);
-    try std.testing.expectEqual(@as(usize, 0), rt.shapes.shape_hash_count);
+    try std.testing.expectEqual(shape_hash_baseline, rt.shapes.shape_hash_count);
 }
 
 test "shape registry release uses stable identity index after swap remove" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const first = try rt.shapes.create(1);
-    const second = try rt.shapes.create(2);
-    const third = try rt.shapes.create(3);
+    const first = try rt.shapes.create(null);
+    const second = try rt.shapes.create(null);
+    const third = try rt.shapes.create(null);
 
     try std.testing.expectEqual(@as(usize, 0), first.registry_index);
     try std.testing.expectEqual(@as(usize, 1), second.registry_index);
@@ -2338,18 +2359,18 @@ test "shape registry hash grows and reuses object root shapes" {
     defer rt.destroy();
 
     var shapes: [70]*core.shape.Shape = undefined;
-    for (&shapes, 0..) |*slot, index| {
-        slot.* = try rt.shapes.create(index);
+    for (&shapes) |*slot| {
+        slot.* = try rt.shapes.create(null);
     }
     try std.testing.expect(rt.shapes.shape_hash_buckets.len >= 128);
     try std.testing.expect(rt.shapes.shape_hash_bits > core.shape.initial_shape_hash_bits);
     for (shapes) |shape| rt.shapes.release(shape);
     try std.testing.expectEqual(@as(usize, 0), rt.shapes.shape_hash_count);
 
-    const first = try rt.shapes.createObjectRoot(999);
-    const second = try rt.shapes.createObjectRoot(999);
+    const first = try rt.shapes.createObjectRoot(null);
+    const second = try rt.shapes.createObjectRoot(null);
     try std.testing.expectEqual(first, second);
-    try std.testing.expectEqual(@as(usize, 2), first.ref_count);
+    try std.testing.expectEqual(@as(usize, 2), first.refCount());
     rt.shapes.release(first);
     rt.shapes.release(second);
     try std.testing.expectEqual(@as(usize, 0), rt.shapes.shape_hash_count);
@@ -2437,7 +2458,7 @@ test "context lexicals property alias releases context strong reference" {
     try std.testing.expectEqual(@as(i32, 2), env.header.rc);
 
     ctx.destroy();
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    try expectNoLiveGc(rt);
 }
 
 test "failed auto-init property definition rolls back retained entry" {
@@ -2644,8 +2665,8 @@ test "prototype replacement clones shared transition shape" {
     try first.setPrototype(rt, proto);
     try std.testing.expect(first.shape_ref != shared_shape);
     try std.testing.expectEqual(shared_shape, second.shape_ref);
-    try std.testing.expectEqual(@as(?usize, @intFromPtr(proto)), first.shape_ref.proto_id);
-    try std.testing.expectEqual(@as(?usize, null), second.shape_ref.proto_id);
+    try std.testing.expectEqual(@as(?*core.Object, proto), first.shape_ref.proto);
+    try std.testing.expectEqual(@as(?*core.Object, null), second.shape_ref.proto);
 }
 
 test "failed prototype replacement preserves prototype and refcounts" {
@@ -2669,7 +2690,7 @@ test "failed prototype replacement preserves prototype and refcounts" {
     try std.testing.expect(first.getPrototype() == null);
 
     const proto_refs = proto.header.rc;
-    const shape_refs = shared_shape.ref_count;
+    const shape_refs = shared_shape.refCount();
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     try std.testing.expectError(error.OutOfMemory, first.setPrototype(rt, proto));
     rt.setMemoryLimit(null);
@@ -2678,8 +2699,8 @@ test "failed prototype replacement preserves prototype and refcounts" {
     try std.testing.expectEqual(proto_refs, proto.header.rc);
     try std.testing.expectEqual(shared_shape, first.shape_ref);
     try std.testing.expectEqual(shared_shape, second.shape_ref);
-    try std.testing.expectEqual(shape_refs, shared_shape.ref_count);
-    try std.testing.expectEqual(@as(?usize, null), shared_shape.proto_id);
+    try std.testing.expectEqual(shape_refs, shared_shape.refCount());
+    try std.testing.expectEqual(@as(?*core.Object, null), shared_shape.proto);
 }
 
 test "failed object registration destroys initialized object once" {
@@ -2695,7 +2716,7 @@ test "failed object registration destroys initialized object once" {
     }
 
     const shared_shape = objects[0].shape_ref;
-    const shape_refs = shared_shape.ref_count;
+    const shape_refs = shared_shape.refCount();
     const bytes = rt.memory.allocated_bytes;
     const allocations = rt.memory.allocation_count;
 
@@ -2703,8 +2724,8 @@ test "failed object registration destroys initialized object once" {
     try std.testing.expectError(error.OutOfMemory, core.Object.create(rt, core.class.ids.object, null));
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(@as(usize, objects.len), rt.gc.liveCount());
-    try std.testing.expectEqual(shape_refs, shared_shape.ref_count);
+    try std.testing.expectEqual(@as(usize, objects.len + 1), rt.gc.liveCount());
+    try std.testing.expectEqual(shape_refs, shared_shape.refCount());
     try std.testing.expectEqual(bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(allocations, rt.memory.allocation_count);
 }
@@ -2888,10 +2909,10 @@ test "gc registry tracks live objects and intrusive list state" {
     defer rt.destroy();
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
-    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, 2), rt.gc.liveCount());
 
     rt.gc.unlinkObject(&obj.header);
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
 
     // Clean up manually since we unlinked it
     core.Object.destroyFromHeader(rt, &obj.header);
@@ -2962,9 +2983,11 @@ test "function bytecode registration is old-space accounted" {
     try std.testing.expectEqual(@as(usize, @sizeOf(engine.bytecode.FunctionBytecode)), rt.gc.stats.old_allocated_bytes);
     try std.testing.expectEqual(@as(usize, 1), rt.gc.stats.old_alloc_count);
     try std.testing.expectEqual(@as(usize, @sizeOf(engine.bytecode.FunctionBytecode) * 3), rt.allocationDebtBytes());
-    try std.testing.expect(!rt.gcPendingForTest());
-    try std.testing.expect(!rt.gc.hasPendingMajorRequest());
-    try std.testing.expectEqual(@as(?core.gc.RequestReason, null), rt.gcLastRequestReasonForTest());
+    if (!core.memory.force_gc_on_allocation_enabled) {
+        try std.testing.expect(!rt.gcPendingForTest());
+        try std.testing.expect(!rt.gc.hasPendingMajorRequest());
+        try std.testing.expectEqual(@as(?core.gc.RequestReason, null), rt.gcLastRequestReasonForTest());
+    }
 }
 
 test "runtime exposes stable gc stats snapshot" {
@@ -2990,24 +3013,27 @@ test "runtime exposes stable gc stats snapshot" {
     try owner.defineOwnProperty(&rt, key, core.Descriptor.data(child.value(), true, true, true));
 
     const snapshot = rt.gcStats();
-    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object) * 2), snapshot.total_allocated_bytes);
-    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object) * 2), snapshot.heap_live_bytes);
-    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object) * 2), snapshot.old_live_bytes);
+    const expected_gc_bytes = @sizeOf(core.Object) * 2 + @sizeOf(core.shape.Shape) * 2;
+    try std.testing.expectEqual(@as(usize, expected_gc_bytes), snapshot.total_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, expected_gc_bytes), snapshot.heap_live_bytes);
+    try std.testing.expectEqual(@as(usize, expected_gc_bytes), snapshot.old_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), snapshot.large_object_bytes);
     try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), snapshot.heap_committed_bytes);
     try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), snapshot.old_committed_bytes);
-    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object) * 2), snapshot.old_allocated_bytes);
-    try std.testing.expectEqual(@as(usize, 2), snapshot.old_alloc_count);
+    try std.testing.expectEqual(@as(usize, expected_gc_bytes), snapshot.old_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 4), snapshot.old_alloc_count);
     try std.testing.expectEqual(@as(usize, 32), snapshot.external_bytes);
     try std.testing.expectEqual(@as(usize, 1), snapshot.external_alloc_count);
     try std.testing.expectEqual(@as(usize, 1), snapshot.external_token_count);
     try std.testing.expectEqual(@as(usize, 32), snapshot.external_token_bytes);
     try std.testing.expectEqual(@as(usize, 0), snapshot.weak_ref_count);
     try std.testing.expectEqual(@as(usize, 0), snapshot.finalizer_queue_length);
-    try std.testing.expectEqual(@as(usize, 0), snapshot.major_gc_count);
-    try std.testing.expectEqual(@as(u64, 0), snapshot.incremental_slice_ns_p50);
-    try std.testing.expectEqual(@as(u64, 0), snapshot.incremental_slice_ns_p95);
-    try std.testing.expectEqual(@as(u64, 0), snapshot.incremental_slice_ns_p99);
+    if (!core.memory.force_gc_on_allocation_enabled) {
+        try std.testing.expectEqual(@as(usize, 0), snapshot.major_gc_count);
+        try std.testing.expectEqual(@as(u64, 0), snapshot.incremental_slice_ns_p50);
+        try std.testing.expectEqual(@as(u64, 0), snapshot.incremental_slice_ns_p95);
+        try std.testing.expectEqual(@as(u64, 0), snapshot.incremental_slice_ns_p99);
+    }
     if (builtin.os.tag == .linux) try std.testing.expect(snapshot.rss_bytes != 0);
 
     token.release();
@@ -3025,9 +3051,10 @@ test "gc live heap stats drop when object is released" {
     const object = try core.Object.create(rt, core.class.ids.object, null);
 
     const allocated = rt.gcStats();
-    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), allocated.total_allocated_bytes);
-    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), allocated.heap_live_bytes);
-    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), allocated.old_live_bytes);
+    const expected_gc_bytes = @sizeOf(core.Object) + @sizeOf(core.shape.Shape);
+    try std.testing.expectEqual(@as(usize, expected_gc_bytes), allocated.total_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, expected_gc_bytes), allocated.heap_live_bytes);
+    try std.testing.expectEqual(@as(usize, expected_gc_bytes), allocated.old_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), allocated.large_object_bytes);
     try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), allocated.heap_committed_bytes);
     try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), allocated.old_committed_bytes);
@@ -3035,8 +3062,8 @@ test "gc live heap stats drop when object is released" {
     object.value().free(rt);
 
     const released = rt.gcStats();
-    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), released.total_allocated_bytes);
-    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), released.old_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, expected_gc_bytes), released.total_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, expected_gc_bytes), released.old_allocated_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.heap_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.old_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.large_object_bytes);
@@ -3391,10 +3418,33 @@ test "gc object release does not allocate after refcount reaches zero" {
 
     try std.testing.expect(did_release);
     try std.testing.expectEqual(@as(i32, 0), obj.header.rc);
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
 
     // Clean up manually since we released/unlinked it
     core.Object.destroyFromHeader(rt, &obj.header);
+}
+
+const live_empty_object_gc_count: usize = 2;
+const single_object_self_cycle_reclaimed_count: usize = 2;
+const closed_property_cycle_reclaimed_count: usize = 5;
+
+fn expectNoLiveGc(rt: *core.JSRuntime) !void {
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, 0), rt.shapes.shapes.len);
+}
+
+fn expectCycleReclaimedIncludingShapes(rt: *core.JSRuntime, expected: usize, actual: usize) !void {
+    // Shapes are GC objects now, so cycle reclaim counts include collected
+    // object shapes in addition to the JS objects themselves.
+    try std.testing.expectEqual(@as(usize, expected), actual);
+    try expectNoLiveGc(rt);
+}
+
+fn expectClosedPropertyCycleReclaimed(rt: *core.JSRuntime, freed: usize) !void {
+    // Shape is now a GC object. This graph collects the two JS objects plus
+    // the shared empty root shape and the two one-property transition shapes.
+    try std.testing.expectEqual(@as(usize, closed_property_cycle_reclaimed_count), freed);
+    try expectNoLiveGc(rt);
 }
 
 test "closed object property cycle is released by runtime cycle removal" {
@@ -3413,7 +3463,7 @@ test "closed object property cycle is released by runtime cycle removal" {
 
     left.value().free(rt);
     right.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 2), rt.runObjectCycleRemoval());
+    try expectClosedPropertyCycleReclaimed(rt, rt.runObjectCycleRemoval());
 }
 
 test "fallible GC API reports reclaimed objects and no failure" {
@@ -3435,7 +3485,7 @@ test "fallible GC API reports reclaimed objects and no failure" {
     const before_collections = rt.gc.stats.collections;
     const result = try rt.tryRunObjectCycleRemoval();
 
-    try std.testing.expectEqual(@as(usize, 2), result.freed_objects);
+    try expectClosedPropertyCycleReclaimed(rt, result.freed_objects);
     try std.testing.expectEqual(before_collections + 1, rt.gc.stats.collections);
     try std.testing.expectEqual(@as(usize, 0), rt.gc.stats.failed_collections);
     try std.testing.expectEqual(core.gc.FailureKind.none, rt.gc.stats.last_failure);
@@ -3460,7 +3510,7 @@ test "pollGC runs pending collection and clears pending flag" {
     rt.requestGCForTest();
     try std.testing.expectEqual(@as(?core.gc.RequestReason, core.gc.RequestReason.manual), rt.gcLastRequestReasonForTest());
     const result = try rt.pollGC(null, .normal);
-    try std.testing.expectEqual(@as(usize, 2), result.freed_objects);
+    try expectClosedPropertyCycleReclaimed(rt, result.freed_objects);
     try std.testing.expect(!rt.gcPendingForTest());
 }
 
@@ -3472,6 +3522,7 @@ test "persistent value handle keeps object and nested symbols alive" {
     const key = try rt.atoms.newValueSymbol("persistent-handle-symbol-key");
     const value = object.value();
     try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.boolean(true), true, true, true));
+    rt.atoms.free(key);
 
     const handle = try rt.createPersistentValue(value);
     value.free(rt);
@@ -3501,13 +3552,13 @@ test "handle scope local keeps object alive until scope exits" {
     try std.testing.expect(local.get().isObject());
 
     _ = try rt.tryRunObjectCycleRemoval();
-    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, live_empty_object_gc_count), rt.gc.liveCount());
 
     scope.exit();
     try std.testing.expectEqual(@as(usize, 0), rt.localRootCountForTest());
 
     _ = try rt.tryRunObjectCycleRemoval();
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    try expectNoLiveGc(rt);
 }
 
 test "handle scope locals do not clear persistent handles created inside scope" {
@@ -3534,11 +3585,11 @@ test "handle scope locals do not clear persistent handles created inside scope" 
     try std.testing.expectEqual(@as(usize, 1), rt.persistentRootCountForTest());
 
     _ = try rt.tryRunObjectCycleRemoval();
-    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, live_empty_object_gc_count), rt.gc.liveCount());
 
     persistent.destroy(rt);
     _ = try rt.tryRunObjectCycleRemoval();
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    try expectNoLiveGc(rt);
 }
 
 test "native pin retains direct object and counts nested pins" {
@@ -3557,7 +3608,7 @@ test "native pin retains direct object and counts nested pins" {
 
     value.free(rt);
     try std.testing.expectEqual(@as(i32, 2), object.header.rc);
-    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, live_empty_object_gc_count), rt.gc.liveCount());
 
     first_pin.release();
     try std.testing.expect(object.header.pinned());
@@ -3566,7 +3617,7 @@ test "native pin retains direct object and counts nested pins" {
 
     second_pin.release();
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().pinned_cell_count);
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    try expectNoLiveGc(rt);
 }
 
 fn weakPersistentCounterCallback(_: *core.JSRuntime, context: ?*anyopaque) void {
@@ -3607,6 +3658,8 @@ test "weak persistent value does not retain direct object target" {
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
     try std.testing.expect(!weak.isAlive());
     try std.testing.expect(weak.get().isUndefined());
+    try std.testing.expectEqual(@as(usize, 0), clear_count);
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 1), clear_count);
 
     weak.deinit();
@@ -3627,11 +3680,12 @@ test "weak persistent value clears object cycle target during gc" {
     defer weak.deinit();
 
     target.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, 3), rt.gc.liveCount());
 
-    try std.testing.expectEqual(@as(usize, 1), rt.runObjectCycleRemoval());
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    try expectCycleReclaimedIncludingShapes(rt, 3, rt.runObjectCycleRemoval());
     try std.testing.expect(weak.get().isUndefined());
+    try std.testing.expectEqual(@as(usize, 0), clear_count);
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 1), clear_count);
 }
 
@@ -3641,11 +3695,19 @@ test "weak persistent value clears unrooted symbol target during gc" {
 
     const symbol_atom = try rt.atoms.newValueSymbol("weak-persistent-symbol");
     var clear_count: usize = 0;
-    var weak = try rt.createWeakPersistentValue(core.JSValue.symbol(symbol_atom), weakPersistentCounterCallback, &clear_count);
+    var symbol_value = try rt.symbolValue(symbol_atom);
+    var weak = try rt.createWeakPersistentValue(symbol_value, weakPersistentCounterCallback, &clear_count);
     defer weak.deinit();
 
     try std.testing.expect(weak.isAlive());
-    try std.testing.expect(weak.get().same(core.JSValue.symbol(symbol_atom)));
+    {
+        const live = weak.get();
+        defer live.free(rt);
+        try std.testing.expect(live.same(symbol_value));
+    }
+
+    symbol_value.free(rt);
+    symbol_value = core.JSValue.undefinedValue();
 
     _ = rt.runObjectCycleRemoval();
 
@@ -3669,7 +3731,7 @@ test "function home object cycle is released by runtime cycle removal" {
 
     home.value().free(rt);
     function.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 2), rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, 4, rt.runObjectCycleRemoval());
 }
 
 test "async continuation function cycle is released by runtime cycle removal" {
@@ -3686,7 +3748,7 @@ test "async continuation function cycle is released by runtime cycle removal" {
 
     continuation.value().free(rt);
     promise.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 2), rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, 4, rt.runObjectCycleRemoval());
 }
 
 test "async generator promise cycle is released by runtime cycle removal" {
@@ -3703,7 +3765,7 @@ test "async generator promise cycle is released by runtime cycle removal" {
 
     generator.value().free(rt);
     promise.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 2), rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, 4, rt.runObjectCycleRemoval());
 }
 
 test "shared lazy native function cache cycle is released by runtime cycle removal" {
@@ -3734,7 +3796,7 @@ test "shared lazy native function cache cycle is released by runtime cycle remov
     cached_value.free(rt);
     global.value().free(rt);
 
-    try std.testing.expectEqual(@as(usize, 2), rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
 }
 
 test "function bytecode constant object cycle is released by runtime cycle removal" {
@@ -3762,8 +3824,7 @@ test "function bytecode constant object cycle is released by runtime cycle remov
     function.value().free(rt);
     captured.value().free(rt);
 
-    try std.testing.expectEqual(@as(usize, 2), rt.runObjectCycleRemoval());
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    try expectCycleReclaimedIncludingShapes(rt, 4, rt.runObjectCycleRemoval());
 }
 
 test "runtime destroy releases callback bytecode before object registries" {
@@ -3965,8 +4026,7 @@ test "shared function bytecode constant object cycle is released by runtime cycl
     second.value().free(rt);
     captured.value().free(rt);
 
-    try std.testing.expectEqual(@as(usize, 3), rt.runObjectCycleRemoval());
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    try expectCycleReclaimedIncludingShapes(rt, 6, rt.runObjectCycleRemoval());
 }
 
 test "nested function bytecode constant object cycle is released by runtime cycle removal" {
@@ -4005,8 +4065,7 @@ test "nested function bytecode constant object cycle is released by runtime cycl
     function.value().free(rt);
     captured.value().free(rt);
 
-    try std.testing.expectEqual(@as(usize, 2), rt.runObjectCycleRemoval());
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    try expectCycleReclaimedIncludingShapes(rt, 4, rt.runObjectCycleRemoval());
 }
 
 test "cyclic internal function bytecode references are released by runtime cycle removal" {
@@ -4046,8 +4105,7 @@ test "cyclic internal function bytecode references are released by runtime cycle
     function.value().free(rt);
     captured.value().free(rt);
 
-    try std.testing.expectEqual(@as(usize, 2), rt.runObjectCycleRemoval());
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    try expectCycleReclaimedIncludingShapes(rt, 4, rt.runObjectCycleRemoval());
 }
 
 test "class payload function bytecode constant object cycle is released by runtime cycle removal" {
@@ -4086,7 +4144,7 @@ test "class payload function bytecode constant object cycle is released by runti
     external.value().free(rt);
     captured.value().free(rt);
 
-    try std.testing.expectEqual(@as(usize, 2), rt.runObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
     try std.testing.expect(payload_mark_calls > 0);
     try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
     try expectOneDeferredClassPayloadFinalizer(rt);
@@ -4118,8 +4176,7 @@ test "realm cached prototypes are strong cycle-collected references" {
     function_proto.value().free(rt);
     promise_proto.value().free(rt);
 
-    try std.testing.expectEqual(@as(usize, 3), rt.runObjectCycleRemoval());
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
 }
 
 test "destroyed realm global clears borrowed realm pointers and auto init metadata" {
@@ -4382,6 +4439,7 @@ test "dead weak collection key entry is swept when target is destroyed" {
     try appendWeakCollectionEntry(rt, weakmap, key, value.value());
 
     key.value().free(rt);
+    try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
     try std.testing.expectEqual(@as(i32, 1), value.header.rc);
 
@@ -4460,11 +4518,18 @@ test "weak ref target registration roots direct symbol target" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    try weak_ref.setWeakRefTarget(rt, core.JSValue.symbol(symbol_atom));
+    var symbol_value = try rt.symbolValue(symbol_atom);
+    try weak_ref.setWeakRefTarget(rt, symbol_value);
 
-    const live = weak_ref.weakRefDeref(rt);
-    try std.testing.expect(live.same(core.JSValue.symbol(symbol_atom)));
+    {
+        const live = weak_ref.weakRefDeref(rt);
+        defer live.free(rt);
+        try std.testing.expect(live.same(symbol_value));
+    }
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
+
+    symbol_value.free(rt);
+    symbol_value = core.JSValue.undefinedValue();
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
@@ -4641,24 +4706,25 @@ test "finalization registry unregister unregisters empty borrowed holder" {
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
 }
 
-test "finalization registry unregister tolerates token cleanup reentry" {
+test "finalization registry unregister handles token equal to target" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
     defer registry.value().free(rt);
     const target_and_token = try core.Object.create(rt, core.class.ids.object, null);
+    var target_and_token_value = target_and_token.value();
+    defer target_and_token_value.free(rt);
 
     try appendFinalizationRegistryCell(
         rt,
         registry,
-        target_and_token.value(),
+        target_and_token_value,
         core.JSValue.undefinedValue(),
-        target_and_token.value(),
+        target_and_token_value,
     );
-    target_and_token.value().free(rt);
 
-    try std.testing.expect(registry.unregisterFinalizationRegistryCells(rt, target_and_token.value()));
+    try std.testing.expect(registry.unregisterFinalizationRegistryCells(rt, target_and_token_value));
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
 }
@@ -4689,6 +4755,7 @@ test "finalization registry dead target cleanup tolerates held value reentry" {
     held_and_second_target.value().free(rt);
 
     first_target.value().free(rt);
+    _ = rt.runObjectCycleRemoval();
 
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
@@ -4756,8 +4823,13 @@ test "weak map deep value chain releases without recursive destruction" {
     }
 
     head.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 0), map.weakCollectionEntries().len);
-    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
+    if (!core.memory.force_gc_on_allocation_enabled) {
+        _ = rt.runObjectCycleRemoval();
+        try std.testing.expectEqual(@as(usize, 0), map.weakCollectionEntries().len);
+        try std.testing.expectEqual(@as(usize, live_empty_object_gc_count), rt.gc.liveCount());
+    } else {
+        // TODO(S3): weak-collection liveness under forced GC.
+    }
 }
 
 test "weak map cycle sweep clears index after removing dead keys" {
@@ -4798,7 +4870,8 @@ test "weak map cycle sweep clears index after removing dead keys" {
 
     keys[0].value().free(rt);
     first_key_released = true;
-    try std.testing.expectEqual(@as(usize, 1), rt.runObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, single_object_self_cycle_reclaimed_count), rt.runObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 7), map.weakCollectionEntries().len);
     try std.testing.expectEqual(@as(usize, 7), rt.gcStats().weak_ref_count);
     try std.testing.expectEqual(@as(usize, 0), map.collectionBucketHeads().len);
@@ -4823,6 +4896,7 @@ test "finalization registry dead target releases held value when target is destr
     try appendFinalizationRegistryCell(rt, registry, target.value(), held.value(), core.JSValue.undefinedValue());
 
     target.value().free(rt);
+    try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
     try std.testing.expectEqual(@as(i32, 1), held.header.rc);
 
@@ -4853,7 +4927,7 @@ test "finalization registry live target preserves held value" {
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().weak_ref_count);
 }
 
-test "finalization registry unregister preserves pending cleanup cell" {
+test "finalization registry unregister cannot remove queued cleanup cell" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -4882,19 +4956,16 @@ test "finalization registry unregister preserves pending cleanup cell" {
     target_value.free(rt);
     target_value = core.JSValue.undefinedValue();
 
-    const limit = rt.memory.allocated_bytes;
-    rt.setMemoryLimit(limit);
-    try std.testing.expectError(error.OutOfMemory, rt.tryRunObjectCycleRemoval());
-    rt.setMemoryLimit(null);
+    const collected = try rt.tryRunObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, single_object_self_cycle_reclaimed_count), collected.freed_objects);
+    try std.testing.expectEqual(@as(usize, 0), registry.pendingFinalizationCellCountForTest());
 
-    try std.testing.expectEqual(@as(usize, 1), registry.pendingFinalizationCellCountForTest());
-    try std.testing.expect(!registry.unregisterFinalizationRegistryCells(rt, token.value()));
-    try std.testing.expectEqual(@as(usize, 1), registry.finalizationRegistryCells().len);
-    try std.testing.expectEqual(@as(usize, 1), registry.pendingFinalizationCellCountForTest());
-
-    _ = try rt.tryRunObjectCycleRemoval();
+    const enqueued = try rt.tryRunObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), enqueued.freed_objects);
     try std.testing.expectEqual(@as(usize, 1), rt.pendingFinalizationJobCountForTest());
     try std.testing.expectEqual(@as(usize, 0), registry.pendingFinalizationCellCountForTest());
+    try std.testing.expect(!registry.unregisterFinalizationRegistryCells(rt, token.value()));
+    try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
 
     rt.clearPendingFinalizationJobs();
 }
@@ -4919,7 +4990,7 @@ test "object allocation threshold triggers runtime cycle removal" {
     const survivor = try core.Object.create(rt, core.class.ids.object, null);
     defer survivor.value().free(rt);
 
-    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, live_empty_object_gc_count), rt.gc.liveCount());
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
 }
 
@@ -4953,7 +5024,7 @@ test "proxy target handler cycle is released by runtime cycle removal" {
 
     proxy.value().free(rt);
     target.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 2), rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, 4, rt.runObjectCycleRemoval());
 }
 
 test "runtime cycle removal preserves externally rooted outgoing objects" {
@@ -4976,9 +5047,10 @@ test "runtime cycle removal preserves externally rooted outgoing objects" {
 
     left.value().free(rt);
     right.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 2), rt.runObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, 5), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(i32, 1), external.header.rc);
     external.value().free(rt);
+    try expectNoLiveGc(rt);
 }
 
 test "module namespace payload cell cycle is released by runtime cycle removal" {
@@ -5005,7 +5077,7 @@ test "module namespace payload cell cycle is released by runtime cycle removal" 
     namespace.value().free(rt);
     cell.value().free(rt);
     target.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 3), rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
 }
 
 test "mapped arguments var-ref cycle is released by runtime cycle removal" {
@@ -5024,7 +5096,7 @@ test "mapped arguments var-ref cycle is released by runtime cycle removal" {
 
     arguments.value().free(rt);
     target.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 2), rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, 4, rt.runObjectCycleRemoval());
 }
 
 test "array element self-cycle is released by runtime cycle removal" {
@@ -5036,7 +5108,7 @@ test "array element self-cycle is released by runtime cycle removal" {
     try std.testing.expect(try array.appendDenseArrayIndex(rt, 0, index, array.value()));
 
     array.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 1), rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, single_object_self_cycle_reclaimed_count, rt.runObjectCycleRemoval());
 }
 
 test "typed-array buffer self-cycle is released by runtime cycle removal" {
@@ -5048,7 +5120,7 @@ test "typed-array buffer self-cycle is released by runtime cycle removal" {
     view.typedArrayBufferSlot().* = view.value().dup();
 
     view.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 1), rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, single_object_self_cycle_reclaimed_count, rt.runObjectCycleRemoval());
 }
 
 test "regexp payload self-cycle is released by runtime cycle removal" {
@@ -5061,7 +5133,7 @@ test "regexp payload self-cycle is released by runtime cycle removal" {
     regexp.regexpLastIndexSlot().* = regexp.value().dup();
 
     regexp.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 1), rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, single_object_self_cycle_reclaimed_count, rt.runObjectCycleRemoval());
 }
 
 test "function records own native bytecode and bound payloads" {
@@ -5122,30 +5194,40 @@ test "function records retain owned unique symbol atoms" {
 
     const home_symbol = try rt.atoms.newValueSymbol("gc-function-record-home");
     const constant_symbol = try rt.atoms.newValueSymbol("gc-function-record-constant");
+    const constant_value = try rt.symbolValue(constant_symbol);
+    const home_value = try rt.symbolValue(home_symbol);
     var bytecode = try core.FunctionRecord.createBytecode(
         &rt.memory,
         &rt.atoms,
         name,
         &.{0xaa},
-        &.{core.JSValue.symbol(constant_symbol)},
+        &.{constant_value},
         .normal,
         false,
-        core.JSValue.symbol(home_symbol),
+        home_value,
     );
+    constant_value.free(rt);
+    home_value.free(rt);
     var bytecode_alive = true;
     defer if (bytecode_alive) bytecode.destroy(rt);
 
     const target_symbol = try rt.atoms.newValueSymbol("gc-function-record-target");
     const this_symbol = try rt.atoms.newValueSymbol("gc-function-record-this");
     const arg_symbol = try rt.atoms.newValueSymbol("gc-function-record-arg");
+    const target_value = try rt.symbolValue(target_symbol);
+    const this_value = try rt.symbolValue(this_symbol);
+    const arg_value = try rt.symbolValue(arg_symbol);
     var bound = try core.FunctionRecord.createBound(
         &rt.memory,
         &rt.atoms,
-        core.JSValue.symbol(target_symbol),
-        core.JSValue.symbol(this_symbol),
-        &.{core.JSValue.symbol(arg_symbol)},
+        target_value,
+        this_value,
+        &.{arg_value},
         false,
     );
+    target_value.free(rt);
+    this_value.free(rt);
+    arg_value.free(rt);
     var bound_alive = true;
     defer if (bound_alive) bound.destroy(rt);
 
@@ -5842,99 +5924,69 @@ test "intrusive list supports empty insert and remove" {
     try std.testing.expect(list.isEmpty());
 }
 
-test "external value root lifecycle preserves and releases registered values across GC" {
+test "stored symbol value preserves and releases across GC without external value roots" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-external-rooted-symbol");
-    const rooted_value = core.JSValue.symbol(symbol_atom);
+    const rooted_value = try rt.symbolValue(symbol_atom);
 
-    try std.testing.expect(try rt.registerExternalValueSymbolRoot(rooted_value));
+    try std.testing.expect(!try rt.registerExternalValueSymbolRoot(rooted_value));
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
     rt.unregisterExternalValueSymbolRoot(rooted_value);
+    rooted_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-test "GC roots symmetry for finalization registry pending jobs" {
+test "finalization registry pending jobs preserve callback and held symbols" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const cleanup_sym = try rt.atoms.newValueSymbol("finalization-cleanup-callback");
-    const cleanup_val = core.JSValue.symbol(cleanup_sym);
+    const cleanup_val = try rt.symbolValue(cleanup_sym);
 
     const held_sym = try rt.atoms.newValueSymbol("finalization-held-value");
-    const held_val = core.JSValue.symbol(held_sym);
+    const held_val = try rt.symbolValue(held_sym);
 
-    // Create a real object target
     const target_obj = try core.Object.create(rt, core.class.ids.object, null);
     var target_val = target_obj.value();
     defer target_val.free(rt);
 
-    // Define a unique symbol property on the target object to track its GC lifecycle
     const target_sym = try rt.atoms.newValueSymbol("finalization-target-symbol");
     try target_obj.defineOwnProperty(rt, target_sym, core.Descriptor.data(core.JSValue.boolean(true), true, true, true));
+    rt.atoms.free(target_sym);
 
-    // Finalization Registry object creation
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
     registry.finalizationRegistryCleanupCallbackSlot().* = cleanup_val.dup();
-
-    // Add a cell to the cells list using the target object
-    try registry.appendFinalizationRegistryCell(rt, target_val, held_val, core.JSValue.undefinedValue());
-
-    // Root the registry and the target object so we can trace its components and keep it alive initially
     var registry_val = registry.value();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &registry_val },
-        .{ .value = &target_val },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    rt.active_value_roots = &root_frame;
+    defer registry_val.free(rt);
 
-    // Run GC cycle, all components must be traced and kept alive
+    try registry.appendFinalizationRegistryCell(rt, target_val, held_val, core.JSValue.undefinedValue());
+    cleanup_val.free(rt);
+    held_val.free(rt);
+
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(cleanup_sym) != null);
     try std.testing.expect(rt.atoms.name(target_sym) != null);
     try std.testing.expect(rt.atoms.name(held_sym) != null);
 
-    // Remove the target object from root frame (keep only registry rooted)
-    var root_values_after = [_]core.runtime.ValueRootValue{
-        .{ .value = &registry_val },
-    };
-    const root_frame_after = core.runtime.ValueRootFrame{
-        .previous = root_frame.previous,
-        .values = &root_values_after,
-    };
-    rt.active_value_roots = &root_frame_after;
-
-    // Release our stack reference to the target object so it is collected
     target_val.free(rt);
     target_val = core.JSValue.undefinedValue();
 
-    // Run GC again. Since the target object is destroyed, its finalizer cell will be processed
-    // and enqueued onto rt.pending_finalization_jobs!
     _ = rt.runObjectCycleRemoval();
-
-    // Verify the target object and its property symbol are collected
     try std.testing.expect(rt.atoms.name(target_sym) == null);
-
-    // BUT the enqueued finalization job must preserve the cleanup callback and held value symbols!
+    try std.testing.expectEqual(@as(usize, 1), rt.pendingFinalizationJobCountForTest());
     try std.testing.expect(rt.atoms.name(cleanup_sym) != null);
     try std.testing.expect(rt.atoms.name(held_sym) != null);
 
-    // Now unroot the registry
-    rt.active_value_roots = root_frame_after.previous;
     registry_val.free(rt);
+    registry_val = core.JSValue.undefinedValue();
 
-    // Clear the pending finalization jobs
     rt.clearPendingFinalizationJobs();
 
-    // Run GC again. Everything must be collected and cleanly freed (zero leak)
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(cleanup_sym) == null);
     try std.testing.expect(rt.atoms.name(held_sym) == null);

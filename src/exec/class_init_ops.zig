@@ -206,7 +206,7 @@ pub fn setCurrentArrowLexicalThis(ctx: *core.JSContext, frame: *frame_mod.Frame,
     try current_object.setOptionalValueSlot(ctx.runtime, try current_object.functionLexicalThisSlot(ctx.runtime), value);
 }
 
-pub fn isCurrentSuperConstructor(ctx: *core.JSContext, frame: *frame_mod.Frame, func: core.JSValue) bool {
+pub inline fn isCurrentSuperConstructor(ctx: *core.JSContext, frame: *frame_mod.Frame, func: core.JSValue) bool {
     _ = ctx;
     if (!frame.current_function.isObject()) return false;
     const current_object = property_ops.expectObject(frame.current_function) catch return false;

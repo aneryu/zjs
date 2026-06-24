@@ -823,17 +823,25 @@ test "EventLoop keeps host-held unique symbol atoms until release" {
     defer loop.deinit();
 
     const timer_symbol = try rt.atoms.newValueSymbol("gc-event-loop-timer-symbol");
-    try loop.enqueueTimer(ctx, 1, zjs.JSValue.symbol(timer_symbol), 0, false);
+    const timer_value = try rt.symbolValue(timer_symbol);
+    try loop.enqueueTimer(ctx, 1, timer_value, 0, false);
+    timer_value.free(rt);
 
     const rw_read_symbol = try rt.atoms.newValueSymbol("gc-event-loop-rw-read-symbol");
     const rw_write_symbol = try rt.atoms.newValueSymbol("gc-event-loop-rw-write-symbol");
-    try loop.setRwHandler(ctx, 1, false, zjs.JSValue.symbol(rw_read_symbol));
-    try loop.setRwHandler(ctx, 1, true, zjs.JSValue.symbol(rw_write_symbol));
+    const rw_read_value = try rt.symbolValue(rw_read_symbol);
+    try loop.setRwHandler(ctx, 1, false, rw_read_value);
+    rw_read_value.free(rt);
+    const rw_write_value = try rt.symbolValue(rw_write_symbol);
+    try loop.setRwHandler(ctx, 1, true, rw_write_value);
+    rw_write_value.free(rt);
 
-    const signal_symbol = try rt.atoms.newValueSymbol("gc-event-loop-signal-symbol");
     try loop.ensureSignalHandlerCapacity(ctx, 1);
     loop.signal_handlers = loop.signal_handlers.ptr[0..1];
-    loop.signal_handlers[0] = try SignalHandler.init(ctx, 2, zjs.JSValue.symbol(signal_symbol));
+    const signal_symbol = try rt.atoms.newValueSymbol("gc-event-loop-signal-symbol");
+    const signal_value = try rt.symbolValue(signal_symbol);
+    loop.signal_handlers[0] = try SignalHandler.init(ctx, 2, signal_value);
+    signal_value.free(rt);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(timer_symbol) != null);
@@ -920,9 +928,9 @@ test "EventLoop roots one-shot function bytecode timer callback after dequeue" {
     fb.func_kind = .generator;
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-timer-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(zjs.JSValue, 1);
-    fb.cpool[0] = zjs.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-timer-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var callback = zjs.JSValue.functionBytecode(&fb.header);

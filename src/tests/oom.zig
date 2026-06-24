@@ -158,8 +158,7 @@ fn expectValue(rt: *core.JSRuntime, value: core.JSValue, expect: Expect) !void {
 fn expectStringValue(rt: *core.JSRuntime, value: core.JSValue, expected: []const u8) !void {
     _ = rt;
     if (!value.isString()) return error.TestUnexpectedResult;
-    const header = value.refHeader() orelse return error.TestUnexpectedResult;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return error.TestUnexpectedResult;
     if (!string_value.eqlBytes(expected)) return error.TestUnexpectedResult;
 }
 

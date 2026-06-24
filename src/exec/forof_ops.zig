@@ -78,7 +78,7 @@ pub fn createForInIterator(
             defer core.Object.freeKeys(rt, keys);
 
             for (keys) |key| {
-                if (rt.atoms.kind(key) == .symbol) continue;
+                if (rt.atoms.isPublicSymbol(key)) continue;
                 if (atomListContains(seen, key)) continue;
                 try appendAtom(rt, &seen, key);
                 if (object.moduleNamespaceOwnBindingValue(key)) |binding_value| {
@@ -170,7 +170,7 @@ pub fn simpleForInRootCanUseFastPath(rt: *core.JSRuntime, source: *core.Object) 
         for (object.shapeProps()) |prop| {
             const prop_flags = core.property.Flags.fromBits(prop.flags);
             if (prop_flags.deleted or !prop_flags.enumerable) continue;
-            if (rt.atoms.kind(prop.atom_id) == .symbol or rt.atoms.kind(prop.atom_id) == .private) continue;
+            if (rt.atoms.isPublicSymbol(prop.atom_id) or rt.atoms.kind(prop.atom_id) == .private) continue;
             return false;
         }
     }

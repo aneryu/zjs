@@ -1,5 +1,5 @@
 const core = @import("../core/root.zig");
-const dtoa = @import("../libs/dtoa.zig");
+const dtoa = @import("../libs/number_format.zig");
 const std = @import("std");
 const builtin_dispatch = @import("../exec/builtin_dispatch.zig");
 const builtin_glue = @import("../exec/builtin_glue.zig");

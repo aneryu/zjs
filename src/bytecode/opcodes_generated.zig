@@ -36,7 +36,6 @@ pub const Format = enum {
     arg,
     var_ref,
     u32,
-    u32x2,
     i32,
     @"const",
     label,
@@ -119,45 +118,45 @@ pub const op = struct {
     pub const put_var_init: u8 = 58;
     pub const get_ref_value: u8 = 59;
     pub const put_ref_value: u8 = 60;
-    pub const define_var: u8 = 61;
-    pub const check_define_var: u8 = 62;
-    pub const define_func: u8 = 63;
-    pub const get_field: u8 = 64;
-    pub const get_field2: u8 = 65;
-    pub const put_field: u8 = 66;
-    pub const get_private_field: u8 = 67;
-    pub const put_private_field: u8 = 68;
-    pub const define_private_field: u8 = 69;
-    pub const get_array_el: u8 = 70;
-    pub const get_array_el2: u8 = 71;
-    pub const put_array_el: u8 = 72;
-    pub const get_super_value: u8 = 73;
-    pub const put_super_value: u8 = 74;
-    pub const define_field: u8 = 75;
-    pub const set_name: u8 = 76;
-    pub const set_name_computed: u8 = 77;
-    pub const set_proto: u8 = 78;
-    pub const set_home_object: u8 = 79;
-    pub const define_array_el: u8 = 80;
-    pub const append: u8 = 81;
-    pub const copy_data_properties: u8 = 82;
-    pub const define_method: u8 = 83;
-    pub const define_method_computed: u8 = 84;
-    pub const define_class: u8 = 85;
-    pub const define_class_computed: u8 = 86;
-    pub const get_loc: u8 = 87;
-    pub const put_loc: u8 = 88;
-    pub const set_loc: u8 = 89;
-    pub const get_arg: u8 = 90;
-    pub const put_arg: u8 = 91;
-    pub const set_arg: u8 = 92;
-    pub const get_var_ref: u8 = 93;
-    pub const put_var_ref: u8 = 94;
-    pub const set_var_ref: u8 = 95;
-    pub const set_loc_uninitialized: u8 = 96;
-    pub const get_loc_check: u8 = 97;
-    pub const put_loc_check: u8 = 98;
-    pub const put_loc_check_init: u8 = 99;
+    pub const get_field: u8 = 61;
+    pub const get_field2: u8 = 62;
+    pub const put_field: u8 = 63;
+    pub const get_private_field: u8 = 64;
+    pub const put_private_field: u8 = 65;
+    pub const define_private_field: u8 = 66;
+    pub const get_array_el: u8 = 67;
+    pub const get_array_el2: u8 = 68;
+    pub const get_array_el3: u8 = 69;
+    pub const put_array_el: u8 = 70;
+    pub const get_super_value: u8 = 71;
+    pub const put_super_value: u8 = 72;
+    pub const define_field: u8 = 73;
+    pub const set_name: u8 = 74;
+    pub const set_name_computed: u8 = 75;
+    pub const set_proto: u8 = 76;
+    pub const set_home_object: u8 = 77;
+    pub const define_array_el: u8 = 78;
+    pub const append: u8 = 79;
+    pub const copy_data_properties: u8 = 80;
+    pub const define_method: u8 = 81;
+    pub const define_method_computed: u8 = 82;
+    pub const define_class: u8 = 83;
+    pub const define_class_computed: u8 = 84;
+    pub const get_loc: u8 = 85;
+    pub const put_loc: u8 = 86;
+    pub const set_loc: u8 = 87;
+    pub const get_arg: u8 = 88;
+    pub const put_arg: u8 = 89;
+    pub const set_arg: u8 = 90;
+    pub const get_var_ref: u8 = 91;
+    pub const put_var_ref: u8 = 92;
+    pub const set_var_ref: u8 = 93;
+    pub const set_loc_uninitialized: u8 = 94;
+    pub const get_loc_check: u8 = 95;
+    pub const put_loc_check: u8 = 96;
+    pub const set_loc_check: u8 = 97;
+    pub const put_loc_check_init: u8 = 98;
+    pub const get_loc_checkthis: u8 = 99;
     pub const get_var_ref_check: u8 = 100;
     pub const put_var_ref_check: u8 = 101;
     pub const put_var_ref_check_init: u8 = 102;
@@ -171,158 +170,152 @@ pub const op = struct {
     pub const nip_catch: u8 = 110;
     pub const to_object: u8 = 111;
     pub const to_propkey: u8 = 112;
-    pub const to_propkey2: u8 = 113;
-    pub const with_get_var: u8 = 114;
-    pub const with_put_var: u8 = 115;
-    pub const with_delete_var: u8 = 116;
-    pub const with_make_ref: u8 = 117;
-    pub const with_get_ref: u8 = 118;
-    pub const with_get_ref_undef: u8 = 119;
-    pub const make_loc_ref: u8 = 120;
-    pub const make_arg_ref: u8 = 121;
-    pub const make_var_ref_ref: u8 = 122;
-    pub const make_var_ref: u8 = 123;
-    pub const for_in_start: u8 = 124;
-    pub const for_of_start: u8 = 125;
-    pub const for_await_of_start: u8 = 126;
-    pub const for_in_next: u8 = 127;
-    pub const for_of_next: u8 = 128;
-    pub const iterator_check_object: u8 = 129;
-    pub const iterator_get_value_done: u8 = 130;
-    pub const iterator_close: u8 = 131;
-    pub const iterator_next: u8 = 132;
-    pub const iterator_call: u8 = 133;
-    pub const initial_yield: u8 = 134;
-    pub const yield: u8 = 135;
-    pub const yield_star: u8 = 136;
-    pub const async_yield_star: u8 = 137;
-    pub const await: u8 = 138;
-    pub const neg: u8 = 139;
-    pub const plus: u8 = 140;
-    pub const dec: u8 = 141;
-    pub const inc: u8 = 142;
-    pub const post_dec: u8 = 143;
-    pub const post_inc: u8 = 144;
-    pub const dec_loc: u8 = 145;
-    pub const inc_loc: u8 = 146;
-    pub const add_loc: u8 = 147;
-    pub const not: u8 = 148;
-    pub const lnot: u8 = 149;
-    pub const typeof: u8 = 150;
-    pub const delete: u8 = 151;
-    pub const delete_var: u8 = 152;
-    pub const mul: u8 = 153;
-    pub const div: u8 = 154;
-    pub const mod: u8 = 155;
-    pub const add: u8 = 156;
-    pub const sub: u8 = 157;
+    pub const with_get_var: u8 = 113;
+    pub const with_put_var: u8 = 114;
+    pub const with_delete_var: u8 = 115;
+    pub const with_make_ref: u8 = 116;
+    pub const with_get_ref: u8 = 117;
+    pub const make_loc_ref: u8 = 118;
+    pub const make_arg_ref: u8 = 119;
+    pub const make_var_ref_ref: u8 = 120;
+    pub const make_var_ref: u8 = 121;
+    pub const for_in_start: u8 = 122;
+    pub const for_of_start: u8 = 123;
+    pub const for_await_of_start: u8 = 124;
+    pub const for_in_next: u8 = 125;
+    pub const for_of_next: u8 = 126;
+    pub const for_await_of_next: u8 = 127;
+    pub const iterator_check_object: u8 = 128;
+    pub const iterator_get_value_done: u8 = 129;
+    pub const iterator_close: u8 = 130;
+    pub const iterator_next: u8 = 131;
+    pub const iterator_call: u8 = 132;
+    pub const initial_yield: u8 = 133;
+    pub const yield: u8 = 134;
+    pub const yield_star: u8 = 135;
+    pub const async_yield_star: u8 = 136;
+    pub const await: u8 = 137;
+    pub const neg: u8 = 138;
+    pub const plus: u8 = 139;
+    pub const dec: u8 = 140;
+    pub const inc: u8 = 141;
+    pub const post_dec: u8 = 142;
+    pub const post_inc: u8 = 143;
+    pub const dec_loc: u8 = 144;
+    pub const inc_loc: u8 = 145;
+    pub const add_loc: u8 = 146;
+    pub const not: u8 = 147;
+    pub const lnot: u8 = 148;
+    pub const typeof: u8 = 149;
+    pub const delete: u8 = 150;
+    pub const delete_var: u8 = 151;
+    pub const mul: u8 = 152;
+    pub const div: u8 = 153;
+    pub const mod: u8 = 154;
+    pub const add: u8 = 155;
+    pub const sub: u8 = 156;
+    pub const pow: u8 = 157;
     pub const shl: u8 = 158;
     pub const sar: u8 = 159;
     pub const shr: u8 = 160;
-    pub const @"and": u8 = 161;
-    pub const xor: u8 = 162;
-    pub const @"or": u8 = 163;
-    pub const pow: u8 = 164;
-    pub const lt: u8 = 165;
-    pub const lte: u8 = 166;
-    pub const gt: u8 = 167;
-    pub const gte: u8 = 168;
-    pub const instanceof: u8 = 169;
-    pub const in: u8 = 170;
-    pub const eq: u8 = 171;
-    pub const neq: u8 = 172;
-    pub const strict_eq: u8 = 173;
-    pub const strict_neq: u8 = 174;
-    pub const is_undefined_or_null: u8 = 175;
-    pub const private_in: u8 = 176;
-    pub const push_bigint_i32: u8 = 177;
-    pub const nop: u8 = 178;
-    pub const push_minus1: u8 = 179;
-    pub const push_0: u8 = 180;
-    pub const push_1: u8 = 181;
-    pub const push_2: u8 = 182;
-    pub const push_3: u8 = 183;
-    pub const push_4: u8 = 184;
-    pub const push_5: u8 = 185;
-    pub const push_6: u8 = 186;
-    pub const push_7: u8 = 187;
-    pub const push_i8: u8 = 188;
-    pub const push_i16: u8 = 189;
-    pub const push_const8: u8 = 190;
-    pub const fclosure8: u8 = 191;
-    pub const push_empty_string: u8 = 192;
-    pub const get_loc8: u8 = 193;
-    pub const put_loc8: u8 = 194;
-    pub const set_loc8: u8 = 195;
-    pub const get_loc0_loc1: u8 = 196;
-    pub const get_loc0: u8 = 197;
-    pub const get_loc1: u8 = 198;
-    pub const get_loc2: u8 = 199;
-    pub const get_loc3: u8 = 200;
-    pub const put_loc0: u8 = 201;
-    pub const put_loc1: u8 = 202;
-    pub const put_loc2: u8 = 203;
-    pub const put_loc3: u8 = 204;
-    pub const set_loc0: u8 = 205;
-    pub const set_loc1: u8 = 206;
-    pub const set_loc2: u8 = 207;
-    pub const set_loc3: u8 = 208;
-    pub const get_arg0: u8 = 209;
-    pub const get_arg1: u8 = 210;
-    pub const get_arg2: u8 = 211;
-    pub const get_arg3: u8 = 212;
-    pub const put_arg0: u8 = 213;
-    pub const put_arg1: u8 = 214;
-    pub const put_arg2: u8 = 215;
-    pub const put_arg3: u8 = 216;
-    pub const set_arg0: u8 = 217;
-    pub const set_arg1: u8 = 218;
-    pub const set_arg2: u8 = 219;
-    pub const set_arg3: u8 = 220;
-    pub const get_var_ref0: u8 = 221;
-    pub const get_var_ref1: u8 = 222;
-    pub const get_var_ref2: u8 = 223;
-    pub const get_var_ref3: u8 = 224;
-    pub const put_var_ref0: u8 = 225;
-    pub const put_var_ref1: u8 = 226;
-    pub const put_var_ref2: u8 = 227;
-    pub const put_var_ref3: u8 = 228;
-    pub const set_var_ref0: u8 = 229;
-    pub const set_var_ref1: u8 = 230;
-    pub const set_var_ref2: u8 = 231;
-    pub const set_var_ref3: u8 = 232;
-    pub const get_length: u8 = 233;
-    pub const if_false8: u8 = 234;
-    pub const if_true8: u8 = 235;
-    pub const goto8: u8 = 236;
-    pub const goto16: u8 = 237;
-    pub const call0: u8 = 238;
-    pub const call1: u8 = 239;
-    pub const call2: u8 = 240;
-    pub const call3: u8 = 241;
-    pub const is_undefined: u8 = 242;
-    pub const is_null: u8 = 243;
-    pub const typeof_is_undefined: u8 = 244;
-    pub const typeof_is_function: u8 = 245;
-    pub const get_field_data_slot: u8 = 246;
-    pub const get_global_data_slot: u8 = 247;
-    pub const get_global_lexical_slot: u8 = 248;
-    pub const prepare_call_prop_atom: u8 = 249;
-    pub const call_prepared: u8 = 250;
+    pub const lt: u8 = 161;
+    pub const lte: u8 = 162;
+    pub const gt: u8 = 163;
+    pub const gte: u8 = 164;
+    pub const instanceof: u8 = 165;
+    pub const in: u8 = 166;
+    pub const eq: u8 = 167;
+    pub const neq: u8 = 168;
+    pub const strict_eq: u8 = 169;
+    pub const strict_neq: u8 = 170;
+    pub const @"and": u8 = 171;
+    pub const xor: u8 = 172;
+    pub const @"or": u8 = 173;
+    pub const is_undefined_or_null: u8 = 174;
+    pub const private_in: u8 = 175;
+    pub const push_bigint_i32: u8 = 176;
+    pub const nop: u8 = 177;
+    pub const push_minus1: u8 = 178;
+    pub const push_0: u8 = 179;
+    pub const push_1: u8 = 180;
+    pub const push_2: u8 = 181;
+    pub const push_3: u8 = 182;
+    pub const push_4: u8 = 183;
+    pub const push_5: u8 = 184;
+    pub const push_6: u8 = 185;
+    pub const push_7: u8 = 186;
+    pub const push_i8: u8 = 187;
+    pub const push_i16: u8 = 188;
+    pub const push_const8: u8 = 189;
+    pub const fclosure8: u8 = 190;
+    pub const push_empty_string: u8 = 191;
+    pub const get_loc8: u8 = 192;
+    pub const put_loc8: u8 = 193;
+    pub const set_loc8: u8 = 194;
+    pub const get_loc0: u8 = 195;
+    pub const get_loc1: u8 = 196;
+    pub const get_loc2: u8 = 197;
+    pub const get_loc3: u8 = 198;
+    pub const put_loc0: u8 = 199;
+    pub const put_loc1: u8 = 200;
+    pub const put_loc2: u8 = 201;
+    pub const put_loc3: u8 = 202;
+    pub const set_loc0: u8 = 203;
+    pub const set_loc1: u8 = 204;
+    pub const set_loc2: u8 = 205;
+    pub const set_loc3: u8 = 206;
+    pub const get_arg0: u8 = 207;
+    pub const get_arg1: u8 = 208;
+    pub const get_arg2: u8 = 209;
+    pub const get_arg3: u8 = 210;
+    pub const put_arg0: u8 = 211;
+    pub const put_arg1: u8 = 212;
+    pub const put_arg2: u8 = 213;
+    pub const put_arg3: u8 = 214;
+    pub const set_arg0: u8 = 215;
+    pub const set_arg1: u8 = 216;
+    pub const set_arg2: u8 = 217;
+    pub const set_arg3: u8 = 218;
+    pub const get_var_ref0: u8 = 219;
+    pub const get_var_ref1: u8 = 220;
+    pub const get_var_ref2: u8 = 221;
+    pub const get_var_ref3: u8 = 222;
+    pub const put_var_ref0: u8 = 223;
+    pub const put_var_ref1: u8 = 224;
+    pub const put_var_ref2: u8 = 225;
+    pub const put_var_ref3: u8 = 226;
+    pub const set_var_ref0: u8 = 227;
+    pub const set_var_ref1: u8 = 228;
+    pub const set_var_ref2: u8 = 229;
+    pub const set_var_ref3: u8 = 230;
+    pub const get_length: u8 = 231;
+    pub const if_false8: u8 = 232;
+    pub const if_true8: u8 = 233;
+    pub const goto8: u8 = 234;
+    pub const goto16: u8 = 235;
+    pub const call0: u8 = 236;
+    pub const call1: u8 = 237;
+    pub const call2: u8 = 238;
+    pub const call3: u8 = 239;
+    pub const is_undefined: u8 = 240;
+    pub const is_null: u8 = 241;
+    pub const typeof_is_undefined: u8 = 242;
+    pub const typeof_is_function: u8 = 243;
 
     // Temporary opcodes (phase-1 emit, erased before resolve_labels).
     // Ids overlap the short opcodes above; phase-1 streams and final
     // streams must use the matching opcode.zig view to size them.
-    pub const enter_scope: u8 = 179;
-    pub const leave_scope: u8 = 180;
-    pub const label: u8 = 181;
-    pub const scope_get_var_undef: u8 = 182;
-    pub const scope_get_var: u8 = 183;
-    pub const scope_put_var: u8 = 184;
-    pub const scope_delete_var: u8 = 185;
-    pub const scope_make_ref: u8 = 186;
-    pub const scope_get_ref: u8 = 187;
-    pub const scope_put_var_init: u8 = 188;
+    pub const enter_scope: u8 = 178;
+    pub const leave_scope: u8 = 179;
+    pub const label: u8 = 180;
+    pub const scope_get_var_undef: u8 = 181;
+    pub const scope_get_var: u8 = 182;
+    pub const scope_put_var: u8 = 183;
+    pub const scope_delete_var: u8 = 184;
+    pub const scope_make_ref: u8 = 185;
+    pub const scope_get_ref: u8 = 186;
+    pub const scope_put_var_init: u8 = 187;
+    pub const scope_get_var_checkthis: u8 = 188;
     pub const scope_get_private_field: u8 = 189;
     pub const scope_get_private_field2: u8 = 190;
     pub const scope_put_private_field: u8 = 191;
@@ -330,19 +323,19 @@ pub const op = struct {
     pub const get_field_opt_chain: u8 = 193;
     pub const get_array_el_opt_chain: u8 = 194;
     pub const set_class_name: u8 = 195;
-    pub const source_loc: u8 = 196;
+    pub const line_num: u8 = 196;
 
     /// Number of real (DEF) opcodes; ids 0..op_count-1 are claimed.
-    pub const op_count: u16 = 251;
+    pub const op_count: u16 = 244;
     /// First id of the temp/short overlap range (OP_nop + 1).
-    pub const op_temp_start: u8 = 179;
+    pub const op_temp_start: u8 = 178;
     /// One past the last temp id (exclusive).
     pub const op_temp_end: u8 = 197;
     /// Number of temp opcodes (= short-entry shift in `opcode_info`).
-    pub const op_temp_count: u8 = 18;
+    pub const op_temp_count: u8 = 19;
 };
 
-pub const op_info_len: usize = 269;
+pub const op_info_len: usize = 263;
 
 /// Merged metadata table in quickjs-opcode.h file order (see header
 /// comment for the index layout).
@@ -402,51 +395,51 @@ pub const opcode_info: [op_info_len]Info = .{
     .{ .name = "regexp", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [52] id 52
     .{ .name = "get_super", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [53] id 53
     .{ .name = "import", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [54] id 54
-    .{ .name = "get_var_undef", .size = 5, .n_pop = 0, .n_push = 1, .fmt = .atom }, // [55] id 55
-    .{ .name = "get_var", .size = 5, .n_pop = 0, .n_push = 1, .fmt = .atom }, // [56] id 56
-    .{ .name = "put_var", .size = 5, .n_pop = 1, .n_push = 0, .fmt = .atom }, // [57] id 57
-    .{ .name = "put_var_init", .size = 5, .n_pop = 1, .n_push = 0, .fmt = .atom }, // [58] id 58
+    .{ .name = "get_var_undef", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .var_ref }, // [55] id 55
+    .{ .name = "get_var", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .var_ref }, // [56] id 56
+    .{ .name = "put_var", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .var_ref }, // [57] id 57
+    .{ .name = "put_var_init", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .var_ref }, // [58] id 58
     .{ .name = "get_ref_value", .size = 1, .n_pop = 2, .n_push = 3, .fmt = .none }, // [59] id 59
     .{ .name = "put_ref_value", .size = 1, .n_pop = 3, .n_push = 0, .fmt = .none }, // [60] id 60
-    .{ .name = "define_var", .size = 6, .n_pop = 0, .n_push = 0, .fmt = .atom_u8 }, // [61] id 61
-    .{ .name = "check_define_var", .size = 6, .n_pop = 0, .n_push = 0, .fmt = .atom_u8 }, // [62] id 62
-    .{ .name = "define_func", .size = 6, .n_pop = 1, .n_push = 0, .fmt = .atom_u8 }, // [63] id 63
-    .{ .name = "get_field", .size = 5, .n_pop = 1, .n_push = 1, .fmt = .atom }, // [64] id 64
-    .{ .name = "get_field2", .size = 5, .n_pop = 1, .n_push = 2, .fmt = .atom }, // [65] id 65
-    .{ .name = "put_field", .size = 5, .n_pop = 2, .n_push = 0, .fmt = .atom }, // [66] id 66
-    .{ .name = "get_private_field", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [67] id 67
-    .{ .name = "put_private_field", .size = 1, .n_pop = 3, .n_push = 0, .fmt = .none }, // [68] id 68
-    .{ .name = "define_private_field", .size = 1, .n_pop = 3, .n_push = 1, .fmt = .none }, // [69] id 69
-    .{ .name = "get_array_el", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [70] id 70
-    .{ .name = "get_array_el2", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [71] id 71
-    .{ .name = "put_array_el", .size = 1, .n_pop = 3, .n_push = 0, .fmt = .none }, // [72] id 72
-    .{ .name = "get_super_value", .size = 1, .n_pop = 3, .n_push = 1, .fmt = .none }, // [73] id 73
-    .{ .name = "put_super_value", .size = 1, .n_pop = 4, .n_push = 0, .fmt = .none }, // [74] id 74
-    .{ .name = "define_field", .size = 5, .n_pop = 2, .n_push = 1, .fmt = .atom }, // [75] id 75
-    .{ .name = "set_name", .size = 5, .n_pop = 1, .n_push = 1, .fmt = .atom }, // [76] id 76
-    .{ .name = "set_name_computed", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [77] id 77
-    .{ .name = "set_proto", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [78] id 78
-    .{ .name = "set_home_object", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [79] id 79
-    .{ .name = "define_array_el", .size = 1, .n_pop = 3, .n_push = 2, .fmt = .none }, // [80] id 80
-    .{ .name = "append", .size = 1, .n_pop = 3, .n_push = 2, .fmt = .none }, // [81] id 81
-    .{ .name = "copy_data_properties", .size = 2, .n_pop = 3, .n_push = 3, .fmt = .u8 }, // [82] id 82
-    .{ .name = "define_method", .size = 6, .n_pop = 2, .n_push = 1, .fmt = .atom_u8 }, // [83] id 83
-    .{ .name = "define_method_computed", .size = 2, .n_pop = 3, .n_push = 1, .fmt = .u8 }, // [84] id 84
-    .{ .name = "define_class", .size = 6, .n_pop = 2, .n_push = 2, .fmt = .atom_u8 }, // [85] id 85
-    .{ .name = "define_class_computed", .size = 6, .n_pop = 3, .n_push = 3, .fmt = .atom_u8 }, // [86] id 86
-    .{ .name = "get_loc", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .loc }, // [87] id 87
-    .{ .name = "put_loc", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .loc }, // [88] id 88
-    .{ .name = "set_loc", .size = 3, .n_pop = 1, .n_push = 1, .fmt = .loc }, // [89] id 89
-    .{ .name = "get_arg", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .arg }, // [90] id 90
-    .{ .name = "put_arg", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .arg }, // [91] id 91
-    .{ .name = "set_arg", .size = 3, .n_pop = 1, .n_push = 1, .fmt = .arg }, // [92] id 92
-    .{ .name = "get_var_ref", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .var_ref }, // [93] id 93
-    .{ .name = "put_var_ref", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .var_ref }, // [94] id 94
-    .{ .name = "set_var_ref", .size = 3, .n_pop = 1, .n_push = 1, .fmt = .var_ref }, // [95] id 95
-    .{ .name = "set_loc_uninitialized", .size = 3, .n_pop = 0, .n_push = 0, .fmt = .loc }, // [96] id 96
-    .{ .name = "get_loc_check", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .loc }, // [97] id 97
-    .{ .name = "put_loc_check", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .loc }, // [98] id 98
-    .{ .name = "put_loc_check_init", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .loc }, // [99] id 99
+    .{ .name = "get_field", .size = 5, .n_pop = 1, .n_push = 1, .fmt = .atom }, // [61] id 61
+    .{ .name = "get_field2", .size = 5, .n_pop = 1, .n_push = 2, .fmt = .atom }, // [62] id 62
+    .{ .name = "put_field", .size = 5, .n_pop = 2, .n_push = 0, .fmt = .atom }, // [63] id 63
+    .{ .name = "get_private_field", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [64] id 64
+    .{ .name = "put_private_field", .size = 1, .n_pop = 3, .n_push = 0, .fmt = .none }, // [65] id 65
+    .{ .name = "define_private_field", .size = 1, .n_pop = 3, .n_push = 1, .fmt = .none }, // [66] id 66
+    .{ .name = "get_array_el", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [67] id 67
+    .{ .name = "get_array_el2", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [68] id 68
+    .{ .name = "get_array_el3", .size = 1, .n_pop = 2, .n_push = 3, .fmt = .none }, // [69] id 69
+    .{ .name = "put_array_el", .size = 1, .n_pop = 3, .n_push = 0, .fmt = .none }, // [70] id 70
+    .{ .name = "get_super_value", .size = 1, .n_pop = 3, .n_push = 1, .fmt = .none }, // [71] id 71
+    .{ .name = "put_super_value", .size = 1, .n_pop = 4, .n_push = 0, .fmt = .none }, // [72] id 72
+    .{ .name = "define_field", .size = 5, .n_pop = 2, .n_push = 1, .fmt = .atom }, // [73] id 73
+    .{ .name = "set_name", .size = 5, .n_pop = 1, .n_push = 1, .fmt = .atom }, // [74] id 74
+    .{ .name = "set_name_computed", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [75] id 75
+    .{ .name = "set_proto", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [76] id 76
+    .{ .name = "set_home_object", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [77] id 77
+    .{ .name = "define_array_el", .size = 1, .n_pop = 3, .n_push = 2, .fmt = .none }, // [78] id 78
+    .{ .name = "append", .size = 1, .n_pop = 3, .n_push = 2, .fmt = .none }, // [79] id 79
+    .{ .name = "copy_data_properties", .size = 2, .n_pop = 3, .n_push = 3, .fmt = .u8 }, // [80] id 80
+    .{ .name = "define_method", .size = 6, .n_pop = 2, .n_push = 1, .fmt = .atom_u8 }, // [81] id 81
+    .{ .name = "define_method_computed", .size = 2, .n_pop = 3, .n_push = 1, .fmt = .u8 }, // [82] id 82
+    .{ .name = "define_class", .size = 6, .n_pop = 2, .n_push = 2, .fmt = .atom_u8 }, // [83] id 83
+    .{ .name = "define_class_computed", .size = 6, .n_pop = 3, .n_push = 3, .fmt = .atom_u8 }, // [84] id 84
+    .{ .name = "get_loc", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .loc }, // [85] id 85
+    .{ .name = "put_loc", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .loc }, // [86] id 86
+    .{ .name = "set_loc", .size = 3, .n_pop = 1, .n_push = 1, .fmt = .loc }, // [87] id 87
+    .{ .name = "get_arg", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .arg }, // [88] id 88
+    .{ .name = "put_arg", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .arg }, // [89] id 89
+    .{ .name = "set_arg", .size = 3, .n_pop = 1, .n_push = 1, .fmt = .arg }, // [90] id 90
+    .{ .name = "get_var_ref", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .var_ref }, // [91] id 91
+    .{ .name = "put_var_ref", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .var_ref }, // [92] id 92
+    .{ .name = "set_var_ref", .size = 3, .n_pop = 1, .n_push = 1, .fmt = .var_ref }, // [93] id 93
+    .{ .name = "set_loc_uninitialized", .size = 3, .n_pop = 0, .n_push = 0, .fmt = .loc }, // [94] id 94
+    .{ .name = "get_loc_check", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .loc }, // [95] id 95
+    .{ .name = "put_loc_check", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .loc }, // [96] id 96
+    .{ .name = "set_loc_check", .size = 3, .n_pop = 1, .n_push = 1, .fmt = .loc }, // [97] id 97
+    .{ .name = "put_loc_check_init", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .loc }, // [98] id 98
+    .{ .name = "get_loc_checkthis", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .loc }, // [99] id 99
     .{ .name = "get_var_ref_check", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .var_ref }, // [100] id 100
     .{ .name = "put_var_ref_check", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .var_ref }, // [101] id 101
     .{ .name = "put_var_ref_check_init", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .var_ref }, // [102] id 102
@@ -460,82 +453,82 @@ pub const opcode_info: [op_info_len]Info = .{
     .{ .name = "nip_catch", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [110] id 110
     .{ .name = "to_object", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [111] id 111
     .{ .name = "to_propkey", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [112] id 112
-    .{ .name = "to_propkey2", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [113] id 113
-    .{ .name = "with_get_var", .size = 10, .n_pop = 1, .n_push = 0, .fmt = .atom_label_u8 }, // [114] id 114
-    .{ .name = "with_put_var", .size = 10, .n_pop = 2, .n_push = 1, .fmt = .atom_label_u8 }, // [115] id 115
-    .{ .name = "with_delete_var", .size = 10, .n_pop = 1, .n_push = 0, .fmt = .atom_label_u8 }, // [116] id 116
-    .{ .name = "with_make_ref", .size = 10, .n_pop = 1, .n_push = 0, .fmt = .atom_label_u8 }, // [117] id 117
-    .{ .name = "with_get_ref", .size = 10, .n_pop = 1, .n_push = 0, .fmt = .atom_label_u8 }, // [118] id 118
-    .{ .name = "with_get_ref_undef", .size = 10, .n_pop = 1, .n_push = 0, .fmt = .atom_label_u8 }, // [119] id 119
-    .{ .name = "make_loc_ref", .size = 7, .n_pop = 0, .n_push = 2, .fmt = .atom_u16 }, // [120] id 120
-    .{ .name = "make_arg_ref", .size = 7, .n_pop = 0, .n_push = 2, .fmt = .atom_u16 }, // [121] id 121
-    .{ .name = "make_var_ref_ref", .size = 7, .n_pop = 0, .n_push = 2, .fmt = .atom_u16 }, // [122] id 122
-    .{ .name = "make_var_ref", .size = 5, .n_pop = 0, .n_push = 2, .fmt = .atom }, // [123] id 123
-    .{ .name = "for_in_start", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [124] id 124
-    .{ .name = "for_of_start", .size = 1, .n_pop = 1, .n_push = 3, .fmt = .none }, // [125] id 125
-    .{ .name = "for_await_of_start", .size = 1, .n_pop = 1, .n_push = 3, .fmt = .none }, // [126] id 126
-    .{ .name = "for_in_next", .size = 1, .n_pop = 1, .n_push = 3, .fmt = .none }, // [127] id 127
-    .{ .name = "for_of_next", .size = 2, .n_pop = 3, .n_push = 5, .fmt = .u8 }, // [128] id 128
-    .{ .name = "iterator_check_object", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [129] id 129
-    .{ .name = "iterator_get_value_done", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [130] id 130
-    .{ .name = "iterator_close", .size = 1, .n_pop = 3, .n_push = 0, .fmt = .none }, // [131] id 131
-    .{ .name = "iterator_next", .size = 1, .n_pop = 4, .n_push = 4, .fmt = .none }, // [132] id 132
-    .{ .name = "iterator_call", .size = 2, .n_pop = 4, .n_push = 5, .fmt = .u8 }, // [133] id 133
-    .{ .name = "initial_yield", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [134] id 134
-    .{ .name = "yield", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [135] id 135
-    .{ .name = "yield_star", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [136] id 136
-    .{ .name = "async_yield_star", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [137] id 137
-    .{ .name = "await", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [138] id 138
-    .{ .name = "neg", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [139] id 139
-    .{ .name = "plus", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [140] id 140
-    .{ .name = "dec", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [141] id 141
-    .{ .name = "inc", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [142] id 142
-    .{ .name = "post_dec", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [143] id 143
-    .{ .name = "post_inc", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [144] id 144
-    .{ .name = "dec_loc", .size = 2, .n_pop = 0, .n_push = 0, .fmt = .loc8 }, // [145] id 145
-    .{ .name = "inc_loc", .size = 2, .n_pop = 0, .n_push = 0, .fmt = .loc8 }, // [146] id 146
-    .{ .name = "add_loc", .size = 2, .n_pop = 1, .n_push = 0, .fmt = .loc8 }, // [147] id 147
-    .{ .name = "not", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [148] id 148
-    .{ .name = "lnot", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [149] id 149
-    .{ .name = "typeof", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [150] id 150
-    .{ .name = "delete", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [151] id 151
-    .{ .name = "delete_var", .size = 5, .n_pop = 0, .n_push = 1, .fmt = .atom }, // [152] id 152
-    .{ .name = "mul", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [153] id 153
-    .{ .name = "div", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [154] id 154
-    .{ .name = "mod", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [155] id 155
-    .{ .name = "add", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [156] id 156
-    .{ .name = "sub", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [157] id 157
+    .{ .name = "with_get_var", .size = 10, .n_pop = 1, .n_push = 0, .fmt = .atom_label_u8 }, // [113] id 113
+    .{ .name = "with_put_var", .size = 10, .n_pop = 2, .n_push = 1, .fmt = .atom_label_u8 }, // [114] id 114
+    .{ .name = "with_delete_var", .size = 10, .n_pop = 1, .n_push = 0, .fmt = .atom_label_u8 }, // [115] id 115
+    .{ .name = "with_make_ref", .size = 10, .n_pop = 1, .n_push = 0, .fmt = .atom_label_u8 }, // [116] id 116
+    .{ .name = "with_get_ref", .size = 10, .n_pop = 1, .n_push = 0, .fmt = .atom_label_u8 }, // [117] id 117
+    .{ .name = "make_loc_ref", .size = 7, .n_pop = 0, .n_push = 2, .fmt = .atom_u16 }, // [118] id 118
+    .{ .name = "make_arg_ref", .size = 7, .n_pop = 0, .n_push = 2, .fmt = .atom_u16 }, // [119] id 119
+    .{ .name = "make_var_ref_ref", .size = 7, .n_pop = 0, .n_push = 2, .fmt = .atom_u16 }, // [120] id 120
+    .{ .name = "make_var_ref", .size = 5, .n_pop = 0, .n_push = 2, .fmt = .atom }, // [121] id 121
+    .{ .name = "for_in_start", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [122] id 122
+    .{ .name = "for_of_start", .size = 1, .n_pop = 1, .n_push = 3, .fmt = .none }, // [123] id 123
+    .{ .name = "for_await_of_start", .size = 1, .n_pop = 1, .n_push = 3, .fmt = .none }, // [124] id 124
+    .{ .name = "for_in_next", .size = 1, .n_pop = 1, .n_push = 3, .fmt = .none }, // [125] id 125
+    .{ .name = "for_of_next", .size = 2, .n_pop = 3, .n_push = 5, .fmt = .u8 }, // [126] id 126
+    .{ .name = "for_await_of_next", .size = 1, .n_pop = 3, .n_push = 4, .fmt = .none }, // [127] id 127
+    .{ .name = "iterator_check_object", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [128] id 128
+    .{ .name = "iterator_get_value_done", .size = 1, .n_pop = 2, .n_push = 3, .fmt = .none }, // [129] id 129
+    .{ .name = "iterator_close", .size = 1, .n_pop = 3, .n_push = 0, .fmt = .none }, // [130] id 130
+    .{ .name = "iterator_next", .size = 1, .n_pop = 4, .n_push = 4, .fmt = .none }, // [131] id 131
+    .{ .name = "iterator_call", .size = 2, .n_pop = 4, .n_push = 5, .fmt = .u8 }, // [132] id 132
+    .{ .name = "initial_yield", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [133] id 133
+    .{ .name = "yield", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [134] id 134
+    .{ .name = "yield_star", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [135] id 135
+    .{ .name = "async_yield_star", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [136] id 136
+    .{ .name = "await", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [137] id 137
+    .{ .name = "neg", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [138] id 138
+    .{ .name = "plus", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [139] id 139
+    .{ .name = "dec", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [140] id 140
+    .{ .name = "inc", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [141] id 141
+    .{ .name = "post_dec", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [142] id 142
+    .{ .name = "post_inc", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [143] id 143
+    .{ .name = "dec_loc", .size = 2, .n_pop = 0, .n_push = 0, .fmt = .loc8 }, // [144] id 144
+    .{ .name = "inc_loc", .size = 2, .n_pop = 0, .n_push = 0, .fmt = .loc8 }, // [145] id 145
+    .{ .name = "add_loc", .size = 2, .n_pop = 1, .n_push = 0, .fmt = .loc8 }, // [146] id 146
+    .{ .name = "not", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [147] id 147
+    .{ .name = "lnot", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [148] id 148
+    .{ .name = "typeof", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [149] id 149
+    .{ .name = "delete", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [150] id 150
+    .{ .name = "delete_var", .size = 5, .n_pop = 0, .n_push = 1, .fmt = .atom }, // [151] id 151
+    .{ .name = "mul", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [152] id 152
+    .{ .name = "div", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [153] id 153
+    .{ .name = "mod", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [154] id 154
+    .{ .name = "add", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [155] id 155
+    .{ .name = "sub", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [156] id 156
+    .{ .name = "pow", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [157] id 157
     .{ .name = "shl", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [158] id 158
     .{ .name = "sar", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [159] id 159
     .{ .name = "shr", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [160] id 160
-    .{ .name = "and", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [161] id 161
-    .{ .name = "xor", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [162] id 162
-    .{ .name = "or", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [163] id 163
-    .{ .name = "pow", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [164] id 164
-    .{ .name = "lt", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [165] id 165
-    .{ .name = "lte", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [166] id 166
-    .{ .name = "gt", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [167] id 167
-    .{ .name = "gte", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [168] id 168
-    .{ .name = "instanceof", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [169] id 169
-    .{ .name = "in", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [170] id 170
-    .{ .name = "eq", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [171] id 171
-    .{ .name = "neq", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [172] id 172
-    .{ .name = "strict_eq", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [173] id 173
-    .{ .name = "strict_neq", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [174] id 174
-    .{ .name = "is_undefined_or_null", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [175] id 175
-    .{ .name = "private_in", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [176] id 176
-    .{ .name = "push_bigint_i32", .size = 5, .n_pop = 0, .n_push = 1, .fmt = .i32 }, // [177] id 177
-    .{ .name = "nop", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [178] id 178
-    .{ .name = "enter_scope", .size = 3, .n_pop = 0, .n_push = 0, .fmt = .u16 }, // [179] id 179 (temp)
-    .{ .name = "leave_scope", .size = 3, .n_pop = 0, .n_push = 0, .fmt = .u16 }, // [180] id 180 (temp)
-    .{ .name = "label", .size = 5, .n_pop = 0, .n_push = 0, .fmt = .label }, // [181] id 181 (temp)
-    .{ .name = "scope_get_var_undef", .size = 7, .n_pop = 0, .n_push = 1, .fmt = .atom_u16 }, // [182] id 182 (temp)
-    .{ .name = "scope_get_var", .size = 7, .n_pop = 0, .n_push = 1, .fmt = .atom_u16 }, // [183] id 183 (temp)
-    .{ .name = "scope_put_var", .size = 7, .n_pop = 1, .n_push = 0, .fmt = .atom_u16 }, // [184] id 184 (temp)
-    .{ .name = "scope_delete_var", .size = 7, .n_pop = 0, .n_push = 1, .fmt = .atom_u16 }, // [185] id 185 (temp)
-    .{ .name = "scope_make_ref", .size = 11, .n_pop = 0, .n_push = 2, .fmt = .atom_label_u16 }, // [186] id 186 (temp)
-    .{ .name = "scope_get_ref", .size = 7, .n_pop = 0, .n_push = 2, .fmt = .atom_u16 }, // [187] id 187 (temp)
-    .{ .name = "scope_put_var_init", .size = 7, .n_pop = 0, .n_push = 2, .fmt = .atom_u16 }, // [188] id 188 (temp)
+    .{ .name = "lt", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [161] id 161
+    .{ .name = "lte", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [162] id 162
+    .{ .name = "gt", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [163] id 163
+    .{ .name = "gte", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [164] id 164
+    .{ .name = "instanceof", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [165] id 165
+    .{ .name = "in", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [166] id 166
+    .{ .name = "eq", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [167] id 167
+    .{ .name = "neq", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [168] id 168
+    .{ .name = "strict_eq", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [169] id 169
+    .{ .name = "strict_neq", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [170] id 170
+    .{ .name = "and", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [171] id 171
+    .{ .name = "xor", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [172] id 172
+    .{ .name = "or", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [173] id 173
+    .{ .name = "is_undefined_or_null", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [174] id 174
+    .{ .name = "private_in", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [175] id 175
+    .{ .name = "push_bigint_i32", .size = 5, .n_pop = 0, .n_push = 1, .fmt = .i32 }, // [176] id 176
+    .{ .name = "nop", .size = 1, .n_pop = 0, .n_push = 0, .fmt = .none }, // [177] id 177
+    .{ .name = "enter_scope", .size = 3, .n_pop = 0, .n_push = 0, .fmt = .u16 }, // [178] id 178 (temp)
+    .{ .name = "leave_scope", .size = 3, .n_pop = 0, .n_push = 0, .fmt = .u16 }, // [179] id 179 (temp)
+    .{ .name = "label", .size = 5, .n_pop = 0, .n_push = 0, .fmt = .label }, // [180] id 180 (temp)
+    .{ .name = "scope_get_var_undef", .size = 7, .n_pop = 0, .n_push = 1, .fmt = .atom_u16 }, // [181] id 181 (temp)
+    .{ .name = "scope_get_var", .size = 7, .n_pop = 0, .n_push = 1, .fmt = .atom_u16 }, // [182] id 182 (temp)
+    .{ .name = "scope_put_var", .size = 7, .n_pop = 1, .n_push = 0, .fmt = .atom_u16 }, // [183] id 183 (temp)
+    .{ .name = "scope_delete_var", .size = 7, .n_pop = 0, .n_push = 1, .fmt = .atom_u16 }, // [184] id 184 (temp)
+    .{ .name = "scope_make_ref", .size = 11, .n_pop = 0, .n_push = 2, .fmt = .atom_label_u16 }, // [185] id 185 (temp)
+    .{ .name = "scope_get_ref", .size = 7, .n_pop = 0, .n_push = 2, .fmt = .atom_u16 }, // [186] id 186 (temp)
+    .{ .name = "scope_put_var_init", .size = 7, .n_pop = 0, .n_push = 2, .fmt = .atom_u16 }, // [187] id 187 (temp)
+    .{ .name = "scope_get_var_checkthis", .size = 7, .n_pop = 0, .n_push = 1, .fmt = .atom_u16 }, // [188] id 188 (temp)
     .{ .name = "scope_get_private_field", .size = 7, .n_pop = 1, .n_push = 1, .fmt = .atom_u16 }, // [189] id 189 (temp)
     .{ .name = "scope_get_private_field2", .size = 7, .n_pop = 1, .n_push = 2, .fmt = .atom_u16 }, // [190] id 190 (temp)
     .{ .name = "scope_put_private_field", .size = 7, .n_pop = 2, .n_push = 0, .fmt = .atom_u16 }, // [191] id 191 (temp)
@@ -543,77 +536,71 @@ pub const opcode_info: [op_info_len]Info = .{
     .{ .name = "get_field_opt_chain", .size = 5, .n_pop = 1, .n_push = 1, .fmt = .atom }, // [193] id 193 (temp)
     .{ .name = "get_array_el_opt_chain", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [194] id 194 (temp)
     .{ .name = "set_class_name", .size = 5, .n_pop = 1, .n_push = 1, .fmt = .u32 }, // [195] id 195 (temp)
-    .{ .name = "source_loc", .size = 9, .n_pop = 0, .n_push = 0, .fmt = .u32x2 }, // [196] id 196 (temp)
-    .{ .name = "push_minus1", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [197] id 179 (short, shifted)
-    .{ .name = "push_0", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [198] id 180 (short, shifted)
-    .{ .name = "push_1", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [199] id 181 (short, shifted)
-    .{ .name = "push_2", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [200] id 182 (short, shifted)
-    .{ .name = "push_3", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [201] id 183 (short, shifted)
-    .{ .name = "push_4", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [202] id 184 (short, shifted)
-    .{ .name = "push_5", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [203] id 185 (short, shifted)
-    .{ .name = "push_6", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [204] id 186 (short, shifted)
-    .{ .name = "push_7", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [205] id 187 (short, shifted)
-    .{ .name = "push_i8", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .i8 }, // [206] id 188 (short, shifted)
-    .{ .name = "push_i16", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .i16 }, // [207] id 189 (short, shifted)
-    .{ .name = "push_const8", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .const8 }, // [208] id 190 (short, shifted)
-    .{ .name = "fclosure8", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .const8 }, // [209] id 191 (short, shifted)
-    .{ .name = "push_empty_string", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [210] id 192 (short, shifted)
-    .{ .name = "get_loc8", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .loc8 }, // [211] id 193 (short, shifted)
-    .{ .name = "put_loc8", .size = 2, .n_pop = 1, .n_push = 0, .fmt = .loc8 }, // [212] id 194 (short, shifted)
-    .{ .name = "set_loc8", .size = 2, .n_pop = 1, .n_push = 1, .fmt = .loc8 }, // [213] id 195 (short, shifted)
-    .{ .name = "get_loc0_loc1", .size = 1, .n_pop = 0, .n_push = 2, .fmt = .none_loc }, // [214] id 196 (short, shifted)
-    .{ .name = "get_loc0", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [215] id 197 (short, shifted)
-    .{ .name = "get_loc1", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [216] id 198 (short, shifted)
-    .{ .name = "get_loc2", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [217] id 199 (short, shifted)
-    .{ .name = "get_loc3", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [218] id 200 (short, shifted)
-    .{ .name = "put_loc0", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_loc }, // [219] id 201 (short, shifted)
-    .{ .name = "put_loc1", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_loc }, // [220] id 202 (short, shifted)
-    .{ .name = "put_loc2", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_loc }, // [221] id 203 (short, shifted)
-    .{ .name = "put_loc3", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_loc }, // [222] id 204 (short, shifted)
-    .{ .name = "set_loc0", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_loc }, // [223] id 205 (short, shifted)
-    .{ .name = "set_loc1", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_loc }, // [224] id 206 (short, shifted)
-    .{ .name = "set_loc2", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_loc }, // [225] id 207 (short, shifted)
-    .{ .name = "set_loc3", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_loc }, // [226] id 208 (short, shifted)
-    .{ .name = "get_arg0", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_arg }, // [227] id 209 (short, shifted)
-    .{ .name = "get_arg1", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_arg }, // [228] id 210 (short, shifted)
-    .{ .name = "get_arg2", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_arg }, // [229] id 211 (short, shifted)
-    .{ .name = "get_arg3", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_arg }, // [230] id 212 (short, shifted)
-    .{ .name = "put_arg0", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_arg }, // [231] id 213 (short, shifted)
-    .{ .name = "put_arg1", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_arg }, // [232] id 214 (short, shifted)
-    .{ .name = "put_arg2", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_arg }, // [233] id 215 (short, shifted)
-    .{ .name = "put_arg3", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_arg }, // [234] id 216 (short, shifted)
-    .{ .name = "set_arg0", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_arg }, // [235] id 217 (short, shifted)
-    .{ .name = "set_arg1", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_arg }, // [236] id 218 (short, shifted)
-    .{ .name = "set_arg2", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_arg }, // [237] id 219 (short, shifted)
-    .{ .name = "set_arg3", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_arg }, // [238] id 220 (short, shifted)
-    .{ .name = "get_var_ref0", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_var_ref }, // [239] id 221 (short, shifted)
-    .{ .name = "get_var_ref1", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_var_ref }, // [240] id 222 (short, shifted)
-    .{ .name = "get_var_ref2", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_var_ref }, // [241] id 223 (short, shifted)
-    .{ .name = "get_var_ref3", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_var_ref }, // [242] id 224 (short, shifted)
-    .{ .name = "put_var_ref0", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_var_ref }, // [243] id 225 (short, shifted)
-    .{ .name = "put_var_ref1", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_var_ref }, // [244] id 226 (short, shifted)
-    .{ .name = "put_var_ref2", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_var_ref }, // [245] id 227 (short, shifted)
-    .{ .name = "put_var_ref3", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_var_ref }, // [246] id 228 (short, shifted)
-    .{ .name = "set_var_ref0", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_var_ref }, // [247] id 229 (short, shifted)
-    .{ .name = "set_var_ref1", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_var_ref }, // [248] id 230 (short, shifted)
-    .{ .name = "set_var_ref2", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_var_ref }, // [249] id 231 (short, shifted)
-    .{ .name = "set_var_ref3", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_var_ref }, // [250] id 232 (short, shifted)
-    .{ .name = "get_length", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [251] id 233 (short, shifted)
-    .{ .name = "if_false8", .size = 2, .n_pop = 1, .n_push = 0, .fmt = .label8 }, // [252] id 234 (short, shifted)
-    .{ .name = "if_true8", .size = 2, .n_pop = 1, .n_push = 0, .fmt = .label8 }, // [253] id 235 (short, shifted)
-    .{ .name = "goto8", .size = 2, .n_pop = 0, .n_push = 0, .fmt = .label8 }, // [254] id 236 (short, shifted)
-    .{ .name = "goto16", .size = 3, .n_pop = 0, .n_push = 0, .fmt = .label16 }, // [255] id 237 (short, shifted)
-    .{ .name = "call0", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .npopx }, // [256] id 238 (short, shifted)
-    .{ .name = "call1", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .npopx }, // [257] id 239 (short, shifted)
-    .{ .name = "call2", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .npopx }, // [258] id 240 (short, shifted)
-    .{ .name = "call3", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .npopx }, // [259] id 241 (short, shifted)
-    .{ .name = "is_undefined", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [260] id 242 (short, shifted)
-    .{ .name = "is_null", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [261] id 243 (short, shifted)
-    .{ .name = "typeof_is_undefined", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [262] id 244 (short, shifted)
-    .{ .name = "typeof_is_function", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [263] id 245 (short, shifted)
-    .{ .name = "get_field_data_slot", .size = 5, .n_pop = 0, .n_push = 0, .fmt = .u32 }, // [264] id 246 (short, shifted)
-    .{ .name = "get_global_data_slot", .size = 5, .n_pop = 0, .n_push = 0, .fmt = .u32 }, // [265] id 247 (short, shifted)
-    .{ .name = "get_global_lexical_slot", .size = 5, .n_pop = 0, .n_push = 0, .fmt = .u32 }, // [266] id 248 (short, shifted)
-    .{ .name = "prepare_call_prop_atom", .size = 5, .n_pop = 0, .n_push = 0, .fmt = .u32 }, // [267] id 249 (short, shifted)
-    .{ .name = "call_prepared", .size = 3, .n_pop = 1, .n_push = 1, .fmt = .npop }, // [268] id 250 (short, shifted)
+    .{ .name = "line_num", .size = 5, .n_pop = 0, .n_push = 0, .fmt = .u32 }, // [196] id 196 (temp)
+    .{ .name = "push_minus1", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [197] id 178 (short, shifted)
+    .{ .name = "push_0", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [198] id 179 (short, shifted)
+    .{ .name = "push_1", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [199] id 180 (short, shifted)
+    .{ .name = "push_2", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [200] id 181 (short, shifted)
+    .{ .name = "push_3", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [201] id 182 (short, shifted)
+    .{ .name = "push_4", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [202] id 183 (short, shifted)
+    .{ .name = "push_5", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [203] id 184 (short, shifted)
+    .{ .name = "push_6", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [204] id 185 (short, shifted)
+    .{ .name = "push_7", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_int }, // [205] id 186 (short, shifted)
+    .{ .name = "push_i8", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .i8 }, // [206] id 187 (short, shifted)
+    .{ .name = "push_i16", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .i16 }, // [207] id 188 (short, shifted)
+    .{ .name = "push_const8", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .const8 }, // [208] id 189 (short, shifted)
+    .{ .name = "fclosure8", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .const8 }, // [209] id 190 (short, shifted)
+    .{ .name = "push_empty_string", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [210] id 191 (short, shifted)
+    .{ .name = "get_loc8", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .loc8 }, // [211] id 192 (short, shifted)
+    .{ .name = "put_loc8", .size = 2, .n_pop = 1, .n_push = 0, .fmt = .loc8 }, // [212] id 193 (short, shifted)
+    .{ .name = "set_loc8", .size = 2, .n_pop = 1, .n_push = 1, .fmt = .loc8 }, // [213] id 194 (short, shifted)
+    .{ .name = "get_loc0", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [214] id 195 (short, shifted)
+    .{ .name = "get_loc1", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [215] id 196 (short, shifted)
+    .{ .name = "get_loc2", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [216] id 197 (short, shifted)
+    .{ .name = "get_loc3", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [217] id 198 (short, shifted)
+    .{ .name = "put_loc0", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_loc }, // [218] id 199 (short, shifted)
+    .{ .name = "put_loc1", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_loc }, // [219] id 200 (short, shifted)
+    .{ .name = "put_loc2", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_loc }, // [220] id 201 (short, shifted)
+    .{ .name = "put_loc3", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_loc }, // [221] id 202 (short, shifted)
+    .{ .name = "set_loc0", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_loc }, // [222] id 203 (short, shifted)
+    .{ .name = "set_loc1", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_loc }, // [223] id 204 (short, shifted)
+    .{ .name = "set_loc2", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_loc }, // [224] id 205 (short, shifted)
+    .{ .name = "set_loc3", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_loc }, // [225] id 206 (short, shifted)
+    .{ .name = "get_arg0", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_arg }, // [226] id 207 (short, shifted)
+    .{ .name = "get_arg1", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_arg }, // [227] id 208 (short, shifted)
+    .{ .name = "get_arg2", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_arg }, // [228] id 209 (short, shifted)
+    .{ .name = "get_arg3", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_arg }, // [229] id 210 (short, shifted)
+    .{ .name = "put_arg0", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_arg }, // [230] id 211 (short, shifted)
+    .{ .name = "put_arg1", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_arg }, // [231] id 212 (short, shifted)
+    .{ .name = "put_arg2", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_arg }, // [232] id 213 (short, shifted)
+    .{ .name = "put_arg3", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_arg }, // [233] id 214 (short, shifted)
+    .{ .name = "set_arg0", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_arg }, // [234] id 215 (short, shifted)
+    .{ .name = "set_arg1", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_arg }, // [235] id 216 (short, shifted)
+    .{ .name = "set_arg2", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_arg }, // [236] id 217 (short, shifted)
+    .{ .name = "set_arg3", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_arg }, // [237] id 218 (short, shifted)
+    .{ .name = "get_var_ref0", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_var_ref }, // [238] id 219 (short, shifted)
+    .{ .name = "get_var_ref1", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_var_ref }, // [239] id 220 (short, shifted)
+    .{ .name = "get_var_ref2", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_var_ref }, // [240] id 221 (short, shifted)
+    .{ .name = "get_var_ref3", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_var_ref }, // [241] id 222 (short, shifted)
+    .{ .name = "put_var_ref0", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_var_ref }, // [242] id 223 (short, shifted)
+    .{ .name = "put_var_ref1", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_var_ref }, // [243] id 224 (short, shifted)
+    .{ .name = "put_var_ref2", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_var_ref }, // [244] id 225 (short, shifted)
+    .{ .name = "put_var_ref3", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_var_ref }, // [245] id 226 (short, shifted)
+    .{ .name = "set_var_ref0", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_var_ref }, // [246] id 227 (short, shifted)
+    .{ .name = "set_var_ref1", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_var_ref }, // [247] id 228 (short, shifted)
+    .{ .name = "set_var_ref2", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_var_ref }, // [248] id 229 (short, shifted)
+    .{ .name = "set_var_ref3", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none_var_ref }, // [249] id 230 (short, shifted)
+    .{ .name = "get_length", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [250] id 231 (short, shifted)
+    .{ .name = "if_false8", .size = 2, .n_pop = 1, .n_push = 0, .fmt = .label8 }, // [251] id 232 (short, shifted)
+    .{ .name = "if_true8", .size = 2, .n_pop = 1, .n_push = 0, .fmt = .label8 }, // [252] id 233 (short, shifted)
+    .{ .name = "goto8", .size = 2, .n_pop = 0, .n_push = 0, .fmt = .label8 }, // [253] id 234 (short, shifted)
+    .{ .name = "goto16", .size = 3, .n_pop = 0, .n_push = 0, .fmt = .label16 }, // [254] id 235 (short, shifted)
+    .{ .name = "call0", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .npopx }, // [255] id 236 (short, shifted)
+    .{ .name = "call1", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .npopx }, // [256] id 237 (short, shifted)
+    .{ .name = "call2", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .npopx }, // [257] id 238 (short, shifted)
+    .{ .name = "call3", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .npopx }, // [258] id 239 (short, shifted)
+    .{ .name = "is_undefined", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [259] id 240 (short, shifted)
+    .{ .name = "is_null", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [260] id 241 (short, shifted)
+    .{ .name = "typeof_is_undefined", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [261] id 242 (short, shifted)
+    .{ .name = "typeof_is_function", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [262] id 243 (short, shifted)
 };

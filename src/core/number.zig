@@ -1,14 +1,14 @@
 //! Pure number-parsing primitives shared by the `Number.parseInt`/`parseFloat`
 //! and global `parseInt`/`parseFloat` fast paths and their bare-runtime
 //! fallbacks. These are ASCII -> f64 arithmetic parsers with zero exec/VM
-//! dependencies: they only reach `std`, the `libs/{dtoa,bignum,unicode}`
+//! dependencies: they only reach `std`, the `libs/{number_format,bigint,unicode}`
 //! helpers, and core value/string/object plumbing. The realm-coercing record
 //! handler and the `Number.prototype.*` formatting methods stay in
 //! `src/builtins/number.zig`, which re-exports the entry points below for the
 //! install path.
 
 const core = @import("root.zig");
-const bignum = @import("../libs/bignum.zig");
+const bignum = @import("../libs/bigint.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 
@@ -20,9 +20,7 @@ const AppendStringError = error{
 };
 
 fn stringFromValue(value: core.JSValue) ?*core.string.String {
-    if (!value.isString()) return null;
-    const header = value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
+    return value.asStringBody();
 }
 
 /// QuickJS source map: global parseInt / Number.parseInt. This is still the
@@ -227,8 +225,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
 }
 
 fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
-    const header = value.refHeader() orelse return;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),

@@ -20,6 +20,7 @@ const diagnostic_accounting_enabled = builtin.is_test or builtin.mode == .Debug;
 /// `MemoryAccount.allocator` container call sites at the backing-allocator
 /// vtable instead, and schedule fail-injection toward not-yet-failed sites.
 pub const oom_coverage_enabled: bool = build_options.zjs_oom_coverage;
+pub const force_gc_on_allocation_enabled: bool = build_options.zjs_force_gc;
 
 const oom_coverage = struct {
     // Plain atomic spinlock: diagnostic instrumentation must not depend on
@@ -316,10 +317,10 @@ pub const MemoryAccount = struct {
         if (count == 0) return &.{};
         const bytes = std.math.mul(usize, @sizeOf(T), count) catch return error.OutOfMemory;
         try self.checkAllocation(bytes);
-        const next_allocated_bytes = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;
         if (comptime trigger_gc) {
-            if (self.trigger_gc_fn) |trigger| trigger(self.trigger_gc_ctx, bytes);
+            self.triggerGCBeforeAllocation(bytes);
         }
+        const next_allocated_bytes = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;
         const raw = try self.rawAlloc(bytes, std.mem.Alignment.of(T));
         const ptr: [*]T = @ptrCast(@alignCast(raw));
         const slice = ptr[0..count];
@@ -347,6 +348,43 @@ pub const MemoryAccount = struct {
         self.rawFree(bytes_ptr[0..bytes], std.mem.Alignment.of(T));
     }
 
+    /// Attempts to resize an existing allocation through the backing allocator's
+    /// remap/realloc primitive. Returns null when the allocation is slab-backed
+    /// or when the allocator cannot grow it without a caller-managed copy.
+    pub fn remap(self: *MemoryAccount, comptime T: type, slice: []T, new_count: usize) !?[]T {
+        if (slice.len == 0) return null;
+        if (new_count == 0) {
+            self.free(T, slice);
+            return &.{};
+        }
+        const old_bytes = std.math.mul(usize, @sizeOf(T), slice.len) catch return error.OutOfMemory;
+        const new_bytes = std.math.mul(usize, @sizeOf(T), new_count) catch return error.OutOfMemory;
+        if (new_bytes == old_bytes) return slice.ptr[0..new_count];
+        if (new_bytes > old_bytes) try self.checkAllocation(new_bytes - old_bytes);
+        const alignment = std.mem.Alignment.of(T);
+        if (self.small_slab_enabled and
+            (SmallObjectSlab.canUse(old_bytes, alignment) or SmallObjectSlab.canUse(new_bytes, alignment)))
+        {
+            return null;
+        }
+        const old_raw: []u8 = @as([*]u8, @ptrCast(slice.ptr))[0..old_bytes];
+        const remapped_ptr = self.persistent_allocator.rawRemap(old_raw, alignment, new_bytes, @returnAddress()) orelse return null;
+        if (new_bytes > old_bytes) {
+            self.allocated_bytes += new_bytes - old_bytes;
+        } else {
+            self.allocated_bytes -= old_bytes - new_bytes;
+        }
+        if (comptime diagnostic_accounting_enabled) {
+            if (remapped_ptr != old_raw.ptr) {
+                self.traceFree(@intFromPtr(old_raw.ptr));
+                self.traceAlloc(@sizeOf(T), new_count, @intFromPtr(remapped_ptr));
+            }
+            self.updatePeak();
+        }
+        const new_ptr: [*]T = @ptrCast(@alignCast(remapped_ptr));
+        return new_ptr[0..new_count];
+    }
+
     pub fn allocAlignedBytes(self: *MemoryAccount, byte_count: usize, alignment: std.mem.Alignment) ![]u8 {
         return self.allocAlignedBytesInternal(byte_count, alignment, true);
     }
@@ -361,10 +399,10 @@ pub const MemoryAccount = struct {
         if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
         if (byte_count == 0) return &.{};
         try self.checkAllocation(byte_count);
-        const next_allocated_bytes = std.math.add(usize, self.allocated_bytes, byte_count) catch return error.OutOfMemory;
         if (comptime trigger_gc) {
-            if (self.trigger_gc_fn) |trigger| trigger(self.trigger_gc_ctx, byte_count);
+            self.triggerGCBeforeAllocation(byte_count);
         }
+        const next_allocated_bytes = std.math.add(usize, self.allocated_bytes, byte_count) catch return error.OutOfMemory;
         const ptr = try self.rawAlloc(byte_count, alignment);
         self.allocated_bytes = next_allocated_bytes;
         if (comptime diagnostic_accounting_enabled) {
@@ -403,10 +441,10 @@ pub const MemoryAccount = struct {
         if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
         const bytes = @sizeOf(T);
         try self.checkAllocation(bytes);
-        const next_allocated_bytes = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;
         if (comptime trigger_gc) {
-            if (self.trigger_gc_fn) |trigger| trigger(self.trigger_gc_ctx, bytes);
+            self.triggerGCBeforeAllocation(bytes);
         }
+        const next_allocated_bytes = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;
         const raw = try self.rawAlloc(bytes, std.mem.Alignment.of(T));
         const ptr: *T = @ptrCast(@alignCast(raw));
         self.allocated_bytes = next_allocated_bytes;
@@ -459,6 +497,13 @@ pub const MemoryAccount = struct {
         const limit = self.limit orelse return;
         const next = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;
         if (next > limit) return error.OutOfMemory;
+    }
+
+    inline fn triggerGCBeforeAllocation(self: *MemoryAccount, byte_count: usize) void {
+        // Runtime-owned accounts install this after GC initialization. In the
+        // forced-GC build, the same trigger performs a full collection here,
+        // before the backing allocation.
+        if (self.trigger_gc_fn) |trigger| trigger(self.trigger_gc_ctx, byte_count);
     }
 
     fn updatePeak(self: *MemoryAccount) void {

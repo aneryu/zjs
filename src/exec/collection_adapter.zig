@@ -1,6 +1,6 @@
 const core = @import("../core/root.zig");
 const closure_mod = @import("closure.zig");
-const globals_mod = @import("globals.zig");
+const globals_mod = core.global_slots;
 
 const CallbackHost = core.host_function.CallbackHost;
 const CallbackError = core.host_function.CallbackError;

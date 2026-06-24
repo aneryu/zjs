@@ -12,6 +12,20 @@ pub const ids = struct {
     pub const external_host = 119;
 };
 
+pub const InternalCallableTag = enum(u8) {
+    none = 0,
+    promise_resolving = 1,
+    promise_thenable_job = 2,
+    promise_reaction_job = 3,
+    promise_capability_executor = 4,
+    promise_combinator_element = 5,
+    promise_finally_callback = 6,
+    async_function_resume = 7,
+    async_from_sync_iterator_unwrap = 8,
+    async_disposable_stack_continuation = 9,
+    throw_type_error_intrinsic = 10,
+};
+
 pub const ExternalCall = struct {
     ctx: *anyopaque,
     output: ?*std.Io.Writer,

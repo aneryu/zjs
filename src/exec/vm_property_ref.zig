@@ -111,17 +111,6 @@ pub noinline fn withGetOrDelete(
             errdefer value.free(ctx.runtime);
             try stack.pushOwned(value);
         },
-        op.with_get_ref_undef => {
-            const value = try object_ops.getValueProperty(ctx, output, global, obj_value, atom_id, function, frame);
-            var value_owned = true;
-            errdefer if (value_owned) value.free(ctx.runtime);
-            try stack.reserveAdditional(1);
-            const dropped = try stack.pop();
-            dropped.free(ctx.runtime);
-            stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
-            stack.pushOwnedAssumeCapacity(value);
-            value_owned = false;
-        },
         op.with_make_ref => {
             const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
             errdefer key_value.free(ctx.runtime);
@@ -438,7 +427,9 @@ pub noinline fn deleteVar(
 ) !void {
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
-    if (call_runtime.deleteEvalBinding(ctx.runtime, function, frame, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, atom_id)) |deleted| {
+    if (call_runtime.deleteDirectEvalGlobalVarLocalBinding(ctx.runtime, global, function, frame, atom_id)) |deleted| {
+        try stack.pushOwned(core.JSValue.boolean(deleted));
+    } else if (call_runtime.deleteEvalBinding(ctx.runtime, function, frame, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, atom_id)) |deleted| {
         try stack.pushOwned(core.JSValue.boolean(deleted));
     } else if (global.hasProperty(atom_id)) {
         try stack.pushOwned(core.JSValue.boolean(global.deleteProperty(ctx.runtime, atom_id)));
@@ -474,9 +465,7 @@ pub noinline fn deletePropertyVm(
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
-        } else if (object == global and call_runtime.functionHasFrameBinding(ctx.runtime, function, frame, atom_id))
-            false
-        else if (object.flags.is_array and atom_id == core.atom.ids.length)
+        } else if (object.flags.is_array and atom_id == core.atom.ids.length)
             false
         else if (try array_ops.typedArrayCanonicalDelete(ctx.runtime, object, atom_id)) |typed_deleted|
             typed_deleted

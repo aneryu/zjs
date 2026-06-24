@@ -5,8 +5,8 @@ const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
-const quickjs_regexp = @import("../libs/quickjs_regexp.zig");
-const regexp_validate = @import("../libs/regexp_validate.zig");
+const regexp_adapter = @import("../libs/regexp.zig").js_adapter;
+const regexp_validate = @import("../libs/regexp.zig").validate;
 const std = @import("std");
 const unicode_lib = @import("../libs/unicode.zig");
 const value_ops = @import("value_ops.zig");
@@ -100,7 +100,6 @@ const reflectConstructPrototypeVm = object_ops.reflectConstructPrototypeVm;
 const regExpLegacyNoCaptureSliceValue = array_ops.regExpLegacyNoCaptureSliceValue;
 const regExpPrototypeFromGlobal = object_ops.regExpPrototypeFromGlobal;
 const regexpInternalStringValue = string_ops.regexpInternalStringValue;
-const regexpSourceUsesZigPropertyFallback = object_ops.regexpSourceUsesZigPropertyFallback;
 const replaceRegExpLegacySlot = string_ops.replaceRegExpLegacySlot;
 const sameObjectIdentity = object_ops.sameObjectIdentity;
 const setValuePropertyStrict = object_ops.setValuePropertyStrict;
@@ -113,7 +112,6 @@ const simpleClassSequenceAtomMatches = string_ops.simpleClassSequenceAtomMatches
 const simpleClassSequenceMatchPattern = string_ops.simpleClassSequenceMatchPattern;
 const simpleLatin1LiteralPlusLiteralMatch = string_ops.simpleLatin1LiteralPlusLiteralMatch;
 const simpleUnicodeLiteralMatch = string_ops.simpleUnicodeLiteralMatch;
-const simpleUnicodePropertyRunTestFast = object_ops.simpleUnicodePropertyRunTestFast;
 const stringAtomId = string_ops.stringAtomId;
 const stringCodePointAt = string_ops.stringCodePointAt;
 const stringLengthIndex = string_ops.stringLengthIndex;
@@ -374,28 +372,23 @@ pub fn qjsRegExpTestFastNoResult(
         const is_sticky = std.mem.indexOfScalar(u8, flags, 'y') != null;
         if (is_global or is_sticky) return null;
 
-        if (!regexpSourceUsesZigPropertyFallback(borrowed.source, flags)) {
-            if (simpleLatin1LiteralPlusLiteralMatch(borrowed.source, flags, string_value)) |matched| {
-                return matched;
-            }
-            if (nativeFunctionMatcherUnicodeClassAsciiResult(borrowed.source, flags, string_value, 0)) |matched| {
-                return matched;
-            }
-            const full_unicode = regExpFlagsContain(flags, 'u') or regExpFlagsContain(flags, 'v');
-            if (full_unicode and parseUnicodeAstralSpecialSource(borrowed.source) != null) {
-                return unicodeAstralSpecialMatch(borrowed.source, string_value, 0, false, true) != null;
-            }
-            if (full_unicode and std.mem.eql(u8, borrowed.source, "^\\S$")) {
-                return anchoredSingleNonWhitespaceMatches(string_value, true);
-            }
-            if (full_unicode and singleLowSurrogateLiteralSource(borrowed.source) != null) {
-                return unicodeLowSurrogateLiteralMatch(borrowed.source, string_value, 0, false) != null;
-            }
-            if (full_unicode) {
-                if (simpleUnicodePropertyRunTestFast(borrowed.source, flags, string_value)) |matched| {
-                    return matched;
-                }
-            }
+        if (simpleLatin1LiteralPlusLiteralMatch(borrowed.source, flags, string_value)) |matched| {
+            return matched;
+        }
+        if (nativeFunctionMatcherUnicodeClassAsciiResult(borrowed.source, flags, string_value, 0)) |matched| {
+            return matched;
+        }
+        const full_unicode = regExpFlagsContain(flags, 'u') or regExpFlagsContain(flags, 'v');
+        if (full_unicode and parseUnicodeAstralSpecialSource(borrowed.source) != null) {
+            return unicodeAstralSpecialMatch(borrowed.source, string_value, 0, false, true) != null;
+        }
+        if (full_unicode and std.mem.eql(u8, borrowed.source, "^\\S$")) {
+            return anchoredSingleNonWhitespaceMatches(string_value, true);
+        }
+        if (full_unicode and singleLowSurrogateLiteralSource(borrowed.source) != null) {
+            return unicodeLowSurrogateLiteralMatch(borrowed.source, string_value, 0, false) != null;
+        }
+        if (!full_unicode or !sourceContainsUnicodePropertyEscape(borrowed.source)) {
             if (simpleClassEscapeTestFast(borrowed.source, flags, string_value)) |matched| {
                 return matched;
             }
@@ -419,10 +412,10 @@ pub fn qjsRegExpTestFastNoResult(
 
     const cached_bytecode = regexp_object.regexpCompiledBytecode();
     if (cached_bytecode.len != 0) {
-        const compiled = quickjs_regexp.Compiled{ .bytecode = @constCast(cached_bytecode) };
+        const compiled = regexp_adapter.Compiled{ .bytecode = @constCast(cached_bytecode) };
         const flag_bits = compiled.flagBits();
-        if ((flag_bits & (quickjs_regexp.flag_bits.global | quickjs_regexp.flag_bits.sticky)) != 0) return null;
-        return quickjs_regexp.testOnStringFromIndex(ctx.runtime, compiled, string_value, 0) catch |err| switch (err) {
+        if ((flag_bits & (regexp_adapter.flag_bits.global | regexp_adapter.flag_bits.sticky)) != 0) return null;
+        return regexp_adapter.testOnStringFromIndex(ctx.runtime, compiled, string_value, 0) catch |err| switch (err) {
             error.BytecodeCorrupt, error.Timeout => return null,
             else => return err,
         };
@@ -433,20 +426,19 @@ pub fn qjsRegExpTestFastNoResult(
     const is_global = std.mem.indexOfScalar(u8, flags, 'g') != null;
     const is_sticky = std.mem.indexOfScalar(u8, flags, 'y') != null;
     if (is_global or is_sticky) return null;
-    if (regexpSourceUsesZigPropertyFallback(borrowed.source, flags)) return null;
     if (!bytesAreAscii(borrowed.source)) return null;
 
     if (regexp_object.regexpCompiledBytecode().len == 0) {
-        var compiled = quickjs_regexp.compile(ctx.runtime.memory.allocator, borrowed.source, flags) catch |err| switch (err) {
+        var compiled = regexp_adapter.compile(ctx.runtime.memory.allocator, borrowed.source, flags) catch |err| switch (err) {
             error.InvalidPattern, error.Unsupported => return null,
             else => |other| return other,
         };
         defer compiled.deinit(ctx.runtime.memory.allocator);
         try regexp_object.setRegexpCompiledBytecode(ctx.runtime, compiled.bytecode);
     }
-    const compiled = quickjs_regexp.Compiled{ .bytecode = @constCast(regexp_object.regexpCompiledBytecode()) };
+    const compiled = regexp_adapter.Compiled{ .bytecode = @constCast(regexp_object.regexpCompiledBytecode()) };
 
-    return quickjs_regexp.testOnStringFromIndex(ctx.runtime, compiled, string_value, 0) catch |err| switch (err) {
+    return regexp_adapter.testOnStringFromIndex(ctx.runtime, compiled, string_value, 0) catch |err| switch (err) {
         error.BytecodeCorrupt, error.Timeout => return null,
         else => return err,
     };
@@ -456,6 +448,19 @@ pub fn simpleClassEscapeTestFast(source: []const u8, flags: []const u8, string_v
     if (!isSimpleStringClassEscapeSource(source)) return null;
     if (regExpFlagsContain(flags, 'i')) return null;
     return findStringClassEscapeMatch(string_value, source, 0) != null;
+}
+
+fn sourceContainsUnicodePropertyEscape(source: []const u8) bool {
+    var index: usize = 0;
+    while (index + 2 < source.len) : (index += 1) {
+        if (source[index] == '\\' and
+            (source[index + 1] == 'p' or source[index + 1] == 'P') and
+            source[index + 2] == '{')
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 pub fn simpleAsciiLiteralTestFast(source: []const u8, flags: []const u8, string_value: core.JSValue) ?bool {
@@ -972,11 +977,11 @@ pub fn qjsRegExpExecResult(
 
     const cached_bytecode = regexp_object.regexpCompiledBytecode();
     if (cached_bytecode.len != 0) {
-        const compiled = quickjs_regexp.Compiled{ .bytecode = @constCast(cached_bytecode) };
+        const compiled = regexp_adapter.Compiled{ .bytecode = @constCast(cached_bytecode) };
         const bits = compiled.flagBits();
-        const is_global = (bits & quickjs_regexp.flag_bits.global) != 0;
-        const is_sticky = (bits & quickjs_regexp.flag_bits.sticky) != 0;
-        const has_indices = (bits & quickjs_regexp.flag_bits.indices) != 0;
+        const is_global = (bits & regexp_adapter.flag_bits.global) != 0;
+        const is_sticky = (bits & regexp_adapter.flag_bits.sticky) != 0;
+        const has_indices = (bits & regexp_adapter.flag_bits.indices) != 0;
         const start_index = if (use_last_index and (is_global or is_sticky)) initial_last_index else 0;
         if (start_index > input_len) {
             if (use_last_index and (is_global or is_sticky)) {
@@ -1007,9 +1012,6 @@ pub fn qjsRegExpExecResult(
         return core.JSValue.nullValue();
     }
 
-    if (regexpSourceUsesZigPropertyFallback(source.items, flags.items)) {
-        return try qjsRegExpExecPropertyFallback(ctx, output, global, regexp_value, source.items, flags.items, string_value, use_last_index, is_global, is_sticky, has_indices, input_len, start_index, caller_function, caller_frame);
-    }
     const full_unicode = regExpFlagsContain(flags.items, 'u') or regExpFlagsContain(flags.items, 'v');
     if (nativeFunctionMatcherUnicodeClassAsciiResult(source.items, flags.items, string_value, start_index)) |matched| {
         if (!matched) return core.JSValue.nullValue();
@@ -1089,14 +1091,14 @@ pub fn qjsRegExpExecResult(
         return core.JSValue.nullValue();
     }
     if (regexp_object.regexpCompiledBytecode().len == 0) {
-        var compiled = quickjs_regexp.compile(rt.memory.allocator, source.items, flags.items) catch |err| switch (err) {
+        var compiled = regexp_adapter.compile(rt.memory.allocator, source.items, flags.items) catch |err| switch (err) {
             error.InvalidPattern, error.Unsupported => return try qjsRegExpExecPropertyFallback(ctx, output, global, regexp_value, source.items, flags.items, string_value, use_last_index, is_global, is_sticky, has_indices, input_len, start_index, caller_function, caller_frame),
             else => |other| return other,
         };
         defer compiled.deinit(rt.memory.allocator);
         try regexp_object.setRegexpCompiledBytecode(rt, compiled.bytecode);
     }
-    const compiled = quickjs_regexp.Compiled{ .bytecode = @constCast(regexp_object.regexpCompiledBytecode()) };
+    const compiled = regexp_adapter.Compiled{ .bytecode = @constCast(regexp_object.regexpCompiledBytecode()) };
 
     return try qjsRegExpExecCompiledResult(ctx, output, global, regexp_value, regexp_object, string_value, compiled, use_last_index, is_global, is_sticky, has_indices, start_index, caller_function, caller_frame);
 }
@@ -1108,7 +1110,7 @@ pub fn qjsRegExpExecCompiledResult(
     regexp_value: core.JSValue,
     regexp_object: *core.Object,
     string_value: core.JSValue,
-    compiled: quickjs_regexp.Compiled,
+    compiled: regexp_adapter.Compiled,
     use_last_index: bool,
     is_global: bool,
     is_sticky: bool,
@@ -1118,7 +1120,7 @@ pub fn qjsRegExpExecCompiledResult(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const rt = ctx.runtime;
-    const status = quickjs_regexp.execOnStringFromIndex(rt, compiled, string_value, start_index) catch |err| switch (err) {
+    const status = regexp_adapter.execOnStringFromIndex(rt, compiled, string_value, start_index) catch |err| switch (err) {
         error.BytecodeCorrupt, error.Timeout => return null,
         else => return err,
     };
@@ -1680,9 +1682,7 @@ pub fn appendRegExpFlags(rt: *core.JSRuntime, object: *core.Object, out: *std.Ar
 }
 
 pub fn appendRegExpInputUnits(rt: *core.JSRuntime, out: *std.ArrayList(u8), value: core.JSValue) !void {
-    const header = value.refHeader() orelse return value_ops.appendRawString(rt, out, value);
-    if (!value.isString()) return value_ops.appendRawString(rt, out, value);
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return value_ops.appendRawString(rt, out, value);
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try out.appendSlice(rt.memory.allocator, bytes),
@@ -1907,9 +1907,7 @@ pub fn simpleClassSequenceSingleUnitLengthLoop(pattern: SimpleClassSequencePatte
     if (pattern.len != 1 or pattern.anchor_start or pattern.anchor_end) return null;
     const atom = pattern.atoms[0];
     if (atom.min_repeat != 1 or atom.max_repeat != 1) return null;
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     return switch (string_value.resolveData()) {
         .latin1 => |bytes| simpleClassSequenceSingleUnitLengthLoopLatin1(atom, bytes, start, sticky),
         .utf16 => |units| simpleClassSequenceSingleUnitLengthLoopUtf16(atom, units, start, sticky),
@@ -1925,9 +1923,7 @@ pub fn simpleClassAlternationSingleAtomRunLengthLoop(pattern: SimpleClassAlterna
         if (atom.max_repeat != 1 and atom.max_repeat != std.math.maxInt(usize)) return null;
     }
 
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     return switch (string_value.resolveData()) {
         .latin1 => |bytes| simpleClassAlternationSingleAtomRunLengthLoopLatin1(pattern, bytes, start, sticky),
         .utf16 => |units| simpleClassAlternationSingleAtomRunLengthLoopUtf16(pattern, units, start, sticky),
@@ -1937,9 +1933,7 @@ pub fn simpleClassAlternationSingleAtomRunLengthLoop(pattern: SimpleClassAlterna
 pub fn simpleClassAlternationLengthLoop(pattern: SimpleClassAlternationPattern, value: core.JSValue, start: usize, sticky: bool, flags: []const u8) ?SimpleClassAlternationLengthLoopResult {
     if (simpleClassAlternationSingleAtomRunLengthLoop(pattern, value, start, sticky)) |result| return result;
     if (pattern.len < 2) return null;
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     return switch (string_value.resolveData()) {
         .latin1 => |bytes| simpleClassAlternationLengthLoopLatin1(pattern, bytes, start, sticky, flags),
         .utf16 => |units| simpleClassAlternationLengthLoopUtf16(pattern, units, start, sticky, flags),
@@ -1959,9 +1953,7 @@ pub fn simpleCaptureSequenceLengthSumLoop(
     flags: []const u8,
     capture_indexes: []const u8,
 ) ?SimpleCaptureLengthSumLoopResult {
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     return switch (string_value.resolveData()) {
         .latin1 => |bytes| simpleCaptureSequenceLengthSumLoopLatin1(pattern, bytes, start, sticky, flags, capture_indexes),
         .utf16 => |units| simpleCaptureSequenceLengthSumLoopUtf16(pattern, units, start, sticky, flags, capture_indexes),

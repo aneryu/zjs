@@ -61,6 +61,20 @@ fn freeOwnedAtomSlice(atoms: *atom.AtomTable, mem: *memory.MemoryAccount, slot: 
     if (items.len != 0) mem.free(atom.Atom, items);
 }
 
+fn freeOwnedClosureVarSlice(atoms: *atom.AtomTable, mem: *memory.MemoryAccount, slot: *[]function_bytecode.ClosureVar) void {
+    const items = slot.*;
+    slot.* = &.{};
+    for (items) |*cv| atoms.free(cv.var_name);
+    if (items.len != 0) mem.free(function_bytecode.ClosureVar, items);
+}
+
+fn freeOwnedGlobalVarSlice(atoms: *atom.AtomTable, mem: *memory.MemoryAccount, slot: *[]function_bytecode.GlobalVar) void {
+    const items = slot.*;
+    slot.* = &.{};
+    for (items) |*gv| atoms.free(gv.var_name);
+    if (items.len != 0) mem.free(function_bytecode.GlobalVar, items);
+}
+
 fn freeGrowableAtomSlice(
     atoms: *atom.AtomTable,
     mem: *memory.MemoryAccount,
@@ -97,7 +111,9 @@ pub const Flags = packed struct(u16) {
     is_global_var: bool = false,
     is_module: bool = false,
     is_indirect_eval: bool = false,
-    reserved: u5 = 0,
+    has_eval_call: bool = false,
+    backtrace_barrier: bool = false,
+    reserved: u3 = 0,
 };
 
 /// Compatibility aliases for finalized runtime function bytecode.
@@ -159,10 +175,22 @@ pub const Bytecode = struct {
     var_names: []atom.Atom = &.{},
     var_is_lexical: []bool = &.{},
     var_is_const: []bool = &.{},
+    // Lexical scope level (`JSVarDef.scope_level`) per local slot. Top-level
+    // (scope_level == 0) lexicals participate in the global-lexical sync; a
+    // block-level shadower (scope_level > 0) that happens to share a name with
+    // a top-level `let`/`const` must NOT. Mirrors qjs, where a block `let` is a
+    // pure frame local (`add_scope_var`) with no tie to the global_decl cell.
+    var_scope_level: []i32 = &.{},
     var_ref_names: []atom.Atom = &.{},
     var_ref_is_lexical: []bool = &.{},
     var_ref_is_const: []bool = &.{},
+    // True for each var-ref that is a top-level script lexical (closure_type
+    // == .global_decl, qjs JS_CLOSURE_GLOBAL_DECL). Distinguishes top-level
+    // let/const from hoisted function-decl closure vars at instantiation.
+    var_ref_is_global_decl: []bool = &.{},
+    closure_var: []function_bytecode.ClosureVar = &.{},
     global_var_names: []atom.Atom = &.{},
+    global_vars: []function_bytecode.GlobalVar = &.{},
     private_bound_names: []atom.Atom = &.{},
     constants: constant.Pool,
     module_record: ?module.Record = null,
@@ -197,10 +225,14 @@ pub const Bytecode = struct {
         freeOwnedAtomSlice(self.atoms, self.memory, &self.var_names);
         freeOwnedSlice(bool, self.memory, &self.var_is_lexical);
         freeOwnedSlice(bool, self.memory, &self.var_is_const);
+        freeOwnedSlice(i32, self.memory, &self.var_scope_level);
         freeOwnedAtomSlice(self.atoms, self.memory, &self.var_ref_names);
         freeOwnedSlice(bool, self.memory, &self.var_ref_is_lexical);
         freeOwnedSlice(bool, self.memory, &self.var_ref_is_const);
+        freeOwnedSlice(bool, self.memory, &self.var_ref_is_global_decl);
+        freeOwnedClosureVarSlice(self.atoms, self.memory, &self.closure_var);
         freeOwnedAtomSlice(self.atoms, self.memory, &self.global_var_names);
+        freeOwnedGlobalVarSlice(self.atoms, self.memory, &self.global_vars);
         freeOwnedAtomSlice(self.atoms, self.memory, &self.private_bound_names);
         freeGrowableSlice(u8, self.memory, &self.code, &self.code_capacity);
         freeGrowableSlice(pc2line.SourceLocSlot, self.memory, &self.source_loc_slots, &self.source_loc_capacity);
@@ -296,6 +328,7 @@ pub const Bytecode = struct {
     /// the current size, while reallocations are amortised O(1).
     pub fn appendCode(self: *Bytecode, bytes: []const u8) !void {
         if (bytes.len == 0) return;
+        if (bytesMayContainEvalCall(bytes)) self.flags.has_eval_call = true;
         const tail = try growSliceBy(u8, self.memory, &self.code, &self.code_capacity, bytes.len);
         @memcpy(tail, bytes);
     }
@@ -449,9 +482,13 @@ pub const Bytecode = struct {
 /// It intentionally omits compile-only fields such as scopes, modules, and
 /// debug tables; those remain on the compile-time `Bytecode` representation.
 pub fn asBytecodeView(fb: *const FunctionBytecode, rt: *runtime.JSRuntime) Bytecode {
+    return makeBytecodeView(fb, &rt.memory, &rt.atoms);
+}
+
+fn makeBytecodeView(fb: *const FunctionBytecode, mem: *memory.MemoryAccount, atoms: *atom.AtomTable) Bytecode {
     return .{
-        .memory = &rt.memory,
-        .atoms = &rt.atoms,
+        .memory = mem,
+        .atoms = atoms,
         .name = fb.func_name,
         .filename = fb.filename,
         .line_num = fb.line_num,
@@ -469,6 +506,8 @@ pub fn asBytecodeView(fb: *const FunctionBytecode, rt: *runtime.JSRuntime) Bytec
             .is_strict = fb.is_strict_mode,
             .runtime_strict = fb.runtime_strict_mode,
             .is_indirect_eval = fb.is_indirect_eval,
+            .has_eval_call = fb.has_eval_call,
+            .backtrace_barrier = fb.backtrace_barrier,
         },
         .arg_count = fb.arg_count,
         .var_count = fb.var_count,
@@ -479,17 +518,56 @@ pub fn asBytecodeView(fb: *const FunctionBytecode, rt: *runtime.JSRuntime) Bytec
         .var_names = fb.var_names,
         .var_is_lexical = fb.var_is_lexical,
         .var_is_const = fb.var_is_const,
+        .var_scope_level = fb.var_scope_level,
         .var_ref_names = fb.var_ref_names,
         .var_ref_is_lexical = fb.var_ref_is_lexical,
         .var_ref_is_const = fb.var_ref_is_const,
+        .var_ref_is_global_decl = fb.var_ref_is_global_decl,
+        .closure_var = fb.closure_var,
         .global_var_names = fb.global_var_names,
+        .global_vars = fb.global_vars,
         .private_bound_names = fb.private_bound_names,
         .ic_slots = fb.ic_slots,
         .ic_site_ids = fb.ic_site_ids,
         .ic_sites = fb.ic_sites,
         .call_sites = fb.call_sites,
-        .constants = .{ .memory = &rt.memory, .atoms = &rt.atoms, .values = fb.cpool },
+        .constants = .{ .memory = mem, .atoms = atoms, .values = fb.cpool },
     };
+}
+
+pub fn cachedBytecodeView(fb: *const FunctionBytecode) ?*const Bytecode {
+    const ptr = fb.execution_view orelse return null;
+    return @ptrCast(@alignCast(ptr));
+}
+
+pub fn installCachedBytecodeView(fb: *FunctionBytecode, view: *Bytecode) void {
+    view.* = makeBytecodeView(fb, fb.memory, fb.atoms);
+    fb.execution_view = view;
+    fb.execution_view_owned = false;
+    fb.execution_view_heap_size = 0;
+    fb.execution_view_destroy = null;
+}
+
+pub fn ensureCachedBytecodeView(fb: *const FunctionBytecode, rt: *runtime.JSRuntime) !*const Bytecode {
+    if (cachedBytecodeView(fb)) |view| return view;
+    const mutable_fb: *FunctionBytecode = @constCast(fb);
+    const view = try rt.memory.create(Bytecode);
+    view.* = makeBytecodeView(fb, &rt.memory, &rt.atoms);
+    mutable_fb.execution_view = view;
+    mutable_fb.execution_view_owned = true;
+    mutable_fb.execution_view_heap_size = @sizeOf(Bytecode);
+    mutable_fb.execution_view_destroy = destroyCachedBytecodeView;
+    return view;
+}
+
+pub fn refreshCachedBytecodeView(fb: *FunctionBytecode) void {
+    const view = cachedBytecodeView(fb) orelse return;
+    @constCast(view).* = makeBytecodeView(fb, fb.memory, fb.atoms);
+}
+
+fn destroyCachedBytecodeView(mem: *memory.MemoryAccount, ptr: *anyopaque) void {
+    const view: *Bytecode = @ptrCast(@alignCast(ptr));
+    mem.destroy(Bytecode, view);
 }
 
 pub fn allocateFunctionBytecodeIcSlots(fb: *FunctionBytecode) !void {
@@ -530,19 +608,18 @@ fn lookupIcSlotForPc(ic_slots: []const ic.Slot, ic_site_ids: []const usize, ic_s
     return @constCast(&ic_slots[site.slot_index]);
 }
 
-// Note: the reserved slot-form opcodes (`get_field_data_slot`,
-// `get_global_data_slot`, `get_global_lexical_slot`, ids 246-248) are never
-// emitted; the generic forms below already reach their IC slots in O(1) via
-// the dense `site_ids[pc]` index, so the slot forms stay reserved ids only
-// and are intentionally not listed here.
 fn opcodeHasOwnDataIc(op_id: u8) bool {
     return op_id == opcode.op.get_var or
         op_id == opcode.op.get_var_undef or
         op_id == opcode.op.put_var or
         op_id == opcode.op.get_field or
         op_id == opcode.op.get_field2 or
-        op_id == opcode.op.prepare_call_prop_atom or
         op_id == opcode.op.put_field;
+}
+
+fn bytesMayContainEvalCall(bytes: []const u8) bool {
+    return std.mem.indexOfScalar(u8, bytes, opcode.op.eval) != null or
+        std.mem.indexOfScalar(u8, bytes, opcode.op.apply_eval) != null;
 }
 
 fn bytecodeSkipsPropertyIc(code: []const u8) bool {
@@ -559,7 +636,6 @@ fn bytecodeSkipsPropertyIc(code: []const u8) bool {
             opcode.op.with_delete_var,
             opcode.op.with_make_ref,
             opcode.op.with_get_ref,
-            opcode.op.with_get_ref_undef,
             => return true,
             else => {},
         }

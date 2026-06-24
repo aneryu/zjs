@@ -182,10 +182,20 @@ pub fn buildModuleVarRefs(
 ) ![]core.JSValue {
     if (function.var_ref_names.len == 0) return &.{};
     const record = ctx.runtime.modules.find(module_name) orelse return error.ModuleNotFound;
-    for (function.var_ref_names, 0..) |name, idx| {
-        if (moduleHasResolvedImport(record, name)) continue;
-        const cell = try moduleLocalCell(ctx, record, name, moduleVarRefIsLexical(function, idx), moduleVarRefIsConst(function, idx));
-        cell.free(ctx.runtime);
+    if (function.closure_var.len == 0) {
+        for (function.var_ref_names, 0..) |name, idx| {
+            if (moduleHasResolvedImport(record, name)) continue;
+            const cell = try moduleLocalCell(ctx, record, name, moduleVarRefIsLexical(function, idx), moduleVarRefIsConst(function, idx));
+            cell.free(ctx.runtime);
+        }
+    } else {
+        for (function.closure_var, 0..) |cv, idx| {
+            if (idx >= function.var_ref_names.len) return error.InvalidBytecode;
+            if (cv.closure_type != .module_decl) continue;
+            const name = function.var_ref_names[idx];
+            const cell = try moduleLocalCell(ctx, record, name, cv.is_lexical, cv.is_const);
+            cell.free(ctx.runtime);
+        }
     }
     const refs = try ctx.runtime.memory.alloc(core.JSValue, function.var_ref_names.len);
     errdefer ctx.runtime.memory.free(core.JSValue, refs);
@@ -203,7 +213,12 @@ pub fn buildModuleVarRefs(
     }
 
     for (function.var_ref_names, 0..) |name, idx| {
-        refs[idx] = if (moduleHasResolvedImport(record, name))
+        refs[idx] = if (idx < function.closure_var.len) switch (function.closure_var[idx].closure_type) {
+            .module_import => try moduleImportCell(ctx, record, name),
+            .module_decl => try moduleLocalCell(ctx, record, name, moduleVarRefIsLexical(function, idx), moduleVarRefIsConst(function, idx)),
+            .global, .global_ref, .global_decl => try createGlobalModuleVarRef(ctx, function.closure_var[idx]),
+            .local, .arg, .ref => try createGlobalModuleVarRef(ctx, function.closure_var[idx]),
+        } else if (moduleHasResolvedImport(record, name))
             try moduleImportCell(ctx, record, name)
         else
             try moduleLocalCell(ctx, record, name, moduleVarRefIsLexical(function, idx), moduleVarRefIsConst(function, idx));
@@ -211,6 +226,13 @@ pub fn buildModuleVarRefs(
         rooted_refs = refs[0..initialized];
     }
     return refs;
+}
+
+fn createGlobalModuleVarRef(ctx: *core.JSContext, cv: bytecode.function_def.ClosureVar) !core.JSValue {
+    const cell = try core.VarRef.createClosed(ctx.runtime, core.JSValue.uninitialized());
+    cell.varRefIsConstSlot().* = cv.is_const;
+    cell.varRefIsFunctionNameSlot().* = cv.var_kind == .function_name;
+    return cell.valueRef();
 }
 
 fn moduleVarRefIsLexical(function: *const bytecode.Bytecode, index: usize) bool {
@@ -257,7 +279,7 @@ pub fn initializeModuleFunctionDeclarations(
     defer frame_var_refs_root.deinit();
     if (module_var_refs.len != 0) {
         frame.var_refs = try ctx.runtime.memory.alloc(core.JSValue, module_var_refs.len);
-        frame.var_refs_on_heap = true;
+        frame.installOwnedStorage(frame.var_refs);
         for (module_var_refs, 0..) |value, idx| frame.var_refs[idx] = value.dup();
         rooted_frame_var_refs = frame.var_refs;
     }
@@ -432,14 +454,14 @@ test "createVarRefCellWithConst roots direct symbol value while creating cell" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const cell_value = try createVarRefCellWithConst(ctx, core.JSValue.symbol(symbol_atom), true);
+    const cell_value = try createVarRefCellWithConst(ctx, try rt.symbolValue(symbol_atom), true);
     var cell_alive = true;
     defer if (cell_alive) cell_value.free(rt);
     const cell = varRefCellFromValue(cell_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = cell.varRefValue();
-    try std.testing.expect(stored.same(core.JSValue.symbol(symbol_atom)));
+    try std.testing.expectEqual(symbol_atom, stored.asSymbolAtom().?);
     try std.testing.expect(cell.varRefIsConstSlot().*);
 
     cell_value.free(rt);
@@ -568,7 +590,7 @@ test "ownedValueSliceFromList roots source list during runtime allocation" {
         for (list.items) |value| value.free(rt);
         list.deinit(rt.memory.allocator);
     }
-    try list.append(rt.memory.allocator, core.JSValue.symbol(first_atom));
+    try list.append(rt.memory.allocator, try rt.symbolValue(first_atom));
 
     const Trigger = struct {
         rt: *core.JSRuntime,
@@ -579,26 +601,8 @@ test "ownedValueSliceFromList roots source list during runtime allocation" {
         fn trigger(context: ?*anyopaque, size: usize) void {
             _ = size;
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            var visitor = core.runtime.RootVisitor{
-                .context = self,
-                .visit_value = @This().visitValue,
-                .visit_object = @This().visitObject,
-            };
-            self.rt.traceActiveRoots(&visitor) catch {
-                self.trace_failed = true;
-            };
-        }
-
-        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (slot.asSymbolAtom()) |atom_id| {
-                if (atom_id == self.atom_id) self.saw_value = true;
-            }
-        }
-
-        fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
-            _ = context;
-            _ = slot;
+            _ = self.rt.runObjectCycleRemoval();
+            self.saw_value = self.rt.atoms.name(self.atom_id) != null;
         }
     };
 
@@ -625,7 +629,7 @@ test "ownedValueSliceFromList roots source list during runtime allocation" {
     try std.testing.expect(trigger.saw_value);
     try std.testing.expectEqual(@as(usize, 0), list.items.len);
     try std.testing.expectEqual(@as(usize, 1), out.len);
-    try std.testing.expect(out[0].same(core.JSValue.symbol(first_atom)));
+    try std.testing.expectEqual(first_atom, out[0].asSymbolAtom().?);
 }
 
 fn collectModuleNamespaceExports(ctx: *core.JSContext, record: *core.module.ModuleRecord, exports: *std.ArrayList(core.Atom)) !void {

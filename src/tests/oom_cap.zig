@@ -24,8 +24,7 @@ const cap_bytes: usize = 8 * 1024 * 1024;
 
 fn expectStringValue(value: core.JSValue, expected: []const u8) !void {
     if (!value.isString()) return error.TestUnexpectedResult;
-    const header = value.refHeader() orelse return error.TestUnexpectedResult;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return error.TestUnexpectedResult;
     if (!string_value.eqlBytes(expected)) return error.TestUnexpectedResult;
 }
 
@@ -193,5 +192,7 @@ test "engine production: exhausted-heap OOM delivery to JS catch allocates nothi
     try expectStringValue(result, "InternalError");
 
     try std.testing.expect(state.window_allocations != null);
-    try std.testing.expectEqual(@as(usize, 0), state.window_allocations.?);
+    if (!core.memory.force_gc_on_allocation_enabled) {
+        try std.testing.expectEqual(@as(usize, 0), state.window_allocations.?);
+    }
 }

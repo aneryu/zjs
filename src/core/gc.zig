@@ -11,6 +11,7 @@ const var_ref = @import("var_ref.zig");
 const string = @import("string.zig");
 const function_bytecode_mod = @import("function_bytecode.zig");
 const FunctionBytecode = function_bytecode_mod.FunctionBytecode;
+const shape = @import("shape.zig");
 
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
@@ -116,6 +117,7 @@ pub const RefKind = enum(u8) {
     big_int = 2,
     function_bytecode = 3,
     var_ref = 4,
+    shape = 5,
 };
 
 pub const GcKind = RefKind;
@@ -354,6 +356,19 @@ pub const BlockHeader = extern struct {
 
     pub fn setPinned(self: *BlockHeader, value: bool) void {
         self.flags.is_pinned = value;
+    }
+};
+
+pub const StringHeader = extern struct {
+    rc: i32 = 1,
+
+    comptime {
+        std.debug.assert(@sizeOf(StringHeader) == 4);
+    }
+
+    pub inline fn retain(self: *StringHeader) void {
+        std.debug.assert(self.rc > 0);
+        self.rc += 1;
     }
 };
 
@@ -609,6 +624,10 @@ pub const Registry = struct {
 
         // 释放可能存活的所有 Candidate 对象
         while (self.gc_object_tail) |h| {
+            if (h.kind == .shape) {
+                self.removeGcObject(h);
+                continue;
+            }
             self.removeGcObject(h);
             self.recordHeapFreeWithBytes(h, heapByteSizeFromHeader(rt, h));
             h.flags.finalizing = true;
@@ -619,6 +638,8 @@ pub const Registry = struct {
                 function_bytecode_mod.destroyFromHeader(rt, h);
             }
         }
+
+        rt.shapes.deinit();
 
         self.gc_object_head = null;
         self.gc_object_tail = null;
@@ -978,6 +999,7 @@ pub const Registry = struct {
             .object => @sizeOf(object.Object),
             .function_bytecode => @sizeOf(FunctionBytecode),
             .var_ref => @sizeOf(var_ref.VarRef),
+            .shape => @sizeOf(shape.Shape),
             .string, .big_int => 0,
         };
     }
@@ -1004,6 +1026,7 @@ pub const Registry = struct {
                 break :blk fb.heapByteSize();
             },
             .var_ref => @sizeOf(var_ref.VarRef),
+            .shape => @sizeOf(shape.Shape),
             .string, .big_int => 0,
         };
     }
@@ -1013,7 +1036,7 @@ pub const Registry = struct {
     }
 
     fn isCycleCandidate(h: *const GCObjectHeader) bool {
-        return h.kind == .object or h.kind == .function_bytecode or h.kind == .var_ref;
+        return h.kind == .object or h.kind == .function_bytecode or h.kind == .var_ref or h.kind == .shape;
     }
 
     fn recordHeapAlloc(self: *Registry, is_large: bool, bytes: usize) void {
@@ -1404,13 +1427,17 @@ pub inline fn payloadFromHeader(h: *BlockHeader) *anyopaque {
 }
 
 /// 9.1 统一的非原子 retain/release/dup/free 路径
-pub inline fn retain(header: *Header) void {
+pub inline fn retain(header: anytype) void {
     header.retain();
 }
 
-pub inline fn release(rt: anytype, header: *Header) void {
+pub inline fn release(rt: anytype, header: anytype) void {
     comptime {
         @setEvalBranchQuota(10_000);
+    }
+    if (comptime @TypeOf(header.*) == StringHeader) {
+        string.String.releaseFromHeader(rt, header);
+        return;
     }
     std.debug.assert(header.rc > 0);
     header.rc -= 1;
@@ -1420,15 +1447,16 @@ pub inline fn release(rt: anytype, header: *Header) void {
 }
 
 noinline fn releaseAndDestroy(rt: anytype, header: *Header) void {
-    if (rt.gc.phase == .deinit and (header.kind == .object or header.kind == .var_ref)) return;
+    if (rt.gc.phase == .deinit and (header.kind == .object or header.kind == .var_ref or header.kind == .shape)) return;
     rt.gc.unlinkObjectWithBytes(header, Registry.heapByteSizeFromHeader(rt, header));
 
     // 10.1 静态 kind switch 派发销毁
     switch (header.kind) {
-        .string => string.String.destroyFromHeader(rt, header),
+        .string => unreachable,
         .object => object.Object.destroyFromHeader(rt, header),
         .big_int => bigint.BigInt.destroyFromHeader(rt, header),
         .function_bytecode => function_bytecode_mod.destroyFromHeader(rt, header),
         .var_ref => var_ref.VarRef.destroyFromHeader(rt, header),
+        .shape => rt.shapes.destroyFromHeader(header),
     }
 }

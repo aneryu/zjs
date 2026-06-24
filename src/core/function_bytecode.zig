@@ -64,6 +64,17 @@ pub const ClosureVar = struct {
     var_name: atom.Atom,
 };
 
+/// Mirrors `JSGlobalVar` (`quickjs.c:713`).
+pub const GlobalVar = struct {
+    cpool_idx: i32,
+    force_init: bool = false,
+    is_configurable: bool = false,
+    is_lexical: bool = false,
+    is_const: bool = false,
+    scope_level: i32,
+    var_name: atom.Atom,
+};
+
 pub const SimpleNumericKind = enum(u8) {
     none,
     arg0_const,
@@ -132,6 +143,7 @@ pub const FunctionBytecode = struct {
     arguments_allowed: bool = false,
     backtrace_barrier: bool = false,
     is_indirect_eval: bool = false,
+    has_eval_call: bool = false,
 
     // Bytecode (quickjs.c:783-784)
     byte_code: []u8 = &.{},
@@ -142,10 +154,15 @@ pub const FunctionBytecode = struct {
     var_names: []atom.Atom = &.{},
     var_is_lexical: []bool = &.{},
     var_is_const: []bool = &.{},
+    // Lexical scope level per local slot (parallels var_is_lexical). Distinguishes
+    // a top-level (scope_level == 0) lexical from a block-level shadower.
+    var_scope_level: []i32 = &.{},
     var_ref_names: []atom.Atom = &.{},
     var_ref_is_lexical: []bool = &.{},
     var_ref_is_const: []bool = &.{},
+    var_ref_is_global_decl: []bool = &.{},
     global_var_names: []atom.Atom = &.{},
+    global_vars: []GlobalVar = &.{},
 
     // Metadata (quickjs.c:785-792)
     func_name: atom.Atom,
@@ -170,6 +187,16 @@ pub const FunctionBytecode = struct {
     ic_site_ids: []usize = &.{},
     ic_sites: []ic.Site = &.{},
     call_sites: []CallSite = &.{},
+
+    /// Cached execution view used by the VM call machinery. QuickJS keeps a
+    /// direct `JSFunctionBytecode *` on function objects and dispatches from
+    /// that pointer; zjs still exposes the older `bytecode.Bytecode` execution
+    /// API, so finalized bytecode stores one borrowed view and the VM passes a
+    /// pointer to it instead of rebuilding the view per call.
+    execution_view: ?*anyopaque = null,
+    execution_view_owned: bool = false,
+    execution_view_heap_size: usize = 0,
+    execution_view_destroy: ?*const fn (*memory.MemoryAccount, *anyopaque) void = null,
 
     // Note: QuickJS has 'realm' field (JSContext *) here; Zig version
     // tracks this differently via the runtime context.
@@ -204,6 +231,19 @@ pub const FunctionBytecode = struct {
         // block is freed once at the end.
         const owned = self.block.len == 0;
 
+        const execution_view = self.execution_view;
+        const execution_view_owned = self.execution_view_owned;
+        const execution_view_destroy = self.execution_view_destroy;
+        self.execution_view = null;
+        self.execution_view_owned = false;
+        self.execution_view_heap_size = 0;
+        self.execution_view_destroy = null;
+        if (execution_view_owned) {
+            if (execution_view_destroy) |destroy| {
+                if (execution_view) |ptr| destroy(self.memory, ptr);
+            }
+        }
+
         const func_name = self.func_name;
         const filename = self.filename;
         self.func_name = atom.null_atom;
@@ -220,10 +260,17 @@ pub const FunctionBytecode = struct {
         releaseAtomSlice(self.atoms, self.memory, &self.var_names, owned);
         releaseSlice(bool, self.memory, &self.var_is_lexical, owned);
         releaseSlice(bool, self.memory, &self.var_is_const, owned);
+        releaseSlice(i32, self.memory, &self.var_scope_level, owned);
         releaseAtomSlice(self.atoms, self.memory, &self.var_ref_names, owned);
         releaseSlice(bool, self.memory, &self.var_ref_is_lexical, owned);
         releaseSlice(bool, self.memory, &self.var_ref_is_const, owned);
+        releaseSlice(bool, self.memory, &self.var_ref_is_global_decl, owned);
         releaseAtomSlice(self.atoms, self.memory, &self.global_var_names, owned);
+
+        const global_vars = self.global_vars;
+        self.global_vars = &.{};
+        for (global_vars) |*gv| self.atoms.free(gv.var_name);
+        if (owned and global_vars.len != 0) self.memory.free(GlobalVar, global_vars);
 
         const vardefs = self.vardefs;
         self.vardefs = &.{};
@@ -277,6 +324,7 @@ pub const FunctionBytecode = struct {
         bytes = addSliceBytes(bytes, ic.Slot, self.ic_slots.len);
         bytes = addSliceBytes(bytes, usize, self.ic_site_ids.len);
         bytes = addSliceBytes(bytes, ic.Site, self.ic_sites.len);
+        bytes = addSaturating(bytes, self.execution_view_heap_size);
         if (self.block.len != 0) return addSaturating(bytes, self.block.len);
         bytes = addSliceBytes(bytes, u8, self.byte_code.len);
         bytes = addSliceBytes(bytes, atom.Atom, self.atom_operands.len);
@@ -284,10 +332,13 @@ pub const FunctionBytecode = struct {
         bytes = addSliceBytes(bytes, atom.Atom, self.var_names.len);
         bytes = addSliceBytes(bytes, bool, self.var_is_lexical.len);
         bytes = addSliceBytes(bytes, bool, self.var_is_const.len);
+        bytes = addSliceBytes(bytes, i32, self.var_scope_level.len);
         bytes = addSliceBytes(bytes, atom.Atom, self.var_ref_names.len);
         bytes = addSliceBytes(bytes, bool, self.var_ref_is_lexical.len);
         bytes = addSliceBytes(bytes, bool, self.var_ref_is_const.len);
+        bytes = addSliceBytes(bytes, bool, self.var_ref_is_global_decl.len);
         bytes = addSliceBytes(bytes, atom.Atom, self.global_var_names.len);
+        bytes = addSliceBytes(bytes, GlobalVar, self.global_vars.len);
         bytes = addSliceBytes(bytes, VarDef, self.vardefs.len);
         bytes = addSliceBytes(bytes, ClosureVar, self.closure_var.len);
         bytes = addSliceBytes(bytes, atom.Atom, self.class_instance_fields.len);

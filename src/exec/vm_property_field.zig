@@ -39,6 +39,7 @@ const borrowedSimpleCallArg = property_vm.borrowedSimpleCallArg;
 const decodeBindingGet = property_vm.decodeBindingGet;
 const decodeBindingPut = property_vm.decodeBindingPut;
 const decodeFalseBranch = property_vm.decodeFalseBranch;
+const decodeGlobalDataGet = property_vm.decodeGlobalDataGet;
 const decodeGlobalPut = property_vm.decodeGlobalPut;
 const decodeGotoTarget = property_vm.decodeGotoTarget;
 const decodeLocalGet = property_vm.decodeLocalGet;
@@ -67,6 +68,7 @@ const varRefReadableBorrowed = property_vm.varRefReadableBorrowed;
 
 const functionOwnDataPropertyValueForFastPath = property_ic.functionOwnDataPropertyValueForFastPath;
 const functionOwnNativeBuiltinRefForFastPath = property_ic.functionOwnNativeBuiltinRefForFastPath;
+const dataPropertyValueForFastPath = property_ic.dataPropertyValueForFastPath;
 const globalOwnDataPropertyValue = property_ic.globalOwnDataPropertyValue;
 const ordinaryDataPropertyValueOrUndefinedForFastPath = property_ic.ordinaryDataPropertyValueOrUndefinedForFastPath;
 const ownDataPropertyValueMaterializedForFastPath = property_ic.ownDataPropertyValueMaterializedForFastPath;
@@ -86,20 +88,17 @@ fn sameBindingGetPut(get: BindingGet, put: BindingPut) bool {
     return get.idx == put.idx and get.is_var_ref == put.is_var_ref;
 }
 
-fn decodeRegExpMatchGet(code: []const u8, pc: usize) ?RegExpMatchGet {
+fn decodeRegExpMatchGet(function: *const bytecode.Bytecode, pc: usize) ?RegExpMatchGet {
+    const code = function.code;
     if (decodeBindingGet(code, pc)) |get| return .{ .binding = get };
-    if (pc + 5 <= code.len and (code[pc] == op.get_var or code[pc] == op.get_var_undef)) {
-        return .{ .global = .{
-            .atom = readInt(u32, code[pc + 1 ..][0..4]),
-            .next_pc = pc + 5,
-        } };
-    }
+    if (decodeGlobalDataGet(function, pc)) |get| return .{ .global = get };
     return null;
 }
 
-fn decodeRegExpMatchPut(code: []const u8, pc: usize) ?RegExpMatchPut {
+fn decodeRegExpMatchPut(function: *const bytecode.Bytecode, pc: usize) ?RegExpMatchPut {
+    const code = function.code;
     if (decodeBindingPut(code, pc)) |put| return .{ .binding = put };
-    if (decodeGlobalPut(code, pc)) |put| return .{ .global = put };
+    if (decodeGlobalPut(function, pc)) |put| return .{ .global = put };
     return null;
 }
 
@@ -155,41 +154,6 @@ pub noinline fn toPropKeyVm(
     catch_target: *?usize,
 ) !Step {
     toPropKey(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
-        return err;
-    };
-    return .done;
-}
-
-pub fn toPropKey2(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-) !void {
-    if (stack.values.len < 2) return error.StackUnderflow;
-    const receiver = stack.values[stack.values.len - 2];
-    if (receiver.isUndefined() or receiver.isNull()) return error.TypeError;
-
-    const value = try stack.pop();
-    defer value.free(ctx.runtime);
-    const key = try object_ops.toPropertyKeyValue(ctx, output, global, value, function, frame);
-    errdefer key.free(ctx.runtime);
-    try stack.pushOwned(key);
-}
-
-pub noinline fn toPropKey2Vm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
-    toPropKey2(ctx, output, global, stack, function, frame) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
@@ -271,6 +235,7 @@ pub noinline fn field(
     sync_global_lexical_locals: bool,
 ) !Step {
     _ = sync_global_lexical_locals;
+    const site_pc = frame.pc - 1;
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
     switch (opc) {
@@ -278,6 +243,10 @@ pub noinline fn field(
             if (stack.values.len == 0) return error.StackUnderflow;
             const top_index = stack.values.len - 1;
             const receiver = stack.values[top_index];
+            if (dataPropertyValueForFastPath(function, site_pc, ctx.runtime, receiver, atom_id)) |value| {
+                replaceTopBorrowed(ctx.runtime, stack, top_index, receiver, value);
+                return .done;
+            }
             if (qjsGetFieldFast(ctx.runtime, receiver, atom_id)) |value| {
                 replaceTopBorrowed(ctx.runtime, stack, top_index, receiver, value);
                 return .done;
@@ -312,6 +281,10 @@ pub noinline fn field(
         op.get_field2 => {
             const obj = try stackValueFromTop(stack, 0);
             defer obj.free(ctx.runtime);
+            if (dataPropertyValueForFastPath(function, site_pc, ctx.runtime, obj, atom_id)) |value| {
+                stack.pushAssumeCapacity(value);
+                return .done;
+            }
             if (qjsGetFieldFast(ctx.runtime, obj, atom_id)) |value| {
                 stack.pushAssumeCapacity(value);
                 return .done;
@@ -342,11 +315,19 @@ pub noinline fn field(
         },
         op.put_field => {
             const value = try stack.pop();
-            defer value.free(ctx.runtime);
+            var value_consumed = false;
+            defer if (!value_consumed) value.free(ctx.runtime);
             const obj = try stack.pop();
             defer obj.free(ctx.runtime);
             if (setArrayLengthForPutFieldFastPath(ctx.runtime, obj, atom_id, value)) return .done;
-            if (qjsPutFieldFast(ctx.runtime, obj, atom_id, value)) return .done;
+            if (try property_ic.setObjectDataPropertyForPutFieldFastPath(ctx.runtime, function, site_pc, obj, atom_id, value)) {
+                value_consumed = true;
+                return .done;
+            }
+            if (qjsPutFieldFast(ctx.runtime, obj, atom_id, value)) {
+                value_consumed = true;
+                return .done;
+            }
             const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
                 try forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(ctx, output, global, stack, frame);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
@@ -385,9 +366,8 @@ pub inline fn qjsPutFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_
     const object = objectFromValue(receiver) orelse return false;
     if (object.needsSlowPropertyAccess()) return false;
     const lookup = object.findWritableOwnDataPropertyFast(atom_id) orelse return false;
-    const next_value = value.dup();
     const old_value = lookup.value.*;
-    lookup.value.* = next_value;
+    lookup.value.* = value;
     old_value.free(rt);
     return true;
 }
@@ -551,6 +531,52 @@ pub noinline fn arrayElement(
             stack.values[stack.values.len - 1] = value;
             old_value.free(ctx.runtime);
         },
+        op.get_array_el3 => {
+            const key = try stackValueFromTop(stack, 0);
+            defer key.free(ctx.runtime);
+            const obj = try stackValueFromTop(stack, 1);
+            defer obj.free(ctx.runtime);
+            if (obj.isNull() or obj.isUndefined()) {
+                _ = object_ops.throwNullishComputedPropertyTypeError(ctx, global, obj, key) catch |err| {
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                    return err;
+                };
+                unreachable;
+            }
+            if (fastDenseArrayElementValue(obj, key)) |value| {
+                errdefer value.free(ctx.runtime);
+                try stack.pushOwned(value);
+                return .done;
+            }
+            if (fastStringIndexValue(ctx.runtime, obj, key)) |value| {
+                errdefer value.free(ctx.runtime);
+                try stack.pushOwned(value);
+                return .done;
+            }
+            if (fastInt32TypedArrayElementValue(obj, key)) |value| {
+                errdefer value.free(ctx.runtime);
+                try stack.pushOwned(value);
+                return .done;
+            }
+            const key_value = object_ops.toPropertyKeyValue(ctx, output, global, key, function, frame) catch |err| {
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                return err;
+            };
+            var key_value_owned = true;
+            defer if (key_value_owned) key_value.free(ctx.runtime);
+            const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
+            defer ctx.runtime.atoms.free(atom_id);
+            const value = object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame) catch |err| {
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                return err;
+            };
+            errdefer value.free(ctx.runtime);
+            const old_key = stack.values[stack.values.len - 1];
+            stack.values[stack.values.len - 1] = key_value;
+            key_value_owned = false;
+            old_key.free(ctx.runtime);
+            try stack.pushOwned(value);
+        },
         op.put_array_el => {
             const value = try stack.pop();
             defer value.free(ctx.runtime);
@@ -691,8 +717,7 @@ fn fastStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, key: core.JSVa
     if (!value.isString() or !key.isInt()) return null;
     const index_i32 = key.asInt32().?;
     if (index_i32 < 0) return null;
-    const header = value.refHeader() orelse return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     const index: usize = @intCast(index_i32);
     if (index >= string_value.len()) return null;
     const unit = string_value.codeUnitAt(index);

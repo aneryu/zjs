@@ -44,7 +44,6 @@ pub fn describe(format: opcode.Format) Description {
         .arg => .{ .operands = &.{.argument} },
         .var_ref => .{ .operands = &.{.var_ref} },
         .u32 => .{ .operands = &.{.u32} },
-        .u32x2 => .{ .operands = &.{ .u32, .u32 } },
         .i32 => .{ .operands = &.{.i32} },
         .@"const" => .{ .operands = &.{.constant} },
         .label => .{ .operands = &.{.label} },
@@ -72,5 +71,4 @@ test "format metadata computes immediate operand widths" {
     try std.testing.expectEqual(@as(usize, 4), describe(.i32).immediateSize());
     try std.testing.expectEqual(@as(usize, 5), describe(.atom_u8).immediateSize());
     try std.testing.expectEqual(@as(usize, 10), describe(.atom_label_u16).immediateSize());
-    try std.testing.expectEqual(@as(usize, 8), describe(.u32x2).immediateSize());
 }

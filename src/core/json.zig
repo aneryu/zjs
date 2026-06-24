@@ -43,11 +43,10 @@ pub fn appendJsonStringValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), va
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    const header = rooted_value.refHeader() orelse {
+    const string_value = rooted_value.asStringBody() orelse {
         try appendEscapedJsonString(rt, buffer, "");
         return;
     };
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try appendEscapedJsonLatin1String(rt, buffer, bytes),

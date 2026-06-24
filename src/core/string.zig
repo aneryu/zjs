@@ -48,6 +48,7 @@ pub const Rope = struct {
     wide: bool,
     rt: *JSRuntime,
     hash: u32 = 0,
+    hash_ready: bool = false,
     flat: FlatCache = .none,
     /// Growable private append buffer so `s += x` loops extend the rope in
     /// place instead of chaining one ~150-byte node per concatenation.
@@ -96,11 +97,12 @@ pub fn isAsciiBytes(bytes: []const u8) bool {
 }
 
 pub const String = struct {
-    header: gc.Header,
+    header: gc.StringHeader,
     data: Data,
     layout: Layout,
     capacity: usize,
     hash: u32,
+    hash_ready: bool = false,
     atom_id: ?u32 = null,
     /// Set once a string becomes a rope child. Rope nodes snapshot their
     /// children's content, so in-place appends must be refused from then on.
@@ -120,14 +122,13 @@ pub const String = struct {
             const self = try createUninitialized(rt, .latin1, plan.units);
             errdefer destroyUninitialized(rt, self);
             _ = try decodeUtf8(bytes, self.data.latin1, null);
-            self.hash = hashLatin1(self.data.latin1, 0);
+            writeLatin1Terminator(self.data.latin1);
             return self;
         }
 
         const self = try createUninitialized(rt, .utf16, plan.units);
         errdefer destroyUninitialized(rt, self);
         _ = try decodeUtf8(bytes, null, self.data.utf16);
-        self.hash = hashUtf16(self.data.utf16, 0);
         return self;
     }
 
@@ -146,14 +147,13 @@ pub const String = struct {
             const self = try createUninitialized(rt, .latin1, units.len);
             errdefer destroyUninitialized(rt, self);
             for (units, 0..) |unit, i| self.data.latin1[i] = @intCast(unit);
-            self.hash = hashLatin1(self.data.latin1, 0);
+            writeLatin1Terminator(self.data.latin1);
             return self;
         }
 
         const self = try createUninitialized(rt, .utf16, units.len);
         errdefer destroyUninitialized(rt, self);
         @memcpy(self.data.utf16, units);
-        self.hash = hashUtf16(self.data.utf16, 0);
         return self;
     }
 
@@ -171,18 +171,18 @@ pub const String = struct {
             const self = try createUninitialized(rt, .latin1, units.len);
             errdefer destroyUninitialized(rt, self);
             for (units, 0..) |unit, i| self.data.latin1[i] = @intCast(unit);
-            self.hash = hashLatin1(self.data.latin1, 0);
+            writeLatin1Terminator(self.data.latin1);
             rt.memory.free(u16, units.ptr[0..capacity]);
             return self;
         }
 
         const self = try rt.createRuntime(String);
         self.* = .{
-            .header = .{ .kind = .string },
+            .header = .{},
             .data = .{ .utf16 = units },
             .layout = .separate,
             .capacity = capacity,
-            .hash = hashUtf16(units, 0),
+            .hash = 0,
         };
         return self;
     }
@@ -193,7 +193,7 @@ pub const String = struct {
             errdefer destroyUninitialized(rt, self);
             self.data.latin1[0] = @intCast(first);
             self.data.latin1[1] = @intCast(second);
-            self.hash = (@as(u32, @intCast(first)) *% 263) +% @as(u32, @intCast(second));
+            writeLatin1Terminator(self.data.latin1);
             return self;
         }
 
@@ -201,8 +201,15 @@ pub const String = struct {
         errdefer destroyUninitialized(rt, self);
         self.data.utf16[0] = first;
         self.data.utf16[1] = second;
-        self.hash = (@as(u32, @intCast(first)) *% 263) +% @as(u32, @intCast(second));
         return self;
+    }
+
+    pub fn createSymbolNoDescription(rt: *JSRuntime) !*String {
+        return createUninitialized(rt, .utf16, 0);
+    }
+
+    pub fn isSymbolNoDescription(self: String) bool {
+        return self.data.len() == 0 and self.data.isWide();
     }
 
     pub fn createAtomBacked(rt: *JSRuntime, atom_id: u32) !*String {
@@ -234,6 +241,7 @@ pub const String = struct {
     /// reuses the same cached string with zero conversion.
     /// Rope-backed strings are flattened by the content read.
     pub fn internAtom(self: *String, rt: *JSRuntime) !u32 {
+        _ = self.contentHash();
         if (self.atom_id) |cached| return rt.atoms.dup(cached);
         var utf8 = std.ArrayList(u8).empty;
         defer utf8.deinit(rt.memory.allocator);
@@ -258,31 +266,33 @@ pub const String = struct {
     /// Used by the `+` operator string fast path so we skip the per-call
     /// `ArrayList(u8)` intermediate (and its `deinit`).
     pub fn createLatin1Concat(rt: *JSRuntime, a: []const u8, b: []const u8) !*String {
-        return createLatin1ConcatGrowableWithSeed(rt, a, b, hashLatin1(a, 0));
+        return createLatin1ConcatGrowable(rt, a, b);
     }
 
     pub fn createLatin1ConcatWithSeed(rt: *JSRuntime, a: []const u8, b: []const u8, seed: u32) !*String {
+        _ = seed;
         const total = a.len + b.len;
         const self = try createUninitialized(rt, .latin1, total);
         errdefer destroyUninitialized(rt, self);
         @memcpy(self.data.latin1[0..a.len], a);
         @memcpy(self.data.latin1[a.len..], b);
-        self.hash = hashLatin1(b, seed);
+        writeLatin1Terminator(self.data.latin1);
         return self;
     }
 
-    fn createLatin1ConcatGrowableWithSeed(rt: *JSRuntime, a: []const u8, b: []const u8, seed: u32) !*String {
+    fn createLatin1ConcatGrowable(rt: *JSRuntime, a: []const u8, b: []const u8) !*String {
         const total = a.len + b.len;
         const capacity = nextStringCapacity(0, total);
         const self = try createInlineUninitialized(rt, .latin1, total, capacity);
         errdefer destroyUninitialized(rt, self);
         @memcpy(self.data.latin1[0..a.len], a);
         @memcpy(self.data.latin1[a.len..], b);
-        self.hash = hashLatin1(b, seed);
+        writeLatin1Terminator(self.data.latin1);
         return self;
     }
 
     pub fn createLatin1RepeatedConcatWithSeed(rt: *JSRuntime, a: []const u8, suffix: []const u8, repeat_count: usize, seed: u32) !*String {
+        _ = seed;
         const append_len = try std.math.mul(usize, suffix.len, repeat_count);
         const total = try std.math.add(usize, a.len, append_len);
         const self = try createUninitialized(rt, .latin1, total);
@@ -298,38 +308,33 @@ pub const String = struct {
                 offset += suffix.len;
             }
         }
-        self.hash = seed;
-        var remaining = repeat_count;
-        while (remaining != 0) : (remaining -= 1) {
-            self.hash = hashLatin1(suffix, self.hash);
-        }
+        writeLatin1Terminator(self.data.latin1);
         return self;
     }
 
     /// Concatenate two utf16 unit buffers into a single freshly allocated
     /// utf16 string. The runtime owns the result.
     pub fn createUtf16Concat(rt: *JSRuntime, a: []const u16, b: []const u16) !*String {
-        return createUtf16ConcatGrowableWithSeed(rt, a, b, hashUtf16(a, 0));
+        return createUtf16ConcatGrowable(rt, a, b);
     }
 
     pub fn createUtf16ConcatWithSeed(rt: *JSRuntime, a: []const u16, b: []const u16, seed: u32) !*String {
+        _ = seed;
         const total = a.len + b.len;
         const self = try createUninitialized(rt, .utf16, total);
         errdefer destroyUninitialized(rt, self);
         @memcpy(self.data.utf16[0..a.len], a);
         @memcpy(self.data.utf16[a.len..], b);
-        self.hash = hashUtf16(b, seed);
         return self;
     }
 
-    fn createUtf16ConcatGrowableWithSeed(rt: *JSRuntime, a: []const u16, b: []const u16, seed: u32) !*String {
+    fn createUtf16ConcatGrowable(rt: *JSRuntime, a: []const u16, b: []const u16) !*String {
         const total = a.len + b.len;
         const capacity = nextStringCapacity(0, total);
         const self = try createInlineUninitialized(rt, .utf16, total, capacity);
         errdefer destroyUninitialized(rt, self);
         @memcpy(self.data.utf16[0..a.len], a);
         @memcpy(self.data.utf16[a.len..], b);
-        self.hash = hashUtf16(b, seed);
         return self;
     }
 
@@ -337,7 +342,7 @@ pub const String = struct {
         const self = try createUninitialized(rt, .latin1, bytes.len);
         errdefer destroyUninitialized(rt, self);
         @memcpy(self.data.latin1, bytes);
-        self.hash = hashLatin1(bytes, 0);
+        writeLatin1Terminator(self.data.latin1);
         return self;
     }
 
@@ -360,14 +365,14 @@ pub const String = struct {
             .rt = rt,
         };
         self.* = .{
-            .header = .{ .kind = .string },
+            .header = .{},
             .data = .{ .rope = node },
             .layout = .separate,
             .capacity = 0,
             .hash = 0,
         };
-        gc.retain(&left.header);
-        gc.retain(&right.header);
+        left.retain();
+        right.retain();
         left.rope_child = true;
         right.rope_child = true;
         return self;
@@ -391,11 +396,11 @@ pub const String = struct {
         const node = self.data.rope;
         std.debug.assert(node.rt == rt);
         if (node.flat != .none) return false;
-        // Tail appends happen strictly pre-materialization (the flat-cache
-        // guard above): content hashes are only computed at flatten time,
-        // so no hash cache can go stale through this in-place mutation.
-        std.debug.assert(node.hash == 0);
-        std.debug.assert(self.hash == 0);
+        // Tail appends happen strictly before flattening. A demanded rope hash
+        // flattens first, so this in-place mutation cannot leave a live hash
+        // cache stale.
+        std.debug.assert(!node.hash_ready);
+        std.debug.assert(!self.hash_ready);
         const add_len = suffix.len();
         if (add_len == 0) return true;
         const new_total = checkedAddLength(node.len, add_len) orelse return false;
@@ -425,17 +430,47 @@ pub const String = struct {
     }
 
     /// Content hash usable for hashing string values regardless of rope state.
-    /// Flattens rope-backed strings first so equal contents hash equally.
+    /// Computed lazily and cached on first demand. Rope-backed strings flatten
+    /// first so equal contents hash equally without hashing at rope creation or
+    /// flatten time.
     pub fn contentHash(self: *const String) u32 {
         if (self.data == .rope) {
             _ = self.resolveData();
-            return self.data.rope.hash;
+            const node = self.data.rope;
+            if (!node.hash_ready) {
+                node.hash = switch (node.flat) {
+                    .latin1 => |buf| hashLatin1(buf, 0),
+                    .utf16 => |buf| hashUtf16(buf, 0),
+                    .none => unreachable,
+                };
+                node.hash_ready = true;
+            }
+            return node.hash;
+        }
+        if (!self.hash_ready) {
+            const mutable = @constCast(self);
+            mutable.hash = switch (self.resolveData()) {
+                .latin1 => |bytes| hashLatin1(bytes, 0),
+                .utf16 => |units| hashUtf16(units, 0),
+            };
+            mutable.hash_ready = true;
         }
         return self.hash;
     }
 
     pub fn value(self: *String) JSValue {
         return JSValue.string(&self.header);
+    }
+
+    pub inline fn retain(self: *String) void {
+        self.header.retain();
+    }
+
+    pub fn releaseFromHeader(rt: *JSRuntime, header: *gc.StringHeader) void {
+        std.debug.assert(header.rc > 0);
+        header.rc -= 1;
+        rt.gc.stats.rc_dec += 1;
+        if (header.rc == 0) destroyFromHeader(rt, header);
     }
 
     pub fn len(self: String) usize {
@@ -491,9 +526,6 @@ pub const String = struct {
             .rope => |node| {
                 std.debug.assert(node.rt == rt);
                 try flattenRopeNodeFallible(node);
-                // Keep the canonical wrapper's hash cache coherent, matching
-                // the infallible flatten path.
-                @constCast(cursor).hash = node.hash;
             },
             else => {},
         }
@@ -542,18 +574,15 @@ pub const String = struct {
         if (slice_len == 0) return try createAscii(rt, "");
         const self = try rt.createRuntime(String);
         errdefer rt.memory.destroy(String, self);
-        self.header = .{ .kind = .string };
+        self.header = .{};
         self.hash = 0;
+        self.hash_ready = false;
         self.atom_id = null;
         self.rope_child = false;
         self.layout = .slice;
         self.capacity = 0;
         self.data = .{ .slice = .{ .parent = parent, .start = start, .len = slice_len } };
-        gc.retain(&parent.header);
-        self.hash = switch (self.resolveData()) {
-            .latin1 => |bytes| hashLatin1(bytes, 0),
-            .utf16 => |units| hashUtf16(units, 0),
-        };
+        parent.retain();
         return self;
     }
 
@@ -569,8 +598,9 @@ pub const String = struct {
         if (new_len <= self.capacity) {
             const expanded = bytes.ptr[0..new_len];
             @memcpy(expanded[old_len..new_len], suffix);
+            writeLatin1Terminator(expanded);
             self.data = .{ .latin1 = expanded };
-            self.hash = hashLatin1(suffix, self.hash);
+            if (self.hash_ready) self.hash = hashLatin1(suffix, self.hash);
             return true;
         }
         if (self.layout != .separate) return false;
@@ -579,14 +609,16 @@ pub const String = struct {
         while (next_capacity < new_len) {
             next_capacity = next_capacity * 2;
         }
-        const expanded = try rt.allocRuntime(u8, next_capacity);
-        errdefer rt.memory.free(u8, expanded);
+        const expanded_allocation = try allocFinalLatin1Buffer(rt, next_capacity);
+        errdefer rt.memory.free(u8, expanded_allocation);
+        const expanded = expanded_allocation[0..new_len];
         @memcpy(expanded[0..old_len], bytes);
         @memcpy(expanded[old_len..new_len], suffix);
-        const old_bytes = bytes.ptr[0..self.capacity];
-        self.data = .{ .latin1 = expanded[0..new_len] };
+        writeLatin1Terminator(expanded);
+        const old_bytes = finalLatin1Allocation(bytes, self.capacity);
+        self.data = .{ .latin1 = expanded };
         self.capacity = next_capacity;
-        self.hash = hashLatin1(suffix, self.hash);
+        if (self.hash_ready) self.hash = hashLatin1(suffix, self.hash);
         rt.memory.free(u8, old_bytes);
         return true;
     }
@@ -604,7 +636,7 @@ pub const String = struct {
             const expanded = units.ptr[0..new_len];
             @memcpy(expanded[old_len..new_len], suffix);
             self.data = .{ .utf16 = expanded };
-            self.hash = hashUtf16(suffix, self.hash);
+            if (self.hash_ready) self.hash = hashUtf16(suffix, self.hash);
             return true;
         }
         if (self.layout != .separate) return false;
@@ -617,7 +649,7 @@ pub const String = struct {
         const old_units = units.ptr[0..self.capacity];
         self.data = .{ .utf16 = expanded[0..new_len] };
         self.capacity = next_capacity;
-        self.hash = hashUtf16(suffix, self.hash);
+        if (self.hash_ready) self.hash = hashUtf16(suffix, self.hash);
         rt.memory.free(u16, old_units);
         return true;
     }
@@ -635,7 +667,7 @@ pub const String = struct {
             const expanded = units.ptr[0..new_len];
             for (suffix, old_len..) |byte, index| expanded[index] = byte;
             self.data = .{ .utf16 = expanded };
-            self.hash = hashLatin1(suffix, self.hash);
+            if (self.hash_ready) self.hash = hashLatin1(suffix, self.hash);
             return true;
         }
         if (self.layout != .separate) return false;
@@ -648,7 +680,7 @@ pub const String = struct {
         const old_units = units.ptr[0..self.capacity];
         self.data = .{ .utf16 = expanded[0..new_len] };
         self.capacity = next_capacity;
-        self.hash = hashLatin1(suffix, self.hash);
+        if (self.hash_ready) self.hash = hashLatin1(suffix, self.hash);
         rt.memory.free(u16, old_units);
         return true;
     }
@@ -668,10 +700,10 @@ pub const String = struct {
         errdefer rt.memory.free(u16, expanded);
         for (bytes, 0..) |byte, index| expanded[index] = byte;
         @memcpy(expanded[old_len..new_len], suffix);
-        const old_bytes = bytes.ptr[0..self.capacity];
+        const old_bytes = finalLatin1Allocation(bytes, self.capacity);
         self.data = .{ .utf16 = expanded[0..new_len] };
         self.capacity = next_capacity;
-        self.hash = hashUtf16(suffix, self.hash);
+        if (self.hash_ready) self.hash = hashUtf16(suffix, self.hash);
         rt.memory.free(u8, old_bytes);
         return true;
     }
@@ -704,10 +736,11 @@ pub const String = struct {
                 const doubled = @mulWithOverflow(next_capacity, 2);
                 next_capacity = if (doubled[1] == 0 and doubled[0] > next_capacity) doubled[0] else new_len;
             }
-            expanded = try rt.allocRuntime(u8, next_capacity);
-            errdefer rt.memory.free(u8, expanded);
+            const expanded_allocation = try allocFinalLatin1Buffer(rt, next_capacity);
+            errdefer rt.memory.free(u8, expanded_allocation);
+            expanded = expanded_allocation[0..new_len];
             @memcpy(expanded[0..old_len], bytes);
-            old_bytes = bytes.ptr[0..self.capacity];
+            old_bytes = finalLatin1Allocation(bytes, self.capacity);
         }
 
         if (suffix.len == 1) {
@@ -720,25 +753,38 @@ pub const String = struct {
                 offset += suffix.len;
             }
         }
+        writeLatin1Terminator(expanded);
         self.data = .{ .latin1 = expanded[0..new_len] };
         self.capacity = next_capacity;
-        var remaining = repeat_count;
-        while (remaining != 0) : (remaining -= 1) {
-            self.hash = hashLatin1(suffix, self.hash);
+        if (self.hash_ready) {
+            var remaining = repeat_count;
+            while (remaining != 0) : (remaining -= 1) {
+                self.hash = hashLatin1(suffix, self.hash);
+            }
         }
         if (old_bytes.len != 0) rt.memory.free(u8, old_bytes);
         return true;
     }
 
-    pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) void {
+    pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.StringHeader) void {
         const self: *String = @alignCast(@fieldParentPtr("header", header));
         // `atom_id` is a weak back-pointer: it holds no atom reference.
         // A string bound to a live dynamic atom cannot be destroyed (the
         // atom table holds a reference), so reaching here with a dynamic
         // id would mean the table failed to clear the back-pointer.
         if (self.atom_id) |atom_id| {
-            std.debug.assert(atom_mod.isConst(atom_id) or atom_mod.isTaggedInt(atom_id));
+            if (!atom_mod.isConst(atom_id) and !atom_mod.isTaggedInt(atom_id)) {
+                if (rt.atoms.onSymbolBodyZeroRef(rt, atom_id, self)) return;
+            } else {
+                std.debug.assert(atom_mod.isConst(atom_id) or atom_mod.isTaggedInt(atom_id));
+            }
         }
+        destroyUninitialized(rt, self);
+    }
+
+    pub fn destroyWeakSymbolBody(rt: *JSRuntime, self: *String) void {
+        std.debug.assert(self.header.rc == 0);
+        self.atom_id = null;
         destroyUninitialized(rt, self);
     }
 
@@ -751,8 +797,9 @@ pub const String = struct {
         const inline_layout = inlineAllocationLayout(tag, capacity) orelse return error.OutOfMemory;
         const bytes = try rt.allocRuntimeAlignedBytes(inline_layout.total_size, inline_layout.allocation_alignment);
         const self: *String = @ptrCast(@alignCast(bytes.ptr));
-        self.header = .{ .kind = .string };
+        self.header = .{};
         self.hash = 0;
+        self.hash_ready = false;
         self.atom_id = null;
         self.rope_child = false;
         self.layout = .compact;
@@ -776,7 +823,7 @@ pub const String = struct {
         switch (self.data) {
             .latin1 => |bytes| switch (self.layout) {
                 .compact => return destroyInline(rt, self, .latin1),
-                .separate => rt.memory.free(u8, bytes.ptr[0..self.capacity]),
+                .separate => rt.memory.free(u8, finalLatin1Allocation(bytes, self.capacity)),
                 .slice => unreachable,
             },
             .utf16 => |units| switch (self.layout) {
@@ -855,9 +902,7 @@ fn orderToI32(order: std.math.Order) i32 {
 
 fn flattenedRopeData(self: *const String, node: *Rope) String.ResolvedData {
     flattenRopeNode(node);
-    // Keep the canonical wrapper's hash cache coherent for direct readers.
-    // (When `self` is a transient by-value copy the write is simply lost.)
-    @constCast(self).hash = node.hash;
+    _ = self;
     return switch (node.flat) {
         .latin1 => |buf| .{ .latin1 = buf },
         .utf16 => |buf| .{ .utf16 = buf },
@@ -890,13 +935,13 @@ fn flattenRopeNodeFallible(node: *Rope) !void {
         errdefer rt.memory.free(u16, buf);
         try copyRopeContent(u16, rt, node, buf);
         node.flat = .{ .utf16 = buf };
-        node.hash = hashUtf16(buf, 0);
     } else {
-        const buf = try rt.allocRuntime(u8, node.len);
-        errdefer rt.memory.free(u8, buf);
+        const allocation = try allocFinalLatin1Buffer(rt, node.len);
+        errdefer rt.memory.free(u8, allocation);
+        const buf = allocation[0..node.len];
         try copyRopeContent(u8, rt, node, buf);
+        writeLatin1Terminator(buf);
         node.flat = .{ .latin1 = buf };
-        node.hash = hashLatin1(buf, 0);
     }
     releaseRopeChildRef(rt, node.left);
     releaseRopeChildRef(rt, node.right);
@@ -1054,7 +1099,7 @@ fn releaseStringRefIntoChain(rt: *JSRuntime, s: *String, pending: *?*String) voi
         }
         return;
     }
-    gc.release(rt, &s.header);
+    String.releaseFromHeader(rt, &s.header);
 }
 
 fn drainRopeDestroyChain(rt: *JSRuntime, pending: *?*String) void {
@@ -1076,7 +1121,7 @@ fn drainRopeDestroyChain(rt: *JSRuntime, pending: *?*String) void {
             // rope never carries one.
             .latin1 => |buf| {
                 std.debug.assert(node.tail == .none);
-                rt.memory.free(u8, buf);
+                rt.memory.free(u8, finalLatin1Allocation(buf, buf.len));
             },
             .utf16 => |buf| {
                 std.debug.assert(node.tail == .none);
@@ -1116,13 +1161,36 @@ fn inlineAllocationLayout(comptime tag: std.meta.Tag(Data), capacity: usize) ?In
     const string_alignment = std.mem.Alignment.of(String);
     const allocation_alignment = if (payload_alignment.compare(.gt, string_alignment)) payload_alignment else string_alignment;
     const payload_offset = std.mem.alignForward(usize, @sizeOf(String), payload_alignment.toByteUnits());
-    const payload_size = std.math.mul(usize, unit_size, capacity) catch return null;
+    const payload_units = switch (tag) {
+        .latin1 => finalLatin1AllocationLen(capacity) orelse return null,
+        .utf16 => capacity,
+        .slice, .rope => unreachable,
+    };
+    const payload_size = std.math.mul(usize, unit_size, payload_units) catch return null;
     const total_size = std.math.add(usize, payload_offset, payload_size) catch return null;
     return .{
         .payload_offset = payload_offset,
         .total_size = total_size,
         .allocation_alignment = allocation_alignment,
     };
+}
+
+fn finalLatin1AllocationLen(capacity: usize) ?usize {
+    return std.math.add(usize, capacity, 1) catch null;
+}
+
+fn allocFinalLatin1Buffer(rt: *JSRuntime, capacity: usize) ![]u8 {
+    const allocation_len = finalLatin1AllocationLen(capacity) orelse return error.OutOfMemory;
+    return rt.allocRuntime(u8, allocation_len);
+}
+
+fn finalLatin1Allocation(bytes: []u8, capacity: usize) []u8 {
+    const allocation_len = finalLatin1AllocationLen(capacity) orelse unreachable;
+    return bytes.ptr[0..allocation_len];
+}
+
+fn writeLatin1Terminator(bytes: []u8) void {
+    bytes.ptr[bytes.len] = 0;
 }
 
 fn checkedAddLength(a: usize, b: usize) ?usize {

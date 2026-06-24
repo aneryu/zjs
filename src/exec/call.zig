@@ -5,7 +5,7 @@ const function_bytecode = @import("../bytecode/function.zig");
 const closure_mod = @import("closure.zig");
 const construct_mod = @import("construct.zig");
 const frame_mod = @import("frame.zig");
-const globals_mod = @import("globals.zig");
+const globals_mod = core.global_slots;
 const host_dispatch_stats = @import("host_dispatch_stats.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
@@ -19,7 +19,7 @@ const math_ops = @import("math_ops.zig");
 const object_ops = @import("object_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const reflect_ops = @import("reflect_ops.zig");
-const dtoa = @import("../libs/dtoa.zig");
+const dtoa = @import("../libs/number_format.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 const exceptions = @import("exceptions.zig");
@@ -42,9 +42,15 @@ fn hostResult(result: anytype) HostError!switch (@typeInfo(@TypeOf(result))) {
     return result catch |err| return @errorCast(err);
 }
 
-fn restoreEvalGlobalLexicals(ctx: *core.JSContext, global: *core.Object, saved_lexicals: ?*core.Object) !void {
-    defer ctx.lexicals = saved_lexicals;
-    try global.setGlobalLexicals(ctx.runtime, ctx.lexicals);
+fn restoreEvalGlobalLexicals(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    saved_lexicals: ?*core.Object,
+    keep_active_lexicals: bool,
+) !void {
+    const active_lexicals = ctx.lexicals;
+    try global.setGlobalLexicals(ctx.runtime, active_lexicals);
+    ctx.lexicals = if (keep_active_lexicals) active_lexicals else saved_lexicals;
 }
 
 pub fn returnThis(this_value: core.JSValue) core.JSValue {
@@ -885,8 +891,10 @@ fn createPromiseCapability(
         reject_val = try createPromiseBuiltinFunction(ctx.runtime, active_global, "", 1);
         const resolve_object = thisObject(resolve_val) orelse return error.TypeError;
         const reject_object = thisObject(reject_val) orelse return error.TypeError;
+        try resolve_object.setInternalCallableTag(ctx.runtime, .promise_resolving);
         try resolve_object.setFunctionPromiseResolvingTarget(ctx.runtime, promise_val.dup());
         (try resolve_object.functionPromiseResolvingRejectSlot(ctx.runtime)).* = false;
+        try reject_object.setInternalCallableTag(ctx.runtime, .promise_resolving);
         try reject_object.setFunctionPromiseResolvingTarget(ctx.runtime, promise_val.dup());
         (try reject_object.functionPromiseResolvingRejectSlot(ctx.runtime)).* = true;
         return .{
@@ -902,6 +910,7 @@ fn createPromiseCapability(
 
     executor_val = try createPromiseBuiltinFunction(ctx.runtime, active_global, "", 2);
     const executor_object = thisObject(executor_val) orelse return error.TypeError;
+    try executor_object.setInternalCallableTag(ctx.runtime, .promise_capability_executor);
     try executor_object.setFunctionPromiseCapabilitySlot(ctx.runtime, capability_slot_val.dup());
 
     const instance = try core.Object.create(ctx.runtime, core.class.ids.object, constructorPrototype(ctx.runtime, constructor_object));
@@ -1195,7 +1204,8 @@ test "createPromiseSettlementRecord roots direct symbol payload while defining s
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const record_value = try createPromiseSettlementRecord(rt, false, core.JSValue.symbol(symbol_atom));
+    const payload_value = try rt.symbolValue(symbol_atom);
+    const record_value = try createPromiseSettlementRecord(rt, false, payload_value);
     var record_alive = true;
     defer if (record_alive) record_value.free(rt);
     const record = thisObject(record_value) orelse return error.TypeError;
@@ -1203,12 +1213,15 @@ test "createPromiseSettlementRecord roots direct symbol payload while defining s
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const value_atom = try rt.internAtom("value");
     defer rt.atoms.free(value_atom);
-    const value = record.getProperty(value_atom);
-    defer value.free(rt);
-    try std.testing.expect(value.same(core.JSValue.symbol(symbol_atom)));
+    {
+        const value = record.getProperty(value_atom);
+        defer value.free(rt);
+        try std.testing.expect(value.same(payload_value));
+    }
 
     record_value.free(rt);
     record_alive = false;
+    payload_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -1275,9 +1288,9 @@ test "createPromiseCombinatorState roots direct function bytecode resolve while 
     fb.* = function_bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-combinator-state-resolve-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-combinator-state-resolve-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var resolve_value = core.JSValue.functionBytecode(&fb.header);
@@ -1314,6 +1327,7 @@ fn createPromiseCombinatorCallback(
     const callback = try createPromiseBuiltinFunction(rt, global, "", 1);
     errdefer callback.free(rt);
     const callback_object = thisObject(callback) orelse return error.TypeError;
+    try callback_object.setInternalCallableTag(rt, .promise_combinator_element);
     (try callback_object.functionPromiseCombinatorModeSlot(rt)).* = @intFromEnum(mode);
     try callback_object.setFunctionPromiseCombinatorState(rt, state.value().dup());
     (try callback_object.functionPromiseCombinatorIndexSlot(rt)).* = index;
@@ -1868,8 +1882,8 @@ pub fn callObjectStatic(
         const out = try core.Object.createArray(rt, null);
         errdefer core.Object.destroyFromHeader(rt, &out.header);
         for (keys) |key| {
-            if (rt.atoms.kind(key) != .symbol) continue;
-            try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out.arrayLength()), core.Descriptor.data(core.JSValue.symbol(key), true, true, true));
+            if (!rt.atoms.isPublicSymbol(key)) continue;
+            try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out.arrayLength()), core.Descriptor.data(try rt.symbolValue(key), true, true, true));
         }
         return out.value();
     }
@@ -2261,17 +2275,19 @@ test "primitiveWrapper roots direct symbol while creating call wrapper" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const wrapper_value = try primitiveWrapper(ctx, core.class.ids.symbol, core.JSValue.symbol(symbol_atom), null);
+    const symbol_value = try rt.symbolValue(symbol_atom);
+    const wrapper_value = try primitiveWrapper(ctx, core.class.ids.symbol, symbol_value, null);
     var wrapper_alive = true;
     defer if (wrapper_alive) wrapper_value.free(rt);
     const wrapper = property_ops.expectObject(wrapper_value) catch return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = wrapper.objectData() orelse return error.TypeError;
-    try std.testing.expect(stored.same(core.JSValue.symbol(symbol_atom)));
+    try std.testing.expect(stored.same(symbol_value));
 
     wrapper_value.free(rt);
     wrapper_alive = false;
+    symbol_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -2414,8 +2430,10 @@ test "createBoundFunction roots bound this and args while creating function" {
     defer target.free(rt);
 
     const this_atom = try rt.atoms.newValueSymbol("gc-bound-this-symbol");
+    const this_value = try rt.symbolValue(this_atom);
     const arg_atom = try rt.atoms.newValueSymbol("gc-bound-arg-symbol");
-    const bound_args = [_]core.JSValue{core.JSValue.symbol(arg_atom)};
+    const arg_value = try rt.symbolValue(arg_atom);
+    const bound_args = [_]core.JSValue{arg_value};
     var globals = [_]globals_mod.Slot{};
 
     const old_threshold = rt.gcThreshold();
@@ -2428,7 +2446,7 @@ test "createBoundFunction roots bound this and args while creating function" {
         null,
         globals[0..],
         target,
-        core.JSValue.symbol(this_atom),
+        this_value,
         &bound_args,
     );
     var bound_alive = true;
@@ -2437,12 +2455,14 @@ test "createBoundFunction roots bound this and args while creating function" {
 
     try std.testing.expect(rt.atoms.name(this_atom) != null);
     try std.testing.expect(rt.atoms.name(arg_atom) != null);
-    try std.testing.expect(bound.boundThis().?.same(core.JSValue.symbol(this_atom)));
+    try std.testing.expect(bound.boundThis().?.same(this_value));
     try std.testing.expectEqual(@as(usize, 1), bound.boundArgs().len);
-    try std.testing.expect(bound.boundArgs()[0].same(core.JSValue.symbol(arg_atom)));
+    try std.testing.expect(bound.boundArgs()[0].same(arg_value));
 
     bound_value.free(rt);
     bound_alive = false;
+    this_value.free(rt);
+    arg_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(this_atom) == null);
     try std.testing.expect(rt.atoms.name(arg_atom) == null);
@@ -2473,7 +2493,8 @@ test "callValueWithThisGlobalsAndGlobal roots inline args before bound argument 
     defer if (bound_alive) bound_value.free(rt);
 
     const arg_atom = try rt.atoms.newValueSymbol("gc-call-legacy-inline-arg-root");
-    const args = [_]core.JSValue{core.JSValue.symbol(arg_atom)};
+    const arg_value = try rt.symbolValue(arg_atom);
+    const args = [_]core.JSValue{arg_value};
 
     const Trigger = struct {
         rt: *core.JSRuntime,
@@ -2492,26 +2513,8 @@ test "callValueWithThisGlobalsAndGlobal roots inline args before bound argument 
                 self.rt.memory.trigger_gc_fn = saved_trigger_fn;
                 self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
             }
-            var visitor = core.runtime.RootVisitor{
-                .context = self,
-                .visit_value = @This().visitValue,
-                .visit_object = @This().visitObject,
-            };
-            self.rt.traceActiveRoots(&visitor) catch {
-                self.trace_failed = true;
-            };
-        }
-
-        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (slot.asSymbolAtom()) |atom_id| {
-                if (atom_id == self.atom_id) self.saw_arg = true;
-            }
-        }
-
-        fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
-            _ = context;
-            _ = slot;
+            _ = self.rt.runObjectCycleRemoval();
+            self.saw_arg = self.rt.atoms.name(self.atom_id) != null;
         }
     };
 
@@ -2546,6 +2549,7 @@ test "callValueWithThisGlobalsAndGlobal roots inline args before bound argument 
 
     bound_value.free(rt);
     bound_alive = false;
+    arg_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(arg_atom) == null);
 }
@@ -2699,9 +2703,7 @@ pub fn nativeFunctionDispatchNameRef(
 /// `null` if the value is not a latin1 string (utf16 strings carry no
 /// usable byte slice for ASCII-only dispatch comparisons).
 fn stringLatin1BytesRef(value: core.JSValue) ?[]const u8 {
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     return switch (string_value.resolveData()) {
         .latin1 => |bytes| bytes,
         .utf16 => null,
@@ -2941,8 +2943,7 @@ fn globalAtob(ctx: *core.JSContext, global: ?*core.Object, args: []const core.JS
 const Latin1StringError = error{ InvalidCharacter, TypeError } || std.mem.Allocator.Error;
 
 fn stringToLatin1Bytes(rt: *core.JSRuntime, value: core.JSValue, max_unit: u16) Latin1StringError!std.ArrayList(u8) {
-    const header = value.refHeader() orelse return error.TypeError;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return error.TypeError;
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(rt.memory.allocator);
     try string_value.ensureFlat(rt);
@@ -3180,9 +3181,10 @@ test "descriptorObject roots direct symbol value while creating descriptor objec
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
+    const symbol_value = try rt.symbolValue(symbol_atom);
     const descriptor_value = try descriptorObject(
         rt,
-        core.Descriptor.data(core.JSValue.symbol(symbol_atom), true, true, true),
+        core.Descriptor.data(symbol_value, true, true, true),
     );
     var descriptor_alive = true;
     defer if (descriptor_alive) descriptor_value.free(rt);
@@ -3191,12 +3193,15 @@ test "descriptorObject roots direct symbol value while creating descriptor objec
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const value_key = try rt.internAtom("value");
     defer rt.atoms.free(value_key);
-    const stored = descriptor.getProperty(value_key);
-    defer stored.free(rt);
-    try std.testing.expect(stored.same(core.JSValue.symbol(symbol_atom)));
+    {
+        const stored = descriptor.getProperty(value_key);
+        defer stored.free(rt);
+        try std.testing.expect(stored.same(symbol_value));
+    }
 
     descriptor_value.free(rt);
     descriptor_alive = false;
+    symbol_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -3291,8 +3296,7 @@ fn printArray(rt: *core.JSRuntime, writer: *std.Io.Writer, object: *core.Object)
 }
 
 fn printString(rt: *core.JSRuntime, writer: *std.Io.Writer, value: core.JSValue) !void {
-    const header = value.refHeader() orelse return writer.writeAll("[string]");
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return writer.writeAll("[string]");
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try writer.writeAll(bytes),
@@ -3344,6 +3348,7 @@ pub fn qjsEvalGlobalScriptSource(
 
     const context_global = ctx.global;
     const use_global_lexicals = context_global == null or context_global.? != global;
+    const keep_active_lexicals = context_global == null;
     const saved_lexicals = ctx.lexicals;
     if (use_global_lexicals) ctx.lexicals = global.globalLexicals();
 
@@ -3359,7 +3364,7 @@ pub fn qjsEvalGlobalScriptSource(
 
     if (use_global_lexicals) {
         var rooted_result = result catch |err| {
-            try restoreEvalGlobalLexicals(ctx, global, saved_lexicals);
+            try restoreEvalGlobalLexicals(ctx, global, saved_lexicals, keep_active_lexicals);
             return err;
         };
         errdefer rooted_result.free(ctx.runtime);
@@ -3372,7 +3377,7 @@ pub fn qjsEvalGlobalScriptSource(
         };
         ctx.runtime.active_value_roots = &root_frame;
         defer ctx.runtime.active_value_roots = root_frame.previous;
-        try restoreEvalGlobalLexicals(ctx, global, saved_lexicals);
+        try restoreEvalGlobalLexicals(ctx, global, saved_lexicals, keep_active_lexicals);
         return rooted_result;
     }
     return result;

@@ -77,9 +77,9 @@ test "fulfilledWithPrototype roots direct function bytecode result while constru
     fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-fulfilled-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-fulfilled-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var result_value = core.JSValue.functionBytecode(&fb.header);
@@ -245,6 +245,7 @@ fn createResolvingFunction(rt: *core.JSRuntime, promise: core.JSValue, reject: b
     state_val = state.value();
     defer state_val.free(rt);
     (try state.promiseAlreadyResolvedSlot(rt)).* = false;
+    try object.setInternalCallableTag(rt, .promise_resolving);
     try object.setFunctionPromiseResolvingTarget(rt, rooted_promise.dup());
     try object.setFunctionPromiseResolvingState(rt, state_val.dup());
     (try object.functionPromiseResolvingRejectSlot(rt)).* = reject;
@@ -260,20 +261,22 @@ test "createResolvingFunction roots promise and state while allocating slots" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const function_value = try createResolvingFunction(rt, core.JSValue.symbol(promise_symbol), false);
+    const promise_value = try rt.symbolValue(promise_symbol);
+    const function_value = try createResolvingFunction(rt, promise_value, false);
     var function_alive = true;
     defer if (function_alive) function_value.free(rt);
     const function_object: *core.Object = @fieldParentPtr("header", function_value.refHeader() orelse return error.TypeError);
 
     try std.testing.expect(rt.atoms.name(promise_symbol) != null);
     const stored_target = function_object.functionPromiseResolvingTarget() orelse return error.TypeError;
-    try std.testing.expect(stored_target.same(core.JSValue.symbol(promise_symbol)));
+    try std.testing.expect(stored_target.same(promise_value));
     const stored_state = function_object.functionPromiseResolvingState() orelse return error.TypeError;
     const state_object: *core.Object = @fieldParentPtr("header", stored_state.refHeader() orelse return error.TypeError);
     try std.testing.expect(!state_object.promiseAlreadyResolved());
 
     function_value.free(rt);
     function_alive = false;
+    promise_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(promise_symbol) == null);
 }
@@ -503,22 +506,28 @@ test "promise all family preserves direct symbol payload ownership" {
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    const all_symbol = try rt.atoms.newValueSymbol("gc-promise-all-symbol");
     const all_source = try core.Object.createArray(rt, null);
     var all_source_alive = true;
     defer if (all_source_alive) all_source.value().free(rt);
-    try all_source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.symbol(all_symbol), true, true, true));
+    const all_symbol = try rt.atoms.newValueSymbol("gc-promise-all-symbol");
+    const all_value = try rt.symbolValue(all_symbol);
+    try all_source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(all_value, true, true, true));
+    all_value.free(rt);
     all_source.setArrayLength(1);
 
-    const settled_symbol = try rt.atoms.newValueSymbol("gc-promise-all-settled-symbol");
     const settled_source = try core.Object.createArray(rt, null);
     var settled_source_alive = true;
     defer if (settled_source_alive) settled_source.value().free(rt);
-    try settled_source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.symbol(settled_symbol), true, true, true));
+    const settled_symbol = try rt.atoms.newValueSymbol("gc-promise-all-settled-symbol");
+    const settled_value = try rt.symbolValue(settled_symbol);
+    try settled_source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(settled_value, true, true, true));
+    settled_value.free(rt);
     settled_source.setArrayLength(1);
 
     const any_symbol = try rt.atoms.newValueSymbol("gc-promise-any-rejection-symbol");
-    const rejected_value = try rejectedWithPrototype(rt, core.JSValue.symbol(any_symbol), null);
+    const any_value = try rt.symbolValue(any_symbol);
+    const rejected_value = try rejectedWithPrototype(rt, any_value, null);
+    any_value.free(rt);
     var rejected_alive = true;
     defer if (rejected_alive) rejected_value.free(rt);
     const any_source = try core.Object.createArray(rt, null);
@@ -536,7 +545,7 @@ test "promise all family preserves direct symbol payload ownership" {
     {
         const stored = all_result.getProperty(core.atom.atomFromUInt32(0));
         defer stored.free(rt);
-        try std.testing.expect(stored.same(core.JSValue.symbol(all_symbol)));
+        try std.testing.expectEqual(@as(?core.Atom, all_symbol), stored.asSymbolAtom());
     }
 
     const settled_promise_value = try promiseAllSettled(ctx, settled_source.value(), null);
@@ -553,7 +562,7 @@ test "promise all family preserves direct symbol payload ownership" {
         defer rt.atoms.free(value_atom);
         const stored = record.getProperty(value_atom);
         defer stored.free(rt);
-        try std.testing.expect(stored.same(core.JSValue.symbol(settled_symbol)));
+        try std.testing.expectEqual(@as(?core.Atom, settled_symbol), stored.asSymbolAtom());
     }
 
     const any_promise_value = try promiseAny(ctx, any_source.value(), null, null);
@@ -571,7 +580,7 @@ test "promise all family preserves direct symbol payload ownership" {
     {
         const stored = errors.getProperty(core.atom.atomFromUInt32(0));
         defer stored.free(rt);
-        try std.testing.expect(stored.same(core.JSValue.symbol(any_symbol)));
+        try std.testing.expectEqual(@as(?core.Atom, any_symbol), stored.asSymbolAtom());
     }
     all_source.value().free(rt);
     all_source_alive = false;
@@ -629,9 +638,9 @@ test "settlementRecord roots direct function bytecode item while creating record
     fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-settlement-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-settlement-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var item = core.JSValue.functionBytecode(&fb.header);
@@ -651,8 +660,10 @@ test "settlementRecord roots direct function bytecode item while creating record
     const value_atom = try rt.internAtom("value");
     defer rt.atoms.free(value_atom);
     const stored = record.getProperty(value_atom);
-    defer stored.free(rt);
-    try std.testing.expect(stored.same(item));
+    {
+        defer stored.free(rt);
+        try std.testing.expect(stored.same(item));
+    }
 
     record_value.free(rt);
     record_alive = false;
@@ -726,7 +737,9 @@ test "aggregateErrorValue roots errors array while creating aggregate error" {
     var errors_alive = true;
     defer if (errors_alive) errors.value().free(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-aggregate-errors-symbol");
-    try errors.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.symbol(symbol_atom), true, true, true));
+    const symbol_value = try rt.symbolValue(symbol_atom);
+    try errors.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(symbol_value, true, true, true));
+    symbol_value.free(rt);
     errors.setArrayLength(1);
 
     const old_threshold = rt.gcThreshold();

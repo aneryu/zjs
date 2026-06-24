@@ -451,7 +451,7 @@ pub fn qjsFinalizationRegistryAppendCell(
 pub fn qjsCanBeHeldWeakly(rt: *core.JSRuntime, value: core.JSValue) bool {
     if (value.isObject()) return true;
     if (value.asSymbolAtom()) |atom_id| {
-        return rt.atoms.kind(atom_id) == .symbol and core.symbol.registryKey(&rt.atoms, atom_id) == null;
+        return rt.atoms.kind(atom_id) == .symbol;
     }
     return false;
 }
@@ -470,10 +470,7 @@ pub fn qjsSymbolFor(
         try ctx.runtime.memory.allocator.dupe(u8, "undefined");
     defer ctx.runtime.memory.allocator.free(key);
 
-    const registered = try std.fmt.allocPrint(ctx.runtime.memory.allocator, "{s}{s}", .{ core.symbol.registry_prefix, key });
-    defer ctx.runtime.memory.allocator.free(registered);
-    const atom_id = try ctx.runtime.atoms.internRegisteredValueSymbol(registered);
-    return core.JSValue.symbol(atom_id);
+    return ctx.runtime.globalSymbolValue(key);
 }
 
 pub fn qjsSymbolKeyFor(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
@@ -566,7 +563,7 @@ pub fn callCollectionAdderFromVm(
 
 // Host output fast-path probes (moved from the VM call runtime).
 
-pub fn fastHostOutputCall(rt: *core.JSRuntime, output: ?*std.Io.Writer, func: core.JSValue, args: []const core.JSValue) !bool {
+pub inline fn fastHostOutputCall(rt: *core.JSRuntime, output: ?*std.Io.Writer, func: core.JSValue, args: []const core.JSValue) !bool {
     const object = object_ops.objectFromValue(func) orelse return false;
     if (object.hostFunctionKind() != core.host_function.ids.output) return false;
     try printHostOutputArgs(rt, output, args);

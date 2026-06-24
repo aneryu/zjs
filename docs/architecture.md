@@ -19,9 +19,12 @@
 - 非原子引用计数负责大多数对象的即时释放。
 - `runObjectCycleRemoval` / `tryRunObjectCycleRemovalWithValueRoots` 负责
   root-aware 的对象与 `FunctionBytecode` 环清理。
-- `ValueRootFrame` 是当前 VM 和宿主边界使用的显式根链表。
-- `FrameRootScope` 会把 VM operand stack、locals、args、var refs 和 eval
-  snapshot 挂到 `JSRuntime.active_value_roots`。
+- `ValueRootFrame` / `ValueRootBuffer` / `ValueSliceRoot` 是宿主边界与 builtin
+  在途值使用的显式根（挂到 `JSRuntime.active_value_roots`）。
+- VM 运行帧的 operand stack / locals / args / var refs **不再经 per-frame
+  root-scope 登记**：它们由 `FrameSlab` carve 帧自有、`Frame.deinit` 确定性释放，
+  运行帧靠 refcount-on-push 保活（对齐 qjs：运行帧 `cur_sp=NULL` 不扫，仅扫挂起
+  async/gen 帧）。
 - 宿主持有跨调用生命周期的值时，必须使用 public API 中的 handle /
   persistent-root 机制，而不是裸保存 `JSValue`。
 

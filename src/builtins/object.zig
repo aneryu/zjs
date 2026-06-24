@@ -361,9 +361,9 @@ test "object literal roots direct function bytecode values while creating object
     fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-object-literal-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-object-literal-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var literal_value = core.JSValue.functionBytecode(&fb.header);
@@ -381,9 +381,11 @@ test "object literal roots direct function bytecode values while creating object
     const object = try expectObject(object_value);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    const stored = object.getProperty(key);
-    defer stored.free(rt);
-    try std.testing.expect(stored.same(literal_value));
+    {
+        const stored = object.getProperty(key);
+        defer stored.free(rt);
+        try std.testing.expect(stored.same(literal_value));
+    }
 
     object_value.free(rt);
     object_alive = false;
@@ -440,9 +442,9 @@ test "object entryArrayValue roots direct function bytecode value while creating
     fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-object-entry-array-value-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-object-entry-array-value-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var entry_value = core.JSValue.functionBytecode(&fb.header);
@@ -459,9 +461,11 @@ test "object entryArrayValue roots direct function bytecode value while creating
     const pair = try expectObject(pair_value);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    const stored = pair.getProperty(core.atom.atomFromUInt32(1));
-    defer stored.free(rt);
-    try std.testing.expect(stored.same(entry_value));
+    {
+        const stored = pair.getProperty(core.atom.atomFromUInt32(1));
+        defer stored.free(rt);
+        try std.testing.expect(stored.same(entry_value));
+    }
 
     pair_value.free(rt);
     pair_alive = false;
@@ -577,7 +581,7 @@ pub fn qjsObjectAssignKeys(
     caller_frame: ?*builtin_dispatch.Frame,
 ) !void {
     for (own_keys) |key| {
-        const is_symbol = ctx.runtime.atoms.kind(key) == .symbol;
+        const is_symbol = ctx.runtime.atoms.isPublicSymbol(key);
         if (symbol_pass) |pass| {
             if (is_symbol != pass) continue;
         }
@@ -951,7 +955,8 @@ test "Object.groupBy new group define failure releases group once" {
         error.TypeError,
         appendObjectGroupByValue(ctx, null, global, out.value(), out, key, core.JSValue.int32(1), null, null),
     );
-    try std.testing.expectEqual(@as(usize, 2), rt.gc.liveCount());
+    // Shapes are GC objects now: global and out share one live empty root shape.
+    try std.testing.expectEqual(@as(usize, 3), rt.gc.liveCount());
 }
 
 pub fn qjsObjectPreventExtensionsCall(
@@ -1081,7 +1086,7 @@ pub fn qjsObjectOwnPropertyKeysCall(
     const out = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
     errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
     for (own_keys) |key| {
-        const is_symbol = ctx.runtime.atoms.kind(key) == .symbol;
+        const is_symbol = ctx.runtime.atoms.isPublicSymbol(key);
         switch (filter) {
             .string => {
                 if (is_symbol) continue;
@@ -1091,7 +1096,9 @@ pub fn qjsObjectOwnPropertyKeysCall(
             },
             .symbol => {
                 if (!is_symbol) continue;
-                try createDataPropertyOrThrow(ctx, output, global, out.value(), out, core.atom.atomFromUInt32(out.arrayLength()), core.JSValue.symbol(key), caller_function, caller_frame);
+                const symbol_value = try ctx.runtime.symbolValue(key);
+                defer symbol_value.free(ctx.runtime);
+                try createDataPropertyOrThrow(ctx, output, global, out.value(), out, core.atom.atomFromUInt32(out.arrayLength()), symbol_value, caller_function, caller_frame);
             },
         }
     }

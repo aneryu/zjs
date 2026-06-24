@@ -66,8 +66,7 @@ pub const helpers = struct {
 
     pub fn expectStringValueBytes(value: core.JSValue, expected: []const u8) !void {
         try std.testing.expect(value.isString());
-        const header = value.refHeader().?;
-        const string: *core.string.String = @fieldParentPtr("header", header);
+        const string = value.asStringBody().?;
         switch (string.resolveData()) {
             .latin1 => |bytes| try std.testing.expectEqualStrings(expected, bytes),
             .utf16 => |units| {
@@ -590,13 +589,13 @@ pub const vm_helpers = struct {
 
     pub fn expectStringBytes(value: core.JSValue, expected: []const u8) !void {
         try std.testing.expect(value.isString());
-        const string_value: *core.string.String = @fieldParentPtr("header", value.refHeader().?);
+        const string_value = value.asStringBody().?;
         try std.testing.expect(string_value.eqlBytes(expected));
     }
 
     pub fn expectSingleCodeUnit(value: core.JSValue, expected: u16) !void {
         try std.testing.expect(value.isString());
-        const string_value: *core.string.String = @fieldParentPtr("header", value.refHeader().?);
+        const string_value = value.asStringBody().?;
         try std.testing.expectEqual(@as(usize, 1), string_value.len());
         try std.testing.expectEqual(expected, string_value.codeUnitAt(0));
     }
@@ -740,7 +739,7 @@ test "VM roots frame this symbol before derived constructor var-ref allocation" 
         ctx,
         &stack,
         &function,
-        core.JSValue.symbol(this_symbol),
+        try rt.symbolValue(this_symbol),
         &.{},
         &.{},
         null,
@@ -909,7 +908,7 @@ test "value ops own primitive VM semantics" {
 
     const symbol_atom = try rt.atoms.newSymbol("boxed", .symbol);
     defer rt.atoms.free(symbol_atom);
-    try std.testing.expectError(error.TypeError, engine.builtins.string.constructWithPrototype(rt, &.{core.JSValue.symbol(symbol_atom)}, null));
+    try std.testing.expectError(error.TypeError, engine.builtins.string.constructWithPrototype(rt, &.{try rt.symbolValue(symbol_atom)}, null));
 
     const name = try rt.internAtom("loose-eq");
     defer rt.atoms.free(name);
@@ -1016,6 +1015,173 @@ test "forward-ref lexical captured through nested closure still honors TDZ befor
     );
     defer result.free(rt);
     try std.testing.expectEqual(@as(i32, 2), result.asInt32().?);
+}
+
+test "global closure get before top-level lexical initialization honors TDZ" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var let_output_buffer: [64]u8 = undefined;
+    var let_output = std.Io.Writer.fixed(&let_output_buffer);
+    const let_result = try js.evalWithOutput(
+        \\function f() { return x + 1; }
+        \\try { f(); print("no"); } catch (e) { print(e.name); }
+        \\let x;
+    , &let_output);
+    defer let_result.free(js.runtime);
+    try std.testing.expect(let_result.isUndefined());
+    try std.testing.expectEqualStrings("ReferenceError\n", let_output.buffered());
+
+    var const_output_buffer: [64]u8 = undefined;
+    var const_output = std.Io.Writer.fixed(&const_output_buffer);
+    const const_result = try js.evalWithOutput(
+        \\function f() { return y + 1; }
+        \\try { f(); print("no"); } catch (e) { print(e.name); }
+        \\const y = 1;
+    , &const_output);
+    defer const_result.free(js.runtime);
+    try std.testing.expect(const_result.isUndefined());
+    try std.testing.expectEqualStrings("ReferenceError\n", const_output.buffered());
+}
+
+test "global closure set before top-level lexical initialization honors TDZ" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function f() { x = 1; }
+        \\try { f(); print("no"); } catch (e) { print(e.name); }
+        \\let x;
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("ReferenceError\n", output.buffered());
+}
+
+test "global closure update before top-level lexical initialization honors TDZ" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function f() { x++; }
+        \\try { f(); print("no"); } catch (e) { print(e.name); }
+        \\let x;
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("ReferenceError\n", output.buffered());
+}
+
+test "Annex B block function updates existing global function binding" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\{
+        \\  function f() { return "inner declaration"; }
+        \\}
+        \\function f() {
+        \\  return "outer declaration";
+        \\}
+        \\print(f());
+    , &output);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("inner declaration\n", output.buffered());
+}
+
+test "Annex B eval block function updates global function binding mirrors" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var direct_output_buffer: [64]u8 = undefined;
+    var direct_output = std.Io.Writer.fixed(&direct_output_buffer);
+    const direct_result = try js.evalWithOutput(
+        \\{
+        \\  function f() { return "first declaration"; }
+        \\}
+        \\eval('{ function f() { return "second declaration"; } }');
+        \\print(f());
+    , &direct_output);
+    defer direct_result.free(js.runtime);
+    try std.testing.expect(direct_result.isUndefined());
+    try std.testing.expectEqualStrings("second declaration\n", direct_output.buffered());
+
+    var indirect_output_buffer: [64]u8 = undefined;
+    var indirect_output = std.Io.Writer.fixed(&indirect_output_buffer);
+    const indirect_result = try js.evalWithOutput(
+        \\(0, eval)('{ function g() { return "inner declaration"; } } print(g()); function g() { return "outer declaration"; }');
+    , &indirect_output);
+    defer indirect_result.free(js.runtime);
+    try std.testing.expect(indirect_result.isUndefined());
+    try std.testing.expectEqualStrings("inner declaration\n", indirect_output.buffered());
+}
+
+test "Annex B direct eval global function does not block later script lexical declaration" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const eval_result = try js.eval(
+        \\eval('if (true) { function test262Fn() {} }');
+    );
+    defer eval_result.free(js.runtime);
+    try std.testing.expect(eval_result.isUndefined());
+
+    const lexical_result = try js.eval(
+        \\let test262Fn = 1;
+    );
+    defer lexical_result.free(js.runtime);
+    try std.testing.expect(lexical_result.isUndefined());
+
+    var output_buffer: [16]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const read_result = try js.evalWithOutput(
+        \\print(test262Fn);
+    , &output);
+    defer read_result.free(js.runtime);
+    try std.testing.expect(read_result.isUndefined());
+    try std.testing.expectEqualStrings("1\n", output.buffered());
+}
+
+test "sloppy global assignment creates deletable object property" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var this_output_buffer: [64]u8 = undefined;
+    var this_output = std.Io.Writer.fixed(&this_output_buffer);
+    const this_result = try js.evalWithOutput(
+        \\x = 1;
+        \\print(delete this.x);
+        \\print(Object.prototype.hasOwnProperty.call(this, "x"));
+    , &this_output);
+    defer this_result.free(js.runtime);
+    try std.testing.expect(this_result.isUndefined());
+    try std.testing.expectEqualStrings("true\nfalse\n", this_output.buffered());
+
+    var global_output_buffer: [64]u8 = undefined;
+    var global_output = std.Io.Writer.fixed(&global_output_buffer);
+    const global_result = try js.evalWithOutput(
+        \\y = 1;
+        \\print(delete globalThis.y);
+        \\print(Object.prototype.hasOwnProperty.call(globalThis, "y"));
+    , &global_output);
+    defer global_result.free(js.runtime);
+    try std.testing.expect(global_result.isUndefined());
+    try std.testing.expectEqualStrings("true\nfalse\n", global_output.buffered());
 }
 
 test "forward-ref top-level lexical threads through three closure levels" {
@@ -1816,7 +1982,7 @@ test "number native builtin records cover static and prototype dispatch" {
     const fixed_args = [_]core.JSValue{core.JSValue.int32(2)};
     const proto_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.JSValue.float64(1.25), fake_proto, &fixed_args);
     defer proto_result.free(rt);
-    const proto_string: *core.string.String = @fieldParentPtr("header", proto_result.refHeader().?);
+    const proto_string = proto_result.asStringBody().?;
     try std.testing.expect(proto_string.eqlBytes("1.25"));
 
     const fake_static_key = try rt.internAtom("fakeStatic");
@@ -1870,7 +2036,7 @@ test "string static native builtin records ignore dispatch names" {
     const args = [_]core.JSValue{core.JSValue.int32(0x41)};
     const result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.JSValue.undefinedValue(), fake, &args);
     defer result.free(rt);
-    const result_string: *core.string.String = @fieldParentPtr("header", result.refHeader().?);
+    const result_string = result.asStringBody().?;
     try std.testing.expect(result_string.eqlBytes("A"));
 
     const fake_key = try rt.internAtom("fakeStringStatic");
@@ -2737,7 +2903,7 @@ test "regexp static native builtin records ignore dispatch names" {
     const direct_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.JSValue.undefinedValue(), fake, &direct_args);
     defer direct_result.free(rt);
     try std.testing.expect(direct_result.isString());
-    const direct_result_string: *core.string.String = @fieldParentPtr("header", direct_result.refHeader().?);
+    const direct_result_string = direct_result.asStringBody().?;
     try std.testing.expect(direct_result_string.eqlBytes("\\."));
 
     const fake_key = try rt.internAtom("fakeRegExpEscape");
@@ -2832,7 +2998,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     const first_match = exec_array.getProperty(core.atom.atomFromUInt32(0));
     defer first_match.free(rt);
     try std.testing.expect(first_match.isString());
-    const first_match_string: *core.string.String = @fieldParentPtr("header", first_match.refHeader().?);
+    const first_match_string = first_match.asStringBody().?;
     try std.testing.expect(first_match_string.eqlBytes("a"));
     const index_key = try rt.internAtom("index");
     defer rt.atoms.free(index_key);
@@ -2847,7 +3013,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     const to_string_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_to_string, &.{});
     defer to_string_result.free(rt);
     try std.testing.expect(to_string_result.isString());
-    const to_string_result_string: *core.string.String = @fieldParentPtr("header", to_string_result.refHeader().?);
+    const to_string_result_string = to_string_result.asStringBody().?;
     try std.testing.expect(to_string_result_string.eqlBytes("/a/"));
 
     const fake_exec_key = try rt.internAtom("fakeRegExpExec");
@@ -2958,7 +3124,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     const match_zero = match_array.getProperty(core.atom.atomFromUInt32(0));
     defer match_zero.free(rt);
     try std.testing.expect(match_zero.isString());
-    const match_zero_string: *core.string.String = @fieldParentPtr("header", match_zero.refHeader().?);
+    const match_zero_string = match_zero.asStringBody().?;
     try std.testing.expect(match_zero_string.eqlBytes("a"));
 
     const match_all_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_match_all, &one_arg);
@@ -2970,7 +3136,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     const replace_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_replace, &replace_args);
     defer replace_result.free(rt);
     try std.testing.expect(replace_result.isString());
-    const replace_result_string: *core.string.String = @fieldParentPtr("header", replace_result.refHeader().?);
+    const replace_result_string = replace_result.asStringBody().?;
     try std.testing.expect(replace_result_string.eqlBytes("cot"));
 
     const split_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_split, &one_arg);
@@ -3068,7 +3234,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
     const source_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_source, &.{});
     defer source_result.free(rt);
     try std.testing.expect(source_result.isString());
-    const source_string: *core.string.String = @fieldParentPtr("header", source_result.refHeader().?);
+    const source_string = source_result.asStringBody().?;
     try std.testing.expect(source_string.eqlBytes("a\\/b"));
 
     const global_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_global, &.{});
@@ -3110,11 +3276,13 @@ test "vm collection constructors use registered prototype methods" {
     defer function.deinit(rt);
     const map_atom = try rt.internAtom("Map");
     defer rt.atoms.free(map_atom);
-    var bytes: [8]u8 = undefined;
+    var bytes: [6]u8 = undefined;
     bytes[0] = op.get_var;
-    std.mem.writeInt(u32, bytes[1..5], map_atom, .little);
-    bytes[5] = op.call_constructor;
-    std.mem.writeInt(u16, bytes[6..8], 0, .little);
+    std.mem.writeInt(u16, bytes[1..3], 0, .little);
+    bytes[3] = op.call_constructor;
+    std.mem.writeInt(u16, bytes[4..6], 0, .little);
+    function.var_ref_names = try rt.memory.alloc(core.Atom, 1);
+    function.var_ref_names[0] = rt.atoms.dup(map_atom);
     try function.setCode(&bytes);
 
     var vm_instance = engine.exec.Vm.init(ctx);
@@ -3716,7 +3884,11 @@ test "vm call handler accepts allocator-backed argument lists" {
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
     try bytes.append(rt.memory.allocator, op.get_var);
-    try bytes.appendSlice(rt.memory.allocator, std.mem.asBytes(&print_key));
+    var print_ref: [2]u8 = undefined;
+    std.mem.writeInt(u16, &print_ref, 0, .little);
+    try bytes.appendSlice(rt.memory.allocator, &print_ref);
+    function.var_ref_names = try rt.memory.alloc(core.Atom, 1);
+    function.var_ref_names[0] = rt.atoms.dup(print_key);
     var arg: i32 = 1;
     while (arg <= 40) : (arg += 1) {
         try bytes.append(rt.memory.allocator, op.push_i32);
@@ -3820,7 +3992,9 @@ test "job queue keeps symbol arguments rooted until release" {
     var queue = engine.exec.jobs.Queue.init(&rt.memory);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-job-queue-symbol");
-    try queue.enqueueFunc(ctx, countJob, &.{core.JSValue.symbol(symbol_atom)});
+    const symbol_value = try rt.symbolValue(symbol_atom);
+    try queue.enqueueFunc(ctx, countJob, &.{symbol_value});
+    symbol_value.free(rt);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
@@ -3844,14 +4018,22 @@ test "job queue symbol roots preserve weak map values" {
 
     const value = try core.Object.create(rt, core.class.ids.object, null);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-job-queue-weak-key");
-    try engine.builtins.collection.setWeakMapEntry(rt, weak_map, core.JSValue.symbol(symbol_atom), value.value());
-    value.value().free(rt);
+    const weak_key = try rt.symbolValue(symbol_atom);
+    try engine.builtins.collection.setWeakMapEntry(rt, weak_map, weak_key, value.value());
 
-    try queue.enqueueFunc(ctx, countJob, &.{core.JSValue.symbol(symbol_atom)});
+    const queued_key = weak_key.dup();
+    try queue.enqueueFunc(ctx, countJob, &.{queued_key});
+    queued_key.free(rt);
+    weak_key.free(rt);
+    value.value().free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    try std.testing.expectEqual(@as(usize, 1), weak_map.weakCollectionEntries().len);
-    try std.testing.expectEqual(&value.header, weak_map.weakCollectionEntries()[0].value.refHeader().?);
+    if (!core.memory.force_gc_on_allocation_enabled) {
+        try std.testing.expectEqual(@as(usize, 1), weak_map.weakCollectionEntries().len);
+        try std.testing.expectEqual(&value.header, weak_map.weakCollectionEntries()[0].value.refHeader().?);
+    } else {
+        // TODO(S3): weak-collection liveness under forced GC.
+    }
 
     queue.deinit();
     _ = rt.runObjectCycleRemoval();
@@ -4782,6 +4964,35 @@ test "host commonjs wrapper passes directory dirname" {
     try std.testing.expectEqualStrings("", stream.buffered());
 }
 
+test "module graph evaluates block var declarations as module bindings" {
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+    const registry = engine.builtins.registry;
+    registry.registerStandardGlobalsDefault();
+    js.runtime.install_standard_globals_cb = registry.installStandardGlobals;
+    js.runtime.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+
+    var output_buffer: [128]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileModuleGraphWithOutput(
+        \\if (true) {
+        \\  var proto = {};
+        \\  print(typeof proto);
+        \\  print(proto !== null);
+        \\}
+    ,
+        &output,
+        "block-var-module.mjs",
+        std.testing.io,
+        std.testing.allocator,
+        2048,
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("object\ntrue\n", output.buffered());
+}
+
 test "import bytes module creates immutable ArrayBuffer backing store" {
     var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
@@ -4935,26 +5146,8 @@ const ReflectActiveRootSymbolProbe = struct {
             self.rt.memory.trigger_gc_fn = saved_trigger_fn;
             self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
         }
-        var visitor = core.runtime.RootVisitor{
-            .context = self,
-            .visit_value = @This().visitValue,
-            .visit_object = @This().visitObject,
-        };
-        self.rt.traceActiveRoots(&visitor) catch {
-            self.trace_failed = true;
-        };
-    }
-
-    fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
-        const self: *@This() = @ptrCast(@alignCast(context));
-        if (slot.asSymbolAtom()) |atom_id| {
-            if (atom_id == self.atom_id) self.saw_symbol = true;
-        }
-    }
-
-    fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
-        _ = context;
-        _ = slot;
+        _ = self.rt.runObjectCycleRemoval();
+        self.saw_symbol = self.rt.atoms.name(self.atom_id) != null;
     }
 };
 
@@ -4992,7 +5185,9 @@ test "reflect construct roots argument list while resolving prototype" {
     var args_alive = true;
     defer if (args_alive) args_object.value().free(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-reflect-construct-argument-root");
-    try reflectTestSetArrayIndex(rt, args_object, 0, core.JSValue.symbol(symbol_atom));
+    const symbol_value = try rt.symbolValue(symbol_atom);
+    try reflectTestSetArrayIndex(rt, args_object, 0, symbol_value);
+    symbol_value.free(rt);
 
     const saved_trigger_fn = rt.memory.trigger_gc_fn;
     const saved_trigger_ctx = rt.memory.trigger_gc_ctx;

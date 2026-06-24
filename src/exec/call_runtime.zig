@@ -1,11 +1,11 @@
-const regexp_unicode = @import("../libs/regexp_unicode.zig");
+const regexp_properties = @import("../libs/unicode.zig").regexp_properties;
 const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
-const bignum = @import("../libs/bignum.zig");
+const bignum = @import("../libs/bigint.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const frontend = @import("../frontend/root.zig");
-const quickjs_regexp = @import("../libs/quickjs_regexp.zig");
+const regexp_adapter = @import("../libs/regexp.zig").js_adapter;
 const unicode_lib = @import("../libs/unicode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_mod = @import("call.zig");
@@ -56,7 +56,7 @@ const slot_ops = @import("slot_ops.zig");
 const eval_ops = @import("eval_ops.zig");
 
 // --- Reflect/Atomics dispatch selectors are exec-owned (VM-natured) ---
-const reflect_dispatch = @import("reflect_dispatch.zig");
+const reflect_dispatch = core.host_function.builtin_method_ids.reflect;
 const atomics_wait = @import("atomics_wait.zig");
 
 pub const InlineCallRequest = struct {
@@ -71,7 +71,7 @@ pub const InlineCallRequest = struct {
 
 pub const ExecCallResult = union(enum) { done, continue_loop, inline_call: InlineCallRequest };
 
-pub noinline fn execCall(
+pub fn execCall(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -83,7 +83,7 @@ pub noinline fn execCall(
     allow_inline: bool,
 ) !ExecCallResult {
     // Zero-copy call sequence: borrow `func` and `args` directly from the
-    // operand stack (which is rooted by the caller's FrameRootScope) instead
+    // operand stack (which is owned by the caller's frame) instead
     // of popping them into a duplicated, separately rooted staging buffer.
     // The region is popped and released only after the call completes, so
     // the values stay rooted for the whole call.
@@ -102,7 +102,7 @@ pub noinline fn execCall(
     if (allow_inline and !is_super_constructor) {
         // Plain call: no receiver on the stack, so the call binds `this` to
         // undefined (arrow targets override this with their lexical `this`).
-        if (inline_calls.resolveInlineTarget(global, core.JSValue.undefinedValue(), func)) |target| {
+        if (inline_calls.resolveInlineTarget(ctx, global, core.JSValue.undefinedValue(), func)) |target| {
             return .{ .inline_call = .{ .target = target, .region_base = region_base, .argc = argc } };
         }
     }
@@ -265,7 +265,6 @@ pub fn tryCatchInFrame(
     const restored = (try array_ops.popCatchMarker(ctx.runtime, stack)) orelse null;
     stack.pushOwnedAssumeCapacity(catch_value);
     catch_value_owned = false;
-    frame.dropPreparedCallsForCatchDepth(ctx.runtime, stack.values.len);
     frame.pc = target;
     catch_target.* = restored;
     return true;
@@ -367,8 +366,8 @@ pub fn callValueOrBytecodeClassMode(
     caller_frame: ?*frame_mod.Frame,
     allow_class_constructor_call: bool,
 ) HostError!core.JSValue {
-    var this_value = input_this_value;
-    var func = input_func;
+    const this_value = input_this_value;
+    const func = input_func;
     var inline_args: [8]core.JSValue = undefined;
     var args_buffer: core.runtime.ValueRootBuffer = .{};
     defer args_buffer.deinit(ctx.runtime);
@@ -380,21 +379,6 @@ pub fn callValueOrBytecodeClassMode(
         args_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, input_args);
         args = args_buffer.values;
     }
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &this_value },
-        .{ .value = &func },
-    };
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        .{ .mutable = &args },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-        .slices = &root_slices,
-    };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
-
     return callValueOrBytecodeClassModeDispatch(ctx, output, global, this_value, func, args, caller_function, caller_frame, allow_class_constructor_call);
 }
 
@@ -476,6 +460,54 @@ fn collectionPrototypeMethodByName(
     return builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame);
 }
 
+const VmNativeCallableDispatch = union(enum) {
+    bound_function,
+    native_record: core.function.NativeBuiltinRef,
+    host_function,
+    internal: core.host_function.InternalCallableTag,
+    name_dispatch,
+};
+
+fn vmNativeCallableDispatch(function_object: *core.Object) VmNativeCallableDispatch {
+    return switch (function_object.class_id) {
+        core.class.ids.bound_function => .bound_function,
+        else => blk: {
+            if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*)) |native_ref| {
+                break :blk .{ .native_record = native_ref };
+            }
+            if (function_object.hostFunctionKindSlot().* != 0) break :blk .host_function;
+            const tag = function_object.internalCallableTag();
+            if (tag != .none) break :blk .{ .internal = tag };
+            break :blk .name_dispatch;
+        },
+    };
+}
+
+fn callInternalCallableByTag(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    function_object: *core.Object,
+    tag: core.host_function.InternalCallableTag,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!?core.JSValue {
+    return switch (tag) {
+        .none => null,
+        .promise_resolving => try promise_ops.qjsPromiseResolvingFunctionCall(ctx, output, global, function_object, args, caller_function, caller_frame),
+        .promise_thenable_job => try promise_ops.qjsPromiseThenableJobCall(ctx, output, global, function_object, caller_function, caller_frame),
+        .promise_reaction_job => try promise_ops.qjsPromiseReactionJobCall(ctx, output, global, function_object, caller_function, caller_frame),
+        .promise_capability_executor => try promise_ops.qjsPromiseCapabilityExecutorCall(ctx, function_object, args),
+        .promise_combinator_element => try promise_ops.qjsPromiseCombinatorElementCall(ctx, output, global, function_object, args, caller_function, caller_frame),
+        .promise_finally_callback => try promise_ops.qjsPromiseFinallyCallbackCall(ctx, output, global, function_object, args, caller_function, caller_frame),
+        .async_function_resume => try promise_ops.qjsAsyncFunctionResumeCallbackCall(ctx, output, global, function_object, args, caller_function, caller_frame),
+        .async_from_sync_iterator_unwrap => try promise_ops.qjsAsyncFromSyncIteratorUnwrapCall(ctx, global, function_object, args),
+        .async_disposable_stack_continuation => try promise_ops.qjsAsyncDisposableStackContinuationCall(ctx, output, global, function_object, args, caller_function, caller_frame),
+        .throw_type_error_intrinsic => @as(?core.JSValue, try qjsThrowTypeErrorIntrinsic(ctx, global, function_object)),
+    };
+}
+
 fn callValueOrBytecodeClassModeDispatch(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -550,30 +582,24 @@ fn callValueOrBytecodeClassModeDispatch(
         }
     }
     if (object_ops.callableObjectFromValue(func)) |function_object| {
-        if (function_object.class_id == core.class.ids.bound_function) {
-            return callBoundFunction(ctx, output, global, function_object, args, caller_function, caller_frame);
+        switch (vmNativeCallableDispatch(function_object)) {
+            .bound_function => return callBoundFunction(ctx, output, global, function_object, args, caller_function, caller_frame),
+            .native_record => |native_ref| {
+                const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
+                const native_result = callNativeBuiltinRecordForVm(ctx, output, function_global, func, this_value, function_object, native_ref, args, caller_function, caller_frame) catch |err| {
+                    try throwRuntimeErrorForGlobal(ctx, function_global, err);
+                    return err;
+                };
+                if (native_result) |value| return value;
+            },
+            .host_function => {
+                if (try call_mod.callHostFunctionObjectForVm(ctx, output, global, function_object, this_value, args)) |value| return value;
+            },
+            .internal => |tag| {
+                if (try callInternalCallableByTag(ctx, output, global, function_object, tag, args, caller_function, caller_frame)) |value| return value;
+            },
+            .name_dispatch => {},
         }
-        if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*)) |native_ref| {
-            const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-            const native_result = callNativeBuiltinRecordForVm(ctx, output, function_global, func, this_value, function_object, native_ref, args, caller_function, caller_frame) catch |err| {
-                try throwRuntimeErrorForGlobal(ctx, function_global, err);
-                return err;
-            };
-            if (native_result) |value| {
-                return value;
-            }
-        }
-        if (try call_mod.callHostFunctionObjectForVm(ctx, output, global, function_object, this_value, args)) |value| return value;
-        if (try promise_ops.qjsPromiseResolvingFunctionCall(ctx, output, global, function_object, args, caller_function, caller_frame)) |value| return value;
-        if (try promise_ops.qjsPromiseThenableJobCall(ctx, output, global, function_object, caller_function, caller_frame)) |value| return value;
-        if (try promise_ops.qjsPromiseReactionJobCall(ctx, output, global, function_object, caller_function, caller_frame)) |value| return value;
-        if (try promise_ops.qjsPromiseCapabilityExecutorCall(ctx, function_object, args)) |value| return value;
-        if (try promise_ops.qjsPromiseCombinatorElementCall(ctx, output, global, function_object, args, caller_function, caller_frame)) |value| return value;
-        if (try promise_ops.qjsPromiseFinallyCallbackCall(ctx, output, global, function_object, args, caller_function, caller_frame)) |value| return value;
-        if (try promise_ops.qjsAsyncFunctionResumeCallbackCall(ctx, output, global, function_object, args, caller_function, caller_frame)) |value| return value;
-        if (try promise_ops.qjsAsyncFromSyncIteratorUnwrapCall(ctx, global, function_object, args)) |value| return value;
-        if (try promise_ops.qjsAsyncDisposableStackContinuationCall(ctx, output, global, function_object, args, caller_function, caller_frame)) |value| return value;
-        if (object_ops.isThrowTypeErrorIntrinsicObject(function_object)) return qjsThrowTypeErrorIntrinsic(ctx, global, function_object);
         // Borrow the internal dispatch-name bytes instead of allocating a
         // fresh `[]u8` per call. Hot URI 4-byte-UTF-8 sweeps call this path millions of
         // times, and the previous round-trip alloc/free showed up clearly
@@ -1001,7 +1027,8 @@ test "callValueOrBytecodeClassMode roots inline args before bytecode frame alloc
     defer if (func_alive) func_value.free(rt);
 
     const arg_atom = try rt.atoms.newValueSymbol("gc-call-value-inline-arg-root");
-    const args = [_]core.JSValue{core.JSValue.symbol(arg_atom)};
+    const arg_value = try rt.symbolValue(arg_atom);
+    const args = [_]core.JSValue{arg_value};
 
     const Trigger = struct {
         rt: *core.JSRuntime,
@@ -1020,26 +1047,8 @@ test "callValueOrBytecodeClassMode roots inline args before bytecode frame alloc
                 self.rt.memory.trigger_gc_fn = saved_trigger_fn;
                 self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
             }
-            var visitor = core.runtime.RootVisitor{
-                .context = self,
-                .visit_value = @This().visitValue,
-                .visit_object = @This().visitObject,
-            };
-            self.rt.traceActiveRoots(&visitor) catch {
-                self.trace_failed = true;
-            };
-        }
-
-        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (slot.asSymbolAtom()) |atom_id| {
-                if (atom_id == self.atom_id) self.saw_arg = true;
-            }
-        }
-
-        fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
-            _ = context;
-            _ = slot;
+            _ = self.rt.runObjectCycleRemoval();
+            self.saw_arg = self.rt.atoms.name(self.atom_id) != null;
         }
     };
 
@@ -1076,6 +1085,7 @@ test "callValueOrBytecodeClassMode roots inline args before bytecode frame alloc
 
     func_value.free(rt);
     func_alive = false;
+    arg_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(arg_atom) == null);
 }
@@ -1794,15 +1804,20 @@ test "qjsConstructWeakRefWithPrototype roots direct symbol target while creating
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const weak_ref_value = try object_ops.qjsConstructWeakRefWithPrototype(rt, core.JSValue.symbol(symbol_atom), null);
+    const symbol_value = try rt.symbolValue(symbol_atom);
+    const weak_ref_value = try object_ops.qjsConstructWeakRefWithPrototype(rt, symbol_value, null);
     var weak_ref_alive = true;
     defer if (weak_ref_alive) weak_ref_value.free(rt);
     const weak_ref = object_ops.objectFromValue(weak_ref_value) orelse return error.TypeError;
 
-    const live = weak_ref.weakRefDeref(rt);
-    try std.testing.expect(live.same(core.JSValue.symbol(symbol_atom)));
+    {
+        const live = weak_ref.weakRefDeref(rt);
+        defer live.free(rt);
+        try std.testing.expect(live.same(symbol_value));
+    }
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
+    symbol_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
     try std.testing.expect(weak_ref.weakRefDeref(rt).isUndefined());
@@ -1821,9 +1836,9 @@ test "qjsConstructFinalizationRegistryWithPrototype roots function bytecode clea
     fb.func_kind = .generator;
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-finalization-cleanup-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-finalization-cleanup-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var cleanup_callback = core.JSValue.functionBytecode(&fb.header);
@@ -1859,18 +1874,21 @@ test "qjsFinalizationRegistryAppendCell roots direct symbol fields while allocat
     var registry_alive = true;
     defer if (registry_alive) registry.value().free(rt);
     const target_atom = try rt.atoms.newValueSymbol("gc-finalization-target-symbol");
+    const target_value = try rt.symbolValue(target_atom);
     const held_atom = try rt.atoms.newValueSymbol("gc-finalization-held-symbol");
+    const held_value = try rt.symbolValue(held_atom);
     const token_atom = try rt.atoms.newValueSymbol("gc-finalization-token-symbol");
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
+    const token_value = try rt.symbolValue(token_atom);
     try builtin_glue.qjsFinalizationRegistryAppendCell(
         rt,
         registry,
-        core.JSValue.symbol(target_atom),
-        core.JSValue.symbol(held_atom),
-        core.JSValue.symbol(token_atom),
+        target_value,
+        held_value,
+        token_value,
     );
 
     try std.testing.expect(rt.atoms.name(target_atom) != null);
@@ -1878,8 +1896,14 @@ test "qjsFinalizationRegistryAppendCell roots direct symbol fields while allocat
     try std.testing.expect(rt.atoms.name(token_atom) != null);
     try std.testing.expectEqual(@as(usize, 1), registry.finalizationRegistryCells().len);
     const cell = registry.finalizationRegistryCells()[0];
-    try std.testing.expect(cell.held_value.same(core.JSValue.symbol(held_atom)));
-    try std.testing.expect(cell.unregister_token.same(core.JSValue.symbol(token_atom)));
+    try std.testing.expect(cell.held_value.same(held_value));
+    try std.testing.expectEqual(
+        core.Object.weakIdentityFromValuePeek(rt, token_value),
+        cell.unregister_token_identity,
+    );
+    target_value.free(rt);
+    held_value.free(rt);
+    token_value.free(rt);
 
     registry.value().free(rt);
     registry_alive = false;
@@ -2106,7 +2130,7 @@ fn prototypeChainBlocksSimpleFieldStore(prototype: *core.Object, pattern: Simple
         for (pattern.atoms[0..pattern.len]) |atom_id| {
             if (object.hasOwnProperty(atom_id)) return true;
         }
-        current = object.prototype;
+        current = object.getPrototype();
     }
     return false;
 }
@@ -3645,17 +3669,39 @@ pub fn isIteratorIdentityFunction(rt: *core.JSRuntime, function_object: *core.Ob
 
 pub fn globalLexicalEnv(ctx: *core.JSContext) !*core.Object {
     if (ctx.lexicals) |env| return env;
+    if (ctx.global) |global| {
+        if (global.globalLexicals()) |env| {
+            ctx.lexicals = env;
+            return env;
+        }
+    }
     const env = try core.Object.create(ctx.runtime, core.class.ids.object, null);
     ctx.lexicals = env;
     return env;
 }
 
 pub fn existingGlobalLexicalEnv(ctx: *core.JSContext) ?*core.Object {
-    return ctx.lexicals;
+    if (ctx.lexicals) |env| return env;
+    if (ctx.global) |global| return global.globalLexicals();
+    return null;
+}
+
+pub fn existingGlobalLexicalEnvForGlobal(ctx: *core.JSContext, global: *core.Object) ?*core.Object {
+    if (ctx.lexicals) |env| return env;
+    if (global.globalLexicals()) |env| return env;
+    if (ctx.global) |context_global| {
+        if (context_global != global) return context_global.globalLexicals();
+    }
+    return null;
 }
 
 pub fn globalLexicalHas(ctx: *core.JSContext, atom_id: core.Atom) bool {
     const env = existingGlobalLexicalEnv(ctx) orelse return false;
+    return env.hasOwnProperty(atom_id);
+}
+
+pub fn globalLexicalHasForGlobal(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom) bool {
+    const env = existingGlobalLexicalEnvForGlobal(ctx, global) orelse return false;
     return env.hasOwnProperty(atom_id);
 }
 
@@ -3670,6 +3716,47 @@ pub fn globalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom) ?core.JSValu
     return env.getProperty(atom_id);
 }
 
+/// Return a fresh ref to the VarRef cell backing a top-level lexical binding
+/// in ctx.lexicals (qjs JS_PROP_VARREF slot -> pr->u.var_ref). The caller owns
+/// the returned ref. Returns null if the binding is absent or not a cell slot
+/// (so callers fall back to the legacy data-property path).
+pub fn globalLexicalCell(ctx: *core.JSContext, atom_id: core.Atom) ?core.JSValue {
+    const env = existingGlobalLexicalEnv(ctx) orelse return null;
+    const index = env.findProperty(atom_id) orelse return null;
+    return switch (env.properties[index].slot) {
+        .var_ref => |cell| cell.valueRef().dup(),
+        else => null,
+    };
+}
+
+/// Create-or-fetch the VarRef cell for a top-level lexical in ctx.lexicals,
+/// stored as a JS_PROP_VARREF slot (qjs js_closure_define_global_var). Returns
+/// a fresh ref the caller owns (for frame.var_refs[idx]). The slot holds its
+/// own ref; the cell starts uninitialized (TDZ) like qjs js_create_var_ref.
+pub fn ensureGlobalLexicalCell(ctx: *core.JSContext, atom_id: core.Atom, is_const: bool) !core.JSValue {
+    const env = try globalLexicalEnv(ctx);
+    if (env.findProperty(atom_id)) |index| {
+        switch (env.properties[index].slot) {
+            .var_ref => |cell| return cell.valueRef().dup(),
+            else => {},
+        }
+    }
+    const rt = ctx.runtime;
+    const cell = try core.VarRef.createClosed(rt, core.JSValue.uninitialized());
+    errdefer cell.valueRef().free(rt);
+    cell.varRefIsConstSlot().* = is_const;
+    cell.is_lexical = true;
+    try env.appendPreparedPropertyEntry(rt, atom_id, core.property.Flags.data(!is_const, false, false), .{ .var_ref = cell });
+    return cell.valueRef().dup();
+}
+
+pub fn globalLexicalValueForGlobal(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom) ?core.JSValue {
+    const env = existingGlobalLexicalEnvForGlobal(ctx, global) orelse return null;
+    if (env.getOwnDataPropertyValue(atom_id)) |value| return value;
+    if (!env.hasOwnProperty(atom_id)) return null;
+    return env.getProperty(atom_id);
+}
+
 pub fn defineGlobalLexicalValue(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom, value: core.JSValue, is_const: bool) !void {
     const env = try globalLexicalEnv(ctx);
     if (!env.hasOwnProperty(atom_id)) {
@@ -3679,8 +3766,62 @@ pub fn defineGlobalLexicalValue(ctx: *core.JSContext, global: *core.Object, atom
     }
 }
 
+/// qjs js_closure_define_global_var PASS2 for a top-level script let/const:
+/// run by the define_var opcode AFTER check_define_var (PASS1) has passed.
+/// Creates the single ctx.lexicals VARREF cell and rebinds frame.var_refs[idx]
+/// to alias it (replacing the TDZ placeholder initFrameVarRefs reserved), so
+/// the frame and the global lexical share one cell. Returns true if the atom is
+/// a .global_decl var-ref in this frame (handled here); false otherwise (caller
+/// falls back to defineGlobalLexicalValue for module/eval data-property paths).
+pub fn defineGlobalDeclLexicalCell(
+    ctx: *core.JSContext,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    atom_id: core.Atom,
+    is_const: bool,
+) !bool {
+    for (function.var_ref_names, 0..) |name, idx| {
+        if (name != atom_id) continue;
+        if (idx >= function.var_ref_is_global_decl.len or !function.var_ref_is_global_decl[idx]) return false;
+        const cell_value = try ensureGlobalLexicalCell(ctx, atom_id, is_const);
+        if (idx >= frame.var_refs.len) {
+            try frame_mod.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
+        }
+        const old_slot = frame.var_refs[idx];
+        frame.var_refs[idx] = cell_value;
+        old_slot.free(ctx.runtime);
+        return true;
+    }
+    return false;
+}
+
 pub fn setGlobalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom, value: core.JSValue) !bool {
     const env = existingGlobalLexicalEnv(ctx) orelse return false;
+    if (env.findProperty(atom_id)) |index| {
+        switch (env.properties[index].slot) {
+            // qjs JS_SetPropertyInternal VARREF: write through cell->pvalue,
+            // const guarded by cell->is_const. Shared cell => no write loss.
+            .var_ref => |cell| {
+                if (cell.is_const) return error.TypeError;
+                try cell.setVarRefValue(ctx.runtime, value.dup());
+                return true;
+            },
+            else => {},
+        }
+    }
+    if (!env.hasOwnProperty(atom_id)) return false;
+    const rt = ctx.runtime;
+    if (initializeGlobalLexicalValue(rt, env, atom_id, value)) return true;
+    if (try env.setOwnWritableDataProperty(rt, atom_id, value)) return true;
+    env.setProperty(rt, atom_id, value) catch |err| switch (err) {
+        error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
+        else => return err,
+    };
+    return true;
+}
+
+pub fn setGlobalLexicalValueForGlobal(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom, value: core.JSValue) !bool {
+    const env = existingGlobalLexicalEnvForGlobal(ctx, global) orelse return false;
     if (!env.hasOwnProperty(atom_id)) return false;
     const rt = ctx.runtime;
     if (initializeGlobalLexicalValue(rt, env, atom_id, value)) return true;
@@ -3709,6 +3850,11 @@ pub fn initializeGlobalLexicalValue(rt: *core.JSRuntime, env: *core.Object, atom
                 const old_value = stored.*;
                 stored.* = next;
                 old_value.free(rt);
+                return true;
+            },
+            .var_ref => |cell| {
+                if (!cell.varRefValue().isUninitialized()) return false;
+                cell.setVarRefValue(rt, value.dup()) catch return false;
                 return true;
             },
             else => return false,
@@ -3764,7 +3910,7 @@ pub fn looksLikeStatementFunctionKeyword(source: []const u8, keyword_index: usiz
 }
 
 pub fn canDeclareGlobalFunction(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom, ignore_global_lexical: bool) bool {
-    if (!ignore_global_lexical and globalLexicalHas(ctx, atom_id)) return false;
+    if (!ignore_global_lexical and globalLexicalHasForGlobal(ctx, global, atom_id)) return false;
     const rt = ctx.runtime;
     const desc = global.getOwnProperty(rt, atom_id) orelse return global.isExtensible();
     defer desc.destroy(rt);
@@ -3795,7 +3941,7 @@ pub fn classStaticThisAtom(
         const atom_id = function.var_names[idx];
         const name = rt.atoms.name(atom_id) orelse continue;
         if (!std.mem.startsWith(u8, name, "__class_static_this_")) continue;
-        if (frame.locals[idx].isUninitialized()) continue;
+        if (slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) continue;
         return atom_id;
     }
     return null;
@@ -3811,7 +3957,7 @@ pub fn classStaticThisValue(
     for (function.var_names[0..count], 0..) |name, idx| {
         if (name != atom_id) continue;
         const value = caller_frame.locals[idx];
-        if (value.isUninitialized()) continue;
+        if (slot_ops.varRefSlotIsUninitialized(value)) continue;
         return value;
     }
     return null;
@@ -4050,10 +4196,13 @@ test "createEvalVarRefCells roots initialized refs while allocating next cell" {
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
+    // Force a cycle-removal pass mid-creation. createEvalVarRefCells roots its
+    // initialized prefix via ValueSliceRoot, so cells already created when this
+    // GC fires must survive it; if they were not rooted they would be reclaimed
+    // here and the returned values (asserted to be live VarRefs below) would be
+    // dangling.
     const Probe = struct {
         rt: *core.JSRuntime,
-        saw_var_ref: bool = false,
-        trace_failed: bool = false,
 
         fn trigger(context: ?*anyopaque, size: usize) void {
             _ = size;
@@ -4066,24 +4215,7 @@ test "createEvalVarRefCells roots initialized refs while allocating next cell" {
                 self.rt.memory.trigger_gc_fn = saved_trigger_fn;
                 self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
             }
-            var visitor = core.runtime.RootVisitor{
-                .context = self,
-                .visit_value = @This().visitValue,
-                .visit_object = @This().visitObject,
-            };
-            self.rt.traceActiveRoots(&visitor) catch {
-                self.trace_failed = true;
-            };
-        }
-
-        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (core.VarRef.fromValue(slot.*) != null) self.saw_var_ref = true;
-        }
-
-        fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
-            _ = context;
-            _ = slot;
+            _ = self.rt.runObjectCycleRemoval();
         }
     };
 
@@ -4102,8 +4234,10 @@ test "createEvalVarRefCells roots initialized refs while allocating next cell" {
     rt.memory.trigger_gc_ctx = saved_trigger_ctx;
     defer array_ops.freeValueSlice(rt, refs);
 
-    try std.testing.expect(!probe.trace_failed);
-    try std.testing.expect(probe.saw_var_ref);
+    // The initialized cells survived the mid-creation cycle removal: each
+    // returned value is still a live VarRef cell.
+    try std.testing.expectEqual(@as(usize, 2), refs.len);
+    for (refs) |ref| try std.testing.expect(core.VarRef.fromValue(ref) != null);
 }
 
 pub fn createDirectEvalVarRefCells(
@@ -4201,7 +4335,21 @@ pub fn createDirectEvalVisibleLocalBindings(
         const atom_id = caller_function.var_names[local_index];
         if (atom_id == core.atom.null_atom) continue;
         if (eval_ops.directEvalVisibleBindingExists(ctx.runtime, names[0..initialized], atom_id)) continue;
+        // A top-level (scope 0) `let`/`const` is promoted into the global
+        // lexical environment (a `.global_decl` closure var-ref), so its frame
+        // local slot is only a hoisting placeholder — exposing it as an eval
+        // binding would shadow the live global-lexical cell with an empty slot.
+        // Skip it so direct eval resolves through the global lexical env. A
+        // block-scoped (`scope_level > 0`) lexical that merely shares the name
+        // is a genuine shadowing binding and must be exposed, inner-first,
+        // mirroring qjs `add_eval_variables` capturing `fd->scopes[scope_level]`
+        // lexicals ahead of the scope-0 globals (quickjs.c:33700-33733).
+        const local_scope_level = if (local_index < caller_function.var_scope_level.len)
+            caller_function.var_scope_level[local_index]
+        else
+            0;
         if (eval_global_var_bindings and
+            local_scope_level == 0 and
             globalLexicalHas(ctx, atom_id) and
             eval_ops.directEvalVisibleLocalNameCount(ctx.runtime, caller_function.var_names[0..local_count], atom_id) == 1)
         {
@@ -4210,6 +4358,11 @@ pub fn createDirectEvalVisibleLocalBindings(
         names[initialized] = ctx.runtime.atoms.dup(atom_id);
         initialized_names += 1;
         slots[initialized] = try slot_ops.ensureFrameVarRefCell(ctx, caller_frame, &caller_frame.locals[local_index]);
+        if (local_index < caller_function.var_is_const.len and caller_function.var_is_const[local_index]) {
+            if (slot_ops.varRefCellFromValue(slots[initialized])) |cell| {
+                cell.varRefIsConstSlot().* = true;
+            }
+        }
         initialized += 1;
         rooted_slots = slots[0..initialized];
     }
@@ -4336,10 +4489,15 @@ pub fn directEvalVarDeclarationNames(
             if (directEvalSourceHasLexicalDeclarationName(rt, source, atom_id)) continue;
             if (!functionHasNonLexicalLocal(rt, function, atom_id)) n += 1;
         }
+        for (function.global_vars, 0..) |gv, idx| {
+            if (!directEvalGlobalVarNeedsRef(rt, global, function, source, function_decl_names, gv, idx, eval_global_var_bindings)) continue;
+            n += 1;
+        }
         if (simple_var_name != core.atom.null_atom and
             simple_var_name != eval_ret_atom and
             (!eval_global_var_bindings or directEvalGlobalDataVarNeedsTemporaryRef(rt, global, simple_var_name)) and
             !functionHasNonLexicalLocal(rt, function, simple_var_name) and
+            !functionHasNonLexicalGlobalVar(rt, function, simple_var_name) and
             !array_ops.atomSliceContains(rt, function_decl_names, simple_var_name) and
             !directEvalSourceHasLexicalDeclarationName(rt, source, simple_var_name))
         {
@@ -4369,10 +4527,16 @@ pub fn directEvalVarDeclarationNames(
         names[out_idx] = rt.atoms.dup(atom_id);
         out_idx += 1;
     }
+    for (function.global_vars, 0..) |gv, idx| {
+        if (!directEvalGlobalVarNeedsRef(rt, global, function, source, function_decl_names, gv, idx, eval_global_var_bindings)) continue;
+        names[out_idx] = rt.atoms.dup(gv.var_name);
+        out_idx += 1;
+    }
     if (simple_var_name != core.atom.null_atom and
         simple_var_name != eval_ret_atom and
         (!eval_global_var_bindings or directEvalGlobalDataVarNeedsTemporaryRef(rt, global, simple_var_name)) and
         !functionHasNonLexicalLocal(rt, function, simple_var_name) and
+        !functionHasNonLexicalGlobalVar(rt, function, simple_var_name) and
         !array_ops.atomSliceContains(rt, function_decl_names, simple_var_name) and
         !directEvalSourceHasLexicalDeclarationName(rt, source, simple_var_name))
     {
@@ -4380,6 +4544,41 @@ pub fn directEvalVarDeclarationNames(
         out_idx += 1;
     }
     return names;
+}
+
+fn directEvalGlobalVarNeedsRef(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    function: *const bytecode.Bytecode,
+    source: []const u8,
+    function_decl_names: []const core.Atom,
+    gv: core.function_bytecode.GlobalVar,
+    global_var_index: usize,
+    eval_global_var_bindings: bool,
+) bool {
+    const atom_id = gv.var_name;
+    if (atom_id == core.atom.null_atom) return false;
+    if (atom_id == eval_ret_atom) return false;
+    if (gv.is_lexical) return false;
+    if (directEvalSourceHasLexicalDeclarationName(rt, source, atom_id)) return false;
+    if (functionHasNonLexicalLocal(rt, function, atom_id)) return false;
+    if (array_ops.atomSliceContains(rt, function_decl_names, atom_id)) return false;
+    if (priorDirectEvalGlobalVarMatches(rt, function, global_var_index, atom_id)) return false;
+    if (gv.force_init) return true;
+    return eval_global_var_bindings and directEvalVarDeclarationShouldCreateRef(rt, global, atom_id);
+}
+
+fn priorDirectEvalGlobalVarMatches(
+    rt: *core.JSRuntime,
+    function: *const bytecode.Bytecode,
+    end_index: usize,
+    atom_id: core.Atom,
+) bool {
+    for (function.global_vars[0..end_index]) |gv| {
+        if (gv.is_lexical) continue;
+        if (atomIdOrNameEql(rt, gv.var_name, atom_id)) return true;
+    }
+    return false;
 }
 
 pub fn directEvalVarNameIsNonLeadingFunctionCallerArg(
@@ -4467,6 +4666,33 @@ pub fn functionHasNonLexicalLocal(rt: *core.JSRuntime, function: *const bytecode
     return false;
 }
 
+fn functionHasNonLexicalGlobalVar(rt: *core.JSRuntime, function: *const bytecode.Bytecode, atom_id: core.Atom) bool {
+    for (function.global_vars) |gv| {
+        if (gv.is_lexical) continue;
+        if (atomIdOrNameEql(rt, gv.var_name, atom_id)) return true;
+    }
+    return false;
+}
+
+pub fn directEvalGlobalVarLocalAtom(
+    rt: *core.JSRuntime,
+    function: *const bytecode.Bytecode,
+    idx: usize,
+    slot: core.JSValue,
+) ?core.Atom {
+    if (!value_ops.atomNameEql(rt, function.name, "<eval>")) return null;
+    if (idx >= function.var_names.len) return null;
+    if (idx < function.var_is_lexical.len and function.var_is_lexical[idx]) return null;
+    if (!slot_ops.evalLocalSlotIsEvalVarCell(slot)) return null;
+
+    const atom_id = function.var_names[idx];
+    for (function.global_vars) |gv| {
+        if (gv.is_lexical) continue;
+        if (atomIdOrNameEql(rt, gv.var_name, atom_id)) return atom_id;
+    }
+    return null;
+}
+
 pub fn publishDirectEvalVarRefs(
     ctx: *core.JSContext,
     global: *core.Object,
@@ -4503,8 +4729,24 @@ pub fn publishDirectEvalVarRefs(
             refs[index].dup();
         defer value.free(ctx.runtime);
         if (directEvalGlobalVarPublishBlocked(ctx.runtime, global, names[index])) continue;
-        try slot_ops.defineGlobalFunctionBindingValue(ctx.runtime, global, names[index], value, true);
+        try publishDirectEvalGlobalVarRef(ctx, global, names[index], value);
+        if (caller_frame) |frame| {
+            var frame_value = value.dup();
+            if (!try setFrameVarRefValue(ctx, frame.function, frame, names[index], frame_value)) {
+                frame_value.free(ctx.runtime);
+            }
+        }
     }
+}
+
+fn publishDirectEvalGlobalVarRef(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    atom_id: core.Atom,
+    value: core.JSValue,
+) !void {
+    if (try global.setOwnWritableDataProperty(ctx.runtime, atom_id, value)) return;
+    try slot_ops.defineGlobalFunctionBindingValue(ctx.runtime, global, atom_id, value, true);
 }
 
 pub fn directEvalGlobalVarPublishBlocked(rt: *core.JSRuntime, global: *core.Object, atom_id: core.Atom) bool {
@@ -4529,9 +4771,15 @@ pub fn directEvalGlobalDataVarNeedsTemporaryRef(rt: *core.JSRuntime, global: *co
     return desc.kind == .data and desc.writable != true;
 }
 
-fn restoreEvalGlobalLexicals(ctx: *core.JSContext, global: *core.Object, saved_lexicals: ?*core.Object) !void {
-    defer ctx.lexicals = saved_lexicals;
-    try global.setGlobalLexicals(ctx.runtime, ctx.lexicals);
+fn restoreEvalGlobalLexicals(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    saved_lexicals: ?*core.Object,
+    keep_active_lexicals: bool,
+) !void {
+    const active_lexicals = ctx.lexicals;
+    try global.setGlobalLexicals(ctx.runtime, active_lexicals);
+    ctx.lexicals = if (keep_active_lexicals) active_lexicals else saved_lexicals;
 }
 
 pub fn indirectEval(
@@ -4548,6 +4796,7 @@ pub fn indirectEval(
 
     const context_global = ctx.global;
     const use_global_lexicals = context_global == null or context_global.? != eval_global;
+    const keep_active_lexicals = context_global == null;
     const saved_lexicals = ctx.lexicals;
     if (use_global_lexicals) ctx.lexicals = eval_global.globalLexicals();
 
@@ -4568,7 +4817,7 @@ pub fn indirectEval(
 
     if (use_global_lexicals) {
         var rooted_result = result catch |err| {
-            try restoreEvalGlobalLexicals(ctx, eval_global, saved_lexicals);
+            try restoreEvalGlobalLexicals(ctx, eval_global, saved_lexicals, keep_active_lexicals);
             return err;
         };
         errdefer rooted_result.free(ctx.runtime);
@@ -4581,7 +4830,7 @@ pub fn indirectEval(
         };
         ctx.runtime.active_value_roots = &root_frame;
         defer ctx.runtime.active_value_roots = root_frame.previous;
-        try restoreEvalGlobalLexicals(ctx, eval_global, saved_lexicals);
+        try restoreEvalGlobalLexicals(ctx, eval_global, saved_lexicals, keep_active_lexicals);
         return rooted_result;
     }
     return result;
@@ -4627,10 +4876,7 @@ pub fn evalSimpleCallerExpression(
     if (string_ops.simpleEvalStringLiteral(ctx.runtime, trimmed)) |value| return value;
     if (std.mem.eql(u8, trimmed, "this")) return eval_ops.directEvalThisValue(ctx.runtime, caller_function, caller_frame).dup();
     if (std.mem.startsWith(u8, trimmed, "delete ")) {
-        const ident = std.mem.trim(u8, trimmed["delete ".len..], " \t\r\n");
-        if (isSimpleIdentifierName(ident) and callerFunctionHasBinding(ctx.runtime, caller_function, frame, ident)) {
-            return core.JSValue.boolean(false);
-        }
+        _ = frame;
         return null;
     }
     if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq| {
@@ -4726,7 +4972,8 @@ pub fn functionHasFrameBinding(
         if (binding == atom_id or atomNamesEqual(rt, binding, atom_id)) return true;
     }
     const ref_count = @min(function.var_ref_names.len, frame.var_refs.len);
-    for (function.var_ref_names[0..ref_count]) |binding| {
+    for (function.var_ref_names[0..ref_count], 0..) |binding, idx| {
+        if (slot_ops.varRefSlotIsUninitialized(frame.var_refs[idx]) and closureVarIsNonLexicalGlobalSentinel(function, idx)) continue;
         if (binding == atom_id or atomNamesEqual(rt, binding, atom_id)) return true;
     }
     return false;
@@ -4738,16 +4985,11 @@ pub fn atomNamesEqual(rt: *core.JSRuntime, a: core.Atom, b: core.Atom) bool {
     return std.mem.eql(u8, a_name, b_name);
 }
 
+// Forces a cycle-removal pass mid-operation so a caller can prove its in-flight
+// values were rooted: if they were not, they would be reclaimed here and the
+// caller's outcome assertion (e.g. the copied value) would fail.
 pub const ActiveRootValueProbe = struct {
-    const Mode = enum { same_value, heap_bigint };
-
     rt: *core.JSRuntime,
-    mode: Mode = .same_value,
-    target: core.JSValue = core.JSValue.undefinedValue(),
-    match_count: usize = 0,
-    current_match_count: usize = 0,
-    max_match_count: usize = 0,
-    trace_failed: bool = false,
 
     pub fn trigger(context: ?*anyopaque, size: usize) void {
         _ = size;
@@ -4760,35 +5002,7 @@ pub const ActiveRootValueProbe = struct {
             self.rt.memory.trigger_gc_fn = saved_trigger_fn;
             self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
         }
-        var visitor = core.runtime.RootVisitor{
-            .context = self,
-            .visit_value = @This().visitValue,
-            .visit_object = @This().visitObject,
-        };
-        self.current_match_count = 0;
-        self.rt.traceActiveRoots(&visitor) catch {
-            self.trace_failed = true;
-        };
-        self.max_match_count = @max(self.max_match_count, self.current_match_count);
-    }
-
-    pub fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
-        const self: *@This() = @ptrCast(@alignCast(context));
-        switch (self.mode) {
-            .same_value => if (slot.same(self.target)) {
-                self.match_count += 1;
-                self.current_match_count += 1;
-            },
-            .heap_bigint => if (slot.isBigInt() and slot.asShortBigInt() == null) {
-                self.match_count += 1;
-                self.current_match_count += 1;
-            },
-        }
-    }
-
-    pub fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
-        _ = context;
-        _ = slot;
+        _ = self.rt.runObjectCycleRemoval();
     }
 };
 
@@ -4809,7 +5023,9 @@ test "argsFromArrayLike roots initialized prefix while reading source" {
     defer if (source_alive) source.value().free(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-args-from-array-like-prefix-root");
-    try source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.symbol(symbol_atom), true, true, true));
+    const symbol_value = try rt.symbolValue(symbol_atom);
+    try source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(symbol_value, true, true, true));
+    symbol_value.free(rt);
     try source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), true, false, true));
     try source.defineAutoInitProperty(rt, core.atom.atomFromUInt32(1), "lazyArgsFromArrayLikeValue", 0, core.property.Flags.data(true, true, true));
 
@@ -4830,26 +5046,8 @@ test "argsFromArrayLike roots initialized prefix while reading source" {
                 self.rt.memory.trigger_gc_fn = saved_trigger_fn;
                 self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
             }
-            var visitor = core.runtime.RootVisitor{
-                .context = self,
-                .visit_value = @This().visitValue,
-                .visit_object = @This().visitObject,
-            };
-            self.rt.traceActiveRoots(&visitor) catch {
-                self.trace_failed = true;
-            };
-        }
-
-        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (slot.asSymbolAtom()) |atom_id| {
-                if (atom_id == self.atom_id) self.saw_symbol = true;
-            }
-        }
-
-        fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
-            _ = context;
-            _ = slot;
+            _ = self.rt.runObjectCycleRemoval();
+            self.saw_symbol = self.rt.atoms.name(self.atom_id) != null;
         }
     };
 
@@ -4953,15 +5151,12 @@ pub fn callFunctionBytecodeModeState(
         return object_ops.createGeneratorObject(ctx, func, current_function_value, this_value, args, var_refs, output, global, eval_var_ref_names, eval_var_refs, fb.func_kind == .async_generator);
     }
 
-    var nested = bytecode.function.asBytecodeView(fb, ctx.runtime);
+    var nested_overlay: bytecode.Bytecode = undefined;
+    var nested = try bytecode.function.ensureCachedBytecodeView(fb, ctx.runtime);
 
     var combined_var_refs: []const core.JSValue = var_refs;
     var allocated_combined_refs: []core.JSValue = &.{};
     defer if (allocated_combined_refs.len != 0) ctx.runtime.memory.free(core.JSValue, allocated_combined_refs);
-    var rooted_combined_refs: []core.JSValue = &.{};
-    var combined_refs_root = array_ops.ValueSliceRoot{};
-    combined_refs_root.init(ctx.runtime, &rooted_combined_refs);
-    defer combined_refs_root.deinit();
     var allocated_var_ref_names: []core.Atom = &.{};
     defer {
         for (allocated_var_ref_names) |atom_id| ctx.runtime.atoms.free(atom_id);
@@ -4987,14 +5182,14 @@ pub fn callFunctionBytecodeModeState(
         const refs = try ctx.runtime.memory.alloc(core.JSValue, var_refs.len + add_len);
         var refs_transferred = false;
         errdefer if (!refs_transferred) {
-            rooted_combined_refs = &.{};
             ctx.runtime.memory.free(core.JSValue, refs);
         };
         for (var_refs, 0..) |value, idx| refs[idx] = value;
         for (eval_var_refs[0..add_len], 0..) |value, idx| refs[var_refs.len + idx] = value;
-        rooted_combined_refs = refs;
 
-        nested.var_ref_names = names;
+        nested_overlay = nested.*;
+        nested_overlay.var_ref_names = names;
+        nested = &nested_overlay;
         allocated_var_ref_names = names;
         names_transferred = true;
         combined_var_refs = refs;
@@ -5027,7 +5222,7 @@ pub fn callFunctionBytecodeModeState(
     else
         stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
-    const dispatch_result = runWithArgsState(ctx, &nested_stack, &nested, effective_this, args, combined_var_refs, output, global, false, fb_runtime_strict, stop_on_yield, &.{}, &.{}, eval_var_ref_names, eval_var_refs, &.{}, &.{}, &.{}, &.{}, generator_state, resume_value, stop_before_pc, current_function_value, new_target_value, constructor_this_value, false, false, core.JSValue.undefinedValue(), false, false);
+    const dispatch_result = runWithArgsState(ctx, &nested_stack, nested, effective_this, args, combined_var_refs, output, global, false, fb_runtime_strict, stop_on_yield, &.{}, &.{}, eval_var_ref_names, eval_var_refs, &.{}, &.{}, &.{}, &.{}, generator_state, resume_value, stop_before_pc, current_function_value, new_target_value, constructor_this_value, false, false, core.JSValue.undefinedValue(), false, false);
     const result = dispatch_result catch |err| {
         if (fb.func_kind == .async_generator) {
             return exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, global));
@@ -5091,6 +5286,21 @@ pub fn runGeneratorParameterInit(
         nested.var_ref_names = try ctx.runtime.memory.alloc(core.Atom, fb.var_ref_names.len);
         for (fb.var_ref_names, 0..) |atom_id, idx| {
             nested.var_ref_names[idx] = ctx.runtime.atoms.dup(atom_id);
+        }
+    }
+    if (fb.var_ref_is_lexical.len > 0) {
+        nested.var_ref_is_lexical = try ctx.runtime.memory.alloc(bool, fb.var_ref_is_lexical.len);
+        @memcpy(nested.var_ref_is_lexical, fb.var_ref_is_lexical);
+    }
+    if (fb.var_ref_is_const.len > 0) {
+        nested.var_ref_is_const = try ctx.runtime.memory.alloc(bool, fb.var_ref_is_const.len);
+        @memcpy(nested.var_ref_is_const, fb.var_ref_is_const);
+    }
+    if (fb.closure_var.len > 0) {
+        nested.closure_var = try ctx.runtime.memory.alloc(bytecode.function_def.ClosureVar, fb.closure_var.len);
+        for (fb.closure_var, 0..) |cv, idx| {
+            nested.closure_var[idx] = cv;
+            nested.closure_var[idx].var_name = ctx.runtime.atoms.dup(cv.var_name);
         }
     }
     for (fb.cpool) |value| {
@@ -6187,9 +6397,9 @@ test "wrapIteratorFromIterator roots direct function bytecode next method while 
     fb.func_kind = .generator;
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-wrap-iterator-next-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-wrap-iterator-next-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var next_method = core.JSValue.functionBytecode(&fb.header);
@@ -6313,7 +6523,7 @@ pub fn qjsIteratorHelperReturn(
 }
 
 pub fn pollGCSafePoint(ctx: *core.JSContext) !void {
-    _ = ctx.runtime.gcSafepoint(ctx.runtime.active_value_roots) catch |err| switch (err) {
+    _ = ctx.runtime.gcSafepoint(null) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.PayloadMarkFailed => return error.OutOfMemory,
     };
@@ -6379,9 +6589,9 @@ test "createIteratorResult roots direct function bytecode value while creating r
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-result-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-result-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var result_value = core.JSValue.functionBytecode(&fb.header);
@@ -6400,9 +6610,11 @@ test "createIteratorResult roots direct function bytecode value while creating r
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const value_atom = try rt.internAtom("value");
     defer rt.atoms.free(value_atom);
-    const stored = iterator_result.getProperty(value_atom);
-    defer stored.free(rt);
-    try std.testing.expect(stored.same(result_value));
+    {
+        const stored = iterator_result.getProperty(value_atom);
+        defer stored.free(rt);
+        try std.testing.expect(stored.same(result_value));
+    }
 
     iterator_result_value.free(rt);
     iterator_result_alive = false;
@@ -7328,8 +7540,30 @@ pub fn isBlockedByUnscopables(
     return coercion_ops.valueTruthy(blocked);
 }
 
-pub fn lookupFrameVarRef(rt: *core.JSRuntime, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, atom_id: core.Atom) ?core.JSValue {
-    return lookupNamedVarRef(rt, function.var_ref_names, frame.var_refs, atom_id);
+pub fn lookupFrameVarRef(ctx: *core.JSContext, global: *core.Object, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, atom_id: core.Atom) ?core.JSValue {
+    const rt = ctx.runtime;
+    const count = @min(function.var_ref_names.len, frame.var_refs.len);
+    for (function.var_ref_names[0..count], 0..) |name, idx| {
+        if (!atomIdOrNameEql(rt, name, atom_id)) continue;
+        if (closureVarIsNonLexicalGlobalSentinel(function, idx)) {
+            if (globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| return lexical_value;
+            continue;
+        }
+        if (slot_ops.varRefSlotIsDeleted(frame.var_refs[idx])) return core.JSValue.uninitialized();
+        const value = slot_ops.slotValueDup(frame.var_refs[idx]);
+        return value;
+    }
+    return null;
+}
+
+pub fn closureVarIsNonLexicalGlobalSentinel(function: *const bytecode.Bytecode, idx: usize) bool {
+    if (idx >= function.closure_var.len) return false;
+    const cv = function.closure_var[idx];
+    if (cv.is_lexical) return false;
+    return switch (cv.closure_type) {
+        .global, .global_ref, .global_decl => true,
+        else => false,
+    };
 }
 
 pub fn lookupFrameLocalValue(rt: *core.JSRuntime, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, atom_id: core.Atom) ?core.JSValue {
@@ -7426,6 +7660,24 @@ pub fn deleteEvalBinding(
     return null;
 }
 
+pub fn deleteDirectEvalGlobalVarLocalBinding(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    atom_id: core.Atom,
+) ?bool {
+    const count = @min(function.var_names.len, frame.locals.len);
+    for (function.var_names[0..count], 0..) |name, idx| {
+        if (!atomIdOrNameEql(rt, name, atom_id)) continue;
+        _ = directEvalGlobalVarLocalAtom(rt, function, idx, frame.locals[idx]) orelse return null;
+        const deleted = if (global.hasProperty(atom_id)) global.deleteProperty(rt, atom_id) else true;
+        if (deleted) _ = deleteVarRefSlot(rt, frame.locals[idx]);
+        return deleted;
+    }
+    return null;
+}
+
 pub fn deleteFrameLocalBinding(
     rt: *core.JSRuntime,
     function: *const bytecode.Bytecode,
@@ -7503,9 +7755,16 @@ pub fn initializeEvalFrameLocals(
     }
 }
 
-pub fn setNamedSlotValue(ctx: *core.JSContext, names: []const core.Atom, slots: []core.JSValue, atom_id: core.Atom, value: core.JSValue) !bool {
+pub fn setNamedSlotValue(ctx: *core.JSContext, global: *core.Object, names: []const core.Atom, slots: []core.JSValue, atom_id: core.Atom, value: core.JSValue) !bool {
     for (names, 0..) |name, idx| {
         if (!atomIdOrNameEql(ctx.runtime, name, atom_id) or idx >= slots.len) continue;
+        if (slot_ops.varRefCellFromValue(slots[idx])) |cell| {
+            if (cell.varRefIsConstSlot().*) {
+                value.free(ctx.runtime);
+                _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
+                return error.TypeError;
+            }
+        }
         try slot_ops.setSlotValue(ctx, &slots[idx], value);
         return true;
     }
@@ -7586,7 +7845,7 @@ pub fn functionNameValueFromAtom(rt: *core.JSRuntime, atom_id: core.Atom, prefix
         return value_ops.createStringValue(rt, bytes.items);
     }
     const atom_name = rt.atoms.name(atom_id) orelse "";
-    if (rt.atoms.kind(atom_id) == .symbol) {
+    if (rt.atoms.isPublicSymbol(atom_id)) {
         if (core.symbol.description(&rt.atoms, atom_id)) |description| {
             try bytes.append(rt.memory.allocator, '[');
             try bytes.appendSlice(rt.memory.allocator, description);

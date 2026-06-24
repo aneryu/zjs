@@ -16,8 +16,7 @@ pub fn toBoolean(value: JSValue) bool {
         return !(value_mod.isZeroBigInt(value) orelse return true);
     }
     if (value.isString()) {
-        const header = value.refHeader() orelse return false;
-        const string_value: *string.String = @fieldParentPtr("header", header);
+        const string_value = value.asStringBody() orelse return false;
         return string_value.len() != 0;
     }
     return true;

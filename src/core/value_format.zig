@@ -1,4 +1,4 @@
-const dtoa = @import("../libs/dtoa.zig");
+const dtoa = @import("../libs/number_format.zig");
 const std = @import("std");
 const BigIntObject = @import("bigint.zig").BigInt;
 const JSValue = @import("value.zig").JSValue;

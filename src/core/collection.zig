@@ -9,7 +9,7 @@
 //!
 //! Everything here depends only on `core` (`Object` storage slots, `JSValue`
 //! sameValueZero, `string`, `bigint`, `symbol.canBeHeldWeakly`, the runtime
-//! borrowed-reference holder registry) and `libs` (`bignum`, `dtoa`). There is
+//! borrowed-reference holder registry) and `libs` (`bigint`, `number_format`). There is
 //! zero exec/builtins/VM dependency: the weak-key GC interaction is entirely
 //! core-resident (`Object.weakIdentityFromValue*`, `rt.*BorrowedReferenceHolder`).
 //! The builtins collection method bodies (`builtins/collection.zig`) call these
@@ -22,8 +22,8 @@
 const std = @import("std");
 
 const core = @import("root.zig");
-const bignum = @import("../libs/bignum.zig");
-const dtoa = @import("../libs/dtoa.zig");
+const bignum = @import("../libs/bigint.zig");
+const dtoa = @import("../libs/number_format.zig");
 
 pub const strong_no_entry = core.object.collection_no_entry;
 pub const weak_no_entry = core.object.collection_no_entry;
@@ -323,6 +323,8 @@ pub fn appendWeakEntry(rt: *core.JSRuntime, object: *core.Object, entry: core.ob
     var stored = entry;
     stored.hash = weakEntryHash(stored.key_identity);
     stored.hash_next = weak_no_entry;
+    rt.retainWeakIdentity(stored.key_identity);
+    errdefer rt.releaseWeakIdentity(stored.key_identity);
     const entries_slot = object.weakCollectionEntriesSlot();
     const index = entries_slot.*.len;
     const inserted_holder = !rt.borrowedReferenceHolderRegistered(object);
@@ -335,6 +337,7 @@ pub fn appendWeakEntry(rt: *core.JSRuntime, object: *core.Object, entry: core.ob
     errdefer refreshed_entries.* = refreshed_entries.*[0..index];
     refreshed_entries.*[index] = stored;
     linkWeakEntry(object, index);
+    try rt.registerBorrowedReferenceHolder(object);
 }
 
 fn ensureWeakIndexForInsert(rt: *core.JSRuntime, object: *core.Object, next_count: usize) !void {
@@ -515,7 +518,7 @@ pub fn setWeakMapEntryByIdentityChecked(rt: *core.JSRuntime, object: *core.Objec
     }
 
     var entry = core.object.WeakCollectionEntry{ .key_identity = key_identity, .value = value.dup() };
-    errdefer entry.destroy(rt);
+    errdefer entry.value.free(rt);
     try appendWeakEntry(rt, object, entry);
 }
 
@@ -600,7 +603,5 @@ pub fn mapSetLatin1PrefixInt32Range(
 // === Shared helpers ===
 
 fn stringFromValue(value: core.JSValue) ?*core.string.String {
-    if (!value.isString()) return null;
-    const header = value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
+    return value.asStringBody();
 }

@@ -3,20 +3,17 @@ const atom = @import("../core/atom.zig");
 const JSValue = @import("../core/value.zig").JSValue;
 
 fn dupOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
-    if (value.asSymbolAtom()) |atom_id| return JSValue.symbol(atoms.dup(atom_id));
+    _ = atoms;
     return value.dup();
 }
 
 fn takeOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
-    if (value.asSymbolAtom()) |atom_id| return JSValue.symbol(atoms.dup(atom_id));
+    _ = atoms;
     return value;
 }
 
 fn freeOwnedValue(atoms: *atom.AtomTable, value: JSValue, rt: anytype) void {
-    if (value.asSymbolAtom()) |atom_id| {
-        atoms.free(atom_id);
-        return;
-    }
+    _ = atoms;
     value.free(rt);
 }
 

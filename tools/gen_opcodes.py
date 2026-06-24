@@ -273,11 +273,11 @@ def legacy_live_views(legacy):
         "private_in", "push_bigint_i32", "nop", "push_minus1", "push_0", "push_1",
         "push_2", "push_3", "push_4", "push_5", "push_6", "push_7", "push_i8",
         "push_i16", "push_const8", "fclosure8", "push_empty_string", "get_loc8",
-        "put_loc8", "set_loc8", "get_loc0_loc1",
+        "put_loc8", "set_loc8",
     ]
 
     def name_of(op):
-        if 176 <= op <= 196:
+        if 176 <= op < 176 + len(short_names):
             return short_names[op - 176]
         return legacy["name"][op]
 
@@ -331,7 +331,6 @@ HANDWRITTEN_PHASE1 = {
     "with_delete_var": 10,
     "with_make_ref": 10,
     "with_get_ref": 10,
-    "with_get_ref_undef": 10,
 }
 
 # Deliberate, reviewed deltas vs the legacy live accessors.

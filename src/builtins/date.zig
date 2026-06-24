@@ -690,8 +690,7 @@ fn dateObjectFromValue(value: core.JSValue) ?*core.Object {
 }
 
 fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
-    const header = value.refHeader() orelse return;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
@@ -749,8 +748,7 @@ fn toNumber(value: core.JSValue) ?f64 {
 }
 
 fn appendStringValueAscii(writer: *std.Io.Writer, value: core.JSValue) !void {
-    const header = value.refHeader() orelse return;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return;
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try writer.writeAll(bytes),
         .utf16 => |units| {

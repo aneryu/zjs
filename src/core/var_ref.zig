@@ -15,6 +15,9 @@ pub const VarRef = struct {
     pvalue: *JSValue = undefined,
     next_open: ?*VarRef = null,
     is_const: bool = false,
+    // QuickJS JSVarRef.is_lexical (quickjs.c:453) — only meaningful for
+    // top-level global lexical bindings; gates TDZ-throw on read.
+    is_lexical: bool = false,
     is_function_name: bool = false,
     is_deletable: bool = false,
     is_deleted: bool = false,

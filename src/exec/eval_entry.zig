@@ -217,6 +217,7 @@ fn forceFunctionBytecodeRuntimeStrict(value: core.JSValue) void {
     const header = value.objectHeader() orelse return;
     const function_bytecode: *bytecode.FunctionBytecode = @fieldParentPtr("header", header);
     function_bytecode.runtime_strict_mode = true;
+    bytecode.function.refreshCachedBytecodeView(function_bytecode);
     for (function_bytecode.cpool) |child| forceFunctionBytecodeRuntimeStrict(child);
 }
 

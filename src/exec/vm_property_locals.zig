@@ -169,10 +169,6 @@ pub noinline fn loc(
         op.set_loc1 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, 1, 0, opc, sync_global_lexical_locals),
         op.set_loc2 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, 2, 0, opc, sync_global_lexical_locals),
         op.set_loc3 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, 3, 0, opc, sync_global_lexical_locals),
-        op.get_loc0_loc1 => {
-            try slot_ops.execGetLoc(ctx, frame, stack, 0, 0, opc);
-            try slot_ops.execGetLoc(ctx, frame, stack, 1, 0, opc);
-        },
         else => unreachable,
     }
 }
@@ -224,41 +220,33 @@ pub noinline fn checkedLocVm(
     _ = eval_with_object;
     const idx = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
-    if (idx >= frame.locals.len or idx >= frame.locals_uninit.len) return error.InvalidBytecode;
+    if (idx >= frame.locals.len) return error.InvalidBytecode;
 
     switch (opc) {
         op.set_loc_uninitialized => {
-            frame.setLocalUninitialized(idx);
             // Mirror the slot's TDZ state in its value tag (lets the dispatch
             // fast paths test the tag instead of the side bitmap). Free the old
             // binding first: on block re-entry (loop) the slot may hold the
             // previous iteration's value/var-ref cell, which a captured closure
             // still references via its own dup — we only drop the slot's share.
-            // Mirror TDZ in the slot's value tag ONLY for plain slots, so the
-            // dispatch fast paths can test the tag without the side bitmap. A
-            // var-ref cell keeps its identity (captured closures reference it via
-            // their own dup) — its TDZ lives in the cell and is resolved through
-            // the bitmap/varRefSlot slow path, so never overwrite a cell here.
             const cur_binding = frame.locals[idx];
-            if (slot_ops.varRefCellFromValue(cur_binding) == null) {
+            if (slot_ops.varRefCellFromValue(cur_binding)) |cell| {
+                try cell.setVarRefValue(ctx.runtime, core.JSValue.uninitialized());
+            } else {
                 frame.locals[idx] = core.JSValue.uninitialized();
                 cur_binding.free(ctx.runtime);
             }
         },
-        op.get_loc_check => {
-            if (frame.localIsUninitialized(idx)) {
-                if (varRefCellFromValue(frame.locals[idx]) != null and !slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) {
-                    frame.clearLocalUninitialized(idx);
-                } else {
-                    const err = exception_ops.throwTdzReference(ctx);
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
-                    return err;
-                }
+        op.get_loc_check, op.get_loc_checkthis => {
+            if (slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) {
+                const err = exception_ops.throwTdzReference(ctx);
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                return err;
             }
             try array_ops.pushSlotValue(stack, frame.locals[idx]);
         },
         op.put_loc_check => {
-            if (frame.localIsUninitialized(idx)) {
+            if (slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) {
                 const err = exception_ops.throwTdzReference(ctx);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
@@ -269,6 +257,16 @@ pub noinline fn checkedLocVm(
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
+            try slot_ops.setSlotValue(ctx, &frame.locals[idx], value);
+            try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+        },
+        op.set_loc_check => {
+            if (slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) {
+                const err = exception_ops.throwTdzReference(ctx);
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                return err;
+            }
+            const value = stack.peek() orelse return error.StackUnderflow;
             try slot_ops.setSlotValue(ctx, &frame.locals[idx], value);
             try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         },
@@ -290,7 +288,6 @@ pub noinline fn checkedLocVm(
             if (!constructor_this.isUndefined()) {
                 try slot_ops.setSlotValue(ctx, &frame.this_value, constructor_this.dup());
             }
-            frame.clearLocalUninitialized(idx);
             try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         },
         else => unreachable,
@@ -320,8 +317,8 @@ pub fn varRef(
             if (frame.pc + 2 > function.code.len) return error.TypeError;
             const idx = readInt(u16, function.code[frame.pc..][0..2]);
             const next_pc = frame.pc + 2;
-            if (!canStartLongVarRefGetFusion(opc, function.code, next_pc) and try tryFastDirectVarRefGet(frame, stack, idx, 2)) return .done;
-            if (try slot_ops.execGetVarRefMaybeTdz(ctx, frame, stack, idx, 2, catch_target, global)) return .continue_loop;
+            if (!canStartLongVarRefGetFusion(opc, function.code, next_pc) and try tryFastDirectVarRefGet(function, frame, stack, idx, 2)) return .done;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, idx, 2, catch_target, global)) return .continue_loop;
         },
         op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init => {
             if (frame.pc + 2 > function.code.len) return error.TypeError;
@@ -333,20 +330,20 @@ pub fn varRef(
         },
 
         op.get_var_ref0 => {
-            if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(frame, stack, 0, 0)) return .done;
-            if (try slot_ops.execGetVarRefMaybeTdz(ctx, frame, stack, 0, 0, catch_target, global)) return .continue_loop;
+            if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(function, frame, stack, 0, 0)) return .done;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, 0, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref1 => {
-            if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(frame, stack, 1, 0)) return .done;
-            if (try slot_ops.execGetVarRefMaybeTdz(ctx, frame, stack, 1, 0, catch_target, global)) return .continue_loop;
+            if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(function, frame, stack, 1, 0)) return .done;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, 1, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref2 => {
-            if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(frame, stack, 2, 0)) return .done;
-            if (try slot_ops.execGetVarRefMaybeTdz(ctx, frame, stack, 2, 0, catch_target, global)) return .continue_loop;
+            if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(function, frame, stack, 2, 0)) return .done;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, 2, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref3 => {
-            if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(frame, stack, 3, 0)) return .done;
-            if (try slot_ops.execGetVarRefMaybeTdz(ctx, frame, stack, 3, 0, catch_target, global)) return .continue_loop;
+            if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(function, frame, stack, 3, 0)) return .done;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, 3, 0, catch_target, global)) return .continue_loop;
         },
         op.put_var_ref0 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 0, 0, opc, eval_global_var_bindings, is_eval_code),
         op.put_var_ref1 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 1, 0, opc, eval_global_var_bindings, is_eval_code),
@@ -392,7 +389,8 @@ fn canStartShortVarRefGetFusion(code: []const u8, pc: usize) bool {
         canStartBorrowedSimpleCallArg(code, pc);
 }
 
-fn tryFastDirectVarRefGet(frame: *frame_mod.Frame, stack: *stack_mod.Stack, idx: u16, consume: u8) !bool {
+fn tryFastDirectVarRefGet(function: *const bytecode.Bytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack, idx: u16, consume: u8) !bool {
+    if (call_runtime.closureVarIsNonLexicalGlobalSentinel(function, idx)) return false;
     const value = varRefReadableBorrowed(frame, idx) orelse return false;
     frame.pc += consume;
     try stack.push(value);
@@ -694,7 +692,7 @@ fn canStartBorrowedSimpleCallable(code: []const u8, pc: usize) bool {
     return switch (code[pc]) {
         op.get_var,
         op.get_var_undef,
-        => pc + 5 <= code.len,
+        => pc + 3 <= code.len,
         op.get_var_ref,
         op.get_var_ref_check,
         op.get_loc,
@@ -719,7 +717,7 @@ fn canStartBorrowedSimpleCallArg(code: []const u8, pc: usize) bool {
     return switch (code[pc]) {
         op.get_var,
         op.get_var_undef,
-        => pc + 5 <= code.len,
+        => pc + 3 <= code.len,
         op.get_var_ref, op.get_var_ref_check, op.get_loc, op.get_loc_check, op.push_i16 => pc + 3 <= code.len,
         op.get_loc8, op.push_i8 => pc + 2 <= code.len,
         op.push_i32 => pc + 5 <= code.len,
@@ -746,7 +744,7 @@ fn canStartBorrowedSimpleCallArg(code: []const u8, pc: usize) bool {
 }
 
 fn canStartGlobalCall1(code: []const u8, pc: usize) bool {
-    return pc + 6 <= code.len and (code[pc] == op.get_var or code[pc] == op.get_var_undef) and code[pc + 5] == op.call1;
+    return pc + 4 <= code.len and (code[pc] == op.get_var or code[pc] == op.get_var_undef) and code[pc + 3] == op.call1;
 }
 
 fn simpleNumericArg0ConstCallable(func: core.JSValue) ?SimpleNumericArg0ConstCall {
@@ -1025,8 +1023,8 @@ fn denseArrayAppendValueFromBytecode(
     first_value_idx: u16,
     first_value_next_pc: usize,
 ) ?DenseArrayAppendValue {
-    if (first_value_idx >= frame.locals.len or first_value_idx >= frame.locals_uninit.len) return null;
-    if (frame.localIsUninitialized(first_value_idx)) return null;
+    if (first_value_idx >= frame.locals.len) return null;
+    if (slot_ops.varRefSlotIsUninitialized(frame.locals[first_value_idx])) return null;
     const value = slotValueBorrowed(frame.locals[first_value_idx]);
     if (value.isUninitialized()) return null;
 
@@ -1078,7 +1076,7 @@ fn fastGlobalDataValueForRange(
     if (frameHasVarRefBinding(function, frame, atom_id)) return null;
     if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return null;
     if (frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return null;
-    if (call_runtime.globalLexicalValue(ctx, atom_id)) |lexical_value| {
+    if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
     }
@@ -1162,8 +1160,8 @@ fn tryStoreStringFromCharCodeInt32LocalAppend(
     }
     const store = decodeLocalPut(code, store_pc) orelse return false;
     if (store.idx != local_idx) return false;
-    if (local_idx >= frame.locals.len or local_idx >= frame.locals_uninit.len) return false;
-    if (frame.localIsUninitialized(local_idx)) return false;
+    if (local_idx >= frame.locals.len) return false;
+    if (slot_ops.varRefSlotIsUninitialized(frame.locals[local_idx])) return false;
     if (local_idx < function.var_is_const.len and function.var_is_const[local_idx]) return false;
 
     const lhs = slotValueBorrowed(frame.locals[local_idx]);
@@ -1183,9 +1181,6 @@ fn tryStoreStringFromCharCodeInt32LocalAppend(
         const lhs_bytes = lhs_string.borrowLatin1() orelse return false;
         const replacement = (try core.string.String.createLatin1Concat(ctx.runtime, lhs_bytes, &.{byte})).value();
         try slot_ops.setSlotValue(ctx, &frame.locals[local_idx], replacement);
-    }
-    if (local_idx < function.var_is_lexical.len and function.var_is_lexical[local_idx]) {
-        frame.clearLocalUninitialized(local_idx);
     }
     try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, local_idx, sync_global_lexical_locals);
     frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;

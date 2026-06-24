@@ -5,7 +5,7 @@
 
 const core = @import("../core/root.zig");
 const std = @import("std");
-const bignum = @import("../libs/bignum.zig");
+const bignum = @import("../libs/bigint.zig");
 const builtin_dispatch = @import("../exec/builtin_dispatch.zig");
 const call_runtime = @import("../exec/call_runtime.zig");
 const coercion_ops = @import("../exec/coercion_ops.zig");

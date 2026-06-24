@@ -5,21 +5,21 @@ const JSValue = @import("value.zig").JSValue;
 
 pub const BigInt = struct {
     header: gc.Header,
-    value: libs.bignum.BigInt,
+    value: libs.bigint.BigInt,
 
     pub fn create(rt: *JSRuntime, value: i128) !*BigInt {
-        var big = try libs.bignum.BigInt.fromIntAlloc(rt.memory.persistent_allocator, value);
+        var big = try libs.bigint.BigInt.fromIntAlloc(rt.memory.persistent_allocator, value);
         errdefer big.deinit();
         return createFromOwned(rt, big);
     }
 
-    pub fn createFromBigInt(rt: *JSRuntime, value: libs.bignum.BigInt) !*BigInt {
+    pub fn createFromBigInt(rt: *JSRuntime, value: libs.bigint.BigInt) !*BigInt {
         var cloned = try value.cloneWithAllocator(rt.memory.persistent_allocator);
         errdefer cloned.deinit();
         return createFromOwned(rt, cloned);
     }
 
-    pub fn createFromOwned(rt: *JSRuntime, value: libs.bignum.BigInt) !*BigInt {
+    pub fn createFromOwned(rt: *JSRuntime, value: libs.bigint.BigInt) !*BigInt {
         const self = try rt.memory.create(BigInt);
         self.* = .{
             .header = .{ .kind = .big_int },
