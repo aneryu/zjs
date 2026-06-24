@@ -4629,9 +4629,28 @@ pub fn getFastStringPrimitiveDataProperty(
     return ownDataOrAutoInitPropertyValue(proto, atom_id);
 }
 
+/// Comptime bitset of the predefined atom ids whose name is a standard
+/// String.prototype method. Built from the SAME `prototypeMethodId` map, so the
+/// membership result is identical — but the per-access check below becomes an
+/// O(1) integer-indexed lookup instead of `atoms.name()` + a ~40-way
+/// `std.mem.eql` chain on every `s.method()` resolution. A user string equal to
+/// a method name interns to its predefined atom id (interning is by content),
+/// so dynamic atoms (id > predefined_count) are correctly never methods.
+const string_method_atom_bits = blk: {
+    @setEvalBranchQuota(400000);
+    var bits = [_]bool{false} ** (core.atom.predefined_count + 1);
+    for (core.atom.predefined_atoms) |pa| {
+        if (pa.kind == .string and string_id_lookup.prototypeMethodId(pa.name) != null) {
+            bits[pa.id] = true;
+        }
+    }
+    break :blk bits;
+};
+
 pub fn isStandardStringPrototypeMethodAtom(rt: *core.JSRuntime, atom_id: core.Atom) bool {
-    const name = rt.atoms.name(atom_id) orelse return false;
-    return string_id_lookup.prototypeMethodId(name) != null;
+    _ = rt;
+    if (core.atom.isTaggedInt(atom_id) or atom_id == 0 or atom_id > core.atom.predefined_count) return false;
+    return string_method_atom_bits[atom_id];
 }
 
 pub fn defineStringWrapperIndexProperty(rt: *core.JSRuntime, object: *core.Object, index: u32, unit: u16) !void {
