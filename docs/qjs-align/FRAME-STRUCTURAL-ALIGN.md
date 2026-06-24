@@ -1,3 +1,10 @@
+> ⚠️ 2026-06-24 UPDATE — parts of this design were DISPROVEN by source verification.
+> See `HANDOVER-call-dispatch-align.md`: "borrow cur_func" is a non-diff (takeSourceSlot is a
+> move, not a dup — same refcount as qjs); Frame slim (B3) has low benefit (teardown cost is the
+> NECESSARY value frees, not field proliferation) + high complexity (most cold fields cross
+> generator suspend). Do NOT re-attempt those two. The raw-sp/single-frame rewrite + global
+> var_ref lowering remain the real (deep) frontiers.
+
 # qjs-faithful frame structural alignment — design
 
 ## Aligned representation
