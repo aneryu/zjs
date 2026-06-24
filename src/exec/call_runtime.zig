@@ -6664,8 +6664,12 @@ pub fn createIteratorResult(rt: *core.JSRuntime, global: *core.Object, value: co
 
     const object = try core.Object.create(rt, core.class.ids.object, object_ops.objectPrototypeFromGlobal(rt, global));
     errdefer core.Object.destroyFromHeader(rt, &object.header);
-    try object_ops.defineValueProperty(rt, object, "value", rooted_value);
-    try object_ops.defineValueProperty(rt, object, "done", core.JSValue.boolean(done));
+    // qjs js_create_iterator_result (quickjs.c:16768) keys on the predefined
+    // JS_ATOM_value / JS_ATOM_done constants; use the interned atom ids directly
+    // instead of re-interning the "value"/"done" byte strings per result (this
+    // runs once per generator/iterator step, a hot path).
+    try object.defineOwnProperty(rt, core.atom.ids.value, core.Descriptor.data(rooted_value, true, true, true));
+    try object.defineOwnProperty(rt, core.atom.ids.done, core.Descriptor.data(core.JSValue.boolean(done), true, true, true));
     return object.value();
 }
 

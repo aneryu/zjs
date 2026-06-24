@@ -44,6 +44,8 @@ pub const ids = struct {
     pub const name: Atom = 55;
     pub const prototype: Atom = 60;
     pub const constructor: Atom = 61;
+    pub const value: Atom = 65;
+    pub const done: Atom = 106;
     pub const undefined_: Atom = 70;
     // `typeof` result strings — predefined string atoms, so OP_typeof returns
     // the interned atom string (a refcount dup) instead of allocating a fresh
