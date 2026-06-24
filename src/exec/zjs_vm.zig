@@ -1303,10 +1303,31 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 try value_vm.nipCatch(ctx.runtime, stack);
             },
             op.dup => {
+                if (comptime thread_dispatch) {
+                    // OP_dup: push an OWNED copy of the top — byte-identical to
+                    // value_vm.dup (pushAssumeCapacity(peekBorrowed)), where
+                    // pushAssumeCapacity RETAINS refcounted values
+                    // (`if (v.requiresRefCount()) v.dup() else v`). Missing this
+                    // retain under-refs the object -> premature free.
+                    const v = (reg_sp - 1)[0];
+                    reg_sp[0] = if (v.requiresRefCount()) v.dup() else v;
+                    reg_sp += 1;
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
+                }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 try value_vm.dup(ctx, stack, opc);
             },
             op.swap => {
+                if (comptime thread_dispatch) {
+                    const tmp = (reg_sp - 2)[0];
+                    (reg_sp - 2)[0] = (reg_sp - 1)[0];
+                    (reg_sp - 1)[0] = tmp;
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
+                }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 try value_vm.swap(ctx, stack);
             },
@@ -2161,6 +2182,26 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 }
             },
             op.add_loc => {
+                if (comptime thread_dispatch) add_local_fast: {
+                    // qjs OP_add_loc: local[idx] += sp[-1]; sp--. Threaded int32
+                    // fast path mirrors inc_loc (same local-store guards) plus the
+                    // rhs pop; fastInt32Add folds overflow to a double, so no extra
+                    // break needed. Both operands int32 here (no refcount).
+                    if (localFastPathNeedsGeneratorStopBoundary(stop_before_pc)) break :add_local_fast;
+                    const idx: u16 = reg_ip[0];
+                    if (idx >= frame.locals.len) break :add_local_fast;
+                    if (localStoreNeedsSlowSync(frame, idx, sync_global_lexical_locals)) break :add_local_fast;
+                    const old_v = reg_var_buf[idx];
+                    if (slot_ops.varRefCellFromValue(old_v) != null) break :add_local_fast;
+                    const lhs = old_v.asInt32() orelse break :add_local_fast;
+                    const rhs = (reg_sp - 1)[0].asInt32() orelse break :add_local_fast;
+                    reg_ip += 1;
+                    reg_sp -= 1;
+                    reg_var_buf[idx] = arith_vm.fastInt32Add(lhs, rhs);
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
+                }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try arith_vm.addLocalVm(ctx, stack, function, global, frame, catch_target, output, sync_global_lexical_locals)) {
                     .done => {},
