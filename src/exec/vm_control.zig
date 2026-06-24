@@ -37,13 +37,13 @@ pub const InterruptPoller = struct {
     }
 };
 
-pub noinline fn returnTop(ctx: *core.JSContext, stack: *stack_mod.Stack, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
+pub fn returnTop(ctx: *core.JSContext, stack: *stack_mod.Stack, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
     if (generator) |generator_object| generator_object.generatorDoneSlot().* = true;
     const value = stack.peek() orelse core.JSValue.undefinedValue();
     return finishFunctionReturn(ctx, frame, value);
 }
 
-pub noinline fn returnUndefined(ctx: *core.JSContext, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
+pub fn returnUndefined(ctx: *core.JSContext, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
     if (generator) |generator_object| generator_object.generatorDoneSlot().* = true;
     return finishFunctionReturn(ctx, frame, core.JSValue.undefinedValue());
 }

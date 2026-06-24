@@ -114,7 +114,7 @@ pub fn linkDerivedConstructorThisLocal(ctx: *core.JSContext, function: *const by
     }
 }
 
-pub fn initFrameLocals(
+pub inline fn initFrameLocals(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
@@ -149,7 +149,7 @@ pub fn initFrameLocals(
     storage_transferred = true;
 }
 
-pub fn initFrameVarRefs(
+pub inline fn initFrameVarRefs(
     ctx: *core.JSContext,
     global: *core.Object,
     function: *const bytecode.Bytecode,

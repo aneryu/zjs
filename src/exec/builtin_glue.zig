@@ -563,7 +563,7 @@ pub fn callCollectionAdderFromVm(
 
 // Host output fast-path probes (moved from the VM call runtime).
 
-pub fn fastHostOutputCall(rt: *core.JSRuntime, output: ?*std.Io.Writer, func: core.JSValue, args: []const core.JSValue) !bool {
+pub inline fn fastHostOutputCall(rt: *core.JSRuntime, output: ?*std.Io.Writer, func: core.JSValue, args: []const core.JSValue) !bool {
     const object = object_ops.objectFromValue(func) orelse return false;
     if (object.hostFunctionKind() != core.host_function.ids.output) return false;
     try printHostOutputArgs(rt, output, args);

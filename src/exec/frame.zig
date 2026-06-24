@@ -497,7 +497,7 @@ pub const Frame = struct {
         self.eval_var_refs_republished = false;
     }
 
-    pub fn deinitInlineCall(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
+    pub inline fn deinitInlineCall(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
         if (self.this_value_owned) self.this_value.free(rt);
         if (self.constructor_this_value_owned) self.constructor_this_value.free(rt);
         self.current_function.free(rt);
@@ -649,7 +649,7 @@ pub const Frame = struct {
         }
     }
 
-    fn releaseValueSliceNoReset(rt: anytype, values: []JSValue) void {
+    inline fn releaseValueSliceNoReset(rt: anytype, values: []JSValue) void {
         for (values) |value| {
             value.free(rt);
         }

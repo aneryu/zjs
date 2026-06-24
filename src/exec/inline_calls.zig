@@ -74,7 +74,7 @@ pub const InlineTarget = struct {
 /// as the recursive path — the boxing rules stay in one place. Fusion arrows
 /// (`x => x + 1`) are still caught by the fusion check below and routed to the
 /// faster `callSimple*Bytecode` path.
-pub fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, func: core.JSValue) ?InlineTarget {
+pub inline fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, func: core.JSValue) ?InlineTarget {
     const function_object = object_ops.functionObjectFromValue(func) orelse return null;
     const function_value = function_object.functionBytecodeSlot().* orelse return null;
     const fb = call_runtime.functionBytecodeFromValue(function_value) orelse return null;
@@ -145,8 +145,12 @@ pub const Machine = struct {
     l0_stack: *stack_mod.Stack,
     l0_catch_target: *?usize,
     /// Chunked entry storage; only the first `chunk_count` slots are valid.
-    /// Left undefined so machine construction is O(1) per interpreter entry.
-    chunks: [max_chunks]*[entries_per_chunk]Entry = undefined,
+    /// The chunk-pointer array is heap-allocated lazily on the first inline
+    /// push (capacity `max_chunks`), so a Machine that never pushes carries
+    /// only a 16-byte empty slice instead of a 4 KiB inline array — keeping
+    /// `Machine.init`'s by-value return from memcpy-ing 4 KiB of (undefined)
+    /// chunk-pointer storage on every interpreter entry.
+    chunks: []*[entries_per_chunk]Entry = &.{},
     chunk_count: usize = 0,
     depth: usize = 0,
     /// Set whenever the current execution level changed (push, pop, unwind);
@@ -179,6 +183,10 @@ pub const Machine = struct {
             self.ctx.runtime.memory.destroy(@TypeOf(chunk.*), chunk);
         }
         self.chunk_count = 0;
+        if (self.chunks.len != 0) {
+            self.ctx.runtime.memory.free(*[entries_per_chunk]Entry, self.chunks);
+            self.chunks = &.{};
+        }
     }
 
     pub fn topEntry(self: *Machine) *Entry {
@@ -198,6 +206,9 @@ pub const Machine = struct {
             return error.RangeError;
         }
         if (chunk_index == self.chunk_count) {
+            if (self.chunks.len == 0) {
+                self.chunks = try self.ctx.runtime.memory.alloc(*[entries_per_chunk]Entry, max_chunks);
+            }
             const chunk = try self.ctx.runtime.memory.create([entries_per_chunk]Entry);
             for (chunk) |*entry| {
                 entry.backtrace_frame = .{
@@ -526,7 +537,7 @@ pub const Machine = struct {
         }
     }
 
-    fn freeSourceSlot(rt: *core.JSRuntime, slot: *core.JSValue) void {
+    inline fn freeSourceSlot(rt: *core.JSRuntime, slot: *core.JSValue) void {
         const value = slot.*;
         slot.* = core.JSValue.undefinedValue();
         value.free(rt);
@@ -642,7 +653,7 @@ pub const Machine = struct {
     /// recursive `runWithArgsState` + `callFunctionBytecodeModeState` exit
     /// path (eval snapshot, frame, operand stack, arena watermark,
     /// backtrace, profile scope, call depth).
-    fn popTeardown(self: *Machine) void {
+    inline fn popTeardown(self: *Machine) void {
         teardownInlineEntry(self.ctx, self.topEntry());
         self.ctx.call_depth -= 1;
         self.depth -= 1;

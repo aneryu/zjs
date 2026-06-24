@@ -740,6 +740,9 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
     var reg_base: [*]core.JSValue = undefined;
     var reg_sp: [*]core.JSValue = undefined;
     var reg_var_buf: [*]core.JSValue = undefined;
+    // qjs keeps arg_buf register-resident (a JS_CallInternal local); mirror it
+    // so threaded get_arg0..3 read args without reloading frame.args from memory.
+    var reg_arg_buf: [*]core.JSValue = undefined;
     var reg_code_end: [*]const u8 = undefined;
     while (true) {
         if (machine.switched) {
@@ -791,6 +794,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
         reg_base = stack.values.ptr;
         reg_sp = stack.values.ptr + stack.values.len;
         reg_var_buf = frame.locals.ptr;
+        reg_arg_buf = frame.args.ptr;
         if (frame.pc >= function.code.len) {
             if (machine.depth == 0) break;
             const fallthrough_value = stack.peek() orelse core.JSValue.undefinedValue();
@@ -1000,21 +1004,23 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             // vm_property_locals.arg()'s call + re-switch), mirroring qjs's
             // inlined OP_get_arg0..3. get_arg0 is the 2nd hottest opcode in
             // recursive/call-heavy code (fib).
-            op.get_arg0 => {
+            op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3 => {
+                if (comptime thread_dispatch) get_arg_fast: {
+                    // qjs OP_get_arg0..3 (quickjs.c): `*sp++ = JS_DupValue(arg_buf[idx])`.
+                    // arg_buf is register-resident; the compiler only emits get_argN
+                    // for idx < arg_count and frame.args is padded to arg_count, so
+                    // reg_arg_buf[idx] is always in bounds. A captured arg (var-ref
+                    // cell) falls through to the slow path's cell-aware deref.
+                    const v = reg_arg_buf[opc - op.get_arg0];
+                    if (slot_ops.varRefCellFromValue(v) != null) break :get_arg_fast;
+                    reg_sp[0] = v.dup();
+                    reg_sp += 1;
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
+                }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                try slot_ops.execGetArg(ctx, frame, stack, 0, 0, opc);
-            },
-            op.get_arg1 => {
-                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                try slot_ops.execGetArg(ctx, frame, stack, 1, 0, opc);
-            },
-            op.get_arg2 => {
-                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                try slot_ops.execGetArg(ctx, frame, stack, 2, 0, opc);
-            },
-            op.get_arg3 => {
-                syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                try slot_ops.execGetArg(ctx, frame, stack, 3, 0, opc);
+                try slot_ops.execGetArg(ctx, frame, stack, @as(u16, @intCast(opc - op.get_arg0)), 0, opc);
             },
             op.get_arg, op.put_arg, op.set_arg, op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3, op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 => {
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
