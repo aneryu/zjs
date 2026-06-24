@@ -250,16 +250,6 @@ inline fn dispatchFieldOwnDataIcStoreOwned(
     };
 }
 
-inline fn tryDispatchInt32BinaryWindow(base: [*]core.JSValue, sp_len: *usize, binop: u8) bool {
-    const n = sp_len.*;
-    if (n < 2) return false;
-    const ints = core.JSValue.asInt32Pair(base[n - 2], base[n - 1]) orelse return false;
-    const result = dispatchFastBinaryInt32(binop, ints.lhs, ints.rhs) orelse return false;
-    base[n - 2] = result;
-    sp_len.* = n - 1;
-    return true;
-}
-
 inline fn dispatchFastUpdateInt32(opcode_id: u8, value: i32) core.JSValue {
     return switch (opcode_id) {
         op.post_inc, op.inc_loc => dispatchFastInt32Add(value, 1),
@@ -1354,16 +1344,20 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
 
             // ---- Binary arithmetic ----
             op.add, op.sub, op.mul, op.div, op.mod, op.pow, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor => {
-                if (comptime thread_dispatch) {
-                    if (opc != op.pow) {
-                        var sp_len = (@intFromPtr(reg_sp) - @intFromPtr(reg_base)) / @sizeOf(core.JSValue);
-                        if (tryDispatchInt32BinaryWindow(reg_base, &sp_len, opc)) {
-                            reg_sp = reg_base + sp_len;
-                            opc = reg_ip[0];
-                            reg_ip += 1;
-                            continue :sw opc;
-                        }
-                    }
+                if (comptime thread_dispatch) bin_int_fast: {
+                    // Register-resident int32 fast path operating directly on
+                    // reg_sp (mirrors the lean op.lt arm), avoiding the sp_len
+                    // round-trip (ptr-diff divide + by-pointer helper + reg_sp
+                    // recompute) the prior window-helper path paid.
+                    if (opc == op.pow) break :bin_int_fast;
+                    const a = (reg_sp - 2)[0].asInt32() orelse break :bin_int_fast;
+                    const b = (reg_sp - 1)[0].asInt32() orelse break :bin_int_fast;
+                    const result = dispatchFastBinaryInt32(opc, a, b) orelse break :bin_int_fast;
+                    (reg_sp - 2)[0] = result;
+                    reg_sp -= 1;
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
                 }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 // Inline int32 fast path: replaces binaryVm->binary call frames
