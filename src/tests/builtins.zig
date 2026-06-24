@@ -2458,9 +2458,7 @@ test "host WeakMap mutation closure rejects registered symbol keys" {
     const closure_value = try engine.exec.closure.create(rt, 39, 0, 0, 0);
     defer closure_value.free(rt);
 
-    const registered_name = try std.fmt.allocPrint(rt.memory.allocator, "{s}registered", .{engine.builtins.symbol.registry_prefix});
-    defer rt.memory.allocator.free(registered_name);
-    const registered_atom = try rt.atoms.internSymbol(registered_name);
+    const registered_atom = try rt.atoms.internGlobalSymbol("registered");
     defer rt.atoms.free(registered_atom);
 
     const map_name = try rt.internAtom("map");
@@ -2470,9 +2468,10 @@ test "host WeakMap mutation closure rejects registered symbol keys" {
 
     var globals = [_]engine.exec.globals.Slot{
         .{ .name = map_name, .value = map_value.dup() },
-        .{ .name = key_name, .value = core.JSValue.symbol(registered_atom) },
+        .{ .name = key_name, .value = try rt.symbolValue(registered_atom) },
     };
     defer globals[0].value.free(rt);
+    defer globals[1].value.free(rt);
 
     if (engine.exec.closure.call(rt, closure_value, &.{}, globals[0..])) |value| {
         defer value.free(rt);

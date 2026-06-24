@@ -32,8 +32,7 @@ pub const FourByteEscapeUnits = struct {
 /// constraint, so a non-ASCII utf16 string can never be a valid escape run.
 pub fn decodeSingleFourByteEscapeUnits(value: JSValue) !?FourByteEscapeUnits {
     if (!value.isString()) return null;
-    const header = value.refHeader() orelse return null;
-    const string_value: *string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     const bytes = switch (string_value.resolveData()) {
         .latin1 => |latin1| latin1,
         .utf16 => return null,

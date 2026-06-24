@@ -220,11 +220,10 @@ pub noinline fn checkedLocVm(
     _ = eval_with_object;
     const idx = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
-    if (idx >= frame.locals.len or idx >= frame.locals_uninit.len) return error.InvalidBytecode;
+    if (idx >= frame.locals.len) return error.InvalidBytecode;
 
     switch (opc) {
         op.set_loc_uninitialized => {
-            frame.setLocalUninitialized(idx);
             // Mirror the slot's TDZ state in its value tag (lets the dispatch
             // fast paths test the tag instead of the side bitmap). Free the old
             // binding first: on block re-entry (loop) the slot may hold the
@@ -239,19 +238,15 @@ pub noinline fn checkedLocVm(
             }
         },
         op.get_loc_check, op.get_loc_checkthis => {
-            if (frame.localIsUninitialized(idx)) {
-                if (varRefCellFromValue(frame.locals[idx]) != null and !slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) {
-                    frame.clearLocalUninitialized(idx);
-                } else {
-                    const err = exception_ops.throwTdzReference(ctx);
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
-                    return err;
-                }
+            if (slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) {
+                const err = exception_ops.throwTdzReference(ctx);
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                return err;
             }
             try array_ops.pushSlotValue(stack, frame.locals[idx]);
         },
         op.put_loc_check => {
-            if (frame.localIsUninitialized(idx)) {
+            if (slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) {
                 const err = exception_ops.throwTdzReference(ctx);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
@@ -266,7 +261,7 @@ pub noinline fn checkedLocVm(
             try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         },
         op.set_loc_check => {
-            if (frame.localIsUninitialized(idx)) {
+            if (slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) {
                 const err = exception_ops.throwTdzReference(ctx);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
@@ -293,7 +288,6 @@ pub noinline fn checkedLocVm(
             if (!constructor_this.isUndefined()) {
                 try slot_ops.setSlotValue(ctx, &frame.this_value, constructor_this.dup());
             }
-            frame.clearLocalUninitialized(idx);
             try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         },
         else => unreachable,
@@ -1029,8 +1023,8 @@ fn denseArrayAppendValueFromBytecode(
     first_value_idx: u16,
     first_value_next_pc: usize,
 ) ?DenseArrayAppendValue {
-    if (first_value_idx >= frame.locals.len or first_value_idx >= frame.locals_uninit.len) return null;
-    if (frame.localIsUninitialized(first_value_idx)) return null;
+    if (first_value_idx >= frame.locals.len) return null;
+    if (slot_ops.varRefSlotIsUninitialized(frame.locals[first_value_idx])) return null;
     const value = slotValueBorrowed(frame.locals[first_value_idx]);
     if (value.isUninitialized()) return null;
 
@@ -1166,8 +1160,8 @@ fn tryStoreStringFromCharCodeInt32LocalAppend(
     }
     const store = decodeLocalPut(code, store_pc) orelse return false;
     if (store.idx != local_idx) return false;
-    if (local_idx >= frame.locals.len or local_idx >= frame.locals_uninit.len) return false;
-    if (frame.localIsUninitialized(local_idx)) return false;
+    if (local_idx >= frame.locals.len) return false;
+    if (slot_ops.varRefSlotIsUninitialized(frame.locals[local_idx])) return false;
     if (local_idx < function.var_is_const.len and function.var_is_const[local_idx]) return false;
 
     const lhs = slotValueBorrowed(frame.locals[local_idx]);
@@ -1187,9 +1181,6 @@ fn tryStoreStringFromCharCodeInt32LocalAppend(
         const lhs_bytes = lhs_string.borrowLatin1() orelse return false;
         const replacement = (try core.string.String.createLatin1Concat(ctx.runtime, lhs_bytes, &.{byte})).value();
         try slot_ops.setSlotValue(ctx, &frame.locals[local_idx], replacement);
-    }
-    if (local_idx < function.var_is_lexical.len and function.var_is_lexical[local_idx]) {
-        frame.clearLocalUninitialized(local_idx);
     }
     try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, local_idx, sync_global_lexical_locals);
     frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;

@@ -164,9 +164,8 @@ pub noinline fn compareVm(
 pub inline fn tryInt32Binary(stack: *stack_mod.Stack, binop: u8) bool {
     const n = stack.values.len;
     if (n < 2) return false;
-    const lhs_int = stack.values[n - 2].asInt32() orelse return false;
-    const rhs_int = stack.values[n - 1].asInt32() orelse return false;
-    const result = fastBinaryInt32(binop, lhs_int, rhs_int) orelse return false;
+    const ints = core.JSValue.asInt32Pair(stack.values[n - 2], stack.values[n - 1]) orelse return false;
+    const result = fastBinaryInt32(binop, ints.lhs, ints.rhs) orelse return false;
     stack.values[n - 2] = result;
     stack.values = stack.values.ptr[0 .. n - 1];
     return true;
@@ -175,9 +174,8 @@ pub inline fn tryInt32Binary(stack: *stack_mod.Stack, binop: u8) bool {
 pub inline fn tryInt32BinaryWindow(base: [*]core.JSValue, sp_len: *usize, binop: u8) bool {
     const n = sp_len.*;
     if (n < 2) return false;
-    const lhs_int = base[n - 2].asInt32() orelse return false;
-    const rhs_int = base[n - 1].asInt32() orelse return false;
-    const result = fastBinaryInt32(binop, lhs_int, rhs_int) orelse return false;
+    const ints = core.JSValue.asInt32Pair(base[n - 2], base[n - 1]) orelse return false;
+    const result = fastBinaryInt32(binop, ints.lhs, ints.rhs) orelse return false;
     base[n - 2] = result;
     sp_len.* = n - 1;
     return true;
@@ -189,15 +187,14 @@ pub inline fn tryInt32BinaryWindow(base: [*]core.JSValue, sp_len: *usize, binop:
 pub inline fn tryInt32Compare(stack: *stack_mod.Stack, cmp: u8) bool {
     const n = stack.values.len;
     if (n < 2) return false;
-    const lhs_int = stack.values[n - 2].asInt32() orelse return false;
-    const rhs_int = stack.values[n - 1].asInt32() orelse return false;
+    const ints = core.JSValue.asInt32Pair(stack.values[n - 2], stack.values[n - 1]) orelse return false;
     const result = switch (cmp) {
-        op.lt => lhs_int < rhs_int,
-        op.lte => lhs_int <= rhs_int,
-        op.gt => lhs_int > rhs_int,
-        op.gte => lhs_int >= rhs_int,
-        op.eq, op.strict_eq => lhs_int == rhs_int,
-        op.neq, op.strict_neq => lhs_int != rhs_int,
+        op.lt => ints.lhs < ints.rhs,
+        op.lte => ints.lhs <= ints.rhs,
+        op.gt => ints.lhs > ints.rhs,
+        op.gte => ints.lhs >= ints.rhs,
+        op.eq, op.strict_eq => ints.lhs == ints.rhs,
+        op.neq, op.strict_neq => ints.lhs != ints.rhs,
         else => return false,
     };
     stack.values[n - 2] = core.JSValue.boolean(result);
@@ -208,15 +205,14 @@ pub inline fn tryInt32Compare(stack: *stack_mod.Stack, cmp: u8) bool {
 pub inline fn tryInt32CompareWindow(base: [*]core.JSValue, sp_len: *usize, cmp: u8) bool {
     const n = sp_len.*;
     if (n < 2) return false;
-    const lhs_int = base[n - 2].asInt32() orelse return false;
-    const rhs_int = base[n - 1].asInt32() orelse return false;
+    const ints = core.JSValue.asInt32Pair(base[n - 2], base[n - 1]) orelse return false;
     const result = switch (cmp) {
-        op.lt => lhs_int < rhs_int,
-        op.lte => lhs_int <= rhs_int,
-        op.gt => lhs_int > rhs_int,
-        op.gte => lhs_int >= rhs_int,
-        op.eq, op.strict_eq => lhs_int == rhs_int,
-        op.neq, op.strict_neq => lhs_int != rhs_int,
+        op.lt => ints.lhs < ints.rhs,
+        op.lte => ints.lhs <= ints.rhs,
+        op.gt => ints.lhs > ints.rhs,
+        op.gte => ints.lhs >= ints.rhs,
+        op.eq, op.strict_eq => ints.lhs == ints.rhs,
+        op.neq, op.strict_neq => ints.lhs != ints.rhs,
         else => return false,
     };
     base[n - 2] = core.JSValue.boolean(result);
@@ -650,8 +646,8 @@ fn parseCheckedLocalInt32LessThanLocalLengthCondition(code: []const u8, target_p
 }
 
 fn localArrayLengthI32(frame: *const frame_mod.Frame, array_idx: u16) ?i32 {
-    if (array_idx >= frame.locals.len or array_idx >= frame.locals_uninit.len) return null;
-    if (frame.localIsUninitialized(array_idx)) return null;
+    if (array_idx >= frame.locals.len) return null;
+    if (slot_ops.varRefSlotIsUninitialized(frame.locals[array_idx])) return null;
     const object = objectFromValue(frame.locals[array_idx]) orelse return null;
     if (object.proxyTarget() != null or object.hasExoticMethods() or !object.flags.is_array) return null;
     if (object.arrayLength() > @as(u32, @intCast(std.math.maxInt(i32)))) return null;

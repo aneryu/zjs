@@ -104,6 +104,16 @@ pub const VmStackArena = struct {
         return self.chunks[next_index][0..n];
     }
 
+    pub fn carveTyped(self: *VmStackArena, account: *memory.MemoryAccount, comptime T: type, n: usize) ?[]T {
+        if (n == 0) return &.{};
+        if (@alignOf(T) > @alignOf(JSValue)) return null;
+        const byte_count = std.math.mul(usize, @sizeOf(T), n) catch return null;
+        const slot_count = std.math.divCeil(usize, byte_count, @sizeOf(JSValue)) catch return null;
+        const value_window = self.carve(account, slot_count) orelse return null;
+        const bytes = std.mem.sliceAsBytes(value_window);
+        return std.mem.bytesAsSlice(T, bytes[0..byte_count]);
+    }
+
     /// Restore the watermark taken by `mark`. All values stored in the
     /// released region must already have been freed by frame/stack teardown.
     pub fn restore(self: *VmStackArena, m: Mark) void {
@@ -186,23 +196,27 @@ pub const ValueRootBuffer = struct {
     pub fn initCopy(rt: *JSRuntime, source: []const JSValue) !ValueRootBuffer {
         if (source.len == 0) return .{};
 
-        const saved_trigger_fn = rt.memory.trigger_gc_fn;
-        const saved_trigger_ctx = rt.memory.trigger_gc_ctx;
-        rt.memory.trigger_gc_fn = null;
-        rt.memory.trigger_gc_ctx = null;
-        defer {
-            rt.memory.trigger_gc_fn = saved_trigger_fn;
-            rt.memory.trigger_gc_ctx = saved_trigger_ctx;
-        }
-
         const values = try rt.memory.alloc(JSValue, source.len);
-        @memcpy(values, source);
+        var initialized: usize = 0;
+        errdefer {
+            for (values[0..initialized]) |value| value.free(rt);
+            rt.memory.free(JSValue, values);
+        }
+        for (source, 0..) |value, idx| {
+            values[idx] = value.dup();
+            initialized += 1;
+        }
         return .{ .values = values };
     }
 
     pub fn deinit(self: *ValueRootBuffer, rt: *JSRuntime) void {
         const values = self.values;
         self.values = &.{};
+        for (values) |*slot| {
+            const value = slot.*;
+            slot.* = JSValue.undefinedValue();
+            value.free(rt);
+        }
         if (values.len != 0) rt.memory.free(JSValue, values);
     }
 
@@ -441,6 +455,7 @@ pub const WeakPersistentValue = struct {
     ) !WeakPersistentValue {
         const identity = (try object_mod.Object.weakIdentityFromValue(runtime, value)) orelse return error.InvalidWeakTarget;
         const slot = try runtime.createWeakRootSlot(identity, callback, callback_context);
+        runtime.retainWeakIdentity(identity);
         return .{
             .runtime = runtime,
             .slot = slot,
@@ -631,10 +646,6 @@ pub const JSRuntime = struct {
     persistent_root_slots_capacity: usize = 0,
     weak_root_slots: []*WeakRootSlot = &.{},
     weak_root_slots_capacity: usize = 0,
-    external_symbol_roots: []atom.Atom = &.{},
-    external_symbol_roots_capacity: usize = 0,
-    external_value_roots: []JSValue = &.{},
-    external_value_roots_capacity: usize = 0,
     active_value_roots: ?*const ValueRootFrame = null,
     pending_finalization_jobs: []FinalizationJob = &.{},
     pending_finalization_jobs_capacity: usize = 0,
@@ -786,7 +797,7 @@ pub const JSRuntime = struct {
         errdefer {
             rt.classes.deinit();
         }
-        rt.shapes = shape.Registry.init(&rt.memory, &rt.atoms);
+        rt.shapes = shape.Registry.init(rt, &rt.memory, &rt.atoms, &rt.gc);
         rt.modules = module.Registry.init(&rt.memory, &rt.atoms);
         rt.auto_init_table = .empty;
         rt.materialize_builtin_namespace_cb = null;
@@ -804,10 +815,6 @@ pub const JSRuntime = struct {
         rt.persistent_root_slots_capacity = 0;
         rt.weak_root_slots = &.{};
         rt.weak_root_slots_capacity = 0;
-        rt.external_symbol_roots = &.{};
-        rt.external_symbol_roots_capacity = 0;
-        rt.external_value_roots = &.{};
-        rt.external_value_roots_capacity = 0;
         rt.active_value_roots = null;
         rt.pending_finalization_jobs = &.{};
         rt.pending_finalization_jobs_capacity = 0;
@@ -934,8 +941,6 @@ pub const JSRuntime = struct {
         self.clearLocalRootSlots();
         self.clearPersistentRootSlots();
         self.clearWeakRootSlots(false);
-        self.clearExternalSymbolRoots();
-        self.clearExternalValueRoots();
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
         self.modules.deinit(self);
@@ -970,8 +975,6 @@ pub const JSRuntime = struct {
         const local_root_slots: []*RootSlot = if (self.local_root_slots_capacity != 0) self.local_root_slots.ptr[0..self.local_root_slots_capacity] else self.local_root_slots[0..0];
         const persistent_root_slots: []*RootSlot = if (self.persistent_root_slots_capacity != 0) self.persistent_root_slots.ptr[0..self.persistent_root_slots_capacity] else self.persistent_root_slots[0..0];
         const weak_root_slots: []*WeakRootSlot = if (self.weak_root_slots_capacity != 0) self.weak_root_slots.ptr[0..self.weak_root_slots_capacity] else self.weak_root_slots[0..0];
-        const external_symbol_roots: []atom.Atom = if (self.external_symbol_roots_capacity != 0) self.external_symbol_roots.ptr[0..self.external_symbol_roots_capacity] else self.external_symbol_roots[0..0];
-        const external_value_roots: []JSValue = if (self.external_value_roots_capacity != 0) self.external_value_roots.ptr[0..self.external_value_roots_capacity] else self.external_value_roots[0..0];
         const external_host_functions: []host_function.ExternalRecord = if (self.external_host_functions_capacity != 0) self.external_host_functions.ptr[0..self.external_host_functions_capacity] else self.external_host_functions[0..0];
         const cached_iterator_next_entries: []CachedIteratorNextEntry = if (self.cached_iterator_next_entries_capacity != 0) self.cached_iterator_next_entries.ptr[0..self.cached_iterator_next_entries_capacity] else self.cached_iterator_next_entries[0..0];
         const deferred_native_cleanups: []NativeCleanupJob = if (self.deferred_native_cleanups_capacity != 0) self.deferred_native_cleanups.ptr[0..self.deferred_native_cleanups_capacity] else self.deferred_native_cleanups[0..0];
@@ -986,10 +989,6 @@ pub const JSRuntime = struct {
         self.persistent_root_slots_capacity = 0;
         self.weak_root_slots = &.{};
         self.weak_root_slots_capacity = 0;
-        self.external_symbol_roots = &.{};
-        self.external_symbol_roots_capacity = 0;
-        self.external_value_roots = &.{};
-        self.external_value_roots_capacity = 0;
         self.external_host_functions = &.{};
         self.external_host_functions_capacity = 0;
         self.cached_iterator_next_entries = &.{};
@@ -1004,8 +1003,6 @@ pub const JSRuntime = struct {
         if (local_root_slots.len != 0) self.memory.free(*RootSlot, local_root_slots);
         if (persistent_root_slots.len != 0) self.memory.free(*RootSlot, persistent_root_slots);
         if (weak_root_slots.len != 0) self.memory.free(*WeakRootSlot, weak_root_slots);
-        if (external_symbol_roots.len != 0) self.memory.free(atom.Atom, external_symbol_roots);
-        if (external_value_roots.len != 0) self.memory.free(JSValue, external_value_roots);
         if (external_host_functions.len != 0) self.memory.free(host_function.ExternalRecord, external_host_functions);
         if (cached_iterator_next_entries.len != 0) self.memory.free(CachedIteratorNextEntry, cached_iterator_next_entries);
         if (deferred_native_cleanups.len != 0) self.memory.free(NativeCleanupJob, deferred_native_cleanups);
@@ -1038,6 +1035,15 @@ pub const JSRuntime = struct {
         self.memory.free(T, slice);
     }
 
+    pub inline fn remapRuntime(self: *JSRuntime, comptime T: type, slice: []T, new_count: usize) !?[]T {
+        if (new_count > slice.len) {
+            const old_bytes = std.math.mul(usize, @sizeOf(T), slice.len) catch std.math.maxInt(usize);
+            const new_bytes = std.math.mul(usize, @sizeOf(T), new_count) catch std.math.maxInt(usize);
+            self.requestGCForAllocation(new_bytes -| old_bytes);
+        }
+        return self.memory.remap(T, slice, new_count);
+    }
+
     pub inline fn createRuntime(self: *JSRuntime, comptime T: type) !*T {
         self.requestGCForAllocation(@sizeOf(T));
         return self.memory.createNoTrigger(T);
@@ -1059,15 +1065,11 @@ pub const JSRuntime = struct {
     pub fn registerObject(self: *JSRuntime, object: *Object) !void {
         try self.gc.addWithSize(&object.header, object.allocationSize(self));
         if (self.gc.hasPendingMajorRequest() or self.memory.allocated_bytes > self.malloc_gc_threshold) {
-            _ = self.pollGC(self.active_value_roots, .normal) catch {};
+            _ = self.pollGC(null, .normal) catch {};
         }
     }
 
     pub fn unregisterObject(self: *JSRuntime, object: *Object) void {
-        const notify = self.gc.phase != .deinit;
-        if (self.peekWeakObjectIdentity(object)) |weak_identity| {
-            self.clearWeakPersistentIdentity(weak_identity, notify);
-        }
         self.unregisterBorrowedReferenceHolder(object);
         self.gc.unlinkObjectWithBytes(&object.header, object.allocationSize(self));
     }
@@ -1174,12 +1176,14 @@ pub const JSRuntime = struct {
         for (self.persistent_root_slots) |slot| {
             try visitor.value(&slot.value);
         }
-        try visitor.values(self.external_value_roots);
         for (self.pending_finalization_jobs) |*job| {
             try job.traceRoots(visitor);
         }
         for (self.deferred_class_payload_finalizers) |*job| {
             try job.traceRoots(self, visitor);
+        }
+        for (self.deferred_weak_value_frees) |*item| {
+            try visitor.value(&item.value);
         }
         try self.job_queue.traceRoots(visitor);
         for (self.root_providers) |provider| {
@@ -1188,7 +1192,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn traceActiveRoots(self: *JSRuntime, visitor: *RootVisitor) RootTraceError!void {
-        try self.traceRoots(self.active_value_roots, visitor);
+        try self.traceRoots(null, visitor);
     }
 
     fn traceValueRootFrames(self: *JSRuntime, roots: ?*const ValueRootFrame, visitor: *RootVisitor) RootTraceError!void {
@@ -1265,6 +1269,7 @@ pub const JSRuntime = struct {
 
     fn destroyWeakRootSlot(self: *JSRuntime, slot: *WeakRootSlot) void {
         self.removeWeakRootSlot(slot);
+        self.clearWeakRootSlot(slot, false);
         slot.* = .{};
         self.memory.destroy(WeakRootSlot, slot);
     }
@@ -1352,9 +1357,9 @@ pub const JSRuntime = struct {
         if (capacity != 0) self.memory.free(*WeakRootSlot, slots.ptr[0..capacity]);
     }
 
-    fn clearWeakRootSlot(self: *JSRuntime, slot: *WeakRootSlot, notify: bool) void {
+    pub fn clearWeakRootSlot(self: *JSRuntime, slot: *WeakRootSlot, notify: bool) void {
         if (slot.identity == null) return;
-        slot.identity = null;
+        self.clearWeakIdentitySlot(&slot.identity);
         if (notify) {
             if (slot.callback) |callback| callback(self, slot.callback_context);
         }
@@ -1376,6 +1381,39 @@ pub const JSRuntime = struct {
         }
     }
 
+    pub fn retainWeakIdentity(self: *JSRuntime, identity: usize) void {
+        if ((identity & 1) == 0) {
+            const object = self.objectFromWeakIdentity(identity) orelse return;
+            std.debug.assert(object.header.rc > 0);
+            object.weakref_count += 1;
+            return;
+        }
+        const atom_id = identity >> 1;
+        if (atom_id > std.math.maxInt(atom.Atom)) return;
+        self.atoms.retainSymbolWeakRef(@intCast(atom_id));
+    }
+
+    pub fn releaseWeakIdentity(self: *JSRuntime, identity: usize) void {
+        if ((identity & 1) == 0) {
+            const object = self.objectFromWeakIdentity(identity) orelse return;
+            std.debug.assert(object.weakref_count > 0);
+            object.weakref_count -= 1;
+            if (object.weakref_count == 0 and object.header.rc == 0 and !object.header.flags.mark) {
+                Object.destroyDeadWeakHusk(self, object);
+            }
+            return;
+        }
+        const atom_id = identity >> 1;
+        if (atom_id > std.math.maxInt(atom.Atom)) return;
+        self.atoms.releaseSymbolWeakRef(self, @intCast(atom_id));
+    }
+
+    pub fn clearWeakIdentitySlot(self: *JSRuntime, slot: *?usize) void {
+        const identity = slot.* orelse return;
+        slot.* = null;
+        self.releaseWeakIdentity(identity);
+    }
+
     fn weakIdentityIsCurrentlyLive(self: *JSRuntime, identity: usize) bool {
         if ((identity & 1) != 0) {
             const atom_id = identity >> 1;
@@ -1390,7 +1428,8 @@ pub const JSRuntime = struct {
             const atom_id = identity >> 1;
             if (atom_id > std.math.maxInt(atom.Atom)) return JSValue.undefinedValue();
             const symbol_atom: atom.Atom = @intCast(atom_id);
-            return if (self.atoms.kind(symbol_atom) == .symbol) JSValue.symbol(symbol_atom) else JSValue.undefinedValue();
+            if (self.atoms.kind(symbol_atom) != .symbol) return JSValue.undefinedValue();
+            return self.atoms.symbolValueIfLive(self, symbol_atom) catch JSValue.undefinedValue();
         }
         const object = self.liveObjectFromWeakIdentity(identity) orelse return JSValue.undefinedValue();
         return object.value().dup();
@@ -1401,9 +1440,14 @@ pub const JSRuntime = struct {
     /// and objects that are currently being destroyed.
     pub fn liveObjectFromWeakIdentity(self: *const JSRuntime, identity: usize) ?*Object {
         if ((identity & 1) != 0) return null;
-        const object = self.weak_id_objects.get(identity >> 1) orelse return null;
+        const object = self.objectFromWeakIdentity(identity) orelse return null;
         if (object.header.rc == 0) return null;
         return object;
+    }
+
+    fn objectFromWeakIdentity(self: *const JSRuntime, identity: usize) ?*Object {
+        if ((identity & 1) != 0) return null;
+        return self.weak_id_objects.get(identity >> 1);
     }
 
     /// Returns the encoded weak identity for `object`, allocating a fresh
@@ -1488,29 +1532,39 @@ pub const JSRuntime = struct {
         return self.persistent_root_slots.len;
     }
 
-    pub fn registerExternalSymbolRoot(self: *JSRuntime, atom_id: atom.Atom) !void {
-        if (self.atoms.kind(atom_id) != .symbol) return;
-        const retained = self.atoms.dup(atom_id);
-        errdefer self.atoms.free(retained);
-        try appendRuntimeAtom(&self.memory, &self.external_symbol_roots, &self.external_symbol_roots_capacity, retained);
+    pub fn symbolValue(self: *JSRuntime, atom_id: atom.Atom) !JSValue {
+        return self.atoms.symbolValue(self, atom_id);
     }
 
-    /// External roots are useful for host-owned Values or Atoms that must not be garbage collected
-    /// but are stored outside the engine's standard call stack / execution state.
-    ///
-    /// Invariants:
-    /// 1. Values registered with `registerExternalValueSymbolRoot` must be unregistered with
-    ///    `unregisterExternalValueSymbolRoot` when the host no longer needs them.
-    /// 2. If a registered JSValue is a Symbol atom, it is retained via the atom subsystem.
-    /// 3. Registered value roots are preserved across cycle-collection GC passes.
+    pub fn takeSymbolValue(self: *JSRuntime, atom_id: atom.Atom) !JSValue {
+        return self.atoms.takeSymbolValue(self, atom_id);
+    }
+
+    pub fn newSymbolValue(self: *JSRuntime, description: ?[]const u8) !JSValue {
+        const atom_id = if (description) |bytes|
+            try self.atoms.newValueSymbol(bytes)
+        else
+            try self.atoms.newValueSymbolNoDescription();
+        return self.takeSymbolValue(atom_id);
+    }
+
+    pub fn globalSymbolValue(self: *JSRuntime, key: []const u8) !JSValue {
+        const atom_id = try self.atoms.internRegisteredValueSymbol(key);
+        return self.symbolValue(atom_id);
+    }
+
+    pub fn registerExternalSymbolRoot(self: *JSRuntime, atom_id: atom.Atom) !void {
+        _ = self;
+        _ = atom_id;
+    }
+
+    /// Compatibility shim for host records that used to participate in zjs's
+    /// symbol-root scan. S2 made symbol values refcounted, so the stored
+    /// JSValue itself now owns any symbol body it needs.
     pub fn registerExternalValueSymbolRoot(self: *JSRuntime, value: JSValue) !bool {
-        if (value.asSymbolAtom()) |atom_id| {
-            try self.registerExternalSymbolRoot(atom_id);
-            return true;
-        }
-        if (!valueMayContainNestedSymbolRoots(value)) return false;
-        try appendRuntimeValue(&self.memory, &self.external_value_roots, &self.external_value_roots_capacity, value);
-        return true;
+        _ = self;
+        _ = value;
+        return false;
     }
 
     pub fn dupValue(self: *JSRuntime, value: JSValue) JSValue {
@@ -1544,73 +1598,13 @@ pub const JSRuntime = struct {
     }
 
     pub fn unregisterExternalSymbolRoot(self: *JSRuntime, atom_id: atom.Atom) void {
-        var found: ?usize = null;
-        for (self.external_symbol_roots, 0..) |registered, index| {
-            if (registered == atom_id) {
-                found = index;
-                break;
-            }
-        }
-        const index = found orelse return;
-        const retained = self.external_symbol_roots[index];
-        if (index + 1 < self.external_symbol_roots.len) {
-            std.mem.copyForwards(atom.Atom, self.external_symbol_roots[index .. self.external_symbol_roots.len - 1], self.external_symbol_roots[index + 1 ..]);
-        }
-        self.external_symbol_roots = self.external_symbol_roots[0 .. self.external_symbol_roots.len - 1];
-        self.atoms.free(retained);
-        if (self.external_symbol_roots.len == 0 and self.external_symbol_roots_capacity != 0) {
-            const old_roots = self.external_symbol_roots.ptr[0..self.external_symbol_roots_capacity];
-            self.external_symbol_roots = &.{};
-            self.external_symbol_roots_capacity = 0;
-            self.memory.free(atom.Atom, old_roots);
-        }
+        _ = self;
+        _ = atom_id;
     }
 
     pub fn unregisterExternalValueSymbolRoot(self: *JSRuntime, value: JSValue) void {
-        if (value.asSymbolAtom()) |atom_id| {
-            self.unregisterExternalSymbolRoot(atom_id);
-            return;
-        }
-        if (!valueMayContainNestedSymbolRoots(value)) return;
-        self.unregisterExternalValueRoot(value);
-    }
-
-    pub fn clearExternalSymbolRoots(self: *JSRuntime) void {
-        const roots = self.external_symbol_roots;
-        const capacity = self.external_symbol_roots_capacity;
-        self.external_symbol_roots = &.{};
-        self.external_symbol_roots_capacity = 0;
-        for (roots) |atom_id| self.atoms.free(atom_id);
-        if (capacity != 0) self.memory.free(atom.Atom, roots.ptr[0..capacity]);
-    }
-
-    fn unregisterExternalValueRoot(self: *JSRuntime, value: JSValue) void {
-        var found: ?usize = null;
-        for (self.external_value_roots, 0..) |registered, index| {
-            if (registered.same(value)) {
-                found = index;
-                break;
-            }
-        }
-        const index = found orelse return;
-        if (index + 1 < self.external_value_roots.len) {
-            std.mem.copyForwards(JSValue, self.external_value_roots[index .. self.external_value_roots.len - 1], self.external_value_roots[index + 1 ..]);
-        }
-        self.external_value_roots = self.external_value_roots[0 .. self.external_value_roots.len - 1];
-        if (self.external_value_roots.len == 0 and self.external_value_roots_capacity != 0) {
-            const old_roots = self.external_value_roots.ptr[0..self.external_value_roots_capacity];
-            self.external_value_roots = &.{};
-            self.external_value_roots_capacity = 0;
-            self.memory.free(JSValue, old_roots);
-        }
-    }
-
-    pub fn clearExternalValueRoots(self: *JSRuntime) void {
-        const roots = self.external_value_roots;
-        const capacity = self.external_value_roots_capacity;
-        self.external_value_roots = &.{};
-        self.external_value_roots_capacity = 0;
-        if (capacity != 0) self.memory.free(JSValue, roots.ptr[0..capacity]);
+        _ = self;
+        _ = value;
     }
 
     pub fn registerExternalHostFunction(self: *JSRuntime, record: host_function.ExternalRecord) !u32 {
@@ -1665,7 +1659,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn runObjectCycleRemoval(self: *JSRuntime) usize {
-        return self.runObjectCycleRemovalWithValueRoots(self.active_value_roots);
+        return self.runObjectCycleRemovalWithValueRoots(null);
     }
 
     pub fn runObjectCycleRemovalWithValueRoots(self: *JSRuntime, roots: ?*const ValueRootFrame) usize {
@@ -1674,7 +1668,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn tryRunObjectCycleRemoval(self: *JSRuntime) gc.CollectionError!gc.CollectionResult {
-        return self.tryRunObjectCycleRemovalWithValueRoots(self.active_value_roots);
+        return self.tryRunObjectCycleRemovalWithValueRoots(null);
     }
 
     pub fn tryRunObjectCycleRemovalWithValueRoots(
@@ -1724,6 +1718,7 @@ pub const JSRuntime = struct {
         roots: ?*const ValueRootFrame,
         mode: GCPollMode,
     ) gc.CollectionError!gc.CollectionResult {
+        _ = roots;
         if (self.gc_running) return .{};
         const scheduler_point: gc.SchedulerPoint = switch (mode) {
             .normal => .allocation_slow_path,
@@ -1749,7 +1744,7 @@ pub const JSRuntime = struct {
         else
             gc.RequestReason.manual;
         self.gc.beginMajorCycle(reason, profile.nowNanos());
-        return try self.tryRunObjectCycleRemovalWithValueRoots(roots orelse self.active_value_roots);
+        return try self.tryRunObjectCycleRemovalWithValueRoots(null);
     }
 
     pub fn gcSafepoint(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!gc.CollectionResult {
@@ -1909,7 +1904,10 @@ pub const JSRuntime = struct {
     }
 
     fn weakReferenceCount(self: JSRuntime) usize {
-        var count = self.weak_root_slots.len;
+        var count: usize = 0;
+        for (self.weak_root_slots) |slot| {
+            if (slot.identity != null) count += 1;
+        }
         var gc_iter = self.gc.objectIterator();
         while (gc_iter.next()) |header| {
             if (header.kind == .object) {
@@ -1974,6 +1972,14 @@ pub const JSRuntime = struct {
                     return;
                 }
             }
+        }
+        if (comptime memory.force_gc_on_allocation_enabled) {
+            if (self.memory.trigger_gc_fn == null) return;
+            if (self.gc_running) return;
+            const saved_threshold = self.malloc_gc_threshold;
+            defer self.malloc_gc_threshold = saved_threshold;
+            _ = self.forceGC(null) catch {};
+            return;
         }
         if (self.gc_running) return;
         const total = std.math.add(usize, self.memory.allocated_bytes, size) catch std.math.maxInt(usize);
@@ -2480,6 +2486,16 @@ pub const JSRuntime = struct {
             const previous_skip_identity = self.current_deferred_weak_value_free_identity;
             self.current_deferred_weak_value_free_identity = skip_identity;
             defer self.current_deferred_weak_value_free_identity = previous_skip_identity;
+            if (item.value.refCountHeader()) |header| {
+                if (header.rc == 0) {
+                    const already_consumed_prequeued_object =
+                        header.kind == .object and
+                        skip_identity != null and
+                        skip_identity.? == (@intFromPtr(header) & ~@as(usize, 1));
+                    std.debug.assert(already_consumed_prequeued_object);
+                    if (already_consumed_prequeued_object) continue;
+                }
+            }
             item.value.free(self);
         }
         if (self.deferred_weak_value_frees_capacity != 0) {
@@ -2712,12 +2728,6 @@ fn objectFromLastRefValue(value: JSValue) ?*Object {
     return @alignCast(@fieldParentPtr("header", header));
 }
 
-fn valueMayContainNestedSymbolRoots(value: JSValue) bool {
-    if (value.isObject()) return true;
-    const header = value.objectHeader() orelse return false;
-    return header.kind == .function_bytecode;
-}
-
 fn appendRuntimeObject(account: *memory.MemoryAccount, slice: *[]*Object, capacity: *usize, item: *Object) !void {
     if (slice.*.len == capacity.*) {
         const next_capacity = if (capacity.* == 0) 64 else capacity.* * 2;
@@ -2729,23 +2739,6 @@ fn appendRuntimeObject(account: *memory.MemoryAccount, slice: *[]*Object, capaci
         slice.* = next[0..slice.*.len];
         capacity.* = next_capacity;
         if (old_capacity != 0) account.free(*Object, old);
-    }
-    const len = slice.*.len;
-    slice.* = slice.*.ptr[0 .. len + 1];
-    slice.*[len] = item;
-}
-
-fn appendRuntimeValue(account: *memory.MemoryAccount, slice: *[]JSValue, capacity: *usize, item: JSValue) !void {
-    if (slice.*.len == capacity.*) {
-        const next_capacity = if (capacity.* == 0) 4 else capacity.* * 2;
-        const next = try account.alloc(JSValue, next_capacity);
-        errdefer account.free(JSValue, next);
-        @memcpy(next[0..slice.*.len], slice.*);
-        const old_capacity = capacity.*;
-        const old = if (old_capacity != 0) slice.*.ptr[0..old_capacity] else slice.*[0..0];
-        slice.* = next[0..slice.*.len];
-        capacity.* = next_capacity;
-        if (old_capacity != 0) account.free(JSValue, old);
     }
     const len = slice.*.len;
     slice.* = slice.*.ptr[0 .. len + 1];
@@ -2802,23 +2795,6 @@ fn appendRuntimeWeakRootSlot(account: *memory.MemoryAccount, slice: *[]*WeakRoot
         slice.* = next[0..slice.*.len];
         capacity.* = next_capacity;
         if (old_capacity != 0) account.free(*WeakRootSlot, old);
-    }
-    const len = slice.*.len;
-    slice.* = slice.*.ptr[0 .. len + 1];
-    slice.*[len] = item;
-}
-
-fn appendRuntimeAtom(account: *memory.MemoryAccount, slice: *[]atom.Atom, capacity: *usize, item: atom.Atom) !void {
-    if (slice.*.len == capacity.*) {
-        const next_capacity = if (capacity.* == 0) 4 else capacity.* * 2;
-        const next = try account.alloc(atom.Atom, next_capacity);
-        errdefer account.free(atom.Atom, next);
-        @memcpy(next[0..slice.*.len], slice.*);
-        const old_capacity = capacity.*;
-        const old = if (old_capacity != 0) slice.*.ptr[0..old_capacity] else slice.*[0..0];
-        slice.* = next[0..slice.*.len];
-        capacity.* = next_capacity;
-        if (old_capacity != 0) account.free(atom.Atom, old);
     }
     const len = slice.*.len;
     slice.* = slice.*.ptr[0 .. len + 1];
@@ -2902,7 +2878,12 @@ test "external hard memory pressure requests urgent major gc" {
     try std.testing.expectEqual(@as(?gc.RequestUrgency, gc.RequestUrgency.urgent), pending.pending_request_urgency);
 
     _ = try rt.pollGC(null, .callback_boundary);
-    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_gc_count);
-    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_slice_count);
+    if (comptime memory.force_gc_on_allocation_enabled) {
+        try std.testing.expect(rt.gcStats().major_gc_count >= 1);
+        try std.testing.expect(rt.gcStats().major_slice_count >= 1);
+    } else {
+        try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_gc_count);
+        try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_slice_count);
+    }
     try std.testing.expect(!rt.gcPendingForTest());
 }

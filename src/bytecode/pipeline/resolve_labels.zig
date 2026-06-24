@@ -57,17 +57,6 @@ pub const JSContext = struct {
     }
 };
 
-/// Run Phase 3a label resolution on a function.
-///
-/// Input: a Bytecode with Phase 2 output (no temp opcodes except label).
-/// Output: the same Bytecode with label opcodes dropped.
-///
-/// This simplified implementation:
-/// - Drops OP_label opcodes (5 bytes: opcode + label:u32)
-/// - Preserves all other opcodes
-///
-/// Full QuickJS alignment (prologue, jump rewriting, short-form selection,
-/// coalescing) will be added when FunctionDef is integrated into the parser.
 /// Total byte length (opcode + operands) for `op_id` in final-form
 /// (non-temp) encoding, from the generated metadata table. This pass's
 /// input contains no temp opcode except `label` (resolve_variables
@@ -152,6 +141,36 @@ fn atomLabelTarget(code: []const u8, pc: usize) !usize {
     return @intCast(target);
 }
 
+fn skipLabels(code: []const u8, pc: usize) !usize {
+    var cursor = pc;
+    while (cursor < code.len and code[cursor] == opcode.op.label) {
+        if (cursor + 5 > code.len) return error.InvalidBytecode;
+        cursor += 5;
+    }
+    return cursor;
+}
+
+fn threadedJumpTarget(code: []const u8, pc: usize) !usize {
+    const original = try jumpTarget(code, pc);
+    var target = original;
+    var depth: usize = 0;
+    while (depth < 10) : (depth += 1) {
+        const target_pc = try skipLabels(code, target);
+        if (target_pc >= code.len or code[target_pc] != opcode.op.goto) return target;
+        const next = try jumpTarget(code, target_pc);
+        if (next == target) return original;
+        target = next;
+    }
+    return original;
+}
+
+fn resolvedJumpTarget(code: []const u8, pc: usize) !usize {
+    return switch (code[pc]) {
+        opcode.op.goto, opcode.op.if_false, opcode.op.if_true => threadedJumpTarget(code, pc),
+        else => jumpTarget(code, pc),
+    };
+}
+
 fn relOffset(from_pc: usize, target_pc: usize) i64 {
     return @as(i64, @intCast(target_pc)) - @as(i64, @intCast(from_pc + 1));
 }
@@ -182,14 +201,20 @@ fn jumpOpForSize(op_id: u8, size: usize) u8 {
     };
 }
 
+fn loweredPushI32Size(value: i32, use_short_opcodes: bool) usize {
+    if (!use_short_opcodes) return 5;
+    if (value >= -1 and value <= 7) return 1;
+    if (value >= std.math.minInt(i8) and value <= std.math.maxInt(i8)) return 2;
+    if (value >= std.math.minInt(i16) and value <= std.math.maxInt(i16)) return 3;
+    return 5;
+}
+
 fn loweredInstrSize(code: []const u8, pc: usize, use_short_opcodes: bool) usize {
     const op = code[pc];
     if (!use_short_opcodes) return instrSize(op);
     if (op == opcode.op.push_i32 and pc + 5 <= code.len) {
         const value = std.mem.readInt(i32, code[pc + 1 ..][0..4], .little);
-        if (value >= -1 and value <= 7) return 1;
-        if (value >= std.math.minInt(i8) and value <= std.math.maxInt(i8)) return 2;
-        if (value >= std.math.minInt(i16) and value <= std.math.maxInt(i16)) return 3;
+        return loweredPushI32Size(value, use_short_opcodes);
     }
     if (op == opcode.op.call and pc + 3 <= code.len) {
         const argc = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little);
@@ -204,6 +229,83 @@ fn loweredInstrSize(code: []const u8, pc: usize, use_short_opcodes: bool) usize 
         if (selectShortSlot(op, idx)) |form| return form.size;
     }
     return instrSize(op);
+}
+
+fn hasAtomOperand(op_id: u8) bool {
+    const fmt = opcode.formatOf(op_id);
+    return fmt == .atom or fmt == .atom_u8 or fmt == .atom_u16 or
+        fmt == .atom_label_u8 or fmt == .atom_label_u16;
+}
+
+fn hasJumpTargetInRange(code: []const u8, start_pc: usize, end_pc: usize) bool {
+    var scan_pc: usize = 0;
+    while (scan_pc < code.len) {
+        const op_id = code[scan_pc];
+        const size = if (op_id == opcode.op.label) 5 else instrSize(op_id);
+        if (size == 0 or scan_pc + size > code.len) return false;
+        const target = if (isJumpOp(op_id))
+            (jumpTarget(code, scan_pc) catch return false)
+        else if (isAtomLabelU8Op(op_id))
+            (atomLabelTarget(code, scan_pc) catch return false)
+        else
+            null;
+        if (target) |target_pc| {
+            if (target_pc >= start_pc and target_pc < end_pc) return true;
+        }
+        scan_pc += size;
+    }
+    return false;
+}
+
+const ConstantTestPeephole = struct {
+    taken: bool,
+    jump_pc: usize,
+    total_size: usize,
+};
+
+fn matchConstantTestPeephole(code: []const u8, pc: usize) ?ConstantTestPeephole {
+    if (pc + 10 > code.len or code[pc] != opcode.op.push_i32) return null;
+    const jump_pc = pc + 5;
+    const jump_op = code[jump_pc];
+    if (jump_op != opcode.op.if_false and jump_op != opcode.op.if_true) return null;
+    if (hasJumpTargetInRange(code, pc + 1, pc + 10)) return null;
+    const value = std.mem.readInt(i32, code[pc + 1 ..][0..4], .little);
+    const truthy = value != 0;
+    return .{
+        .taken = if (jump_op == opcode.op.if_true) truthy else !truthy,
+        .jump_pc = jump_pc,
+        .total_size = 10,
+    };
+}
+
+const PushI32NegPeephole = struct {
+    value: i32,
+    total_size: usize,
+};
+
+fn matchPushI32NegPeephole(code: []const u8, pc: usize) ?PushI32NegPeephole {
+    if (pc + 6 > code.len or code[pc] != opcode.op.push_i32 or code[pc + 5] != opcode.op.neg) return null;
+    if (hasJumpTargetInRange(code, pc + 1, pc + 6)) return null;
+    const value = std.mem.readInt(i32, code[pc + 1 ..][0..4], .little);
+    if (value == std.math.minInt(i32) or value == 0) return null;
+    return .{ .value = -value, .total_size = 6 };
+}
+
+fn deadCodePastGotoSize(code: []const u8, pc: usize) ?usize {
+    if (pc >= code.len or code[pc] != opcode.op.goto) return null;
+    const goto_size = instrSize(opcode.op.goto);
+    var scan_pc = pc + goto_size;
+    var skipped: usize = 0;
+    while (scan_pc < code.len) {
+        if (hasJumpTargetTo(code, scan_pc)) break;
+        const op_id = code[scan_pc];
+        const size = if (op_id == opcode.op.label) 5 else instrSize(op_id);
+        if (size == 0 or scan_pc + size > code.len) return null;
+        if (hasAtomOperand(op_id)) return null;
+        scan_pc += size;
+        skipped += size;
+    }
+    return if (skipped == 0) null else skipped;
 }
 
 fn undefinedDropPairSize(code: []const u8, pc: usize) ?usize {
@@ -314,10 +416,8 @@ fn redundantReturnUndefSize(code: []const u8, pc: usize) ?usize {
     return null;
 }
 
-fn emitLoweredInstruction(code: []const u8, pc: usize, output: []u8, out_idx: *usize, use_short_opcodes: bool) !void {
-    const op = code[pc];
-    if (use_short_opcodes and op == opcode.op.push_i32 and pc + 5 <= code.len) {
-        const value = std.mem.readInt(i32, code[pc + 1 ..][0..4], .little);
+fn emitPushI32Value(output: []u8, out_idx: *usize, value: i32, use_short_opcodes: bool) void {
+    if (use_short_opcodes) {
         if (value >= -1 and value <= 7) {
             output[out_idx.*] = switch (value) {
                 -1 => opcode.op.push_minus1,
@@ -346,6 +446,18 @@ fn emitLoweredInstruction(code: []const u8, pc: usize, output: []u8, out_idx: *u
             out_idx.* += 3;
             return;
         }
+    }
+    output[out_idx.*] = opcode.op.push_i32;
+    std.mem.writeInt(i32, output[out_idx.* + 1 ..][0..4], value, .little);
+    out_idx.* += 5;
+}
+
+fn emitLoweredInstruction(code: []const u8, pc: usize, output: []u8, out_idx: *usize, use_short_opcodes: bool) !void {
+    const op = code[pc];
+    if (op == opcode.op.push_i32 and pc + 5 <= code.len) {
+        const value = std.mem.readInt(i32, code[pc + 1 ..][0..4], .little);
+        emitPushI32Value(output, out_idx, value, use_short_opcodes);
+        return;
     }
     if (use_short_opcodes and op == opcode.op.call and pc + 3 <= code.len) {
         const argc = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little);
@@ -421,10 +533,18 @@ fn computeLayout(ctx: *const JSContext, positions: []usize, sizes: []usize, use_
                 0
             else if (matchAddLocPeephole(code, pc)) |_|
                 loweredInstrSize(code, pc + 3, use_short_opcodes) + 2
+            else if (matchConstantTestPeephole(code, pc)) |p| blk: {
+                if (!p.taken) break :blk 0;
+                const target = try resolvedJumpTarget(code, p.jump_pc);
+                const target_pc = positions[target];
+                const diff = relOffset(out_pc, target_pc);
+                break :blk jumpSizeForOffset(opcode.op.goto, diff, use_short_opcodes);
+            } else if (matchPushI32NegPeephole(code, pc)) |p|
+                loweredPushI32Size(p.value, use_short_opcodes)
             else if (isAtomLabelU8Op(op))
                 instrSize(op)
             else if (isJumpOp(op)) blk: {
-                const target = try jumpTarget(code, pc);
+                const target = try resolvedJumpTarget(code, pc);
                 const target_pc = positions[target];
                 const diff = relOffset(out_pc, target_pc);
                 break :blk jumpSizeForOffset(op, diff, use_short_opcodes);
@@ -432,7 +552,7 @@ fn computeLayout(ctx: *const JSContext, positions: []usize, sizes: []usize, use_
 
             sizes[pc] = new_size;
             if (old_size != new_size) changed = true;
-            const next_pc = pc + (undefinedDropPairSize(code, pc) orelse (redundantReturnUndefSize(code, pc) orelse (if (matchAddLocPeephole(code, pc)) |p| p.total_size else in_size)));
+            const next_pc = pc + (undefinedDropPairSize(code, pc) orelse (redundantReturnUndefSize(code, pc) orelse (if (matchAddLocPeephole(code, pc)) |p| p.total_size else if (matchConstantTestPeephole(code, pc)) |p| p.total_size else if (matchPushI32NegPeephole(code, pc)) |p| p.total_size else in_size + (deadCodePastGotoSize(code, pc) orelse 0))));
             var boundary_pc = pc + 1;
             while (boundary_pc <= next_pc and boundary_pc < positions.len) : (boundary_pc += 1) {
                 positions[boundary_pc] = out_pc + new_size;
@@ -447,9 +567,7 @@ fn computeLayout(ctx: *const JSContext, positions: []usize, sizes: []usize, use_
     return final_size;
 }
 
-fn emitJump(code: []const u8, pc: usize, output: []u8, out_idx: *usize, positions: []const usize, size: usize) !void {
-    const op = code[pc];
-    const target = try jumpTarget(code, pc);
+fn emitJumpToTarget(op: u8, target: usize, output: []u8, out_idx: *usize, positions: []const usize, size: usize) !void {
     const target_pc = positions[target];
     const current_pc = out_idx.*;
     const diff = relOffset(current_pc, target_pc);
@@ -467,6 +585,12 @@ fn emitJump(code: []const u8, pc: usize, output: []u8, out_idx: *usize, position
         else => return error.InvalidBytecode,
     }
     out_idx.* += size;
+}
+
+fn emitJump(code: []const u8, pc: usize, output: []u8, out_idx: *usize, positions: []const usize, size: usize) !void {
+    const op = code[pc];
+    const target = try resolvedJumpTarget(code, pc);
+    try emitJumpToTarget(op, target, output, out_idx, positions, size);
 }
 
 fn emitAtomLabelU8(code: []const u8, pc: usize, output: []u8, out_idx: *usize, positions: []const usize) !void {
@@ -643,10 +767,20 @@ pub fn run(ctx: *JSContext) !void {
             output[out_idx + 1] = @intCast(p.idx);
             out_idx += 2;
             i += p.total_size;
+        } else if (matchConstantTestPeephole(func.code, i)) |p| {
+            if (p.taken) {
+                const size = sizes[i];
+                const target = try resolvedJumpTarget(func.code, p.jump_pc);
+                try emitJumpToTarget(opcode.op.goto, target, output, &out_idx, positions, size);
+            }
+            i += p.total_size;
+        } else if (matchPushI32NegPeephole(func.code, i)) |p| {
+            emitPushI32Value(output, &out_idx, p.value, use_short_opcodes);
+            i += p.total_size;
         } else if (isJumpOp(op)) {
             const size = sizes[i];
             try emitJump(func.code, i, output, &out_idx, positions, size);
-            i += instrSize(op);
+            i += instrSize(op) + (deadCodePastGotoSize(func.code, i) orelse 0);
         } else if (isAtomLabelU8Op(op)) {
             try emitAtomLabelU8(func.code, i, output, &out_idx, positions);
             i += instrSize(op);

@@ -279,7 +279,7 @@ pub fn initializeModuleFunctionDeclarations(
     defer frame_var_refs_root.deinit();
     if (module_var_refs.len != 0) {
         frame.var_refs = try ctx.runtime.memory.alloc(core.JSValue, module_var_refs.len);
-        frame.var_refs_on_heap = true;
+        frame.installOwnedStorage(frame.var_refs);
         for (module_var_refs, 0..) |value, idx| frame.var_refs[idx] = value.dup();
         rooted_frame_var_refs = frame.var_refs;
     }
@@ -454,14 +454,14 @@ test "createVarRefCellWithConst roots direct symbol value while creating cell" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const cell_value = try createVarRefCellWithConst(ctx, core.JSValue.symbol(symbol_atom), true);
+    const cell_value = try createVarRefCellWithConst(ctx, try rt.symbolValue(symbol_atom), true);
     var cell_alive = true;
     defer if (cell_alive) cell_value.free(rt);
     const cell = varRefCellFromValue(cell_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = cell.varRefValue();
-    try std.testing.expect(stored.same(core.JSValue.symbol(symbol_atom)));
+    try std.testing.expectEqual(symbol_atom, stored.asSymbolAtom().?);
     try std.testing.expect(cell.varRefIsConstSlot().*);
 
     cell_value.free(rt);
@@ -590,7 +590,7 @@ test "ownedValueSliceFromList roots source list during runtime allocation" {
         for (list.items) |value| value.free(rt);
         list.deinit(rt.memory.allocator);
     }
-    try list.append(rt.memory.allocator, core.JSValue.symbol(first_atom));
+    try list.append(rt.memory.allocator, try rt.symbolValue(first_atom));
 
     const Trigger = struct {
         rt: *core.JSRuntime,
@@ -601,26 +601,8 @@ test "ownedValueSliceFromList roots source list during runtime allocation" {
         fn trigger(context: ?*anyopaque, size: usize) void {
             _ = size;
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            var visitor = core.runtime.RootVisitor{
-                .context = self,
-                .visit_value = @This().visitValue,
-                .visit_object = @This().visitObject,
-            };
-            self.rt.traceActiveRoots(&visitor) catch {
-                self.trace_failed = true;
-            };
-        }
-
-        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (slot.asSymbolAtom()) |atom_id| {
-                if (atom_id == self.atom_id) self.saw_value = true;
-            }
-        }
-
-        fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
-            _ = context;
-            _ = slot;
+            _ = self.rt.runObjectCycleRemoval();
+            self.saw_value = self.rt.atoms.name(self.atom_id) != null;
         }
     };
 
@@ -647,7 +629,7 @@ test "ownedValueSliceFromList roots source list during runtime allocation" {
     try std.testing.expect(trigger.saw_value);
     try std.testing.expectEqual(@as(usize, 0), list.items.len);
     try std.testing.expectEqual(@as(usize, 1), out.len);
-    try std.testing.expect(out[0].same(core.JSValue.symbol(first_atom)));
+    try std.testing.expectEqual(first_atom, out[0].asSymbolAtom().?);
 }
 
 fn collectModuleNamespaceExports(ctx: *core.JSContext, record: *core.module.ModuleRecord, exports: *std.ArrayList(core.Atom)) !void {

@@ -26,12 +26,36 @@ pub const BacktraceFrame = struct {
     /// authoritative. Resolution caches into `function_name` and clears this.
     function_value: JSValue = JSValue.undefinedValue(),
 
+    pub fn currentPc(self: BacktraceFrame) usize {
+        return if (self.pc_source) |pc_source| pc_source.* -| 1 else self.pc;
+    }
+
     pub fn location(self: BacktraceFrame) BacktraceLocation {
-        const current_pc = if (self.pc_source) |pc_source| pc_source.* -| 1 else self.pc;
-        if (self.location_resolver) |resolver| return resolver(self.location_data, current_pc);
+        const pc = self.currentPc();
+        if (self.location_resolver) |resolver| return resolver(self.location_data, pc);
         return .{ .line_num = self.line_num, .col_num = self.col_num };
     }
 };
+
+pub const ActiveBacktraceFrame = struct {
+    previous: ?*ActiveBacktraceFrame = null,
+    data: ?*const anyopaque,
+    resolver: ActiveBacktraceResolver,
+};
+
+pub const ActiveBacktraceSnapshot = struct {
+    function_name: atom.Atom,
+    filename: atom.Atom,
+    line_num: i32,
+    col_num: i32,
+    pc: usize = 0,
+    location_data: ?*const anyopaque = null,
+    location_resolver: ?BacktraceLocationResolver = null,
+    function_value: JSValue = JSValue.undefinedValue(),
+    backtrace_barrier: bool = false,
+};
+
+pub const ActiveBacktraceResolver = *const fn (?*const anyopaque) ActiveBacktraceSnapshot;
 
 pub const BacktraceLocation = struct {
     line_num: i32,
@@ -401,6 +425,7 @@ pub const JSContext = struct {
     formatting_error_stack: bool = false,
     backtrace_frames: []BacktraceFrame = &.{},
     backtrace_capacity: usize = 0,
+    current_backtrace_frame: ?*ActiveBacktraceFrame = null,
     class_prototypes: []JSValue = &.{},
     class_prototypes_inline: [class_prototype_inline_capacity]JSValue = @splat(JSValue.nullValue()),
     /// Global object, populated lazily by the eval entry path.
@@ -767,6 +792,81 @@ pub const JSContext = struct {
         location_resolver: ?BacktraceLocationResolver,
     ) !void {
         try self.pushBacktraceFrameLazyName(function_name, filename, line_num, col_num, location_data, location_resolver, JSValue.undefinedValue());
+    }
+
+    pub fn pushActiveBacktraceFrame(self: *JSContext, frame: *ActiveBacktraceFrame) void {
+        frame.previous = self.current_backtrace_frame;
+        self.current_backtrace_frame = frame;
+    }
+
+    pub fn popActiveBacktraceFrame(self: *JSContext, frame: *ActiveBacktraceFrame) void {
+        std.debug.assert(self.current_backtrace_frame == frame);
+        self.current_backtrace_frame = frame.previous;
+        frame.previous = null;
+    }
+
+    pub fn snapshotBacktraceFrames(self: *JSContext) ![]BacktraceFrame {
+        var active_count: usize = 0;
+        var active = self.current_backtrace_frame;
+        while (active) |frame| {
+            if (frame.resolver(frame.data).backtrace_barrier) break;
+            active_count += 1;
+            active = frame.previous;
+        }
+
+        const total = self.backtrace_frames.len + active_count;
+        if (total == 0) return &.{};
+        const frames = try self.runtime.memory.alloc(BacktraceFrame, total);
+
+        for (self.backtrace_frames, 0..) |frame, idx| {
+            frames[idx] = self.dupBacktraceFrame(frame);
+        }
+
+        var active_index = active_count;
+        active = self.current_backtrace_frame;
+        while (active) |frame| {
+            if (frame.resolver(frame.data).backtrace_barrier) break;
+            active_index -= 1;
+            frames[self.backtrace_frames.len + active_index] = self.dupActiveBacktraceFrame(frame.*);
+            active = frame.previous;
+        }
+        return frames;
+    }
+
+    pub fn freeBacktraceFrameSnapshot(self: *JSContext, frames: []BacktraceFrame) void {
+        for (frames) |frame| {
+            self.runtime.atoms.free(frame.function_name);
+            self.runtime.atoms.free(frame.filename);
+            frame.function_value.free(self.runtime);
+        }
+        if (frames.len != 0) self.runtime.memory.free(BacktraceFrame, frames);
+    }
+
+    fn dupBacktraceFrame(self: *JSContext, frame: BacktraceFrame) BacktraceFrame {
+        return .{
+            .function_name = self.runtime.atoms.dup(frame.function_name),
+            .filename = self.runtime.atoms.dup(frame.filename),
+            .line_num = frame.line_num,
+            .col_num = frame.col_num,
+            .pc = frame.currentPc(),
+            .location_data = frame.location_data,
+            .location_resolver = frame.location_resolver,
+            .function_value = if (frame.function_value.isObject()) frame.function_value.dup() else JSValue.undefinedValue(),
+        };
+    }
+
+    fn dupActiveBacktraceFrame(self: *JSContext, frame: ActiveBacktraceFrame) BacktraceFrame {
+        const snapshot = frame.resolver(frame.data);
+        return .{
+            .function_name = self.runtime.atoms.dup(snapshot.function_name),
+            .filename = self.runtime.atoms.dup(snapshot.filename),
+            .line_num = snapshot.line_num,
+            .col_num = snapshot.col_num,
+            .pc = snapshot.pc,
+            .location_data = snapshot.location_data,
+            .location_resolver = snapshot.location_resolver,
+            .function_value = if (snapshot.function_value.isObject()) snapshot.function_value.dup() else JSValue.undefinedValue(),
+        };
     }
 
     /// Push a backtrace frame whose display name is resolved lazily from

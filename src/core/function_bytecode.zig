@@ -143,6 +143,7 @@ pub const FunctionBytecode = struct {
     arguments_allowed: bool = false,
     backtrace_barrier: bool = false,
     is_indirect_eval: bool = false,
+    has_eval_call: bool = false,
 
     // Bytecode (quickjs.c:783-784)
     byte_code: []u8 = &.{},
@@ -187,6 +188,16 @@ pub const FunctionBytecode = struct {
     ic_sites: []ic.Site = &.{},
     call_sites: []CallSite = &.{},
 
+    /// Cached execution view used by the VM call machinery. QuickJS keeps a
+    /// direct `JSFunctionBytecode *` on function objects and dispatches from
+    /// that pointer; zjs still exposes the older `bytecode.Bytecode` execution
+    /// API, so finalized bytecode stores one borrowed view and the VM passes a
+    /// pointer to it instead of rebuilding the view per call.
+    execution_view: ?*anyopaque = null,
+    execution_view_owned: bool = false,
+    execution_view_heap_size: usize = 0,
+    execution_view_destroy: ?*const fn (*memory.MemoryAccount, *anyopaque) void = null,
+
     // Note: QuickJS has 'realm' field (JSContext *) here; Zig version
     // tracks this differently via the runtime context.
 
@@ -219,6 +230,19 @@ pub const FunctionBytecode = struct {
         // only the per-element atom/value references are released and the
         // block is freed once at the end.
         const owned = self.block.len == 0;
+
+        const execution_view = self.execution_view;
+        const execution_view_owned = self.execution_view_owned;
+        const execution_view_destroy = self.execution_view_destroy;
+        self.execution_view = null;
+        self.execution_view_owned = false;
+        self.execution_view_heap_size = 0;
+        self.execution_view_destroy = null;
+        if (execution_view_owned) {
+            if (execution_view_destroy) |destroy| {
+                if (execution_view) |ptr| destroy(self.memory, ptr);
+            }
+        }
 
         const func_name = self.func_name;
         const filename = self.filename;
@@ -300,6 +324,7 @@ pub const FunctionBytecode = struct {
         bytes = addSliceBytes(bytes, ic.Slot, self.ic_slots.len);
         bytes = addSliceBytes(bytes, usize, self.ic_site_ids.len);
         bytes = addSliceBytes(bytes, ic.Site, self.ic_sites.len);
+        bytes = addSaturating(bytes, self.execution_view_heap_size);
         if (self.block.len != 0) return addSaturating(bytes, self.block.len);
         bytes = addSliceBytes(bytes, u8, self.byte_code.len);
         bytes = addSliceBytes(bytes, atom.Atom, self.atom_operands.len);

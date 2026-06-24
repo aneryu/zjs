@@ -360,7 +360,7 @@ pub fn execDirectEval(
             const func_borrowed = stack.values[region_base];
             if (!isContextIntrinsicEval(ctx, func_borrowed)) {
                 // `eval(...)` is a plain call: no receiver, `this` is undefined.
-                if (inline_calls.resolveInlineTarget(global, core.JSValue.undefinedValue(), func_borrowed)) |target| {
+                if (inline_calls.resolveInlineTarget(ctx, global, core.JSValue.undefinedValue(), func_borrowed)) |target| {
                     return .{ .tail_inline = .{ .target = target, .region_base = region_base, .argc = argc } };
                 }
             }

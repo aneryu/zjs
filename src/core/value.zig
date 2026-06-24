@@ -3,6 +3,7 @@ const build_options = @import("build_options");
 
 const bignum = @import("../libs/bignum.zig");
 const gc = @import("gc.zig");
+const string_mod = @import("string.zig");
 
 /// When true, JSValue uses the 8-byte NaN-boxed representation (build -Dzjs_nan_boxing=true).
 pub const nan_boxing: bool = build_options.zjs_nan_boxing;
@@ -44,19 +45,19 @@ const NanBox = struct {
     // range, letting `requiresRefCount`/`dup`/`free` test them with a single
     // prefix range compare instead of a `tag_by_index` table lookup (QuickJS's
     // `JS_VALUE_HAS_REF_COUNT` is likewise a single `tag >= FIRST` range test).
-    // Refcounted, in this order: the gc.Header (`gc.retain`) tags first
-    // (big_int, string, string_rope, module, object) then function_bytecode,
-    // with the deinit-phase skip set {module, object, function_bytecode} placed
-    // last among them so it is also a contiguous range. Non-refcounted tags
-    // follow. `tag_assertions` below pins these invariants at comptime.
+    // Refcounted, in this order: full gc.Header tags and refcount-only
+    // string/symbol tags first, then function_bytecode, with the deinit-phase
+    // skip set {module, object, function_bytecode} placed last among them so it
+    // is also a contiguous range. Non-refcounted tags follow. `tag_assertions`
+    // below pins these invariants at comptime.
     const boxed_tags = [_]i32{
         Tag.big_int,
+        Tag.symbol,
         Tag.string,
         Tag.string_rope,
         Tag.module,
         Tag.object,
         Tag.function_bytecode,
-        Tag.symbol,
         Tag.int,
         Tag.boolean,
         Tag.null_value,
@@ -79,12 +80,12 @@ const NanBox = struct {
 
     const tag_assertions = blk: {
         // Refcounted tags must form the contiguous range [refcount_min, refcount_max].
-        for ([_]i32{ Tag.big_int, Tag.string, Tag.string_rope, Tag.module, Tag.object, Tag.function_bytecode }) |tag| {
+        for ([_]i32{ Tag.big_int, Tag.symbol, Tag.string, Tag.string_rope, Tag.module, Tag.object, Tag.function_bytecode }) |tag| {
             const p = prefixOf(tag);
             if (p < refcount_min or p > refcount_max) @compileError("refcounted tag escaped the contiguous prefix range");
         }
         // Non-refcounted boxed tags must sit OUTSIDE that range.
-        for ([_]i32{ Tag.symbol, Tag.int, Tag.boolean, Tag.null_value, Tag.undefined_value, Tag.uninitialized, Tag.catch_offset, Tag.exception, Tag.short_big_int }) |tag| {
+        for ([_]i32{ Tag.int, Tag.boolean, Tag.null_value, Tag.undefined_value, Tag.uninitialized, Tag.catch_offset, Tag.exception, Tag.short_big_int }) |tag| {
             const p = prefixOf(tag);
             if (p >= refcount_min and p <= refcount_max) @compileError("non-refcounted tag landed inside the refcount prefix range");
         }
@@ -121,6 +122,11 @@ const NanBox = struct {
 };
 
 pub const JSValue = extern struct {
+    pub const Int32Pair = struct {
+        lhs: i32,
+        rhs: i32,
+    };
+
     pub const Scope = @import("runtime.zig").HandleScope;
     pub const Local = @import("runtime.zig").LocalHandle;
     pub const Persistent = @import("runtime.zig").JSValueHandle;
@@ -217,16 +223,16 @@ pub const JSValue = extern struct {
         return make(Tag.big_int, @intFromPtr(header));
     }
 
-    pub fn string(header: *gc.Header) JSValue {
+    pub fn string(header: *gc.StringHeader) JSValue {
         return make(Tag.string, @intFromPtr(header));
     }
 
-    pub fn stringRope(header: *gc.Header) JSValue {
+    pub fn stringRope(header: *gc.StringHeader) JSValue {
         return make(Tag.string_rope, @intFromPtr(header));
     }
 
-    pub fn symbol(atom_id: u32) JSValue {
-        return make(Tag.symbol, atom_id);
+    pub fn symbol(header: *gc.StringHeader) JSValue {
+        return make(Tag.symbol, @intFromPtr(header));
     }
 
     pub fn object(header: *gc.Header) JSValue {
@@ -338,7 +344,7 @@ pub const JSValue = extern struct {
             return p >= NanBox.refcount_min and p <= NanBox.refcount_max;
         }
         switch (self.tagOf()) {
-            Tag.big_int, Tag.string, Tag.string_rope, Tag.object, Tag.module, Tag.function_bytecode => return true,
+            Tag.big_int, Tag.symbol, Tag.string, Tag.string_rope, Tag.object, Tag.module, Tag.function_bytecode => return true,
             else => return false,
         }
     }
@@ -346,6 +352,27 @@ pub const JSValue = extern struct {
     pub fn asInt32(self: JSValue) ?i32 {
         if (self.hasTag(Tag.int)) return payloadAsI32(self.payloadOf());
         return null;
+    }
+
+    pub inline fn asInt32Pair(lhs: JSValue, rhs: JSValue) ?Int32Pair {
+        if (comptime nan_boxing) {
+            const int_prefix_bits = comptime NanBox.prefixOf(Tag.int) << NanBox.payload_bits;
+            const tag_mask = comptime ~NanBox.payload_mask;
+            if ((((lhs.repr.bits ^ int_prefix_bits) | (rhs.repr.bits ^ int_prefix_bits)) & tag_mask) != 0) return null;
+            return .{
+                .lhs = payloadAsI32(lhs.repr.bits),
+                .rhs = payloadAsI32(rhs.repr.bits),
+            };
+        }
+        if (comptime Tag.int == 0) {
+            if ((lhs.repr.tag | rhs.repr.tag) != 0) return null;
+        } else {
+            if (((lhs.repr.tag ^ Tag.int) | (rhs.repr.tag ^ Tag.int)) != 0) return null;
+        }
+        return .{
+            .lhs = payloadAsI32(lhs.repr.payload),
+            .rhs = payloadAsI32(rhs.repr.payload),
+        };
     }
 
     pub fn asFloat64(self: JSValue) ?f64 {
@@ -367,8 +394,13 @@ pub const JSValue = extern struct {
     }
 
     pub fn asSymbolAtom(self: JSValue) ?u32 {
-        if (self.hasTag(Tag.symbol)) return @truncate(self.payloadOf());
-        return null;
+        return if (self.asSymbolBody()) |body| body.atom_id else null;
+    }
+
+    pub fn asSymbolBody(self: JSValue) ?*string_mod.String {
+        if (!self.hasTag(Tag.symbol)) return null;
+        const header = self.stringHeader() orelse return null;
+        return @alignCast(@fieldParentPtr("header", header));
     }
 
     pub fn asShortBigInt(self: JSValue) ?i64 {
@@ -431,6 +463,12 @@ pub const JSValue = extern struct {
         return String.fromValue(self);
     }
 
+    pub fn asStringBody(self: JSValue) ?*string_mod.String {
+        if (!self.isString()) return null;
+        const header = self.stringHeader() orelse return null;
+        return @alignCast(@fieldParentPtr("header", header));
+    }
+
     pub fn asBytes(self: JSValue, ctx: anytype) Bytes.Error!Bytes {
         _ = ctx;
         return Bytes.fromValue(self);
@@ -438,7 +476,14 @@ pub const JSValue = extern struct {
 
     pub fn refHeader(self: JSValue) ?*gc.Header {
         return switch (self.tagOf()) {
-            Tag.big_int, Tag.string, Tag.string_rope, Tag.object, Tag.module => ptrFromPayload(gc.Header, self.payloadOf()),
+            Tag.big_int, Tag.object, Tag.module => ptrFromPayload(gc.Header, self.payloadOf()),
+            else => null,
+        };
+    }
+
+    pub fn stringHeader(self: JSValue) ?*gc.StringHeader {
+        return switch (self.tagOf()) {
+            Tag.symbol, Tag.string, Tag.string_rope => ptrFromPayload(gc.StringHeader, self.payloadOf()),
             else => null,
         };
     }
@@ -450,22 +495,39 @@ pub const JSValue = extern struct {
         };
     }
 
+    /// Full GC headers only. Strings and symbols use `stringHeader()` because
+    /// their bodies are refcount-only and do not carry cycle-list links.
+    pub fn refCountHeader(self: JSValue) ?*gc.Header {
+        return switch (self.tagOf()) {
+            Tag.big_int, Tag.object, Tag.module, Tag.function_bytecode => ptrFromPayload(gc.Header, self.payloadOf()),
+            else => null,
+        };
+    }
+
     pub inline fn dup(self: JSValue) JSValue {
         if (comptime nan_boxing) {
-            // All refcounted tags (gc.Header *and* function_bytecode) share one
-            // header type (`gc.Header == gc.GCObjectHeader`) and one retain
-            // (`gc.retain` == `BlockHeader.retain`), so a single prefix range
-            // test + one header reconstruction replaces the former
-            // requiresRefCount + refHeader + objectHeader (3 table lookups).
             const p = NanBox.prefixBits(self.repr.bits);
             if (p >= NanBox.refcount_min and p <= NanBox.refcount_max) {
-                gc.retain(ptrFromPayload(gc.Header, self.payloadOf()).?);
+                if (p == NanBox.prefixOf(Tag.symbol) or
+                    p == NanBox.prefixOf(Tag.string) or
+                    p == NanBox.prefixOf(Tag.string_rope))
+                {
+                    gc.retain(ptrFromPayload(gc.StringHeader, self.payloadOf()).?);
+                } else {
+                    gc.retain(ptrFromPayload(gc.Header, self.payloadOf()).?);
+                }
             }
             return self;
         }
         if (!self.requiresRefCount()) return self;
-        if (self.refHeader()) |header| gc.retain(header);
-        if (self.objectHeader()) |header| header.retain();
+        switch (self.tagOf()) {
+            Tag.symbol, Tag.string, Tag.string_rope => {
+                if (self.stringHeader()) |header| gc.retain(header);
+                return self;
+            },
+            else => {},
+        }
+        if (self.refCountHeader()) |header| gc.retain(header);
         return self;
     }
 
@@ -477,7 +539,14 @@ pub const JSValue = extern struct {
             // contiguous tail [deinit_skip_min, refcount_max].
             if (rt.gc.phase == .deinit and p >= NanBox.deinit_skip_min) return;
             if (rt.opcode_profile) |prof| prof.recordValueFree();
-            gc.release(rt, ptrFromPayload(gc.Header, self.payloadOf()).?);
+            if (p == NanBox.prefixOf(Tag.symbol) or
+                p == NanBox.prefixOf(Tag.string) or
+                p == NanBox.prefixOf(Tag.string_rope))
+            {
+                gc.release(rt, ptrFromPayload(gc.StringHeader, self.payloadOf()).?);
+            } else {
+                gc.release(rt, ptrFromPayload(gc.Header, self.payloadOf()).?);
+            }
             return;
         }
         if (!self.requiresRefCount()) return;
@@ -488,8 +557,14 @@ pub const JSValue = extern struct {
             }
         }
         if (rt.opcode_profile) |prof| prof.recordValueFree();
-        if (self.refHeader()) |header| gc.release(rt, header);
-        if (self.objectHeader()) |header| gc.release(rt, header);
+        switch (self.tagOf()) {
+            Tag.symbol, Tag.string, Tag.string_rope => {
+                if (self.stringHeader()) |header| gc.release(rt, header);
+                return;
+            },
+            else => {},
+        }
+        if (self.refCountHeader()) |header| gc.release(rt, header);
     }
 
     pub fn same(self: JSValue, other: JSValue) bool {
@@ -573,10 +648,8 @@ fn isNegativeZero(value: f64) bool {
 
 fn compareStringValues(a: JSValue, b: JSValue) ?i32 {
     if (!a.isString() or !b.isString()) return null;
-    const a_header = a.refHeader() orelse return null;
-    const b_header = b.refHeader() orelse return null;
-    const a_string: *const @import("string.zig").String = @fieldParentPtr("header", a_header);
-    const b_string: *const @import("string.zig").String = @fieldParentPtr("header", b_header);
+    const a_string = a.asStringBody() orelse return null;
+    const b_string = b.asStringBody() orelse return null;
     return a_string.compare(b_string.*);
 }
 

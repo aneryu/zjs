@@ -672,18 +672,20 @@ pub fn buildErrorStackStringValue(ctx: *core.JSContext, global: *core.Object, sk
     const limit = errorStackTraceLimit(ctx.runtime, global);
     if (limit == 0) return value_ops.createStringValue(ctx.runtime, "");
 
-    var idx = ctx.backtrace_frames.len;
+    const frames = try ctx.snapshotBacktraceFrames();
+    defer ctx.freeBacktraceFrameSnapshot(frames);
+    var idx = frames.len;
     var emitted: usize = 0;
     var skipping = skip_name != null;
     while (idx > 0) {
         idx -= 1;
-        _ = exception_ops.resolvedBacktraceFunctionNameAt(ctx, idx);
+        _ = exception_ops.resolveBacktraceFunctionName(ctx, &frames[idx]);
         if (skipping) {
-            if (backtraceFunctionNameEql(ctx, ctx.backtrace_frames[idx], skip_name.?)) skipping = false;
+            if (backtraceFunctionNameEql(ctx, frames[idx], skip_name.?)) skipping = false;
             continue;
         }
         if (emitted >= limit) break;
-        const entry = ctx.backtrace_frames[idx];
+        const entry = frames[idx];
         if (bytes.items.len != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
         try bytes.appendSlice(ctx.runtime.memory.allocator, "    at ");
         try appendBacktraceFunctionName(ctx, &bytes, entry.function_name, entry.filename);
@@ -1036,9 +1038,7 @@ fn parseSimpleLatin1LiteralPlusLiteral(source: []const u8, flags: []const u8) ?S
 
 pub fn simpleLatin1LiteralPlusLiteralMatch(source: []const u8, flags: []const u8, string_value: core.JSValue) ?bool {
     const pattern = parseSimpleLatin1LiteralPlusLiteral(source, flags) orelse return null;
-    const header = string_value.refHeader() orelse return null;
-    if (!string_value.isString()) return null;
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = string_value.asStringBody() orelse return null;
     return switch (string_object.resolveData()) {
         .latin1 => |bytes| simpleLatin1LiteralPlusLiteralMatchBytesPattern(pattern, bytes),
         .utf16 => |units| simpleLatin1LiteralPlusLiteralMatchUtf16Pattern(pattern, units),
@@ -1116,9 +1116,7 @@ pub fn simpleAsciiLiteralClassPlusLiteralMatchBytes(pattern: SimpleAsciiLiteralC
 }
 
 pub fn latin1StringSlice(value: core.JSValue) ?[]const u8 {
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = value.asStringBody() orelse return null;
     return switch (string_object.resolveData()) {
         .latin1 => |bytes| bytes,
         .utf16 => null,
@@ -1737,9 +1735,7 @@ pub fn replaceSingleUnitGlobalSimpleClassEscape(
     source: []const u8,
 ) ?core.JSValue {
     if (!classEscapeIsQuantified(source) or !isSimpleStringClassEscapeSource(source)) return null;
-    const header = string_value.refHeader() orelse return null;
-    if (!string_value.isString()) return null;
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = string_value.asStringBody() orelse return null;
     const unit = switch (string_object.resolveData()) {
         .latin1 => |bytes| blk: {
             if (bytes.len != 1) return null;
@@ -1760,9 +1756,7 @@ pub fn replaceGlobalSimpleClassEscape(
     source: []const u8,
 ) !?core.JSValue {
     if (!classEscapeIsQuantified(source) or !isSimpleStringClassEscapeSource(source)) return null;
-    const header = string_value.refHeader() orelse return null;
-    if (!string_value.isString()) return null;
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = string_value.asStringBody() orelse return null;
 
     var replacement_units = std.ArrayList(u16).empty;
     defer replacement_units.deinit(rt.memory.allocator);
@@ -1922,21 +1916,13 @@ pub fn appendFastReplacement(rt: *core.JSRuntime, out: *std.ArrayList(u8), input
 }
 
 pub fn appendStringValueUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: core.JSValue) !void {
-    const header = value.refHeader() orelse {
+    const string_object = value.asStringBody() orelse {
         var bytes = std.ArrayList(u8).empty;
         defer bytes.deinit(rt.memory.allocator);
         try value_ops.appendRawString(rt, &bytes, value);
         for (bytes.items) |byte| try out.append(rt.memory.allocator, byte);
         return;
     };
-    if (!value.isString()) {
-        var bytes = std.ArrayList(u8).empty;
-        defer bytes.deinit(rt.memory.allocator);
-        try value_ops.appendRawString(rt, &bytes, value);
-        for (bytes.items) |byte| try out.append(rt.memory.allocator, byte);
-        return;
-    }
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
     try string_object.ensureFlat(rt);
     switch (string_object.resolveData()) {
         .latin1 => |bytes| for (bytes) |byte| try out.append(rt.memory.allocator, byte),
@@ -1945,9 +1931,7 @@ pub fn appendStringValueUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), val
 }
 
 pub fn stringValueContainsUnitByte(value: core.JSValue, needle: u8) bool {
-    if (!value.isString()) return false;
-    const header = value.refHeader() orelse return false;
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = value.asStringBody() orelse return false;
     return switch (string_object.resolveData()) {
         .latin1 => |bytes| std.mem.indexOfScalar(u8, bytes, needle) != null,
         .utf16 => |units| blk: {
@@ -1960,9 +1944,7 @@ pub fn stringValueContainsUnitByte(value: core.JSValue, needle: u8) bool {
 }
 
 pub fn stringValueUnitsEqualBytes(value: core.JSValue, expected: []const u8) bool {
-    if (!value.isString()) return false;
-    const header = value.refHeader() orelse return false;
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = value.asStringBody() orelse return false;
     return switch (string_object.resolveData()) {
         .latin1 => |bytes| std.mem.eql(u8, bytes, expected),
         .utf16 => |units| blk: {
@@ -2196,9 +2178,7 @@ pub fn replacementCaptureUnits(match: ReplaceMatch, replacement: []const u16, in
 }
 
 pub fn stringLengthIndex(rt: *core.JSRuntime, string_value: core.JSValue) !usize {
-    const header = string_value.refHeader() orelse return 0;
-    if (!string_value.isString()) return 0;
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = string_value.asStringBody() orelse return 0;
     _ = rt;
     return string_object.len();
 }
@@ -2223,9 +2203,7 @@ pub fn advanceStringIndexNumber(
         return value_ops.numberToValue(index_number + 1);
     }
     const index: usize = @intFromFloat(index_number);
-    const header = string_value.refHeader() orelse return value_ops.numberToValue(index_number + 1);
-    if (!string_value.isString()) return value_ops.numberToValue(index_number + 1);
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = string_value.asStringBody() orelse return value_ops.numberToValue(index_number + 1);
     if (index + 1 >= string_object.len()) return value_ops.numberToValue(index_number + 1);
     const first = string_object.codeUnitAt(index);
     const second = string_object.codeUnitAt(index + 1);
@@ -2244,9 +2222,7 @@ pub fn replaceRegExpLegacySlot(rt: *core.JSRuntime, owner: *core.Object, slot: *
 }
 
 pub fn stringAtomId(value: core.JSValue) ?core.Atom {
-    if (!value.isString()) return null;
-    const header = value.refHeader() orelse return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     return string_value.atom_id;
 }
 
@@ -2255,8 +2231,7 @@ pub fn nativeFunctionMatcherUnicodeClassAsciiResult(source: []const u8, flags: [
     const is_id_start = std.mem.startsWith(u8, source, "(?:[A-Za-z");
     const is_id_continue = std.mem.startsWith(u8, source, "(?:[0-9A-Z_a-z");
     if (!is_id_start and !is_id_continue) return null;
-    const header = string_value.refHeader() orelse return null;
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = string_value.asStringBody() orelse return null;
     if (string_object.len() != 1) return null;
     const unit = string_object.codeUnitAt(0);
     if (unit > 0x7f) return null;
@@ -2268,9 +2243,7 @@ pub fn nativeFunctionMatcherUnicodeClassAsciiResult(source: []const u8, flags: [
 }
 
 pub fn stringValueUnits(string_value: core.JSValue) ?emoji.StringUnits {
-    const header = string_value.refHeader() orelse return null;
-    if (!string_value.isString()) return null;
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = string_value.asStringBody() orelse return null;
     switch (string_object.resolveData()) {
         .latin1 => |bytes| {
             return .{ .latin1 = bytes };
@@ -2283,9 +2256,7 @@ pub fn stringValueUnits(string_value: core.JSValue) ?emoji.StringUnits {
 
 pub fn findPropertyEscapeMatch(source: []const u8, string_value: core.JSValue, start_index: usize, sticky: bool) ?RegExpMatch {
     const parsed = propertyEscapePattern(source) orelse return null;
-    const header = string_value.refHeader() orelse return null;
-    if (!string_value.isString()) return null;
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = string_value.asStringBody() orelse return null;
     switch (string_object.resolveData()) {
         .latin1 => |bytes| {
             var index = start_index;
@@ -2359,9 +2330,7 @@ pub fn isUnicodeGreekScriptCodePoint(code_point: u21) bool {
 
 pub fn findUnicodePropertyOnlyClassMatch(source: []const u8, string_value: core.JSValue, start_index: usize, sticky: bool) ?RegExpMatch {
     if (!unicodePropertyOnlyClassSource(source)) return null;
-    const header = string_value.refHeader() orelse return null;
-    if (!string_value.isString()) return null;
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = string_value.asStringBody() orelse return null;
     switch (string_object.resolveData()) {
         .latin1 => |bytes| {
             var index = start_index;
@@ -3177,9 +3146,7 @@ pub fn qjsRegExpMatch(rt: *core.JSRuntime, global: *core.Object, regexp: core.JS
 
 pub fn unicodeLowSurrogateLiteralMatch(source: []const u8, value: core.JSValue, start: usize, sticky: bool) ?RegExpMatch {
     const unit = singleLowSurrogateLiteralSource(source) orelse return null;
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     if (start > string_value.len()) return null;
     if (sticky) return lowSurrogateLiteralAt(unit, string_value.*, start);
     var index = start;
@@ -3198,9 +3165,7 @@ pub fn advanceStringIndexStringValue(string_value: core.string.String, index: us
 }
 
 pub fn findCharacterClassSourceMatch(value: core.JSValue, source: []const u8, start: usize, sticky: bool) ?RegExpMatch {
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {
             if (sticky) {
@@ -3241,9 +3206,7 @@ pub fn findLeadingAlternationCharacterClassSingleUnitMatch(rt: *core.JSRuntime, 
 }
 
 pub fn findStringUnitMatch(value: core.JSValue, unit: u16, start: usize) ?usize {
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {
             if (unit > 0xff) return null;
@@ -3264,9 +3227,7 @@ pub fn findStringUnitMatch(value: core.JSValue, unit: u16, start: usize) ?usize 
 
 pub fn simpleUnicodeLiteralMatch(source: []const u8, value: core.JSValue, start: usize, sticky: bool, flags: []const u8) ?RegExpMatch {
     const pattern = parseSimpleUnicodeLiteralSource(source) orelse return null;
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     if (start > string_value.len()) return null;
     if (sticky) return simpleUnicodeLiteralAt(pattern, string_value.*, start, flags);
     var index = start;
@@ -3282,9 +3243,7 @@ pub fn simpleClassSequenceMatch(source: []const u8, value: core.JSValue, start: 
 }
 
 pub fn simpleClassSequenceMatchPattern(pattern: SimpleClassSequencePattern, value: core.JSValue, start: usize, sticky: bool, flags: []const u8) ?RegExpMatch {
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     return switch (string_value.resolveData()) {
         .latin1 => |bytes| simpleClassSequenceMatchLatin1(pattern, bytes, start, sticky, flags),
         .utf16 => |units| simpleClassSequenceMatchUtf16(pattern, units, start, sticky, flags),
@@ -3292,9 +3251,7 @@ pub fn simpleClassSequenceMatchPattern(pattern: SimpleClassSequencePattern, valu
 }
 
 pub fn simpleClassAlternationMatchPattern(pattern: SimpleClassAlternationPattern, value: core.JSValue, start: usize, sticky: bool, flags: []const u8) ?RegExpMatch {
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     return switch (string_value.resolveData()) {
         .latin1 => |bytes| simpleClassAlternationMatchLatin1(pattern, bytes, start, sticky, flags),
         .utf16 => |units| simpleClassAlternationMatchUtf16(pattern, units, start, sticky, flags),
@@ -3302,9 +3259,7 @@ pub fn simpleClassAlternationMatchPattern(pattern: SimpleClassAlternationPattern
 }
 
 pub fn simpleCaptureSequenceMatchPattern(pattern: SimpleCaptureSequencePattern, value: core.JSValue, start: usize, sticky: bool, flags: []const u8) ?RegExpMatch {
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     return switch (string_value.resolveData()) {
         .latin1 => |bytes| simpleCaptureSequenceMatchLatin1(pattern, bytes, start, sticky, flags),
         .utf16 => |units| simpleCaptureSequenceMatchUtf16(pattern, units, start, sticky, flags),
@@ -3428,9 +3383,7 @@ pub fn isStringLineEndPosition(string_value: core.string.String, pos: usize, mul
 pub fn unicodeSurrogatePairClassMatch(source: []const u8, value: core.JSValue, start: usize, sticky: bool, unicode: bool) ?RegExpMatch {
     if (!unicode) return null;
     const pattern = parseSurrogatePairClassSource(source) orelse return null;
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     if (start > string_value.len()) return null;
     if (sticky) return surrogatePairClassAt(pattern, string_value.*, start);
     var index = start;
@@ -3443,9 +3396,7 @@ pub fn unicodeSurrogatePairClassMatch(source: []const u8, value: core.JSValue, s
 pub fn unicodeAstralSpecialMatch(source: []const u8, value: core.JSValue, start: usize, sticky: bool, unicode: bool) ?RegExpMatch {
     if (!unicode) return null;
     const pattern = parseUnicodeAstralSpecialSource(source) orelse return null;
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     if (start > string_value.len()) return null;
     if (sticky) return unicodeAstralSpecialAt(pattern, string_value.*, start);
     var index = start;
@@ -3476,9 +3427,7 @@ pub fn surrogatePairFromCodePoint(code_point: u21) unicode_lib.SurrogatePair {
 }
 
 pub fn findUnicodeFoldClassMatch(value: core.JSValue, unit: u16, start: usize) ?usize {
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {
             var index = start;
@@ -3509,9 +3458,7 @@ pub fn unicodeSimpleFoldClassMatches(pattern: u16, input: u16) bool {
 }
 
 pub fn isStringHighSurrogateAt(value: core.JSValue, index: usize) bool {
-    const header = value.refHeader() orelse return false;
-    if (!value.isString()) return false;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return false;
     return switch (string_value.resolveData()) {
         .latin1 => false,
         .utf16 => |units| index < units.len and isHighSurrogateUnit(units[index]),
@@ -3519,9 +3466,7 @@ pub fn isStringHighSurrogateAt(value: core.JSValue, index: usize) bool {
 }
 
 pub fn singleDotAnchoredMatches(rt: *core.JSRuntime, string_value: core.JSValue, flags: []const u8) !bool {
-    const header = string_value.refHeader() orelse return false;
-    if (!string_value.isString()) return false;
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = string_value.asStringBody() orelse return false;
     try string_object.ensureFlat(rt);
     const dot_all = std.mem.indexOfScalar(u8, flags, 's') != null;
     const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null;
@@ -3539,9 +3484,7 @@ pub fn singleDotAnchoredMatches(rt: *core.JSRuntime, string_value: core.JSValue,
 }
 
 pub fn anchoredWhitespaceMatches(string_value: core.JSValue) bool {
-    const header = string_value.refHeader() orelse return false;
-    if (!string_value.isString()) return false;
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = string_value.asStringBody() orelse return false;
     switch (string_object.resolveData()) {
         .latin1 => |bytes| {
             if (bytes.len == 0) return false;
@@ -3561,9 +3504,7 @@ pub fn anchoredWhitespaceMatches(string_value: core.JSValue) bool {
 }
 
 pub fn anchoredSingleNonWhitespaceMatches(string_value: core.JSValue, unicode: bool) bool {
-    const header = string_value.refHeader() orelse return false;
-    if (!string_value.isString()) return false;
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = string_value.asStringBody() orelse return false;
     switch (string_object.resolveData()) {
         .latin1 => |bytes| return bytes.len == 1 and !isEcmaWhitespaceOrLineTerminator(bytes[0]),
         .utf16 => |units| {
@@ -3582,9 +3523,7 @@ pub fn isSimpleStringClassEscapeSource(source: []const u8) bool {
 }
 
 pub fn findStringClassEscapeMatch(string_value: core.JSValue, source: []const u8, start: usize) ?RegExpMatch {
-    const header = string_value.refHeader() orelse return null;
-    if (!string_value.isString()) return null;
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = string_value.asStringBody() orelse return null;
     switch (string_object.resolveData()) {
         .latin1 => |bytes| {
             var index = start;
@@ -3620,9 +3559,7 @@ pub fn classEscapeUnitMatches(source: []const u8, unit: u16) bool {
 }
 
 pub fn anchoredComplementClassMatches(source: []const u8, string_value: core.JSValue) bool {
-    const header = string_value.refHeader() orelse return false;
-    if (!string_value.isString()) return false;
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = string_value.asStringBody() orelse return false;
     switch (string_object.resolveData()) {
         .latin1 => |bytes| {
             if (bytes.len == 0) return false;
@@ -3642,9 +3579,7 @@ pub fn anchoredComplementClassMatches(source: []const u8, string_value: core.JSV
 }
 
 pub fn anchoredBinaryPropertyMatches(source: []const u8, string_value: core.JSValue) bool {
-    const header = string_value.refHeader() orelse return false;
-    if (!string_value.isString()) return false;
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = string_value.asStringBody() orelse return false;
     const name = anchoredBinaryPropertyName(source) orelse return false;
     const positive = std.mem.startsWith(u8, source, "^\\p{");
     return anchoredCodePointPredicateMatches(string_object, positive, name);
@@ -4097,9 +4032,7 @@ pub fn createRegExpMatchArrayFromStringSliceValue(rt: *core.JSRuntime, input_val
 }
 
 pub fn stringSliceValue(rt: *core.JSRuntime, value: core.JSValue, start: usize, len: usize) !core.JSValue {
-    const header = value.refHeader() orelse return value.dup();
-    if (!value.isString()) return value.dup();
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return value.dup();
     const input_len = string_value.len();
     const slice_start = @min(start, input_len);
     const slice_end = @min(input_len, slice_start + len);
@@ -4595,8 +4528,7 @@ pub fn replaceFrameVarRefBinding(rt: *core.JSRuntime, frame: *frame_mod.Frame, a
 }
 
 pub fn appendSourceStringUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
-    const header = value.refHeader() orelse return error.TypeError;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return error.TypeError;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {
@@ -4736,8 +4668,7 @@ pub fn defineStringWrapperIndexProperty(rt: *core.JSRuntime, object: *core.Objec
 
 pub fn getStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) !?core.JSValue {
     const index = core.array.arrayIndexFromAtom(&rt.atoms, atom_id) orelse return null;
-    const header = value.refHeader() orelse return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     if (index >= string_value.len()) return core.JSValue.undefinedValue();
     try string_value.ensureFlat(rt);
     const unit = string_value.codeUnitAt(index);
@@ -4949,8 +4880,7 @@ pub fn stringObjectHasIndexProperty(rt: *core.JSRuntime, object: *core.Object, a
     if (object.class_id != core.class.ids.string) return false;
     const string_data = object.objectData() orelse return false;
     const index = core.array.arrayIndexFromAtom(&rt.atoms, atom_id) orelse return false;
-    const header = string_data.refHeader() orelse return false;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = string_data.asStringBody() orelse return false;
     return index < string_value.len();
 }
 
@@ -5215,8 +5145,7 @@ pub fn qjsStringNumericArgsMethod(
 
 fn fastLatin1Substring(rt: *core.JSRuntime, string_value: core.JSValue, args: []const core.JSValue) !?core.JSValue {
     if (!string_value.isString() or args.len > 2) return null;
-    const header = string_value.refHeader() orelse return null;
-    const string: *core.string.String = @fieldParentPtr("header", header);
+    const string = string_value.asStringBody() orelse return null;
     try string.ensureFlat(rt);
     const bytes = switch (string.resolveData()) {
         .latin1 => |latin1| latin1,

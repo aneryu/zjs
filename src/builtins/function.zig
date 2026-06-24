@@ -158,7 +158,6 @@ fn expectObject(value: core.JSValue) !*core.Object {
 }
 
 fn expectString(value: core.JSValue) !*core.string.String {
-    const header = value.refHeader() orelse return error.TypeError;
     if (!value.isString()) return error.TypeError;
-    return @fieldParentPtr("header", header);
+    return value.asStringBody() orelse error.TypeError;
 }

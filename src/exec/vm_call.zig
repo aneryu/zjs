@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("build_options");
 
 const bytecode = @import("../bytecode/root.zig");
 const core = @import("../core/root.zig");
@@ -53,15 +54,17 @@ pub const CallDepthGuard = struct {
     }
 };
 
-pub const CallProfileGuard = struct {
+pub const CallProfileGuard = if (build_options.zjs_enable_opcode_profile) struct {
     rt: *core.JSRuntime,
     previous: ?*core.profile.OpcodeProfile,
 
-    pub fn deinit(self: CallProfileGuard) void {
+    pub fn deinit(self: @This()) void {
         if (self.rt.opcode_profile != null) {
             _ = core.profile.activate(self.previous);
         }
     }
+} else struct {
+    pub fn deinit(_: @This()) void {}
 };
 
 pub fn enterCallDepth(ctx: *core.JSContext, global: *core.Object) !CallDepthGuard {
@@ -84,6 +87,12 @@ pub fn enterInlineCallDepth(ctx: *core.JSContext, global: *core.Object) !void {
 }
 
 pub fn enterCallProfile(rt: *core.JSRuntime) CallProfileGuard {
+    if (comptime !build_options.zjs_enable_opcode_profile) {
+        return .{};
+    }
+    if (rt.opcode_profile == null) {
+        return .{ .rt = rt, .previous = null };
+    }
     const previous = if (rt.opcode_profile) |opcode_profile|
         core.profile.activate(opcode_profile)
     else
@@ -112,50 +121,52 @@ pub fn initFrameLocals(
     eval_local_names: []const core.Atom,
     eval_local_slots: []core.JSValue,
     use_inline_storage: bool,
+    windows: frame_mod.FrameStorageWindows,
 ) !void {
     if (function.var_count == 0) return;
     var storage_transferred = false;
     errdefer if (!storage_transferred) frame.releaseOwnedStorage(&ctx.runtime.memory, ctx.runtime);
 
     const locals = blk: {
-        if (use_inline_storage and function.var_count <= frame.inline_locals.len) {
-            break :blk frame.inline_locals[0..function.var_count];
+        if (windows.locals) |values| {
+            std.debug.assert(values.len == function.var_count);
+            break :blk values;
         }
         if (use_inline_storage) {
             if (ctx.runtime.vm_stack.carve(&ctx.runtime.memory, function.var_count)) |window| break :blk window;
         }
-        frame.locals_on_heap = true;
-        break :blk try ctx.runtime.memory.alloc(core.JSValue, function.var_count);
+        break :blk try frame.allocOwnedStorage(&ctx.runtime.memory, function.var_count);
     };
     @memset(locals, core.JSValue.undefinedValue());
     frame.locals = locals;
 
-    const uninit = if (use_inline_storage and function.var_count <= frame.inline_locals_uninit.len)
-        frame.inline_locals_uninit[0..function.var_count]
-    else blk: {
-        frame.locals_uninit_on_heap = true;
-        break :blk try ctx.runtime.memory.alloc(bool, function.var_count);
-    };
-    @memset(uninit, false);
-    frame.locals_uninit = uninit;
-
-    if (value_ops.atomNameEql(ctx.runtime, function.name, "<eval>")) {
+    if (eval_local_names.len != 0 and value_ops.atomNameEql(ctx.runtime, function.name, "<eval>")) {
         call_runtime.initializeEvalFrameLocals(ctx, function, frame, eval_local_names, eval_local_slots);
     }
-    try linkDerivedConstructorThisLocal(ctx, function, frame);
+    if (function.flags.is_derived_class_constructor) {
+        try linkDerivedConstructorThisLocal(ctx, function, frame);
+    }
     storage_transferred = true;
 }
 
-pub fn initFrameVarRefs(ctx: *core.JSContext, global: *core.Object, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, var_refs: []const core.JSValue, use_inline_storage: bool) !void {
+pub fn initFrameVarRefs(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    var_refs: []const core.JSValue,
+    use_inline_storage: bool,
+    windows: frame_mod.FrameStorageWindows,
+) !void {
     if (var_refs.len > 0) {
-        const owned_refs = if (use_inline_storage and var_refs.len <= frame.inline_var_refs.len)
-            frame.inline_var_refs[0..var_refs.len]
-        else blk: {
+        const owned_refs = if (windows.var_refs) |values| blk: {
+            std.debug.assert(values.len == var_refs.len);
+            break :blk values;
+        } else blk: {
             if (use_inline_storage) {
                 if (ctx.runtime.vm_stack.carve(&ctx.runtime.memory, var_refs.len)) |window| break :blk window;
             }
-            frame.var_refs_on_heap = true;
-            break :blk try ctx.runtime.memory.alloc(core.JSValue, var_refs.len);
+            break :blk try frame.allocOwnedStorage(&ctx.runtime.memory, var_refs.len);
         };
         for (var_refs, 0..) |value, idx| owned_refs[idx] = value.dup();
         frame.var_refs = owned_refs;
@@ -163,16 +174,15 @@ pub fn initFrameVarRefs(ctx: *core.JSContext, global: *core.Object, function: *c
     }
 
     if (function.closure_var.len > 0) {
-        const owned_refs = if (use_inline_storage and function.closure_var.len <= frame.inline_var_refs.len)
-            frame.inline_var_refs[0..function.closure_var.len]
-        else blk: {
+        const owned_refs = if (windows.var_refs) |values| blk: {
+            std.debug.assert(values.len == function.closure_var.len);
+            break :blk values;
+        } else blk: {
             if (use_inline_storage) {
                 if (ctx.runtime.vm_stack.carve(&ctx.runtime.memory, function.closure_var.len)) |window| break :blk window;
             }
-            frame.var_refs_on_heap = true;
-            break :blk try ctx.runtime.memory.alloc(core.JSValue, function.closure_var.len);
+            break :blk try frame.allocOwnedStorage(&ctx.runtime.memory, function.closure_var.len);
         };
-        errdefer if (frame.var_refs_on_heap) ctx.runtime.memory.free(core.JSValue, owned_refs);
         var initialized: usize = 0;
         errdefer {
             for (owned_refs[0..initialized]) |*val| val.free(ctx.runtime);
@@ -186,16 +196,15 @@ pub fn initFrameVarRefs(ctx: *core.JSContext, global: *core.Object, function: *c
     }
 
     if (function.var_ref_names.len == 0) return;
-    const owned_refs = if (use_inline_storage and function.var_ref_names.len <= frame.inline_var_refs.len)
-        frame.inline_var_refs[0..function.var_ref_names.len]
-    else blk: {
+    const owned_refs = if (windows.var_refs) |values| blk: {
+        std.debug.assert(values.len == function.var_ref_names.len);
+        break :blk values;
+    } else blk: {
         if (use_inline_storage) {
             if (ctx.runtime.vm_stack.carve(&ctx.runtime.memory, function.var_ref_names.len)) |window| break :blk window;
         }
-        frame.var_refs_on_heap = true;
-        break :blk try ctx.runtime.memory.alloc(core.JSValue, function.var_ref_names.len);
+        break :blk try frame.allocOwnedStorage(&ctx.runtime.memory, function.var_ref_names.len);
     };
-    errdefer if (frame.var_refs_on_heap) ctx.runtime.memory.free(core.JSValue, owned_refs);
     var initialized: usize = 0;
     errdefer {
         for (owned_refs[0..initialized]) |*val| val.free(ctx.runtime);
@@ -611,7 +620,7 @@ pub noinline fn callMethod(
             const region_base = stack.values.len - total;
             const receiver = stack.values[region_base];
             const method = stack.values[region_base + 1];
-            if (inline_calls.resolveInlineTarget(global, receiver, method)) |target| {
+            if (inline_calls.resolveInlineTarget(ctx, global, receiver, method)) |target| {
                 return .{ .inline_call = .{ .target = target, .region_base = region_base, .argc = argc, .layout = .method } };
             }
         }
@@ -785,7 +794,7 @@ pub noinline fn tailCallMethod(
             const region_base = stack.values.len - total;
             const receiver = stack.values[region_base];
             const method = stack.values[region_base + 1];
-            if (inline_calls.resolveInlineTarget(global, receiver, method)) |target| {
+            if (inline_calls.resolveInlineTarget(ctx, global, receiver, method)) |target| {
                 return .{ .tail_inline = .{ .target = target, .region_base = region_base, .argc = argc, .layout = .method } };
             }
         }

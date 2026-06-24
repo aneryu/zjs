@@ -391,23 +391,27 @@ test "constructValidated roots source and flags while creating regexp object" {
     defer rt.destroy();
 
     const source_atom = try rt.atoms.newValueSymbol("gc-regexp-source-symbol");
+    const source_value = try rt.symbolValue(source_atom);
     const flags_atom = try rt.atoms.newValueSymbol("gc-regexp-flags-symbol");
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const regexp_value = try constructValidated(rt, core.JSValue.symbol(source_atom), core.JSValue.symbol(flags_atom), null);
+    const flags_value = try rt.symbolValue(flags_atom);
+    const regexp_value = try constructValidated(rt, source_value, flags_value, null);
     var regexp_alive = true;
     defer if (regexp_alive) regexp_value.free(rt);
     const regexp = regexpObjectFromValue(regexp_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(source_atom) != null);
     try std.testing.expect(rt.atoms.name(flags_atom) != null);
-    try std.testing.expect(regexp.regexpSource().?.same(core.JSValue.symbol(source_atom)));
-    try std.testing.expect(regexp.regexpFlags().?.same(core.JSValue.symbol(flags_atom)));
+    try std.testing.expect(regexp.regexpSource().?.same(source_value));
+    try std.testing.expect(regexp.regexpFlags().?.same(flags_value));
 
     regexp_value.free(rt);
     regexp_alive = false;
+    source_value.free(rt);
+    flags_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(source_atom) == null);
     try std.testing.expect(rt.atoms.name(flags_atom) == null);
@@ -1320,9 +1324,7 @@ fn escapedSource(rt: *core.JSRuntime, source: core.JSValue) !core.JSValue {
 }
 
 fn regexpSourceCanReturnRaw(source: core.JSValue) bool {
-    const header = source.refHeader() orelse return false;
-    if (!source.isString()) return false;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = source.asStringBody() orelse return false;
     if (string_value.len() == 0) return false;
     var in_class = false;
     var index: usize = 0;
@@ -1419,9 +1421,7 @@ fn expectRegExpObject(value: core.JSValue) !*core.Object {
 }
 
 fn expectString(value: core.JSValue) !*core.string.String {
-    const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isString()) return error.TypeError;
-    return @fieldParentPtr("header", header);
+    return value.asStringBody() orelse return error.TypeError;
 }
 
 fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
@@ -1496,8 +1496,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
 }
 
 fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
-    const header = value.refHeader() orelse return;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {

@@ -75,28 +75,23 @@ pub fn saveGeneratorExecutionState(
     generator.generatorPcSlot().* = pc;
     const old_stack = generator.generatorStack();
     const old_stack_capacity = generator.generatorStackCapacity();
+    const old_frame_storage = generator.generatorFrameStorage();
     const old_frame_locals = generator.generatorFrameLocals();
     const old_frame_args = generator.generatorFrameArgs();
     const old_frame_var_refs = generator.generatorFrameVarRefs();
-    const old_frame_locals_uninit = generator.generatorFrameLocalsUninit();
     generator.generatorStackSlot().* = stack.values;
     generator.generatorStackCapacitySlot().* = stack.capacity;
+    generator.generatorFrameStorageSlot().* = frame.storage_values;
     generator.generatorFrameLocalsSlot().* = frame.locals;
     generator.generatorFrameArgsSlot().* = frame.args;
     generator.generatorFrameVarRefsSlot().* = frame.var_refs;
-    generator.generatorFrameLocalsUninitSlot().* = frame.locals_uninit;
     stack.values = &.{};
     stack.capacity = 0;
+    frame.storage_values = &.{};
+    frame.storage_on_heap = false;
     frame.locals = &.{};
     frame.args = &.{};
     frame.var_refs = &.{};
-    frame.locals_uninit = &.{};
-    frame.locals_uninit_count = 0;
-    frame.locals_on_heap = false;
-    frame.locals_uninit_on_heap = false;
-    frame.args_on_heap = false;
-    frame.original_args_on_heap = false;
-    frame.var_refs_on_heap = false;
 
     for (old_stack) |stored| stored.free(ctx.runtime);
     if (old_stack_capacity != 0) {
@@ -104,10 +99,7 @@ pub fn saveGeneratorExecutionState(
     } else if (old_stack.len != 0) {
         ctx.runtime.memory.free(core.JSValue, old_stack);
     }
-    freeValueSlice(ctx.runtime, old_frame_locals);
-    freeValueSlice(ctx.runtime, old_frame_args);
-    freeValueSlice(ctx.runtime, old_frame_var_refs);
-    if (old_frame_locals_uninit.len != 0) ctx.runtime.memory.free(bool, old_frame_locals_uninit);
+    freeGeneratorFrameStorage(ctx.runtime, old_frame_storage, old_frame_locals, old_frame_args, old_frame_var_refs);
 }
 
 pub fn resumeExecutionState(
@@ -163,25 +155,20 @@ fn resumeExecutionStateRaw(
     generator.generatorJustYieldedSlot().* = false;
     frame.pc = resume_pc;
     frame.releaseOwnedStorage(&ctx.runtime.memory, ctx.runtime);
+    frame.storage_values = generator.generatorFrameStorage();
+    frame.storage_on_heap = frame.storage_values.len != 0;
     frame.locals = generator.generatorFrameLocals();
-    frame.locals_on_heap = frame.locals.len != 0;
     frame.args = generator.generatorFrameArgs();
     frame.original_args = &.{};
-    frame.args_on_heap = true;
-    frame.original_args_on_heap = false;
     frame.var_refs = generator.generatorFrameVarRefs();
-    frame.var_refs_on_heap = frame.var_refs.len != 0;
-    frame.locals_uninit = generator.generatorFrameLocalsUninit();
-    frame.locals_uninit_on_heap = frame.locals_uninit.len != 0;
-    frame.recomputeLocalsUninitCount();
     frame.global_lexical_sync_slots = &.{};
     frame.global_lexical_sync_indices = &.{};
     frame.global_lexical_sync_env = null;
     frame.global_lexical_sync_checked = false;
+    generator.generatorFrameStorageSlot().* = &.{};
     generator.generatorFrameLocalsSlot().* = &.{};
     generator.generatorFrameArgsSlot().* = &.{};
     generator.generatorFrameVarRefsSlot().* = &.{};
-    generator.generatorFrameLocalsUninitSlot().* = &.{};
     stack.values = generator.generatorStack();
     stack.capacity = generator.generatorStackCapacity();
     generator.generatorStackSlot().* = &.{};
@@ -556,6 +543,29 @@ fn objectFromValue(value: core.JSValue) ?*core.Object {
 fn freeValueSlice(rt: *core.JSRuntime, values: []core.JSValue) void {
     for (values) |value| value.free(rt);
     if (values.len != 0) rt.memory.free(core.JSValue, values);
+}
+
+fn freeValueSliceValuesOnly(rt: *core.JSRuntime, values: []core.JSValue) void {
+    for (values) |value| value.free(rt);
+}
+
+fn freeGeneratorFrameStorage(
+    rt: *core.JSRuntime,
+    storage: []core.JSValue,
+    locals: []core.JSValue,
+    args: []core.JSValue,
+    var_refs: []core.JSValue,
+) void {
+    if (storage.len == 0) {
+        freeValueSlice(rt, locals);
+        freeValueSlice(rt, args);
+        freeValueSlice(rt, var_refs);
+        return;
+    }
+    freeValueSliceValuesOnly(rt, locals);
+    freeValueSliceValuesOnly(rt, args);
+    freeValueSliceValuesOnly(rt, var_refs);
+    rt.memory.free(core.JSValue, storage);
 }
 
 fn readInt(comptime T: type, bytes: []const u8) T {

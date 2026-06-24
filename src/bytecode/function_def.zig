@@ -10,23 +10,21 @@ const atom = @import("../core/atom.zig");
 const function_bytecode = @import("../core/function_bytecode.zig");
 const memory = @import("../core/memory.zig");
 const JSValue = @import("../core/value.zig").JSValue;
+const opcode = @import("opcode.zig");
 const pc2line = @import("./pipeline/pc2line.zig");
 
 fn dupOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
-    if (value.asSymbolAtom()) |atom_id| return JSValue.symbol(atoms.dup(atom_id));
+    _ = atoms;
     return value.dup();
 }
 
 fn takeOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
-    if (value.asSymbolAtom()) |atom_id| return JSValue.symbol(atoms.dup(atom_id));
+    _ = atoms;
     return value;
 }
 
 fn freeOwnedValue(atoms: *atom.AtomTable, value: JSValue, rt: anytype) void {
-    if (value.asSymbolAtom()) |atom_id| {
-        atoms.free(atom_id);
-        return;
-    }
+    _ = atoms;
     value.free(rt);
 }
 
@@ -500,6 +498,7 @@ pub const FunctionDef = struct {
     /// bytecode emission during parsing.
     pub fn appendByteCode(self: *FunctionDef, bytes: []const u8) !void {
         if (bytes.len == 0) return;
+        if (bytesMayContainEvalCall(bytes)) self.has_eval_call = true;
         const tail = try growSliceBy(u8, self.memory, &self.byte_code, &self.byte_code_capacity, bytes.len);
         @memcpy(tail, bytes);
     }
@@ -639,3 +638,8 @@ pub const FunctionDef = struct {
         if (old_child_list_capacity != 0) self.memory.free(*FunctionDef, old_child_list.ptr[0..old_child_list_capacity]);
     }
 };
+
+fn bytesMayContainEvalCall(bytes: []const u8) bool {
+    return std.mem.indexOfScalar(u8, bytes, opcode.op.eval) != null or
+        std.mem.indexOfScalar(u8, bytes, opcode.op.apply_eval) != null;
+}

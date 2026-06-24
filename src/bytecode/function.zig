@@ -111,7 +111,9 @@ pub const Flags = packed struct(u16) {
     is_global_var: bool = false,
     is_module: bool = false,
     is_indirect_eval: bool = false,
-    reserved: u5 = 0,
+    has_eval_call: bool = false,
+    backtrace_barrier: bool = false,
+    reserved: u3 = 0,
 };
 
 /// Compatibility aliases for finalized runtime function bytecode.
@@ -326,6 +328,7 @@ pub const Bytecode = struct {
     /// the current size, while reallocations are amortised O(1).
     pub fn appendCode(self: *Bytecode, bytes: []const u8) !void {
         if (bytes.len == 0) return;
+        if (bytesMayContainEvalCall(bytes)) self.flags.has_eval_call = true;
         const tail = try growSliceBy(u8, self.memory, &self.code, &self.code_capacity, bytes.len);
         @memcpy(tail, bytes);
     }
@@ -479,9 +482,13 @@ pub const Bytecode = struct {
 /// It intentionally omits compile-only fields such as scopes, modules, and
 /// debug tables; those remain on the compile-time `Bytecode` representation.
 pub fn asBytecodeView(fb: *const FunctionBytecode, rt: *runtime.JSRuntime) Bytecode {
+    return makeBytecodeView(fb, &rt.memory, &rt.atoms);
+}
+
+fn makeBytecodeView(fb: *const FunctionBytecode, mem: *memory.MemoryAccount, atoms: *atom.AtomTable) Bytecode {
     return .{
-        .memory = &rt.memory,
-        .atoms = &rt.atoms,
+        .memory = mem,
+        .atoms = atoms,
         .name = fb.func_name,
         .filename = fb.filename,
         .line_num = fb.line_num,
@@ -499,6 +506,8 @@ pub fn asBytecodeView(fb: *const FunctionBytecode, rt: *runtime.JSRuntime) Bytec
             .is_strict = fb.is_strict_mode,
             .runtime_strict = fb.runtime_strict_mode,
             .is_indirect_eval = fb.is_indirect_eval,
+            .has_eval_call = fb.has_eval_call,
+            .backtrace_barrier = fb.backtrace_barrier,
         },
         .arg_count = fb.arg_count,
         .var_count = fb.var_count,
@@ -522,8 +531,43 @@ pub fn asBytecodeView(fb: *const FunctionBytecode, rt: *runtime.JSRuntime) Bytec
         .ic_site_ids = fb.ic_site_ids,
         .ic_sites = fb.ic_sites,
         .call_sites = fb.call_sites,
-        .constants = .{ .memory = &rt.memory, .atoms = &rt.atoms, .values = fb.cpool },
+        .constants = .{ .memory = mem, .atoms = atoms, .values = fb.cpool },
     };
+}
+
+pub fn cachedBytecodeView(fb: *const FunctionBytecode) ?*const Bytecode {
+    const ptr = fb.execution_view orelse return null;
+    return @ptrCast(@alignCast(ptr));
+}
+
+pub fn installCachedBytecodeView(fb: *FunctionBytecode, view: *Bytecode) void {
+    view.* = makeBytecodeView(fb, fb.memory, fb.atoms);
+    fb.execution_view = view;
+    fb.execution_view_owned = false;
+    fb.execution_view_heap_size = 0;
+    fb.execution_view_destroy = null;
+}
+
+pub fn ensureCachedBytecodeView(fb: *const FunctionBytecode, rt: *runtime.JSRuntime) !*const Bytecode {
+    if (cachedBytecodeView(fb)) |view| return view;
+    const mutable_fb: *FunctionBytecode = @constCast(fb);
+    const view = try rt.memory.create(Bytecode);
+    view.* = makeBytecodeView(fb, &rt.memory, &rt.atoms);
+    mutable_fb.execution_view = view;
+    mutable_fb.execution_view_owned = true;
+    mutable_fb.execution_view_heap_size = @sizeOf(Bytecode);
+    mutable_fb.execution_view_destroy = destroyCachedBytecodeView;
+    return view;
+}
+
+pub fn refreshCachedBytecodeView(fb: *FunctionBytecode) void {
+    const view = cachedBytecodeView(fb) orelse return;
+    @constCast(view).* = makeBytecodeView(fb, fb.memory, fb.atoms);
+}
+
+fn destroyCachedBytecodeView(mem: *memory.MemoryAccount, ptr: *anyopaque) void {
+    const view: *Bytecode = @ptrCast(@alignCast(ptr));
+    mem.destroy(Bytecode, view);
 }
 
 pub fn allocateFunctionBytecodeIcSlots(fb: *FunctionBytecode) !void {
@@ -571,6 +615,11 @@ fn opcodeHasOwnDataIc(op_id: u8) bool {
         op_id == opcode.op.get_field or
         op_id == opcode.op.get_field2 or
         op_id == opcode.op.put_field;
+}
+
+fn bytesMayContainEvalCall(bytes: []const u8) bool {
+    return std.mem.indexOfScalar(u8, bytes, opcode.op.eval) != null or
+        std.mem.indexOfScalar(u8, bytes, opcode.op.apply_eval) != null;
 }
 
 fn bytecodeSkipsPropertyIc(code: []const u8) bool {

@@ -48,7 +48,9 @@ test "constant pool retains owned unique symbol atoms until release" {
     defer if (pool_alive) pool.deinit(rt);
 
     const borrowed_symbol = try rt.atoms.newValueSymbol("gc-bytecode-constant-pool-symbol");
-    _ = try pool.append(core.JSValue.symbol(borrowed_symbol));
+    const borrowed_value = try rt.symbolValue(borrowed_symbol);
+    _ = try pool.append(borrowed_value);
+    borrowed_value.free(rt);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(borrowed_symbol) != null);
@@ -69,7 +71,7 @@ test "constant pool appendOwned retains unique symbol atoms until release" {
     defer if (pool_alive) pool.deinit(rt);
 
     const owned_symbol = try rt.atoms.newValueSymbol("gc-bytecode-constant-pool-owned-symbol");
-    _ = try pool.appendOwned(core.JSValue.symbol(owned_symbol));
+    _ = try pool.appendOwned(try rt.symbolValue(owned_symbol));
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(owned_symbol) != null);
@@ -229,7 +231,9 @@ test "FunctionDef: cpool retains unique symbol atoms until release" {
     defer if (fd_alive) fd.deinit(rt);
 
     const borrowed_symbol = try rt.atoms.newValueSymbol("gc-function-def-cpool-symbol");
-    _ = try fd.appendCpool(core.JSValue.symbol(borrowed_symbol));
+    const borrowed_value = try rt.symbolValue(borrowed_symbol);
+    _ = try fd.appendCpool(borrowed_value);
+    borrowed_value.free(rt);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(borrowed_symbol) != null);
@@ -253,7 +257,7 @@ test "FunctionDef: cpool appendOwned retains unique symbol atoms until release" 
     defer if (fd_alive) fd.deinit(rt);
 
     const owned_symbol = try rt.atoms.newValueSymbol("gc-function-def-cpool-owned-symbol");
-    _ = try fd.appendCpoolOwned(core.JSValue.symbol(owned_symbol));
+    _ = try fd.appendCpoolOwned(try rt.symbolValue(owned_symbol));
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(owned_symbol) != null);
@@ -818,9 +822,152 @@ test "resolve_labels: rewrites absolute goto target to relative offset" {
     var ctx = pipeline.resolve_labels.JSContext.init(&bc);
     try pipeline.resolve_labels.run(&ctx);
 
-    try std.testing.expectEqual(@as(usize, 12), bc.code.len);
+    try std.testing.expectEqual(@as(usize, 11), bc.code.len);
     try std.testing.expectEqual(op.goto, bc.code[5]);
-    try std.testing.expectEqual(@as(i32, 5), std.mem.readInt(i32, bc.code[6..10], .little));
+    try std.testing.expectEqual(@as(i32, 4), std.mem.readInt(i32, bc.code[6..10], .little));
+    try std.testing.expectEqual(op.@"return", bc.code[10]);
+}
+
+test "resolve_labels: threads jumps through unconditional goto targets" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+
+    // goto pc=5 ; goto pc=10 ; return
+    var input = [_]u8{0} ** 11;
+    input[0] = op.goto;
+    std.mem.writeInt(u32, input[1..5], 5, .little);
+    input[5] = op.goto;
+    std.mem.writeInt(u32, input[6..10], 10, .little);
+    input[10] = op.@"return";
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.JSContext.init(&bc);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 11), bc.code.len);
+    try std.testing.expectEqual(op.goto, bc.code[0]);
+    try std.testing.expectEqual(@as(i32, 9), std.mem.readInt(i32, bc.code[1..5], .little));
+}
+
+test "resolve_labels: folds constant push_i32 conditional tests" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    const op = bytecode.opcode.op;
+
+    {
+        var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+
+        // push_i32 1 ; if_false pc=10 ; return_undef
+        var input = [_]u8{0} ** 11;
+        input[0] = op.push_i32;
+        std.mem.writeInt(i32, input[1..5], 1, .little);
+        input[5] = op.if_false;
+        std.mem.writeInt(u32, input[6..10], 10, .little);
+        input[10] = op.return_undef;
+        try bc.setCode(&input);
+
+        var ctx = pipeline.resolve_labels.JSContext.init(&bc);
+        try pipeline.resolve_labels.run(&ctx);
+
+        try std.testing.expectEqual(@as(usize, 1), bc.code.len);
+        try std.testing.expectEqual(op.return_undef, bc.code[0]);
+    }
+
+    {
+        var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+
+        // push_i32 0 ; if_false pc=11 ; drop ; return_undef
+        var input = [_]u8{0} ** 12;
+        input[0] = op.push_i32;
+        std.mem.writeInt(i32, input[1..5], 0, .little);
+        input[5] = op.if_false;
+        std.mem.writeInt(u32, input[6..10], 11, .little);
+        input[10] = op.drop;
+        input[11] = op.return_undef;
+        try bc.setCode(&input);
+
+        var ctx = pipeline.resolve_labels.JSContext.init(&bc);
+        try pipeline.resolve_labels.run(&ctx);
+
+        try std.testing.expectEqual(@as(usize, 7), bc.code.len);
+        try std.testing.expectEqual(op.goto, bc.code[0]);
+        try std.testing.expectEqual(@as(i32, 5), std.mem.readInt(i32, bc.code[1..5], .little));
+        try std.testing.expectEqual(op.drop, bc.code[5]);
+        try std.testing.expectEqual(op.return_undef, bc.code[6]);
+    }
+}
+
+test "resolve_labels: folds push_i32 neg" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+
+    // push_i32 42 ; neg ; return
+    var input = [_]u8{0} ** 7;
+    input[0] = op.push_i32;
+    std.mem.writeInt(i32, input[1..5], 42, .little);
+    input[5] = op.neg;
+    input[6] = op.@"return";
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.JSContext.init(&bc);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 6), bc.code.len);
+    try std.testing.expectEqual(op.push_i32, bc.code[0]);
+    try std.testing.expectEqual(@as(i32, -42), std.mem.readInt(i32, bc.code[1..5], .little));
+    try std.testing.expectEqual(op.@"return", bc.code[5]);
+}
+
+test "resolve_labels: skips dead code after unconditional goto" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+
+    // goto pc=10 ; push_i32 123 ; return
+    var input = [_]u8{0} ** 11;
+    input[0] = op.goto;
+    std.mem.writeInt(u32, input[1..5], 10, .little);
+    input[5] = op.push_i32;
+    std.mem.writeInt(i32, input[6..10], 123, .little);
+    input[10] = op.@"return";
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.JSContext.init(&bc);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 6), bc.code.len);
+    try std.testing.expectEqual(op.goto, bc.code[0]);
+    try std.testing.expectEqual(@as(i32, 4), std.mem.readInt(i32, bc.code[1..5], .little));
+    try std.testing.expectEqual(op.@"return", bc.code[5]);
 }
 
 test "F10.2: resolve_labels selects goto8 for near relative target" {
@@ -849,11 +996,10 @@ test "F10.2: resolve_labels selects goto8 for near relative target" {
     var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_labels.run(&ctx);
 
-    try std.testing.expectEqual(@as(usize, 4), bc.code.len);
+    try std.testing.expectEqual(@as(usize, 3), bc.code.len);
     try std.testing.expectEqual(op.goto8, bc.code[0]);
-    try std.testing.expectEqual(@as(i8, 2), @as(i8, @bitCast(bc.code[1])));
-    try std.testing.expectEqual(op.push_1, bc.code[2]);
-    try std.testing.expectEqual(op.@"return", bc.code[3]);
+    try std.testing.expectEqual(@as(i8, 1), @as(i8, @bitCast(bc.code[1])));
+    try std.testing.expectEqual(op.@"return", bc.code[2]);
 }
 
 test "F10.2: resolve_labels keeps conditional jump wide when target exceeds i8" {

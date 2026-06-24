@@ -223,37 +223,41 @@ pub fn setObjectDataPropertyForPutFieldFastPath(
     atom_id: core.Atom,
     value: core.JSValue,
 ) !bool {
-    if (try setCachedOwnDataProperty(rt, function, site_pc, receiver, atom_id, value)) return true;
-    if (try setObjectDataPropertyForSimplePutField(rt, receiver, atom_id, value)) {
+    if (setCachedOwnDataPropertyOwned(rt, function, site_pc, receiver, atom_id, value)) return true;
+    if (setObjectDataPropertyForSimplePutFieldOwned(rt, receiver, atom_id, value)) {
         installOwnDataIcAfterWrite(function, site_pc, rt, receiver, atom_id);
         return true;
     }
     return false;
 }
 
-fn setCachedOwnDataProperty(
+fn setCachedOwnDataPropertyOwned(
     rt: *core.JSRuntime,
     function: *const bytecode.Bytecode,
     site_pc: usize,
     receiver: core.JSValue,
     atom_id: core.Atom,
     value: core.JSValue,
-) !bool {
+) bool {
     const object = cacheableOwnDataReceiver(rt, receiver, atom_id) orelse return false;
+    if (object.needsSlowPropertyAccess()) return false;
     const cached = cachedOwnDataPropertyLookupForObject(function, site_pc, rt, object, atom_id) orelse return false;
-    return try setOwnDataPropertyLookup(rt, object, cached, atom_id, value);
+    return setOwnDataPropertyLookupOwned(rt, object, cached, atom_id, value);
 }
 
-fn setObjectDataPropertyForSimplePutField(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) !bool {
+fn setObjectDataPropertyForSimplePutFieldOwned(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) bool {
     if (rt.atoms.kind(atom_id) == .private) return false;
     const object = objectFromValue(receiver) orelse return false;
+    if (object.needsSlowPropertyAccess()) return false;
     if (object.proxyTarget() != null or object.hasExoticMethods()) return false;
+    if (object.class_id == core.class.ids.module_ns) return false;
     if (core.object.isTypedArrayObject(object)) return false;
     if (object.flags.is_array) {
         if (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
     }
     if (object.class_id == core.class.ids.regexp and atom_id == core.atom.ids.lastIndex and object.regexpLastIndex() != null) return false;
-    return try object.setOrDefineOwnDataPropertyForSimpleSet(rt, atom_id, value);
+    const lookup = writableOwnDataPropertyLookupForObject(object, atom_id) orelse return false;
+    return setOwnDataPropertyLookupOwned(rt, object, lookup, atom_id, value);
 }
 
 fn cachedOwnDataPropertyLookupForObject(
@@ -543,6 +547,10 @@ fn setOwnDataPropertyLookup(rt: *core.JSRuntime, object: *core.Object, lookup: B
     return setOwnDataPropertyAt(rt, object, lookup.index, atom_id, value);
 }
 
+fn setOwnDataPropertyLookupOwned(rt: *core.JSRuntime, object: *core.Object, lookup: BorrowedOwnDataLookup, atom_id: core.Atom, value: core.JSValue) bool {
+    return setOwnDataPropertyAtOwned(rt, object, lookup.index, atom_id, value);
+}
+
 fn setOwnDataPropertyAt(rt: *core.JSRuntime, object: *core.Object, index: usize, atom_id: core.Atom, value: core.JSValue) !bool {
     const slot = writableDataSlotAt(object, index, atom_id) orelse return false;
     if (atom_id != core.atom.ids.Private_brand and !slot.value.requiresRefCount() and !value.requiresRefCount()) {
@@ -554,6 +562,14 @@ fn setOwnDataPropertyAt(rt: *core.JSRuntime, object: *core.Object, index: usize,
     const old_value = slot.value.*;
     slot.value.* = next_value;
     core.object.destroyPropertySlot(rt, atom_id, .{ .data = old_value });
+    return true;
+}
+
+fn setOwnDataPropertyAtOwned(rt: *core.JSRuntime, object: *core.Object, index: usize, atom_id: core.Atom, value: core.JSValue) bool {
+    const slot = writableDataSlotAt(object, index, atom_id) orelse return false;
+    const old_slot = slot.entry.slot;
+    slot.entry.slot = .{ .data = value };
+    core.object.destroyPropertySlot(rt, atom_id, old_slot);
     return true;
 }
 
@@ -859,7 +875,7 @@ inline fn trustedDataPropertyBorrowedAt(object: *core.Object, index: usize) ?cor
     if (index >= object.properties.len) return null;
     return switch (object.properties[index].slot) {
         .data => |stored| stored,
-        .auto_init, .accessor, .deleted => null,
+        .var_ref, .auto_init, .accessor, .deleted => null,
     };
 }
 
@@ -873,17 +889,17 @@ test "fast own data property replacement retains private brand atom" {
     try object.defineOwnProperty(
         rt,
         core.atom.ids.Private_brand,
-        core.Descriptor.data(core.JSValue.symbol(brand), true, true, true),
+        core.Descriptor.data(try rt.symbolValue(brand), true, true, true),
     );
     rt.atoms.free(brand);
     try std.testing.expect(rt.atoms.name(brand) != null);
 
     const lookup = writableOwnDataPropertyLookup(
         object,
-        .{ .index = 0, .value = core.JSValue.symbol(brand) },
+        .{ .index = 0, .value = try rt.symbolValue(brand) },
         core.atom.ids.Private_brand,
     ).?;
-    try std.testing.expect(try setOwnDataPropertyLookup(rt, object, lookup, core.atom.ids.Private_brand, core.JSValue.symbol(brand)));
+    try std.testing.expect(try setOwnDataPropertyLookup(rt, object, lookup, core.atom.ids.Private_brand, try rt.symbolValue(brand)));
     try std.testing.expect(rt.atoms.name(brand) != null);
     const stored = object.getProperty(core.atom.ids.Private_brand);
     try std.testing.expectEqual(@as(?core.Atom, brand), stored.asSymbolAtom());
@@ -914,24 +930,24 @@ test "global own data slot helpers preserve lookup and write ownership" {
 
     const lookup = globalOwnDataPropertyBorrowedLookup(global, key).?;
     try std.testing.expectEqual(@as(usize, 0), lookup.index);
-    try std.testing.expectEqual(&initial.header, lookup.value.refHeader().?);
-    try std.testing.expectEqual(&initial.header, globalOwnDataPropertyValue(global, key).?.refHeader().?);
+    try std.testing.expectEqual(&initial.header, lookup.value.stringHeader().?);
+    try std.testing.expectEqual(&initial.header, globalOwnDataPropertyValue(global, key).?.stringHeader().?);
     try std.testing.expect(globalOwnDataPropertyValue(global, other_key) == null);
-    try std.testing.expectEqual(&initial.header, globalOwnWritableDataPropertyLookup(global, key).?.value.refHeader().?);
+    try std.testing.expectEqual(&initial.header, globalOwnWritableDataPropertyLookup(global, key).?.value.stringHeader().?);
     const writable_lookup = globalWritableDataPropertyLookupAt(global, lookup.index, key).?;
     try std.testing.expectEqual(lookup.index, writable_lookup.index);
-    try std.testing.expectEqual(&initial.header, writable_lookup.value.refHeader().?);
+    try std.testing.expectEqual(&initial.header, writable_lookup.value.stringHeader().?);
     try std.testing.expectEqual(@as(?usize, lookup.index), globalWritableDataStoreIndexForFastPath(rt, null, global, &function, 0, key));
     const store_lookup = globalWritableDataStoreLookupForFastPath(rt, null, global, &function, 0, key).?;
     try std.testing.expectEqual(lookup.index, store_lookup.index);
-    try std.testing.expectEqual(&initial.header, store_lookup.value.refHeader().?);
-    try std.testing.expectEqual(&initial.header, globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.refHeader().?);
-    try std.testing.expectEqual(&initial.header, declaredGlobalVarDataBorrowedLookup(global, &function, key).?.value.refHeader().?);
+    try std.testing.expectEqual(&initial.header, store_lookup.value.stringHeader().?);
+    try std.testing.expectEqual(&initial.header, globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
+    try std.testing.expectEqual(&initial.header, declaredGlobalVarDataBorrowedLookup(global, &function, key).?.value.stringHeader().?);
     try std.testing.expect(declaredGlobalVarDataBorrowedLookup(global, &function, other_key) == null);
-    try std.testing.expectEqual(&initial.header, globalDataPropertyLookupForFastPath(rt, global, &function, 0, key).?.value.refHeader().?);
-    try std.testing.expectEqual(&initial.header, globalDataPropertyValueForFastPath(rt, global, &function, 0, key).?.refHeader().?);
-    try std.testing.expectEqual(&initial.header, globalDataPropertyLookupForFastPathNoProfile(rt, global, &function, 0, key).?.value.refHeader().?);
-    try std.testing.expectEqual(&initial.header, globalDataPropertyValueForFastPathNoProfile(rt, global, &function, 0, key).?.refHeader().?);
+    try std.testing.expectEqual(&initial.header, globalDataPropertyLookupForFastPath(rt, global, &function, 0, key).?.value.stringHeader().?);
+    try std.testing.expectEqual(&initial.header, globalDataPropertyValueForFastPath(rt, global, &function, 0, key).?.stringHeader().?);
+    try std.testing.expectEqual(&initial.header, globalDataPropertyLookupForFastPathNoProfile(rt, global, &function, 0, key).?.value.stringHeader().?);
+    try std.testing.expectEqual(&initial.header, globalDataPropertyValueForFastPathNoProfile(rt, global, &function, 0, key).?.stringHeader().?);
     try std.testing.expect(globalDataPropertyLookupForFastPath(rt, global, &function, 0, other_key) == null);
     try std.testing.expect(globalDataPropertyValueForFastPath(rt, global, &function, 0, other_key) == null);
 
@@ -959,7 +975,7 @@ test "global own data slot helpers preserve lookup and write ownership" {
     try std.testing.expectEqual(@as(i32, 2), copied.header.rc);
     copied.value().free(rt);
     try std.testing.expectEqual(@as(i32, 1), copied.header.rc);
-    try std.testing.expectEqual(&copied.header, globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.refHeader().?);
+    try std.testing.expectEqual(&copied.header, globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
 
     const owned = try core.string.String.createAscii(rt, "owned");
     var owned_transferred = false;
@@ -967,7 +983,7 @@ test "global own data slot helpers preserve lookup and write ownership" {
     try std.testing.expect(setGlobalOwnWritableDataPropertyAtOwned(rt, global, lookup.index, key, owned.value()));
     owned_transferred = true;
     try std.testing.expectEqual(@as(i32, 1), owned.header.rc);
-    try std.testing.expectEqual(&owned.header, globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.refHeader().?);
+    try std.testing.expectEqual(&owned.header, globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
 
     const lookup_owned = try core.string.String.createAscii(rt, "lookup-owned");
     var lookup_transferred = false;
@@ -976,7 +992,7 @@ test "global own data slot helpers preserve lookup and write ownership" {
     try std.testing.expect(setGlobalWritableDataStoreLookupOwned(rt, global, writable_store, key, lookup_owned.value()));
     lookup_transferred = true;
     try std.testing.expectEqual(@as(i32, 1), lookup_owned.header.rc);
-    try std.testing.expectEqual(&lookup_owned.header, globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.refHeader().?);
+    try std.testing.expectEqual(&lookup_owned.header, globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
 
     const fast_path_owned = try core.string.String.createAscii(rt, "fast-path-owned");
     var fast_path_transferred = false;
@@ -984,7 +1000,7 @@ test "global own data slot helpers preserve lookup and write ownership" {
     try std.testing.expect(setGlobalWritableDataStoreForFastPathOwned(rt, null, global, &function, 0, key, fast_path_owned.value()));
     fast_path_transferred = true;
     try std.testing.expectEqual(@as(i32, 1), fast_path_owned.header.rc);
-    try std.testing.expectEqual(&fast_path_owned.header, globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.refHeader().?);
+    try std.testing.expectEqual(&fast_path_owned.header, globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
 }
 
 test "global own data slot helpers reject readonly and accessor writes" {

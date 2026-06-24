@@ -31,10 +31,6 @@ pub const EvalVarRefSnapshot = struct {
         frame.eval_var_refs = self.refs.values;
     }
 
-    pub fn rootSlice(self: *EvalVarRefSnapshot) runtime.ValueRootSlice {
-        return self.refs.slice();
-    }
-
     pub fn deinit(self: *EvalVarRefSnapshot, rt: *JSRuntime) void {
         const names = self.names;
         self.names = &.{};
@@ -43,90 +39,112 @@ pub const EvalVarRefSnapshot = struct {
     }
 };
 
-pub const FrameRootScope = struct {
-    rt: ?*JSRuntime = null,
-    values: [4]runtime.ValueRootValue = undefined,
-    slices: [7]runtime.ValueRootSlice = undefined,
-    frame: runtime.ValueRootFrame = .{},
+pub const FrameSlab = struct {
+    storage: []JSValue = &.{},
+    args: []JSValue = &.{},
+    original_args: []JSValue = &.{},
+    locals: []JSValue = &.{},
+    stack: []JSValue = &.{},
+    var_refs: []JSValue = &.{},
+    open_var_refs: []?*core.VarRef = &.{},
 
-    pub fn init(self: *FrameRootScope, rt: *JSRuntime, stack: *stack_mod.Stack, exec_frame: *Frame, eval_var_refs: *EvalVarRefSnapshot) void {
-        self.initWithOptions(rt, stack, exec_frame, eval_var_refs, .{});
-    }
+    pub fn carve(
+        account: *memory.MemoryAccount,
+        arena: *runtime.VmStackArena,
+        arg_count: usize,
+        original_arg_count: usize,
+        local_count: usize,
+        stack_count: usize,
+        var_ref_count: usize,
+        open_var_ref_count: usize,
+    ) ?FrameSlab {
+        const count_1 = std.math.add(usize, arg_count, original_arg_count) catch return null;
+        const count_2 = std.math.add(usize, count_1, local_count) catch return null;
+        const count_3 = std.math.add(usize, count_2, stack_count) catch return null;
+        const value_count = std.math.add(usize, count_3, var_ref_count) catch return null;
+        const open_bytes = std.math.mul(usize, @sizeOf(?*core.VarRef), open_var_ref_count) catch return null;
+        const open_value_slots = std.math.divCeil(usize, open_bytes, @sizeOf(JSValue)) catch return null;
+        const slab_values = arena.carve(account, value_count + open_value_slots) orelse return null;
 
-    pub const RootOptions = struct {
-        stack: bool = true,
-        locals: bool = true,
-        args: bool = true,
-        original_args: bool = true,
-        var_refs: bool = true,
-        eval_local_slots: bool = true,
-        eval_var_refs: bool = true,
-    };
+        var cursor: usize = 0;
+        const args = slab_values[cursor .. cursor + arg_count];
+        cursor += arg_count;
+        const original_args = slab_values[cursor .. cursor + original_arg_count];
+        cursor += original_arg_count;
+        const locals = slab_values[cursor .. cursor + local_count];
+        cursor += local_count;
+        const stack = slab_values[cursor .. cursor + stack_count];
+        cursor += stack_count;
+        const var_refs = slab_values[cursor .. cursor + var_ref_count];
+        cursor += var_ref_count;
 
-    pub fn initWithOptions(
-        self: *FrameRootScope,
-        rt: *JSRuntime,
-        stack: *stack_mod.Stack,
-        exec_frame: *Frame,
-        eval_var_refs: *EvalVarRefSnapshot,
-        options: RootOptions,
-    ) void {
-        self.rt = rt;
-        self.values = .{
-            .{ .value = &exec_frame.this_value },
-            .{ .value = &exec_frame.constructor_this_value },
-            .{ .value = &exec_frame.current_function },
-            .{ .value = &exec_frame.new_target },
+        const open_var_refs: []?*core.VarRef = if (open_var_ref_count == 0)
+            &.{}
+        else blk: {
+            const bytes = std.mem.sliceAsBytes(slab_values[cursor .. cursor + open_value_slots]);
+            break :blk std.mem.bytesAsSlice(?*core.VarRef, bytes[0..open_bytes]);
         };
-        var slice_count: usize = 0;
-        if (options.stack) {
-            self.slices[slice_count] = .{ .mutable = &stack.values };
-            slice_count += 1;
-        }
-        if (options.locals) {
-            self.slices[slice_count] = .{ .mutable = &exec_frame.locals };
-            slice_count += 1;
-        }
-        if (options.args) {
-            self.slices[slice_count] = .{ .mutable = &exec_frame.args };
-            slice_count += 1;
-        }
-        if (options.original_args) {
-            self.slices[slice_count] = .{ .mutable = &exec_frame.original_args };
-            slice_count += 1;
-        }
-        if (options.var_refs) {
-            self.slices[slice_count] = .{ .mutable = &exec_frame.var_refs };
-            slice_count += 1;
-        }
-        if (options.eval_local_slots) {
-            self.slices[slice_count] = .{ .mutable = &exec_frame.eval_local_slots };
-            slice_count += 1;
-        }
-        if (options.eval_var_refs) {
-            self.slices[slice_count] = eval_var_refs.rootSlice();
-            slice_count += 1;
-        }
-        self.frame = .{
-            .previous = rt.active_value_roots,
-            .slices = self.slices[0..slice_count],
-            .values = &self.values,
+        if (open_var_refs.len != 0) @memset(open_var_refs, null);
+
+        return .{
+            .storage = slab_values,
+            .args = args,
+            .original_args = original_args,
+            .locals = locals,
+            .stack = stack,
+            .var_refs = var_refs,
+            .open_var_refs = open_var_refs,
         };
-        rt.active_value_roots = &self.frame;
     }
 
-    pub fn useMutableOperandStack(self: *FrameRootScope, stack: *stack_mod.Stack) void {
-        self.slices[0] = .{ .mutable = &stack.values };
-    }
+    pub fn allocHeap(
+        account: *memory.MemoryAccount,
+        arg_count: usize,
+        original_arg_count: usize,
+        local_count: usize,
+        stack_count: usize,
+        var_ref_count: usize,
+        open_var_ref_count: usize,
+    ) !FrameSlab {
+        const count_1 = try std.math.add(usize, arg_count, original_arg_count);
+        const count_2 = try std.math.add(usize, count_1, local_count);
+        const count_3 = try std.math.add(usize, count_2, stack_count);
+        const value_count = try std.math.add(usize, count_3, var_ref_count);
+        const open_bytes = try std.math.mul(usize, @sizeOf(?*core.VarRef), open_var_ref_count);
+        const open_value_slots = try std.math.divCeil(usize, open_bytes, @sizeOf(JSValue));
+        const total_value_slots = value_count + open_value_slots;
+        if (total_value_slots == 0) return .{};
+        const storage = try account.alloc(JSValue, total_value_slots);
+        errdefer account.free(JSValue, storage);
 
-    pub fn useWindowedOperandStack(self: *FrameRootScope, stack: *stack_mod.Stack, live_len: *const usize) void {
-        self.slices[0] = .{ .windowed = .{ .values = &stack.values, .live_len = live_len } };
-    }
+        var cursor: usize = 0;
+        const args = storage[cursor .. cursor + arg_count];
+        cursor += arg_count;
+        const original_args = storage[cursor .. cursor + original_arg_count];
+        cursor += original_arg_count;
+        const locals = storage[cursor .. cursor + local_count];
+        cursor += local_count;
+        const stack = storage[cursor .. cursor + stack_count];
+        cursor += stack_count;
+        const var_refs = storage[cursor .. cursor + var_ref_count];
+        cursor += var_ref_count;
+        const open_var_refs: []?*core.VarRef = if (open_var_ref_count == 0)
+            &.{}
+        else blk: {
+            const bytes = std.mem.sliceAsBytes(storage[cursor .. cursor + open_value_slots]);
+            break :blk std.mem.bytesAsSlice(?*core.VarRef, bytes[0..open_bytes]);
+        };
+        if (open_var_refs.len != 0) @memset(open_var_refs, null);
 
-    pub fn deinit(self: *FrameRootScope) void {
-        const rt = self.rt orelse return;
-        rt.active_value_roots = self.frame.previous;
-        self.* = .{};
+        return .{
+            .storage = storage,
+            .args = args,
+            .original_args = original_args,
+            .locals = locals,
+            .stack = stack,
+            .var_refs = var_refs,
+            .open_var_refs = open_var_refs,
+        };
     }
 };
 
@@ -173,6 +191,37 @@ pub fn argumentsNeedsOriginalSnapshot(function: *const bytecode.Bytecode) bool {
         !function.flags.has_simple_parameter_list;
 }
 
+pub fn frameArgCount(function: *const bytecode.Bytecode, argc: usize) usize {
+    return @max(argc, @as(usize, @intCast(function.arg_count)));
+}
+
+pub fn originalArgCount(argc: usize, need_original_snapshot: bool) usize {
+    return if (argc != 0 and need_original_snapshot) argc else 0;
+}
+
+pub fn frameVarRefStorageCount(function: *const bytecode.Bytecode, inherited_var_refs: []const JSValue) usize {
+    if (inherited_var_refs.len != 0) return inherited_var_refs.len;
+    if (function.closure_var.len != 0) return function.closure_var.len;
+    return function.var_ref_names.len;
+}
+
+pub fn frameOpenVarRefStorageCount(function: *const bytecode.Bytecode, frame_arg_count: usize) usize {
+    const slot_count = @as(usize, function.var_count) + frame_arg_count;
+    if (slot_count == 0) return 0;
+    if (function.flags.is_generator or function.flags.is_async) return 0;
+    if (function.constants.values.len != 0) return slot_count;
+    if (function.flags.has_eval_call) return slot_count;
+    return 0;
+}
+
+pub const FrameStorageWindows = struct {
+    args: ?[]JSValue = null,
+    original_args: ?[]JSValue = null,
+    locals: ?[]JSValue = null,
+    var_refs: ?[]JSValue = null,
+    open_var_refs: ?[]?*core.VarRef = null,
+};
+
 pub const Frame = struct {
     function: *const bytecode.Bytecode,
     pc: usize = 0,
@@ -185,39 +234,21 @@ pub const Frame = struct {
     locals: []JSValue = &.{},
     args: []JSValue = &.{},
     original_args: []JSValue = &.{},
-    inline_locals: [8]JSValue = undefined,
-    inline_locals_uninit: [8]bool = undefined,
-    inline_args: [4]JSValue = undefined,
-    inline_original_args: [4]JSValue = undefined,
-    inline_var_refs: [4]JSValue = undefined,
-    locals_on_heap: bool = false,
-    locals_uninit_on_heap: bool = false,
-    args_on_heap: bool = false,
-    original_args_on_heap: bool = false,
     var_refs: []JSValue = &.{},
-    var_refs_on_heap: bool = false,
-    open_var_refs: ?*core.VarRef = null,
+    open_var_refs: []?*core.VarRef = &.{},
+    storage_values: []JSValue = &.{},
+    storage_on_heap: bool = false,
     eval_local_names: []const Atom = &.{},
     eval_local_slots: []JSValue = &.{},
     eval_var_ref_names: []const Atom = &.{},
     eval_var_refs: []JSValue = &.{},
     eval_var_refs_republished: bool = false,
-    /// Per-slot TDZ flag mirroring QuickJS's `JS_UNINITIALIZED`
-    /// sentinel: `true` means the slot is in the temporal dead
-    /// zone; reads via `get_loc_check` / `put_loc_check` throw
-    /// `ReferenceError`, and `put_loc_check_init` clears the flag.
-    /// `set_loc_uninitialized` (emitted by the resolve_variables
-    /// prologue for every lexical local) sets it back to `true`.
-    locals_uninit: []bool = &.{},
-    locals_uninit_count: usize = 0,
     global_lexical_sync_env: ?*Object = null,
     global_lexical_sync_slots: []bool = &.{},
     global_lexical_sync_indices: []usize = &.{},
     global_lexical_sync_checked: bool = false,
     this_value_owned: bool = true,
-    constructor_this_value_owned: bool = true,
-    current_function_owned: bool = true,
-    new_target_owned: bool = true,
+    constructor_this_value_owned: bool = false,
 
     pub fn init(function: *const bytecode.Bytecode) Frame {
         return .{ .function = function };
@@ -234,11 +265,9 @@ pub const Frame = struct {
         self.this_value = bindCallValue(inputs.initial_this_value, modes.this_value);
         self.constructor_this_value = bindCallValue(inputs.constructor_this_value, modes.constructor_this_value);
         self.current_function = bindCallValue(inputs.current_function_value, modes.current_function);
-        self.new_target = bindCallValue(inputs.new_target_value, modes.new_target);
+        self.new_target = inputs.new_target_value;
         self.this_value_owned = modeOwnsValue(modes.this_value);
         self.constructor_this_value_owned = modeOwnsValue(modes.constructor_this_value);
-        self.current_function_owned = modeOwnsValue(modes.current_function);
-        self.new_target_owned = modeOwnsValue(modes.new_target);
     }
 
     pub fn initCallEvalBindings(self: *Frame, rt: *JSRuntime, inputs: CallBindingInputs) !EvalVarRefSnapshot {
@@ -265,18 +294,19 @@ pub const Frame = struct {
         args: []const JSValue,
         use_inline_storage: bool,
         need_original_snapshot: bool,
+        windows: FrameStorageWindows,
     ) !void {
         self.actual_arg_count = args.len;
 
         const frame_arg_count = @max(args.len, @as(usize, @intCast(self.function.arg_count)));
         if (frame_arg_count > 0) {
-            const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, use_inline_storage);
+            const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, use_inline_storage, windows.args);
             if (frame_arg_count > args.len) @memset(owned_args[args.len..], JSValue.undefinedValue());
             for (args, 0..) |arg, idx| owned_args[idx] = arg.dup();
             self.args = owned_args;
         }
 
-        try self.initOriginalArgsSnapshot(account, args, use_inline_storage, need_original_snapshot);
+        try self.initOriginalArgsSnapshot(account, args, use_inline_storage, need_original_snapshot, windows.original_args);
     }
 
     /// Move `argc` call arguments from the operand stack into frame slots
@@ -295,7 +325,7 @@ pub const Frame = struct {
         const frame_arg_count = @max(argc, @as(usize, @intCast(self.function.arg_count)));
         if (frame_arg_count > 0) {
             if (stack.values.len < argc) return error.StackUnderflow;
-            const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, use_inline_storage);
+            const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, use_inline_storage, null);
             if (frame_arg_count > argc) @memset(owned_args[argc..], JSValue.undefinedValue());
             var remaining = argc;
             while (remaining > 0) {
@@ -305,7 +335,7 @@ pub const Frame = struct {
             self.args = owned_args;
         }
         if (argc > 0 and need_original_snapshot) {
-            try self.initOriginalArgsSnapshot(account, self.args[0..argc], use_inline_storage, true);
+            try self.initOriginalArgsSnapshot(account, self.args[0..argc], use_inline_storage, true, null);
         }
     }
 
@@ -321,18 +351,19 @@ pub const Frame = struct {
         args: []JSValue,
         use_inline_storage: bool,
         need_original_snapshot: bool,
+        windows: FrameStorageWindows,
     ) !void {
         self.actual_arg_count = args.len;
         const frame_arg_count = @max(args.len, @as(usize, @intCast(self.function.arg_count)));
         if (frame_arg_count > 0) {
-            const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, use_inline_storage);
+            const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, use_inline_storage, windows.args);
             @memset(owned_args[args.len..], JSValue.undefinedValue());
             @memcpy(owned_args[0..args.len], args);
             @memset(args, JSValue.undefinedValue());
             self.args = owned_args;
         }
         if (args.len > 0 and need_original_snapshot) {
-            try self.initOriginalArgsSnapshot(account, self.args[0..args.len], use_inline_storage, true);
+            try self.initOriginalArgsSnapshot(account, self.args[0..args.len], use_inline_storage, true, windows.original_args);
         }
     }
 
@@ -347,11 +378,12 @@ pub const Frame = struct {
         args: []JSValue,
         use_inline_storage: bool,
         need_original_snapshot: bool,
+        windows: FrameStorageWindows,
     ) !void {
         self.actual_arg_count = args.len;
         std.debug.assert(args.len >= @as(usize, @intCast(self.function.arg_count)));
         if (args.len > 0 and need_original_snapshot) {
-            try self.initOriginalArgsSnapshot(account, args, use_inline_storage, true);
+            try self.initOriginalArgsSnapshot(account, args, use_inline_storage, true, windows.original_args);
         }
         self.args = args;
     }
@@ -362,15 +394,17 @@ pub const Frame = struct {
         arena: ?*runtime.VmStackArena,
         frame_arg_count: usize,
         use_inline_storage: bool,
+        window: ?[]JSValue,
     ) ![]JSValue {
-        if (use_inline_storage and frame_arg_count <= self.inline_args.len) {
-            return self.inline_args[0..frame_arg_count];
+        if (window) |values| {
+            std.debug.assert(values.len == frame_arg_count);
+            return values;
         }
         if (arena) |stack_arena| {
-            if (stack_arena.carve(account, frame_arg_count)) |window| return window;
+            if (stack_arena.carve(account, frame_arg_count)) |arg_window| return arg_window;
         }
-        self.args_on_heap = true;
-        return try account.alloc(JSValue, frame_arg_count);
+        _ = use_inline_storage;
+        return try self.allocOwnedStorage(account, frame_arg_count);
     }
 
     fn initOriginalArgsSnapshot(
@@ -379,16 +413,37 @@ pub const Frame = struct {
         args: []const JSValue,
         use_inline_storage: bool,
         need_original_snapshot: bool,
+        window: ?[]JSValue,
     ) !void {
         if (args.len == 0 or !need_original_snapshot) return;
-        const original_args = if (use_inline_storage and args.len <= self.inline_original_args.len)
-            self.inline_original_args[0..args.len]
-        else blk: {
-            self.original_args_on_heap = true;
-            break :blk try account.alloc(JSValue, args.len);
+        const original_args = if (window) |values| blk: {
+            std.debug.assert(values.len == args.len);
+            break :blk values;
+        } else blk: {
+            _ = use_inline_storage;
+            break :blk try self.allocOwnedStorage(account, args.len);
         };
         for (args, 0..) |arg, idx| original_args[idx] = arg.dup();
         self.original_args = original_args;
+    }
+
+    pub fn installOwnedStorage(self: *Frame, storage: []JSValue) void {
+        std.debug.assert(!self.storage_on_heap);
+        self.storage_values = storage;
+        self.storage_on_heap = storage.len != 0;
+    }
+
+    pub fn allocOwnedStorage(self: *Frame, account: *memory.MemoryAccount, count: usize) ![]JSValue {
+        const values = try account.alloc(JSValue, count);
+        if (self.storage_on_heap and self.storage_values.len != 0) {
+            // Dynamic growth paths that do not receive pre-carved windows are
+            // intentionally rare. Keep ownership explicit instead of silently
+            // leaking a second backing allocation.
+            account.free(JSValue, values);
+            return error.OutOfMemory;
+        }
+        self.installOwnedStorage(values);
+        return values;
     }
 
     fn releaseCallBindings(self: *Frame, rt: *JSRuntime) void {
@@ -398,22 +453,18 @@ pub const Frame = struct {
         const new_target = self.new_target;
         const this_value_owned = self.this_value_owned;
         const constructor_this_value_owned = self.constructor_this_value_owned;
-        const current_function_owned = self.current_function_owned;
-        const new_target_owned = self.new_target_owned;
         self.this_value = JSValue.undefinedValue();
         self.constructor_this_value = JSValue.undefinedValue();
         self.current_function = JSValue.undefinedValue();
         self.new_target = JSValue.undefinedValue();
         self.this_value_owned = true;
         self.constructor_this_value_owned = true;
-        self.current_function_owned = true;
-        self.new_target_owned = true;
         self.eval_local_names = &.{};
         self.eval_local_slots = &.{};
         if (this_value_owned) this_value.free(rt);
         if (constructor_this_value_owned) constructor_this_value.free(rt);
-        if (current_function_owned) current_function.free(rt);
-        if (new_target_owned) new_target.free(rt);
+        current_function.free(rt);
+        _ = new_target;
     }
 
     pub fn deinit(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
@@ -424,8 +475,6 @@ pub const Frame = struct {
         const arguments_object = self.arguments_object;
         const this_value_owned = self.this_value_owned;
         const constructor_this_value_owned = self.constructor_this_value_owned;
-        const current_function_owned = self.current_function_owned;
-        const new_target_owned = self.new_target_owned;
         self.this_value = JSValue.undefinedValue();
         self.constructor_this_value = JSValue.undefinedValue();
         self.current_function = JSValue.undefinedValue();
@@ -433,13 +482,11 @@ pub const Frame = struct {
         self.arguments_object = null;
         self.this_value_owned = true;
         self.constructor_this_value_owned = true;
-        self.current_function_owned = true;
-        self.new_target_owned = true;
 
         if (this_value_owned) this_value.free(rt);
         if (constructor_this_value_owned) constructor_this_value.free(rt);
-        if (current_function_owned) current_function.free(rt);
-        if (new_target_owned) new_target.free(rt);
+        current_function.free(rt);
+        _ = new_target;
         if (arguments_object) |value| value.free(rt);
 
         self.releaseOwnedStorage(account, rt);
@@ -450,33 +497,42 @@ pub const Frame = struct {
         self.eval_var_refs_republished = false;
     }
 
+    pub fn deinitInlineCall(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
+        if (self.this_value_owned) self.this_value.free(rt);
+        if (self.constructor_this_value_owned) self.constructor_this_value.free(rt);
+        self.current_function.free(rt);
+        if (self.arguments_object) |value| value.free(rt);
+
+        if (self.open_var_refs.len != 0) self.closeOpenVarRefs(rt);
+
+        releaseValueSliceNoReset(rt, self.locals);
+        releaseValueSliceNoReset(rt, self.args);
+        releaseValueSliceNoReset(rt, self.original_args);
+        releaseValueSliceNoReset(rt, self.var_refs);
+
+        if (self.storage_on_heap and self.storage_values.len != 0) account.free(JSValue, self.storage_values);
+        if (self.global_lexical_sync_slots.len != 0) account.free(bool, self.global_lexical_sync_slots);
+        if (self.global_lexical_sync_indices.len != 0) account.free(usize, self.global_lexical_sync_indices);
+    }
+
     pub fn releaseOwnedStorage(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
         self.closeOpenVarRefs(rt);
         const locals = self.locals;
         const args = self.args;
         const original_args = self.original_args;
-        const locals_on_heap = self.locals_on_heap;
-        const locals_uninit_on_heap = self.locals_uninit_on_heap;
-        const args_on_heap = self.args_on_heap;
-        const original_args_on_heap = self.original_args_on_heap;
         const var_refs = self.var_refs;
-        const var_refs_on_heap = self.var_refs_on_heap;
-        const locals_uninit = self.locals_uninit;
+        const storage_values = self.storage_values;
+        const storage_on_heap = self.storage_on_heap;
         const global_lexical_sync_slots = self.global_lexical_sync_slots;
         const global_lexical_sync_indices = self.global_lexical_sync_indices;
 
         self.locals = &.{};
         self.args = &.{};
         self.original_args = &.{};
-        self.locals_on_heap = false;
-        self.locals_uninit_on_heap = false;
-        self.args_on_heap = false;
-        self.original_args_on_heap = false;
         self.var_refs = &.{};
-        self.var_refs_on_heap = false;
-        self.open_var_refs = null;
-        self.locals_uninit = &.{};
-        self.locals_uninit_count = 0;
+        self.open_var_refs = &.{};
+        self.storage_values = &.{};
+        self.storage_on_heap = false;
         self.global_lexical_sync_env = null;
         self.global_lexical_sync_slots = &.{};
         self.global_lexical_sync_indices = &.{};
@@ -487,93 +543,81 @@ pub const Frame = struct {
         releaseValueSlice(rt, original_args);
         releaseValueSlice(rt, var_refs);
 
-        if (locals.len != 0 and locals_on_heap) account.free(JSValue, locals);
-        if (args.len != 0 and args_on_heap) account.free(JSValue, args);
-        if (original_args.len != 0 and original_args_on_heap) account.free(JSValue, original_args);
-        if (var_refs.len != 0 and var_refs_on_heap) account.free(JSValue, var_refs);
-        if (locals_uninit.len != 0 and locals_uninit_on_heap) account.free(bool, locals_uninit);
+        if (storage_on_heap and storage_values.len != 0) account.free(JSValue, storage_values);
         if (global_lexical_sync_slots.len != 0) account.free(bool, global_lexical_sync_slots);
         if (global_lexical_sync_indices.len != 0) account.free(usize, global_lexical_sync_indices);
     }
 
     pub fn findOpenVarRef(self: *Frame, slot: *JSValue) ?*core.VarRef {
-        var current = self.open_var_refs;
-        while (current) |ref| : (current = ref.next_open) {
-            if (ref.is_open and ref.pvalue == slot) return ref;
-        }
-        return null;
+        const idx = self.openVarRefIndex(slot) orelse return null;
+        if (idx >= self.open_var_refs.len) return null;
+        return self.open_var_refs[idx];
     }
 
     pub fn addOpenVarRef(self: *Frame, ref: *core.VarRef) void {
         std.debug.assert(ref.is_open);
-        ref.next_open = self.open_var_refs;
-        self.open_var_refs = ref;
+        const idx = self.openVarRefIndex(ref.pvalue) orelse return;
+        std.debug.assert(idx < self.open_var_refs.len);
+        self.open_var_refs[idx] = ref;
     }
 
     pub fn closeOpenVarRefForSlot(self: *Frame, rt: anytype, slot: *JSValue) void {
-        var link = &self.open_var_refs;
-        while (link.*) |ref| {
-            if (ref.is_open and ref.pvalue == slot) {
-                link.* = ref.next_open;
-                ref.close(rt);
-                ref.valueRef().free(rt);
-                return;
-            }
-            link = &ref.next_open;
-        }
+        const idx = self.openVarRefIndex(slot) orelse return;
+        if (idx >= self.open_var_refs.len) return;
+        const ref = self.open_var_refs[idx] orelse return;
+        self.open_var_refs[idx] = null;
+        ref.close(rt);
+        ref.valueRef().free(rt);
     }
 
     pub fn closeOpenVarRefs(self: *Frame, rt: anytype) void {
-        var current = self.open_var_refs;
-        self.open_var_refs = null;
-        while (current) |ref| {
-            const next = ref.next_open;
+        for (self.open_var_refs) |*slot| {
+            const ref = slot.* orelse continue;
+            slot.* = null;
             ref.close(rt);
             ref.valueRef().free(rt);
-            current = next;
         }
     }
 
-    pub fn setLocalUninitialized(self: *Frame, index: usize) void {
-        if (!self.locals_uninit[index]) {
-            self.locals_uninit[index] = true;
-            self.locals_uninit_count += 1;
-        }
+    pub fn installOpenVarRefSlots(self: *Frame, slots: []?*core.VarRef) void {
+        self.open_var_refs = slots;
+        @memset(self.open_var_refs, null);
     }
 
-    pub fn clearLocalUninitialized(self: *Frame, index: usize) void {
-        if (self.locals_uninit[index]) {
-            self.locals_uninit[index] = false;
-            self.locals_uninit_count -= 1;
-        }
+    pub fn ensureOpenVarRefSlots(
+        self: *Frame,
+        account: *memory.MemoryAccount,
+        arena: ?*runtime.VmStackArena,
+        use_inline_storage: bool,
+    ) !void {
+        const count = self.locals.len + self.args.len;
+        if (count == 0 or self.open_var_refs.len >= count) return;
+        _ = use_inline_storage;
+        const slots = blk: {
+            if (arena) |stack_arena| {
+                if (stack_arena.carveTyped(account, ?*core.VarRef, count)) |window| break :blk window;
+            }
+            const bytes = try std.math.mul(usize, @sizeOf(?*core.VarRef), count);
+            const value_slots = try std.math.divCeil(usize, bytes, @sizeOf(JSValue));
+            const values = try self.allocOwnedStorage(account, value_slots);
+            break :blk std.mem.bytesAsSlice(?*core.VarRef, std.mem.sliceAsBytes(values)[0..bytes]);
+        };
+        @memset(slots, null);
+        self.open_var_refs = slots;
     }
 
-    pub fn localIsUninitialized(self: *const Frame, index: usize) bool {
-        return self.locals_uninit_count != 0 and self.locals_uninit[index];
-    }
-
-    pub fn recomputeLocalsUninitCount(self: *Frame) void {
-        var count: usize = 0;
-        for (self.locals_uninit) |is_uninit| {
-            if (is_uninit) count += 1;
-        }
-        self.locals_uninit_count = count;
+    fn openVarRefIndex(self: *const Frame, slot: *const JSValue) ?usize {
+        if (slotIndexInSlice(slot, self.locals)) |idx| return idx;
+        if (slotIndexInSlice(slot, self.args)) |idx| return self.locals.len + idx;
+        return null;
     }
 
     pub fn setLocal(self: *Frame, account: *memory.MemoryAccount, rt: anytype, index: usize, value: JSValue) !void {
         if (index >= self.locals.len) {
             const next_len = index + 1;
             const old_len = self.locals.len;
-            const old_locals_on_heap = self.locals_on_heap;
-            var next_on_heap = false;
-            const next = if (!old_locals_on_heap and next_len <= self.inline_locals.len)
-                self.inline_locals[0..next_len]
-            else blk: {
-                const allocated = try account.alloc(JSValue, next_len);
-                next_on_heap = true;
-                break :blk allocated;
-            };
-            errdefer if (next_on_heap) account.free(JSValue, next);
+            const next = try account.alloc(JSValue, next_len);
+            errdefer account.free(JSValue, next);
             const old_locals = self.locals;
             if (old_len != 0 and old_locals.ptr == next.ptr) {
                 @memset(next[old_len..], JSValue.undefinedValue());
@@ -581,9 +625,12 @@ pub const Frame = struct {
                 @memset(next, JSValue.undefinedValue());
                 if (old_len != 0) @memcpy(next[0..old_len], old_locals);
             }
+            const old_storage = self.storage_values;
+            const old_storage_on_heap = self.storage_on_heap;
             self.locals = next;
-            self.locals_on_heap = next_on_heap;
-            if (old_locals_on_heap) account.free(JSValue, old_locals);
+            self.storage_values = next;
+            self.storage_on_heap = true;
+            if (old_storage_on_heap and old_storage.len != 0) account.free(JSValue, old_storage);
         } else {
             const next_value = value.dup();
             const old_value = self.locals[index];
@@ -600,6 +647,24 @@ pub const Frame = struct {
             slot.* = JSValue.undefinedValue();
             value.free(rt);
         }
+    }
+
+    fn releaseValueSliceNoReset(rt: anytype, values: []JSValue) void {
+        for (values) |value| {
+            value.free(rt);
+        }
+    }
+
+    fn slotIndexInSlice(slot: *const JSValue, values: []const JSValue) ?usize {
+        if (values.len == 0) return null;
+        const slot_addr = @intFromPtr(slot);
+        const start = @intFromPtr(values.ptr);
+        const byte_len = values.len * @sizeOf(JSValue);
+        const end = start + byte_len;
+        if (slot_addr < start or slot_addr >= end) return null;
+        const byte_offset = slot_addr - start;
+        if (byte_offset % @sizeOf(JSValue) != 0) return null;
+        return byte_offset / @sizeOf(JSValue);
     }
 };
 
@@ -651,75 +716,40 @@ test "Frame setLocal preserves inline locals while growing" {
 
     try std.testing.expectEqual(@as(?i32, 11), exec_frame.locals[0].asInt32());
     try std.testing.expectEqual(@as(?i32, 22), exec_frame.locals[1].asInt32());
-    try std.testing.expect(!exec_frame.locals_on_heap);
+    try std.testing.expect(exec_frame.storage_on_heap);
 }
 
 // Frame capacity helpers (moved from the dissolved exec/vm_utils.zig).
 
 pub fn ensureLocalsCapacity(ctx: *core.JSContext, frame: *Frame, idx: usize) !void {
-    if (idx < frame.locals.len and idx < frame.locals_uninit.len) return;
-    const next_len = @max(idx + 1, @max(frame.locals.len, frame.locals_uninit.len));
-
-    if (!frame.locals_on_heap and !frame.locals_uninit_on_heap and
-        next_len <= frame.inline_locals.len and next_len <= frame.inline_locals_uninit.len)
-    {
-        const next_locals = frame.inline_locals[0..next_len];
-        const next_uninit = frame.inline_locals_uninit[0..next_len];
-        if (frame.locals.len != 0 and frame.locals.ptr != next_locals.ptr) {
-            @memcpy(next_locals[0..frame.locals.len], frame.locals);
-        }
-        if (next_len > frame.locals.len) @memset(next_locals[frame.locals.len..next_len], core.JSValue.undefinedValue());
-        if (frame.locals_uninit.len != 0 and frame.locals_uninit.ptr != next_uninit.ptr) {
-            @memcpy(next_uninit[0..frame.locals_uninit.len], frame.locals_uninit);
-        }
-        if (next_len > frame.locals_uninit.len) @memset(next_uninit[frame.locals_uninit.len..next_len], false);
-        frame.locals = next_locals;
-        frame.locals_uninit = next_uninit;
-        return;
-    }
+    if (idx < frame.locals.len) return;
+    const next_len = idx + 1;
 
     const next_locals = try ctx.runtime.memory.alloc(core.JSValue, next_len);
     errdefer ctx.runtime.memory.free(core.JSValue, next_locals);
-    const next_uninit = try ctx.runtime.memory.alloc(bool, next_len);
-    errdefer ctx.runtime.memory.free(bool, next_uninit);
 
     for (frame.locals, 0..) |value, i| next_locals[i] = value;
     if (next_len > frame.locals.len) @memset(next_locals[frame.locals.len..next_len], core.JSValue.undefinedValue());
-    for (frame.locals_uninit, 0..) |value, i| next_uninit[i] = value;
-    if (next_len > frame.locals_uninit.len) @memset(next_uninit[frame.locals_uninit.len..next_len], false);
 
-    const old_locals = frame.locals;
-    const old_locals_uninit = frame.locals_uninit;
-    const old_locals_on_heap = frame.locals_on_heap;
-    const old_locals_uninit_on_heap = frame.locals_uninit_on_heap;
+    const old_storage = frame.storage_values;
+    const old_storage_on_heap = frame.storage_on_heap;
     frame.locals = next_locals;
-    frame.locals_uninit = next_uninit;
-    frame.locals_on_heap = true;
-    frame.locals_uninit_on_heap = true;
-    if (old_locals.len != 0 and old_locals_on_heap) ctx.runtime.memory.free(core.JSValue, old_locals);
-    if (old_locals_uninit.len != 0 and old_locals_uninit_on_heap) ctx.runtime.memory.free(bool, old_locals_uninit);
+    frame.storage_values = next_locals;
+    frame.storage_on_heap = true;
+    if (old_storage.len != 0 and old_storage_on_heap) ctx.runtime.memory.free(core.JSValue, old_storage);
 }
 
 pub fn ensureVarRefsCapacity(ctx: *core.JSContext, frame: *Frame, idx: usize) !void {
     if (idx < frame.var_refs.len) return;
     const next_len = idx + 1;
-    if (!frame.var_refs_on_heap and next_len <= frame.inline_var_refs.len) {
-        const next = frame.inline_var_refs[0..next_len];
-        if (frame.var_refs.len != 0 and frame.var_refs.ptr != next.ptr) {
-            @memcpy(next[0..frame.var_refs.len], frame.var_refs);
-        }
-        @memset(next[frame.var_refs.len..next_len], core.JSValue.undefinedValue());
-        frame.var_refs = next;
-        return;
-    }
-
     const next = try ctx.runtime.memory.alloc(core.JSValue, next_len);
     errdefer ctx.runtime.memory.free(core.JSValue, next);
     for (frame.var_refs, 0..) |value, i| next[i] = value;
     @memset(next[frame.var_refs.len..next_len], core.JSValue.undefinedValue());
-    const old_var_refs = frame.var_refs;
-    const old_var_refs_on_heap = frame.var_refs_on_heap;
+    const old_storage = frame.storage_values;
+    const old_storage_on_heap = frame.storage_on_heap;
     frame.var_refs = next;
-    frame.var_refs_on_heap = true;
-    if (old_var_refs.len != 0 and old_var_refs_on_heap) ctx.runtime.memory.free(core.JSValue, old_var_refs);
+    frame.storage_values = next;
+    frame.storage_on_heap = true;
+    if (old_storage.len != 0 and old_storage_on_heap) ctx.runtime.memory.free(core.JSValue, old_storage);
 }

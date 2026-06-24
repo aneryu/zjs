@@ -20,9 +20,7 @@ const AppendStringError = error{
 };
 
 fn stringFromValue(value: core.JSValue) ?*core.string.String {
-    if (!value.isString()) return null;
-    const header = value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
+    return value.asStringBody();
 }
 
 /// QuickJS source map: global parseInt / Number.parseInt. This is still the
@@ -227,8 +225,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
 }
 
 fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
-    const header = value.refHeader() orelse return;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),

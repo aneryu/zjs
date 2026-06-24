@@ -143,7 +143,7 @@ pub fn arrayBufferSliceRange(rt: *JSRuntime, buffer_value: JSValue, start: usize
     if (buffer.arrayBufferDetached()) return error.TypeError;
     if (object.arrayBufferIsImmutable(rt, buffer)) return error.TypeError;
     const length = if (end > start) end - start else 0;
-    const out = try createArrayBufferWithPrototype(rt, length, null, buffer.prototype);
+    const out = try createArrayBufferWithPrototype(rt, length, null, buffer.getPrototype());
     errdefer out.free(rt);
     const out_object = try expectArrayBufferObject(out);
     if (length != 0) @memcpy(out_object.byteStorage(), buffer.byteStorage()[start..end]);
@@ -166,7 +166,7 @@ pub fn arrayBufferSliceToImmutableRange(rt: *JSRuntime, buffer_value: JSValue, s
     if (object.arrayBufferIsImmutable(rt, buffer)) return error.TypeError;
     if (buffer.byteStorage().len < end) return error.RangeError;
     const length = if (end > start) end - start else 0;
-    const out = try createArrayBufferWithPrototype(rt, length, null, buffer.prototype);
+    const out = try createArrayBufferWithPrototype(rt, length, null, buffer.getPrototype());
     errdefer out.free(rt);
     const out_object = try expectArrayBufferOnlyObject(out);
     if (length != 0) @memcpy(out_object.byteStorage(), buffer.byteStorage()[start..end]);
@@ -189,7 +189,7 @@ pub fn arrayBufferTransferLength(rt: *JSRuntime, buffer_value: JSValue, new_leng
             if (new_length > max) return error.RangeError;
         }
     }
-    const out = try createArrayBufferWithPrototype(rt, new_length, if (fixed_length) null else buffer.arrayBufferMaxByteLength(), buffer.prototype);
+    const out = try createArrayBufferWithPrototype(rt, new_length, if (fixed_length) null else buffer.arrayBufferMaxByteLength(), buffer.getPrototype());
     errdefer out.free(rt);
     const out_object = try expectArrayBufferObject(out);
     const copy_len = @min(buffer.byteStorage().len, new_length);
@@ -209,7 +209,7 @@ pub fn arrayBufferTransferToImmutableLength(rt: *JSRuntime, buffer_value: JSValu
     const buffer = try expectArrayBufferOnlyObject(buffer_value);
     if (buffer.arrayBufferDetached()) return error.TypeError;
     if (object.arrayBufferIsImmutable(rt, buffer)) return error.TypeError;
-    const out = try createArrayBufferWithPrototype(rt, new_length, null, buffer.prototype);
+    const out = try createArrayBufferWithPrototype(rt, new_length, null, buffer.getPrototype());
     errdefer out.free(rt);
     const out_object = try expectArrayBufferOnlyObject(out);
     const copy_len = @min(buffer.byteStorage().len, new_length);
@@ -231,7 +231,7 @@ pub fn sharedArrayBufferSlice(rt: *JSRuntime, buffer_value: JSValue, start_value
 pub fn sharedArrayBufferSliceRange(rt: *JSRuntime, buffer_value: JSValue, start: usize, end: usize) !JSValue {
     const buffer = try expectSharedArrayBufferObject(buffer_value);
     const length = if (end > start) end - start else 0;
-    const out = try sharedArrayBufferConstructLength(rt, length, null, buffer.prototype);
+    const out = try sharedArrayBufferConstructLength(rt, length, null, buffer.getPrototype());
     errdefer out.free(rt);
     const out_object = try expectSharedArrayBufferObject(out);
     if (length != 0) @memcpy(out_object.byteStorage(), buffer.byteStorage()[start..end]);
@@ -916,8 +916,7 @@ fn appendValueString(rt: *JSRuntime, buffer: *std.ArrayList(u8), value: JSValue)
 }
 
 fn appendRawString(rt: *JSRuntime, buffer: *std.ArrayList(u8), value: JSValue) !void {
-    const header = value.refHeader() orelse return;
-    const string_value: *string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),

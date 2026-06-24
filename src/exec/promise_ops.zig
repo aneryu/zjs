@@ -490,6 +490,7 @@ pub fn qjsAsyncDisposableStackContinuation(
     const callback = try qjsCreateBuiltinFunction(rt, global, "", 1);
     errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
+    try callback_object.setInternalCallableTag(rt, .async_disposable_stack_continuation);
     try callback_object.setOptionalValueSlot(rt, try callback_object.functionAsyncDisposeStackSlot(rt), stack.value().dup());
     (try callback_object.functionAsyncDisposeRejectedSlot(rt)).* = rejected;
     return callback;
@@ -789,6 +790,7 @@ pub fn createPromiseResolvingFunction(rt: *core.JSRuntime, global: *core.Object,
     if (functionPrototypeFromGlobal(rt, global)) |function_proto| {
         try object.setPrototype(rt, function_proto);
     }
+    try object.setInternalCallableTag(rt, .promise_resolving);
     try object.setFunctionPromiseResolvingTarget(rt, rooted_promise.dup());
     try object.setFunctionPromiseResolvingState(rt, state_val.dup());
     (try object.functionPromiseResolvingRejectSlot(rt)).* = reject;
@@ -808,21 +810,30 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
     const marker_key = try rt.internAtom("marker");
     defer rt.atoms.free(marker_key);
     const state_symbol = try rt.atoms.newValueSymbol("gc-qjs-promise-resolving-state-symbol");
-    try state.defineOwnProperty(rt, marker_key, core.Descriptor.data(core.JSValue.symbol(state_symbol), true, true, true));
+    {
+        const state_marker_value = try rt.symbolValue(state_symbol);
+        defer state_marker_value.free(rt);
+        try state.defineOwnProperty(rt, marker_key, core.Descriptor.data(state_marker_value, true, true, true));
+    }
 
     const promise_symbol = try rt.atoms.newValueSymbol("gc-qjs-promise-resolving-target-symbol");
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const function_value = try createPromiseResolvingFunction(rt, global, core.JSValue.symbol(promise_symbol), true, state);
+    const promise_value = try rt.symbolValue(promise_symbol);
+    var promise_value_alive = true;
+    defer if (promise_value_alive) promise_value.free(rt);
+    const function_value = try createPromiseResolvingFunction(rt, global, promise_value, true, state);
+    promise_value.free(rt);
+    promise_value_alive = false;
     var function_alive = true;
     defer if (function_alive) function_value.free(rt);
     const function_object = objectFromValue(function_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(promise_symbol) != null);
     try std.testing.expect(rt.atoms.name(state_symbol) != null);
-    try std.testing.expect(function_object.functionPromiseResolvingTarget().?.same(core.JSValue.symbol(promise_symbol)));
+    try std.testing.expectEqual(promise_symbol, function_object.functionPromiseResolvingTarget().?.asSymbolAtom().?);
     try std.testing.expect(function_object.functionPromiseResolvingReject());
 
     state.value().free(rt);
@@ -835,7 +846,7 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
     {
         const marker_value = stored_state.getProperty(marker_key);
         defer marker_value.free(rt);
-        try std.testing.expect(marker_value.same(core.JSValue.symbol(state_symbol)));
+        try std.testing.expectEqual(state_symbol, marker_value.asSymbolAtom().?);
     }
 
     function_value.free(rt);
@@ -914,13 +925,27 @@ test "qjsPromiseReactionRecord roots direct symbol fields while allocating slots
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const record_value = try qjsPromiseReactionRecord(
-        rt,
-        core.JSValue.symbol(on_fulfilled_symbol),
-        core.JSValue.symbol(on_rejected_symbol),
-        core.JSValue.symbol(resolve_symbol),
-        core.JSValue.symbol(reject_symbol),
-    );
+    const on_fulfilled_value = try rt.symbolValue(on_fulfilled_symbol);
+    var on_fulfilled_alive = true;
+    defer if (on_fulfilled_alive) on_fulfilled_value.free(rt);
+    const on_rejected_value = try rt.symbolValue(on_rejected_symbol);
+    var on_rejected_alive = true;
+    defer if (on_rejected_alive) on_rejected_value.free(rt);
+    const resolve_value = try rt.symbolValue(resolve_symbol);
+    var resolve_alive = true;
+    defer if (resolve_alive) resolve_value.free(rt);
+    const reject_value = try rt.symbolValue(reject_symbol);
+    var reject_alive = true;
+    defer if (reject_alive) reject_value.free(rt);
+    const record_value = try qjsPromiseReactionRecord(rt, on_fulfilled_value, on_rejected_value, resolve_value, reject_value);
+    on_fulfilled_value.free(rt);
+    on_fulfilled_alive = false;
+    on_rejected_value.free(rt);
+    on_rejected_alive = false;
+    resolve_value.free(rt);
+    resolve_alive = false;
+    reject_value.free(rt);
+    reject_alive = false;
     var record_value_alive = true;
     defer if (record_value_alive) record_value.free(rt);
     const record = objectFromValue(record_value) orelse return error.TypeError;
@@ -929,10 +954,10 @@ test "qjsPromiseReactionRecord roots direct symbol fields while allocating slots
     try std.testing.expect(rt.atoms.name(on_rejected_symbol) != null);
     try std.testing.expect(rt.atoms.name(resolve_symbol) != null);
     try std.testing.expect(rt.atoms.name(reject_symbol) != null);
-    try std.testing.expect(record.promiseReactionOnFulfilled().?.same(core.JSValue.symbol(on_fulfilled_symbol)));
-    try std.testing.expect(record.promiseReactionOnRejected().?.same(core.JSValue.symbol(on_rejected_symbol)));
-    try std.testing.expect(record.promiseReactionResolve().?.same(core.JSValue.symbol(resolve_symbol)));
-    try std.testing.expect(record.promiseReactionReject().?.same(core.JSValue.symbol(reject_symbol)));
+    try std.testing.expectEqual(on_fulfilled_symbol, record.promiseReactionOnFulfilled().?.asSymbolAtom().?);
+    try std.testing.expectEqual(on_rejected_symbol, record.promiseReactionOnRejected().?.asSymbolAtom().?);
+    try std.testing.expectEqual(resolve_symbol, record.promiseReactionResolve().?.asSymbolAtom().?);
+    try std.testing.expectEqual(reject_symbol, record.promiseReactionReject().?.asSymbolAtom().?);
 
     record_value.free(rt);
     record_value_alive = false;
@@ -968,6 +993,7 @@ pub fn qjsPromiseReactionJob(
     job_val = try qjsCreateBuiltinFunction(rt, global, "", 0);
     errdefer job_val.free(rt);
     const job_object = objectFromValue(job_val) orelse return error.TypeError;
+    try job_object.setInternalCallableTag(rt, .promise_reaction_job);
     try job_object.setFunctionPromiseReactionRecord(rt, reaction_value.dup());
     try job_object.setFunctionPromiseReactionValue(rt, rooted_value.dup());
     (try job_object.functionPromiseReactionIsRejectedSlot(rt)).* = rejected;
@@ -987,21 +1013,30 @@ test "qjsPromiseReactionJob roots reaction and value while allocating job" {
     const marker_key = try rt.internAtom("marker");
     defer rt.atoms.free(marker_key);
     const reaction_symbol = try rt.atoms.newValueSymbol("gc-qjs-promise-reaction-record-symbol");
-    try reaction.defineOwnProperty(rt, marker_key, core.Descriptor.data(core.JSValue.symbol(reaction_symbol), true, true, true));
+    {
+        const reaction_marker_value = try rt.symbolValue(reaction_symbol);
+        defer reaction_marker_value.free(rt);
+        try reaction.defineOwnProperty(rt, marker_key, core.Descriptor.data(reaction_marker_value, true, true, true));
+    }
 
     const value_symbol = try rt.atoms.newValueSymbol("gc-qjs-promise-reaction-value-symbol");
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const job_value = try qjsPromiseReactionJob(rt, global, reaction, core.JSValue.symbol(value_symbol), true);
+    const reaction_payload = try rt.symbolValue(value_symbol);
+    var reaction_payload_alive = true;
+    defer if (reaction_payload_alive) reaction_payload.free(rt);
+    const job_value = try qjsPromiseReactionJob(rt, global, reaction, reaction_payload, true);
+    reaction_payload.free(rt);
+    reaction_payload_alive = false;
     var job_alive = true;
     defer if (job_alive) job_value.free(rt);
     const job_object = objectFromValue(job_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(reaction_symbol) != null);
     try std.testing.expect(rt.atoms.name(value_symbol) != null);
-    try std.testing.expect(job_object.functionPromiseReactionValue().?.same(core.JSValue.symbol(value_symbol)));
+    try std.testing.expectEqual(value_symbol, job_object.functionPromiseReactionValue().?.asSymbolAtom().?);
     try std.testing.expect(job_object.functionPromiseReactionIsRejected());
 
     reaction.value().free(rt);
@@ -1014,7 +1049,7 @@ test "qjsPromiseReactionJob roots reaction and value while allocating job" {
     {
         const marker_value = stored_reaction.getProperty(marker_key);
         defer marker_value.free(rt);
-        try std.testing.expect(marker_value.same(core.JSValue.symbol(reaction_symbol)));
+        try std.testing.expectEqual(reaction_symbol, marker_value.asSymbolAtom().?);
     }
 
     job_value.free(rt);
@@ -1086,11 +1121,11 @@ test "prepared promise reaction jobs root exposes dynamic job slice" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const first_atom = try rt.atoms.newValueSymbol("gc-prepared-promise-job-root-first");
-    const second_atom = try rt.atoms.newValueSymbol("gc-prepared-promise-job-root-second");
     const jobs = try rt.memory.alloc(core.JSValue, 2);
-    jobs[0] = core.JSValue.symbol(first_atom);
-    jobs[1] = core.JSValue.symbol(second_atom);
+    const first_atom = try rt.atoms.newValueSymbol("gc-prepared-promise-job-root-first");
+    jobs[0] = try rt.symbolValue(first_atom);
+    const second_atom = try rt.atoms.newValueSymbol("gc-prepared-promise-job-root-second");
+    jobs[1] = try rt.symbolValue(second_atom);
     var prepared = PreparedPromiseReactionJobs{
         .jobs = jobs,
         .initialized = 2,
@@ -1101,39 +1136,9 @@ test "prepared promise reaction jobs root exposes dynamic job slice" {
     prepared_root.init(rt, &prepared);
     defer prepared_root.deinit();
 
-    const Counter = struct {
-        first_atom: u32,
-        second_atom: u32,
-        first_seen: bool = false,
-        second_seen: bool = false,
-
-        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (slot.asSymbolAtom()) |atom_id| {
-                if (atom_id == self.first_atom) self.first_seen = true;
-                if (atom_id == self.second_atom) self.second_seen = true;
-            }
-        }
-
-        fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
-            _ = context;
-            _ = slot;
-        }
-    };
-
-    var counter = Counter{
-        .first_atom = first_atom,
-        .second_atom = second_atom,
-    };
-    var visitor = core.runtime.RootVisitor{
-        .context = &counter,
-        .visit_value = Counter.visitValue,
-        .visit_object = Counter.visitObject,
-    };
-    try rt.traceActiveRoots(&visitor);
-
-    try std.testing.expect(counter.first_seen);
-    try std.testing.expect(counter.second_seen);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(first_atom) != null);
+    try std.testing.expect(rt.atoms.name(second_atom) != null);
 }
 
 pub fn qjsPreparePromiseReactionJobs(
@@ -1283,15 +1288,20 @@ test "qjsPromiseSettleValue roots direct symbol result while preparing reaction 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
-    try qjsPromiseSettleValue(ctx, global, promise, core.JSValue.symbol(symbol_atom), false);
+    const settle_value = try rt.symbolValue(symbol_atom);
+    var settle_value_alive = true;
+    defer if (settle_value_alive) settle_value.free(rt);
+    try qjsPromiseSettleValue(ctx, global, promise, settle_value, false);
+    settle_value.free(rt);
+    settle_value_alive = false;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const result = promise.promiseResult() orelse return error.TypeError;
-    try std.testing.expect(result.same(core.JSValue.symbol(symbol_atom)));
+    try std.testing.expectEqual(symbol_atom, result.asSymbolAtom().?);
     try std.testing.expectEqual(@as(usize, 1), ctx.pending_promise_jobs.len);
     const job_object = objectFromValue(ctx.pending_promise_jobs[0].value) orelse return error.TypeError;
     const job_value = job_object.functionPromiseReactionValue() orelse return error.TypeError;
-    try std.testing.expect(job_value.same(core.JSValue.symbol(symbol_atom)));
+    try std.testing.expectEqual(symbol_atom, job_value.asSymbolAtom().?);
 
     var pending_job = ctx.takePendingPromiseJob() orelse return error.TypeError;
     pending_job.deinit(rt);
@@ -1409,6 +1419,7 @@ pub fn qjsPromiseThenableJob(rt: *core.JSRuntime, global: *core.Object, target_v
     const job = try qjsCreateBuiltinFunction(rt, global, "", 0);
     errdefer job.free(rt);
     const job_object = objectFromValue(job) orelse return error.TypeError;
+    try job_object.setInternalCallableTag(rt, .promise_thenable_job);
     try job_object.setFunctionPromiseThenableTarget(rt, rooted_target_value.dup());
     try job_object.setFunctionPromiseThenableThis(rt, rooted_thenable_value.dup());
     try job_object.setFunctionPromiseThenableThen(rt, rooted_then_value.dup());
@@ -1432,9 +1443,9 @@ test "qjsPromiseThenableJob roots direct function bytecode then callback while c
     fb.func_kind = .generator;
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-thenable-job-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-thenable-job-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var then_callback = core.JSValue.functionBytecode(&fb.header);
@@ -1744,6 +1755,7 @@ pub fn qjsPromiseCapability(
 
     executor_value = try qjsCreateBuiltinFunction(ctx.runtime, constructor_global, "", 2);
     const executor_object = objectFromValue(executor_value) orelse return error.TypeError;
+    try executor_object.setInternalCallableTag(ctx.runtime, .promise_capability_executor);
     try executor_object.setFunctionPromiseCapabilitySlot(ctx.runtime, slot_value.dup());
 
     promise_value = try constructValueOrBytecode(ctx, output, global, constructor_value, &.{executor_value}, caller_function, caller_frame);
@@ -1823,7 +1835,11 @@ test "qjsPromiseKeyedResult roots direct symbol values while defining keyed resu
     defer key_name.free(rt);
     try qjsPromiseSetArrayIndex(rt, keys, 0, key_name);
     const value_symbol = try rt.atoms.newValueSymbol("gc-qjs-promise-keyed-result-symbol");
-    try qjsPromiseSetArrayIndex(rt, values, 0, core.JSValue.symbol(value_symbol));
+    {
+        const keyed_value = try rt.symbolValue(value_symbol);
+        defer keyed_value.free(rt);
+        try qjsPromiseSetArrayIndex(rt, values, 0, keyed_value);
+    }
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -1846,7 +1862,7 @@ test "qjsPromiseKeyedResult roots direct symbol values while defining keyed resu
     {
         const stored = result.getProperty(answer_atom);
         defer stored.free(rt);
-        try std.testing.expect(stored.same(core.JSValue.symbol(value_symbol)));
+        try std.testing.expectEqual(value_symbol, stored.asSymbolAtom().?);
     }
 
     result_value.free(rt);
@@ -1885,7 +1901,12 @@ test "qjsPromiseSettlementRecord roots direct symbol payload while defining stat
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const record_value = try qjsPromiseSettlementRecord(rt, false, core.JSValue.symbol(symbol_atom));
+    const payload_value = try rt.symbolValue(symbol_atom);
+    var payload_alive = true;
+    defer if (payload_alive) payload_value.free(rt);
+    const record_value = try qjsPromiseSettlementRecord(rt, false, payload_value);
+    payload_value.free(rt);
+    payload_alive = false;
     var record_alive = true;
     defer if (record_alive) record_value.free(rt);
     const record = objectFromValue(record_value) orelse return error.TypeError;
@@ -1893,9 +1914,11 @@ test "qjsPromiseSettlementRecord roots direct symbol payload while defining stat
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const value_atom = try rt.internAtom("value");
     defer rt.atoms.free(value_atom);
-    const value = record.getProperty(value_atom);
-    defer value.free(rt);
-    try std.testing.expect(value.same(core.JSValue.symbol(symbol_atom)));
+    {
+        const value = record.getProperty(value_atom);
+        defer value.free(rt);
+        try std.testing.expectEqual(symbol_atom, value.asSymbolAtom().?);
+    }
 
     record_value.free(rt);
     record_alive = false;
@@ -1940,9 +1963,9 @@ test "qjsPromiseCombinatorState roots direct function bytecode resolve while cre
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-qjs-promise-combinator-state-resolve-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-qjs-promise-combinator-state-resolve-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var resolve_value = core.JSValue.functionBytecode(&fb.header);
@@ -1986,6 +2009,7 @@ pub fn qjsPromiseCombinatorCallback(
     const callback = try qjsCreateBuiltinFunction(rt, global, "", 1);
     errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
+    try callback_object.setInternalCallableTag(rt, .promise_combinator_element);
     (try callback_object.functionPromiseCombinatorModeSlot(rt)).* = @intFromEnum(mode);
     try callback_object.setFunctionPromiseCombinatorState(rt, state.value().dup());
     (try callback_object.functionPromiseCombinatorIndexSlot(rt)).* = index;
@@ -2751,9 +2775,9 @@ test "atomicsWaitAsyncResult roots direct function bytecode value while creating
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-atomics-wait-async-result-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-atomics-wait-async-result-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var result_payload = core.JSValue.functionBytecode(&fb.header);
@@ -2772,9 +2796,11 @@ test "atomicsWaitAsyncResult roots direct function bytecode value while creating
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const value_key = try rt.internAtom("value");
     defer rt.atoms.free(value_key);
-    const stored = result.getProperty(value_key);
-    defer stored.free(rt);
-    try std.testing.expect(stored.same(result_payload));
+    {
+        const stored = result.getProperty(value_key);
+        defer stored.free(rt);
+        try std.testing.expect(stored.same(result_payload));
+    }
 
     result_value.free(rt);
     result_alive = false;
@@ -2819,7 +2845,7 @@ pub fn qjsAsyncFunctionRunState(
     if (continuation.generatorExecuting()) return error.TypeError;
     const function_value = continuation.functionBytecodeSlot().* orelse return error.TypeError;
     const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
-    var nested = bytecode.function.asBytecodeView(fb, ctx.runtime);
+    const nested = try bytecode.function.ensureCachedBytecodeView(fb, ctx.runtime);
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
 
@@ -2830,7 +2856,7 @@ pub fn qjsAsyncFunctionRunState(
     const async_global = objectRealmGlobal(continuation) orelse global;
     const current_function_value = continuation.generatorCurrentFunction() orelse continuation.value();
     const fb_runtime_strict = fb.is_strict_mode or fb.runtime_strict_mode;
-    return runWithArgsState(ctx, &nested_stack, &nested, continuation.generatorThis() orelse core.JSValue.undefinedValue(), continuation.generatorArgs(), continuation.functionCapturesSlot().*, output, async_global, false, fb_runtime_strict, false, &.{}, &.{}, continuation.functionEvalLocalNames(), continuation.functionEvalLocalRefs(), &.{}, &.{}, &.{}, &.{}, continuation, resume_value, null, current_function_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), false, true);
+    return runWithArgsState(ctx, &nested_stack, nested, continuation.generatorThis() orelse core.JSValue.undefinedValue(), continuation.generatorArgs(), continuation.functionCapturesSlot().*, output, async_global, false, fb_runtime_strict, false, &.{}, &.{}, continuation.functionEvalLocalNames(), continuation.functionEvalLocalRefs(), &.{}, &.{}, &.{}, &.{}, continuation, resume_value, null, current_function_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), false, true);
 }
 
 pub fn qjsAsyncFunctionRunAndSettle(
@@ -2923,6 +2949,7 @@ pub fn qjsAsyncFunctionResumeCallback(
     const callback = try qjsCreateBuiltinFunction(rt, global, "", 1);
     errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
+    try callback_object.setInternalCallableTag(rt, .async_function_resume);
     try callback_object.setOptionalValueSlot(rt, try callback_object.functionAsyncContinuationSlot(rt), continuation.value().dup());
     (try callback_object.functionAsyncContinuationRejectedSlot(rt)).* = rejected;
     return callback;
@@ -2997,12 +3024,17 @@ test "qjsAsyncFunctionSettle roots direct symbol result before promise stores it
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
-    try qjsAsyncFunctionSettle(ctx, null, global, continuation, core.JSValue.symbol(symbol_atom), false, null, null);
+    const settle_value = try rt.symbolValue(symbol_atom);
+    var settle_value_alive = true;
+    defer if (settle_value_alive) settle_value.free(rt);
+    try qjsAsyncFunctionSettle(ctx, null, global, continuation, settle_value, false, null, null);
+    settle_value.free(rt);
+    settle_value_alive = false;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const promise_object = objectFromValue(promise) orelse return error.TypeError;
     const result = promise_object.promiseResult() orelse return error.TypeError;
-    try std.testing.expect(result.same(core.JSValue.symbol(symbol_atom)));
+    try std.testing.expectEqual(symbol_atom, result.asSymbolAtom().?);
 
     try promise_object.setPromiseResult(rt, null);
     _ = rt.runObjectCycleRemoval();
@@ -3246,6 +3278,7 @@ pub fn qjsAsyncFromSyncIteratorUnwrap(
     const callback = try qjsCreateBuiltinFunction(rt, global, "", 1);
     errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
+    try callback_object.setInternalCallableTag(rt, .async_from_sync_iterator_unwrap);
     (try callback_object.functionAsyncFromSyncUnwrapDoneSlot(rt)).* = if (done) 2 else 1;
     return callback;
 }
@@ -3296,6 +3329,7 @@ pub fn qjsPromiseFinallyCallback(
     const callback = try qjsCreateBuiltinFunction(rt, global, "", if (mode == .fulfill or mode == .reject) 1 else 0);
     errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
+    try callback_object.setInternalCallableTag(rt, .promise_finally_callback);
     (try callback_object.functionPromiseFinallyModeSlot(rt)).* = @intFromEnum(mode);
     if (payload != null) try callback_object.setFunctionPromiseFinallyPayload(rt, rooted_payload.dup());
     if (on_finally != null) try callback_object.setFunctionPromiseFinallyCallback(rt, rooted_on_finally.dup());
@@ -3316,21 +3350,26 @@ test "qjsPromiseFinallyCallback roots direct symbol payload while allocating cal
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
+    const payload_value = try rt.symbolValue(symbol_atom);
+    var payload_alive = true;
+    defer if (payload_alive) payload_value.free(rt);
     const callback = try qjsPromiseFinallyCallback(
         rt,
         global,
         .return_value,
-        core.JSValue.symbol(symbol_atom),
+        payload_value,
         null,
         null,
     );
+    payload_value.free(rt);
+    payload_alive = false;
     var callback_alive = true;
     defer if (callback_alive) callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = callback_object.functionPromiseFinallyPayload() orelse return error.TypeError;
-    try std.testing.expect(stored.same(core.JSValue.symbol(symbol_atom)));
+    try std.testing.expectEqual(symbol_atom, stored.asSymbolAtom().?);
 
     callback.free(rt);
     callback_alive = false;
@@ -3641,17 +3680,18 @@ test "settlePendingPromiseReaction roots callback and arg after clearing promise
     fb.func_kind = .generator;
     try rt.gc.add(&fb.header);
 
-    const callback_symbol = try rt.atoms.newValueSymbol("gc-promise-reaction-callback-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(callback_symbol);
+    const callback_symbol = try rt.atoms.newValueSymbol("gc-promise-reaction-callback-symbol");
+    fb.cpool[0] = try rt.symbolValue(callback_symbol);
     fb.cpool_count = 1;
 
     var callback = core.JSValue.functionBytecode(&fb.header);
     var callback_alive = true;
     defer if (callback_alive) callback.free(rt);
     const arg_symbol = try rt.atoms.newValueSymbol("gc-promise-reaction-arg-symbol");
+    const arg_value = try rt.symbolValue(arg_symbol);
     try promise.setPromiseReactionCallback(rt, callback.dup());
-    try promise.setPromiseReactionArg(rt, core.JSValue.symbol(arg_symbol));
+    try promise.setPromiseReactionArg(rt, arg_value);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -3664,7 +3704,7 @@ test "settlePendingPromiseReaction roots callback and arg after clearing promise
     const result = promise.promiseResult() orelse return error.TypeError;
     const generator = objectFromValue(result) orelse return error.TypeError;
     try std.testing.expectEqual(@as(usize, 1), generator.generatorArgs().len);
-    try std.testing.expect(generator.generatorArgs()[0].same(core.JSValue.symbol(arg_symbol)));
+    try std.testing.expectEqual(arg_symbol, generator.generatorArgs()[0].asSymbolAtom().?);
 
     try promise.setPromiseResult(rt, null);
     callback.free(rt);

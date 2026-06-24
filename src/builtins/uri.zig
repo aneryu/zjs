@@ -290,13 +290,11 @@ fn stringInputValue(input: core.JSValue) !?core.JSValue {
 }
 
 fn stringDataFromValue(value: core.JSValue) ?*core.string.String {
-    const header = value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
+    return value.asStringBody();
 }
 
 fn stringHasUnpairedSurrogate(value: core.JSValue) bool {
-    const header = value.refHeader() orelse return false;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return false;
     return switch (string_value.resolveData()) {
         .latin1 => false,
         .utf16 => |units| hasUnpairedSurrogate(units),
@@ -304,8 +302,7 @@ fn stringHasUnpairedSurrogate(value: core.JSValue) bool {
 }
 
 fn encodeStringValue(rt: *core.JSRuntime, out: *std.ArrayList(u8), value: core.JSValue, component: bool) !void {
-    const header = value.refHeader() orelse return;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {
@@ -568,8 +565,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
 }
 
 fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
-    const header = value.refHeader() orelse return;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
@@ -616,8 +612,7 @@ fn appendValueCodeUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: co
 }
 
 fn appendStringCodeUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: core.JSValue) !void {
-    const header = value.refHeader() orelse return;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| for (bytes) |byte| try out.append(rt.memory.allocator, byte),

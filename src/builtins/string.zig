@@ -275,8 +275,7 @@ pub fn iteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
     const iterator_object = try expectObject(receiver);
     if (iterator_object.class_id != core.class.ids.string_iterator) return error.TypeError;
     const target = (iterator_object.iteratorTargetSlot().*) orelse return iteratorResult(rt, core.JSValue.undefinedValue(), true);
-    const header = target.refHeader() orelse return error.TypeError;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = target.asStringBody() orelse return error.TypeError;
     try string_value.ensureFlat(rt);
     if ((iterator_object.iteratorIndexSlot().*) >= string_value.len()) {
         const done_result = try iteratorResult(rt, core.JSValue.undefinedValue(), true);
@@ -975,8 +974,7 @@ fn isAsciiTrim(byte: u8) bool {
 fn unicodeCaseReceiver(rt: *core.JSRuntime, receiver: core.JSValue, to_lower: bool) !core.JSValue {
     const primitive = try toStringValueForMethod(rt, receiver);
     defer primitive.free(rt);
-    const header = primitive.refHeader() orelse return error.TypeError;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = primitive.asStringBody() orelse return error.TypeError;
 
     var units = std.ArrayList(u16).empty;
     defer units.deinit(rt.memory.allocator);
@@ -1165,8 +1163,7 @@ fn lastIndexOfReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []cons
 fn charCodeAtReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const primitive = try stringPrimitiveValue(receiver);
     defer primitive.free(rt);
-    const header = primitive.refHeader() orelse return error.TypeError;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = primitive.asStringBody() orelse return error.TypeError;
     const index = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
     if (index < 0 or index >= @as(i64, @intCast(string_value.len()))) return core.JSValue.float64(std.math.nan(f64));
     try string_value.ensureFlat(rt);
@@ -1176,8 +1173,7 @@ fn charCodeAtReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const
 fn codePointAtReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const primitive = try stringPrimitiveValue(receiver);
     defer primitive.free(rt);
-    const header = primitive.refHeader() orelse return error.TypeError;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = primitive.asStringBody() orelse return error.TypeError;
     const index = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
     if (index < 0 or index >= @as(i64, @intCast(string_value.len()))) return core.JSValue.undefinedValue();
     try string_value.ensureFlat(rt);
@@ -1469,8 +1465,7 @@ pub fn stringValueFromReceiver(value: core.JSValue) ?*core.string.String {
         if (object.class_id != core.class.ids.string) return null;
         break :blk object.objectData() orelse return null;
     } else return null;
-    const header = string_value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
+    return string_value.asStringBody();
 }
 
 fn iteratorResult(rt: *core.JSRuntime, value: core.JSValue, done: bool) !core.JSValue {
@@ -1502,9 +1497,9 @@ test "string iteratorResult roots direct function bytecode value while creating 
     fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-string-iterator-result-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-string-iterator-result-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var result_value = core.JSValue.functionBytecode(&fb.header);
@@ -1521,9 +1516,11 @@ test "string iteratorResult roots direct function bytecode value while creating 
     const iterator_result = try expectObject(iterator_result_value);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    const stored = iterator_result.getProperty(core.atom.predefinedId("value", .string).?);
-    defer stored.free(rt);
-    try std.testing.expect(stored.same(result_value));
+    {
+        const stored = iterator_result.getProperty(core.atom.predefinedId("value", .string).?);
+        defer stored.free(rt);
+        try std.testing.expect(stored.same(result_value));
+    }
 
     iterator_result_value.free(rt);
     iterator_result_alive = false;
@@ -1685,8 +1682,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
 }
 
 fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
-    const header = value.refHeader() orelse return;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {

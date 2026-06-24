@@ -387,9 +387,9 @@ test "closure iteratorResult roots direct function bytecode value while creating
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-closure-iterator-result-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-closure-iterator-result-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var result_value = core.JSValue.functionBytecode(&fb.header);
@@ -408,9 +408,11 @@ test "closure iteratorResult roots direct function bytecode value while creating
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const value_atom = try rt.internAtom("value");
     defer rt.atoms.free(value_atom);
-    const stored = iterator_result.getProperty(value_atom);
-    defer stored.free(rt);
-    try std.testing.expect(stored.same(result_value));
+    {
+        const stored = iterator_result.getProperty(value_atom);
+        defer stored.free(rt);
+        try std.testing.expect(stored.same(result_value));
+    }
 
     iterator_result_value.free(rt);
     iterator_result_alive = false;
@@ -431,9 +433,9 @@ fn createTestFunctionBytecodeValue(rt: *core.JSRuntime, symbol_name: []const u8)
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol(symbol_name);
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol(symbol_name);
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     return .{
@@ -1052,9 +1054,7 @@ fn expectObject(value: core.JSValue) !*core.Object {
 }
 
 fn stringFromValue(value: core.JSValue) ?*core.string.String {
-    if (!value.isString()) return null;
-    const header = value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
+    return value.asStringBody();
 }
 
 fn appendIntField(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), label: []const u8, value: i32) !void {

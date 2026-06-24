@@ -85,8 +85,7 @@ pub fn instanceOf(rt: *core.JSRuntime, value: core.JSValue, constructor_value: c
 pub fn propertyKeyAtom(rt: *core.JSRuntime, value: core.JSValue) !core.Atom {
     if (value.asSymbolAtom()) |atom_id| return rt.atoms.dup(atom_id);
     if (value.isString()) {
-        const header = value.refHeader().?;
-        const string_value: *core.string.String = @fieldParentPtr("header", header);
+        const string_value = value.asStringBody().?;
         return string_value.internAtom(rt);
     }
     if (value.asInt32()) |index| {

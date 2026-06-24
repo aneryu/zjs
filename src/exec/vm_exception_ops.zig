@@ -3,6 +3,7 @@ const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const core = @import("../core/root.zig");
 const error_stack_ops = @import("error_stack_ops.zig");
+const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
 
@@ -96,7 +97,9 @@ test "buildNamedErrorObject roots direct symbol constructor while creating error
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-error-constructor-symbol");
-    const ctor_value = core.JSValue.symbol(symbol_atom);
+    const ctor_value = try rt.symbolValue(symbol_atom);
+    var ctor_alive = true;
+    defer if (ctor_alive) ctor_value.free(rt);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -110,9 +113,13 @@ test "buildNamedErrorObject roots direct symbol constructor while creating error
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const constructor_key = try rt.internAtom("constructor");
     defer rt.atoms.free(constructor_key);
-    const stored = object.getProperty(constructor_key);
-    defer stored.free(rt);
-    try std.testing.expect(stored.same(ctor_value));
+    {
+        const stored = object.getProperty(constructor_key);
+        defer stored.free(rt);
+        try std.testing.expect(stored.same(ctor_value));
+    }
+    ctor_value.free(rt);
+    ctor_alive = false;
 
     error_value.free(rt);
     error_alive = false;
@@ -301,6 +308,10 @@ pub fn backtraceFunctionNameAtom(ctx: *core.JSContext, fallback: core.Atom, curr
 /// Returns a borrowed atom valid while the frame entry is alive.
 pub fn resolvedBacktraceFunctionNameAt(ctx: *core.JSContext, index: usize) core.Atom {
     const frame = &ctx.backtrace_frames[index];
+    return resolveBacktraceFunctionName(ctx, frame);
+}
+
+pub fn resolveBacktraceFunctionName(ctx: *core.JSContext, frame: *core.BacktraceFrame) core.Atom {
     const function_value = frame.function_value;
     if (function_value.isUndefined()) return frame.function_name;
     frame.function_value = core.JSValue.undefinedValue();
@@ -321,6 +332,27 @@ pub fn resolveBacktraceLocation(data: ?*const anyopaque, target_pc: usize) core.
         return .{ .line_num = slot.line_num, .col_num = slot.col_num };
     }
     return sourceLocationFromPc2Line(function, target_pc) orelse .{ .line_num = function.line_num, .col_num = function.col_num };
+}
+
+pub fn resolveActiveBacktraceFrame(data: ?*const anyopaque) core.ActiveBacktraceSnapshot {
+    const frame: *const frame_mod.Frame = @ptrCast(@alignCast(data orelse return .{
+        .function_name = core.atom.ids.empty_string,
+        .filename = core.atom.ids.empty_string,
+        .line_num = 1,
+        .col_num = 1,
+    }));
+    const function = frame.function;
+    return .{
+        .function_name = function.name,
+        .filename = function.filename,
+        .line_num = function.line_num,
+        .col_num = function.col_num,
+        .pc = frame.pc,
+        .location_data = function,
+        .location_resolver = resolveBacktraceLocation,
+        .function_value = frame.current_function,
+        .backtrace_barrier = function.flags.backtrace_barrier,
+    };
 }
 
 pub fn isErrorConstructorName(name: []const u8) bool {
@@ -345,9 +377,7 @@ pub fn pendingExceptionMatchesError(ctx: *core.JSContext, err: anytype) bool {
     const object = objectFromValue(ctx.exception_slot.value) orelse return false;
     const name_value = object.getProperty(core.atom.ids.name);
     defer name_value.free(ctx.runtime);
-    const header = name_value.refHeader() orelse return false;
-    if (header.kind != .string) return false;
-    const string: *core.string.String = @fieldParentPtr("header", header);
+    const string = name_value.asStringBody() orelse return false;
     switch (string.resolveData()) {
         .latin1 => |bytes| return std.mem.eql(u8, bytes, expected),
         .utf16 => |units| {

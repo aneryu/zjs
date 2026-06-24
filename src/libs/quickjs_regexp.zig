@@ -864,9 +864,7 @@ pub fn execOnString(compiled: Compiled, string_value: core.JSValue) ExecError!?M
 }
 
 pub fn execOnStringFromIndex(rt: *core.JSRuntime, compiled: Compiled, string_value: core.JSValue, start_index: usize) ExecError!ExecStatus {
-    const header = string_value.refHeader() orelse return .{ .result = .not_available };
-    if (!string_value.isString()) return .{ .result = .not_available };
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = string_value.asStringBody() orelse return .{ .result = .not_available };
     try string_object.ensureFlat(rt);
 
     return switch (string_object.resolveData()) {
@@ -876,9 +874,7 @@ pub fn execOnStringFromIndex(rt: *core.JSRuntime, compiled: Compiled, string_val
 }
 
 pub fn testOnStringFromIndex(rt: *core.JSRuntime, compiled: Compiled, string_value: core.JSValue, start_index: usize) ExecError!?bool {
-    const header = string_value.refHeader() orelse return null;
-    if (!string_value.isString()) return null;
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = string_value.asStringBody() orelse return null;
     try string_object.ensureFlat(rt);
 
     return switch (string_object.resolveData()) {

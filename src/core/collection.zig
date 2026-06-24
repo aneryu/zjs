@@ -323,6 +323,8 @@ pub fn appendWeakEntry(rt: *core.JSRuntime, object: *core.Object, entry: core.ob
     var stored = entry;
     stored.hash = weakEntryHash(stored.key_identity);
     stored.hash_next = weak_no_entry;
+    rt.retainWeakIdentity(stored.key_identity);
+    errdefer rt.releaseWeakIdentity(stored.key_identity);
     const entries_slot = object.weakCollectionEntriesSlot();
     const index = entries_slot.*.len;
     const inserted_holder = !rt.borrowedReferenceHolderRegistered(object);
@@ -335,6 +337,7 @@ pub fn appendWeakEntry(rt: *core.JSRuntime, object: *core.Object, entry: core.ob
     errdefer refreshed_entries.* = refreshed_entries.*[0..index];
     refreshed_entries.*[index] = stored;
     linkWeakEntry(object, index);
+    try rt.registerBorrowedReferenceHolder(object);
 }
 
 fn ensureWeakIndexForInsert(rt: *core.JSRuntime, object: *core.Object, next_count: usize) !void {
@@ -515,7 +518,7 @@ pub fn setWeakMapEntryByIdentityChecked(rt: *core.JSRuntime, object: *core.Objec
     }
 
     var entry = core.object.WeakCollectionEntry{ .key_identity = key_identity, .value = value.dup() };
-    errdefer entry.destroy(rt);
+    errdefer entry.value.free(rt);
     try appendWeakEntry(rt, object, entry);
 }
 
@@ -600,7 +603,5 @@ pub fn mapSetLatin1PrefixInt32Range(
 // === Shared helpers ===
 
 fn stringFromValue(value: core.JSValue) ?*core.string.String {
-    if (!value.isString()) return null;
-    const header = value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
+    return value.asStringBody();
 }

@@ -212,8 +212,7 @@ pub fn strictNotEqual(a: core.JSValue, b: core.JSValue) core.JSValue {
 
 pub fn length(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isString()) {
-        const header = value.refHeader() orelse return error.TypeError;
-        const string_value: *core.string.String = @fieldParentPtr("header", header);
+        const string_value = value.asStringBody() orelse return error.TypeError;
         return core.JSValue.int32(@intCast(string_value.len()));
     }
     if (value.isObject()) {
@@ -624,8 +623,7 @@ pub fn atomNameEql(rt: *core.JSRuntime, atom_id: core.Atom, name: []const u8) bo
 }
 
 pub fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
-    const header = value.refHeader() orelse return;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
@@ -666,8 +664,7 @@ pub fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value:
     } else if (value.isNull()) {
         try buffer.appendSlice(rt.memory.allocator, "null");
     } else if (value.isString()) {
-        const header = value.refHeader() orelse return;
-        const string_value: *core.string.String = @fieldParentPtr("header", header);
+        const string_value = value.asStringBody() orelse return;
         try string_value.ensureFlat(rt);
         switch (string_value.resolveData()) {
             .latin1 => |bytes| {
@@ -904,7 +901,7 @@ fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value
     // held, otherwise chain them through another rope node.
     if (string.isRope()) {
         if (position == .suffix) {
-            if (string_value.refHeader()) |header| {
+            if (string_value.stringHeader()) |header| {
                 if (header.rc == 1) {
                     var digits_buf: [16]u8 = undefined;
                     const digits = dtoa.formatInt32(&digits_buf, int_value);
@@ -935,7 +932,7 @@ fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value
         const digits = cached.borrowLatin1() orelse return null;
 
         if (position == .suffix) {
-            if (string_value.refHeader()) |header| {
+            if (string_value.stringHeader()) |header| {
                 if (header.rc == 1 and string.atom_id == null) {
                     if (try string.appendLatin1InPlace(rt, digits)) {
                         return string_value.dup();
@@ -973,7 +970,7 @@ fn stringAddStrings(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core
     // tail append when the lhs is an unmaterialized rope). A rope rhs keeps
     // the deferred rope-of-rope linking below instead of being copied.
     if (!b_string.isRope()) {
-        if (a.refHeader()) |header| {
+        if (a.stringHeader()) |header| {
             if (header.rc == 1 and try appendStringInPlace(rt, a_string, b_string)) {
                 return a.dup();
             }
@@ -1081,7 +1078,7 @@ pub fn latin1AtomRepeatedConcatValue(rt: *core.JSRuntime, lhs: core.JSValue, ato
         if (byte > 0x7f) return null;
     }
     if (suffix.len == 0 or repeat_count == 0) return lhs.dup();
-    const out = try core.string.String.createLatin1RepeatedConcatWithSeed(rt, lhs_bytes, suffix, repeat_count, lhs_string.contentHash());
+    const out = try core.string.String.createLatin1RepeatedConcatWithSeed(rt, lhs_bytes, suffix, repeat_count, 0);
     return out.value();
 }
 
@@ -1104,9 +1101,7 @@ fn upperHexValue(byte: u8) ?u8 {
 }
 
 fn stringObject(value: core.JSValue) ?*core.string.String {
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    return @fieldParentPtr("header", header);
+    return value.asStringBody();
 }
 
 fn appendStringLatin1Units(rt: *core.JSRuntime, out: *std.ArrayList(u8), string: core.string.String) !void {
@@ -1243,8 +1238,7 @@ fn numberLikeInt(value: core.JSValue) ?i32 {
     if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
     if (value.isNull()) return 0;
     if (value.isString()) {
-        const header = value.refHeader() orelse return null;
-        const string_value: *core.string.String = @fieldParentPtr("header", header);
+        const string_value = value.asStringBody() orelse return null;
         return switch (string_value.resolveData()) {
             .latin1 => |bytes| parseIntString(bytes),
             .utf16 => null,
@@ -1260,10 +1254,8 @@ fn parseIntString(bytes: []const u8) ?i32 {
 }
 
 fn compareStringValues(a: core.JSValue, b: core.JSValue) ?i32 {
-    const a_header = a.refHeader() orelse return null;
-    const b_header = b.refHeader() orelse return null;
-    const a_string: *core.string.String = @fieldParentPtr("header", a_header);
-    const b_string: *core.string.String = @fieldParentPtr("header", b_header);
+    const a_string = a.asStringBody() orelse return null;
+    const b_string = b.asStringBody() orelse return null;
     return a_string.compare(b_string.*);
 }
 

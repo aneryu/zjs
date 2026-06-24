@@ -247,7 +247,9 @@ pub noinline fn pushPrivateSymbol(ctx: *core.JSContext, stack: *stack_mod.Stack,
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
     const effective_atom = remapPrivateAtomFromFrame(ctx.runtime, frame, atom_id);
-    try stack.pushOwned(core.JSValue.symbol(effective_atom));
+    const value = try ctx.runtime.symbolValue(effective_atom);
+    errdefer value.free(ctx.runtime);
+    try stack.pushOwned(value);
 }
 
 pub noinline fn pushEmptyString(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
@@ -647,14 +649,19 @@ test "primitiveObject roots direct symbol while creating ToObject wrapper" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const wrapper_value = try primitiveObject(rt, core.class.ids.symbol, core.JSValue.symbol(symbol_atom));
+    const symbol_value = try rt.symbolValue(symbol_atom);
+    var symbol_value_alive = true;
+    defer if (symbol_value_alive) symbol_value.free(rt);
+    const wrapper_value = try primitiveObject(rt, core.class.ids.symbol, symbol_value);
+    symbol_value.free(rt);
+    symbol_value_alive = false;
     var wrapper_alive = true;
     defer if (wrapper_alive) wrapper_value.free(rt);
     const wrapper = property_ops.expectObject(wrapper_value) catch return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = wrapper.objectData() orelse return error.TypeError;
-    try std.testing.expect(stored.same(core.JSValue.symbol(symbol_atom)));
+    try std.testing.expectEqual(symbol_atom, stored.asSymbolAtom().?);
 
     wrapper_value.free(rt);
     wrapper_alive = false;

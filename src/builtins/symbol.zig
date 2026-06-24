@@ -4,8 +4,6 @@ const boolean = @import("boolean.zig");
 /// Pure Symbol description / registry primitives now live in core/symbol.zig.
 /// Re-exported here so the registry/install path and other builtins keep their
 /// existing `builtins.symbol.*` spellings (builtins -> core is permitted).
-pub const registry_prefix = core.symbol.registry_prefix;
-pub const undefined_description = core.symbol.undefined_description;
 pub const description = core.symbol.description;
 pub const registryKey = core.symbol.registryKey;
 pub const canBeHeldWeakly = core.symbol.canBeHeldWeakly;

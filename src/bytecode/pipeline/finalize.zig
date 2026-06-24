@@ -108,6 +108,7 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
     fb.arguments_allowed = fd.arguments_allowed;
     fb.backtrace_barrier = fd.backtrace_barrier;
     fb.is_indirect_eval = fd.is_indirect_eval;
+    fb.has_eval_call = bytecodeHasEvalCall(lowered.code);
 
     // Pack all read-only artifact slices into a single block allocation.
     // Segments are reserved largest-alignment-first to minimize padding;
@@ -115,6 +116,7 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
     // the whole block at once.
     const source_len: usize = if (fd.source_text) |source| source.len else 0;
     var layout = fb_mod.BlockBuilder{};
+    const execution_view_off = layout.reserve(bytecode_function.Bytecode, 1);
     const cpool_off = layout.reserve(JSValue, fd.cpool.len);
     const call_sites_off = layout.reserve(bytecode_function.CallSite, lowered.call_sites.len);
     const vardefs_off = layout.reserve(function_def_mod.VarDef, fd.vars.len);
@@ -285,6 +287,7 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
         fb.cpool = cpool;
     }
     cacheSimpleNumericBytecode(fb);
+    bytecode_function.installCachedBytecodeView(fb, &fb_mod.blockSlice(block, bytecode_function.Bytecode, execution_view_off, 1)[0]);
 
     try rt.gc.addWithSize(&fb.header, fb.heapByteSize());
     registered = true;
@@ -1135,6 +1138,18 @@ fn installChildFunctionBytecodes(fd: *function_def_mod.FunctionDef, rt: anytype)
         ctor_fb.class_fields_init = next_value;
         if (old_value) |stored| stored.free(rt);
     }
+}
+
+fn bytecodeHasEvalCall(code: []const u8) bool {
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const op_id = code[pc];
+        const size = opcode.sizeOf(op_id);
+        if (size == 0 or pc + size > code.len) return true;
+        if (op_id == opcode.op.eval or op_id == opcode.op.apply_eval) return true;
+        pc += size;
+    }
+    return false;
 }
 
 fn functionBytecodeFromValueMutable(value: JSValue) ?*bytecode_function.FunctionBytecode {

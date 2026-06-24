@@ -1680,9 +1680,7 @@ pub fn appendRegExpFlags(rt: *core.JSRuntime, object: *core.Object, out: *std.Ar
 }
 
 pub fn appendRegExpInputUnits(rt: *core.JSRuntime, out: *std.ArrayList(u8), value: core.JSValue) !void {
-    const header = value.refHeader() orelse return value_ops.appendRawString(rt, out, value);
-    if (!value.isString()) return value_ops.appendRawString(rt, out, value);
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return value_ops.appendRawString(rt, out, value);
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try out.appendSlice(rt.memory.allocator, bytes),
@@ -1907,9 +1905,7 @@ pub fn simpleClassSequenceSingleUnitLengthLoop(pattern: SimpleClassSequencePatte
     if (pattern.len != 1 or pattern.anchor_start or pattern.anchor_end) return null;
     const atom = pattern.atoms[0];
     if (atom.min_repeat != 1 or atom.max_repeat != 1) return null;
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     return switch (string_value.resolveData()) {
         .latin1 => |bytes| simpleClassSequenceSingleUnitLengthLoopLatin1(atom, bytes, start, sticky),
         .utf16 => |units| simpleClassSequenceSingleUnitLengthLoopUtf16(atom, units, start, sticky),
@@ -1925,9 +1921,7 @@ pub fn simpleClassAlternationSingleAtomRunLengthLoop(pattern: SimpleClassAlterna
         if (atom.max_repeat != 1 and atom.max_repeat != std.math.maxInt(usize)) return null;
     }
 
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     return switch (string_value.resolveData()) {
         .latin1 => |bytes| simpleClassAlternationSingleAtomRunLengthLoopLatin1(pattern, bytes, start, sticky),
         .utf16 => |units| simpleClassAlternationSingleAtomRunLengthLoopUtf16(pattern, units, start, sticky),
@@ -1937,9 +1931,7 @@ pub fn simpleClassAlternationSingleAtomRunLengthLoop(pattern: SimpleClassAlterna
 pub fn simpleClassAlternationLengthLoop(pattern: SimpleClassAlternationPattern, value: core.JSValue, start: usize, sticky: bool, flags: []const u8) ?SimpleClassAlternationLengthLoopResult {
     if (simpleClassAlternationSingleAtomRunLengthLoop(pattern, value, start, sticky)) |result| return result;
     if (pattern.len < 2) return null;
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     return switch (string_value.resolveData()) {
         .latin1 => |bytes| simpleClassAlternationLengthLoopLatin1(pattern, bytes, start, sticky, flags),
         .utf16 => |units| simpleClassAlternationLengthLoopUtf16(pattern, units, start, sticky, flags),
@@ -1959,9 +1951,7 @@ pub fn simpleCaptureSequenceLengthSumLoop(
     flags: []const u8,
     capture_indexes: []const u8,
 ) ?SimpleCaptureLengthSumLoopResult {
-    const header = value.refHeader() orelse return null;
-    if (!value.isString()) return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return null;
     return switch (string_value.resolveData()) {
         .latin1 => |bytes| simpleCaptureSequenceLengthSumLoopLatin1(pattern, bytes, start, sticky, flags, capture_indexes),
         .utf16 => |units| simpleCaptureSequenceLengthSumLoopUtf16(pattern, units, start, sticky, flags, capture_indexes),

@@ -2116,7 +2116,9 @@ fn installWellKnownSymbolProperties(rt: *core.JSRuntime, symbol_ctor: *core.Obje
 
 fn defineWellKnownSymbol(rt: *core.JSRuntime, symbol_ctor: *core.Object, name: []const u8, symbol_name: []const u8) !void {
     const symbol_atom = core.atom.predefinedId(symbol_name, .symbol) orelse return error.InvalidBuiltinRegistry;
-    try defineDataAssumingNew(rt, symbol_ctor, name, core.JSValue.symbol(symbol_atom), Flags{ .writable = false, .enumerable = false, .configurable = false });
+    const symbol_value = try rt.symbolValue(symbol_atom);
+    defer symbol_value.free(rt);
+    try defineDataAssumingNew(rt, symbol_ctor, name, symbol_value, Flags{ .writable = false, .enumerable = false, .configurable = false });
 }
 
 fn installArrayPrototypeSymbols(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {

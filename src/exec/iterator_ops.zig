@@ -293,9 +293,9 @@ test "createAsyncFromSyncIterator roots direct function bytecode next method whi
     fb.func_kind = .generator;
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-async-from-sync-next-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-async-from-sync-next-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var next_method = core.JSValue.functionBytecode(&fb.header);
@@ -1056,7 +1056,9 @@ test "arrayIteratorValue roots entry value while creating pair array" {
     defer if (target_alive) target.value().free(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-iterator-entry-symbol");
-    try target.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.symbol(symbol_atom), true, true, true));
+    const symbol_value = try rt.symbolValue(symbol_atom);
+    try target.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(symbol_value, true, true, true));
+    symbol_value.free(rt);
     target.setArrayLength(1);
 
     const old_threshold = rt.gcThreshold();
@@ -1072,7 +1074,7 @@ test "arrayIteratorValue roots entry value while creating pair array" {
     {
         const stored = pair.getProperty(core.atom.atomFromUInt32(1));
         defer stored.free(rt);
-        try std.testing.expect(stored.same(core.JSValue.symbol(symbol_atom)));
+        try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
     }
 
     pair_value.free(rt);
@@ -1365,9 +1367,9 @@ test "qjsIteratorConcatCall roots direct function bytecode iterator method while
     fb.func_kind = .generator;
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-concat-method-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-concat-method-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var iterator_method = core.JSValue.functionBytecode(&fb.header);
@@ -1395,9 +1397,11 @@ test "qjsIteratorConcatCall roots direct function bytecode iterator method while
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const records_value = helper.iteratorTarget() orelse return error.TypeError;
     const records = objectFromValue(records_value) orelse return error.TypeError;
-    const stored_method = records.getProperty(core.atom.atomFromUInt32(1));
-    defer stored_method.free(rt);
-    try std.testing.expect(stored_method.same(iterator_method));
+    {
+        const stored_method = records.getProperty(core.atom.atomFromUInt32(1));
+        defer stored_method.free(rt);
+        try std.testing.expect(stored_method.same(iterator_method));
+    }
 
     helper_value.free(rt);
     helper_alive = false;
@@ -1906,9 +1910,9 @@ test "qjsIteratorZipStoreIndex roots direct function bytecode value while defini
     fb.func_kind = .generator;
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-zip-store-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-zip-store-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var stored_value = core.JSValue.functionBytecode(&fb.header);
@@ -1922,9 +1926,11 @@ test "qjsIteratorZipStoreIndex roots direct function bytecode value while defini
     try qjsIteratorZipStoreIndex(rt, object, 0, stored_value);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    const stored = qjsIteratorZipGetIndex(object, 0);
-    defer stored.free(rt);
-    try std.testing.expect(stored.same(stored_value));
+    {
+        const stored = qjsIteratorZipGetIndex(object, 0);
+        defer stored.free(rt);
+        try std.testing.expect(stored.same(stored_value));
+    }
 
     _ = object.deleteProperty(rt, core.atom.atomFromUInt32(0));
     stored_value.free(rt);
@@ -1945,13 +1951,15 @@ test "qjsIteratorZipStoreIndex roots direct symbol value while defining property
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    try qjsIteratorZipStoreIndex(rt, object, 0, core.JSValue.symbol(symbol_atom));
+    const symbol_value = try rt.symbolValue(symbol_atom);
+    try qjsIteratorZipStoreIndex(rt, object, 0, symbol_value);
+    symbol_value.free(rt);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
         const stored = qjsIteratorZipGetIndex(object, 0);
         defer stored.free(rt);
-        try std.testing.expect(stored.same(core.JSValue.symbol(symbol_atom)));
+        try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
     }
 
     _ = object.deleteProperty(rt, core.atom.atomFromUInt32(0));
@@ -2456,9 +2464,9 @@ test "qjsIteratorCreateHelper roots direct function bytecode callback while crea
     fb.func_kind = .generator;
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-helper-callback-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-helper-callback-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var callback = core.JSValue.functionBytecode(&fb.header);

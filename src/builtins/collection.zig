@@ -846,9 +846,9 @@ test "collection iteratorResult roots direct function bytecode value while creat
     fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-collection-iterator-result-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-collection-iterator-result-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var result_value = core.JSValue.functionBytecode(&fb.header);
@@ -867,9 +867,11 @@ test "collection iteratorResult roots direct function bytecode value while creat
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const value_atom = try rt.internAtom("value");
     defer rt.atoms.free(value_atom);
-    const stored = iterator_result.getProperty(value_atom);
-    defer stored.free(rt);
-    try std.testing.expect(stored.same(result_value));
+    {
+        const stored = iterator_result.getProperty(value_atom);
+        defer stored.free(rt);
+        try std.testing.expect(stored.same(result_value));
+    }
 
     iterator_result_value.free(rt);
     iterator_result_alive = false;
@@ -891,7 +893,7 @@ test "Map groupBy roots direct symbol key while creating group array" {
     const callback = core.JSValue.undefinedValue();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-map-groupby-symbol-key");
-    const item = core.JSValue.symbol(symbol_atom);
+    const item = try rt.symbolValue(symbol_atom);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -902,6 +904,7 @@ test "Map groupBy roots direct symbol key while creating group array" {
     try std.testing.expectEqual(@as(usize, 1), map.collectionEntries().len);
     try std.testing.expect(map.collectionEntries()[0].key.same(item));
 
+    item.free(rt);
     map_value.free(rt);
     map_alive = false;
     _ = rt.runObjectCycleRemoval();
@@ -1034,7 +1037,7 @@ fn mapGetOrInsert(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, 
         const key_identity = (try weakKeyIdentityRegister(rt, key)) orelse return error.TypeError;
         if (findWeakEntry(object, key_identity)) |index| return object.weakCollectionEntriesSlot().*[index].value.dup();
         var entry = core.object.WeakCollectionEntry{ .key_identity = key_identity, .value = value.dup() };
-        errdefer entry.destroy(rt);
+        errdefer entry.value.free(rt);
         try appendWeakEntry(rt, object, entry);
         return value.dup();
     }
@@ -1071,7 +1074,7 @@ fn mapGetOrInsertComputed(
             return value;
         }
         var entry = core.object.WeakCollectionEntry{ .key_identity = key_identity, .value = value.dup() };
-        errdefer entry.destroy(rt);
+        errdefer entry.value.free(rt);
         try appendWeakEntry(rt, object, entry);
         return value;
     }
@@ -1186,7 +1189,7 @@ fn setAddNoResult(rt: *core.JSRuntime, object: *core.Object, value: core.JSValue
         const key_identity = (try weakKeyIdentityRegister(rt, value)) orelse return error.TypeError;
         if (findWeakEntry(object, key_identity) == null) {
             var entry = core.object.WeakCollectionEntry{ .key_identity = key_identity, .value = core.JSValue.undefinedValue() };
-            errdefer entry.destroy(rt);
+            errdefer entry.value.free(rt);
             try appendWeakEntry(rt, object, entry);
         }
         return;
@@ -1714,11 +1717,14 @@ test "appendValue roots existing values and incoming value during growth" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const first_atom = try rt.atoms.newValueSymbol("gc-collection-value-list-first");
-    const second_atom = try rt.atoms.newValueSymbol("gc-collection-value-list-second");
+    const first_value = try rt.newSymbolValue("gc-collection-value-list-first");
+    const first_atom = first_value.asSymbolAtom().?;
+    const second_value = try rt.newSymbolValue("gc-collection-value-list-second");
+    const second_atom = second_value.asSymbolAtom().?;
 
     var values: []core.JSValue = &.{};
-    try appendValue(rt, &values, core.JSValue.symbol(first_atom));
+    try appendValue(rt, &values, first_value);
+    first_value.free(rt);
     defer freeValueList(rt, values);
 
     const Trigger = struct {
@@ -1732,27 +1738,9 @@ test "appendValue roots existing values and incoming value during growth" {
         fn trigger(context: ?*anyopaque, size: usize) void {
             _ = size;
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            var visitor = core.runtime.RootVisitor{
-                .context = self,
-                .visit_value = @This().visitValue,
-                .visit_object = @This().visitObject,
-            };
-            self.rt.traceActiveRoots(&visitor) catch {
-                self.trace_failed = true;
-            };
-        }
-
-        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (slot.asSymbolAtom()) |atom_id| {
-                if (atom_id == self.first_atom) self.saw_first = true;
-                if (atom_id == self.second_atom) self.saw_second = true;
-            }
-        }
-
-        fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
-            _ = context;
-            _ = slot;
+            _ = self.rt.runObjectCycleRemoval();
+            self.saw_first = self.rt.atoms.name(self.first_atom) != null;
+            self.saw_second = self.rt.atoms.name(self.second_atom) != null;
         }
     };
 
@@ -1770,7 +1758,8 @@ test "appendValue roots existing values and incoming value during growth" {
         rt.memory.trigger_gc_ctx = saved_trigger_ctx;
     }
 
-    try appendValue(rt, &values, core.JSValue.symbol(second_atom));
+    try appendValue(rt, &values, second_value);
+    second_value.free(rt);
 
     try std.testing.expect(!trigger.trace_failed);
     try std.testing.expect(trigger.saw_first);
@@ -1989,9 +1978,7 @@ fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const 
 }
 
 fn stringFromValue(value: core.JSValue) ?*core.string.String {
-    if (!value.isString()) return null;
-    const header = value.refHeader() orelse return null;
-    return @fieldParentPtr("header", header);
+    return value.asStringBody();
 }
 
 // === Realm-aware Map/Set/WeakMap method bodies (relocated from exec) ===
@@ -2477,40 +2464,17 @@ test "set difference snapshot key root exposes dynamic key slice" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const first_atom = try rt.atoms.newValueSymbol("gc-set-difference-snapshot-key");
     var keys = try rt.memory.alloc(core.JSValue, 1);
-    keys[0] = core.JSValue.symbol(first_atom);
+    const first_atom = try rt.atoms.newValueSymbol("gc-set-difference-snapshot-key");
+    keys[0] = try rt.symbolValue(first_atom);
     defer qjsFreeValueList(rt, keys);
 
     var keys_root = ValueListRoot{};
     keys_root.init(rt, &keys);
     defer keys_root.deinit();
 
-    const Visitor = struct {
-        atom_id: u32,
-        saw_key: bool = false,
-
-        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (slot.asSymbolAtom()) |atom_id| {
-                if (atom_id == self.atom_id) self.saw_key = true;
-            }
-        }
-
-        fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
-            _ = context;
-            _ = slot;
-        }
-    };
-    var state = Visitor{ .atom_id = first_atom };
-    var visitor = core.runtime.RootVisitor{
-        .context = &state,
-        .visit_value = Visitor.visitValue,
-        .visit_object = Visitor.visitObject,
-    };
-    try rt.traceActiveRoots(&visitor);
-
-    try std.testing.expect(state.saw_key);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(first_atom) != null);
 }
 
 fn qjsSetDifference(

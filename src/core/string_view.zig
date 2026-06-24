@@ -70,10 +70,7 @@ pub fn JSString(comptime Value: type) type {
         };
 
         pub fn fromValue(js_value: Value) ?Self {
-            if (!js_value.isString()) return null;
-            const header = js_value.refHeader() orelse return null;
-            if (header.kind != .string) return null;
-            const string_ptr: *const string_mod.String = @fieldParentPtr("header", header);
+            const string_ptr = js_value.asStringBody() orelse return null;
             return .{
                 .js_value = js_value,
                 .ptr = string_ptr,

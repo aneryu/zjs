@@ -73,9 +73,6 @@ pub noinline fn execPutLoc(
     const value = try stack.pop();
     if (try assignDirectEvalGlobalVarLocalSlot(ctx, global, function, idx, &frame.locals[idx], value)) return;
     try setSlotValue(ctx, &frame.locals[idx], value);
-    if (idx < frame.locals_uninit.len and idx < function.var_is_lexical.len and function.var_is_lexical[idx]) {
-        frame.clearLocalUninitialized(idx);
-    }
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
 }
 
@@ -97,9 +94,6 @@ pub fn execSetLoc(
     defer value.free(ctx.runtime);
     if (try assignDirectEvalGlobalVarLocalSlot(ctx, global, function, idx, &frame.locals[idx], value.dup())) return;
     try setSlotValue(ctx, &frame.locals[idx], value.dup());
-    if (idx < frame.locals_uninit.len and idx < function.var_is_lexical.len and function.var_is_lexical[idx]) {
-        frame.clearLocalUninitialized(idx);
-    }
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
 }
 
@@ -587,6 +581,7 @@ pub fn ensureVarRefCell(ctx: *core.JSContext, slot: *core.JSValue) !core.JSValue
 pub fn ensureFrameVarRefCell(ctx: *core.JSContext, frame: *frame_mod.Frame, slot: *core.JSValue) !core.JSValue {
     if (varRefCellFromValue(slot.*) != null) return ensureVarRefCell(ctx, slot);
     if (!frameSlotCanOpenAlias(frame, slot)) return ensureVarRefCell(ctx, slot);
+    if (frame.open_var_refs.len == 0) return ensureVarRefCell(ctx, slot);
     if (frame.findOpenVarRef(slot)) |cell| return cell.valueRef().dup();
 
     // The frame owns the initial reference; callers receive an additional
@@ -597,17 +592,7 @@ pub fn ensureFrameVarRefCell(ctx: *core.JSContext, frame: *frame_mod.Frame, slot
 }
 
 pub fn ensureLocalVarRefCell(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: usize, is_lexical: bool) !core.JSValue {
-    if (idx < frame.locals_uninit.len and frame.localIsUninitialized(idx)) {
-        if (varRefCellFromValue(frame.locals[idx])) |cell| {
-            const old_value = cell.varRefValueSlot().*;
-            cell.varRefValueSlot().* = core.JSValue.uninitialized();
-            old_value.free(ctx.runtime);
-            return frame.locals[idx].dup();
-        }
-        const old_value = frame.locals[idx];
-        frame.locals[idx] = core.JSValue.uninitialized();
-        old_value.free(ctx.runtime);
-    }
+    if (varRefSlotIsUninitialized(frame.locals[idx])) return ensureVarRefCell(ctx, &frame.locals[idx]);
     if (is_lexical) return ensureVarRefCell(ctx, &frame.locals[idx]);
     return ensureFrameVarRefCell(ctx, frame, &frame.locals[idx]);
 }

@@ -202,10 +202,12 @@ test "constructValue fallback roots callee while defining constructor property" 
     defer if (constructor_alive) constructor.free(rt);
     const constructor_object = try expectObject(constructor);
 
-    const marker_atom = try rt.atoms.newValueSymbol("gc-construct-fallback-callee-symbol");
     const marker_key = try rt.internAtom("marker");
     defer rt.atoms.free(marker_key);
-    try constructor_object.defineOwnProperty(rt, marker_key, core.Descriptor.data(core.JSValue.symbol(marker_atom), true, true, true));
+    const marker_atom = try rt.atoms.newValueSymbol("gc-construct-fallback-callee-symbol");
+    const marker_value = try rt.symbolValue(marker_atom);
+    try constructor_object.defineOwnProperty(rt, marker_key, core.Descriptor.data(marker_value, true, true, true));
+    marker_value.free(rt);
 
     const instance_value = try constructValue(ctx, constructor, &.{}, &.{});
     var instance_alive = true;
@@ -221,7 +223,7 @@ test "constructValue fallback roots callee while defining constructor property" 
     const stored_constructor_object = try expectObject(stored_constructor);
     const marker = stored_constructor_object.getProperty(marker_key);
     defer marker.free(rt);
-    try std.testing.expect(marker.same(core.JSValue.symbol(marker_atom)));
+    try std.testing.expect(marker.same(try rt.symbolValue(marker_atom)));
     try std.testing.expect(rt.atoms.name(marker_atom) != null);
 
     instance_value.free(rt);
@@ -296,8 +298,9 @@ test "constructErrorObject roots direct symbol message while creating error" {
     defer rt.destroy();
 
     const message_atom = try rt.atoms.newValueSymbol("gc-construct-error-message-symbol");
+    const message_arg = try rt.symbolValue(message_atom);
     const args = [_]core.JSValue{
-        core.JSValue.symbol(message_atom),
+        message_arg,
     };
 
     const old_threshold = rt.gcThreshold();
@@ -318,6 +321,7 @@ test "constructErrorObject roots direct symbol message while creating error" {
 
     error_value.free(rt);
     error_alive = false;
+    message_arg.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(message_atom) == null);
 }
@@ -359,10 +363,12 @@ test "constructDOMExceptionObject roots direct symbol args while creating error"
     defer rt.destroy();
 
     const message_atom = try rt.atoms.newValueSymbol("gc-dom-exception-message-symbol");
+    const message_arg = try rt.symbolValue(message_atom);
     const name_atom = try rt.atoms.newValueSymbol("gc-dom-exception-name-symbol");
+    const name_arg = try rt.symbolValue(name_atom);
     const args = [_]core.JSValue{
-        core.JSValue.symbol(message_atom),
-        core.JSValue.symbol(name_atom),
+        message_arg,
+        name_arg,
     };
 
     const old_threshold = rt.gcThreshold();
@@ -389,6 +395,8 @@ test "constructDOMExceptionObject roots direct symbol args while creating error"
 
     error_value.free(rt);
     error_alive = false;
+    message_arg.free(rt);
+    name_arg.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(message_atom) == null);
     try std.testing.expect(rt.atoms.name(name_atom) == null);
@@ -558,15 +566,20 @@ test "constructWeakRef roots direct symbol target while creating weak ref" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const weak_ref_value = try constructWeakRef(rt, &.{core.JSValue.symbol(symbol_atom)}, null);
+    const symbol_value = try rt.symbolValue(symbol_atom);
+    const weak_ref_value = try constructWeakRef(rt, &.{symbol_value}, null);
     var weak_ref_alive = true;
     defer if (weak_ref_alive) weak_ref_value.free(rt);
     const weak_ref = expectObject(weak_ref_value) catch return error.TypeError;
 
-    const live = weak_ref.weakRefDeref(rt);
-    try std.testing.expect(live.same(core.JSValue.symbol(symbol_atom)));
+    {
+        const live = weak_ref.weakRefDeref(rt);
+        defer live.free(rt);
+        try std.testing.expect(live.same(symbol_value));
+    }
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
+    symbol_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
     try std.testing.expect(weak_ref.weakRefDeref(rt).isUndefined());
@@ -616,17 +629,19 @@ test "constructPrimitiveWrapper roots direct symbol while creating wrapper" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const wrapper_value = try constructPrimitiveWrapper(rt, core.class.ids.symbol, null, core.JSValue.symbol(symbol_atom));
+    const symbol_value = try rt.symbolValue(symbol_atom);
+    const wrapper_value = try constructPrimitiveWrapper(rt, core.class.ids.symbol, null, symbol_value);
     var wrapper_alive = true;
     defer if (wrapper_alive) wrapper_value.free(rt);
     const wrapper = expectObject(wrapper_value) catch return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = wrapper.objectData() orelse return error.TypeError;
-    try std.testing.expect(stored.same(core.JSValue.symbol(symbol_atom)));
+    try std.testing.expect(stored.same(symbol_value));
 
     wrapper_value.free(rt);
     wrapper_alive = false;
+    symbol_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -829,7 +844,7 @@ fn arrayBufferPrototypeFromTypedArrayPrototype(prototype: ?*core.Object) ?*core.
         if (current.typedArrayArrayBufferPrototype()) |proto_value| {
             if (expectObject(proto_value) catch null) |buffer_prototype| return buffer_prototype;
         }
-        current = current.prototype orelse return null;
+        current = current.getPrototype() orelse return null;
     }
 }
 

@@ -258,8 +258,8 @@ fn decodeArgGet(code: []const u8, pc: usize) ?ArgGet {
 }
 
 pub fn localReadableBorrowed(frame: *const frame_mod.Frame, idx: u16, checked: bool) ?core.JSValue {
-    if (idx >= frame.locals.len or idx >= frame.locals_uninit.len) return null;
-    if (checked and frame.localIsUninitialized(idx)) return null;
+    if (idx >= frame.locals.len) return null;
+    if (checked and slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) return null;
     const value = slotValueBorrowed(frame.locals[idx]);
     if (value.isUninitialized()) return null;
     return value;
@@ -294,7 +294,7 @@ pub fn localPutNextPc(put: LocalPut) usize {
 }
 
 pub fn localCompletionPutWritableForFastPath(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, put: LocalPut) bool {
-    if (put.idx >= frame.locals.len or put.idx >= frame.locals_uninit.len) return false;
+    if (put.idx >= frame.locals.len) return false;
     if (put.checked) return false;
     if (put.idx < function.var_is_lexical.len and function.var_is_lexical[put.idx]) return false;
     if (varRefCellFromValue(frame.locals[put.idx]) != null) return false;
@@ -414,9 +414,9 @@ pub fn bindingStoreWritableForFastPath(
         if (binding.opc == op.put_var_ref_check and binding.idx < function.var_ref_names.len and call_runtime.globalLexicalHasForGlobal(ctx, global, function.var_ref_names[binding.idx])) return false;
         return true;
     }
-    if (binding.idx >= frame.locals.len or binding.idx >= frame.locals_uninit.len) return false;
+    if (binding.idx >= frame.locals.len) return false;
     if (binding.checked) {
-        if (frame.localIsUninitialized(binding.idx)) return false;
+        if (slot_ops.varRefSlotIsUninitialized(frame.locals[binding.idx])) return false;
         if (binding.idx < function.var_is_const.len and function.var_is_const[binding.idx]) return false;
     }
     return true;
@@ -1266,8 +1266,8 @@ pub fn decodeStringSliceConstLocalStore(
     if (readInt(u16, code[call_pc + 1 ..][0..2]) != 1) return null;
 
     const store = decodeLocalPut(code, call_pc + 3) orelse return null;
-    if (store.idx >= frame.locals.len or store.idx >= frame.locals_uninit.len) return null;
-    if (frame.localIsUninitialized(store.idx)) return null;
+    if (store.idx >= frame.locals.len) return null;
+    if (slot_ops.varRefSlotIsUninitialized(frame.locals[store.idx])) return null;
     if (store.idx < function.var_is_const.len and function.var_is_const[store.idx]) return null;
 
     const input_len = string_value.len();
@@ -1301,9 +1301,6 @@ pub fn storeStringSliceConstLocal(
 
     try slot_ops.setSlotValue(ctx, &frame.locals[decoded.store.idx], result);
     result_owned = false;
-    if (decoded.store.idx < function.var_is_lexical.len and function.var_is_lexical[decoded.store.idx]) {
-        frame.clearLocalUninitialized(decoded.store.idx);
-    }
     try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, decoded.store.idx, sync_global_lexical_locals);
     frame.pc = decoded.store.operand_pc + decoded.store.consume;
 }

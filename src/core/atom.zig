@@ -13,8 +13,17 @@ pub const max_int_atom: Atom = tagged_int_bit - 1;
 pub const AtomKind = enum {
     string,
     symbol,
+    global_symbol,
     private,
 };
+
+pub fn isPublicSymbolKind(kind: AtomKind) bool {
+    return kind == .symbol or kind == .global_symbol;
+}
+
+pub fn isValueSymbolKind(kind: AtomKind) bool {
+    return kind == .symbol or kind == .global_symbol or kind == .private;
+}
 
 pub const PredefinedAtom = struct {
     id: Atom,
@@ -729,6 +738,17 @@ pub const predefined_atoms = [_]PredefinedAtom{
     .{ .id = 656, .name = "immutable" },
 };
 
+comptime {
+    std.debug.assert(@sizeOf(Atom) == 4);
+    std.debug.assert(@bitSizeOf(Atom) == 32);
+    std.debug.assert(null_atom == 0);
+    std.debug.assert(tagged_int_bit == @as(Atom, 1) << 31);
+    std.debug.assert(max_int_atom == tagged_int_bit - 1);
+    std.debug.assert(predefined_count == 656);
+    std.debug.assert(ids.zjs_last_startup_name == predefined_count);
+    std.debug.assert(first_dynamic_atom == predefined_count + 1);
+}
+
 const PredefinedMapEntry = struct { []const u8, Atom };
 
 fn predefinedKindCount(comptime kind: AtomKind) comptime_int {
@@ -781,9 +801,26 @@ pub const DynamicAtom = struct {
     ref_count: usize,
     gc_managed_symbol: bool = false,
     registry_managed_symbol: bool = false,
+    weakref_count: usize = 0,
+    no_symbol_description: bool = false,
+
+    pub fn strongRefCount(self: DynamicAtom) usize {
+        if (isValueSymbolKind(self.kind)) {
+            if (self.str) |body| return @intCast(body.header.rc);
+        }
+        return self.ref_count;
+    }
 
     pub fn isLive(self: DynamicAtom) bool {
-        return self.ref_count != 0;
+        return self.strongRefCount() != 0;
+    }
+
+    pub fn hasLiveValue(self: DynamicAtom) bool {
+        return self.strongRefCount() != 0;
+    }
+
+    pub fn slotOccupied(self: DynamicAtom) bool {
+        return self.hasLiveValue() or self.weakref_count != 0;
     }
 };
 
@@ -826,7 +863,7 @@ pub const AtomTable = struct {
     next_id: Atom = first_dynamic_atom,
     /// Live string interns indexed by bytes. Lookup is O(1) average.
     string_index: InternMap = .{},
-    /// Registered symbols indexed by bytes. Ordinary unique symbols and
+    /// Global registry symbols indexed by bytes. Ordinary unique symbols and
     /// private names intentionally do not enter this map.
     symbol_index: InternMap = .{},
     /// Head of the dead-slot free list threaded through
@@ -839,10 +876,9 @@ pub const AtomTable = struct {
     /// recycled across atom kinds, so this is intentionally a "might be
     /// private" range for hot-path rejection, not an exact kind predicate.
     first_private_dynamic_atom: Atom = std.math.maxInt(Atom),
-    /// Lazily materialized strings for predefined string-kind atoms,
-    /// indexed by `id - 1`. Same ownership rules as `DynamicAtom.str`;
-    /// predefined ids are never recycled, so entries here are released
-    /// only by `releaseCachedStrings`.
+    /// Lazily materialized strings for predefined string-kind atoms and
+    /// predefined symbol bodies, indexed by `id - 1`. Predefined ids are never
+    /// recycled, so entries here are released only by `releaseCachedStrings`.
     predefined_str: [predefined_count]?*string.String = @splat(null),
     pub fn init(account: *memory.MemoryAccount) AtomTable {
         return .{ .memory = account };
@@ -858,7 +894,7 @@ pub const AtomTable = struct {
         self.symbol_index.deinit(account.persistent_allocator);
         for (&self.predefined_str) |slot| std.debug.assert(slot == null);
         for (entries) |*entry| {
-            // Cached strings must have been released through `free` or
+            // Cached strings/symbol bodies must have been released through `free` or
             // `releaseCachedStrings` while the runtime was still usable.
             std.debug.assert(entry.str == null);
             const bytes = entry.bytes;
@@ -885,7 +921,12 @@ pub const AtomTable = struct {
             if (entry.str) |cached| {
                 entry.str = null;
                 cached.atom_id = null;
-                gc.release(rt, &cached.header);
+                if (isValueSymbolKind(entry.kind)) {
+                    cached.header.rc = 1;
+                    gc.release(rt, &cached.header);
+                } else {
+                    gc.release(rt, &cached.header);
+                }
             }
         }
     }
@@ -893,39 +934,47 @@ pub const AtomTable = struct {
     pub fn internString(self: *AtomTable, bytes: []const u8) !Atom {
         if (predefinedId(bytes, .string)) |id| return id;
         if (parseArrayIndex(bytes)) |n| return atomFromUInt32(n);
-        return self.internDynamic(bytes, .string, true, false);
+        return self.internDynamic(bytes, .string, true, false, false);
     }
 
     pub fn newSymbol(self: *AtomTable, description: []const u8, atom_kind: AtomKind) !Atom {
         std.debug.assert(atom_kind == .symbol or atom_kind == .private);
-        return self.internDynamic(description, atom_kind, false, false);
+        return self.internDynamic(description, atom_kind, false, false, false);
     }
 
     pub fn newValueSymbol(self: *AtomTable, description: []const u8) !Atom {
-        return self.internDynamic(description, .symbol, false, true);
+        return self.internDynamic(description, .symbol, false, true, false);
+    }
+
+    pub fn newValueSymbolNoDescription(self: *AtomTable) !Atom {
+        return self.internDynamic("", .symbol, false, true, true);
     }
 
     pub fn internSymbol(self: *AtomTable, description: []const u8) !Atom {
+        return self.internGlobalSymbol(description);
+    }
+
+    pub fn internGlobalSymbol(self: *AtomTable, description: []const u8) !Atom {
         if (self.symbol_index.get(.{ .bytes = description })) |idx| {
             const entry = &self.entries[idx];
-            std.debug.assert(entry.isLive() and entry.kind == .symbol);
-            entry.ref_count += 1;
+            std.debug.assert(entry.hasLiveValue() and entry.kind == .global_symbol);
+            self.retainValueSymbolEntry(entry);
             return entry.id;
         }
-        return self.internDynamic(description, .symbol, true, false);
+        return self.internDynamic(description, .global_symbol, true, false, false);
     }
 
     pub fn internRegisteredValueSymbol(self: *AtomTable, description: []const u8) !Atom {
         if (self.symbol_index.get(.{ .bytes = description })) |idx| {
             const entry = &self.entries[idx];
-            std.debug.assert(entry.isLive() and entry.kind == .symbol);
+            std.debug.assert(entry.hasLiveValue() and entry.kind == .global_symbol);
             if (!entry.registry_managed_symbol) {
-                entry.ref_count += 1;
+                self.retainValueSymbolEntry(entry);
                 entry.registry_managed_symbol = true;
             }
             return entry.id;
         }
-        const id = try self.internDynamic(description, .symbol, true, false);
+        const id = try self.internDynamic(description, .global_symbol, true, false, false);
         const entry = self.findDynamic(id).?;
         entry.registry_managed_symbol = true;
         return id;
@@ -935,30 +984,20 @@ pub const AtomTable = struct {
         const idx = dynamicEntryIndex(atom_id) orelse return false;
         if (idx >= self.entries.len) return false;
         const entry = self.entries[idx];
-        if (!entry.isLive() or entry.kind != .symbol) return false;
+        if (!entry.hasLiveValue() or entry.kind != .global_symbol) return false;
         const indexed = self.symbol_index.get(.{ .bytes = entry.bytes }) orelse return false;
         return indexed == idx;
-    }
-
-    pub fn sweepUnrootedUniqueSymbols(self: *AtomTable, roots: anytype) usize {
-        var freed: usize = 0;
-        for (self.entries) |*entry| {
-            if (!entry.isLive() or entry.kind != .symbol) continue;
-            if (!entry.gc_managed_symbol) continue;
-            if (self.isRegisteredSymbol(entry.id)) continue;
-            if (entry.ref_count > 1) continue;
-            if (roots.contains(entry.id)) continue;
-            self.free(entry.id);
-            freed += 1;
-        }
-        return freed;
     }
 
     pub fn dup(self: *AtomTable, atom: Atom) Atom {
         if (isConst(atom) or isTaggedInt(atom)) return atom;
         if (self.findDynamic(atom)) |entry| {
-            std.debug.assert(entry.isLive());
-            entry.ref_count += 1;
+            std.debug.assert(entry.hasLiveValue());
+            if (isValueSymbolKind(entry.kind)) {
+                self.retainValueSymbolEntry(entry);
+            } else {
+                entry.ref_count += 1;
+            }
         }
         return atom;
     }
@@ -968,31 +1007,16 @@ pub const AtomTable = struct {
         const idx = dynamicEntryIndex(atom) orelse return;
         if (idx >= self.entries.len) return;
         const entry = &self.entries[idx];
+        if (isValueSymbolKind(entry.kind)) {
+            if (entry.str) |body| {
+                gc.release(self.runtime.?, &body.header);
+                return;
+            }
+        }
         std.debug.assert(entry.ref_count > 0);
         entry.ref_count -= 1;
         if (entry.ref_count == 0) {
-            // Remove from interning map(s) before clearing bytes so the
-            // hash-map key (which slices into entry.bytes) is valid.
-            switch (entry.kind) {
-                .string => _ = self.string_index.remove(.{ .bytes = entry.bytes }),
-                .symbol => {
-                    if (self.isRegisteredSymbol(atom)) _ = self.symbol_index.remove(.{ .bytes = entry.bytes });
-                },
-                .private => {},
-            }
-            if (entry.str) |cached| {
-                entry.str = null;
-                std.debug.assert(cached.atom_id == atom);
-                cached.atom_id = null;
-                gc.release(self.runtime.?, &cached.header);
-            }
-            const bytes = entry.bytes;
-            entry.bytes = &.{};
-            if (bytes.len != 0) self.memory.free(u8, bytes);
-            // Recycle the slot: nobody holds the id anymore, so the next
-            // intern may rebind it. See `internDynamic` for the pop side.
-            entry.next_free = self.free_slot_head;
-            self.free_slot_head = @intCast(idx);
+            self.finalizeDeadEntry(@intCast(idx), null);
         }
     }
 
@@ -1000,7 +1024,7 @@ pub const AtomTable = struct {
         if (isConst(atom_id) or isTaggedInt(atom_id)) return null;
         const entry = self.findDynamicConst(atom_id) orelse return null;
         if (!entry.isLive()) return null;
-        return entry.ref_count;
+        return entry.strongRefCount();
     }
 
     pub fn replace(self: *AtomTable, slot: *Atom, next: Atom) void {
@@ -1015,7 +1039,7 @@ pub const AtomTable = struct {
         if (isTaggedInt(atom)) return null;
         if (predefinedById(atom)) |entry| return entry.name;
         if (self.findDynamicConst(atom)) |entry| {
-            if (entry.isLive()) return entry.bytes;
+            if (entry.hasLiveValue()) return entry.bytes;
         }
         return null;
     }
@@ -1025,9 +1049,14 @@ pub const AtomTable = struct {
         if (isTaggedInt(atom)) return .string;
         if (predefinedById(atom)) |entry| return entry.kind;
         if (self.findDynamicConst(atom)) |entry| {
-            if (entry.isLive()) return entry.kind;
+            if (entry.hasLiveValue()) return entry.kind;
         }
         return null;
+    }
+
+    pub fn isPublicSymbol(self: *const AtomTable, atom_id: Atom) bool {
+        const atom_kind = self.kind(atom_id) orelse return false;
+        return isPublicSymbolKind(atom_kind);
     }
 
     pub fn toStringValue(self: *AtomTable, rt: anytype, atom_id: Atom) !JSValue {
@@ -1104,7 +1133,132 @@ pub const AtomTable = struct {
         s.atom_id = atom_id;
     }
 
-    fn internDynamic(self: *AtomTable, bytes: []const u8, atom_kind: AtomKind, index_entry: bool, gc_managed_symbol: bool) !Atom {
+    pub fn symbolValue(self: *AtomTable, rt: *JSRuntime, atom_id: Atom) !JSValue {
+        const body = try self.ensureSymbolBody(rt, atom_id);
+        if (body.header.rc == 0) {
+            body.header.rc = 1;
+        } else {
+            gc.retain(&body.header);
+        }
+        return JSValue.symbol(&body.header);
+    }
+
+    pub fn takeSymbolValue(self: *AtomTable, rt: *JSRuntime, atom_id: Atom) !JSValue {
+        const body = try self.ensureSymbolBody(rt, atom_id);
+        if (body.header.rc == 0) body.header.rc = 1;
+        return JSValue.symbol(&body.header);
+    }
+
+    pub fn symbolValueIfLive(self: *AtomTable, rt: *JSRuntime, atom_id: Atom) !JSValue {
+        const body = self.symbolBodyIfLive(atom_id) orelse return JSValue.undefinedValue();
+        _ = rt;
+        gc.retain(&body.header);
+        return JSValue.symbol(&body.header);
+    }
+
+    pub fn retainSymbolWeakRef(self: *AtomTable, atom_id: Atom) void {
+        if (isConst(atom_id) or isTaggedInt(atom_id)) return;
+        const entry = self.findDynamic(atom_id) orelse return;
+        if (!isValueSymbolKind(entry.kind)) return;
+        std.debug.assert(entry.hasLiveValue());
+        entry.weakref_count += 1;
+    }
+
+    pub fn releaseSymbolWeakRef(self: *AtomTable, rt: *JSRuntime, atom_id: Atom) void {
+        if (isConst(atom_id) or isTaggedInt(atom_id)) return;
+        const idx = dynamicEntryIndex(atom_id) orelse return;
+        if (idx >= self.entries.len) return;
+        const entry = &self.entries[idx];
+        if (!isValueSymbolKind(entry.kind)) return;
+        std.debug.assert(entry.weakref_count > 0);
+        entry.weakref_count -= 1;
+        if (entry.weakref_count == 0 and entry.strongRefCount() == 0) {
+            if (entry.str) |body| {
+                if (body.header.rc == 0) {
+                    self.finalizeDeadEntry(@intCast(idx), body);
+                    string.String.destroyWeakSymbolBody(rt, body);
+                }
+            }
+        }
+    }
+
+    pub fn onSymbolBodyZeroRef(self: *AtomTable, rt: *JSRuntime, atom_id: Atom, body: *string.String) bool {
+        _ = rt;
+        if (isConst(atom_id) or isTaggedInt(atom_id)) return false;
+        const idx = dynamicEntryIndex(atom_id) orelse return false;
+        if (idx >= self.entries.len) return false;
+        const entry = &self.entries[idx];
+        if (!isValueSymbolKind(entry.kind) or entry.str != body) return false;
+        if (entry.weakref_count != 0) {
+            self.unindexEntry(@intCast(idx));
+            entry.ref_count = 0;
+            return true;
+        }
+        self.finalizeDeadEntry(@intCast(idx), body);
+        return false;
+    }
+
+    pub fn symbolDescription(self: *AtomTable, symbol: Atom) ?[]const u8 {
+        const body = self.symbolBodyIfLive(symbol) orelse return null;
+        if (body.isSymbolNoDescription()) return null;
+        return self.name(symbol);
+    }
+
+    fn symbolBodyIfLive(self: *AtomTable, atom_id: Atom) ?*string.String {
+        if (atom_id == null_atom or isTaggedInt(atom_id)) return null;
+        if (isConst(atom_id)) {
+            const pre = predefined_atoms[atom_id - 1];
+            if (!isValueSymbolKind(pre.kind)) return null;
+            return self.predefined_str[atom_id - 1];
+        }
+        const entry = self.findDynamicConst(atom_id) orelse return null;
+        if (!isValueSymbolKind(entry.kind)) return null;
+        const body = entry.str orelse return null;
+        if (body.header.rc == 0) return null;
+        return body;
+    }
+
+    fn ensureSymbolBody(self: *AtomTable, rt: *JSRuntime, atom_id: Atom) !*string.String {
+        if (atom_id == null_atom or isTaggedInt(atom_id)) return error.InvalidAtom;
+        if (isConst(atom_id)) {
+            const pre = predefined_atoms[atom_id - 1];
+            if (!isValueSymbolKind(pre.kind)) return error.InvalidAtom;
+            const slot = &self.predefined_str[atom_id - 1];
+            if (slot.*) |cached| return cached;
+            const body = try string.String.createUtf8(rt, pre.name);
+            body.atom_id = atom_id;
+            slot.* = body;
+            return body;
+        }
+        const entry = self.findDynamic(atom_id) orelse return error.InvalidAtom;
+        if (!entry.hasLiveValue() or !isValueSymbolKind(entry.kind)) return error.InvalidAtom;
+        if (entry.str) |cached| return cached;
+        const protect_gc_managed_symbol = entry.kind == .symbol and entry.gc_managed_symbol;
+        if (protect_gc_managed_symbol) entry.ref_count += 1;
+        errdefer if (protect_gc_managed_symbol) {
+            std.debug.assert(entry.ref_count > 0);
+            entry.ref_count -= 1;
+        };
+        const body = if (entry.no_symbol_description)
+            try string.String.createSymbolNoDescription(rt)
+        else
+            try string.String.createUtf8(rt, entry.bytes);
+        var transferred_refs = entry.ref_count;
+        if (protect_gc_managed_symbol) {
+            // The body allocation can run forced GC. The temporary ref above
+            // keeps the unique symbol atom out of the unrooted-symbol sweep
+            // until the atom-owned ref is transferred into the body.
+            std.debug.assert(transferred_refs >= 2);
+            transferred_refs -= 2;
+        }
+        body.atom_id = atom_id;
+        body.header.rc = @intCast(transferred_refs);
+        entry.ref_count = 0;
+        entry.str = body;
+        return body;
+    }
+
+    fn internDynamic(self: *AtomTable, bytes: []const u8, atom_kind: AtomKind, index_entry: bool, gc_managed_symbol: bool, no_symbol_description: bool) !Atom {
         // Fast path: interning lookup via hash map. The map is keyed by
         // bytes, indexed per-kind (string vs symbol/private) so a string
         // `"foo"` and a symbol description `"foo"` map to distinct atoms.
@@ -1113,6 +1267,13 @@ pub const AtomTable = struct {
                 const entry = &self.entries[idx];
                 std.debug.assert(entry.isLive() and entry.kind == .string);
                 entry.ref_count += 1;
+                return entry.id;
+            }
+        } else if (atom_kind == .global_symbol) {
+            if (self.symbol_index.get(.{ .bytes = bytes })) |idx| {
+                const entry = &self.entries[idx];
+                std.debug.assert(entry.hasLiveValue() and entry.kind == .global_symbol);
+                self.retainValueSymbolEntry(entry);
                 return entry.id;
             }
         }
@@ -1129,7 +1290,7 @@ pub const AtomTable = struct {
         if (self.free_slot_head != no_free_slot) {
             const idx = self.free_slot_head;
             const entry = &self.entries[idx];
-            std.debug.assert(!entry.isLive());
+            std.debug.assert(!entry.slotOccupied());
             std.debug.assert(entry.id == @as(Atom, @intCast(idx)) + first_dynamic_atom);
             std.debug.assert(entry.str == null);
             self.free_slot_head = entry.next_free;
@@ -1138,9 +1299,12 @@ pub const AtomTable = struct {
             entry.ref_count = 1;
             entry.gc_managed_symbol = atom_kind == .symbol and gc_managed_symbol;
             entry.registry_managed_symbol = false;
+            entry.weakref_count = 0;
+            entry.no_symbol_description = no_symbol_description;
             errdefer {
                 entry.bytes = &.{};
                 entry.ref_count = 0;
+                entry.weakref_count = 0;
                 entry.next_free = self.free_slot_head;
                 self.free_slot_head = idx;
             }
@@ -1160,6 +1324,7 @@ pub const AtomTable = struct {
             .kind = atom_kind,
             .ref_count = 1,
             .gc_managed_symbol = atom_kind == .symbol and gc_managed_symbol,
+            .no_symbol_description = no_symbol_description,
         });
         errdefer self.entries = self.entries[0..idx];
         if (index_entry) try self.indexEntry(idx);
@@ -1199,9 +1364,55 @@ pub const AtomTable = struct {
         const entry = &self.entries[idx];
         switch (entry.kind) {
             .string => try self.string_index.put(self.memory.persistent_allocator, .{ .bytes = entry.bytes }, idx),
-            .symbol => try self.symbol_index.put(self.memory.persistent_allocator, .{ .bytes = entry.bytes }, idx),
+            .global_symbol => try self.symbol_index.put(self.memory.persistent_allocator, .{ .bytes = entry.bytes }, idx),
+            .symbol => {},
             .private => {},
         }
+    }
+
+    fn unindexEntry(self: *AtomTable, idx: EntryIndex) void {
+        const entry = &self.entries[idx];
+        switch (entry.kind) {
+            .string => _ = self.string_index.remove(.{ .bytes = entry.bytes }),
+            .global_symbol => _ = self.symbol_index.remove(.{ .bytes = entry.bytes }),
+            .symbol, .private => {},
+        }
+    }
+
+    fn finalizeDeadEntry(self: *AtomTable, idx: EntryIndex, destroying_body: ?*string.String) void {
+        const entry = &self.entries[idx];
+        self.unindexEntry(idx);
+        if (entry.str) |cached| {
+            entry.str = null;
+            std.debug.assert(cached.atom_id == entry.id);
+            cached.atom_id = null;
+            if (destroying_body == null or destroying_body.? != cached) {
+                gc.release(self.runtime.?, &cached.header);
+            }
+        }
+        const bytes = entry.bytes;
+        entry.bytes = &.{};
+        if (bytes.len != 0) self.memory.free(u8, bytes);
+        entry.ref_count = 0;
+        entry.weakref_count = 0;
+        entry.no_symbol_description = false;
+        entry.registry_managed_symbol = false;
+        entry.gc_managed_symbol = false;
+        // Recycle the slot: nobody holds the id anymore, so the next
+        // intern may rebind it. See `internDynamic` for the pop side.
+        entry.next_free = self.free_slot_head;
+        self.free_slot_head = idx;
+    }
+
+    fn retainValueSymbolEntry(self: *AtomTable, entry: *DynamicAtom) void {
+        _ = self;
+        std.debug.assert(isValueSymbolKind(entry.kind));
+        if (entry.str) |body| {
+            std.debug.assert(body.header.rc > 0);
+            gc.retain(&body.header);
+            return;
+        }
+        entry.ref_count += 1;
     }
 
     fn findDynamic(self: *AtomTable, atom: Atom) ?*DynamicAtom {
@@ -1250,6 +1461,7 @@ pub fn predefinedId(bytes: []const u8, kind: AtomKind) ?Atom {
     return switch (kind) {
         .string => predefined_string_map.get(bytes),
         .symbol => predefined_symbol_map.get(bytes),
+        .global_symbol => null,
         .private => predefined_private_map.get(bytes),
     };
 }

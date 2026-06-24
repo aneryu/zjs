@@ -547,9 +547,9 @@ test "array iteratorResult roots direct function bytecode value while creating r
     fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-array-iterator-result-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-array-iterator-result-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var result_value = core.JSValue.functionBytecode(&fb.header);
@@ -566,9 +566,11 @@ test "array iteratorResult roots direct function bytecode value while creating r
     const iterator_result = objectFromValue(iterator_result_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    const stored = iterator_result.getProperty(core.atom.predefinedId("value", .string).?);
-    defer stored.free(rt);
-    try std.testing.expect(stored.same(result_value));
+    {
+        const stored = iterator_result.getProperty(core.atom.predefinedId("value", .string).?);
+        defer stored.free(rt);
+        try std.testing.expect(stored.same(result_value));
+    }
 
     iterator_result_value.free(rt);
     iterator_result_alive = false;
@@ -592,9 +594,10 @@ test "array splice roots direct function bytecode insert values while creating r
     first_fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&first_fb.header);
 
-    const first_symbol = try rt.atoms.newValueSymbol("gc-array-splice-first-bytecode-symbol");
+    const first_symbol_value = try rt.newSymbolValue("gc-array-splice-first-bytecode-symbol");
+    const first_symbol = first_symbol_value.asSymbolAtom().?;
     first_fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    first_fb.cpool[0] = core.JSValue.symbol(first_symbol);
+    first_fb.cpool[0] = first_symbol_value;
     first_fb.cpool_count = 1;
 
     const second_slice = try rt.memory.alloc(core.FunctionBytecode, 1);
@@ -602,9 +605,10 @@ test "array splice roots direct function bytecode insert values while creating r
     second_fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&second_fb.header);
 
-    const second_symbol = try rt.atoms.newValueSymbol("gc-array-splice-second-bytecode-symbol");
+    const second_symbol_value = try rt.newSymbolValue("gc-array-splice-second-bytecode-symbol");
+    const second_symbol = second_symbol_value.asSymbolAtom().?;
     second_fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    second_fb.cpool[0] = core.JSValue.symbol(second_symbol);
+    second_fb.cpool[0] = second_symbol_value;
     second_fb.cpool_count = 1;
 
     var first_value = core.JSValue.functionBytecode(&first_fb.header);
@@ -630,12 +634,14 @@ test "array splice roots direct function bytecode insert values while creating r
 
     try std.testing.expect(rt.atoms.name(first_symbol) != null);
     try std.testing.expect(rt.atoms.name(second_symbol) != null);
-    const stored_first = array.getProperty(core.atom.atomFromUInt32(0));
-    defer stored_first.free(rt);
-    try std.testing.expect(stored_first.same(first_value));
-    const stored_second = array.getProperty(core.atom.atomFromUInt32(1));
-    defer stored_second.free(rt);
-    try std.testing.expect(stored_second.same(second_value));
+    {
+        const stored_first = array.getProperty(core.atom.atomFromUInt32(0));
+        defer stored_first.free(rt);
+        try std.testing.expect(stored_first.same(first_value));
+        const stored_second = array.getProperty(core.atom.atomFromUInt32(1));
+        defer stored_second.free(rt);
+        try std.testing.expect(stored_second.same(second_value));
+    }
 
     removed_value.free(rt);
     removed_alive = false;
@@ -660,9 +666,9 @@ test "array constructWithPrototype roots direct function bytecode elements while
     fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-array-construct-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-array-construct-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var element_value = core.JSValue.functionBytecode(&fb.header);
@@ -680,9 +686,11 @@ test "array constructWithPrototype roots direct function bytecode elements while
     const array = try expectArray(array_value);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    const stored = array.getProperty(core.atom.atomFromUInt32(0));
-    defer stored.free(rt);
-    try std.testing.expect(stored.same(element_value));
+    {
+        const stored = array.getProperty(core.atom.atomFromUInt32(0));
+        defer stored.free(rt);
+        try std.testing.expect(stored.same(element_value));
+    }
 
     array_value.free(rt);
     array_alive = false;
@@ -707,9 +715,9 @@ test "array concat roots direct function bytecode argument while creating output
     fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-array-concat-arg-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-array-concat-arg-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var arg_value = core.JSValue.functionBytecode(&fb.header);
@@ -727,9 +735,11 @@ test "array concat roots direct function bytecode argument while creating output
     const out = try expectArray(out_value);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    const stored = out.getProperty(core.atom.atomFromUInt32(0));
-    defer stored.free(rt);
-    try std.testing.expect(stored.same(arg_value));
+    {
+        const stored = out.getProperty(core.atom.atomFromUInt32(0));
+        defer stored.free(rt);
+        try std.testing.expect(stored.same(arg_value));
+    }
 
     out_value.free(rt);
     out_alive = false;
@@ -1122,8 +1132,7 @@ fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
 }
 
 fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
-    const header = value.refHeader() orelse return;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = value.asStringBody() orelse return;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
@@ -1167,8 +1176,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
     } else if (value.isNull()) {
         try buffer.appendSlice(rt.memory.allocator, "null");
     } else if (value.isString()) {
-        const header = value.refHeader() orelse return;
-        const string_value: *core.string.String = @fieldParentPtr("header", header);
+        const string_value = value.asStringBody() orelse return;
         try string_value.ensureFlat(rt);
         switch (string_value.resolveData()) {
             .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
@@ -1270,10 +1278,8 @@ fn bigIntParts(value: core.JSValue, scratch: *[2]bignum.Limb) ?BigIntParts {
 
 fn compareStringValues(a: core.JSValue, b: core.JSValue) ?i32 {
     if (!a.isString() or !b.isString()) return null;
-    const a_header = a.refHeader() orelse return null;
-    const b_header = b.refHeader() orelse return null;
-    const a_string: *core.string.String = @fieldParentPtr("header", a_header);
-    const b_string: *core.string.String = @fieldParentPtr("header", b_header);
+    const a_string = a.asStringBody() orelse return null;
+    const b_string = b.asStringBody() orelse return null;
     return a_string.compare(b_string.*);
 }
 

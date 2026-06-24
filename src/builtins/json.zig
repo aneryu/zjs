@@ -337,7 +337,7 @@ fn appendJsonObject(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *co
     const keys = if (options.has_property_list) options.property_list else owned_keys;
     var emitted = false;
     for (keys) |key| {
-        if (rt.atoms.kind(key) == .symbol) continue;
+        if (rt.atoms.isPublicSymbol(key)) continue;
         const value = object.getOwnDataPropertyValue(key) orelse object.getProperty(key);
         defer value.free(rt);
         var rooted_value = value;
@@ -811,8 +811,7 @@ fn stringifyPropertyListAtom(rt: *core.JSRuntime, value: core.JSValue) !?core.At
     defer rt.active_value_roots = root_frame.previous;
 
     if (rooted_value.isString()) {
-        const header = rooted_value.refHeader().?;
-        const string_object: *core.string.String = @fieldParentPtr("header", header);
+        const string_object = rooted_value.asStringBody().?;
         return try string_object.internAtom(rt);
     }
     if (rooted_value.asInt32()) |int_value| {
@@ -1005,8 +1004,7 @@ fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    const header = rooted_value.refHeader() orelse return;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    const string_value = rooted_value.asStringBody() orelse return;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
@@ -1154,9 +1152,9 @@ test "JSON.parse roots direct function bytecode input while coercing to string" 
     fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-json-parse-input-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-json-parse-input-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var input = core.JSValue.functionBytecode(&fb.header);
@@ -1293,7 +1291,7 @@ pub fn qjsJsonInternalizeProperty(
             ctx.runtime.active_value_roots = &child_root_frame;
             defer ctx.runtime.active_value_roots = child_root_frame.previous;
             for (keys) |child_key| {
-                if (ctx.runtime.atoms.kind(child_key) == .symbol) continue;
+                if (ctx.runtime.atoms.isPublicSymbol(child_key)) continue;
                 const desc = try object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, object, child_key) orelse continue;
                 defer desc.destroy(ctx.runtime);
                 if (desc.enumerable != true) continue;
@@ -1480,7 +1478,7 @@ fn qjsJsonSourceCountForValue(rt: *core.JSRuntime, value: core.JSValue) !usize {
     const keys = try object.ownKeys(rt);
     defer core.Object.freeKeys(rt, keys);
     for (keys) |key| {
-        if (rt.atoms.kind(key) == .symbol) continue;
+        if (rt.atoms.isPublicSymbol(key)) continue;
         const desc = object.getOwnProperty(rt, key) orelse continue;
         defer desc.destroy(rt);
         if (desc.enumerable != true) continue;
@@ -1706,9 +1704,9 @@ test "JSON.stringify roots direct function bytecode value while creating holder"
     fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-json-stringify-value-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-json-stringify-value-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var value = core.JSValue.functionBytecode(&fb.header);
@@ -1879,7 +1877,7 @@ fn qjsJsonAppendSimpleObject(
     for (object.shapeProps(), 0..) |prop, property_index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or !prop_flags.enumerable) continue;
-        if (rt.atoms.kind(prop.atom_id) == .symbol) continue;
+        if (rt.atoms.isPublicSymbol(prop.atom_id)) continue;
         if (core.array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) != null) {
             buffer.shrinkRetainingCapacity(start);
             return .fallback;
@@ -2005,8 +2003,7 @@ fn qjsJsonStringifyPropertyListAtom(
         string_value = core.JSValue.undefinedValue();
         owned_string.free(ctx.runtime);
     }
-    const header = string_value.refHeader().?;
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = string_value.asStringBody().?;
     return try string_object.internAtom(ctx.runtime);
 }
 
@@ -2366,7 +2363,7 @@ pub fn qjsJsonAppendObject(
     defer enumerable_keys.deinit(ctx.runtime.memory.allocator);
     if (!options.has_property_list) {
         for (owned_keys) |key| {
-            if (ctx.runtime.atoms.kind(key) == .symbol) continue;
+            if (ctx.runtime.atoms.isPublicSymbol(key)) continue;
             const desc = try object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, object, key) orelse continue;
             defer desc.destroy(ctx.runtime);
             if (desc.enumerable == true) try enumerable_keys.append(ctx.runtime.memory.allocator, key);
@@ -2375,7 +2372,7 @@ pub fn qjsJsonAppendObject(
     const keys = if (options.has_property_list) options.property_list else enumerable_keys.items;
     var emitted = false;
     for (keys) |key| {
-        if (ctx.runtime.atoms.kind(key) == .symbol) continue;
+        if (ctx.runtime.atoms.isPublicSymbol(key)) continue;
         const before = buffer.items.len;
         var child = std.ArrayList(u8).empty;
         defer child.deinit(ctx.runtime.memory.allocator);

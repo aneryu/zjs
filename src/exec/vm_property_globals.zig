@@ -442,13 +442,9 @@ fn useFastGlobalDataValue(
     _ = eval_var_ref_names;
     _ = eval_with_object;
     const value_int = value.asInt32();
-    if (value_int != null) {
-    }
-    if (value_int != null or value.asShortBigInt() != null) {
-    } else {
-        if (value.isString()) {
-        } else if (nextOpCanStartGlobalUriCall1(function, frame)) {
-        }
+    if (value_int != null) {}
+    if (value_int != null or value.asShortBigInt() != null) {} else {
+        if (value.isString()) {} else if (nextOpCanStartGlobalUriCall1(function, frame)) {}
     }
     try stack.push(value);
     return .done;
@@ -882,8 +878,8 @@ fn uriStrictEqIntArg(
         op.get_loc_check => {
             if (pc + 3 > code.len) return null;
             const idx = readInt(u16, code[pc + 1 ..][0..2]);
-            if (idx >= frame.locals.len or idx >= frame.locals_uninit.len) return null;
-            if (frame.localIsUninitialized(idx)) return null;
+            if (idx >= frame.locals.len) return null;
+            if (slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) return null;
             const value = slotValueBorrowed(frame.locals[idx]);
             return .{ .value = value.asInt32() orelse return null, .next_pc = pc + 3 };
         },
@@ -1371,8 +1367,7 @@ pub fn instantiateGlobalVarDeclarations(
 
 fn fastLengthValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isString()) {
-        const header = value.refHeader() orelse return error.TypeError;
-        const string_value: *core.string.String = @fieldParentPtr("header", header);
+        const string_value = value.asStringBody() orelse return error.TypeError;
         return core.JSValue.int32(@intCast(string_value.len()));
     }
     const object = objectFromValue(value) orelse return error.TypeError;

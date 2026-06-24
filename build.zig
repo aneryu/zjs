@@ -16,11 +16,13 @@ pub fn build(b: *std.Build) void {
     // gated, so the default build's allocation hot path is unchanged.
     // `zig build test-oom -Dzjs_oom_coverage=true` prints the count.
     const zjs_oom_coverage = b.option(bool, "zjs_oom_coverage", "Record distinct allocation call sites for the OOM corpus coverage report") orelse false;
+    const zjs_force_gc = b.option(bool, "zjs_force_gc", "Force a full GC before each runtime heap allocation") orelse false;
     const engine_options = b.addOptions();
     engine_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
     engine_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
     engine_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     engine_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
+    engine_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
 
     const engine_mod = b.addModule("quickjs_zig_engine", .{
         .root_source_file = b.path("src/root.zig"),
@@ -35,6 +37,7 @@ pub fn build(b: *std.Build) void {
     plugin_fixture_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
     plugin_fixture_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     plugin_fixture_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
+    plugin_fixture_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
     const plugin_fixture_zjs_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -447,6 +450,7 @@ pub fn build(b: *std.Build) void {
     test_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
     test_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     test_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
+    test_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
     test_options.addOptionPath("runtime_plugin_fixture_path", runtime_plugin_fixture.getEmittedBin());
     test_options.addOptionPath("runtime_empty_plugin_fixture_path", runtime_empty_plugin_fixture.getEmittedBin());
     test_options.addOption([]const u8, "zjs_executable_path", b.getInstallPath(.bin, "zjs"));

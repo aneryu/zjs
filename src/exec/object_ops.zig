@@ -36,7 +36,6 @@ const string_ops = @import("string_ops.zig");
 pub const Step = enum { done, continue_loop };
 
 // --- Dynamically gathered call_runtime aliases (excluding local definitions) ---
-const ActiveRootValueProbe = call_runtime.ActiveRootValueProbe;
 const DataViewConstructorArgs = builtin_glue.DataViewConstructorArgs;
 const DynamicFunctionKind = call_runtime.DynamicFunctionKind;
 const IntegrityLevel = call_runtime.IntegrityLevel;
@@ -490,7 +489,7 @@ pub fn createBytecodeFunctionObject(
             const local_count = @min(caller_function.var_names.len, frame.locals.len);
             for (frame.locals[0..local_count], 0..) |slot, idx| {
                 if (idx < caller_function.var_is_lexical.len and caller_function.var_is_lexical[idx]) continue;
-                if (idx < frame.locals_uninit.len and frame.localIsUninitialized(idx)) continue;
+                if (slot_ops.varRefSlotIsUninitialized(slot)) continue;
                 if (shouldSkipDirectEvalLocalCapture(fb, slot, skip_direct_eval_capture_values)) continue;
                 used_count += 1;
             }
@@ -562,7 +561,7 @@ pub fn createBytecodeFunctionObject(
                 const local_count = @min(caller_function.var_names.len, frame.locals.len);
                 for (caller_function.var_names[0..local_count], 0..) |atom_id, idx| {
                     if (idx < caller_function.var_is_lexical.len and caller_function.var_is_lexical[idx]) continue;
-                    if (idx < frame.locals_uninit.len and frame.localIsUninitialized(idx)) continue;
+                    if (slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) continue;
                     if (shouldSkipDirectEvalLocalCapture(fb, frame.locals[idx], skip_direct_eval_capture_values)) continue;
                     names[initialized] = ctx.runtime.atoms.dup(atom_id);
                     initialized_names += 1;
@@ -659,17 +658,19 @@ test "constructPrimitiveWrapperWithPrototype roots direct symbol while creating 
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const wrapper_value = try constructPrimitiveWrapperWithPrototype(rt, core.class.ids.symbol, null, core.JSValue.symbol(symbol_atom));
+    const symbol_value = try rt.symbolValue(symbol_atom);
+    const wrapper_value = try constructPrimitiveWrapperWithPrototype(rt, core.class.ids.symbol, null, symbol_value);
     var wrapper_alive = true;
     defer if (wrapper_alive) wrapper_value.free(rt);
     const wrapper = objectFromValue(wrapper_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = wrapper.objectDataSlot().* orelse return error.TypeError;
-    try std.testing.expect(stored.same(core.JSValue.symbol(symbol_atom)));
+    try std.testing.expect(stored.same(symbol_value));
 
     wrapper_value.free(rt);
     wrapper_alive = false;
+    symbol_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -755,12 +756,14 @@ test "qjsAggregateErrorConstructWithPrototype preserves direct symbol errors and
     var options_alive = true;
     defer if (options_alive) options.value().free(rt);
 
-    const error_atom = try rt.atoms.newValueSymbol("gc-aggregate-error-item-symbol");
-    const cause_atom = try rt.atoms.newValueSymbol("gc-aggregate-error-cause-symbol");
-    try errors_source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.symbol(error_atom), true, true, true));
+    const error_value = try rt.newSymbolValue("gc-aggregate-error-item-symbol");
+    const error_atom = error_value.asSymbolAtom().?;
+    const cause_value = try rt.newSymbolValue("gc-aggregate-error-cause-symbol");
+    const cause_atom = cause_value.asSymbolAtom().?;
+    try errors_source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(error_value, true, true, true));
     errors_source.setArrayLength(1);
     try errors_source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(1), true, false, false));
-    try defineDataProperty(rt, options, "cause", core.JSValue.symbol(cause_atom), true, false, true);
+    try defineDataProperty(rt, options, "cause", cause_value, true, false, true);
 
     const args = [_]core.JSValue{
         errors_source.value(),
@@ -790,15 +793,17 @@ test "qjsAggregateErrorConstructWithPrototype preserves direct symbol errors and
         const stored_errors = objectFromValue(stored_errors_value) orelse return error.TypeError;
         const stored_error = stored_errors.getProperty(core.atom.atomFromUInt32(0));
         defer stored_error.free(rt);
-        try std.testing.expect(stored_error.same(core.JSValue.symbol(error_atom)));
+        try std.testing.expect(stored_error.same(error_value));
 
         const stored_cause = aggregate.getProperty(cause_key);
         defer stored_cause.free(rt);
-        try std.testing.expect(stored_cause.same(core.JSValue.symbol(cause_atom)));
+        try std.testing.expect(stored_cause.same(cause_value));
     }
 
     aggregate_value.free(rt);
     aggregate_alive = false;
+    error_value.free(rt);
+    cause_value.free(rt);
     errors_source.value().free(rt);
     errors_source_alive = false;
     options.value().free(rt);
@@ -861,10 +866,12 @@ test "qjsSuppressedErrorConstructWithPrototype roots direct symbol args while cr
     defer global.value().free(rt);
 
     const error_atom = try rt.atoms.newValueSymbol("gc-suppressed-error-value-symbol");
+    const error_arg = try rt.symbolValue(error_atom);
     const suppressed_atom = try rt.atoms.newValueSymbol("gc-suppressed-error-suppressed-symbol");
+    const suppressed_arg = try rt.symbolValue(suppressed_atom);
     const args = [_]core.JSValue{
-        core.JSValue.symbol(error_atom),
-        core.JSValue.symbol(suppressed_atom),
+        error_arg,
+        suppressed_arg,
     };
 
     const old_threshold = rt.gcThreshold();
@@ -882,15 +889,19 @@ test "qjsSuppressedErrorConstructWithPrototype roots direct symbol args while cr
     defer rt.atoms.free(error_key);
     const suppressed_key = try rt.internAtom("suppressed");
     defer rt.atoms.free(suppressed_key);
-    const stored_error = object.getProperty(error_key);
-    defer stored_error.free(rt);
-    const stored_suppressed = object.getProperty(suppressed_key);
-    defer stored_suppressed.free(rt);
-    try std.testing.expect(stored_error.same(core.JSValue.symbol(error_atom)));
-    try std.testing.expect(stored_suppressed.same(core.JSValue.symbol(suppressed_atom)));
+    {
+        const stored_error = object.getProperty(error_key);
+        defer stored_error.free(rt);
+        const stored_suppressed = object.getProperty(suppressed_key);
+        defer stored_suppressed.free(rt);
+        try std.testing.expect(stored_error.same(error_arg));
+        try std.testing.expect(stored_suppressed.same(suppressed_arg));
+    }
 
     error_value.free(rt);
     error_alive = false;
+    error_arg.free(rt);
+    suppressed_arg.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(error_atom) == null);
     try std.testing.expect(rt.atoms.name(suppressed_atom) == null);
@@ -980,7 +991,8 @@ test "qjsErrorConstructWithPrototype preserves direct symbol cause" {
     defer if (options_alive) options.value().free(rt);
 
     const cause_atom = try rt.atoms.newValueSymbol("gc-error-cause-symbol");
-    try defineDataProperty(rt, options, "cause", core.JSValue.symbol(cause_atom), true, false, true);
+    const cause_value = try rt.symbolValue(cause_atom);
+    try defineDataProperty(rt, options, "cause", cause_value, true, false, true);
     const args = [_]core.JSValue{
         core.JSValue.undefinedValue(),
         options.value(),
@@ -1002,11 +1014,12 @@ test "qjsErrorConstructWithPrototype preserves direct symbol cause" {
     {
         const stored_cause = object.getProperty(cause_key);
         defer stored_cause.free(rt);
-        try std.testing.expect(stored_cause.same(core.JSValue.symbol(cause_atom)));
+        try std.testing.expect(stored_cause.same(cause_value));
     }
 
     error_value.free(rt);
     error_alive = false;
+    cause_value.free(rt);
     options.value().free(rt);
     options_alive = false;
     _ = rt.runObjectCycleRemoval();
@@ -1279,9 +1292,7 @@ pub const FastUnicodePropertyPredicate = enum {
 
 pub fn simpleUnicodePropertyRunTestFast(source: []const u8, flags: []const u8, string_value: core.JSValue) ?bool {
     const parsed = unicodePropertyRunPattern(source, flags) orelse return null;
-    const header = string_value.refHeader() orelse return null;
-    if (!string_value.isString()) return null;
-    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    const string_object = string_value.asStringBody() orelse return null;
     switch (string_object.resolveData()) {
         .latin1 => |bytes| {
             for (bytes) |byte| {
@@ -3175,13 +3186,12 @@ fn qjsSymbolConstructorCall(
             var buffer = std.ArrayList(u8).empty;
             errdefer buffer.deinit(rt.memory.allocator);
             try value_ops.appendRawString(rt, &buffer, string_value);
-            break :blk try buffer.toOwnedSlice(rt.memory.allocator);
+            break :blk @as(?[]u8, try buffer.toOwnedSlice(rt.memory.allocator));
         }
-        break :blk try rt.memory.allocator.dupe(u8, core.symbol.undefined_description);
+        break :blk null;
     };
-    defer rt.memory.allocator.free(description);
-    const symbol_atom = try rt.atoms.newValueSymbol(description);
-    return core.JSValue.symbol(symbol_atom);
+    defer if (description) |bytes| rt.memory.allocator.free(bytes);
+    return rt.newSymbolValue(if (description) |bytes| bytes else null);
 }
 
 /// `get Symbol.prototype.description`: unwraps a symbol primitive or a
@@ -3646,7 +3656,9 @@ test "qjsDestructuringRest roots direct symbol values while creating rest array"
     var source_alive = true;
     defer if (source_alive) source.value().free(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-destructuring-rest-symbol");
-    try source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.symbol(symbol_atom), true, true, true));
+    const symbol_value = try rt.symbolValue(symbol_atom);
+    try source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(symbol_value, true, true, true));
+    symbol_value.free(rt);
     source.setArrayLength(1);
 
     const args = [_]core.JSValue{ source.value(), core.JSValue.int32(0) };
@@ -3663,7 +3675,7 @@ test "qjsDestructuringRest roots direct symbol values while creating rest array"
     {
         const stored = rest.getProperty(core.atom.atomFromUInt32(0));
         defer stored.free(rt);
-        try std.testing.expect(stored.same(core.JSValue.symbol(symbol_atom)));
+        try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
     }
 
     rest_value.free(rt);
@@ -3687,7 +3699,9 @@ test "qjsDestructuringObjectRest roots direct symbol values while creating rest 
     const key = try rt.internAtom("kept");
     defer rt.atoms.free(key);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-destructuring-object-rest-symbol");
-    try source.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.symbol(symbol_atom), true, true, true));
+    const symbol_value = try rt.symbolValue(symbol_atom);
+    try source.defineOwnProperty(rt, key, core.Descriptor.data(symbol_value, true, true, true));
+    symbol_value.free(rt);
 
     const args = [_]core.JSValue{source.value()};
     const old_threshold = rt.gcThreshold();
@@ -3703,7 +3717,7 @@ test "qjsDestructuringObjectRest roots direct symbol values while creating rest 
     {
         const stored = rest.getProperty(key);
         defer stored.free(rt);
-        try std.testing.expect(stored.same(core.JSValue.symbol(symbol_atom)));
+        try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
     }
 
     rest_value.free(rt);
@@ -4663,8 +4677,7 @@ pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primi
         const object = try core.Object.create(rt, core.class.ids.string, prototype);
         errdefer core.Object.destroyFromHeader(rt, &object.header);
         try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive.dup());
-        const header = rooted_primitive.refHeader() orelse return error.TypeError;
-        const string_value: *core.string.String = @fieldParentPtr("header", header);
+        const string_value = rooted_primitive.asStringBody() orelse return error.TypeError;
         try string_value.ensureFlat(rt);
         var index: u32 = 0;
         while (index < string_value.len()) : (index += 1) {
@@ -4728,17 +4741,19 @@ test "primitiveObjectForAccess roots direct symbol while creating wrapper" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const wrapper_value = try primitiveObjectForAccess(rt, global, core.JSValue.symbol(symbol_atom));
+    const symbol_value = try rt.symbolValue(symbol_atom);
+    const wrapper_value = try primitiveObjectForAccess(rt, global, symbol_value);
     var wrapper_alive = true;
     defer if (wrapper_alive) wrapper_value.free(rt);
     const wrapper = objectFromValue(wrapper_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = wrapper.objectData() orelse return error.TypeError;
-    try std.testing.expect(stored.same(core.JSValue.symbol(symbol_atom)));
+    try std.testing.expect(stored.same(symbol_value));
 
     wrapper_value.free(rt);
     wrapper_alive = false;
+    symbol_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -5016,7 +5031,7 @@ pub fn qjsObjectEnumerableOwnPropertiesCall(
     defer ctx.runtime.active_value_roots = root_frame.previous;
 
     for (keys) |key| {
-        if (ctx.runtime.atoms.kind(key) == .symbol) continue;
+        if (ctx.runtime.atoms.isPublicSymbol(key)) continue;
         const desc = try objectRestOwnPropertyDescriptor(ctx, output, global, object, key) orelse continue;
         defer desc.destroy(ctx.runtime);
         if (desc.enumerable != true) continue;
@@ -5288,9 +5303,9 @@ test "descriptorObjectFromDescriptor roots direct function bytecode value while 
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-descriptor-object-value-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-descriptor-object-value-bytecode-symbol");
+    fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
 
     var desc_value = core.JSValue.functionBytecode(&fb.header);
@@ -5313,9 +5328,11 @@ test "descriptorObjectFromDescriptor roots direct function bytecode value while 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const value_key = try rt.internAtom("value");
     defer rt.atoms.free(value_key);
-    const stored = descriptor.getProperty(value_key);
-    defer stored.free(rt);
-    try std.testing.expect(stored.same(desc_value));
+    {
+        const stored = descriptor.getProperty(value_key);
+        defer stored.free(rt);
+        try std.testing.expect(stored.same(desc_value));
+    }
 
     descriptor_value.free(rt);
     descriptor_alive = false;
@@ -5554,7 +5571,7 @@ pub fn setSuperPropertyValue(
 
 pub fn findPropertyDescriptor(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?core.Descriptor {
     if (object.getOwnProperty(rt, atom_id)) |desc| return desc;
-    if (object.prototype) |proto| return findPropertyDescriptor(rt, proto, atom_id);
+    if (object.getPrototype()) |proto| return findPropertyDescriptor(rt, proto, atom_id);
     return null;
 }
 
@@ -6390,7 +6407,7 @@ fn ensureHomeObjectBrand(rt: *core.JSRuntime, home: *core.Object) !core.Atom {
     if (!home.isExtensible()) return error.NotExtensible;
     const brand_atom = try rt.atoms.newSymbol(name, .private);
     defer rt.atoms.free(brand_atom);
-    try home.defineOwnProperty(rt, core.atom.ids.Private_brand, core.Descriptor.data(core.JSValue.symbol(brand_atom), true, true, true));
+    try home.defineOwnProperty(rt, core.atom.ids.Private_brand, core.Descriptor.data(try rt.symbolValue(brand_atom), true, true, true));
     return brand_atom;
 }
 
@@ -7054,6 +7071,8 @@ pub fn validateProxyHasResult(rt: *core.JSRuntime, target: *core.Object, atom_id
 }
 
 pub fn proxyTrapKeyValue(rt: *core.JSRuntime, atom_id: core.Atom) !core.JSValue {
-    if (rt.atoms.kind(atom_id) == .symbol) return core.JSValue.symbol(atom_id);
+    if (rt.atoms.kind(atom_id)) |kind| {
+        if (core.atom.isPublicSymbolKind(kind)) return rt.symbolValue(atom_id);
+    }
     return rt.atoms.toStringValue(rt, atom_id);
 }
