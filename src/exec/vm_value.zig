@@ -309,25 +309,29 @@ pub noinline fn toObjectVm(
 pub noinline fn typeOf(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(ctx.runtime);
-    const text: []const u8 = if (value.isUndefined() or value_ops.isHTMLDDA(value))
-        "undefined"
+    // qjs `js_operator_typeof` returns a predefined atom and OP_typeof pushes
+    // `JS_AtomToString` of it — a refcount dup of the interned atom string, not
+    // a fresh allocation. The `typeof` result strings are all predefined string
+    // atoms here too, so resolve to the atom and dup its cached interned string.
+    const atom_id: core.Atom = if (value.isUndefined() or value_ops.isHTMLDDA(value))
+        core.atom.ids.undefined_
     else if (value.isNull())
-        "object"
+        core.atom.ids.type_object
     else if (value.isBool())
-        "boolean"
+        core.atom.ids.type_boolean
     else if (value.isBigInt())
-        "bigint"
+        core.atom.ids.type_bigint
     else if (value.isNumber())
-        "number"
+        core.atom.ids.type_number
     else if (value.isString())
-        "string"
+        core.atom.ids.type_string
     else if (value.isSymbol())
-        "symbol"
+        core.atom.ids.type_symbol
     else if (value.isFunctionBytecode() or functionObjectFromValue(value) != null or callableObjectFromValue(value) != null or proxyTargetIsCallable(value))
-        "function"
+        core.atom.ids.type_function
     else
-        "object";
-    const out = try value_ops.createStringValue(ctx.runtime, text);
+        core.atom.ids.type_object;
+    const out = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
     errdefer out.free(ctx.runtime);
     stack.pushOwnedAssumeCapacity(out);
 }

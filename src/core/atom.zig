@@ -45,6 +45,16 @@ pub const ids = struct {
     pub const prototype: Atom = 60;
     pub const constructor: Atom = 61;
     pub const undefined_: Atom = 70;
+    // `typeof` result strings — predefined string atoms, so OP_typeof returns
+    // the interned atom string (a refcount dup) instead of allocating a fresh
+    // string each time (qjs `js_operator_typeof` -> `JS_AtomToString`).
+    pub const type_function: Atom = 27;
+    pub const type_number: Atom = 71;
+    pub const type_boolean: Atom = 72;
+    pub const type_string: Atom = 73;
+    pub const type_object: Atom = 74;
+    pub const type_symbol: Atom = 75;
+    pub const type_bigint: Atom = 143;
     pub const arguments: Atom = 78;
     pub const lastIndex: Atom = 86;
     pub const source: Atom = 109;
