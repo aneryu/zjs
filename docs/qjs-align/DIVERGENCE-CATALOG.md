@@ -23,6 +23,8 @@ tax (~2–2.5×) and is **not** a faithful target.
 | instanceof ordinary check (no Descriptor, direct proto walk) | `d3edbc6` | 3.64×→3.39× (residual is broad tax — see note) |
 | string-method resolution → comptime atom-id bitset | `e30ecef` | per-access name+eql chain dropped (charCodeAt 3.63×→3.36×) |
 | **Map/Set for-of result-object-free fast step** | `be06930` | **Map.values 21.22×→1.78×, Set 19.8×→1.81×** |
+| Map/Set for-of entries (key_value) extension | `d65b42b` | Map entries 6.63×→4.25× |
+| string indexOf — flat slice once + first-char skip | `bfae525` | indexOf/includes/split 5.78×→2.45× |
 
 ## ⏭ Tractable next (bounded, localized — good follow-ups)
 
@@ -44,13 +46,14 @@ tax (~2–2.5×) and is **not** a faithful target.
   `isStandardStringPrototypeMethodAtom` (string_ops.zig:4652) does `name()` + a 33-way
   `std.mem.eql` chain per access. Fix: compare the interned atom id by integer identity
   (precompute the String.prototype method atom ids once), not name bytes.
-- **String indexOf flat slice + first-char skip** (5.78×). `stringMatchesAtUnits`
-  (string.zig:1416) calls `codeUnitAt`→`resolveData` PER char and rescans every position.
-  qjs `string_indexof` (quickjs.c:45553/45579) hoists is_wide_char once and first-char-skips.
-  Fix: resolve haystack/needle to flat slices once, scan on raw slices.
-- **String toUpperCase/toLowerCase narrow flat buffer** (3.1×). Always decodes per-char via
-  resolveData and builds a UTF-16 buffer even for ASCII. qjs (quickjs.c:46510) uses a
-  pre-sized narrow buffer that widens only on a >0xFF unit.
+- **String indexOf flat slice + first-char skip** (5.78×): SHIPPED `bfae525` (→2.45×).
+  The `resolveData()`-once + first-char-skip pattern is reusable for the remaining string
+  searches: `stringLastIndexOfUnits` (the reverse loop still uses per-char `codeUnitAt`),
+  startsWith/endsWith, and any `codeUnitAt`-per-char scan.
+- **String toUpperCase/toLowerCase narrow flat buffer** (3.1×). Decodes per-char via
+  resolveData (now reusable to fix) AND builds a UTF-16 buffer even for ASCII. qjs
+  (quickjs.c:46510) uses a pre-sized narrow buffer that widens only on a >0xFF unit. Fix:
+  resolve source once (as indexOf now does) + accumulate latin1, widening lazily.
 
 ## 🔶 Medium-deep (need new fast-path machinery, but self-contained)
 
