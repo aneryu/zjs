@@ -1418,14 +1418,34 @@ fn stringMatchesAtUnits(haystack: *core.string.String, needle: *core.string.Stri
     return true;
 }
 
+inline fn resolvedUnitAt(data: core.string.String.ResolvedData, i: usize) u16 {
+    return switch (data) {
+        .latin1 => |bytes| bytes[i],
+        .utf16 => |units| units[i],
+    };
+}
+
 fn stringIndexOfUnits(haystack: *core.string.String, needle: *core.string.String, start: usize) ?usize {
-    if (start > haystack.len()) return null;
-    if (needle.len() == 0) return start;
-    if (needle.len() > haystack.len() - start) return null;
+    const hlen = haystack.len();
+    const nlen = needle.len();
+    if (start > hlen) return null;
+    if (nlen == 0) return start;
+    if (nlen > hlen - start) return null;
+    // Resolve both operands to their flat code-unit slice ONCE (qjs string_indexof
+    // hoists is_wide_char out of the loop, quickjs.c:45553/45579) instead of
+    // re-walking the slice/rope parent chain via `codeUnitAt` on every character,
+    // and first-char-skip so a non-matching position is rejected in a single read.
+    // The loop runs no allocations, so the resolved slices stay valid throughout.
+    const h = haystack.resolveData();
+    const n = needle.resolveData();
+    const first = resolvedUnitAt(n, 0);
     var index = start;
-    const limit = haystack.len() - needle.len();
+    const limit = hlen - nlen;
     while (index <= limit) : (index += 1) {
-        if (stringMatchesAtUnits(haystack, needle, index)) return index;
+        if (resolvedUnitAt(h, index) != first) continue;
+        var offset: usize = 1;
+        while (offset < nlen and resolvedUnitAt(h, index + offset) == resolvedUnitAt(n, offset)) : (offset += 1) {}
+        if (offset == nlen) return index;
     }
     return null;
 }
