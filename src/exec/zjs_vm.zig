@@ -1584,6 +1584,25 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
 
             // ---- Variable access ----
             op.get_var, op.get_var_undef => {
+                if (comptime thread_dispatch) get_var_fast: {
+                    if (localFastPathNeedsGeneratorStopBoundary(stop_before_pc)) break :get_var_fast;
+                    if (vm_property_globals.hasDynamicGlobalOverlay(frame, eval_local_names, eval_var_ref_names, eval_with_object)) break :get_var_fast;
+                    const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
+                    if (idx >= frame.var_refs.len) break :get_var_fast;
+                    const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :get_var_fast;
+                    if (cell.is_deleted) break :get_var_fast;
+                    const v = cell.pvalue.*;
+                    if (v.isUninitialized()) break :get_var_fast;
+                    if (core.VarRef.fromValue(v) != null) break :get_var_fast;
+                    if (!vm_property_globals.globalVarRefCellIsAuthoritative(function, global, idx, cell)) break :get_var_fast;
+                    if (vm_property_globals.parentEvalShadowsGlobalForIdx(ctx.runtime, frame, function, idx)) break :get_var_fast;
+                    reg_ip += 2;
+                    reg_sp[0] = v.dup();
+                    reg_sp += 1;
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
+                }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try vm_property_globals.getVar(ctx, output, global, stack, function, frame, catch_target, opc, sync_global_lexical_locals, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, eval_with_object)) {
                     .done => {},
@@ -1616,6 +1635,26 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 }
             },
             op.put_var => {
+                if (comptime thread_dispatch) put_var_fast: {
+                    if (localFastPathNeedsGeneratorStopBoundary(stop_before_pc)) break :put_var_fast;
+                    if (vm_property_globals.hasDynamicGlobalOverlay(frame, eval_local_names, eval_var_ref_names, eval_with_object)) break :put_var_fast;
+                    const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
+                    if (idx >= frame.var_refs.len) break :put_var_fast;
+                    const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :put_var_fast;
+                    if (cell.is_deleted or cell.is_const or cell.is_function_name) break :put_var_fast;
+                    const cur = cell.pvalue.*;
+                    if (cur.isUninitialized()) break :put_var_fast;
+                    if (core.VarRef.fromValue(cur) != null) break :put_var_fast;
+                    if (!vm_property_globals.globalVarRefCellIsAuthoritative(function, global, idx, cell)) break :put_var_fast;
+                    if (vm_property_globals.parentEvalShadowsGlobalForIdx(ctx.runtime, frame, function, idx)) break :put_var_fast;
+                    reg_ip += 2;
+                    reg_sp -= 1;
+                    cell.pvalue.* = reg_sp[0];
+                    cur.free(ctx.runtime);
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
+                }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try vm_property_globals.putVar(ctx, output, global, stack, function, frame, catch_target, strict_unresolved_get_var, eval_global_var_bindings, is_eval_code, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, eval_with_object)) {
                     .done => {},

@@ -524,6 +524,7 @@ pub fn decodeBindingPut(code: []const u8, pc: usize) ?BindingPut {
 }
 
 pub fn globalVarAtom(function: *const bytecode.Bytecode, idx: u16) ?core.Atom {
+    if (idx < function.closure_var.len) return function.closure_var[idx].var_name;
     if (idx >= function.var_ref_names.len) return null;
     return function.var_ref_names[idx];
 }
@@ -1435,7 +1436,28 @@ fn functionLocalOrArgBindingShadowsGlobal(rt: *core.JSRuntime, function: *const 
     return false;
 }
 
-fn parentFunctionEvalBindingShadowsGlobal(rt: *core.JSRuntime, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
+/// Cheap per-frame-constant precondition for parentFunctionEvalBindingShadowsGlobal:
+/// only a closure created inside a direct eval carries an eval-parent link. The
+/// var_ref fast lanes call this first — fully inlined (one tag test + one header
+/// deref + one field load, no call to objectFromValue) so the common case
+/// (top-level code, ordinary closures) short-circuits to a single register test
+/// before resolving the atom or making the heavier name-comparison call.
+pub inline fn frameClosureHasEvalParent(frame: *const frame_mod.Frame) bool {
+    const cf = frame.current_function;
+    if (!cf.isObject()) return false;
+    const header = cf.refHeader() orelse return false;
+    const function_object: *core.Object = @fieldParentPtr("header", header);
+    return function_object.functionEvalParentFunction() != null;
+}
+
+/// True when this closure's enclosing (eval-containing) function introduced a
+/// runtime `var` binding with the same name — qjs's var_object_test
+/// (quickjs.c:33158-33167): a free var captured from a parent fd that owns a
+/// `_var_`/`_arg_var_` object resolves to that dynamic binding BEFORE the global
+/// cell. The global var_ref fast lane must defer to the slow scope-walk
+/// (lookupParentFunctionEvalBindingValue) whenever this holds. Gate calls behind
+/// frameClosureHasEvalParent so non-eval frames never reach the name walk.
+pub fn parentFunctionEvalBindingShadowsGlobal(rt: *core.JSRuntime, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
     const function_object = objectFromValue(frame.current_function) orelse return false;
     const parent_value = function_object.functionEvalParentFunction() orelse return false;
     const parent_object = objectFromValue(parent_value) orelse return false;

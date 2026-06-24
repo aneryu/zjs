@@ -1,6 +1,6 @@
 # 全局变量访问忠实对齐 qjs:var_ref 绑定(最大剩余 perf 杠杆 ~4.46×)
 
-状态:**已深度分析 + 计划锁定,待统一攻克(深层多阶段,高回归风险)**。日期 2026-06-24。
+状态:**✅ 已落地（2026-06-24）**。本计划已执行：var_ref-cell 下沉 + 33 个作用域回归全修，test262 0/49775、global-read 7.08×→2.45×、global-write 6.70×→2.98×（over 真实 baseline）、fib 中性。施工细节与剩余前沿见 `HANDOVER-global-varref.md`。下文为执行前的深度分析记录（保留备查）。
 
 ## ⭐⭐ 2026-06-24 关键修正:qjs OP_get_var 本身就是 var_ref 解引用 + fallback(不是换 opcode!)
 

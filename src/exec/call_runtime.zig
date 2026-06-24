@@ -3729,6 +3729,92 @@ pub fn globalLexicalCell(ctx: *core.JSContext, atom_id: core.Atom) ?core.JSValue
     };
 }
 
+/// Return a fresh ref to the VarRef cell backing a global-object property.
+/// This is the non-lexical counterpart to `globalLexicalCell`: declared
+/// top-level `var`/function bindings are stored as JS_PROP_VARREF on the
+/// global object so closures can alias the property cell directly.
+pub fn globalObjectVarRefCell(global: *core.Object, atom_id: core.Atom) ?core.JSValue {
+    const index = global.findProperty(atom_id) orelse return null;
+    const flags = global.propFlagsAt(index);
+    if (flags.deleted or flags.accessor) return null;
+    return switch (global.properties[index].slot) {
+        .var_ref => |cell| cell.valueRef().dup(),
+        else => null,
+    };
+}
+
+/// Create the JS_PROP_VARREF slot backing a FRESH top-level `var`/function global.
+/// An already-existing global property is left entirely untouched (see below): we
+/// only materialize a cell when the binding is new, so closures can alias it.
+pub fn ensureGlobalObjectVarRefCell(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    atom_id: core.Atom,
+    configurable: bool,
+) !?core.JSValue {
+    const rt = ctx.runtime;
+    if (global.findProperty(atom_id)) |initial_index| {
+        if (global.propFlagsAt(initial_index).accessor) return null;
+        switch (global.properties[initial_index].slot) {
+            .var_ref => |cell| return cell.valueRef().dup(),
+            // qjs js_closure_define_global_var (quickjs.c:17171-17205): an EXISTING
+            // global property is never rebuilt into a fresh VARREF cell here. qjs
+            // hands back a detached uninitialized var_ref and leaves the property's
+            // slot AND its observable flags (writable/enumerable/configurable)
+            // untouched — a plain `var` redeclaration keeps its descriptor, and a
+            // function redeclaration's value+flags are applied afterwards by the
+            // ordinary global function-binding define path
+            // (slot_ops.defineGlobalFunctionBindingValue). Converting here would
+            // clobber the existing descriptor, because a var_ref slot derives its
+            // writable from is_const (masking the real flag). Returning null leaves
+            // the frame's closure-var slot as its initial detached uninitialized
+            // cell, matching qjs's detached-var_ref behaviour and routing access
+            // back through the ordinary global-object property path.
+            .data, .auto_init => return null,
+            .accessor, .deleted => return null,
+        }
+    }
+
+    const cell = try core.VarRef.createClosed(rt, core.JSValue.undefinedValue());
+    errdefer cell.valueRef().free(rt);
+    try global.appendPreparedPropertyEntry(
+        rt,
+        atom_id,
+        core.property.Flags.data(true, true, configurable),
+        .{ .var_ref = cell },
+    );
+    return cell.valueRef().dup();
+}
+
+/// qjs js_closure_define_global_var for non-lexical script globals: ensure the
+/// global object owns a VARREF property cell and rebind this frame's matching
+/// `.global` closure-var slots to alias it. Eval globals deliberately do not use
+/// this path because their bindings are configurable/deletable data properties.
+pub fn defineGlobalDeclVarCell(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    atom_id: core.Atom,
+    configurable: bool,
+) !bool {
+    const cell_value = (try ensureGlobalObjectVarRefCell(ctx, global, atom_id, configurable)) orelse return false;
+    defer cell_value.free(ctx.runtime);
+    var rebound = false;
+    for (function.var_ref_names, 0..) |name, idx| {
+        if (!atomIdOrNameEql(ctx.runtime, name, atom_id)) continue;
+        if (!closureVarIsNonLexicalGlobalSentinel(function, idx)) continue;
+        if (idx >= frame.var_refs.len) {
+            try frame_mod.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
+        }
+        const old_slot = frame.var_refs[idx];
+        frame.var_refs[idx] = cell_value.dup();
+        old_slot.free(ctx.runtime);
+        rebound = true;
+    }
+    return rebound;
+}
+
 /// Create-or-fetch the VarRef cell for a top-level lexical in ctx.lexicals,
 /// stored as a JS_PROP_VARREF slot (qjs js_closure_define_global_var). Returns
 /// a fresh ref the caller owns (for frame.var_refs[idx]). The slot holds its
@@ -4561,6 +4647,12 @@ fn directEvalGlobalVarNeedsRef(
     if (atom_id == eval_ret_atom) return false;
     if (gv.is_lexical) return false;
     if (directEvalSourceHasLexicalDeclarationName(rt, source, atom_id)) return false;
+    // qjs js_closure_define_global_var (quickjs.c:17059-17094): a name that resolves to a
+    // matching closure_var / local / prior-global binding sets `force_init = FALSE` (goto
+    // closure_found) BEFORE the force_init redirect. The binding-match guards must therefore
+    // run ahead of the force_init shortcut, otherwise an eval `function name(){}` declaration
+    // whose name resolves to an existing binding is wrongly steered into a stale temporary
+    // ref cell while the live global property keeps undefined.
     if (functionHasNonLexicalLocal(rt, function, atom_id)) return false;
     if (array_ops.atomSliceContains(rt, function_decl_names, atom_id)) return false;
     if (priorDirectEvalGlobalVarMatches(rt, function, global_var_index, atom_id)) return false;
@@ -7798,6 +7890,9 @@ pub fn setFrameVarRefValue(
     for (function.var_ref_names, 0..) |name, idx| {
         if (name != atom_id) continue;
         if (idx >= frame.var_refs.len) try frame_mod.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
+        if (closureVarIsNonLexicalGlobalSentinel(function, idx) and slot_ops.varRefSlotIsUninitialized(frame.var_refs[idx])) {
+            return false;
+        }
         try slot_ops.setSlotValue(ctx, &frame.var_refs[idx], value);
         return true;
     }

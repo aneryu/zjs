@@ -150,7 +150,10 @@ pub const Slot = union(enum) {
             .auto_init => {},
             // The slot holds one ref on the cell (qjs add_property ref_count++);
             // release it (qjs free_property VARREF branch -> free_var_ref).
-            .var_ref => |cell| cell.valueRef().free(rt),
+            .var_ref => |cell| {
+                if (rt.gc.phase == .remove_cycles and cell.header.flags.cycle_visited and !cell.header.flags.cycle_preserved) return;
+                cell.valueRef().free(rt);
+            },
             .deleted => {},
         }
     }

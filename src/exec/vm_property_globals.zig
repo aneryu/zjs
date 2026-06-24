@@ -17,6 +17,7 @@ const builtin_dispatch = @import("builtin_dispatch.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const call_mod = @import("call.zig");
 const eval_ops = @import("eval_ops.zig");
+const exception_ops = @import("vm_exception_ops.zig");
 const object_ops = @import("object_ops.zig");
 const slot_ops = @import("slot_ops.zig");
 const string_ops = @import("string_ops.zig");
@@ -115,6 +116,72 @@ const atom_date = core.atom.predefinedId("Date", .string).?;
 const atom_number = core.atom.predefinedId("Number", .string).?;
 const atom_print = core.atom.predefinedId("print", .string).?;
 const atom_string = core.atom.predefinedId("String", .string).?;
+
+pub inline fn hasDynamicGlobalOverlay(
+    frame: *const frame_mod.Frame,
+    eval_local_names: []const core.Atom,
+    eval_var_ref_names: []const core.Atom,
+    eval_with_object: core.JSValue,
+) bool {
+    return !eval_with_object.isUndefined() or
+        eval_local_names.len != 0 or
+        eval_var_ref_names.len != 0 or
+        frame.eval_local_names.len != 0 or
+        frame.eval_var_ref_names.len != 0;
+}
+
+inline fn closureVarAt(function: *const bytecode.Bytecode, idx: u16) ?bytecode.function_def.ClosureVar {
+    if (idx >= function.closure_var.len) return null;
+    return function.closure_var[idx];
+}
+
+pub inline fn globalVarRefCellIsAuthoritative(
+    function: *const bytecode.Bytecode,
+    global: *core.Object,
+    idx: u16,
+    cell: *core.VarRef,
+) bool {
+    const cv = closureVarAt(function, idx) orelse return true;
+    if (cv.is_lexical) return true;
+    switch (cv.closure_type) {
+        .global, .global_ref, .global_decl => {
+            const prop_index = global.findProperty(cv.var_name) orelse return false;
+            return switch (global.properties[prop_index].slot) {
+                .var_ref => |global_cell| global_cell == cell,
+                else => false,
+            };
+        },
+        else => return true,
+    }
+}
+
+/// Threaded-dispatch wrapper of property_vm.parentFunctionEvalBindingShadowsGlobal
+/// keyed by the OP_get_var/OP_put_var operand index (zjs_vm.zig's register-resident
+/// lanes hold the index, not the resolved atom). Resolves the atom and defers to the
+/// shared check; top-level code and ordinary closures early-out before any name
+/// comparison, so the var_ref fast lane keeps its perf for the common case.
+pub inline fn parentEvalShadowsGlobalForIdx(
+    rt: *core.JSRuntime,
+    frame: *const frame_mod.Frame,
+    function: *const bytecode.Bytecode,
+    idx: u16,
+) bool {
+    if (!property_vm.frameClosureHasEvalParent(frame)) return false;
+    const atom_id = globalVarAtom(function, idx) orelse return false;
+    return property_vm.parentFunctionEvalBindingShadowsGlobal(rt, frame, atom_id);
+}
+
+fn throwGlobalTdz(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+) !Step {
+    const err = exception_ops.throwTdzReference(ctx);
+    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    return err;
+}
 
 inline fn inactiveGlobalOverlayState(
     ctx: *const core.JSContext,
@@ -223,6 +290,29 @@ pub noinline fn getVar(
     const ref_idx = readInt(u16, function.code[frame.pc..][0..2]);
     const atom_id = globalVarAtom(function, ref_idx) orelse return error.InvalidBytecode;
     frame.pc += 2;
+    if (!hasDynamicGlobalOverlay(frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
+        if (ref_idx < frame.var_refs.len) {
+            if (varRefCellFromValue(frame.var_refs[ref_idx])) |cell| {
+                if (!cell.varRefIsDeletedSlot().*) {
+                    const value = cell.pvalue.*;
+                    if (!value.isUninitialized()) {
+                        if (core.VarRef.fromValue(value) == null and globalVarRefCellIsAuthoritative(function, global, ref_idx, cell) and
+                            !(property_vm.frameClosureHasEvalParent(frame) and property_vm.parentFunctionEvalBindingShadowsGlobal(ctx.runtime, frame, atom_id)))
+                        {
+                            try stack.push(value);
+                            return .done;
+                        }
+                    } else if (closureVarAt(function, ref_idx)) |cv| {
+                        if (cv.is_lexical) return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
+                    } else if (cell.is_lexical) {
+                        return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
+                    }
+                }
+            }
+        } else if (closureVarAt(function, ref_idx)) |cv| {
+            if (cv.is_lexical) return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
+        }
+    }
     const opcode_profile = ctx.runtime.opcode_profile;
     if (opcode_profile == null) {
         if (cachedGlobalDataValue(function, global, site_pc, atom_id)) |value| {
@@ -1006,9 +1096,48 @@ pub noinline fn putVar(
     const ref_idx = readInt(u16, function.code[frame.pc..][0..2]);
     const atom_id = globalVarAtom(function, ref_idx) orelse return error.InvalidBytecode;
     frame.pc += 2;
+    const value = try stack.pop();
+    if (!hasDynamicGlobalOverlay(frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
+        if (ref_idx < frame.var_refs.len) {
+            if (varRefCellFromValue(frame.var_refs[ref_idx])) |cell| {
+                if (!cell.varRefIsDeletedSlot().*) {
+                    const current = cell.pvalue.*;
+                    if (!current.isUninitialized()) {
+                        if (core.VarRef.fromValue(current) == null and !cell.varRefIsFunctionNameSlot().* and globalVarRefCellIsAuthoritative(function, global, ref_idx, cell) and
+                            !(property_vm.frameClosureHasEvalParent(frame) and property_vm.parentFunctionEvalBindingShadowsGlobal(ctx.runtime, frame, atom_id)))
+                        {
+                            if (cell.varRefIsConstSlot().*) {
+                                value.free(ctx.runtime);
+                                _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| {
+                                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                                    return err;
+                                };
+                                return error.TypeError;
+                            }
+                            errdefer value.free(ctx.runtime);
+                            try cell.setVarRefValue(ctx.runtime, value);
+                            return .done;
+                        }
+                    } else if (closureVarAt(function, ref_idx)) |cv| {
+                        if (cv.is_lexical) {
+                            value.free(ctx.runtime);
+                            return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
+                        }
+                    } else if (cell.is_lexical) {
+                        value.free(ctx.runtime);
+                        return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
+                    }
+                }
+            }
+        } else if (closureVarAt(function, ref_idx)) |cv| {
+            if (cv.is_lexical) {
+                value.free(ctx.runtime);
+                return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
+            }
+        }
+    }
     const opcode_profile = ctx.runtime.opcode_profile;
     if (opcode_profile != null) core.profile.recordGlobalLookup();
-    const value = try stack.pop();
     if (opcode_profile == null) {
         const site_pc = frame.pc - 3;
         if (cachedGlobalDataSlotIndex(function, global, site_pc, atom_id)) |index| {
@@ -1359,6 +1488,13 @@ pub fn instantiateGlobalVarDeclarations(
     if (function.global_vars.len == 0) return;
     for (function.global_vars) |gv| {
         try validateGlobalVarDeclaration(ctx, global, function, gv, is_eval_code);
+    }
+    if (!is_eval_code) {
+        for (function.global_vars) |gv| {
+            if (gv.is_lexical) continue;
+            if (shouldSkipRuntimeStrictGlobalFunctionVar(function, is_eval_code, gv)) continue;
+            _ = try call_runtime.defineGlobalDeclVarCell(ctx, global, function, frame, gv.var_name, gv.is_configurable);
+        }
     }
     for (function.global_vars) |gv| {
         try defineGlobalVarDeclaration(ctx, global, function, frame, gv, is_eval_code, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs);

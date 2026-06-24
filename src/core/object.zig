@@ -8513,6 +8513,14 @@ pub const Object = struct {
             }
             if (!entry_flags.writable) return error.ReadOnly;
             const entry = &self.properties[index];
+            if (entry.slot == .var_ref) {
+                const cell = entry.slot.var_ref;
+                const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
+                errdefer next_value.free(rt);
+                try cell.setVarRefValue(rt, next_value);
+                cell.varRefIsDeletedSlot().* = false;
+                return;
+            }
             const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
             const old_slot = entry.slot;
@@ -8561,9 +8569,13 @@ pub const Object = struct {
                             return true;
                         }
                     },
-                    // VARREF slots are written through the cell via putVar, never
-                    // here; refuse the fast path so we never overwrite the slot.
-                    .var_ref => return false,
+                    .var_ref => |cell| {
+                        const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
+                        errdefer next_value.free(rt);
+                        try cell.setVarRefValue(rt, next_value);
+                        cell.varRefIsDeletedSlot().* = false;
+                        return true;
+                    },
                     .auto_init, .accessor, .deleted => {},
                 }
             }
@@ -9171,6 +9183,16 @@ pub const Object = struct {
         const atom_id = self.propAtomAt(index);
         const merged = mergeDescriptor(self.propFlagsAt(index), self.properties[index].slot, desc);
         const next_flags = flagsFromDescriptor(merged);
+        if (self.properties[index].slot == .var_ref and merged.kind == .data) {
+            const cell = self.properties[index].slot.var_ref;
+            const next_value = dupPropertyDataValue(&rt.atoms, atom_id, merged.value);
+            errdefer next_value.free(rt);
+            try self.ensureUniqueShapeForMutation(rt);
+            try cell.setVarRefValue(rt, next_value);
+            cell.varRefIsDeletedSlot().* = false;
+            rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.bits());
+            return;
+        }
         const next_slot = slotFromDescriptor(&rt.atoms, atom_id, merged);
         var next_owned = true;
         errdefer if (next_owned) destroyPropertySlot(rt, atom_id, next_slot);
@@ -9564,7 +9586,14 @@ fn isCompatible(current_flags: property.Flags, current_slot: property.Slot, desc
     if ((desc.kind == .accessor) != current_is_accessor) return false;
     if (!current_is_accessor and !current_flags.writable) {
         if (desc.writable orelse false) return false;
-        if (desc.kind == .data and desc.value_present and !current_slot.data.sameValue(desc.value)) return false;
+        if (desc.kind == .data and desc.value_present) {
+            const current_value = switch (current_slot) {
+                .data => |value| value,
+                .var_ref => |cell| cell.varRefValue(),
+                else => JSValue.undefinedValue(),
+            };
+            if (!current_value.sameValue(desc.value)) return false;
+        }
     }
     if (current_is_accessor and desc.kind == .accessor) {
         if (current_slot != .accessor) return false;
@@ -9589,18 +9618,24 @@ fn mergeDescriptor(current_flags: property.Flags, current_slot: property.Slot, d
                 desc.enumerable orelse current_flags.enumerable,
                 desc.configurable orelse current_flags.configurable,
             ),
+            .var_ref => |cell| descriptor.Descriptor.data(
+                cell.varRefValue(),
+                current_flags.writable,
+                desc.enumerable orelse current_flags.enumerable,
+                desc.configurable orelse current_flags.configurable,
+            ),
             // Auto-init placeholders should be materialized by the
             // caller before reaching `mergeDescriptor`; defining
             // `Object.defineProperty(global, "Array", {})` (the only
             // way to hit this with a placeholder) materializes first
             // through the same getProperty path.
             .auto_init => desc,
-            .var_ref => desc,
             .deleted => desc,
         },
         .data => descriptor.Descriptor.data(
             if (desc.value_present) desc.value else switch (current_slot) {
                 .data => |value| value,
+                .var_ref => |cell| cell.varRefValue(),
                 else => desc.value,
             },
             desc.writable orelse if (current_flags.accessor) false else current_flags.writable,

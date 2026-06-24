@@ -245,6 +245,16 @@ pub inline fn initFrameVarRefs(
 }
 
 fn initialClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode.function_def.ClosureVar) !core.JSValue {
+    switch (cv.closure_type) {
+        .global, .global_ref, .global_decl => {
+            if (cv.is_lexical) {
+                if (call_runtime.globalLexicalCell(ctx, cv.var_name)) |cell_value| return cell_value;
+            } else if (call_runtime.globalObjectVarRefCell(global, cv.var_name)) |cell_value| {
+                return cell_value;
+            }
+        },
+        else => {},
+    }
     const initial_value = switch (cv.closure_type) {
         .global, .global_ref, .global_decl => core.JSValue.uninitialized(),
         .module_decl, .module_import => core.JSValue.uninitialized(),
@@ -252,6 +262,7 @@ fn initialClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode
     };
     const cell = try core.VarRef.createClosed(ctx.runtime, initial_value);
     cell.varRefIsConstSlot().* = cv.is_const;
+    cell.is_lexical = cv.is_lexical;
     cell.varRefIsFunctionNameSlot().* = cv.var_kind == .function_name;
     return cell.valueRef();
 }

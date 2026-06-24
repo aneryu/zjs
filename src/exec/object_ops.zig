@@ -237,9 +237,15 @@ pub fn generatorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.O
     return object;
 }
 
-fn createGlobalClosureVarRef(ctx: *core.JSContext, cv: bytecode.function_def.ClosureVar) !core.JSValue {
+fn createGlobalClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode.function_def.ClosureVar) !core.JSValue {
+    if (cv.is_lexical) {
+        if (call_runtime.globalLexicalCell(ctx, cv.var_name)) |cell_value| return cell_value;
+    } else if (call_runtime.globalObjectVarRefCell(global, cv.var_name)) |cell_value| {
+        return cell_value;
+    }
     const cell = try core.VarRef.createClosed(ctx.runtime, core.JSValue.uninitialized());
     cell.varRefIsConstSlot().* = cv.is_const;
+    cell.is_lexical = cv.is_lexical;
     cell.varRefIsFunctionNameSlot().* = cv.var_kind == .function_name;
     return cell.valueRef();
 }
@@ -435,7 +441,7 @@ pub fn createBytecodeFunctionObject(
                     if (try directEvalClosureBindingCapture(ctx, caller_function, cv.var_name, eval_local_names, eval_local_slots, capture_eval_var_ref_names, eval_var_refs)) |captured| {
                         break :blk captured;
                     }
-                    break :blk try createGlobalClosureVarRef(ctx, cv);
+                    break :blk try createGlobalClosureVarRef(ctx, global, cv);
                 },
                 .module_decl, .module_import => blk: {
                     try ensureVarRefsCapacity(ctx, frame, cv.var_idx);

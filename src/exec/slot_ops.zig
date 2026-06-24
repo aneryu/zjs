@@ -471,6 +471,18 @@ pub fn defineGlobalFunctionBindingValue(
     value: core.JSValue,
     configurable: bool,
 ) !void {
+    if (global.findProperty(atom_id)) |index| {
+        const flags = global.propFlagsAt(index);
+        if (!flags.deleted and !flags.accessor) {
+            if (global.properties[index].slot == .var_ref) {
+                const cell = global.properties[index].slot.var_ref;
+                try cell.setVarRefValue(rt, value.dup());
+                cell.varRefIsDeletedSlot().* = false;
+                return;
+            }
+        }
+    }
+
     const desc = if (global.getOwnProperty(rt, atom_id)) |current| blk: {
         defer current.destroy(rt);
         if (current.configurable == true) {

@@ -99,8 +99,7 @@ GC-无关忠实对齐：
   （注：dup proto 指针回退已并入 keystone **S4b**；array count/length 拆分见下「大杠杆」。）
 
 大杠杆（高侵入，flag-gated，test262 0/49775 把关）：
-- [ ] **global-var 稳定 cell**：撤 global-var-by-name + `global_lexical_sync` 镜像 → qjs var_ref 稳定 cell。
-      global_destruct_strict 1.85×。**风险**：da34bc1 在此用镜像修过 8 回归，须保 TDZ/eval/with/跨 realm 绿。
+- [x] **global-var var_ref cell（已落地 2026-06-24）**：全局 `var`/function 声明建 `JS_PROP_VARREF` cell（qjs `js_closure_define_global_var`）、`.global` 闭包变量别名该 cell、OP_get_var/OP_put_var 直接 deref（qjs OP_get_var 二合一）。**global-read 76.6B→31.3B（7.08×→2.45× over 真实 baseline）、global-write 69.4B→23.3B（6.70×→2.98×）、fib 中性零回归**。33 个作用域回归全修（4 阶段，每阶段 test262 0/49775 + 1223 单测 + force-GC）：① `directEvalGlobalVarNeedsRef` 排序对齐 qjs（force_init 让位 binding-match，17059-17071）② threaded get_var/put_var lane 补 generator stop-boundary 守卫 ③ 既有全局属性不再转 var_ref（qjs 17171-17205 detached var_ref）④ fast lane 加 parent-eval-shadow 守卫（qjs var_object_test 33158-33167）。详见 `docs/qjs-align/HANDOVER-global-varref.md`。**余**：编译期 `parent_has_eval` 标志（零运行期开销，eliminate ④ 的 per-access 守卫）是后续忠实精炼；发现一个**预存** TDZ bug（hoisted 函数前向引用顶层 let，clean HEAD 同样失败、test262 不可见）。
 - [ ] **builtin 方法上 prototype**：每个 builtin 方法物化为各 prototype 的真 own-property（qjs 结构）。
       method_call_loop 7.06×。须解 null-proto 内部数组的方法解析。
 - [ ] array `count`/`length` 拆分 → qjs 尾部虚 hole 表示（撤 zjs 的 count==length 融合）；审计每个 reader。
