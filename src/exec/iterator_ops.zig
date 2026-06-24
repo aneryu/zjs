@@ -605,6 +605,7 @@ pub fn forOfNext(
     else
         try forof_ops.findForOfIteratorIndex(ctx.runtime, stack);
     if (try fastArrayForOfNext(ctx, stack, iterator_index)) return;
+    if (try fastMapSetForOfNext(ctx, stack, iterator_index)) return;
     const iterator_value = stack.values[iterator_index].dup();
     defer iterator_value.free(ctx.runtime);
     var value: core.JSValue = undefined;
@@ -688,6 +689,66 @@ fn fastArrayForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_in
     iterator.iteratorIndexSlot().* = index + 1;
     stack.pushOwnedAssumeCapacity(value);
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
+    return true;
+}
+
+/// Result-object-free for-of step for the built-in Map/Set iterators (qjs
+/// JS_IteratorNext2 built-in fast path, quickjs.c:16548): when the iterator is a
+/// default map/set iterator (its `next` is the builtin collection iterator_next,
+/// not user-overridden), advance its entry cursor and push the value + done flag
+/// straight onto the operand stack, skipping the per-step `{value, done}` result
+/// object the generic protocol allocates (collectionIteratorNext -> iteratorResult).
+///
+/// Scope: only the `key` / `value` iterator kinds (Map.keys/values, Set, Map.values),
+/// whose value is a borrowed entry slot — alive via the collection regardless of a
+/// GC during reserveAdditional. The `key_value` (entries) kind builds a pair array
+/// and is left to the generic path.
+fn fastMapSetForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_index: usize) !bool {
+    if (iterator_index + 1 >= stack.values.len) return false;
+    const iterator = objectFromValue(stack.values[iterator_index]) orelse return false;
+    if (iterator.class_id != core.class.ids.map_iterator and iterator.class_id != core.class.ids.set_iterator) return false;
+    const kind = iterator.iteratorKindSlot().*;
+    // key=1, value=2 are alloc-free; key_value=3 (and anything else) falls through.
+    if (kind != 1 and kind != 2) return false;
+    const next_function = objectFromValue(stack.values[iterator_index + 1]) orelse return false;
+    const ref = core.function.decodeNativeBuiltinId(next_function.nativeFunctionIdSlot().*) orelse return false;
+    if (ref.domain != .collection or ref.id != @intFromEnum(method_ids.collection.PrototypeMethod.iterator_next)) return false;
+
+    const target_value = (iterator.iteratorTargetSlot().*) orelse return try finishMapSetForOfDone(ctx, stack, iterator_index, false);
+    const target = objectFromValue(target_value) orelse return false;
+    if (target.class_id != core.class.ids.map and target.class_id != core.class.ids.set) return false;
+    const is_set = target.class_id == core.class.ids.set;
+
+    while ((iterator.iteratorIndexSlot().*) < target.collectionEntriesSlot().*.len) {
+        const index = iterator.iteratorIndexSlot().*;
+        iterator.iteratorIndexSlot().* += 1;
+        const entry = target.collectionEntriesSlot().*[index];
+        if (!entry.active) continue;
+        // Borrowed entry slot, kept alive by the collection (reachable via the
+        // iterator's target on the operand stack), so the dup survives the
+        // reserveAdditional grow without separate rooting — same as the array path.
+        const value = if (kind == 1 or is_set) entry.key.dup() else entry.value.dup();
+        errdefer value.free(ctx.runtime);
+        try stack.reserveAdditional(2);
+        stack.pushOwnedAssumeCapacity(value);
+        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
+        return true;
+    }
+    return try finishMapSetForOfDone(ctx, stack, iterator_index, true);
+}
+
+fn finishMapSetForOfDone(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_index: usize, clear_target: bool) !bool {
+    if (clear_target) {
+        if (objectFromValue(stack.values[iterator_index])) |iterator| {
+            iterator.clearOptionalValueSlot(ctx.runtime, iterator.iteratorTargetSlot());
+        }
+    }
+    try stack.reserveAdditional(2);
+    const old_iterator = stack.values[iterator_index];
+    stack.values[iterator_index] = core.JSValue.undefinedValue();
+    old_iterator.free(ctx.runtime);
+    stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
+    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(true));
     return true;
 }
 
