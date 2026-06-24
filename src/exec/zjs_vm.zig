@@ -1588,7 +1588,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     const v = cell.pvalue.*;
                     if (v.isUninitialized()) break :get_var_fast;
                     if (core.VarRef.fromValue(v) != null) break :get_var_fast;
-                    if (!vm_property_globals.globalVarRefCellIsAuthoritative(function, global, idx, cell)) break :get_var_fast;
+                    if (vm_property_globals.globalLexicalShadowsGlobalForIdx(ctx, global, function, idx)) break :get_var_fast;
                     if (vm_property_globals.parentEvalShadowsGlobalForIdx(ctx.runtime, frame, function, idx)) break :get_var_fast;
                     reg_ip += 2;
                     reg_sp[0] = v.dup();
@@ -1639,7 +1639,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     const cur = cell.pvalue.*;
                     if (cur.isUninitialized()) break :put_var_fast;
                     if (core.VarRef.fromValue(cur) != null) break :put_var_fast;
-                    if (!vm_property_globals.globalVarRefCellIsAuthoritative(function, global, idx, cell)) break :put_var_fast;
+                    if (vm_property_globals.globalLexicalShadowsGlobalForIdx(ctx, global, function, idx)) break :put_var_fast;
                     if (vm_property_globals.parentEvalShadowsGlobalForIdx(ctx.runtime, frame, function, idx)) break :put_var_fast;
                     reg_ip += 2;
                     reg_sp -= 1;

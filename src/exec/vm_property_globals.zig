@@ -135,26 +135,6 @@ inline fn closureVarAt(function: *const bytecode.Bytecode, idx: u16) ?bytecode.f
     return function.closure_var[idx];
 }
 
-pub inline fn globalVarRefCellIsAuthoritative(
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    idx: u16,
-    cell: *core.VarRef,
-) bool {
-    const cv = closureVarAt(function, idx) orelse return true;
-    if (cv.is_lexical) return true;
-    switch (cv.closure_type) {
-        .global, .global_ref, .global_decl => {
-            const prop_index = global.findProperty(cv.var_name) orelse return false;
-            return switch (global.properties[prop_index].slot) {
-                .var_ref => |global_cell| global_cell == cell,
-                else => false,
-            };
-        },
-        else => return true,
-    }
-}
-
 /// Threaded-dispatch wrapper of property_vm.parentFunctionEvalBindingShadowsGlobal
 /// keyed by the OP_get_var/OP_put_var operand index (zjs_vm.zig's register-resident
 /// lanes hold the index, not the resolved atom). Resolves the atom and defers to the
@@ -169,6 +149,23 @@ pub inline fn parentEvalShadowsGlobalForIdx(
     if (!property_vm.frameClosureHasEvalParent(frame)) return false;
     const atom_id = globalVarAtom(function, idx) orelse return false;
     return property_vm.parentFunctionEvalBindingShadowsGlobal(rt, frame, atom_id);
+}
+
+/// A global lexical (let/const) shadows the global `var`/object binding of the
+/// same name (qjs's separate global_var_obj lexical environment takes precedence
+/// over global_obj). The bound var_ref cell is therefore NOT authoritative when a
+/// like-named global lexical exists, so the fast lane must defer to the slow path
+/// (which consults the lexical env first). Cheap when there are no global lexicals
+/// (`ctx.lexicals == null`): a single null check, before any atom resolution.
+pub inline fn globalLexicalShadowsGlobalForIdx(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    function: *const bytecode.Bytecode,
+    idx: u16,
+) bool {
+    if (ctx.lexicals == null) return false;
+    const atom_id = globalVarAtom(function, idx) orelse return false;
+    return call_runtime.globalLexicalHasForGlobal(ctx, global, atom_id);
 }
 
 fn throwGlobalTdz(
@@ -296,7 +293,8 @@ pub noinline fn getVar(
                 if (!cell.varRefIsDeletedSlot().*) {
                     const value = cell.pvalue.*;
                     if (!value.isUninitialized()) {
-                        if (core.VarRef.fromValue(value) == null and globalVarRefCellIsAuthoritative(function, global, ref_idx, cell) and
+                        if (core.VarRef.fromValue(value) == null and
+                            !call_runtime.globalLexicalHasForGlobal(ctx, global, atom_id) and
                             !(property_vm.frameClosureHasEvalParent(frame) and property_vm.parentFunctionEvalBindingShadowsGlobal(ctx.runtime, frame, atom_id)))
                         {
                             try stack.push(value);
@@ -1103,7 +1101,8 @@ pub noinline fn putVar(
                 if (!cell.varRefIsDeletedSlot().*) {
                     const current = cell.pvalue.*;
                     if (!current.isUninitialized()) {
-                        if (core.VarRef.fromValue(current) == null and !cell.varRefIsFunctionNameSlot().* and globalVarRefCellIsAuthoritative(function, global, ref_idx, cell) and
+                        if (core.VarRef.fromValue(current) == null and !cell.varRefIsFunctionNameSlot().* and
+                            !call_runtime.globalLexicalHasForGlobal(ctx, global, atom_id) and
                             !(property_vm.frameClosureHasEvalParent(frame) and property_vm.parentFunctionEvalBindingShadowsGlobal(ctx.runtime, frame, atom_id)))
                         {
                             if (cell.varRefIsConstSlot().*) {
