@@ -1306,13 +1306,36 @@ pub fn ordinaryHasInstance(
         }
     }
     const object = object_ops.objectFromValue(value) orelse return false;
-    const proto_value = try object_ops.getValueProperty(ctx, output, global, constructor_value, core.atom.ids.prototype, caller_function, caller_frame);
+    // Fast `.prototype` read: a class constructor (and any non-proxy callable)
+    // carries `prototype` as an own data property, so read it directly without
+    // building/destroying a Descriptor (qjs reads JS_ATOM_prototype once,
+    // quickjs.c:8078). A normal function's lazy-autoinit prototype, an
+    // inherited/accessor prototype, or a proxy returns null here and falls to
+    // the generic getValueProperty (which materializes / traps correctly).
+    const proto_value = blk: {
+        if (object_ops.objectFromValue(constructor_value)) |co| {
+            if (!co.flags.is_proxy) {
+                if (co.getOwnDataPropertyValue(core.atom.ids.prototype)) |v| break :blk v.dup();
+            }
+        }
+        break :blk try object_ops.getValueProperty(ctx, output, global, constructor_value, core.atom.ids.prototype, caller_function, caller_frame);
+    };
     defer proto_value.free(ctx.runtime);
     const prototype = object_ops.objectFromValue(proto_value) orelse return error.TypeError;
-    var current = try object_ops.qjsObjectGetPrototypeOfStep(ctx, output, global, object, caller_function, caller_frame);
+    // Walk the prototype chain. The non-proxy step IS object.getPrototype() (a
+    // direct shape.proto deref); inline it and only call the trap-aware step for
+    // proxies / the throw-type-error intrinsic, mirroring qjs's p->shape->proto
+    // walk (quickjs.c:8087-8125) that bypasses [[GetPrototypeOf]] for ordinary
+    // objects.
+    var current: ?*core.Object = object;
     while (current) |candidate| {
-        if (candidate == prototype) return true;
-        current = try object_ops.qjsObjectGetPrototypeOfStep(ctx, output, global, candidate, caller_function, caller_frame);
+        const next = if (candidate.flags.is_proxy or object_ops.isThrowTypeErrorIntrinsicObject(candidate))
+            try object_ops.qjsObjectGetPrototypeOfStep(ctx, output, global, candidate, caller_function, caller_frame)
+        else
+            candidate.getPrototype();
+        const parent = next orelse return false;
+        if (parent == prototype) return true;
+        current = parent;
     }
     return false;
 }
