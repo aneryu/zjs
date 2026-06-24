@@ -624,6 +624,12 @@ pub const JSRuntime = struct {
     shapes: shape.Registry,
     modules: module.Registry,
     auto_init_table: std.ArrayListUnmanaged(property.AutoInit) = .empty,
+    /// Shared, interned-once descriptor id for the lazy `function.prototype`
+    /// auto-init placeholder (`property.AutoInitKind.function_prototype`). All
+    /// functions reuse this single table entry; the materializer derives the
+    /// realm + constructor from the owner function object, so no per-function
+    /// descriptor is needed (avoids unbounded `auto_init_table` growth).
+    function_prototype_auto_init: ?property.AutoInitRef = null,
     materialize_builtin_namespace_cb: ?*const fn (rt: *JSRuntime, global: *Object, kind: property.AutoInitKind) anyerror!?JSValue = null,
     materialize_context_global_cb: ?*const fn (ctx: *context_mod.JSContext) anyerror!*Object = null,
     /// Bootstrap install seam: builds the standard global object. Seeded from the
@@ -1874,6 +1880,20 @@ pub const JSRuntime = struct {
 
     pub fn allocationDebtBytes(self: JSRuntime) usize {
         return self.gc.stats.allocation_debt;
+    }
+
+    /// Interned-once shared descriptor for the lazy `function.prototype`
+    /// auto-init placeholder. Created on first use and cached on the runtime.
+    pub fn functionPrototypeAutoInitRef(self: *JSRuntime) !property.AutoInitRef {
+        if (self.function_prototype_auto_init) |ref| return ref;
+        const ref = try property.internAutoInit(self, .{
+            .name = "",
+            .length = 0,
+            .rt = self,
+            .kind = .function_prototype,
+        });
+        self.function_prototype_auto_init = ref;
+        return ref;
     }
 
     pub fn gcStats(self: JSRuntime) gc.Stats {

@@ -6945,6 +6945,10 @@ pub const Object = struct {
     /// from the function-object alloc, which would already be lethal
     /// to the running script anyway.)
     fn materializeAutoInit(self: *Object, index: usize, info: property.AutoInit) JSValue {
+        if (info.kind == .function_prototype) {
+            const materialized = self.materializeFunctionPrototypeAutoInit(info) orelse return JSValue.undefinedValue();
+            return self.finishMaterializedAutoInit(index, info, materialized);
+        }
         if (info.kind == .console) {
             const materialized = materializeConsoleAutoInit(info) orelse return JSValue.undefinedValue();
             return self.finishMaterializedAutoInit(index, info, materialized);
@@ -7488,6 +7492,35 @@ pub const Object = struct {
         const prototype_value = objectFromValue(object_ctor_value).?.getProperty(atom.ids.prototype);
         defer prototype_value.free(rt);
         return objectFromValue(prototype_value);
+    }
+
+    /// Materialize a lazy `function.prototype` placeholder (qjs
+    /// `js_instantiate_prototype`, quickjs.c:17341). `self` is the owner
+    /// function object; the prototype's [[Prototype]] is the function's realm
+    /// `Object.prototype`, and `constructor` points back at `self`
+    /// (writable, non-enumerable, configurable) — installed only here, so the
+    /// `func <-> prototype.constructor` cycle forms lazily, never for a
+    /// function whose `.prototype` is never observed.
+    fn materializeFunctionPrototypeAutoInit(self: *Object, info: property.AutoInit) ?JSValue {
+        const rt = info.rt;
+        const parent: ?*Object = if (self.functionRealmGlobalPtr()) |realm_global|
+            objectPrototypeFromGlobalForAutoInit(rt, realm_global)
+        else
+            null;
+        const prototype = Object.create(rt, class.ids.object, parent) catch return null;
+        var prototype_owned = true;
+        errdefer if (prototype_owned) Object.destroyFromHeader(rt, &prototype.header);
+        prototype.defineOwnProperty(rt, atom.ids.constructor, descriptor.Descriptor.data(self.value(), true, false, true)) catch return null;
+        prototype_owned = false;
+        return prototype.value();
+    }
+
+    /// Install the lazy `function.prototype` auto-init placeholder on a freshly
+    /// created function object. Shares the single interned descriptor so the
+    /// `auto_init_table` does not grow per function.
+    pub fn defineFunctionPrototypeAutoInit(self: *Object, rt: *JSRuntime, flags: property.Flags) !void {
+        const ref = try rt.functionPrototypeAutoInitRef();
+        try self.appendPreparedPropertyEntry(rt, atom.ids.prototype, flags, .{ .auto_init = ref });
     }
 
     fn arrayPrototypeFromGlobalForAutoInit(rt: *JSRuntime, global: *Object) ?*Object {

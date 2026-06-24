@@ -601,22 +601,36 @@ pub fn createBytecodeFunctionObject(
         }
     }
     if (create_prototype and fb.has_prototype) {
-        const generator_prototype = if (fb.func_kind == .async_generator)
-            try asyncGeneratorPrototypeFromGlobal(ctx.runtime, global)
-        else if (fb.func_kind == .generator)
-            try generatorPrototypeFromGlobal(ctx.runtime, global)
-        else
-            objectPrototypeFromGlobal(ctx.runtime, global);
-        const prototype = try core.Object.create(ctx.runtime, core.class.ids.object, generator_prototype);
-        var prototype_raw_owned = true;
-        errdefer if (prototype_raw_owned) core.Object.destroyFromHeader(ctx.runtime, &prototype.header);
-        if (fb.func_kind != .generator and fb.func_kind != .async_generator) {
-            try prototype.defineOwnProperty(ctx.runtime, core.atom.ids.constructor, core.Descriptor.data(object.value(), true, false, true));
+        if (fb.func_kind == .normal and !fb.is_class_constructor) {
+            // qjs-faithful lazy `prototype` (JS_AUTOINIT_ID_PROTOTYPE): install a
+            // placeholder; the prototype object + its `constructor` back-ref are
+            // materialized only when `.prototype` is first observed or the
+            // function is constructed. A never-constructed closure (callback /
+            // IIFE / factory result) thus skips the prototype allocation AND the
+            // `func <-> prototype.constructor` cycle, so it is reclaimed by
+            // refcount instead of the cycle collector. Generators /
+            // async-generators / class constructors keep the eager path below
+            // (their prototype shapes are set up with different parents / no
+            // constructor and are observed by the runtime immediately).
+            try object.defineFunctionPrototypeAutoInit(ctx.runtime, core.property.Flags.data(true, false, false));
+        } else {
+            const generator_prototype = if (fb.func_kind == .async_generator)
+                try asyncGeneratorPrototypeFromGlobal(ctx.runtime, global)
+            else if (fb.func_kind == .generator)
+                try generatorPrototypeFromGlobal(ctx.runtime, global)
+            else
+                objectPrototypeFromGlobal(ctx.runtime, global);
+            const prototype = try core.Object.create(ctx.runtime, core.class.ids.object, generator_prototype);
+            var prototype_raw_owned = true;
+            errdefer if (prototype_raw_owned) core.Object.destroyFromHeader(ctx.runtime, &prototype.header);
+            if (fb.func_kind != .generator and fb.func_kind != .async_generator) {
+                try prototype.defineOwnProperty(ctx.runtime, core.atom.ids.constructor, core.Descriptor.data(object.value(), true, false, true));
+            }
+            const prototype_value = prototype.value();
+            prototype_raw_owned = false;
+            defer prototype_value.free(ctx.runtime);
+            try object.defineOwnProperty(ctx.runtime, core.atom.ids.prototype, core.Descriptor.data(prototype_value, true, false, false));
         }
-        const prototype_value = prototype.value();
-        prototype_raw_owned = false;
-        defer prototype_value.free(ctx.runtime);
-        try object.defineOwnProperty(ctx.runtime, core.atom.ids.prototype, core.Descriptor.data(prototype_value, true, false, false));
     }
     return object.value();
 }

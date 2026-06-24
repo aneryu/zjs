@@ -57,6 +57,15 @@ pub const AutoInitKind = enum(u8) {
     int32_constant,
     string_constant,
     empty_array,
+    /// Lazy `function.prototype` (qjs `JS_AUTOINIT_ID_PROTOTYPE`,
+    /// `js_instantiate_prototype` quickjs.c:17341): the prototype object and its
+    /// `constructor` back-reference are materialized only when `.prototype` is
+    /// first observed or the function is constructed. Avoids the per-function
+    /// prototype allocation AND the `func <-> prototype.constructor` reference
+    /// cycle (so a never-constructed closure is reclaimed by refcount instead of
+    /// the cycle collector). All payload is derived from the owner function
+    /// object at materialization, so a single interned descriptor is shared.
+    function_prototype,
 };
 
 pub const ArrayBuiltinMarker = enum(u8) {
