@@ -51,7 +51,8 @@ Phase 3  叶子：GC-无关忠实对齐 + 余下赢回退 + global-var 稳定 ce
   - `INLINE-CACHE-PLAN.md` — IC：get/put_field 已落地，剩 S3 global-IC stable-cell + S4 poly/mega。
   - `GLOBAL-VARREF-PLAN.md` — ✅ 已落地（见 round-2 handover）。
   - `PHASE3-leaves-and-levers.md` — 余下叶子 + 大杠杆登记。
-  - **`HANDOVER-perf-round2.md`（2026-06-24 收口，本轮总入口）** — 4 commit（global var_ref 7×→2.35× · add_loc 融合累加 2.4×→1.3× · 全局绑定即权威 全局==局部）+ 方法论纠偏（对照 qjs 实现抹平偏离、perf 是结果）+ 关键事实（qjs 此机 16 字节非 8、NaN-boxing 是伪命题且预存编译失败）+ 剩余两深前沿。分支 `qjs-faithful-perf-round2`（叠 main 9fc72eb）。
+  - **`HANDOVER-perf-round2.md`（2026-06-24 收口，本轮总入口；2026-06-25 追加 method-dispatch slice）** — 5 commit（global var_ref 7×→2.35× · add_loc 融合累加 2.4×→1.3× · 全局绑定即权威 全局==局部 · **method-dispatch cascade hoist `b20d5b4`：`o.m(s)` 4.43×→2.30×、`p.step(s)` 4.85×→2.74×**）+ 方法论纠偏（对照 qjs 实现抹平偏离、perf 是结果）+ 关键事实（qjs 此机 16 字节非 8、NaN-boxing 是伪命题且预存编译失败）+ 剩余两深前沿。分支 `qjs-faithful-perf-round2`（叠 main 9fc72eb）。
+    - **method-dispatch 发现（2026-06-25）**：method 调用是本轮最大**被低估**缺口（4.4–4.85×，比 fib 更糟且无处不在）。根因=`qjsArrayMethodFastCall`（array_ops.zig:193）对**每个**无 native-id 的 callee（即所有用户 bytecode 方法）跑 ~20 成员线性级联，每成员都以同一 `callableObjectFromValue(func) orelse return null` 开头 → bytecode callee 下整条级联是 ~20 次空转（占简单 method-loop ~30%）。提升该共有前置条件为单次 early-out（可证保行为：恰在每个成员本就返回 null 时返回 null，故 generic `Array.prototype.X.call(arrayLike)` 与同名 user-method shadow 字节级不变）。忠实于 qjs：OP_call_method 一次解析 callee 后按 magic 在 `js_call_c_function` 分发，从不 per-call 扫方法集。剩余 method 缺口=proto get_field IC 税 + call-machinery（帧）税，皆为共有广谱前沿，无 method 专属偏离。调查见 `array-cascade-faithful-gate` workflow（5 agent，证 receiver-gate 不安全：成员实现 generic array-like 语义只需 `receiver.isObject()`）。
   - `HANDOVER-global-varref.md` — global var_ref 下沉 + 33 回归 4 阶段修复细节。
   - `DISPATCH-TAX-FINDINGS.md` — 广谱 dispatch 税定性（结构已对齐；残差=跳转表基址未提升 ~26% + LLVM-vs-gcc op-body ~74%，非忠实可抹平）+ add_loc 融合。
   - `CALL-MACHINERY-QJS.md` / `FRAME-STRUCTURAL-ALIGN.md` — 帧模型偏离剖析（剩余最大单项，多周/高风险，需先出分步门控计划）。

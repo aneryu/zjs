@@ -34,10 +34,18 @@ DIVERGE from this qjs, not align), and is also currently a pre-existing compile 
 | global read `s=s+g+h` | 76.6B | **25.4B** | 10.8B | 7.08× → **2.35×** |
 | global write `g=g+1` | 69.4B | **17.8B** | 10.4B | 6.70× → **1.71×** |
 | accumulator `s=s+1` | 16.6B | **9.2B** | 7.0B | 2.39× → **1.32×** |
+| method `o.m(s)` (simple) | 43.6B | **22.7B** | 9.8B | 4.43× → **2.30×** |
+| method `p.step(s)` (proto) | 48.1B | **27.2B** | 9.9B | 4.85× → **2.74×** |
 | fib(34) | 26.2B | 26.1B | 7.2B | 3.64× → **3.64× (unchanged — frame-model-gated)** |
 
 Global access now equals **local** access (both ~2.35× qjs): the global-specific divergence is
 gone; the residual 2.35× is the shared broad dispatch tax (see below).
+
+**Method calls were the largest under-measured gap** (4.4–4.85×, *worse* than fib, and method
+calls are ubiquitous): a per-call ~20-member array-method cascade ran on every callee that lacked a
+native builtin id — i.e. every user *bytecode* method (`obj.m()`). Eliminated (`b20d5b4`, below).
+After the fix the residual method gap is the proto get_field IC tax + the call-machinery (frame)
+tax, both shared broad frontiers — no method-specific divergence remains.
 
 ## Divergences eliminated (with qjs anchors)
 
@@ -56,6 +64,20 @@ gone; the residual 2.35× is the shared broad dispatch tax (see below).
    non-configurable globals never orphan). Replaced with the one real precondition it compensated
    for — a global lexical shadows a global var (qjs's global_var_obj precedence) — gated cheaply on
    `ctx.lexicals == null`.
+4. **Method-dispatch cascade hoist** (`b20d5b4`). `qjsArrayMethodFastCall` (array_ops.zig:193) ran a
+   linear ~20-member `qjsArray*Call` cascade on *every* method call reached after `fastNativeMethodCall`
+   missed (any callee with no native builtin id — i.e. all user bytecode methods). Every member opens
+   with the same `callableObjectFromValue(func) orelse return null` (c_function/c_closure/bound_function
+   only), so for a bytecode callee the whole cascade was ~20 sequential no-ops (~30% of a simple
+   method-call loop). Hoisted that universal precondition to a single early-out — provably
+   behaviour-preserving (returns null exactly when every member already would, so generic
+   `Array.prototype.X.call(arrayLike)` and builtin-name-shadowing user methods are byte-identical).
+   Faithful to qjs: OP_call_method (quickjs.c:18220) resolves the callee once and dispatches by magic in
+   `js_call_c_function` (quickjs.c:17562) — never a per-call method scan. `o.m(s)` 4.43×→2.30×,
+   `p.step(s)` 4.85×→2.74×; real array methods / plain calls / non-simple methods unchanged. Investigation:
+   `array-cascade-faithful-gate` workflow (5 agents) verified the receiver-gate was UNSAFE (members
+   implement generic array-like semantics, need only `receiver.isObject()`) and the func-precondition
+   was the safe hoist.
 
 ## Remaining frontiers — both DEEP, neither a quick "continue"
 
