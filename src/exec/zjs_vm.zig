@@ -2180,6 +2180,27 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 try value_vm.isNull(ctx.runtime, stack);
             },
             op.get_length => {
+                if (comptime thread_dispatch) get_length_fast: {
+                    // qjs OP_get_field is_length inline: a plain Array's .length
+                    // is an exotic own data property (never a getter), so read
+                    // arrayLength() directly instead of getValueProperty. Strings
+                    // / typed-arrays / proxies / generic objects / length getters
+                    // break to the slow getLength. Matches it: pop receiver
+                    // (free), pushOwned the length (a fresh number, no refcount).
+                    const value = (reg_sp - 1)[0];
+                    const object = class_vm.objectFromValue(value) orelse break :get_length_fast;
+                    if (!object.flags.is_array) break :get_length_fast;
+                    const len = object.arrayLength();
+                    const len_val = if (len <= @as(u32, std.math.maxInt(i32)))
+                        core.JSValue.int32(@intCast(len))
+                    else
+                        value_ops_mod.numberToValue(@as(f64, @floatFromInt(len)));
+                    value.free(ctx.runtime);
+                    (reg_sp - 1)[0] = len_val;
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
+                }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try literal_vm.getLength(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
