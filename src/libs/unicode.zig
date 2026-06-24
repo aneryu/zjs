@@ -1,6 +1,10 @@
 const std = @import("std");
 
-const data = @import("unicode_data.zig");
+const data = @import("unicode/data.zig");
+
+pub const emoji = @import("unicode/emoji.zig");
+pub const emoji_data = @import("unicode/emoji_data.zig");
+pub const regexp_properties = @import("unicode/regexp_properties.zig");
 
 pub const Category = enum {
     uppercase_letter,

@@ -1,7 +1,7 @@
 const bytecode = @import("../bytecode/root.zig");
 const core = @import("../core/root.zig");
-const dtoa = @import("../libs/dtoa.zig");
-const bignum = @import("../libs/bignum.zig");
+const dtoa = @import("../libs/number_format.zig");
+const bignum = @import("../libs/bigint.zig");
 const unicode_lib = @import("../libs/unicode.zig");
 const std = @import("std");
 

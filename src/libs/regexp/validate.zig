@@ -6,10 +6,10 @@
 //! for the RegExp constructor and `compile` paths. Conservative fast-path
 //! validators accept common pattern shapes without compiling, and the
 //! property-escape fallbacks accept supported `\p{...}` expressions that
-//! the `quickjs_regexp` port cannot compile yet.
+//! the JavaScript RegExp adapter cannot compile yet.
 
 const std = @import("std");
-const quickjs_regexp = @import("quickjs_regexp.zig");
+const js_adapter = @import("js_adapter.zig");
 
 pub fn validatePatternAndFlags(pattern: []const u8, flags: []const u8) bool {
     var seen_u = false;
@@ -31,7 +31,7 @@ pub fn validatePatternAndFlags(pattern: []const u8, flags: []const u8) bool {
     if (isFastValidatedUtf8LiteralSequencePattern(pattern, flags)) return true;
     if (isFastValidatedUnicodePropertyPattern(pattern, flags)) return true;
 
-    var compiled = quickjs_regexp.compile(std.heap.page_allocator, pattern, flags) catch |err| switch (err) {
+    var compiled = js_adapter.compile(std.heap.page_allocator, pattern, flags) catch |err| switch (err) {
         error.InvalidPattern, error.Unsupported => return isSupportedPropertyEscapeFallback(pattern, flags),
         else => return false,
     };

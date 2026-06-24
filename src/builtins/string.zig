@@ -1,5 +1,5 @@
 const core = @import("../core/root.zig");
-const bignum = @import("../libs/bignum.zig");
+const bignum = @import("../libs/bigint.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 const builtin_dispatch = @import("../exec/builtin_dispatch.zig");

@@ -41,7 +41,7 @@ const string = @import("string.zig");
 const value_format = @import("value_format.zig");
 const value_semantics = @import("value_semantics.zig");
 
-const bignum = @import("../libs/bignum.zig");
+const bignum = @import("../libs/bigint.zig");
 
 const JSValue = @import("value.zig").JSValue;
 const JSRuntime = @import("runtime.zig").JSRuntime;

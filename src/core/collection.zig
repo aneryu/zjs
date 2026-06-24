@@ -9,7 +9,7 @@
 //!
 //! Everything here depends only on `core` (`Object` storage slots, `JSValue`
 //! sameValueZero, `string`, `bigint`, `symbol.canBeHeldWeakly`, the runtime
-//! borrowed-reference holder registry) and `libs` (`bignum`, `dtoa`). There is
+//! borrowed-reference holder registry) and `libs` (`bigint`, `number_format`). There is
 //! zero exec/builtins/VM dependency: the weak-key GC interaction is entirely
 //! core-resident (`Object.weakIdentityFromValue*`, `rt.*BorrowedReferenceHolder`).
 //! The builtins collection method bodies (`builtins/collection.zig`) call these
@@ -22,8 +22,8 @@
 const std = @import("std");
 
 const core = @import("root.zig");
-const bignum = @import("../libs/bignum.zig");
-const dtoa = @import("../libs/dtoa.zig");
+const bignum = @import("../libs/bigint.zig");
+const dtoa = @import("../libs/number_format.zig");
 
 pub const strong_no_entry = core.object.collection_no_entry;
 pub const weak_no_entry = core.object.collection_no_entry;

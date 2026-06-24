@@ -1,14 +1,14 @@
 const std = @import("std");
 
-const regexp_unicode = @import("../libs/regexp_unicode.zig");
+const regexp_properties = @import("../libs/unicode.zig").regexp_properties;
 const bytecode = @import("../bytecode/root.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const string_id_lookup = core.host_function.builtin_method_id_lookup.string;
-const quickjs_regexp = @import("../libs/quickjs_regexp.zig");
+const regexp_adapter = @import("../libs/regexp.zig").js_adapter;
 const unicode_lib = @import("../libs/unicode.zig");
-const emoji = @import("../libs/emoji.zig");
+const emoji = @import("../libs/unicode.zig").emoji;
 const call_mod = @import("call.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const frame_mod = @import("frame.zig");
@@ -68,7 +68,7 @@ const defineNativeDataMethod = builtin_glue.defineNativeDataMethod;
 const defineRegExpGroupsProperty = object_ops.defineRegExpGroupsProperty;
 const defineRegExpGroupsPropertyFromValue = object_ops.defineRegExpGroupsPropertyFromValue;
 const errorStackTraceLimit = error_stack_ops.errorStackTraceLimit;
-const exactScriptExtensionsAliasTarget = regexp_unicode.exactScriptExtensionsAliasTarget;
+const exactScriptExtensionsAliasTarget = regexp_properties.exactScriptExtensionsAliasTarget;
 const getIteratorMethod = call_runtime.getIteratorMethod;
 const getValueProperty = object_ops.getValueProperty;
 const hasValueProperty = object_ops.hasValueProperty;
@@ -2936,7 +2936,7 @@ pub fn qjsRegExpSplit(rt: *core.JSRuntime, separator: core.JSValue, string_value
     errdefer core.Object.destroyFromHeader(rt, &out.header);
     if (limit == 0) return out.value();
 
-    var compiled = quickjs_regexp.compile(rt.memory.allocator, source.items, split_flags.items) catch |err| switch (err) {
+    var compiled = regexp_adapter.compile(rt.memory.allocator, source.items, split_flags.items) catch |err| switch (err) {
         error.InvalidPattern, error.Unsupported => return null,
         else => |other| return other,
     };
@@ -2945,7 +2945,7 @@ pub fn qjsRegExpSplit(rt: *core.JSRuntime, separator: core.JSValue, string_value
     const input_len = try stringLengthIndex(rt, string_value);
 
     if (input_len == 0) {
-        const status = quickjs_regexp.execOnStringFromIndex(rt, compiled, string_value, 0) catch |err| switch (err) {
+        const status = regexp_adapter.execOnStringFromIndex(rt, compiled, string_value, 0) catch |err| switch (err) {
             error.BytecodeCorrupt, error.Timeout => return null,
             else => return err,
         };
@@ -2970,7 +2970,7 @@ pub fn qjsRegExpSplit(rt: *core.JSRuntime, separator: core.JSValue, string_value
     var pos: usize = 0;
     var out_index: u32 = 0;
     while (pos <= input_len) {
-        const status = quickjs_regexp.execOnStringFromIndex(rt, compiled, string_value, pos) catch |err| switch (err) {
+        const status = regexp_adapter.execOnStringFromIndex(rt, compiled, string_value, pos) catch |err| switch (err) {
             error.BytecodeCorrupt, error.Timeout => return null,
             else => return err,
         };
@@ -3033,14 +3033,14 @@ pub fn qjsRegExpSearch(rt: *core.JSRuntime, regexp: core.JSValue, string_value: 
     defer flags.deinit(rt.memory.allocator);
     if (!try appendRegExpFlags(rt, regexp_object, &flags)) return null;
 
-    var compiled = quickjs_regexp.compile(rt.memory.allocator, source.items, flags.items) catch |err| switch (err) {
+    var compiled = regexp_adapter.compile(rt.memory.allocator, source.items, flags.items) catch |err| switch (err) {
         error.InvalidPattern, error.Unsupported => return null,
         else => |other| return other,
     };
     defer compiled.deinit(rt.memory.allocator);
 
     const input_len = try stringLengthIndex(rt, string_value);
-    const status = quickjs_regexp.execOnStringFromIndex(rt, compiled, string_value, 0) catch |err| switch (err) {
+    const status = regexp_adapter.execOnStringFromIndex(rt, compiled, string_value, 0) catch |err| switch (err) {
         error.BytecodeCorrupt, error.Timeout => return null,
         else => return err,
     };
@@ -3069,13 +3069,13 @@ pub fn qjsRegExpMatch(rt: *core.JSRuntime, global: *core.Object, regexp: core.JS
 
     if (!is_global) {
         // Non-global: single LRE match.
-        var compiled = quickjs_regexp.compile(rt.memory.allocator, source.items, flags.items) catch |err| switch (err) {
+        var compiled = regexp_adapter.compile(rt.memory.allocator, source.items, flags.items) catch |err| switch (err) {
             error.InvalidPattern, error.Unsupported => return null,
             else => |other| return other,
         };
         defer compiled.deinit(rt.memory.allocator);
         const input_len = try stringLengthIndex(rt, string_value);
-        const status = quickjs_regexp.execOnStringFromIndex(rt, compiled, string_value, 0) catch |err| switch (err) {
+        const status = regexp_adapter.execOnStringFromIndex(rt, compiled, string_value, 0) catch |err| switch (err) {
             error.BytecodeCorrupt, error.Timeout => return null,
             else => return err,
         };
@@ -3103,7 +3103,7 @@ pub fn qjsRegExpMatch(rt: *core.JSRuntime, global: *core.Object, regexp: core.JS
     }
 
     // Global: iterate through all matches
-    var compiled = quickjs_regexp.compile(rt.memory.allocator, source.items, flags.items) catch |err| switch (err) {
+    var compiled = regexp_adapter.compile(rt.memory.allocator, source.items, flags.items) catch |err| switch (err) {
         error.InvalidPattern, error.Unsupported => return null,
         else => |other| return other,
     };
@@ -3115,7 +3115,7 @@ pub fn qjsRegExpMatch(rt: *core.JSRuntime, global: *core.Object, regexp: core.JS
     var out_index: u32 = 0;
     var search_pos: usize = 0;
     while (search_pos <= input_len) {
-        const status = quickjs_regexp.execOnStringFromIndex(rt, compiled, string_value, search_pos) catch |err| switch (err) {
+        const status = regexp_adapter.execOnStringFromIndex(rt, compiled, string_value, search_pos) catch |err| switch (err) {
             error.BytecodeCorrupt, error.Timeout => return null,
             else => return err,
         };
@@ -3586,7 +3586,7 @@ pub fn anchoredBinaryPropertyMatches(source: []const u8, string_value: core.JSVa
 }
 
 pub fn binaryPropertyCodePointMatches(name: []const u8, code_point: u21) bool {
-    return regexp_unicode.isUnicodePropertyMatches(code_point, name);
+    return regexp_properties.isUnicodePropertyMatches(code_point, name);
 }
 
 pub fn anchoredCodePointPredicateMatches(
@@ -3598,7 +3598,7 @@ pub fn anchoredCodePointPredicateMatches(
         .latin1 => |bytes| {
             if (bytes.len == 0) return false;
             for (bytes) |byte| {
-                if (regexp_unicode.isUnicodePropertyMatches(byte, name) != positive) return false;
+                if (regexp_properties.isUnicodePropertyMatches(byte, name) != positive) return false;
             }
             return true;
         },
@@ -3606,7 +3606,7 @@ pub fn anchoredCodePointPredicateMatches(
             if (units.len == 0) return false;
             var index: usize = 0;
             while (index < units.len) {
-                if (regexp_unicode.isUnicodePropertyMatches(readUtf16CodePoint(units, &index), name) != positive) return false;
+                if (regexp_properties.isUnicodePropertyMatches(readUtf16CodePoint(units, &index), name) != positive) return false;
             }
             return true;
         },

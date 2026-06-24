@@ -1,7 +1,7 @@
 // RegExp Unicode properties table
 // Completely refactored to use compact binary tables and comptime-optimized routing.
 const std = @import("std");
-const data = @import("unicode_data.zig");
+const data = @import("data.zig");
 const max_code_point: u21 = 0x10ffff;
 
 // --- Compact Binary Tables (preserved from C QuickJS translation) ---

@@ -1,5 +1,5 @@
 const core = @import("../core/root.zig");
-const regexp_validate = @import("../libs/regexp_validate.zig");
+const regexp_validate = @import("../libs/regexp.zig").validate;
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 const builtin_dispatch = @import("../exec/builtin_dispatch.zig");
@@ -417,7 +417,7 @@ test "constructValidated roots source and flags while creating regexp object" {
     try std.testing.expect(rt.atoms.name(flags_atom) == null);
 }
 
-/// Pattern/flags early-error validation lives in `libs/regexp_validate.zig`
+/// Pattern/flags early-error validation lives in `libs/regexp/validate.zig`
 /// (QuickJS: `js_compile_regexp` flag parsing plus `lre_compile`).
 pub const validatePatternAndFlags = regexp_validate.validatePatternAndFlags;
 
@@ -894,7 +894,7 @@ fn trimLeadingZeroes(digits: []const u8) []const u8 {
 
 // Relocated to engine core (`core/regexp.zig`) in Phase 6b-3 STEP 2: the
 // character-class membership predicate and its class-range parsing primitives
-// are pure (std + core.unicode + libs/regexp_validate) and are consumed by the
+// are pure (std + core.unicode + libs/regexp.validate) and are consumed by the
 // VM string fast paths without importing builtins. Re-exported here so the
 // RegExp pattern validators below (hasDescendingCharacterClassRange /
 // scanClassForDescendingRange / hasUnicodeClassEscapeRange / invalidUnicodeEscape)

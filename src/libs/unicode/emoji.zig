@@ -1,4 +1,4 @@
-const unicode = @import("unicode.zig");
+const unicode = @import("../unicode.zig");
 
 pub const StringUnits = union(enum) {
     latin1: []const u8,

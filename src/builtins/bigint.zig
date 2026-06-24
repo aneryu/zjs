@@ -1,4 +1,4 @@
-const bignum = @import("../libs/bignum.zig");
+const bignum = @import("../libs/bigint.zig");
 const std = @import("std");
 const core = @import("../core/root.zig");
 

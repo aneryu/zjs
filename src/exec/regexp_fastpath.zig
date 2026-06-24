@@ -5,8 +5,8 @@ const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
-const quickjs_regexp = @import("../libs/quickjs_regexp.zig");
-const regexp_validate = @import("../libs/regexp_validate.zig");
+const regexp_adapter = @import("../libs/regexp.zig").js_adapter;
+const regexp_validate = @import("../libs/regexp.zig").validate;
 const std = @import("std");
 const unicode_lib = @import("../libs/unicode.zig");
 const value_ops = @import("value_ops.zig");
@@ -419,10 +419,10 @@ pub fn qjsRegExpTestFastNoResult(
 
     const cached_bytecode = regexp_object.regexpCompiledBytecode();
     if (cached_bytecode.len != 0) {
-        const compiled = quickjs_regexp.Compiled{ .bytecode = @constCast(cached_bytecode) };
+        const compiled = regexp_adapter.Compiled{ .bytecode = @constCast(cached_bytecode) };
         const flag_bits = compiled.flagBits();
-        if ((flag_bits & (quickjs_regexp.flag_bits.global | quickjs_regexp.flag_bits.sticky)) != 0) return null;
-        return quickjs_regexp.testOnStringFromIndex(ctx.runtime, compiled, string_value, 0) catch |err| switch (err) {
+        if ((flag_bits & (regexp_adapter.flag_bits.global | regexp_adapter.flag_bits.sticky)) != 0) return null;
+        return regexp_adapter.testOnStringFromIndex(ctx.runtime, compiled, string_value, 0) catch |err| switch (err) {
             error.BytecodeCorrupt, error.Timeout => return null,
             else => return err,
         };
@@ -437,16 +437,16 @@ pub fn qjsRegExpTestFastNoResult(
     if (!bytesAreAscii(borrowed.source)) return null;
 
     if (regexp_object.regexpCompiledBytecode().len == 0) {
-        var compiled = quickjs_regexp.compile(ctx.runtime.memory.allocator, borrowed.source, flags) catch |err| switch (err) {
+        var compiled = regexp_adapter.compile(ctx.runtime.memory.allocator, borrowed.source, flags) catch |err| switch (err) {
             error.InvalidPattern, error.Unsupported => return null,
             else => |other| return other,
         };
         defer compiled.deinit(ctx.runtime.memory.allocator);
         try regexp_object.setRegexpCompiledBytecode(ctx.runtime, compiled.bytecode);
     }
-    const compiled = quickjs_regexp.Compiled{ .bytecode = @constCast(regexp_object.regexpCompiledBytecode()) };
+    const compiled = regexp_adapter.Compiled{ .bytecode = @constCast(regexp_object.regexpCompiledBytecode()) };
 
-    return quickjs_regexp.testOnStringFromIndex(ctx.runtime, compiled, string_value, 0) catch |err| switch (err) {
+    return regexp_adapter.testOnStringFromIndex(ctx.runtime, compiled, string_value, 0) catch |err| switch (err) {
         error.BytecodeCorrupt, error.Timeout => return null,
         else => return err,
     };
@@ -972,11 +972,11 @@ pub fn qjsRegExpExecResult(
 
     const cached_bytecode = regexp_object.regexpCompiledBytecode();
     if (cached_bytecode.len != 0) {
-        const compiled = quickjs_regexp.Compiled{ .bytecode = @constCast(cached_bytecode) };
+        const compiled = regexp_adapter.Compiled{ .bytecode = @constCast(cached_bytecode) };
         const bits = compiled.flagBits();
-        const is_global = (bits & quickjs_regexp.flag_bits.global) != 0;
-        const is_sticky = (bits & quickjs_regexp.flag_bits.sticky) != 0;
-        const has_indices = (bits & quickjs_regexp.flag_bits.indices) != 0;
+        const is_global = (bits & regexp_adapter.flag_bits.global) != 0;
+        const is_sticky = (bits & regexp_adapter.flag_bits.sticky) != 0;
+        const has_indices = (bits & regexp_adapter.flag_bits.indices) != 0;
         const start_index = if (use_last_index and (is_global or is_sticky)) initial_last_index else 0;
         if (start_index > input_len) {
             if (use_last_index and (is_global or is_sticky)) {
@@ -1089,14 +1089,14 @@ pub fn qjsRegExpExecResult(
         return core.JSValue.nullValue();
     }
     if (regexp_object.regexpCompiledBytecode().len == 0) {
-        var compiled = quickjs_regexp.compile(rt.memory.allocator, source.items, flags.items) catch |err| switch (err) {
+        var compiled = regexp_adapter.compile(rt.memory.allocator, source.items, flags.items) catch |err| switch (err) {
             error.InvalidPattern, error.Unsupported => return try qjsRegExpExecPropertyFallback(ctx, output, global, regexp_value, source.items, flags.items, string_value, use_last_index, is_global, is_sticky, has_indices, input_len, start_index, caller_function, caller_frame),
             else => |other| return other,
         };
         defer compiled.deinit(rt.memory.allocator);
         try regexp_object.setRegexpCompiledBytecode(rt, compiled.bytecode);
     }
-    const compiled = quickjs_regexp.Compiled{ .bytecode = @constCast(regexp_object.regexpCompiledBytecode()) };
+    const compiled = regexp_adapter.Compiled{ .bytecode = @constCast(regexp_object.regexpCompiledBytecode()) };
 
     return try qjsRegExpExecCompiledResult(ctx, output, global, regexp_value, regexp_object, string_value, compiled, use_last_index, is_global, is_sticky, has_indices, start_index, caller_function, caller_frame);
 }
@@ -1108,7 +1108,7 @@ pub fn qjsRegExpExecCompiledResult(
     regexp_value: core.JSValue,
     regexp_object: *core.Object,
     string_value: core.JSValue,
-    compiled: quickjs_regexp.Compiled,
+    compiled: regexp_adapter.Compiled,
     use_last_index: bool,
     is_global: bool,
     is_sticky: bool,
@@ -1118,7 +1118,7 @@ pub fn qjsRegExpExecCompiledResult(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const rt = ctx.runtime;
-    const status = quickjs_regexp.execOnStringFromIndex(rt, compiled, string_value, start_index) catch |err| switch (err) {
+    const status = regexp_adapter.execOnStringFromIndex(rt, compiled, string_value, start_index) catch |err| switch (err) {
         error.BytecodeCorrupt, error.Timeout => return null,
         else => return err,
     };

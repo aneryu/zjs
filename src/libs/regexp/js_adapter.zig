@@ -1,8 +1,8 @@
-const core = @import("../core/root.zig");
-const regexp = @import("regexp.zig");
+const core = @import("../../core/root.zig");
+const regexp = @import("engine.zig");
 const regexp_bytecode = regexp;
 const regexp_compile = regexp;
-const unicode = @import("unicode.zig");
+const unicode = @import("../unicode.zig");
 const std = @import("std");
 
 pub const max_captures = regexp_bytecode.max_captures;
@@ -925,7 +925,7 @@ fn patternUsesCodeUnitMode(flags: []const u8) bool {
     return true;
 }
 
-test "quickjs_regexp compilation and execution" {
+test "JavaScript RegExp adapter compilation and execution" {
     var compiled = try compile(std.testing.allocator, "abc", "i");
     defer compiled.deinit(std.testing.allocator);
     const status = try regexp.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "xxAbCy" }, 0);

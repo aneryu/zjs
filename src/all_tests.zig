@@ -100,7 +100,7 @@ test {
     // The emoji helpers are a public library export whose remaining engine
     // callers went away with the exact RegExp string-property support; keep
     // their tests in the suite explicitly.
-    std.testing.refAllDecls(libs.emoji);
+    std.testing.refAllDecls(libs.unicode.emoji);
     std.testing.refAllDecls(@import("tests/engine_production.zig"));
     std.testing.refAllDecls(@import("tests/oom_cap.zig"));
     std.testing.refAllDecls(@import("tests/embedding_examples.zig"));

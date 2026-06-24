@@ -720,7 +720,7 @@ fn toI128(value: BigInt) i128 {
     return if (value.negative) -signed else signed;
 }
 
-test "bignum functionality" {
+test "bigint functionality" {
     var forty = try parseBase10(std.testing.allocator, "40");
     defer forty.deinit();
     var two = try BigInt.fromInt(std.testing.allocator, 2);
@@ -766,7 +766,7 @@ test "bignum functionality" {
     try std.testing.expectEqualStrings("-1", neg_r_text);
 }
 
-test "bignum toU64 and toI64 range edges" {
+test "bigint toU64 and toI64 range edges" {
     const t = std.testing;
     // Zero.
     var zero = try BigInt.fromInt(t.allocator, 0);

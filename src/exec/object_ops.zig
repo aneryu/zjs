@@ -29,7 +29,7 @@ const error_stack_ops = @import("error_stack_ops.zig");
 const eval_ops = @import("eval_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
-const regexp_unicode = @import("../libs/regexp_unicode.zig");
+const regexp_properties = @import("../libs/unicode.zig").regexp_properties;
 const slot_ops = @import("slot_ops.zig");
 const string_ops = @import("string_ops.zig");
 
@@ -81,7 +81,7 @@ const ensureVarRefCell = slot_ops.ensureVarRefCell;
 const ensureVarRefsCapacity = frame_mod.ensureVarRefsCapacity;
 const evalBytecodeHasVarDeclarations = eval_ops.evalBytecodeHasVarDeclarations;
 const evalLocalSlotIsEvalVarCell = slot_ops.evalLocalSlotIsEvalVarCell;
-const exactScriptExtensionsAliasTarget = regexp_unicode.exactScriptExtensionsAliasTarget;
+const exactScriptExtensionsAliasTarget = regexp_properties.exactScriptExtensionsAliasTarget;
 const findPropertyEscapeMatch = string_ops.findPropertyEscapeMatch;
 const findUnicodePropertyOnlyClassMatch = string_ops.findUnicodePropertyOnlyClassMatch;
 const functionBytecodeFromValue = call_runtime.functionBytecodeFromValue;
