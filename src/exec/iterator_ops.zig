@@ -708,8 +708,8 @@ fn fastMapSetForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_i
     const iterator = objectFromValue(stack.values[iterator_index]) orelse return false;
     if (iterator.class_id != core.class.ids.map_iterator and iterator.class_id != core.class.ids.set_iterator) return false;
     const kind = iterator.iteratorKindSlot().*;
-    // key=1, value=2 are alloc-free; key_value=3 (and anything else) falls through.
-    if (kind != 1 and kind != 2) return false;
+    // key=1, value=2, key_value=3 (entries -> [k,v] pair). Anything else falls through.
+    if (kind != 1 and kind != 2 and kind != 3) return false;
     const next_function = objectFromValue(stack.values[iterator_index + 1]) orelse return false;
     const ref = core.function.decodeNativeBuiltinId(next_function.nativeFunctionIdSlot().*) orelse return false;
     if (ref.domain != .collection or ref.id != @intFromEnum(method_ids.collection.PrototypeMethod.iterator_next)) return false;
@@ -724,10 +724,17 @@ fn fastMapSetForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_i
         iterator.iteratorIndexSlot().* += 1;
         const entry = target.collectionEntriesSlot().*[index];
         if (!entry.active) continue;
-        // Borrowed entry slot, kept alive by the collection (reachable via the
-        // iterator's target on the operand stack), so the dup survives the
-        // reserveAdditional grow without separate rooting — same as the array path.
-        const value = if (kind == 1 or is_set) entry.key.dup() else entry.value.dup();
+        // key/value are borrowed entry slots, kept alive by the collection
+        // (reachable via the iterator's target on the operand stack), so the dup
+        // survives the reserveAdditional grow without separate rooting — same as
+        // the array path. key_value builds a fresh [k,v] pair (mirrors
+        // collection.iteratorValue's key_value), held alive by its own refcount.
+        const value = switch (kind) {
+            1 => entry.key.dup(),
+            2 => if (is_set) entry.key.dup() else entry.value.dup(),
+            3 => try buildCollectionEntryPair(ctx.runtime, is_set, entry),
+            else => unreachable,
+        };
         errdefer value.free(ctx.runtime);
         try stack.reserveAdditional(2);
         stack.pushOwnedAssumeCapacity(value);
@@ -735,6 +742,31 @@ fn fastMapSetForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_i
         return true;
     }
     return try finishMapSetForOfDone(ctx, stack, iterator_index, true);
+}
+
+/// Build the `[key, value]` pair for a Map/Set entries iterator step. Mirrors
+/// collection.iteratorValue's key_value arm exactly (a null-proto fast array;
+/// Set yields [key, key]); the borrowed components are rooted across the array
+/// allocation.
+fn buildCollectionEntryPair(rt: *core.JSRuntime, is_set: bool, entry: core.object.CollectionEntry) !core.JSValue {
+    var key_value = entry.key;
+    var value_value = if (is_set) entry.key else entry.value;
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &key_value },
+        .{ .value = &value_value },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = &root_values,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
+
+    const pair = try core.Object.createArray(rt, null);
+    errdefer core.Object.destroyFromHeader(rt, &pair.header);
+    try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(key_value, true, true, true));
+    try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(1), core.Descriptor.data(value_value, true, true, true));
+    return pair.value();
 }
 
 fn finishMapSetForOfDone(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_index: usize, clear_target: bool) !bool {
