@@ -1720,23 +1720,46 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             // ---- Array elements ----
             op.get_array_el, op.get_array_el2, op.get_array_el3, op.put_array_el => {
                 if (comptime thread_dispatch) array_el_fast: {
-                    // qjs OP_get_array_el dense fast path. Only the plain read
-                    // shape (n_pop=2,n_push=1); el2/el3/put keep different stack
-                    // shapes and stay on the slow arm. Byte-identical to the
-                    // arrayElement dense leg: pop key+obj (free both), pushOwned
-                    // the dup'd element. fastDenseArrayElementValue gates on
-                    // object + non-negative int key + fast-array-in-bounds.
-                    if (opc != op.get_array_el) break :array_el_fast;
-                    const obj = (reg_sp - 2)[0];
-                    const key = (reg_sp - 1)[0];
-                    const val = vm_property_field.fastDenseArrayElementValue(obj, key) orelse break :array_el_fast;
-                    key.free(ctx.runtime);
-                    obj.free(ctx.runtime);
-                    (reg_sp - 2)[0] = val;
-                    reg_sp -= 1;
-                    opc = reg_ip[0];
-                    reg_ip += 1;
-                    continue :sw opc;
+                    // qjs OP_get_array_el / OP_put_array_el dense fast paths.
+                    // el2/el3 (different stack shapes) stay on the slow arm.
+                    if (opc == op.get_array_el) {
+                        // n_pop=2,n_push=1. Byte-identical to the arrayElement
+                        // dense leg: pop key+obj (free both), pushOwned the dup'd
+                        // element. fastDenseArrayElementValue gates on object +
+                        // non-negative int key + fast-array-in-bounds.
+                        const obj = (reg_sp - 2)[0];
+                        const key = (reg_sp - 1)[0];
+                        const val = vm_property_field.fastDenseArrayElementValue(obj, key) orelse break :array_el_fast;
+                        key.free(ctx.runtime);
+                        obj.free(ctx.runtime);
+                        (reg_sp - 2)[0] = val;
+                        reg_sp -= 1;
+                        opc = reg_ip[0];
+                        reg_ip += 1;
+                        continue :sw opc;
+                    } else if (opc == op.put_array_el) {
+                        // n_pop=3,n_push=0. In-bounds dense store only (the
+                        // non-erroring setFastArrayElementDup leg of the slow
+                        // path's putDenseArrayElementFast); out-of-bounds /
+                        // append / grow / typed-array / proxy break to slow.
+                        // Matches the slow path: it dups the value into the slot,
+                        // frees the old element, and the caller frees obj/key/val.
+                        const value = (reg_sp - 1)[0];
+                        const key = (reg_sp - 2)[0];
+                        const idx_i32 = key.asInt32() orelse break :array_el_fast;
+                        if (idx_i32 < 0) break :array_el_fast;
+                        const obj = (reg_sp - 3)[0];
+                        const object = class_vm.objectFromValue(obj) orelse break :array_el_fast;
+                        if (!object.setFastArrayElementDup(ctx.runtime, @intCast(idx_i32), value)) break :array_el_fast;
+                        value.free(ctx.runtime);
+                        key.free(ctx.runtime);
+                        obj.free(ctx.runtime);
+                        reg_sp -= 3;
+                        opc = reg_ip[0];
+                        reg_ip += 1;
+                        continue :sw opc;
+                    }
+                    break :array_el_fast;
                 }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try vm_property_field.arrayElement(ctx, output, global, stack, function, frame, catch_target, opc)) {
