@@ -200,11 +200,24 @@ pub fn qjsArrayMethodFastCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (callableObjectFromValue(func)) |function_object| {
-        if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*)) |native_ref| {
-            if (native_ref.domain == .iterator) {
-                if (try qjsIteratorCallForNativeRecord(ctx, output, global, receiver, native_ref.id, args, caller_function, caller_frame)) |value| return value;
-            }
+    // Every branch below requires `func` to be a NATIVE callable: the iterator
+    // branch and all ~20 cascade members each open with
+    // `callableObjectFromValue(func) orelse return null` (c_function /
+    // c_closure / bound_function). The overwhelmingly common method-call callee
+    // is a user *bytecode* function (e.g. `obj.m()`, `p.step()`), for which
+    // `callableObjectFromValue` is null — so the whole cascade degenerates into
+    // ~20 sequential no-op calls. Hoist the shared precondition and bail once.
+    //
+    // Faithful to qjs: a method call resolves its callee once via the property
+    // lookup, then dispatches by the resolved function's magic
+    // (`js_call_c_function`, quickjs.c:17562, reached from OP_call_method at
+    // quickjs.c:18220). qjs never scans the array-method set per call; this
+    // early-out moves zjs toward that structure for non-native-method receivers
+    // without changing any matched-method behavior.
+    const native_callable = callableObjectFromValue(func) orelse return null;
+    if (core.function.decodeNativeBuiltinId(native_callable.nativeFunctionIdSlot().*)) |native_ref| {
+        if (native_ref.domain == .iterator) {
+            if (try qjsIteratorCallForNativeRecord(ctx, output, global, receiver, native_ref.id, args, caller_function, caller_frame)) |value| return value;
         }
     }
     if (try qjsArrayIterationCall(ctx, output, global, receiver, func, args, caller_function, caller_frame)) |value| return value;
