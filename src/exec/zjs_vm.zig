@@ -1359,6 +1359,37 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     reg_ip += 1;
                     continue :sw opc;
                 }
+                if (comptime thread_dispatch) bin_float_fast: {
+                    // Inline float64 fast path mirroring qjs's OP_add/sub/mul
+                    // `JS_TAG_IS_FLOAT64` branch (quickjs.c:19710-19728): for two
+                    // number operands where the int32 path above did not apply
+                    // (≥1 float64, or an int32 add/sub/mul that overflowed), compute
+                    // in f64 and canonicalize EXACTLY like value_ops.binaryNumber
+                    // (numberToValue), avoiding the binaryVm→toPrimitive→binary
+                    // call cascade + pop/defer-free traffic. Only the float-math
+                    // ops qualify: bitwise/shift need ToInt32 (not float math) and
+                    // pow has no fast path; `add` with a string operand is excluded
+                    // because asNumber() is null for strings (→ slow stringAdd).
+                    switch (opc) {
+                        op.add, op.sub, op.mul, op.div, op.mod => {},
+                        else => break :bin_float_fast,
+                    }
+                    const fa = (reg_sp - 2)[0].asNumber() orelse break :bin_float_fast;
+                    const fb = (reg_sp - 1)[0].asNumber() orelse break :bin_float_fast;
+                    const fout = switch (opc) {
+                        op.add => fa + fb,
+                        op.sub => fa - fb,
+                        op.mul => fa * fb,
+                        op.div => fa / fb,
+                        op.mod => @rem(fa, fb),
+                        else => unreachable,
+                    };
+                    (reg_sp - 2)[0] = value_ops_mod.numberToValue(fout);
+                    reg_sp -= 1;
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
+                }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 // Inline int32 fast path: replaces binaryVm->binary call frames
                 // and pop/defer-free traffic for the common two-int operand case.
