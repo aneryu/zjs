@@ -36,6 +36,7 @@ DIVERGE from this qjs, not align), and is also currently a pre-existing compile 
 | accumulator `s=s+1` | 16.6B | **9.2B** | 7.0B | 2.39× → **1.32×** |
 | method `o.m(s)` (simple) | 43.6B | **22.7B** | 9.8B | 4.43× → **2.30×** |
 | method `p.step(s)` (proto) | 48.1B | **27.2B** | 9.9B | 4.85× → **2.74×** |
+| closure-per-iter (`var c=function(){...}`) | — | **94.7B** | 24.3B | 5.68× → **3.90×** |
 | fib(34) | 26.2B | 26.1B | 7.2B | 3.64× → **3.64× (unchanged — frame-model-gated)** |
 
 Global access now equals **local** access (both ~2.35× qjs): the global-specific divergence is
@@ -78,6 +79,32 @@ tax, both shared broad frontiers — no method-specific divergence remains.
    `array-cascade-faithful-gate` workflow (5 agents) verified the receiver-gate was UNSAFE (members
    implement generic array-like semantics, need only `receiver.isObject()`) and the func-precondition
    was the safe hoist.
+5. **Lazy `function.prototype`** (`18a2610`). `createBytecodeFunctionObject` eagerly allocated a prototype
+   object + `constructor` back-ref for every normal function with `has_prototype`. Two divergences in one:
+   a wasted allocation for any function whose `.prototype` is never observed, AND the
+   `func ↔ prototype.constructor` cycle — which means refcount can NEVER free such a function; only the
+   cycle collector can. A closure-per-iteration loop thus paid the full mark/sweep collector
+   (`destroyRuntimeCyclesWithValueRoots` ~10%). qjs makes `.prototype` a lazy autoinit property
+   (`JS_AUTOINIT_ID_PROTOTYPE` / `js_instantiate_prototype`, quickjs.c:17341). zjs already had the autoinit
+   infra (`Slot.auto_init`, used for ~700 lazy builtins); added a `function_prototype` AutoInitKind whose
+   materializer derives realm/constructor from the owner function object (one shared interned descriptor —
+   no per-function table growth). Installed for normal non-class functions; generators/async-gen/class
+   ctors keep the eager path. A never-constructed closure now has no prototype + no cycle → reclaimed by
+   refcount, not the collector. Closure-per-iter 5.68×→3.90×, cycle collector gone from the profile;
+   constructors materialize on `new` exactly as before. Remaining closure cost is function-object creation
+   (`createBytecodeFunctionObject` + `defineOwnProperty` for length/name) — qjs makes those lazy autoinit
+   too (next slice candidate).
+
+## ⚠️ Benchmarking hazard — gate builds overwrite `zig-out/bin/zjs`
+
+`zig build test` / `zig build test262-gate` / **especially `zig build test -Dzjs_force_gc=true`** rebuild
+and install the `zjs` artifact with **different build options**. The force-GC binary runs a full GC before
+*every* allocation, so allocation-heavy benchmarks read **100–260× qjs** on it — a pure artifact, not a real
+regression (a clean `zig build zjs` restores normal ~2–2.5×). This burned a long investigation: an apparent
+"GC pathology" (objlit 165×, arraylit 259×, new 120×) was entirely the force-GC binary left in
+`zig-out/bin/zjs` by a prior gate run. **ALWAYS run `zig build zjs` immediately before any `perf stat`
+benchmark, never benchmark after a gate without rebuilding.** A stale binary can also show an *older*
+mtime after `zig build zjs` (build-cache hit), so check behaviour, not timestamp.
 
 ## Remaining frontiers — both DEEP, neither a quick "continue"
 
