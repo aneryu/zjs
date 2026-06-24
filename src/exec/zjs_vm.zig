@@ -1719,6 +1719,25 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
 
             // ---- Array elements ----
             op.get_array_el, op.get_array_el2, op.get_array_el3, op.put_array_el => {
+                if (comptime thread_dispatch) array_el_fast: {
+                    // qjs OP_get_array_el dense fast path. Only the plain read
+                    // shape (n_pop=2,n_push=1); el2/el3/put keep different stack
+                    // shapes and stay on the slow arm. Byte-identical to the
+                    // arrayElement dense leg: pop key+obj (free both), pushOwned
+                    // the dup'd element. fastDenseArrayElementValue gates on
+                    // object + non-negative int key + fast-array-in-bounds.
+                    if (opc != op.get_array_el) break :array_el_fast;
+                    const obj = (reg_sp - 2)[0];
+                    const key = (reg_sp - 1)[0];
+                    const val = vm_property_field.fastDenseArrayElementValue(obj, key) orelse break :array_el_fast;
+                    key.free(ctx.runtime);
+                    obj.free(ctx.runtime);
+                    (reg_sp - 2)[0] = val;
+                    reg_sp -= 1;
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
+                }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try vm_property_field.arrayElement(ctx, output, global, stack, function, frame, catch_target, opc)) {
                     .done => {},
