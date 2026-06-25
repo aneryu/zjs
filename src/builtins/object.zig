@@ -30,6 +30,7 @@ const getValueProperty = object_ops.getValueProperty;
 const setValuePropertyStrict = object_ops.setValuePropertyStrict;
 const toPropertyKeyAtom = object_ops.toPropertyKeyAtom;
 const proxyAwareOwnPropertyDescriptor = object_ops.proxyAwareOwnPropertyDescriptor;
+const proxyAwareExistsOwnProperty = object_ops.proxyAwareExistsOwnProperty;
 const proxyDefineOwnProperty = object_ops.proxyDefineOwnProperty;
 const proxyAwarePreventExtensions = object_ops.proxyAwarePreventExtensions;
 const createDataPropertyOrThrow = object_ops.createDataPropertyOrThrow;
@@ -610,9 +611,12 @@ pub fn qjsObjectHasOwnCall(
     const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const atom_id = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
     defer ctx.runtime.atoms.free(atom_id);
-    const desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, object, atom_id, caller_function, caller_frame) orelse return core.JSValue.boolean(false);
-    desc.destroy(ctx.runtime);
-    return core.JSValue.boolean(true);
+    // qjs `js_object_hasOwn` -> `JS_GetOwnPropertyInternal(ctx, NULL, p, atom)`:
+    // the desc==NULL existence mode (quickjs.c:8854) -- no descriptor is built,
+    // no value is dup'd, and auto-init instantiation is delayed. Proxies still
+    // route through the full getOwnPropertyDescriptor trap inside the wrapper.
+    const present = try proxyAwareExistsOwnProperty(ctx, output, global, object, atom_id, caller_function, caller_frame);
+    return core.JSValue.boolean(present);
 }
 
 pub fn qjsObjectPrototypeOwnPropertyCall(
@@ -635,10 +639,18 @@ pub fn qjsObjectPrototypeOwnPropertyCall(
     const object_value = if (objectFromValue(this_value)) |_| this_value.dup() else try primitiveObjectForAccess(ctx.runtime, global, this_value);
     defer object_value.free(ctx.runtime);
     const object = property_ops.expectObject(object_value) catch return error.TypeError;
+    // `hasOwnProperty` is the desc==NULL existence mode of
+    // `JS_GetOwnPropertyInternal` (qjs `js_object_hasOwnProperty`,
+    // quickjs.c:40536): probe presence with no descriptor materialization.
+    // `propertyIsEnumerable` (qjs `js_object_propertyIsEnumerable`) still
+    // needs the enumerable flag, so it keeps the full-descriptor path.
+    if (method_id == @intFromEnum(PrototypeMethod.has_own_property)) {
+        const present = try proxyAwareExistsOwnProperty(ctx, output, global, object, atom_id, caller_function, caller_frame);
+        return core.JSValue.boolean(present);
+    }
     const desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, object, atom_id, caller_function, caller_frame) orelse return core.JSValue.boolean(false);
     defer desc.destroy(ctx.runtime);
-    if (method_id == @intFromEnum(PrototypeMethod.property_is_enumerable)) return core.JSValue.boolean(desc.enumerable orelse false);
-    return core.JSValue.boolean(true);
+    return core.JSValue.boolean(desc.enumerable orelse false);
 }
 
 pub fn qjsObjectPrototypeDefineAccessorCall(

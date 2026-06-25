@@ -1148,6 +1148,11 @@ fn exoticMethodsForClassId(class_id: class.ClassId) ?*const ExoticMethods {
     };
 }
 
+/// Three-state result of an existence-only binding probe (no value `dup`).
+/// `uninitialized` mirrors qjs's TDZ VARREF case where the existence path
+/// (quickjs.c:8856-8860) still raises `ReferenceErrorUninitialized`.
+pub const BindingExistence = enum { absent, present, uninitialized };
+
 pub const Object = struct {
     header: gc.GCObjectHeader,
     class_payload: class.Payload = null,
@@ -5309,6 +5314,25 @@ pub const Object = struct {
         return self.moduleNamespaceBindingValue(atom_id);
     }
 
+    /// Existence-only probe for a module-namespace binding. Mirrors
+    /// `moduleNamespaceBindingValue` but performs NO `dup` -- it reports
+    /// presence and, separately, whether the cell is still uninitialized
+    /// (qjs `JS_GetOwnPropertyInternal` desc==NULL VARREF branch,
+    /// quickjs.c:8856-8860). Module-namespace bindings are stored as
+    /// VARREF cells in qjs's namespace property table, so the existence
+    /// path throws `ReferenceErrorUninitialized` when the cell is in TDZ.
+    pub fn moduleNamespaceBindingExists(self: Object, atom_id: atom.Atom) BindingExistence {
+        if (self.class_id != class.ids.module_ns) return .absent;
+        const payload = @constCast(&self).moduleNamespacePayload() orelse return .absent;
+        for (payload.names, 0..) |name, idx| {
+            if (name != atom_id or idx >= payload.cells.len) continue;
+            const cell = varRefCellFromValue(payload.cells[idx]) orelse return .present;
+            if (cell.varRefValue().isUninitialized()) return .uninitialized;
+            return .present;
+        }
+        return .absent;
+    }
+
     fn destroyModuleNamespacePayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.moduleNamespacePayload() orelse return;
         self.class_payload = null;
@@ -6894,6 +6918,56 @@ pub const Object = struct {
     pub fn hasOwnProperty(self: *const Object, atom_id: atom.Atom) bool {
         if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex and self.regexpLastIndex() != null) return true;
         return self.findProperty(atom_id) != null or self.denseArrayElement(atom_id) != null;
+    }
+
+    /// Complete existence-only own-property probe -- the desc==NULL mode of
+    /// qjs `JS_GetOwnPropertyInternal` (quickjs.c:8854 else-branch). It walks
+    /// the SAME kind cascade as `getOwnProperty` but reports only presence,
+    /// performing NO `JS_DupValue` and DELAYING auto-init instantiation
+    /// ("nothing to do", quickjs.c:8862). It throws `ReferenceError` for an
+    /// uninitialized VARREF / module-namespace binding, matching qjs
+    /// quickjs.c:8856-8860. Exotic numeric indices (fast/dense arrays,
+    /// regexp lastIndex) and module-namespace bindings are covered here;
+    /// the typed-array canonical-index existence and the proxy trap live in
+    /// the `proxyAware` wrapper, parallel to `getOwnProperty` vs
+    /// `proxyAwareOwnPropertyDescriptor`.
+    pub fn existsOwnProperty(self: *const Object, rt: *JSRuntime, atom_id: atom.Atom) !bool {
+        // Exotic `get_own_property` hook (quickjs.c:8884-8890). The hook
+        // builds a full descriptor; we destroy it immediately, but for the
+        // non-test class set this hook is never installed (see
+        // `exoticMethodsForClassId`) so the cost is paid only by the exotic
+        // classes that genuinely need it -- still no dup leaks past us.
+        if (self.exoticMethods(rt)) |methods| {
+            if (methods.get_own_property) |hook| {
+                if (hook(@constCast(self), atom_id)) |desc| {
+                    desc.destroy(rt);
+                    return true;
+                }
+            }
+        }
+        // Module-namespace binding (quickjs.c:8856-8860 VARREF existence
+        // path). Presence with NO dup; TDZ raises ReferenceError.
+        switch (self.moduleNamespaceBindingExists(atom_id)) {
+            .present => return true,
+            .uninitialized => return error.ReferenceError,
+            .absent => {},
+        }
+        if (self.flags.is_array and atom_id == atom.ids.length) return true;
+        if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex and self.regexpLastIndex() != null) return true;
+        if (self.findProperty(atom_id)) |index| {
+            const entry = self.properties[index];
+            if (self.propFlagsAt(index).deleted) return false;
+            // VARREF existence path (quickjs.c:8856-8860): an uninitialized
+            // cell still throws ReferenceError even though desc==NULL.
+            if (entry.slot == .var_ref) {
+                if (entry.slot.var_ref.varRefValue().isUninitialized()) return error.ReferenceError;
+            }
+            // AUTOINIT: qjs "nothing to do" (quickjs.c:8862) -- report
+            // presence WITHOUT materializing the placeholder.
+            return true;
+        }
+        if (self.denseArrayElement(atom_id) != null) return true;
+        return false;
     }
 
     pub fn hasProperty(self: *const Object, atom_id: atom.Atom) bool {

@@ -5600,6 +5600,27 @@ pub fn typedArrayCanonicalOwnDescriptor(rt: *core.JSRuntime, object: *core.Objec
     }
 }
 
+/// Existence-only sibling of `typedArrayCanonicalOwnDescriptor` for the
+/// desc==NULL fast-array path (quickjs.c:8869-8882). Returns presence
+/// (`index < length`) for an in-bounds canonical numeric index WITHOUT
+/// materializing the element value. `null` means "this key is not a settled
+/// typed-array verdict -- fall through to the ordinary own-property probe",
+/// matching `typedArrayCanonicalOwnDescriptor` returning null for the
+/// `.none`/`.invalid`/out-of-range cases (those then resolve to FALSE via
+/// the regular cascade, exactly as in the descriptor path).
+pub fn typedArrayCanonicalIndexExists(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?bool {
+    if (!core.object.isTypedArrayObject(object)) return null;
+    switch (try core.object.typedArrayCanonicalNumericIndex(rt, atom_id)) {
+        .none => return null,
+        .invalid => return null,
+        .index => |index| {
+            const length = try core.object.typedArrayLength(rt, object);
+            if (index >= length) return null;
+            return true;
+        },
+    }
+}
+
 pub fn coerceTypedArrayElementInput(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,

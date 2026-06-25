@@ -141,6 +141,7 @@ const toStringForAnnexB = string_ops.toStringForAnnexB;
 const typedArrayCanonicalGet = array_ops.typedArrayCanonicalGet;
 const typedArrayCanonicalHas = array_ops.typedArrayCanonicalHas;
 const typedArrayCanonicalOwnDescriptor = array_ops.typedArrayCanonicalOwnDescriptor;
+const typedArrayCanonicalIndexExists = array_ops.typedArrayCanonicalIndexExists;
 const typedArrayCanonicalSet = array_ops.typedArrayCanonicalSet;
 const typedArrayDefineOwnPropertyVm = array_ops.typedArrayDefineOwnPropertyVm;
 const typedArrayOwnKeys = array_ops.typedArrayOwnKeys;
@@ -5030,6 +5031,35 @@ pub fn proxyAwareOwnPropertyDescriptor(
     }
     result_desc.destroy(ctx.runtime);
     return complete_desc;
+}
+
+/// Existence-only sibling of `proxyAwareOwnPropertyDescriptor`. For a
+/// NON-proxy source it mirrors qjs `JS_GetOwnPropertyInternal(ctx, NULL, ...)`
+/// (quickjs.c:8854 desc==NULL mode): typed-array canonical-index existence
+/// (no element materialization), the module-namespace TDZ throw, then the
+/// complete kind-cascade probe -- all with NO descriptor allocation and NO
+/// `JS_DupValue`. For a Proxy it MUST keep the full descriptor path so the
+/// `getOwnPropertyDescriptor` trap fires (spec / qjs `js_proxy_get_own_property`);
+/// it then reports presence as `desc != null`. This is the
+/// `JS_GetOwnPropertyInternal(NULL)` used by `js_object_hasOwnProperty`
+/// (quickjs.c:40536).
+pub fn proxyAwareExistsOwnProperty(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    source: *core.Object,
+    key: core.Atom,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !bool {
+    if (source.proxyTarget() == null) {
+        if (try typedArrayCanonicalIndexExists(ctx.runtime, source, key)) |present| return present;
+        return source.existsOwnProperty(ctx.runtime, key);
+    }
+    // Proxy: keep the full-descriptor path so the trap still fires.
+    const desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, source, key, caller_function, caller_frame) orelse return false;
+    desc.destroy(ctx.runtime);
+    return true;
 }
 
 pub fn proxyAwareIsExtensible(
