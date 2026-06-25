@@ -2188,6 +2188,43 @@ pub fn qjsArraySliceCall(
     const count = if (end > start) end - start else 0;
     if (count > std.math.maxInt(u32)) return error.RangeError;
 
+    // qjs js_array_slice fast case (quickjs.c:42967-42971): when the species ctor is
+    // the default (JS_IsUndefined) AND the source is a dense fast array AND
+    // final <= count32, do ONE bulk dense copy via js_create_array (quickjs.c:9601 =
+    // JS_NewArray + expand_fast_array + count=len + JS_DupValue loop), skipping the
+    // per-element TryGetProperty/CreateDataProperty slow loop entirely.
+    if (object.flags.is_array and !object.flags.is_proxy and
+        object.arrayElementStorageMode() == .dense and
+        (start + count) <= @as(usize, @intCast(object.arrayLength())))
+    {
+        if (arrayHasDefaultSpecies(ctx.runtime, global, object)) |array_proto| {
+            const out = try core.Object.createArray(ctx.runtime, array_proto);
+            var out_value = out.value();
+            errdefer out_value.free(ctx.runtime);
+
+            // memory.alloc can GC; root the fresh array across the allocation
+            // (mirror the entries-pair precedent at qjsObjectEntryArrayValue).
+            var root_values = [_]core.runtime.ValueRootValue{
+                .{ .value = &out_value },
+            };
+            const root_frame = core.runtime.ValueRootFrame{
+                .previous = ctx.runtime.active_value_roots,
+                .values = &root_values,
+            };
+            ctx.runtime.active_value_roots = &root_frame;
+            defer ctx.runtime.active_value_roots = root_frame.previous;
+
+            if (count > 0) {
+                const elements = try ctx.runtime.memory.alloc(core.JSValue, count);
+                const src = object.arrayElements()[start .. start + count];
+                for (src, 0..) |v, i| elements[i] = v.dup();
+                out.adoptDenseArrayElementsAssumingEmpty(elements);
+                out.flags.may_have_indexed_properties = true;
+            }
+            return out_value;
+        }
+    }
+
     const out_value = try arraySpeciesCreate(ctx, output, global, receiver_object_value, count, null, null);
     errdefer out_value.free(ctx.runtime);
     const out = try property_ops.expectObject(out_value);
@@ -3240,7 +3277,12 @@ pub fn arraySpeciesCreate(
     return constructValueOrBytecode(ctx, output, global, species_value, &.{length_value}, caller_function, caller_frame);
 }
 
-pub fn defaultArraySpeciesCreate(rt: *core.JSRuntime, global: *core.Object, original: *core.Object, length: usize) !?core.JSValue {
+// Mirrors qjs JS_ArraySpeciesGetCtor returning JS_UNDEFINED (the default-species
+// case at quickjs.c:42962-42971): `original` is a plain non-proxy Array whose
+// constructor/prototype/Symbol.species chain is the unmodified builtin. When this
+// holds, ArraySpeciesCreate is allowed to produce a fresh plain Array. Returns the
+// realm's Array.prototype so callers can build that array.
+pub fn arrayHasDefaultSpecies(rt: *core.JSRuntime, global: *core.Object, original: *core.Object) ?*core.Object {
     if (!original.flags.is_array or original.proxyTarget() != null) return null;
     if (original.getOwnProperty(rt, core.atom.ids.constructor)) |desc| {
         desc.destroy(rt);
@@ -3270,6 +3312,12 @@ pub fn defaultArraySpeciesCreate(rt: *core.JSRuntime, global: *core.Object, orig
     }
     const getter = objectFromValue(species.getter) orelse return null;
     if (getter.arrayBuiltinMarker() != .species_getter) return null;
+
+    return array_proto;
+}
+
+pub fn defaultArraySpeciesCreate(rt: *core.JSRuntime, global: *core.Object, original: *core.Object, length: usize) !?core.JSValue {
+    const array_proto = arrayHasDefaultSpecies(rt, global, original) orelse return null;
 
     if (length > core.array.max_array_length) return error.RangeError;
 
