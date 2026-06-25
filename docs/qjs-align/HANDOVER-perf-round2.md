@@ -22,21 +22,31 @@
 > - **`04f84d1` hoist function/generator payload in functionRealmGlobalPtr chain.** Correctness-neutral
 >   reorder (one payload per object); resolveInlineTarget reads it per call on a bytecode function.
 >   fib −36M (3.33×→3.328×).
+> - **`b822492` hoist inline-invariant per-level locals out of the frame switch (bounded E).** The
+>   prologue's depth>0 branch re-set all 17 per-level locals per switch; 10 are identical constants for
+>   every inline frame (no eval/generator/eval-code) and only change at the L0↔inline boundary. Gate them
+>   behind an `inline_invariants_set` flag — set once on entering the inline regime, skip on every
+>   inline→inline switch (fib's ~18.45M switches are almost all inline→inline). Verified the 10 are
+>   written ONLY in the prologue (correctness-neutral). **fib 23.91B→23.55B (3.328×→3.277×).**
+> - **`e23d30c` inline the hot return-path passthrough.** `returnTop`/`finishFunctionReturn` were
+>   separate non-inlined calls per return; marked inline. **fib 23.55B→23.41B (3.277×→3.257×).**
 >
-> **Frame-rewrite status & remaining (honest).** Round-5 fib end-state **3.328× qjs (23.91B)**, down
-> from 3.46×. The **keystone (A+B) is done**; the remaining documented facets have **no cheap win** and
-> are genuinely multi-session:
-> - **(C) raw-sp operand stack** — Stack.deinit 2% + part of pushFrame; ~165 cold handlers take `*Stack`.
-> - **(E) threaded post-call resume / recursion model** — the real lever on dispatchLoop's per-call
->   re-entry, but "make recursion the default" re-plumbs exception unwinding + generator/async suspend.
->   The profile-scope win above is the *bounded* slice of (E) (per-re-entry prologue overhead); the rest
->   needs the recursion rewrite.
-> - **(F) backtrace from the Entry chain** — needs the Machine reachable from the throw site (a ctx/TLS
->   current-entry pointer); ~0.25% payoff, low ROI.
-> The residual **3.33×** is now dominated by (a) **pushFrame ~21%** = the arena-carve alloca-substitute
-> (structurally permanent — Zig has no variadic alloca, per the "Expected ceiling" analysis below) and
-> (b) **dispatchLoop ~56%** = LLVM-vs-gcc per-opcode codegen (NOT a faithful divergence). Neither is a
-> clean faithful target. The doc-estimated ~1.3–1.5× ceiling requires the full (C)+(E) deep rewrite.
+> **Frame-rewrite status & remaining (honest).** Round-5 fib end-state **3.257× qjs (23.41B)**, down
+> from 3.46× (turn start) — five gated commits, ~1.48B insn off fib. The **keystone (A+B) is done** and
+> the **bounded (E) slices are extracted** (profile-scope, invariant-hoist, return-inline = the
+> per-cold-re-entry overhead that did NOT need the recursion rewrite). The remaining documented facets
+> have **no cheap win** and are genuinely multi-session:
+> - **(E) threaded resume / recursion model** — the real *structural* lever (caller registers survive the
+>   call) needs C-recursion as the default + the frame-setup collapse; re-plumbs exception unwinding +
+>   generator/async suspend. The bounded prologue slices above are extracted; the rest is the deep rewrite.
+> - **(C) raw-sp operand stack** — Stack.deinit ~2% + part of pushFrame; ~165 cold handlers take `*Stack`.
+> - **(F) backtrace from the Entry chain** — needs the Machine reachable from the throw site; ~0.25%, low ROI.
+> The residual **3.26×** is dominated by (a) **pushFrame ~22%** = the arena-carve alloca-substitute
+> (structurally permanent — Zig has no variadic alloca) and (b) **dispatchLoop ~56%** = LLVM-vs-gcc
+> per-opcode codegen (NOT a faithful divergence). Neither is a clean faithful target; bounded wins have
+> diminishing returns (683M→368M→139M). The doc-estimated ~1.3–1.5× ceiling requires the full (C)+(E)
+> deep recursion/raw-sp rewrite — a dedicated multi-session project (write the suspend-crossing-aware
+> step-by-step gated plan first, per §0).
 
 > **2026-06-25 round-4 addendum (frame-incremental + dense-array builds).** On top of round-3,
 > **4 more faithful slices**, each gated test262 0/49775 + 1223 + force-GC:
