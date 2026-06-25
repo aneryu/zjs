@@ -285,6 +285,24 @@ pub fn iteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
 
     const index: usize = @intCast((iterator_object.iteratorIndexSlot().*));
     const first = string_value.codeUnitAt(index);
+
+    // Single code unit (`c <= 0xffff`, non-surrogate-pair): qjs routes these
+    // through js_new_string_char (quickjs.c:3953-3962), which takes the latin1
+    // path for `c < 0x100`. Mirror that — `<= 0x7f` reuses the cached
+    // single-byte string (zero-alloc), `<= 0xff` builds a latin1 string;
+    // only `>= 0x100` and surrogate pairs reach the wide createUtf16.
+    if (first < 0x100) {
+        iterator_object.iteratorIndexSlot().* += 1;
+        const byte: u8 = @intCast(first);
+        if (byte <= 0x7f) {
+            if (try rt.singleByteString(byte)) |cached| {
+                return iteratorResult(rt, cached.value().dup(), false);
+            }
+        }
+        const out = try core.string.String.createLatin1(rt, &.{byte});
+        return iteratorResult(rt, out.value(), false);
+    }
+
     if (isHighSurrogateUnit(first) and index + 1 < string_value.len()) {
         const second = string_value.codeUnitAt(index + 1);
         if (isLowSurrogateUnit(second)) {
