@@ -8,7 +8,6 @@ const method_ids = core.host_function.builtin_method_ids;
 const string_id_lookup = core.host_function.builtin_method_id_lookup.string;
 const regexp_adapter = @import("../libs/regexp.zig").js_adapter;
 const unicode_lib = @import("../libs/unicode.zig");
-const emoji = @import("../libs/unicode.zig").emoji;
 const call_mod = @import("call.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const frame_mod = @import("frame.zig");
@@ -2238,18 +2237,6 @@ pub fn nativeFunctionMatcherUnicodeClassAsciiResult(source: []const u8, flags: [
     if (is_id_continue and unicode_lib.isAsciiDigitByte(byte)) return true;
     if (is_id_continue and byte == '_') return true;
     return false;
-}
-
-pub fn stringValueUnits(string_value: core.JSValue) ?emoji.StringUnits {
-    const string_object = string_value.asStringBody() orelse return null;
-    switch (string_object.resolveData()) {
-        .latin1 => |bytes| {
-            return .{ .latin1 = bytes };
-        },
-        .utf16 => |units| {
-            return .{ .utf16 = units };
-        },
-    }
 }
 
 pub fn findPropertyEscapeMatch(source: []const u8, string_value: core.JSValue, start_index: usize, sticky: bool) ?RegExpMatch {

@@ -1,6 +1,5 @@
 const std = @import("std");
 const unicode = @import("../unicode.zig");
-const emoji_sequences = @import("../unicode/emoji_data.zig");
 
 pub const max_captures = 256;
 const max_stack = 256;
@@ -1500,7 +1499,7 @@ const Compiler = struct {
                 self.index += 2;
                 var ranges = RangeSet.init(self.allocator);
                 defer ranges.deinit();
-                try ranges.addClassEscape(escaped);
+                try addClassEscape(&ranges, escaped);
                 if (self.flags.ignore_case) try ranges.regexpCanonicalize(self.flags.unicode);
                 if (is_backward_dir) try self.emitOp(.prev);
                 try self.emitRangeSet(&ranges);
@@ -1605,9 +1604,15 @@ const Compiler = struct {
                     }
                 }
                 const inverted = escaped == 'P';
-                var ranges = try self.parseUnicodePropertyEscape(inverted);
+                var ranges = try self.parseUnicodePropertyEscape();
                 defer ranges.deinit();
-                if (self.flags.ignore_case) try ranges.regexpCanonicalize(self.flags.unicode);
+                if (self.flags.ignore_case and (self.flags.bits & regex_bytecode.flags.unicode_sets) != 0) {
+                    try ranges.regexpCanonicalize(self.flags.unicode);
+                }
+                if (inverted) try ranges.invert();
+                if (self.flags.ignore_case and (self.flags.bits & regex_bytecode.flags.unicode_sets) == 0) {
+                    try ranges.regexpCanonicalize(self.flags.unicode);
+                }
                 if (is_backward_dir) try self.emitOp(.prev);
                 try self.emitRangeSet(&ranges);
                 if (is_backward_dir) try self.emitOp(.prev);
@@ -1696,7 +1701,7 @@ const Compiler = struct {
         while (self.index < self.pattern.len) {
             if (self.pattern[self.index] == ']') {
                 self.index += 1;
-                try ranges.normalize();
+                ranges.normalize();
                 if (self.flags.ignore_case) try ranges.regexpCanonicalize(self.flags.unicode);
                 if (invert) try ranges.invert();
                 if (is_backward_dir) try self.emitOp(.prev);
@@ -1775,8 +1780,7 @@ const Compiler = struct {
         }
 
         fn subtract(self: *ClassSet, other: *ClassSet) !void {
-            try other.ranges.invert();
-            try self.ranges.intersectWith(&other.ranges);
+            try self.ranges.subWith(&other.ranges);
             var write: usize = 0;
             for (self.strings.items) |s| {
                 if (!other.containsString(s)) {
@@ -1857,7 +1861,7 @@ const Compiler = struct {
                 try result.unionWith(&rhs.set);
             }
         }
-        try result.ranges.normalize();
+        result.ranges.normalize();
         if (invert) {
             // ClassComplement of a set that may contain strings.
             if (result.strings.items.len != 0) return error.InvalidPattern;
@@ -1913,12 +1917,12 @@ const Compiler = struct {
                 return error.InvalidPattern;
             }
             if (second.code_point < first.code_point) return error.InvalidPattern;
-            try set.ranges.addInclusive(first.code_point, second.code_point);
+            try addInclusiveRange(&set.ranges, first.code_point, second.code_point);
             was_range = true;
         } else {
-            try set.ranges.addAtom(first);
+            try addAtomToRangeSet(&set.ranges, first);
         }
-        try set.ranges.normalize();
+        set.ranges.normalize();
         if (self.flags.ignore_case) try set.ranges.regexpCanonicalize(true);
         return .{ .set = set, .was_range = was_range };
     }
@@ -1943,7 +1947,7 @@ const Compiler = struct {
             if (byte == '}' or byte == '|') {
                 self.index += 1;
                 if (current.items.len == 1) {
-                    try set.ranges.addInclusive(current.items[0], current.items[0]);
+                    try addInclusiveRange(&set.ranges, current.items[0], current.items[0]);
                 } else {
                     const copy = try self.allocator.dupe(u21, current.items);
                     errdefer self.allocator.free(copy);
@@ -1961,7 +1965,7 @@ const Compiler = struct {
             const cp = if (self.flags.ignore_case) canonicalize(atom.code_point, true) else atom.code_point;
             try current.append(self.allocator, cp);
         }
-        try set.ranges.normalize();
+        set.ranges.normalize();
         if (self.flags.ignore_case) try set.ranges.regexpCanonicalize(true);
         return set;
     }
@@ -1989,7 +1993,7 @@ const Compiler = struct {
 
         const has_empty = items.len > 0 and items[items.len - 1].len == 0;
         const string_count = items.len - @intFromBool(has_empty);
-        const has_ranges = set.ranges.ranges.items.len != 0;
+        const has_ranges = !set.ranges.isEmpty();
 
         var end_jumps = std.ArrayList(usize).empty;
         defer end_jumps.deinit(self.allocator);
@@ -2050,7 +2054,7 @@ const Compiler = struct {
         if (self.index < self.pattern.len and self.pattern[self.index] == '-' and self.index + 1 < self.pattern.len and self.pattern[self.index + 1] != ']') {
             if (first != .code_point) {
                 if (self.flags.unicode) return error.InvalidPattern;
-                try ranges.addAtom(first);
+                try addAtomToRangeSet(&ranges, first);
                 return ranges;
             }
             const hyphen_index = self.index;
@@ -2059,13 +2063,13 @@ const Compiler = struct {
             if (second != .code_point) {
                 if (self.flags.unicode) return error.InvalidPattern;
                 self.index = hyphen_index;
-                try ranges.addAtom(first);
+                try addAtomToRangeSet(&ranges, first);
                 return ranges;
             }
             if (second.code_point < first.code_point) return error.InvalidPattern;
-            try ranges.addInclusive(first.code_point, second.code_point);
+            try addInclusiveRange(&ranges, first.code_point, second.code_point);
         } else {
-            try ranges.addAtom(first);
+            try addAtomToRangeSet(&ranges, first);
         }
         return ranges;
     }
@@ -2081,7 +2085,7 @@ const Compiler = struct {
                     self.index += 2;
                     var ranges = RangeSet.init(self.allocator);
                     errdefer ranges.deinit();
-                    try ranges.addClassEscape(escaped);
+                    try addClassEscape(&ranges, escaped);
                     return .{ .ranges = ranges };
                 },
                 '0' => {
@@ -2115,8 +2119,8 @@ const Compiler = struct {
                     self.index += 2;
                     var ranges = RangeSet.init(self.allocator);
                     errdefer ranges.deinit();
-                    try ranges.addInclusive('\\', '\\');
-                    try ranges.addInclusive('c', 'c');
+                    try addInclusiveRange(&ranges, '\\', '\\');
+                    try addInclusiveRange(&ranges, 'c', 'c');
                     return .{ .ranges = ranges };
                 },
                 'B', 'k' => {
@@ -2129,7 +2133,7 @@ const Compiler = struct {
                         self.index += 2;
                         return .{ .code_point = escaped };
                     }
-                    return .{ .ranges = try self.parseUnicodePropertyEscape(escaped == 'P') };
+                    return .{ .ranges = try self.parseUnicodePropertyEscapeWithOrdering(escaped == 'P') };
                 },
                 'x' => {
                     const escape_start = self.index;
@@ -2177,7 +2181,7 @@ const Compiler = struct {
         if (cp > 0xffff and !self.flags.unicode) {
             var ranges = RangeSet.init(self.allocator);
             errdefer ranges.deinit();
-            try ranges.addNonUnicodeSurrogatePair(cp);
+            try addNonUnicodeSurrogatePair(&ranges, cp);
             return .{ .ranges = ranges };
         }
         return .{ .code_point = cp };
@@ -2406,34 +2410,6 @@ const Compiler = struct {
         return parseGroupNameAt(self.pattern, &self.index);
     }
 
-    /// The seven v-mode Unicode properties of strings (UTS #51 sequence
-    /// properties; sec-static-semantics-unicodematchpropertyofstrings).
-    const StringProperty = enum {
-        basic_emoji,
-        emoji_keycap_sequence,
-        rgi_emoji,
-        rgi_emoji_flag_sequence,
-        rgi_emoji_modifier_sequence,
-        rgi_emoji_tag_sequence,
-        rgi_emoji_zwj_sequence,
-    };
-
-    fn stringPropertyByName(name: []const u8) ?StringProperty {
-        const names = [_]struct { []const u8, StringProperty }{
-            .{ "Basic_Emoji", .basic_emoji },
-            .{ "Emoji_Keycap_Sequence", .emoji_keycap_sequence },
-            .{ "RGI_Emoji", .rgi_emoji },
-            .{ "RGI_Emoji_Flag_Sequence", .rgi_emoji_flag_sequence },
-            .{ "RGI_Emoji_Modifier_Sequence", .rgi_emoji_modifier_sequence },
-            .{ "RGI_Emoji_Tag_Sequence", .rgi_emoji_tag_sequence },
-            .{ "RGI_Emoji_ZWJ_Sequence", .rgi_emoji_zwj_sequence },
-        };
-        for (names) |entry| {
-            if (std.mem.eql(u8, entry[0], name)) return entry[1];
-        }
-        return null;
-    }
-
     /// When the `\p{...}`/`\P{...}` escape at `self.index` names a v-mode
     /// property of strings, consumes it and returns its class set. `\P` of
     /// a property of strings is a SyntaxError (MayContainStrings under
@@ -2446,60 +2422,71 @@ const Compiler = struct {
         var end = self.index + 3;
         while (end < self.pattern.len and self.pattern[end] != '}') : (end += 1) {}
         if (end >= self.pattern.len) return null;
-        const property = stringPropertyByName(self.pattern[self.index + 3 .. end]) orelse return null;
+        const property_name = self.pattern[self.index + 3 .. end];
+        if (!unicode.isSequencePropertyName(property_name)) return null;
         if (self.pattern[self.index + 1] == 'P') return error.InvalidPattern;
+        const set = (try self.buildStringPropertyClassSet(property_name)).?;
         self.index = end + 1;
-        return try self.buildStringPropertyClassSet(property);
+        return set;
     }
 
-    fn buildStringPropertyClassSet(self: *Compiler, property: StringProperty) CompileError!ClassSet {
+    const SequenceBuildContext = struct {
+        compiler: *Compiler,
+        set: *ClassSet,
+    };
+
+    fn buildStringPropertyClassSet(self: *Compiler, property_name: []const u8) CompileError!?ClassSet {
         var set = ClassSet.init(self.allocator);
         errdefer set.deinit();
-        switch (property) {
-            .basic_emoji => try self.addBasicEmoji(&set),
-            .emoji_keycap_sequence => try self.addPropertyStrings(&set, &emoji_sequences.emoji_keycap_sequences),
-            .rgi_emoji_flag_sequence => try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_flag_sequences),
-            .rgi_emoji_modifier_sequence => try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_modifier_sequences),
-            .rgi_emoji_tag_sequence => try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_tag_sequences),
-            .rgi_emoji_zwj_sequence => try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_zwj_sequences),
-            .rgi_emoji => {
-                // RGI_Emoji is the union of the six other properties of
-                // strings (UTS #51); their sequence sets are pairwise
-                // disjoint, so plain concatenation needs no dedup.
-                try self.addBasicEmoji(&set);
-                try self.addPropertyStrings(&set, &emoji_sequences.emoji_keycap_sequences);
-                try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_flag_sequences);
-                try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_modifier_sequences);
-                try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_tag_sequences);
-                try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_zwj_sequences);
-            },
+
+        var ctx = SequenceBuildContext{ .compiler = self, .set = &set };
+        const found = unicode.addSequenceProperty(self.allocator, SequenceBuildContext, &ctx, property_name, addSequenceToClassSet) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidProperty => unreachable,
+        };
+        if (!found) {
+            set.deinit();
+            return null;
         }
-        try set.ranges.normalize();
+
+        set.ranges.normalize();
         if (self.flags.ignore_case) try set.ranges.regexpCanonicalize(true);
         return set;
     }
 
-    fn addBasicEmoji(self: *Compiler, set: *ClassSet) CompileError!void {
-        for (emoji_sequences.basic_emoji_ranges) |range| {
-            try set.ranges.addInclusive(range.lo, range.hi);
+    fn addSequenceToClassSet(ctx: *SequenceBuildContext, sequence: []const u21) std.mem.Allocator.Error!void {
+        if (sequence.len == 1) {
+            const cp = sequence[0];
+            try ctx.set.ranges.addInterval(cp, cp + 1);
+            return;
         }
-        try self.addPropertyStrings(set, &emoji_sequences.basic_emoji_sequences);
+
+        const copy = try ctx.compiler.allocator.dupe(u21, sequence);
+        errdefer ctx.compiler.allocator.free(copy);
+        if (ctx.compiler.flags.ignore_case) {
+            for (copy) |*cp| cp.* = canonicalize(cp.*, true);
+        }
+        if (ctx.set.containsString(copy)) {
+            ctx.compiler.allocator.free(copy);
+            return;
+        }
+        try ctx.set.strings.append(ctx.compiler.allocator, copy);
     }
 
-    fn addPropertyStrings(self: *Compiler, set: *ClassSet, property_sequences: []const []const u21) CompileError!void {
-        try set.strings.ensureUnusedCapacity(self.allocator, property_sequences.len);
-        for (property_sequences) |sequence| {
-            const copy = try self.allocator.dupe(u21, sequence);
-            if (self.flags.ignore_case) {
-                for (copy) |*cp| cp.* = canonicalize(cp.*, true);
-            }
-            // The generated tables are already deduplicated, so skip
-            // ClassSet.addOwnedString's linear duplicate scan.
-            set.strings.appendAssumeCapacity(copy);
+    fn parseUnicodePropertyEscapeWithOrdering(self: *Compiler, inverted: bool) CompileError!RangeSet {
+        var ranges = try self.parseUnicodePropertyEscape();
+        errdefer ranges.deinit();
+        if (self.flags.ignore_case and (self.flags.bits & regex_bytecode.flags.unicode_sets) != 0) {
+            try ranges.regexpCanonicalize(self.flags.unicode);
         }
+        if (inverted) try ranges.invert();
+        if (self.flags.ignore_case and (self.flags.bits & regex_bytecode.flags.unicode_sets) == 0) {
+            try ranges.regexpCanonicalize(self.flags.unicode);
+        }
+        return ranges;
     }
 
-    fn parseUnicodePropertyEscape(self: *Compiler, inverted: bool) CompileError!RangeSet {
+    fn parseUnicodePropertyEscape(self: *Compiler) CompileError!RangeSet {
         std.debug.assert(self.pattern[self.index] == '\\');
         if (self.index + 3 >= self.pattern.len or self.pattern[self.index + 2] != '{') return error.InvalidPattern;
         self.index += 3;
@@ -2514,7 +2501,7 @@ const Compiler = struct {
 
         var ranges = RangeSet.init(self.allocator);
         errdefer ranges.deinit();
-        try ranges.addUnicodeProperty(name, inverted);
+        try addUnicodeProperty(&ranges, name);
         return ranges;
     }
 
@@ -2694,25 +2681,36 @@ const Compiler = struct {
     }
 
     fn emitRangeSet(self: *Compiler, ranges: *RangeSet) !void {
-        try ranges.normalize();
-        if (ranges.ranges.items.len == 0) {
+        ranges.normalize();
+        if (ranges.isEmpty()) {
             try self.emitOpU16(.range32, 1);
             try self.appendU32(0xffffffff);
             try self.appendU32(0xffffffff);
             return;
         }
-        const use_32 = ranges.ranges.items[ranges.ranges.items.len - 1].hi > 0x10000;
+        var high = ranges.lastHi();
+        if (high == unicode.char_range_sentinel) {
+            high = ranges.points.items[ranges.points.items.len - 2];
+        }
+        const use_32 = high > 0xffff;
+        const range_count = ranges.rangeCount();
         if (use_32) {
-            try self.emitOpU16(.range32, @intCast(ranges.ranges.items.len));
-            for (ranges.ranges.items) |range| {
+            try self.emitOpU16(.range32, @intCast(range_count));
+            var i: usize = 0;
+            while (i < range_count) : (i += 1) {
+                const range = ranges.rangeAt(i);
                 try self.appendU32(range.lo);
                 try self.appendU32(@as(u32, range.hi) - 1);
             }
         } else {
-            try self.emitOpU16(.range, @intCast(ranges.ranges.items.len));
-            for (ranges.ranges.items) |range| {
+            try self.emitOpU16(.range, @intCast(range_count));
+            var i: usize = 0;
+            while (i < range_count) : (i += 1) {
+                const range = ranges.rangeAt(i);
+                var inclusive_hi = range.hi - 1;
+                if (inclusive_hi == unicode.char_range_sentinel - 1) inclusive_hi = 0xffff;
                 try self.appendU16(@intCast(range.lo));
-                try self.appendU16(@intCast(range.hi - 1));
+                try self.appendU16(@intCast(inclusive_hi));
             }
         }
     }
@@ -2803,226 +2801,66 @@ const ClassAtom = union(enum) {
     ranges: RangeSet,
 };
 
-const Range = struct {
-    lo: u21,
-    hi: u21,
-};
+const RangeSet = unicode.CharRange;
 
-const RangeSet = struct {
-    allocator: std.mem.Allocator,
-    ranges: std.ArrayList(Range),
-
-    fn init(allocator: std.mem.Allocator) RangeSet {
-        return .{ .allocator = allocator, .ranges = .empty };
-    }
-
-    fn deinit(self: *RangeSet) void {
-        self.ranges.deinit(self.allocator);
-    }
-
-    fn addAtom(self: *RangeSet, atom: ClassAtom) !void {
-        switch (atom) {
-            .code_point => |cp| try self.addInclusive(cp, cp),
-            .ranges => |owned_ranges| {
-                defer {
-                    var mutable = owned_ranges;
-                    mutable.deinit();
-                }
-                try self.ranges.appendSlice(self.allocator, owned_ranges.ranges.items);
-            },
-        }
-    }
-
-    fn addSet(self: *RangeSet, other: *const RangeSet) !void {
-        try self.ranges.appendSlice(self.allocator, other.ranges.items);
-    }
-
-    fn addInclusive(self: *RangeSet, lo: u21, hi_inclusive: u21) !void {
-        if (hi_inclusive < lo) return error.InvalidPattern;
-        if (hi_inclusive == max_code_point) {
-            try self.ranges.append(self.allocator, .{ .lo = lo, .hi = max_code_point + 1 });
-        } else {
-            try self.ranges.append(self.allocator, .{ .lo = lo, .hi = hi_inclusive + 1 });
-        }
-    }
-
-    fn addNonUnicodeSurrogatePair(self: *RangeSet, cp: u21) !void {
-        const pair = unicode.surrogatePairFromCodePoint(cp);
-        try self.addInclusive(pair.high, pair.high);
-        try self.addInclusive(pair.low, pair.low);
-    }
-
-    fn addHalfOpen(self: *RangeSet, lo: u21, hi: u21) !void {
-        if (hi <= lo) return;
-        try self.ranges.append(self.allocator, .{ .lo = lo, .hi = hi });
-    }
-
-    fn addClassEscape(self: *RangeSet, escaped: u8) !void {
-        switch (escaped) {
-            'd', 'D' => {
-                try self.addHalfOpen('0', '9' + 1);
-                if (escaped == 'D') try self.invert();
-            },
-            's', 'S' => {
-                for (unicode.ecmaWhitespaceOrLineTerminatorRanges) |range| {
-                    try self.addHalfOpen(range.lo, range.hi);
-                }
-                if (escaped == 'S') try self.invert();
-            },
-            'w', 'W' => {
-                try self.addHalfOpen('0', '9' + 1);
-                try self.addHalfOpen('A', 'Z' + 1);
-                try self.addHalfOpen('_', '_' + 1);
-                try self.addHalfOpen('a', 'z' + 1);
-                if (escaped == 'W') try self.invert();
-            },
-            else => unreachable,
-        }
-    }
-
-    fn addUnicodeProperty(self: *RangeSet, name: []const u8, inverted: bool) CompileError!void {
-        const property_ranges = unicode.propertyRangesAlloc(self.allocator, name, inverted) catch |err| switch (err) {
-            error.InvalidProperty => return error.InvalidPattern,
-            error.OutOfMemory => return error.OutOfMemory,
-        };
-        defer self.allocator.free(property_ranges);
-        for (property_ranges) |range| try self.addHalfOpen(range.lo, range.hi);
-    }
-
-    fn regexpCanonicalize(self: *RangeSet, is_unicode: bool) !void {
-        try self.normalize();
-        if (try self.regexpCanonicalizeAscii(is_unicode)) return;
-
-        const bit_count: usize = @as(usize, max_code_point) + 1;
-        var present = try self.allocator.alloc(bool, bit_count);
-        defer self.allocator.free(present);
-        @memset(present, false);
-
-        for (self.ranges.items) |range| {
-            var cp = range.lo;
-            while (cp < range.hi) : (cp += 1) {
-                const folded = unicode.regexpCanonicalize(cp, is_unicode);
-                present[@intCast(folded)] = true;
+fn addAtomToRangeSet(ranges: *RangeSet, atom: ClassAtom) CompileError!void {
+    switch (atom) {
+        .code_point => |cp| try addInclusiveRange(ranges, cp, cp),
+        .ranges => |owned_ranges| {
+            defer {
+                var mutable = owned_ranges;
+                mutable.deinit();
             }
-        }
+            try ranges.addSet(&owned_ranges);
+        },
+    }
+}
 
-        var canonical = std.ArrayList(Range).empty;
-        errdefer canonical.deinit(self.allocator);
-        var cp: usize = 0;
-        while (cp < bit_count) {
-            if (!present[cp]) {
-                cp += 1;
-                continue;
+fn addInclusiveRange(ranges: *RangeSet, lo: u21, hi_inclusive: u21) CompileError!void {
+    if (hi_inclusive < lo) return error.InvalidPattern;
+    if (hi_inclusive == max_code_point) {
+        try ranges.addInterval(lo, max_code_point + 1);
+    } else {
+        try ranges.addInterval(lo, hi_inclusive + 1);
+    }
+}
+
+fn addNonUnicodeSurrogatePair(ranges: *RangeSet, cp: u21) CompileError!void {
+    const pair = unicode.surrogatePairFromCodePoint(cp);
+    try addInclusiveRange(ranges, pair.high, pair.high);
+    try addInclusiveRange(ranges, pair.low, pair.low);
+}
+
+fn addClassEscape(ranges: *RangeSet, escaped: u8) CompileError!void {
+    switch (escaped) {
+        'd', 'D' => {
+            try ranges.addInterval('0', '9' + 1);
+            if (escaped == 'D') try ranges.invert();
+        },
+        's', 'S' => {
+            for (unicode.ecmaWhitespaceOrLineTerminatorRanges) |range| {
+                try ranges.addInterval(range.lo, range.hi);
             }
-            const start = cp;
-            while (cp < bit_count and present[cp]) : (cp += 1) {}
-            try canonical.append(self.allocator, .{ .lo = @intCast(start), .hi = @intCast(cp) });
-        }
-
-        self.ranges.deinit(self.allocator);
-        self.ranges = canonical;
+            if (escaped == 'S') try ranges.invert();
+        },
+        'w', 'W' => {
+            try ranges.addInterval('0', '9' + 1);
+            try ranges.addInterval('A', 'Z' + 1);
+            try ranges.addInterval('_', '_' + 1);
+            try ranges.addInterval('a', 'z' + 1);
+            if (escaped == 'W') try ranges.invert();
+        },
+        else => unreachable,
     }
+}
 
-    fn regexpCanonicalizeAscii(self: *RangeSet, is_unicode: bool) !bool {
-        for (self.ranges.items) |range| {
-            if (range.hi > 128) return false;
-        }
-
-        var present = [_]bool{false} ** 128;
-        for (self.ranges.items) |range| {
-            var cp = range.lo;
-            while (cp < range.hi) : (cp += 1) {
-                const folded = unicode.regexpCanonicalize(cp, is_unicode);
-                std.debug.assert(folded < present.len);
-                present[@intCast(folded)] = true;
-            }
-        }
-
-        var canonical = std.ArrayList(Range).empty;
-        errdefer canonical.deinit(self.allocator);
-        var cp: usize = 0;
-        while (cp < present.len) {
-            if (!present[cp]) {
-                cp += 1;
-                continue;
-            }
-            const start = cp;
-            while (cp < present.len and present[cp]) : (cp += 1) {}
-            try canonical.append(self.allocator, .{ .lo = @intCast(start), .hi = @intCast(cp) });
-        }
-
-        self.ranges.deinit(self.allocator);
-        self.ranges = canonical;
-        return true;
-    }
-
-    fn invert(self: *RangeSet) !void {
-        try self.normalize();
-        var inverted = std.ArrayList(Range).empty;
-        errdefer inverted.deinit(self.allocator);
-        var cursor: u21 = 0;
-        for (self.ranges.items) |range| {
-            if (cursor < range.lo) try inverted.append(self.allocator, .{ .lo = cursor, .hi = range.lo });
-            if (cursor < range.hi) cursor = range.hi;
-        }
-        if (cursor <= max_code_point) try inverted.append(self.allocator, .{ .lo = cursor, .hi = max_code_point + 1 });
-        self.ranges.deinit(self.allocator);
-        self.ranges = inverted;
-    }
-
-    fn intersectWith(self: *RangeSet, other: *RangeSet) !void {
-        try self.normalize();
-        try other.normalize();
-        var intersection = std.ArrayList(Range).empty;
-        errdefer intersection.deinit(self.allocator);
-
-        var lhs_index: usize = 0;
-        var rhs_index: usize = 0;
-        while (lhs_index < self.ranges.items.len and rhs_index < other.ranges.items.len) {
-            const lhs = self.ranges.items[lhs_index];
-            const rhs = other.ranges.items[rhs_index];
-            const lo = @max(lhs.lo, rhs.lo);
-            const hi = @min(lhs.hi, rhs.hi);
-            if (lo < hi) try intersection.append(self.allocator, .{ .lo = lo, .hi = hi });
-            if (lhs.hi < rhs.hi) {
-                lhs_index += 1;
-            } else {
-                rhs_index += 1;
-            }
-        }
-
-        self.ranges.deinit(self.allocator);
-        self.ranges = intersection;
-    }
-
-    fn normalize(self: *RangeSet) !void {
-        insertionSortRanges(self.ranges.items);
-        if (self.ranges.items.len <= 1) return;
-        var write: usize = 0;
-        var read: usize = 1;
-        while (read < self.ranges.items.len) : (read += 1) {
-            const current = self.ranges.items[read];
-            if (current.lo <= self.ranges.items[write].hi) {
-                if (current.hi > self.ranges.items[write].hi) self.ranges.items[write].hi = current.hi;
-            } else {
-                write += 1;
-                self.ranges.items[write] = current;
-            }
-        }
-        self.ranges.shrinkRetainingCapacity(write + 1);
-    }
-};
-
-fn insertionSortRanges(ranges: []Range) void {
-    var i: usize = 1;
-    while (i < ranges.len) : (i += 1) {
-        const item = ranges[i];
-        var j = i;
-        while (j > 0 and ranges[j - 1].lo > item.lo) : (j -= 1) {
-            ranges[j] = ranges[j - 1];
-        }
-        ranges[j] = item;
-    }
+fn addUnicodeProperty(ranges: *RangeSet, name: []const u8) CompileError!void {
+    var property_points = unicode.propertyRangePoints(ranges.allocator, name, false) catch |err| switch (err) {
+        error.InvalidProperty => return error.InvalidPattern,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    defer property_points.deinit();
+    try ranges.addSet(&property_points);
 }
 
 fn computeStackSize(code: []const u8) CompileError!u8 {
@@ -3578,4 +3416,59 @@ test "Zig regexp compiler emits bytecode for common ASCII patterns" {
     try std.testing.expectEqual(.match, property_class_status.result);
     try std.testing.expectEqual(@as(usize, 0), property_class_status.match.start);
     try std.testing.expectEqual(@as(usize, 1), property_class_status.match.end);
+
+    const basic_emoji = try compile(allocator, "\\p{Basic_Emoji}", "v");
+    defer allocator.free(basic_emoji);
+    const copyright = [_]u16{0x00a9};
+    const copyright_vs16 = [_]u16{ 0x00a9, 0xfe0f };
+    try std.testing.expectEqual(.no_match, (try regex_bytecode.exec(allocator, basic_emoji, .{ .utf16 = &copyright }, 0)).result);
+    const basic_emoji_status = try regex_bytecode.exec(allocator, basic_emoji, .{ .utf16 = &copyright_vs16 }, 0);
+    try std.testing.expectEqual(.match, basic_emoji_status.result);
+    try std.testing.expectEqual(@as(usize, 2), basic_emoji_status.match.end);
+
+    const modifier_sequence = try compile(allocator, "\\p{RGI_Emoji_Modifier_Sequence}", "v");
+    defer allocator.free(modifier_sequence);
+    const family_light_skin = [_]u16{ 0xd83d, 0xdc6a, 0xd83c, 0xdffb };
+    const modifier_sequence_status = try regex_bytecode.exec(allocator, modifier_sequence, .{ .utf16 = &family_light_skin }, 0);
+    try std.testing.expectEqual(.match, modifier_sequence_status.result);
+    try std.testing.expectEqual(@as(usize, 4), modifier_sequence_status.match.end);
+
+    const flag_sequence = try compile(allocator, "\\p{RGI_Emoji_Flag_Sequence}", "v");
+    defer allocator.free(flag_sequence);
+    const us_flag = [_]u16{ 0xd83c, 0xddfa, 0xd83c, 0xddf8 };
+    const flag_sequence_status = try regex_bytecode.exec(allocator, flag_sequence, .{ .utf16 = &us_flag }, 0);
+    try std.testing.expectEqual(.match, flag_sequence_status.result);
+    try std.testing.expectEqual(@as(usize, 4), flag_sequence_status.match.end);
+
+    const keycap_sequence = try compile(allocator, "\\p{Emoji_Keycap_Sequence}", "v");
+    defer allocator.free(keycap_sequence);
+    const keycap_one = [_]u16{ '1', 0xfe0f, 0x20e3 };
+    const keycap_sequence_status = try regex_bytecode.exec(allocator, keycap_sequence, .{ .utf16 = &keycap_one }, 0);
+    try std.testing.expectEqual(.match, keycap_sequence_status.result);
+    try std.testing.expectEqual(@as(usize, 3), keycap_sequence_status.match.end);
+
+    const zwj_sequence = try compile(allocator, "\\p{RGI_Emoji_ZWJ_Sequence}", "v");
+    defer allocator.free(zwj_sequence);
+    const family_zwj = [_]u16{ 0xd83d, 0xdc68, 0x200d, 0xd83d, 0xdc69, 0x200d, 0xd83d, 0xdc67, 0x200d, 0xd83d, 0xdc66 };
+    const zwj_sequence_status = try regex_bytecode.exec(allocator, zwj_sequence, .{ .utf16 = &family_zwj }, 0);
+    try std.testing.expectEqual(.match, zwj_sequence_status.result);
+    try std.testing.expectEqual(@as(usize, 11), zwj_sequence_status.match.end);
+
+    const rgi_emoji = try compile(allocator, "\\p{RGI_Emoji}", "v");
+    defer allocator.free(rgi_emoji);
+    const rgi_emoji_status = try regex_bytecode.exec(allocator, rgi_emoji, .{ .utf16 = &us_flag }, 0);
+    try std.testing.expectEqual(.match, rgi_emoji_status.result);
+    try std.testing.expectEqual(@as(usize, 4), rgi_emoji_status.match.end);
+
+    try std.testing.expectError(error.InvalidPattern, compile(allocator, "\\P{RGI_Emoji}", "v"));
+
+    const not_lower_u = try compile(allocator, "\\P{Lowercase_Letter}", "iuy");
+    defer allocator.free(not_lower_u);
+    try std.testing.expectEqual(.match, (try regex_bytecode.exec(allocator, not_lower_u, .{ .latin1 = "a" }, 0)).result);
+    try std.testing.expectEqual(.match, (try regex_bytecode.exec(allocator, not_lower_u, .{ .latin1 = "A" }, 0)).result);
+
+    const not_lower_v = try compile(allocator, "\\P{Lowercase_Letter}", "ivy");
+    defer allocator.free(not_lower_v);
+    try std.testing.expectEqual(.no_match, (try regex_bytecode.exec(allocator, not_lower_v, .{ .latin1 = "a" }, 0)).result);
+    try std.testing.expectEqual(.no_match, (try regex_bytecode.exec(allocator, not_lower_v, .{ .latin1 = "A" }, 0)).result);
 }

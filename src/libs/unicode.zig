@@ -2,9 +2,8 @@ const std = @import("std");
 
 const data = @import("unicode/data.zig");
 const names = @import("unicode/names.zig");
+const properties = @import("unicode/properties.zig");
 
-pub const emoji = @import("unicode/emoji.zig");
-pub const emoji_data = @import("unicode/emoji_data.zig");
 pub const regexp_properties = @import("unicode/regexp_properties.zig");
 
 pub const Category = enum {
@@ -27,6 +26,7 @@ pub fn asciiCategory(c: u21) Category {
 pub const case_mapping_max_len = 3;
 const unicode_limit: u21 = 0x110000;
 const max_code_point: u21 = 0x10ffff;
+pub const char_range_sentinel: u32 = std.math.maxInt(u32);
 const high_surrogate_min: u21 = 0xd800;
 const high_surrogate_max: u21 = 0xdbff;
 const low_surrogate_min: u21 = 0xdc00;
@@ -404,33 +404,52 @@ pub fn normalizeAlloc(allocator: std.mem.Allocator, src: []const u32, form: Norm
     return try out.toOwnedSlice(allocator);
 }
 
-/// Returns owned half-open Unicode code point ranges. Caller must free with the same allocator.
-pub fn propertyRangesAlloc(
+/// Returns owned QuickJS-style boundary points: [lo, hi, lo, hi, ...].
+/// Caller must free with the same allocator.
+pub fn propertyRangePointsAlloc(
     allocator: std.mem.Allocator,
     expr: []const u8,
     inverted: bool,
-) UnicodeError![]CodePointRange {
+) UnicodeError![]u32 {
+    var buffer = try propertyRangePoints(allocator, expr, inverted);
+    defer buffer.deinit();
+    const items = buffer.items();
+    const points = try allocator.alloc(u32, items.len);
+    @memcpy(points, items);
+    return points;
+}
+
+pub fn propertyRangePoints(
+    allocator: std.mem.Allocator,
+    expr: []const u8,
+    inverted: bool,
+) UnicodeError!CharRange {
+    var ranges = try propertyRangeSet(allocator, expr);
+    errdefer ranges.deinit();
+
+    if (inverted) try ranges.invert();
+    ranges.compress();
+    return ranges;
+}
+
+fn propertyRangeSet(allocator: std.mem.Allocator, expr: []const u8) UnicodeError!RangeSet {
     const equals = std.mem.indexOfScalar(u8, expr, '=');
     const name = if (equals) |pos| expr[0..pos] else expr;
     const value = if (equals) |pos| expr[pos + 1 ..] else "";
     if (name.len == 0 or name.len >= 64 or value.len >= 64) return error.InvalidProperty;
 
-    var ranges = if (std.mem.eql(u8, name, "Script") or std.mem.eql(u8, name, "sc"))
-        try scriptRanges(allocator, value, false)
+    return if (std.mem.eql(u8, name, "Script") or std.mem.eql(u8, name, "sc"))
+        scriptRanges(allocator, value, false)
     else if (std.mem.eql(u8, name, "Script_Extensions") or std.mem.eql(u8, name, "scx"))
-        try scriptRanges(allocator, value, true)
+        scriptRanges(allocator, value, true)
     else if (std.mem.eql(u8, name, "General_Category") or std.mem.eql(u8, name, "gc"))
-        try generalCategory(allocator, value)
+        generalCategory(allocator, value)
     else if (value.len == 0) blk: {
         break :blk generalCategory(allocator, name) catch |err| switch (err) {
             error.InvalidProperty => try unicodeProp(allocator, name),
             else => return err,
         };
     } else return error.InvalidProperty;
-    errdefer ranges.deinit();
-
-    if (inverted) try ranges.invert();
-    return try ranges.toOwnedSlice();
 }
 
 pub fn toUpperAscii(c: u8) u8 {
@@ -992,145 +1011,288 @@ fn composePair(c0: u32, c1: u32) u32 {
     return unicodeComposePair(c0, c1);
 }
 
-const RangeSet = struct {
+pub const CharRangePointRange = struct {
+    lo: u32,
+    hi: u32,
+};
+
+pub const CharRange = struct {
     allocator: std.mem.Allocator,
-    ranges: std.ArrayList(CodePointRange),
+    points: std.ArrayList(u32),
 
-    fn init(allocator: std.mem.Allocator) RangeSet {
-        return .{ .allocator = allocator, .ranges = .empty };
+    pub fn init(allocator: std.mem.Allocator) CharRange {
+        return .{ .allocator = allocator, .points = .empty };
     }
 
-    fn deinit(self: *RangeSet) void {
-        self.ranges.deinit(self.allocator);
+    pub fn deinit(self: *CharRange) void {
+        self.points.deinit(self.allocator);
     }
 
-    fn addInterval(self: *RangeSet, lo_in: u32, hi_in: u32) std.mem.Allocator.Error!void {
-        if (hi_in <= lo_in or lo_in >= unicode_limit) return;
-        const hi = @min(hi_in, unicode_limit);
-        if (hi <= lo_in) return;
-        try self.ranges.append(self.allocator, .{ .lo = @intCast(lo_in), .hi = @intCast(hi) });
+    pub fn items(self: *const CharRange) []const u32 {
+        return self.points.items;
     }
 
-    fn normalize(self: *RangeSet) void {
-        std.mem.sort(CodePointRange, self.ranges.items, {}, rangeLessThan);
-        if (self.ranges.items.len <= 1) return;
+    pub fn addInterval(self: *CharRange, lo: u32, hi: u32) std.mem.Allocator.Error!void {
+        if (hi <= lo) return;
+        try self.points.ensureUnusedCapacity(self.allocator, 2);
+        self.points.appendAssumeCapacity(lo);
+        self.points.appendAssumeCapacity(hi);
+    }
+
+    pub fn appendPoints(self: *CharRange, points: []const u32) std.mem.Allocator.Error!void {
+        try self.points.appendSlice(self.allocator, points);
+    }
+
+    pub fn addSet(self: *CharRange, other: *const CharRange) std.mem.Allocator.Error!void {
+        try self.appendPoints(other.points.items);
+    }
+
+    pub fn normalize(self: *CharRange) void {
+        self.sortAndRemoveOverlap();
+    }
+
+    pub fn compress(self: *CharRange) void {
+        self.compressAdjacent();
+    }
+
+    fn compressAdjacent(self: *CharRange) void {
+        const pts = self.points.items;
+        var read: usize = 0;
         var write: usize = 0;
-        var read: usize = 1;
-        while (read < self.ranges.items.len) : (read += 1) {
-            const current = self.ranges.items[read];
-            if (current.lo <= self.ranges.items[write].hi) {
-                if (current.hi > self.ranges.items[write].hi) self.ranges.items[write].hi = current.hi;
-            } else {
-                write += 1;
-                self.ranges.items[write] = current;
+        while (read + 1 < pts.len) {
+            if (pts[read] == pts[read + 1]) {
+                read += 2;
+                continue;
+            }
+            var end = read;
+            while (end + 3 < pts.len and pts[end + 1] == pts[end + 2]) {
+                end += 2;
+            }
+            pts[write] = pts[read];
+            pts[write + 1] = pts[end + 1];
+            write += 2;
+            read = end + 2;
+        }
+        self.points.shrinkRetainingCapacity(write);
+    }
+
+    pub fn sortAndRemoveOverlap(self: *CharRange) void {
+        insertionSortPointPairs(self.points.items);
+        self.compressOverlapping();
+    }
+
+    fn compressOverlapping(self: *CharRange) void {
+        const pts = self.points.items;
+        var read: usize = 0;
+        var write: usize = 0;
+        while (read + 1 < pts.len) {
+            if (pts[read] == pts[read + 1]) {
+                read += 2;
+                continue;
+            }
+            var end = read;
+            while (end + 3 < pts.len and pts[end + 2] <= pts[end + 1]) {
+                if (pts[end + 3] > pts[end + 1]) pts[end + 1] = pts[end + 3];
+                end += 2;
+            }
+            pts[write] = pts[read];
+            pts[write + 1] = pts[end + 1];
+            write += 2;
+            read = end + 2;
+        }
+        self.points.shrinkRetainingCapacity(write);
+    }
+
+    pub fn unionWith(self: *CharRange, other: *const CharRange) std.mem.Allocator.Error!void {
+        try self.opWith(other, .op_union);
+    }
+
+    pub fn intersectWith(self: *CharRange, other: *const CharRange) std.mem.Allocator.Error!void {
+        try self.opWith(other, .op_inter);
+    }
+
+    pub fn xorWith(self: *CharRange, other: *const CharRange) std.mem.Allocator.Error!void {
+        try self.opWith(other, .op_xor);
+    }
+
+    pub fn subWith(self: *CharRange, other: *const CharRange) std.mem.Allocator.Error!void {
+        try self.opWith(other, .op_sub);
+    }
+
+    const BinaryOp = enum {
+        op_union,
+        op_inter,
+        op_xor,
+        op_sub,
+    };
+
+    fn opWith(self: *CharRange, other: *const CharRange, op: BinaryOp) std.mem.Allocator.Error!void {
+        var out = try makeOp(self.allocator, self, other, op);
+        self.points.deinit(self.allocator);
+        self.points = out.points;
+        out.points = .empty;
+    }
+
+    fn makeOp(
+        allocator: std.mem.Allocator,
+        a: *const CharRange,
+        b: *const CharRange,
+        op: BinaryOp,
+    ) std.mem.Allocator.Error!CharRange {
+        var out = CharRange.init(allocator);
+        errdefer out.deinit();
+        try out.points.ensureTotalCapacity(allocator, a.points.items.len + b.points.items.len);
+
+        var a_idx: usize = 0;
+        var b_idx: usize = 0;
+        while (true) {
+            const point = if (a_idx < a.points.items.len and b_idx < b.points.items.len)
+                if (a.points.items[a_idx] < b.points.items[b_idx]) blk: {
+                    const p = a.points.items[a_idx];
+                    a_idx += 1;
+                    break :blk p;
+                } else if (a.points.items[a_idx] == b.points.items[b_idx]) blk: {
+                    const p = a.points.items[a_idx];
+                    a_idx += 1;
+                    b_idx += 1;
+                    break :blk p;
+                } else blk: {
+                    const p = b.points.items[b_idx];
+                    b_idx += 1;
+                    break :blk p;
+                }
+            else if (a_idx < a.points.items.len) blk: {
+                const p = a.points.items[a_idx];
+                a_idx += 1;
+                break :blk p;
+            } else if (b_idx < b.points.items.len) blk: {
+                const p = b.points.items[b_idx];
+                b_idx += 1;
+                break :blk p;
+            } else break;
+
+            const is_in = switch (op) {
+                .op_union => ((a_idx & 1) != 0) or ((b_idx & 1) != 0),
+                .op_inter => ((a_idx & 1) != 0) and ((b_idx & 1) != 0),
+                .op_xor => ((a_idx & 1) != 0) != ((b_idx & 1) != 0),
+                .op_sub => ((a_idx & 1) != 0) and ((b_idx & 1) == 0),
+            };
+            if (is_in != ((out.points.items.len & 1) != 0)) {
+                try out.points.append(allocator, point);
             }
         }
-        self.ranges.shrinkRetainingCapacity(write + 1);
+        out.compress();
+        return out;
     }
 
-    fn unionWith(self: *RangeSet, other: *RangeSet) std.mem.Allocator.Error!void {
-        try self.ranges.appendSlice(self.allocator, other.ranges.items);
-        self.normalize();
+    pub fn invert(self: *CharRange) std.mem.Allocator.Error!void {
+        const len = self.points.items.len;
+        try self.points.resize(self.allocator, len + 2);
+        @memmove(self.points.items[1 .. len + 1], self.points.items[0..len]);
+        self.points.items[0] = 0;
+        self.points.items[len + 1] = char_range_sentinel;
+        self.compress();
     }
 
-    fn intersectWith(self: *RangeSet, other: *RangeSet) std.mem.Allocator.Error!void {
-        self.normalize();
-        other.normalize();
-        var out = std.ArrayList(CodePointRange).empty;
-        errdefer out.deinit(self.allocator);
-        var lhs: usize = 0;
-        var rhs: usize = 0;
-        while (lhs < self.ranges.items.len and rhs < other.ranges.items.len) {
-            const a = self.ranges.items[lhs];
-            const b = other.ranges.items[rhs];
-            const lo = @max(a.lo, b.lo);
-            const hi = @min(a.hi, b.hi);
-            if (lo < hi) try out.append(self.allocator, .{ .lo = lo, .hi = hi });
-            if (a.hi < b.hi) {
-                lhs += 1;
-            } else {
-                rhs += 1;
+    pub fn regexpCanonicalize(self: *CharRange, is_unicode: bool) std.mem.Allocator.Error!void {
+        self.compress();
+
+        var cr_mask = try unicodeCase1(self.allocator, if (is_unicode) properties.CASE_F else properties.CASE_U);
+        defer cr_mask.deinit();
+
+        var cr_inter = try makeOp(self.allocator, &cr_mask, self, .op_inter);
+        defer cr_inter.deinit();
+
+        try cr_mask.invert();
+        var cr_sub = try makeOp(self.allocator, &cr_mask, self, .op_inter);
+        defer cr_sub.deinit();
+
+        var cr_result = CharRange.init(self.allocator);
+        defer cr_result.deinit();
+
+        var d_start: u32 = char_range_sentinel;
+        var d_end: u32 = char_range_sentinel;
+        var idx: usize = 0;
+        var v = data.case_conv_table1[idx];
+        var code = v >> (32 - 17);
+        var len = (v >> (32 - 17 - 7)) & 0x7f;
+
+        var range_index: usize = 0;
+        while (range_index < cr_inter.rangeCount()) : (range_index += 1) {
+            const range = cr_inter.rangeAt(range_index);
+            var c = range.lo;
+            while (c < range.hi) : (c += 1) {
+                while (!(c >= code and c < code + len)) {
+                    idx += 1;
+                    std.debug.assert(idx < data.case_conv_table1.len);
+                    v = data.case_conv_table1[idx];
+                    code = v >> (32 - 17);
+                    len = (v >> (32 - 17 - 7)) & 0x7f;
+                }
+
+                const d = caseFoldingEntry(@intCast(c), idx, v, is_unicode);
+                if (d_start == char_range_sentinel) {
+                    d_start = d;
+                    d_end = d + 1;
+                } else if (d_end == d) {
+                    d_end += 1;
+                } else {
+                    try cr_result.addInterval(d_start, d_end);
+                    d_start = d;
+                    d_end = d + 1;
+                }
             }
         }
-        self.ranges.deinit(self.allocator);
-        self.ranges = out;
+        if (d_start != char_range_sentinel) try cr_result.addInterval(d_start, d_end);
+        cr_result.sortAndRemoveOverlap();
+
+        var unioned = try makeOp(self.allocator, &cr_result, &cr_sub, .op_union);
+        self.points.deinit(self.allocator);
+        self.points = unioned.points;
+        unioned.points = .empty;
     }
 
-    fn xorWith(self: *RangeSet, other: *RangeSet) std.mem.Allocator.Error!void {
-        self.normalize();
-        other.normalize();
-        var points = std.ArrayList(u21).empty;
-        defer points.deinit(self.allocator);
-        try points.ensureTotalCapacity(self.allocator, self.ranges.items.len * 2 + other.ranges.items.len * 2);
-        for (self.ranges.items) |range| {
-            try points.append(self.allocator, range.lo);
-            try points.append(self.allocator, range.hi);
-        }
-        for (other.ranges.items) |range| {
-            try points.append(self.allocator, range.lo);
-            try points.append(self.allocator, range.hi);
-        }
-        std.mem.sort(u21, points.items, {}, u21LessThan);
-
-        var out = std.ArrayList(CodePointRange).empty;
-        errdefer out.deinit(self.allocator);
-        var in_a = false;
-        var in_b = false;
-        var index: usize = 0;
-        var last: u21 = 0;
-        while (index < points.items.len) {
-            const point = points.items[index];
-            if (point > last and (in_a != in_b)) {
-                try out.append(self.allocator, .{ .lo = last, .hi = point });
-            }
-            while (index < points.items.len and points.items[index] == point) : (index += 1) {
-                if (pointBelongsToBoundary(self.ranges.items, point)) in_a = !in_a;
-                if (pointBelongsToBoundary(other.ranges.items, point)) in_b = !in_b;
-            }
-            last = point;
-        }
-        self.ranges.deinit(self.allocator);
-        self.ranges = out;
+    pub fn rangeCount(self: *const CharRange) usize {
+        return self.points.items.len / 2;
     }
 
-    fn invert(self: *RangeSet) std.mem.Allocator.Error!void {
-        self.normalize();
-        var out = std.ArrayList(CodePointRange).empty;
-        errdefer out.deinit(self.allocator);
-        var cursor: u21 = 0;
-        for (self.ranges.items) |range| {
-            if (cursor < range.lo) try out.append(self.allocator, .{ .lo = cursor, .hi = range.lo });
-            if (cursor < range.hi) cursor = range.hi;
-        }
-        if (cursor < unicode_limit) try out.append(self.allocator, .{ .lo = cursor, .hi = unicode_limit });
-        self.ranges.deinit(self.allocator);
-        self.ranges = out;
+    pub fn rangeAt(self: *const CharRange, index: usize) CharRangePointRange {
+        const pts = self.points.items;
+        return .{
+            .lo = pts[index * 2],
+            .hi = pts[index * 2 + 1],
+        };
     }
 
-    fn toOwnedSlice(self: *RangeSet) std.mem.Allocator.Error![]CodePointRange {
-        self.normalize();
-        return try self.ranges.toOwnedSlice(self.allocator);
+    pub fn isEmpty(self: *const CharRange) bool {
+        return self.points.items.len == 0;
+    }
+
+    pub fn lastHi(self: *const CharRange) u32 {
+        return self.points.items[self.points.items.len - 1];
     }
 };
 
-fn rangeLessThan(_: void, lhs: CodePointRange, rhs: CodePointRange) bool {
-    return lhs.lo < rhs.lo or (lhs.lo == rhs.lo and lhs.hi < rhs.hi);
-}
+const RangeSet = CharRange;
 
-fn u21LessThan(_: void, lhs: u21, rhs: u21) bool {
-    return lhs < rhs;
-}
-
-fn pointBelongsToBoundary(ranges: []const CodePointRange, point: u21) bool {
-    for (ranges) |range| {
-        if (range.lo == point or range.hi == point) return true;
+fn insertionSortPointPairs(points: []u32) void {
+    var i: usize = 2;
+    while (i < points.len) : (i += 2) {
+        const lo = points[i];
+        const hi = points[i + 1];
+        var j = i;
+        while (j >= 2 and points[j - 2] > lo) : (j -= 2) {
+            points[j] = points[j - 2];
+            points[j + 1] = points[j - 1];
+        }
+        points[j] = lo;
+        points[j + 1] = hi;
     }
-    return false;
 }
 
 fn generalCategory(allocator: std.mem.Allocator, name: []const u8) UnicodeError!RangeSet {
-    const gc_idx = names.gcIndex(name) orelse return error.InvalidProperty;
-    return try unicodeGeneralCategory1(allocator, names.gcMaskByIndex(gc_idx));
+    const gc = names.gcIndex(name) orelse return error.InvalidProperty;
+    return try unicodeGeneralCategory1(allocator, names.gcMaskByIndex(gc));
 }
 
 fn unicodeGeneralCategory1(allocator: std.mem.Allocator, gc_mask: u32) std.mem.Allocator.Error!RangeSet {
@@ -1177,11 +1339,12 @@ fn unicodeGeneralCategory1(allocator: std.mem.Allocator, gc_mask: u32) std.mem.A
     return cr;
 }
 
-fn unicodeProp1(allocator: std.mem.Allocator, prop_idx: usize) UnicodeError!RangeSet {
-    if (prop_idx >= data.unicode_prop_table.len) return error.InvalidProperty;
-    const table = data.unicode_prop_table[prop_idx];
+fn unicodeProp1(allocator: std.mem.Allocator, prop: data.Prop) UnicodeError!RangeSet {
+    const table = data.propTable(prop) orelse return error.InvalidProperty;
     var cr = RangeSet.init(allocator);
     errdefer cr.deinit();
+    try cr.points.ensureTotalCapacity(allocator, table.len);
+
     var p: usize = 0;
     var c: u32 = 0;
     var bit = false;
@@ -1210,24 +1373,11 @@ fn unicodeProp1(allocator: std.mem.Allocator, prop_idx: usize) UnicodeError!Rang
     return cr;
 }
 
-const CASE_U = 1 << 0;
-const CASE_L = 1 << 1;
-const CASE_F = 1 << 2;
-
-const PropOp = union(enum) {
-    gc: u32,
-    prop: usize,
-    case_mask: u32,
-    op_union,
-    op_inter,
-    op_xor,
-    op_invert,
-};
-
 fn unicodeCase1(allocator: std.mem.Allocator, case_mask: u32) std.mem.Allocator.Error!RangeSet {
     var cr = RangeSet.init(allocator);
     errdefer cr.deinit();
     if (case_mask == 0) return cr;
+    try cr.points.ensureTotalCapacity(allocator, data.case_conv_table1.len * 2);
 
     const tab_run_mask = [_]u32{
         (1 << RUN_TYPE_U) | (1 << RUN_TYPE_UF) | (1 << RUN_TYPE_UL) | (1 << RUN_TYPE_LSU) | (1 << RUN_TYPE_U2L_399_EXT2) | (1 << RUN_TYPE_UF_D20) | (1 << RUN_TYPE_UF_D1_EXT) | (1 << RUN_TYPE_U_EXT) | (1 << RUN_TYPE_UF_EXT2) | (1 << RUN_TYPE_UF_EXT3),
@@ -1245,21 +1395,21 @@ fn unicodeCase1(allocator: std.mem.Allocator, case_mask: u32) std.mem.Allocator.
         if (((mask >> @intCast(typ)) & 1) == 0) continue;
         switch (typ) {
             RUN_TYPE_UL => {
-                if ((case_mask & CASE_U) != 0 and (case_mask & (CASE_L | CASE_F)) != 0) {
+                if ((case_mask & properties.CASE_U) != 0 and (case_mask & (properties.CASE_L | properties.CASE_F)) != 0) {
                     try cr.addInterval(code, code + len);
                 } else {
-                    code += if ((case_mask & CASE_U) != 0) @as(u32, 1) else 0;
+                    code += if ((case_mask & properties.CASE_U) != 0) @as(u32, 1) else 0;
                     var i: u32 = 0;
                     while (i < len) : (i += 2) try cr.addInterval(code + i, code + i + 1);
                 }
             },
             RUN_TYPE_LSU => {
-                if ((case_mask & CASE_U) != 0 and (case_mask & (CASE_L | CASE_F)) != 0) {
+                if ((case_mask & properties.CASE_U) != 0 and (case_mask & (properties.CASE_L | properties.CASE_F)) != 0) {
                     try cr.addInterval(code, code + len);
                 } else {
-                    if ((case_mask & CASE_U) == 0) try cr.addInterval(code, code + 1);
+                    if ((case_mask & properties.CASE_U) == 0) try cr.addInterval(code, code + 1);
                     try cr.addInterval(code + 1, code + 2);
-                    if ((case_mask & CASE_U) != 0) try cr.addInterval(code + 2, code + 3);
+                    if ((case_mask & properties.CASE_U) != 0) try cr.addInterval(code + 2, code + 3);
                 }
             },
             else => try cr.addInterval(code, code + len),
@@ -1268,7 +1418,7 @@ fn unicodeCase1(allocator: std.mem.Allocator, case_mask: u32) std.mem.Allocator.
     return cr;
 }
 
-fn unicodePropOps(allocator: std.mem.Allocator, comptime ops: []const PropOp) UnicodeError!RangeSet {
+fn unicodePropOps(allocator: std.mem.Allocator, ops: []const properties.Op) UnicodeError!RangeSet {
     var stack: [4]RangeSet = undefined;
     var stack_len: usize = 0;
     errdefer {
@@ -1276,7 +1426,7 @@ fn unicodePropOps(allocator: std.mem.Allocator, comptime ops: []const PropOp) Un
         while (i < stack_len) : (i += 1) stack[i].deinit();
     }
 
-    inline for (ops) |op| {
+    for (ops) |op| {
         switch (op) {
             .gc => |mask| {
                 std.debug.assert(stack_len < stack.len);
@@ -1323,122 +1473,32 @@ fn unicodePropOps(allocator: std.mem.Allocator, comptime ops: []const PropOp) Un
 }
 
 fn unicodeProp(allocator: std.mem.Allocator, name: []const u8) UnicodeError!RangeSet {
-    const prop_idx = names.propIndex(name) orelse return error.InvalidProperty;
+    const prop = names.propIndex(name) orelse return error.InvalidProperty;
 
-    switch (prop_idx) {
-        data.Prop.ASCII => {
-            var cr = RangeSet.init(allocator);
-            errdefer cr.deinit();
-            try cr.addInterval(0x00, 0x80);
-            return cr;
-        },
-        data.Prop.Any => {
-            var cr = RangeSet.init(allocator);
-            errdefer cr.deinit();
-            try cr.addInterval(0, unicode_limit);
-            return cr;
-        },
-        data.Prop.Assigned => return try unicodePropOps(allocator, &.{
-            .{ .gc = names.gcBit("Cn") },
-            .op_invert,
-        }),
-        data.Prop.Math => return try unicodePropOps(allocator, &.{
-            .{ .gc = names.gcBit("Sm") },
-            .{ .prop = data.Prop.Other_Math },
-            .op_union,
-        }),
-        data.Prop.Lowercase => return try unicodePropOps(allocator, &.{
-            .{ .gc = names.gcBit("Ll") },
-            .{ .prop = data.Prop.Other_Lowercase },
-            .op_union,
-        }),
-        data.Prop.Uppercase => return try unicodePropOps(allocator, &.{
-            .{ .gc = names.gcBit("Lu") },
-            .{ .prop = data.Prop.Other_Uppercase },
-            .op_union,
-        }),
-        data.Prop.Cased => return try unicodePropOps(allocator, &.{
-            .{ .gc = names.gcBit("Lu") | names.gcBit("Ll") | names.gcBit("Lt") },
-            .{ .prop = data.Prop.Other_Uppercase },
-            .op_union,
-            .{ .prop = data.Prop.Other_Lowercase },
-            .op_union,
-        }),
-        data.Prop.Alphabetic => return try unicodePropOps(allocator, &.{
-            .{ .gc = names.gcBit("Lu") | names.gcBit("Ll") | names.gcBit("Lt") | names.gcBit("Lm") | names.gcBit("Lo") | names.gcBit("Nl") },
-            .{ .prop = data.Prop.Other_Uppercase },
-            .op_union,
-            .{ .prop = data.Prop.Other_Lowercase },
-            .op_union,
-            .{ .prop = data.Prop.Other_Alphabetic },
-            .op_union,
-        }),
-        data.Prop.Grapheme_Base => return try unicodePropOps(allocator, &.{
-            .{ .gc = names.gcBit("Cc") | names.gcBit("Cf") | names.gcBit("Cs") | names.gcBit("Co") | names.gcBit("Cn") | names.gcBit("Zl") | names.gcBit("Zp") | names.gcBit("Me") | names.gcBit("Mn") },
-            .{ .prop = data.Prop.Other_Grapheme_Extend },
-            .op_union,
-            .op_invert,
-        }),
-        data.Prop.Grapheme_Extend => return try unicodePropOps(allocator, &.{
-            .{ .gc = names.gcBit("Me") | names.gcBit("Mn") },
-            .{ .prop = data.Prop.Other_Grapheme_Extend },
-            .op_union,
-        }),
-        data.Prop.XID_Start => return try unicodePropOps(allocator, &.{
-            .{ .gc = names.gcBit("Lu") | names.gcBit("Ll") | names.gcBit("Lt") | names.gcBit("Lm") | names.gcBit("Lo") | names.gcBit("Nl") },
-            .{ .prop = data.Prop.Other_ID_Start },
-            .op_union,
-            .{ .prop = data.Prop.Pattern_Syntax },
-            .{ .prop = data.Prop.Pattern_White_Space },
-            .op_union,
-            .{ .prop = data.Prop.XID_Start1 },
-            .op_union,
-            .op_invert,
-            .op_inter,
-        }),
-        data.Prop.XID_Continue => return try unicodePropOps(allocator, &.{
-            .{ .gc = names.gcBit("Lu") | names.gcBit("Ll") | names.gcBit("Lt") | names.gcBit("Lm") | names.gcBit("Lo") | names.gcBit("Nl") | names.gcBit("Mn") | names.gcBit("Mc") | names.gcBit("Nd") | names.gcBit("Pc") },
-            .{ .prop = data.Prop.Other_ID_Start },
-            .op_union,
-            .{ .prop = data.Prop.Other_ID_Continue },
-            .op_union,
-            .{ .prop = data.Prop.Pattern_Syntax },
-            .{ .prop = data.Prop.Pattern_White_Space },
-            .op_union,
-            .{ .prop = data.Prop.XID_Continue1 },
-            .op_union,
-            .op_invert,
-            .op_inter,
-        }),
-        data.Prop.Changes_When_Uppercased => return try unicodeCase1(allocator, CASE_U),
-        data.Prop.Changes_When_Lowercased => return try unicodeCase1(allocator, CASE_L),
-        data.Prop.Changes_When_Casemapped => return try unicodeCase1(allocator, CASE_U | CASE_L | CASE_F),
-        data.Prop.Changes_When_Titlecased => return try unicodePropOps(allocator, &.{
-            .{ .case_mask = CASE_U },
-            .{ .prop = data.Prop.Changes_When_Titlecased1 },
-            .op_xor,
-        }),
-        data.Prop.Changes_When_Casefolded => return try unicodePropOps(allocator, &.{
-            .{ .case_mask = CASE_F },
-            .{ .prop = data.Prop.Changes_When_Casefolded1 },
-            .op_xor,
-        }),
-        data.Prop.Changes_When_NFKC_Casefolded => return try unicodePropOps(allocator, &.{
-            .{ .case_mask = CASE_F },
-            .{ .prop = data.Prop.Changes_When_NFKC_Casefolded1 },
-            .op_xor,
-        }),
-        data.Prop.ID_Continue => return try unicodePropOps(allocator, &.{
-            .{ .prop = data.Prop.ID_Start },
-            .{ .prop = data.Prop.ID_Continue1 },
-            .op_xor,
-        }),
-        else => return try unicodeProp1(allocator, prop_idx),
+    if (properties.derived(prop)) |derived| {
+        switch (derived) {
+            .ascii => {
+                var cr = RangeSet.init(allocator);
+                errdefer cr.deinit();
+                try cr.addInterval(0x00, 0x80);
+                return cr;
+            },
+            .any => {
+                var cr = RangeSet.init(allocator);
+                errdefer cr.deinit();
+                try cr.addInterval(0, unicode_limit);
+                return cr;
+            },
+            .ops => |ops| return try unicodePropOps(allocator, ops),
+        }
     }
+
+    return try unicodeProp1(allocator, prop);
 }
 
 fn scriptRanges(allocator: std.mem.Allocator, script_name: []const u8, is_ext: bool) UnicodeError!RangeSet {
     const script_idx = names.scriptIndex(script_name) orelse return error.InvalidProperty;
+    const script_idx_value = @intFromEnum(script_idx);
     const is_common = script_idx == data.Script.Common or script_idx == data.Script.Inherited;
 
     var base = RangeSet.init(allocator);
@@ -1463,7 +1523,7 @@ fn scriptRanges(allocator: std.mem.Allocator, script_name: []const u8, is_ext: b
         if (typ != 0) {
             const v = data.unicode_script_table[p];
             p += 1;
-            if (v == script_idx or script_idx == data.Script.Unknown) try base.addInterval(c, c1);
+            if (v == script_idx_value or script_idx == data.Script.Unknown) try base.addInterval(c, c1);
         }
         c = c1;
     }
@@ -1497,7 +1557,7 @@ fn scriptRanges(allocator: std.mem.Allocator, script_name: []const u8, is_ext: b
             if (v_len != 0) try ext.addInterval(c, c1);
         } else {
             for (data.unicode_script_ext_table[p .. p + v_len]) |value| {
-                if (value == script_idx) {
+                if (value == script_idx_value) {
                     try ext.addInterval(c, c1);
                     break;
                 }
@@ -1513,6 +1573,220 @@ fn scriptRanges(allocator: std.mem.Allocator, script_name: []const u8, is_ext: b
         try base.unionWith(&ext);
     }
     return base;
+}
+
+pub fn addSequenceProperty(
+    allocator: std.mem.Allocator,
+    comptime Context: type,
+    ctx: *Context,
+    prop_name: []const u8,
+    comptime callback: fn (*Context, []const u21) std.mem.Allocator.Error!void,
+) UnicodeError!bool {
+    const prop = names.sequencePropIndex(prop_name) orelse return false;
+    try sequenceProp1(allocator, Context, ctx, prop, callback);
+    return true;
+}
+
+pub fn isSequencePropertyName(prop_name: []const u8) bool {
+    return names.sequencePropIndex(prop_name) != null;
+}
+
+const sequence_max_len = 16;
+
+fn sequenceProp1(
+    allocator: std.mem.Allocator,
+    comptime Context: type,
+    ctx: *Context,
+    prop: data.SequenceProp,
+    comptime callback: fn (*Context, []const u21) std.mem.Allocator.Error!void,
+) UnicodeError!void {
+    switch (prop) {
+        .Basic_Emoji => {
+            try emitPropertySequences(allocator, Context, ctx, data.Prop.Basic_Emoji1, &.{}, callback);
+            try emitPropertySequences(allocator, Context, ctx, data.Prop.Basic_Emoji2, &.{0xfe0f}, callback);
+        },
+        .RGI_Emoji_Modifier_Sequence => {
+            var cr = try unicodeProp1(allocator, data.Prop.Emoji_Modifier_Base);
+            defer cr.deinit();
+            cr.normalize();
+
+            var seq: [sequence_max_len]u21 = undefined;
+            var range_index: usize = 0;
+            while (range_index < cr.rangeCount()) : (range_index += 1) {
+                const range = cr.rangeAt(range_index);
+                var c = range.lo;
+                while (c < range.hi) : (c += 1) {
+                    var j: u21 = 0;
+                    while (j < 5) : (j += 1) {
+                        seq[0] = @intCast(c);
+                        seq[1] = 0x1f3fb + j;
+                        try callback(ctx, seq[0..2]);
+                    }
+                }
+            }
+        },
+        .RGI_Emoji_Flag_Sequence => {
+            var cr = try unicodeProp1(allocator, data.Prop.RGI_Emoji_Flag_Sequence);
+            defer cr.deinit();
+            cr.normalize();
+
+            var seq: [sequence_max_len]u21 = undefined;
+            var range_index: usize = 0;
+            while (range_index < cr.rangeCount()) : (range_index += 1) {
+                const range = cr.rangeAt(range_index);
+                var c = range.lo;
+                while (c < range.hi) : (c += 1) {
+                    const c0 = c / 26;
+                    const c1 = c % 26;
+                    seq[0] = @intCast(0x1f1e6 + c0);
+                    seq[1] = @intCast(0x1f1e6 + c1);
+                    try callback(ctx, seq[0..2]);
+                }
+            }
+        },
+        .RGI_Emoji_ZWJ_Sequence => try emitZwjSequences(Context, ctx, callback),
+        .RGI_Emoji_Tag_Sequence => {
+            var seq: [sequence_max_len]u21 = undefined;
+            var i: usize = 0;
+            while (i < data.unicode_rgi_emoji_tag_sequence.len) {
+                var j: usize = 0;
+                seq[j] = 0x1f3f4;
+                j += 1;
+                while (true) {
+                    const c = data.unicode_rgi_emoji_tag_sequence[i];
+                    i += 1;
+                    if (c == 0) break;
+                    std.debug.assert(j < seq.len);
+                    seq[j] = 0xe0000 + @as(u21, c);
+                    j += 1;
+                }
+                std.debug.assert(j < seq.len);
+                seq[j] = 0xe007f;
+                j += 1;
+                try callback(ctx, seq[0..j]);
+            }
+        },
+        .Emoji_Keycap_Sequence => try emitPropertySequences(allocator, Context, ctx, data.Prop.Emoji_Keycap_Sequence, &.{ 0xfe0f, 0x20e3 }, callback),
+        .RGI_Emoji => {
+            var i = @intFromEnum(data.SequenceProp.Basic_Emoji);
+            while (i <= @intFromEnum(data.SequenceProp.RGI_Emoji_ZWJ_Sequence)) : (i += 1) {
+                try sequenceProp1(allocator, Context, ctx, @enumFromInt(i), callback);
+            }
+        },
+    }
+}
+
+fn emitPropertySequences(
+    allocator: std.mem.Allocator,
+    comptime Context: type,
+    ctx: *Context,
+    prop: data.Prop,
+    comptime suffix: []const u21,
+    comptime callback: fn (*Context, []const u21) std.mem.Allocator.Error!void,
+) UnicodeError!void {
+    var cr = try unicodeProp1(allocator, prop);
+    defer cr.deinit();
+    cr.normalize();
+
+    var seq: [sequence_max_len]u21 = undefined;
+    var range_index: usize = 0;
+    while (range_index < cr.rangeCount()) : (range_index += 1) {
+        const range = cr.rangeAt(range_index);
+        var c = range.lo;
+        while (c < range.hi) : (c += 1) {
+            seq[0] = @intCast(c);
+            inline for (suffix, 0..) |cp, i| seq[i + 1] = cp;
+            try callback(ctx, seq[0 .. suffix.len + 1]);
+        }
+    }
+}
+
+fn emitZwjSequences(
+    comptime Context: type,
+    ctx: *Context,
+    comptime callback: fn (*Context, []const u21) std.mem.Allocator.Error!void,
+) std.mem.Allocator.Error!void {
+    var i: usize = 0;
+    while (i < data.unicode_rgi_emoji_zwj_sequence.len) {
+        const len = data.unicode_rgi_emoji_zwj_sequence[i];
+        i += 1;
+
+        var seq: [sequence_max_len]u21 = undefined;
+        var mod_pos: [2]usize = undefined;
+        var k: usize = 0;
+        var mod: u2 = 0;
+        var mod_count: usize = 0;
+        var hc_pos: ?usize = null;
+
+        var j: usize = 0;
+        while (j < len) : (j += 1) {
+            var code = @as(u16, data.unicode_rgi_emoji_zwj_sequence[i]) |
+                (@as(u16, data.unicode_rgi_emoji_zwj_sequence[i + 1]) << 8);
+            i += 2;
+
+            const pres = code >> 15;
+            const mod1: u2 = @intCast((code >> 13) & 3);
+            code &= 0x1fff;
+            const c: u21 = if (code < 0x1000)
+                0x2000 + @as(u21, code)
+            else
+                0x1f000 + (@as(u21, code) - 0x1000);
+
+            if (c == 0x1f9b0) hc_pos = k;
+            std.debug.assert(k < seq.len);
+            seq[k] = c;
+            k += 1;
+
+            if (mod1 != 0) {
+                std.debug.assert(mod_count < mod_pos.len);
+                mod = mod1;
+                mod_pos[mod_count] = k;
+                mod_count += 1;
+                std.debug.assert(k < seq.len);
+                seq[k] = 0;
+                k += 1;
+            }
+            if (pres != 0) {
+                std.debug.assert(k < seq.len);
+                seq[k] = 0xfe0f;
+                k += 1;
+            }
+            if (j < len - 1) {
+                std.debug.assert(k < seq.len);
+                seq[k] = 0x200d;
+                k += 1;
+            }
+        }
+
+        const n_mod: usize = switch (mod) {
+            1 => 5,
+            2 => 25,
+            3 => 20,
+            else => 1,
+        };
+        const n_hc: usize = if (hc_pos != null) 4 else 1;
+
+        var hc_idx: usize = 0;
+        while (hc_idx < n_hc) : (hc_idx += 1) {
+            var mod_idx: usize = 0;
+            while (mod_idx < n_mod) : (mod_idx += 1) {
+                if (hc_pos) |pos| seq[pos] = 0x1f9b0 + @as(u21, @intCast(hc_idx));
+
+                switch (mod) {
+                    1 => seq[mod_pos[0]] = 0x1f3fb + @as(u21, @intCast(mod_idx)),
+                    2, 3 => {
+                        var skin0 = mod_idx / 5;
+                        const skin1 = mod_idx % 5;
+                        if (mod == 3 and skin0 >= skin1) skin0 += 1;
+                        seq[mod_pos[0]] = 0x1f3fb + @as(u21, @intCast(skin0));
+                        seq[mod_pos[1]] = 0x1f3fb + @as(u21, @intCast(skin1));
+                    },
+                    else => {},
+                }
+                try callback(ctx, seq[0..k]);
+            }
+        }
+    }
 }
 
 test "unicode functionality" {
@@ -1540,34 +1814,38 @@ test "unicode functionality" {
     defer std.testing.allocator.free(nfkd);
     try std.testing.expectEqualSlices(u32, &[_]u32{ 0x0073, 0x0323, 0x0307 }, nfkd);
 
-    const ascii_ranges = try propertyRangesAlloc(std.testing.allocator, "ASCII", false);
-    defer std.testing.allocator.free(ascii_ranges);
-    try std.testing.expect(rangesContain(ascii_ranges, 'A'));
-    try std.testing.expect(!rangesContain(ascii_ranges, 0x80));
-    const non_ascii_ranges = try propertyRangesAlloc(std.testing.allocator, "ASCII", true);
-    defer std.testing.allocator.free(non_ascii_ranges);
-    try std.testing.expect(!rangesContain(non_ascii_ranges, 'A'));
-    try std.testing.expect(rangesContain(non_ascii_ranges, 0x80));
-    try std.testing.expect(rangesContain(non_ascii_ranges, 0x10ffff));
-    const greek_ranges = try propertyRangesAlloc(std.testing.allocator, "Script=Greek", false);
-    defer std.testing.allocator.free(greek_ranges);
-    try std.testing.expect(rangesContain(greek_ranges, 0x03c0));
-    try std.testing.expect(!rangesContain(greek_ranges, 'A'));
-    try std.testing.expect(!rangesContain(greek_ranges, 0x038b));
+    var ascii_ranges = try propertyRangePoints(std.testing.allocator, "ASCII", false);
+    defer ascii_ranges.deinit();
+    try std.testing.expect(pointsContain(ascii_ranges.items(), 'A'));
+    try std.testing.expect(!pointsContain(ascii_ranges.items(), 0x80));
+    var non_ascii_ranges = try propertyRangePoints(std.testing.allocator, "ASCII", true);
+    defer non_ascii_ranges.deinit();
+    try std.testing.expect(!pointsContain(non_ascii_ranges.items(), 'A'));
+    try std.testing.expect(pointsContain(non_ascii_ranges.items(), 0x80));
+    try std.testing.expect(pointsContain(non_ascii_ranges.items(), 0x10ffff));
+    var greek_ranges = try propertyRangePoints(std.testing.allocator, "Script=Greek", false);
+    defer greek_ranges.deinit();
+    try std.testing.expect(pointsContain(greek_ranges.items(), 0x03c0));
+    try std.testing.expect(!pointsContain(greek_ranges.items(), 'A'));
+    try std.testing.expect(!pointsContain(greek_ranges.items(), 0x038b));
 
-    const unknown_script_ranges = try propertyRangesAlloc(std.testing.allocator, "Script=Unknown", false);
-    defer std.testing.allocator.free(unknown_script_ranges);
-    try std.testing.expect(rangesContain(unknown_script_ranges, 0x038b));
-    try std.testing.expect(rangesContain(unknown_script_ranges, 0x0e01f0));
-    try std.testing.expect(rangesContain(unknown_script_ranges, 0x10ffff));
-    try std.testing.expect(!rangesContain(unknown_script_ranges, 0x03c0));
+    var unknown_script_ranges = try propertyRangePoints(std.testing.allocator, "Script=Unknown", false);
+    defer unknown_script_ranges.deinit();
+    try std.testing.expect(pointsContain(unknown_script_ranges.items(), 0x038b));
+    try std.testing.expect(pointsContain(unknown_script_ranges.items(), 0x0e01f0));
+    try std.testing.expect(pointsContain(unknown_script_ranges.items(), 0x10ffff));
+    try std.testing.expect(!pointsContain(unknown_script_ranges.items(), 0x03c0));
 
-    const unknown_script_ext_ranges = try propertyRangesAlloc(std.testing.allocator, "Script_Extensions=Unknown", false);
-    defer std.testing.allocator.free(unknown_script_ext_ranges);
-    try std.testing.expect(rangesContain(unknown_script_ext_ranges, 0x038b));
-    try std.testing.expect(rangesContain(unknown_script_ext_ranges, 0x0e01f0));
-    try std.testing.expect(rangesContain(unknown_script_ext_ranges, 0x10ffff));
-    try std.testing.expect(!rangesContain(unknown_script_ext_ranges, 0x03c0));
+    var unknown_script_ext_ranges = try propertyRangePoints(std.testing.allocator, "Script_Extensions=Unknown", false);
+    defer unknown_script_ext_ranges.deinit();
+    try std.testing.expect(pointsContain(unknown_script_ext_ranges.items(), 0x038b));
+    try std.testing.expect(pointsContain(unknown_script_ext_ranges.items(), 0x0e01f0));
+    try std.testing.expect(pointsContain(unknown_script_ext_ranges.items(), 0x10ffff));
+    try std.testing.expect(!pointsContain(unknown_script_ext_ranges.items(), 0x03c0));
+
+    try std.testing.expectError(error.InvalidProperty, propertyRangePoints(std.testing.allocator, "ID_Compat_Math_Start", false));
+    try std.testing.expectError(error.InvalidProperty, propertyRangePoints(std.testing.allocator, "ID_Compat_Math_Continue", false));
+    try std.testing.expectError(error.InvalidProperty, propertyRangePoints(std.testing.allocator, "InCB", false));
 }
 
 test "regexp unicode shortcut matches range builder boundaries" {
@@ -1878,25 +2156,37 @@ fn rangesContain(ranges: []const CodePointRange, code_point: u21) bool {
     return false;
 }
 
+fn pointsContain(points: []const u32, code_point: u21) bool {
+    var i: usize = 0;
+    while (i + 1 < points.len) : (i += 2) {
+        if (code_point >= points[i] and code_point < points[i + 1]) return true;
+    }
+    return false;
+}
+
 fn expectRegexpShortcutMatchesRangeBuilder(expr: []const u8) !void {
-    const ranges = try propertyRangesAlloc(std.testing.allocator, expr, false);
-    defer std.testing.allocator.free(ranges);
+    var ranges = try propertyRangePoints(std.testing.allocator, expr, false);
+    defer ranges.deinit();
+    const points = ranges.items();
 
-    try expectRegexpShortcutPointMatchesRanges(expr, ranges, 0);
-    try expectRegexpShortcutPointMatchesRanges(expr, ranges, 0x2e2f);
-    try expectRegexpShortcutPointMatchesRanges(expr, ranges, max_code_point);
+    try expectRegexpShortcutPointMatchesRanges(expr, points, 0);
+    try expectRegexpShortcutPointMatchesRanges(expr, points, 0x2e2f);
+    try expectRegexpShortcutPointMatchesRanges(expr, points, max_code_point);
 
-    for (ranges) |range| {
-        if (range.lo > 0) try expectRegexpShortcutPointMatchesRanges(expr, ranges, range.lo - 1);
-        try expectRegexpShortcutPointMatchesRanges(expr, ranges, range.lo);
-        if (range.hi > 0) try expectRegexpShortcutPointMatchesRanges(expr, ranges, range.hi - 1);
-        if (range.hi <= max_code_point) try expectRegexpShortcutPointMatchesRanges(expr, ranges, range.hi);
+    var i: usize = 0;
+    while (i + 1 < points.len) : (i += 2) {
+        const lo = points[i];
+        const hi = points[i + 1];
+        if (lo > 0 and lo <= max_code_point) try expectRegexpShortcutPointMatchesRanges(expr, points, @intCast(lo - 1));
+        if (lo <= max_code_point) try expectRegexpShortcutPointMatchesRanges(expr, points, @intCast(lo));
+        if (hi > 0 and hi - 1 <= max_code_point) try expectRegexpShortcutPointMatchesRanges(expr, points, @intCast(hi - 1));
+        if (hi <= max_code_point) try expectRegexpShortcutPointMatchesRanges(expr, points, @intCast(hi));
     }
 }
 
-fn expectRegexpShortcutPointMatchesRanges(expr: []const u8, ranges: []const CodePointRange, code_point: u21) !void {
+fn expectRegexpShortcutPointMatchesRanges(expr: []const u8, points: []const u32, code_point: u21) !void {
     const actual = regexp_properties.isUnicodePropertyMatches(code_point, expr);
-    const expected = rangesContain(ranges, code_point);
+    const expected = pointsContain(points, code_point);
     if (actual != expected) {
         std.debug.print("regexp unicode shortcut mismatch expr={s} code_point=0x{x} actual={} expected={}\n", .{
             expr,
