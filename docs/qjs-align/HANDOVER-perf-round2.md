@@ -36,11 +36,16 @@
 >   filter + callSimpleNumericBytecode/callSimpleStringBytecode + the parser detection) — qjs has no
 >   fusion; deleting it routes those fns through the normal interpreter (regresses accumulator/getter
 >   benches, the documented "cheat layer" the doctrine says to revert).
-> - **method-dispatch native fast paths** (vm_call.zig:fastNativeMethodCall + array_ops.zig:
->   qjsArrayMethodFastCall cascade) — qjs dispatches native methods uniformly by magic in
->   js_call_c_function; the ~20-member cascade + the redundant fastNativeMethodCall probe can route
->   through the generic vmNativeCallableDispatch / qjsArrayPrototypeNativeRecord. Measure mapget +
->   array methods for regression (the generic switch should be ≥ the cascade).
+> - ~~method-dispatch native fast paths~~ — **TESTED + REVERTED. NOT deletable.** Deleting
+>   fastNativeMethodCall + qjsArrayMethodFastCall and routing native methods through
+>   callValueOrBytecodeClassMode **regressed mapget 10.56B→11.30B (+710M)** while arrmap was flat.
+>   The survey was wrong: `fastNativeMethodCall` is the FAITHFUL equivalent of qjs's
+>   `js_call_c_function` (quickjs.c:17562) — qjs's "magic dispatch" IS a fast direct C-pointer call,
+>   not a slow general path, so zjs's probe mirrors it rather than diverging. The generic
+>   vmNativeCallableDispatch is slower than this faithful fast path. **Lesson: the survey conflated
+>   "zjs has a helper qjs has no named function for" with "qjs has no fast path" — but qjs's fast path
+>   is inline in js_call_c_function. Always MEASURE a deletion; "qjs-absent" needs the perf check, not
+>   just a source diff.** (qjsArrayMethodFastCall alone was perf-neutral but was reverted with it.)
 > - NOT deletable (survey over-flagged; they are FAITHFUL): property ICs (qjsGetFieldFast,
 >   fastDenseArrayElementValue — qjs has get_ic/put_ic + fast_array), threaded dispatch arms
 >   (push_const etc. — qjs computed-goto), int32/float64 arith fast paths (qjs has identical inline
