@@ -10,6 +10,43 @@ allocation benchmarks 100×).
 Anything not listed as a *structural divergence* is broad LLVM-vs-gcc per-opcode
 tax (~2–2.5×) and is **not** a faithful target.
 
+## 🧭 Next-direction survey (2026-06-25, `qjs-next-direction-survey`) — ranked roadmap
+
+A second data-driven survey (re-measure + scope/ROI audit of each candidate) ranked the
+remaining work and **inverted the going-in assumption** (count/length split was NOT the best ROI).
+Ranked by `unlock × commonality / (risk × effort)`:
+
+1. **String resolve-once cleanups — DONE** (`bfae525` indexOf, `bd263cc` startsWith/endsWith/
+   lastIndexOf). Was #1: near-free (the resolve-once template ships), 3–6.5× → ~2.5–3×.
+   REMAINING in this bucket: `toUpperCase`/`toLowerCase` (3×, *medium* — needs resolve-once
+   **+** a narrow latin1 output buffer that widens lazily, `unicodeCaseReceiver` string.zig:974,
+   qjs string_buffer quickjs.c:46510).
+2. **Object descriptor-materialization skips** (hasOwnProperty 4.13×, Object.values 2.45×,
+   entries 1.64× — all common). Materialize a full Descriptor (DupValue+destroy) per key when
+   only existence/enumerability is needed. *Medium*, NOT a quick swap: `Object.hasOwnProperty`
+   (object.zig:6890) is incomplete (misses array `length`, typed-array/string indices, module
+   namespace) — needs an existence-only `getOwnProperty` variant covering every kind. qjs NULL-desc
+   existence quickjs.c:8854, ENUM_ONLY inline quickjs.c:8629.
+3. **Array count/length split — CONFIRMED BOUNDED** (3–4 days, 17 readers / 11 need hole-handling,
+   all localized to object.zig/array_ops.zig/builtins/exec; flag-gated 5-stage plan with a staged
+   reader audit). Unlocks `new Array(n)` 5–10× (375M→150M) + the map/filter/slice/Array.from
+   dense-output cluster. Real MEDIUM risk (hole semantics in a[i]/for-in/Object.keys/length-write/
+   JSON; test262 Array holes/sparse/length-write). The single biggest *bounded* structural unlock.
+4. **Frame incremental gates — a real shipping window exists** (~4–5% of fib, ~1.1B insn, several
+   small/medium FAITHFUL slices short of the monolithic rewrite): eval-snapshot deinit gate (~437M,
+   ~2-line — skip `entry.eval_snapshot.deinit`/`ValueRootBuffer.deinit` when `eval_names.len==0`),
+   backtrace-pop gate (~100–200M), var_refs borrow-not-copy (~263M, scales with capture count),
+   lazy-this + borrowed cur_func (~263M). The **bulk** (pushFrame 23% + teardown 7% = ~30% of fib)
+   still needs the monolithic frame collapse.
+5. **Map/Set per-op (get/set 7.63×, add/has 6.3×)** — NOT a hash-table gap (collection.zig already
+   uses open-chained hashing); the cost is the general **call path** to reach the native op, so this
+   is coupled to the frame/call-machinery, not a standalone fix.
+6. **Regex `regex.test` 12.04× — the single largest raw gap** (4.8B vs qjs 404M), missed by the
+   first sweep. DEEP (the whole ~9500-line libs/regexp engine + exec/regexp_fastpath; not incremental).
+   Worth a dedicated future investigation.
+
+`new Array(n)` and `s.replace` boxing corrections from the first sweep still stand (below).
+
 ## ✅ Shipped this round (each: test262 0/49775 + 1223 unit + 1223 force-GC)
 
 | slice | commit | effect |
