@@ -235,6 +235,14 @@ pub const Frame = struct {
     args: []JSValue = &.{},
     original_args: []JSValue = &.{},
     var_refs: []JSValue = &.{},
+    /// True when `var_refs` aliases the callee's closure captures array
+    /// (`functionCapturesSlot`) instead of an owned per-frame copy — qjs's
+    /// `var_refs = p->u.func.var_refs` borrow (quickjs.c:17844). Set only for a
+    /// no-eval, no-global-var inline call whose captures are all VarRef cells, so
+    /// every var_ref write goes through a cell (never the array element) and the
+    /// shared array is never mutated/realloced. Teardown then skips the per-element
+    /// free (the closure still owns the cells).
+    var_refs_borrowed: bool = false,
     open_var_refs: []?*core.VarRef = &.{},
     storage_values: []JSValue = &.{},
     storage_on_heap: bool = false,
@@ -508,7 +516,9 @@ pub const Frame = struct {
         releaseValueSliceNoReset(rt, self.locals);
         releaseValueSliceNoReset(rt, self.args);
         releaseValueSliceNoReset(rt, self.original_args);
-        releaseValueSliceNoReset(rt, self.var_refs);
+        // Borrowed var_refs alias the closure's captures (owned by the still-live
+        // function object); freeing them here would double-free on the next call.
+        if (!self.var_refs_borrowed) releaseValueSliceNoReset(rt, self.var_refs);
 
         if (self.storage_on_heap and self.storage_values.len != 0) account.free(JSValue, self.storage_values);
         if (self.global_lexical_sync_slots.len != 0) account.free(bool, self.global_lexical_sync_slots);
@@ -520,7 +530,8 @@ pub const Frame = struct {
         const locals = self.locals;
         const args = self.args;
         const original_args = self.original_args;
-        const var_refs = self.var_refs;
+        // A borrowed var_refs aliases the closure captures (not owned here).
+        const var_refs: []JSValue = if (self.var_refs_borrowed) &.{} else self.var_refs;
         const storage_values = self.storage_values;
         const storage_on_heap = self.storage_on_heap;
         const global_lexical_sync_slots = self.global_lexical_sync_slots;
@@ -530,6 +541,7 @@ pub const Frame = struct {
         self.args = &.{};
         self.original_args = &.{};
         self.var_refs = &.{};
+        self.var_refs_borrowed = false;
         self.open_var_refs = &.{};
         self.storage_values = &.{};
         self.storage_on_heap = false;
