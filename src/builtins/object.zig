@@ -558,15 +558,84 @@ pub fn qjsObjectAssignCall(
         const source = objectFromValue(source_value) orelse return error.TypeError;
         const own_keys = try objectRestOwnKeys(ctx, output, global, source);
         defer core.Object.freeKeys(ctx.runtime, own_keys);
-        if (source.proxyTarget() != null) {
-            try qjsObjectAssignKeys(ctx, output, global, target_value, source_value, source, own_keys, null, caller_function, caller_frame);
+        if (assignSourceIsOrdinary(source)) {
+            // qjs js_object_assign is ONE JS_CopyDataProperties walk with
+            // JS_GPN_ENUM_ONLY (quickjs.c:40654 -> 16920). For an ordinary
+            // (non-exotic, non-proxy) source the enumerability is filtered
+            // INLINE during the shape walk (quickjs.c:8628) and no per-key
+            // descriptor is materialized (the ~ENUM_ONLY descriptor branch
+            // at quickjs.c:16942 runs only for the exotic fallback). Mirror
+            // that single enumerable-only spec-ordered pass here.
+            try qjsObjectAssignEnumOnly(ctx, output, global, target_value, source_value, source, own_keys, caller_function, caller_frame);
         } else {
-            try qjsObjectAssignKeys(ctx, output, global, target_value, source_value, source, own_keys, false, caller_function, caller_frame);
-            try qjsObjectAssignKeys(ctx, output, global, target_value, source_value, source, own_keys, true, caller_function, caller_frame);
+            // Proxy / exotic source: qjs clears JS_GPN_ENUM_ONLY
+            // (quickjs.c:16924) and builds a per-key descriptor in the loop
+            // so the ownKeys + getOwnPropertyDescriptor traps fire in order.
+            // Keep the descriptor-driven single pass that preserves the trap
+            // sequence (symbol_pass = null = no extra traversal).
+            try qjsObjectAssignKeys(ctx, output, global, target_value, source_value, source, own_keys, null, caller_function, caller_frame);
         }
     }
 
     return target_value;
+}
+
+/// True when `Object.assign`'s source is an ordinary object — no proxy
+/// handler, no typed-array indexed exotic, no module-namespace bindings,
+/// and no exotic own-keys hook. This mirrors qjs's `!p->is_exotic ||
+/// !em->get_own_property_names` test (quickjs.c:16920-16927): only such a
+/// source keeps `JS_GPN_ENUM_ONLY` and reads the enumerable bit straight
+/// off the shape. Everything else falls through to the descriptor path so
+/// its traps/exotic enumeration fire exactly as qjs's ~ENUM_ONLY branch.
+fn assignSourceIsOrdinary(source: *core.Object) bool {
+    if (source.proxyTarget() != null) return false;
+    if (source.hasExoticMethods()) return false;
+    if (source.class_id == core.class.ids.module_ns) return false;
+    if (core.object.isTypedArrayObject(source)) return false;
+    return true;
+}
+
+/// Single ENUM_ONLY CopyDataProperties pass over an ordinary source's own
+/// keys (already in spec order: integer indices ascending, then strings in
+/// insertion order, then symbols). Enumerability is filtered ONCE at walk
+/// time — exactly like qjs's JS_GPN_ENUM_ONLY GPN walk, which materializes
+/// only the enumerable keys (quickjs.c:8628) BEFORE any user code runs.
+/// The copy loop then does NO per-key enumerable re-check (quickjs.c:16933
+/// skips the descriptor branch for ordinary sources): for each snapshotted
+/// key it runs JS_GetProperty (the source getter fires once, in key order)
+/// then JS_SetProperty on the target (target setters / Proxy traps fire).
+/// Snapshotting up front is load-bearing: a getter on an earlier key may
+/// mutate a later key's enumerability/existence, and qjs copies the key
+/// regardless because it was already in the enumerable list. This is the
+/// deliberate difference from Object.keys/values/entries, which re-check
+/// enumerability per key after getters (quickjs.c:40400) and which zjs
+/// keeps on its own descriptor path.
+fn qjsObjectAssignEnumOnly(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    target_value: core.JSValue,
+    source_value: core.JSValue,
+    source: *core.Object,
+    own_keys: []const core.Atom,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) !void {
+    if (own_keys.len == 0) return;
+    // Snapshot the enumerable bit of every key off the shape now, before
+    // any getter/setter runs — mirroring qjs filling tab_atom[] with only
+    // the enumerable keys during the ENUM_ONLY GPN walk.
+    const enumerable_snapshot = try ctx.runtime.memory.alloc(bool, own_keys.len);
+    defer ctx.runtime.memory.free(bool, enumerable_snapshot);
+    for (own_keys, enumerable_snapshot) |key, *slot| {
+        slot.* = source.ownPropertyEnumerable(key) orelse false;
+    }
+    for (own_keys, enumerable_snapshot) |key, enumerable| {
+        if (!enumerable) continue;
+        const value = try getValueProperty(ctx, output, global, source_value, key, caller_function, caller_frame);
+        defer value.free(ctx.runtime);
+        try setValuePropertyStrict(ctx, output, global, target_value, key, value, caller_function, caller_frame);
+    }
 }
 
 pub fn qjsObjectAssignKeys(

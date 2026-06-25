@@ -6970,6 +6970,30 @@ pub const Object = struct {
         return false;
     }
 
+    /// Read just the enumerable bit of an own property, mirroring the
+    /// `prs->flags & JS_PROP_ENUMERABLE` inline test in qjs's
+    /// `JS_GetOwnPropertyNamesInternal` ENUM_ONLY shape walk
+    /// (quickjs.c:8628). Returns `null` when the key is absent. This
+    /// reads the flag straight off the shape without materializing a
+    /// `Descriptor` (no value dup, no getter), which is what lets
+    /// `Object.assign` collapse to a single ENUM_ONLY pass for ordinary
+    /// objects. Only valid for non-proxy/non-exotic sources; proxy/exotic
+    /// sources keep the descriptor path (qjs clears ENUM_ONLY there).
+    pub fn ownPropertyEnumerable(self: *const Object, atom_id: atom.Atom) ?bool {
+        // Synthetic, always-non-enumerable own keys mirror qjs's
+        // length/lastIndex which carry no JS_PROP_ENUMERABLE flag.
+        if (self.flags.is_array and atom_id == atom.ids.length) return false;
+        if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex and self.regexpLastIndex() != null) return false;
+        if (self.findProperty(atom_id)) |index| {
+            return self.propFlagsAt(index).enumerable;
+        }
+        // Dense array index elements are enumerable data properties in
+        // qjs's fast_array (the GPN walk includes them unconditionally
+        // under ENUM_ONLY).
+        if (self.denseArrayElement(atom_id) != null) return true;
+        return null;
+    }
+
     pub fn hasProperty(self: *const Object, atom_id: atom.Atom) bool {
         profile.recordPropLookup(self.flags.is_global);
         if (self.hasOwnProperty(atom_id)) return true;
