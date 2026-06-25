@@ -449,6 +449,35 @@ pub fn typedArraySetIndex(rt: *JSRuntime, obj: *Object, index: u32, value: JSVal
     return true;
 }
 
+/// QuickJS source map: js_typed_array_fill (quickjs.c:57979-58002).
+/// `value` has already been coerced to the target element type once by the
+/// caller; coerce it to raw element bytes ONCE here, then fill the contiguous
+/// byte range directly (memset for 1-byte kinds, tight typed-store loop for
+/// wider kinds), exactly as qjs's switch(shift) does. The caller has already
+/// re-validated detach/out-of-bounds and clamped `final` to the live length.
+pub fn typedArrayFillRange(rt: *JSRuntime, obj: *Object, start: u32, final: u32, value: JSValue) !void {
+    if (start >= final) return;
+    const kind = obj.typedArrayKind();
+    const width = obj.typedArrayElementSize();
+    var scratch: [8]u8 = undefined;
+    try writeElement(rt, kind, scratch[0..width], value);
+
+    const buffer = try typedArrayBufferObject(obj);
+    const storage = buffer.byteStorage();
+    const base = obj.typedArrayByteOffset();
+    var offset = base + @as(usize, start) * width;
+    const end = base + @as(usize, final) * width;
+    switch (width) {
+        1 => @memset(storage[offset..end], scratch[0]),
+        else => {
+            const cell = scratch[0..width];
+            while (offset < end) : (offset += width) {
+                @memcpy(storage[offset..][0..width], cell);
+            }
+        },
+    }
+}
+
 pub fn typedArraySetInt32IndexFast(rt: *JSRuntime, obj: *Object, index: u32, value: i32) !bool {
     if (obj.typedArrayKind() != 6) return false;
     if (try object.typedArrayImmutableBuffer(rt, obj)) return false;

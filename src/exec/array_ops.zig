@@ -2952,9 +2952,8 @@ pub fn qjsArrayFillCall(
 
         const current_length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
         const capped_final = @min(final, current_length);
-        var index = start;
-        while (index < capped_final) : (index += 1) {
-            _ = try core.typed_array.typedArraySetIndex(ctx.runtime, object, @intCast(index), value);
+        if (start < capped_final) {
+            try core.typed_array.typedArrayFillRange(ctx.runtime, object, @intCast(start), @intCast(capped_final), value);
         }
         return receiver_object_value.dup();
     }
