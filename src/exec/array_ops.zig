@@ -3353,6 +3353,28 @@ pub fn qjsArrayReverseCall(
         break :blk try toLengthIndex(ctx, output, global, length_value);
     };
 
+    // Special case fast arrays (qjs js_array_reverse quickjs.c:42836-42847):
+    // js_get_fast_array(ctx, obj, &arrp, &count32) && count32 == len → bare
+    // pointer-swap loop, a pure JSValue permutation with no dup/free (matches
+    // qjs's set_value-free swap). count32 == len rejects tail holes; non-fast /
+    // sparse / proxy / array-like fall through to the generic loop below.
+    if (object.isFastArray() and object.fastArrayCount() == length) {
+        if (length > 1) {
+            const arrp = object.fastArrayValuesMut();
+            var ll: usize = 0;
+            var hh: usize = length - 1;
+            while (ll < hh) : ({
+                ll += 1;
+                hh -= 1;
+            }) {
+                const lval = arrp[ll];
+                arrp[ll] = arrp[hh];
+                arrp[hh] = lval;
+            }
+        }
+        return receiver_object_value;
+    }
+
     var lower: usize = 0;
     while (lower < length / 2) : (lower += 1) {
         const upper = length - lower - 1;
