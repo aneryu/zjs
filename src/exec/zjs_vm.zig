@@ -1873,12 +1873,17 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     // el2/el3 (different stack shapes) stay on the slow arm.
                     if (opc == op.get_array_el) {
                         // n_pop=2,n_push=1. Byte-identical to the arrayElement
-                        // dense leg: pop key+obj (free both), pushOwned the dup'd
+                        // dense/typed legs: pop key+obj (free both), pushOwned the
                         // element. fastDenseArrayElementValue gates on object +
-                        // non-negative int key + fast-array-in-bounds.
+                        // non-negative int key + fast-array-in-bounds; the typed
+                        // fall-through mirrors qjs's JS_GetPropertyValue class_id
+                        // switch (quickjs.c:9029) so `ta[i]` reads inline instead of
+                        // syncing down to the generic property path.
                         const obj = (reg_sp - 2)[0];
                         const key = (reg_sp - 1)[0];
-                        const val = vm_property_field.fastDenseArrayElementValue(obj, key) orelse break :array_el_fast;
+                        const val = vm_property_field.fastDenseArrayElementValue(obj, key) orelse
+                            vm_property_field.fastTypedArrayElementValue(ctx.runtime, obj, key) orelse
+                            break :array_el_fast;
                         key.free(ctx.runtime);
                         obj.free(ctx.runtime);
                         (reg_sp - 2)[0] = val;

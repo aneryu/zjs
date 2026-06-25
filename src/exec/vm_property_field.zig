@@ -462,7 +462,7 @@ pub noinline fn arrayElement(
                 try stack.pushOwned(value);
                 return .done;
             }
-            if (fastInt32TypedArrayElementValue(obj, key)) |value| {
+            if (fastTypedArrayElementValue(ctx.runtime, obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
                 try stack.pushOwned(value);
                 return .done;
@@ -505,7 +505,7 @@ pub noinline fn arrayElement(
                 old_value.free(ctx.runtime);
                 return .done;
             }
-            if (fastInt32TypedArrayElementValue(obj, key)) |value| {
+            if (fastTypedArrayElementValue(ctx.runtime, obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
                 const old_value = stack.values[stack.values.len - 1];
                 stack.values[stack.values.len - 1] = value;
@@ -550,7 +550,7 @@ pub noinline fn arrayElement(
                 try stack.pushOwned(value);
                 return .done;
             }
-            if (fastInt32TypedArrayElementValue(obj, key)) |value| {
+            if (fastTypedArrayElementValue(ctx.runtime, obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
                 try stack.pushOwned(value);
                 return .done;
@@ -609,12 +609,25 @@ pub noinline fn arrayElement(
     return .done;
 }
 
-fn fastInt32TypedArrayElementValue(obj: core.JSValue, key: core.JSValue) ?core.JSValue {
+// Inline typed-array element read for `obj[int]`, mirroring qjs's
+// `JS_GetPropertyValue` per-`class_id` switch (quickjs.c:9029) which reads the
+// element straight from the typed storage (`int8_ptr/.../double_ptr`) after a
+// single bounds check. Covers every non-BigInt element kind (Int8/Uint8/
+// Uint8Clamped/Int16/Uint16/Int32/Uint32/Float16/Float32/Float64 — kinds 1..10),
+// which are all allocation-free; BigInt64/BigUint64 (kinds 11/12) return null so
+// the value flows through the (correct, allocating) generic path. The byte→value
+// mapping is delegated to the canonical `typedArrayGetIndex` (one source of truth
+// with the slow path / DataView), so no kind-specific decoder is duplicated here.
+pub fn fastTypedArrayElementValue(rt: *core.JSRuntime, obj: core.JSValue, key: core.JSValue) ?core.JSValue {
     const object = objectFromValue(obj) orelse return null;
     const key_int = key.asInt32() orelse return null;
     if (key_int < 0) return null;
-    if (object.typedArrayKind() != 6 or object.typedArrayElementSize() != 4) return null;
+    // Non-BigInt, fixed-length, real typed array only. element_size==0 means the
+    // object is not a typed array; kinds 11/12 are BigInt (skip — they allocate).
+    const kind = object.typedArrayKind();
+    if (kind < 1 or kind > 10) return null;
     const fixed_len = object.typedArrayFixedLength() orelse return null;
+    const element_size = object.typedArrayElementSize();
     const buffer_value = object.typedArrayBuffer() orelse return null;
     const buffer = objectFromValue(buffer_value) orelse return null;
     if (buffer.class_id != core.class.ids.array_buffer and buffer.class_id != core.class.ids.shared_array_buffer) return null;
@@ -623,12 +636,14 @@ fn fastInt32TypedArrayElementValue(obj: core.JSValue, key: core.JSValue) ?core.J
     const bytes = buffer.byteStorage();
     const byte_offset = object.typedArrayByteOffset();
     if (byte_offset > bytes.len) return core.JSValue.undefinedValue();
-    const byte_len = std.math.mul(usize, @as(usize, fixed_len), @as(usize, 4)) catch return null;
+    const byte_len = std.math.mul(usize, @as(usize, fixed_len), @as(usize, element_size)) catch return null;
     if (byte_len > bytes.len - byte_offset) return core.JSValue.undefinedValue();
     const index: u32 = @intCast(key_int);
     if (index >= fixed_len) return core.JSValue.undefinedValue();
-    const offset = byte_offset + @as(usize, index) * 4;
-    return core.JSValue.int32(std.mem.readInt(i32, bytes[offset..][0..4], .little));
+    // All bounds/detach/length conditions above match typedArrayGetIndex's own
+    // gating, so for kinds 1..10 it cannot error here (no allocation) — but route
+    // any unexpected error to the slow path rather than swallowing it.
+    return core.typed_array.typedArrayGetIndex(rt, object, index) catch null;
 }
 
 fn putInt32TypedArrayElementFast(rt: *core.JSRuntime, obj: core.JSValue, key: core.JSValue, value: core.JSValue) !bool {
