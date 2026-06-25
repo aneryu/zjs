@@ -712,6 +712,13 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
     var stop_before_pc = entry_stop_before_pc;
     var suspend_on_module_await = entry_suspend_on_module_await;
     machine.switched = true;
+    // For an inline (depth>0) frame these 10 per-level locals are always the same
+    // constants (no eval, no generator, not eval-code). They only change at the
+    // L0<->inline boundary, so the prologue sets them ONCE on entering the inline
+    // regime and skips them on every inline->inline frame switch — fib recurses
+    // deep, so almost every switch is inline->inline. Reset to false whenever the
+    // depth==0 (L0) branch runs so the next inline entry re-establishes them.
+    var inline_invariants_set = false;
 
     var interrupt_poller = control_vm.InterruptPoller.init(ctx.runtime);
     // `opc` lives across `continue :sw` threaded re-dispatch so combined arms
@@ -756,25 +763,34 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 stop_on_yield = entry_stop_on_yield;
                 stop_before_pc = entry_stop_before_pc;
                 suspend_on_module_await = entry_suspend_on_module_await;
+                // Left the inline regime: the next inline entry must re-establish
+                // the inline invariants (L0 may be eval/generator/eval-code).
+                inline_invariants_set = false;
             } else {
                 const entry = machine.topEntry();
                 function = entry.function;
                 stack = &entry.stack;
                 frame = &entry.frame;
                 catch_target = &entry.catch_target;
-                eval_local_names = &.{};
-                eval_local_slots = &.{};
                 eval_var_ref_names = entry.frame.evalVarRefNames();
                 eval_var_refs = entry.frame.evalVarRefs();
-                eval_with_object = core.JSValue.undefinedValue();
-                eval_global_var_bindings = false;
-                is_eval_code = false;
-                sync_global_lexical_locals = false;
                 strict_unresolved_get_var = entry.function.flags.is_strict or entry.function.flags.runtime_strict;
-                generator_state = null;
-                stop_on_yield = false;
-                stop_before_pc = null;
-                suspend_on_module_await = false;
+                // The 10 inline-invariant locals are identical for every inline
+                // frame; set them once when entering the inline regime, then skip
+                // on every inline->inline switch (the common deep-recursion case).
+                if (!inline_invariants_set) {
+                    eval_local_names = &.{};
+                    eval_local_slots = &.{};
+                    eval_with_object = core.JSValue.undefinedValue();
+                    eval_global_var_bindings = false;
+                    is_eval_code = false;
+                    sync_global_lexical_locals = false;
+                    generator_state = null;
+                    stop_on_yield = false;
+                    stop_before_pc = null;
+                    suspend_on_module_await = false;
+                    inline_invariants_set = true;
+                }
             }
         }
         // Canonical register reload: runs after the switched-block frame refresh and
