@@ -699,10 +699,10 @@ fn fastArrayForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_in
 /// straight onto the operand stack, skipping the per-step `{value, done}` result
 /// object the generic protocol allocates (collectionIteratorNext -> iteratorResult).
 ///
-/// Scope: only the `key` / `value` iterator kinds (Map.keys/values, Set, Map.values),
+/// Scope: the `key` / `value` iterator kinds (Map.keys/values, Set, Map.values),
 /// whose value is a borrowed entry slot — alive via the collection regardless of a
-/// GC during reserveAdditional. The `key_value` (entries) kind builds a pair array
-/// and is left to the generic path.
+/// GC during reserveAdditional — plus the `key_value` (entries) kind, which builds
+/// a dense `[k,v]` pair array (`buildCollectionEntryPair`) right here.
 fn fastMapSetForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_index: usize) !bool {
     if (iterator_index + 1 >= stack.values.len) return false;
     const iterator = objectFromValue(stack.values[iterator_index]) orelse return false;
@@ -749,23 +749,20 @@ fn fastMapSetForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_i
 /// Set yields [key, key]); the borrowed components are rooted across the array
 /// allocation.
 fn buildCollectionEntryPair(rt: *core.JSRuntime, is_set: bool, entry: core.object.CollectionEntry) !core.JSValue {
-    var key_value = entry.key;
-    var value_value = if (is_set) entry.key else entry.value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &key_value },
-        .{ .value = &value_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
-
+    // qjs js_create_array (quickjs.c:9601): a pre-sized dense fast array filled by
+    // direct slot writes, NOT two per-element defineOwnProperty (each an
+    // atomFromUInt32 + Descriptor build + the indexed-property machinery). Every
+    // allocation (createArray, the elements slice) happens BEFORE the dups, so no
+    // GC sits between a dup and the adopt; the borrowed key/value meanwhile stay
+    // alive via the collection (same liveness the key/value kinds rely on).
     const pair = try core.Object.createArray(rt, null);
     errdefer core.Object.destroyFromHeader(rt, &pair.header);
-    try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(key_value, true, true, true));
-    try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(1), core.Descriptor.data(value_value, true, true, true));
+    const elements = try rt.memory.alloc(core.JSValue, 2);
+    elements[0] = entry.key.dup();
+    elements[1] = if (is_set) entry.key.dup() else entry.value.dup();
+    pair.adoptDenseArrayElementsAssumingEmpty(elements);
+    // Match the flag the old defineOwnProperty path set via markIndexedProperties.
+    pair.flags.may_have_indexed_properties = true;
     return pair.value();
 }
 
