@@ -2090,6 +2090,278 @@ pub fn arrayMethodTypedArrayLength(rt: *core.JSRuntime, object: *core.Object, is
     return @intCast(try core.object.typedArrayLength(rt, object));
 }
 
+pub const TypedSearchMode = enum { index_of, last_index_of, includes };
+
+/// Raw-buffer typed scan for TypedArray indexOf/lastIndexOf/includes — mirrors
+/// qjs js_typed_array_indexOf (quickjs.c:58072, raw per-class scan :58179-58245).
+/// The search value is normalized ONCE against the element class with an early
+/// can't-fit short-circuit; then the backing buffer is scanned per element-kind
+/// (memchr for the u8 classes, typed-pointer compare otherwise) without boxing.
+///
+/// `start` is the already-fromIndex-coerced cursor as the existing zjs Array
+/// search produces it: for forward modes the inclusive first index `k`; for
+/// lastIndexOf the EXCLUSIVE upper bound (`k + 1`, matching the `cursor`/while
+/// loop in qjsArraySearchCall). `original_length` is the length read before the
+/// fromIndex coercion ran (which may resize a RAB via valueOf), used only for
+/// the qjs includes-undefined-out-of-bounds special case.
+pub fn qjsTypedArraySearchScan(
+    rt: *core.JSRuntime,
+    object: *core.Object,
+    mode: TypedSearchMode,
+    search_value: core.JSValue,
+    start: usize,
+    original_length: usize,
+) !core.JSValue {
+    const class_kind = object.typedArrayKind();
+    const elem_size = object.typedArrayElementSize();
+
+    // qjs: includes can find 'undefined' if searching out of bounds of a RAB
+    // that shrank during the fromIndex coercion (quickjs.c:58114-58119). The
+    // pre-coercion length stays > the current count, special == includes, the
+    // search value is undefined, and the (lastIndexOf-clamped) cursor is still
+    // < original_length.
+    const current_length = @as(usize, @intCast(try core.object.typedArrayLength(rt, object)));
+    if (mode == .includes and original_length > current_length and search_value.isUndefined()) {
+        const k_for_special = if (mode == .last_index_of) (if (start == 0) start else start - 1) else start;
+        if (k_for_special < original_length) return core.JSValue.boolean(true);
+    }
+
+    // RAB may have been resized by an evil valueOf in the fromIndex coercion;
+    // re-clamp the scan window to min(original, live) — qjs reads len ONCE at
+    // the top and then does len = min_int(len, p->u.array.count), so a buffer
+    // that GREW during coercion is still scanned only over the original window
+    // (quickjs.c:58122-58129).
+    const length = @min(original_length, current_length);
+    if (length == 0) return searchScanResult(mode, null);
+
+    // Translate the zjs cursor to qjs's k / stop / inc.
+    var k: usize = undefined;
+    var stop: usize = undefined;
+    const forward = mode != .last_index_of;
+    if (forward) {
+        k = @min(start, length);
+        stop = length;
+        if (k >= stop) return searchScanResult(mode, null);
+    } else {
+        // `start` is the exclusive upper bound; the highest index scanned is
+        // start - 1, re-clamped to length - 1.
+        if (start == 0) return searchScanResult(mode, null);
+        k = @min(start - 1, length - 1);
+        stop = 0; // inclusive lower bound for the backward loop
+    }
+
+    // Normalize the search value ONCE (quickjs.c:58131-58177). No coercion is
+    // run on the search value itself — only its tag is inspected.
+    var is_int = false;
+    var is_bigint = false;
+    var v64: i64 = 0;
+    var d: f64 = 0;
+    if (search_value.asInt32()) |int_value| {
+        is_int = true;
+        v64 = int_value;
+        d = @floatFromInt(int_value);
+    } else if (search_value.asFloat64()) |float_value| {
+        d = float_value;
+        if (d >= @as(f64, @floatFromInt(std.math.minInt(i64))) and d < 0x1p63) {
+            v64 = @intFromFloat(d);
+            is_int = (@as(f64, @floatFromInt(v64)) == d);
+        }
+    } else if (search_value.isBigInt()) {
+        switch (class_kind) {
+            11 => { // BigInt64Array: must fit int64
+                v64 = search_value.asInt64() orelse return searchScanResult(mode, null);
+            },
+            12 => { // BigUint64Array: non-negative and must fit uint64
+                const u = search_value.asUint64() orelse return searchScanResult(mode, null);
+                v64 = @bitCast(u);
+            },
+            else => return searchScanResult(mode, null), // bigint can't match a non-bigint array
+        }
+        is_bigint = true;
+        d = 0;
+    } else {
+        return searchScanResult(mode, null);
+    }
+
+    const buffer = try core.typed_array.typedArrayBufferObject(object);
+    const base_offset = object.typedArrayByteOffset();
+    const bytes = buffer.byteStorage()[base_offset..][0 .. length * elem_size];
+
+    const res: ?usize = switch (class_kind) {
+        1 => blk: { // Int8
+            if (!(is_int and @as(i64, @as(i8, @truncate(v64))) == v64)) break :blk null;
+            break :blk scanU8(bytes, k, stop, forward, @bitCast(@as(i8, @truncate(v64))));
+        },
+        2, 3 => blk: { // Uint8, Uint8Clamped
+            if (!(is_int and @as(i64, @as(u8, @truncate(@as(u64, @bitCast(v64))))) == v64)) break :blk null;
+            break :blk scanU8(bytes, k, stop, forward, @truncate(@as(u64, @bitCast(v64))));
+        },
+        4 => blk: { // Int16
+            if (!(is_int and @as(i64, @as(i16, @truncate(v64))) == v64)) break :blk null;
+            break :blk scanElem(i16, bytes, k, stop, forward, @truncate(v64));
+        },
+        5 => blk: { // Uint16
+            if (!(is_int and @as(i64, @as(u16, @truncate(@as(u64, @bitCast(v64))))) == v64)) break :blk null;
+            break :blk scanElem(u16, bytes, k, stop, forward, @truncate(@as(u64, @bitCast(v64))));
+        },
+        6 => blk: { // Int32
+            if (!(is_int and @as(i64, @as(i32, @truncate(v64))) == v64)) break :blk null;
+            break :blk scanElem(i32, bytes, k, stop, forward, @truncate(v64));
+        },
+        7 => blk: { // Uint32
+            if (!(is_int and @as(i64, @as(u32, @truncate(@as(u64, @bitCast(v64))))) == v64)) break :blk null;
+            break :blk scanElem(u32, bytes, k, stop, forward, @truncate(@as(u64, @bitCast(v64))));
+        },
+        8 => blk: { // Float16
+            if (is_bigint) break :blk null;
+            break :blk scanFloat16(mode, bytes, k, stop, forward, d);
+        },
+        9 => blk: { // Float32
+            if (is_bigint) break :blk null;
+            break :blk scanFloat(f32, mode, bytes, k, stop, forward, d);
+        },
+        10 => blk: { // Float64
+            if (is_bigint) break :blk null;
+            break :blk scanFloat(f64, mode, bytes, k, stop, forward, d);
+        },
+        11 => blk: { // BigInt64
+            if (!is_bigint) break :blk null;
+            break :blk scanElem(i64, bytes, k, stop, forward, v64);
+        },
+        12 => blk: { // BigUint64
+            if (!is_bigint) break :blk null;
+            break :blk scanElem(u64, bytes, k, stop, forward, @bitCast(v64));
+        },
+        else => null,
+    };
+
+    return searchScanResult(mode, res);
+}
+
+fn searchScanResult(mode: TypedSearchMode, res: ?usize) core.JSValue {
+    if (mode == .includes) return core.JSValue.boolean(res != null);
+    return if (res) |index| lengthIndexValue(index) else core.JSValue.int32(-1);
+}
+
+fn scanU8(bytes: []const u8, k: usize, stop: usize, forward: bool, v: u8) ?usize {
+    if (forward) {
+        // qjs uses memchr over [k, len) for the u8 classes (quickjs.c:58192-58197).
+        const found = std.mem.indexOfScalarPos(u8, bytes[0..stop], k, v) orelse return null;
+        return found;
+    }
+    var i = k;
+    while (true) : (i -= 1) {
+        if (bytes[i] == v) return i;
+        if (i == stop) break;
+    }
+    return null;
+}
+
+fn scanElem(comptime T: type, bytes: []const u8, k: usize, stop: usize, forward: bool, v: T) ?usize {
+    const width = @sizeOf(T);
+    if (forward) {
+        var i = k;
+        while (i != stop) : (i += 1) {
+            if (std.mem.readInt(T, bytes[i * width ..][0..width], .little) == v) return i;
+        }
+        return null;
+    }
+    var i = k;
+    while (true) : (i -= 1) {
+        if (std.mem.readInt(T, bytes[i * width ..][0..width], .little) == v) return i;
+        if (i == stop) break;
+    }
+    return null;
+}
+
+fn readFloat(comptime T: type, bytes: []const u8, index: usize) T {
+    const Bits = std.meta.Int(.unsigned, @bitSizeOf(T));
+    const width = @sizeOf(T);
+    return @bitCast(std.mem.readInt(Bits, bytes[index * width ..][0..width], .little));
+}
+
+fn scanFloat16(mode: TypedSearchMode, bytes: []const u8, k: usize, stop: usize, forward: bool, d: f64) ?usize {
+    if (std.math.isNan(d)) {
+        // indexOf returns -1, includes finds NaN (quickjs.c:58249-58259).
+        if (mode != .includes) return null;
+        return scanFloatPredicate(f16, bytes, k, stop, forward, struct {
+            fn match(e: f16) bool {
+                return std.math.isNan(e);
+            }
+        }.match);
+    }
+    if (d == 0) {
+        // includes/indexOf both find +0 and -0 (quickjs.c:58260-58268).
+        return scanFloatPredicate(f16, bytes, k, stop, forward, struct {
+            fn match(e: f16) bool {
+                return e == 0;
+            }
+        }.match);
+    }
+    // d == fromfp16(tofp16(d)): only scan if the value roundtrips through f16.
+    const hf: f16 = @floatCast(d);
+    if (@as(f64, @floatCast(hf)) != d) return null;
+    const target = hf;
+    if (forward) {
+        var i = k;
+        while (i != stop) : (i += 1) {
+            if (readFloat(f16, bytes, i) == target) return i;
+        }
+        return null;
+    }
+    var i = k;
+    while (true) : (i -= 1) {
+        if (readFloat(f16, bytes, i) == target) return i;
+        if (i == stop) break;
+    }
+    return null;
+}
+
+fn scanFloat(comptime T: type, mode: TypedSearchMode, bytes: []const u8, k: usize, stop: usize, forward: bool, d: f64) ?usize {
+    if (std.math.isNan(d)) {
+        // indexOf returns -1, includes finds NaN (quickjs.c:58282-58292 / :58306-58316).
+        if (mode != .includes) return null;
+        return scanFloatPredicate(T, bytes, k, stop, forward, struct {
+            fn match(e: T) bool {
+                return std.math.isNan(e);
+            }
+        }.match);
+    }
+    // float32: only scan if (float)d == d roundtrips (quickjs.c:58293).
+    // float64: scan directly (quickjs.c:58317-58324). +0.0 == -0.0 matches both.
+    const target: T = @floatCast(d);
+    if (T == f32 and @as(f64, @floatCast(target)) != d) return null;
+    if (forward) {
+        var i = k;
+        while (i != stop) : (i += 1) {
+            if (readFloat(T, bytes, i) == target) return i;
+        }
+        return null;
+    }
+    var i = k;
+    while (true) : (i -= 1) {
+        if (readFloat(T, bytes, i) == target) return i;
+        if (i == stop) break;
+    }
+    return null;
+}
+
+fn scanFloatPredicate(comptime T: type, bytes: []const u8, k: usize, stop: usize, forward: bool, comptime match: fn (T) bool) ?usize {
+    if (forward) {
+        var i = k;
+        while (i != stop) : (i += 1) {
+            if (match(readFloat(T, bytes, i))) return i;
+        }
+        return null;
+    }
+    var i = k;
+    while (true) : (i -= 1) {
+        if (match(readFloat(T, bytes, i))) return i;
+        if (i == stop) break;
+    }
+    return null;
+}
+
 pub fn qjsArrayLastIndexSparseLarge(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,

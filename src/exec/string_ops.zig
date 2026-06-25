@@ -4253,6 +4253,23 @@ pub fn qjsArraySearchCall(
     if (length == 0) return if (mode == .includes) core.JSValue.boolean(false) else core.JSValue.int32(-1);
 
     const search_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    // Typed arrays: raw-buffer per-class scan (qjs js_typed_array_indexOf,
+    // quickjs.c:58072 / :58179-58245). Normalize the search value once with an
+    // early can't-fit short-circuit, then scan the backing buffer per element
+    // kind instead of boxing each element through typedArrayGetIndex. The
+    // fromIndex coercion below mirrors what the generic loop already ran.
+    if (is_typed_array) {
+        const search_mode: array_ops.TypedSearchMode = switch (mode) {
+            .index_of => .index_of,
+            .last_index_of => .last_index_of,
+            .includes => .includes,
+        };
+        const cursor = if (mode == .last_index_of)
+            try arrayLastIndexStart(ctx, output, global, args, length)
+        else
+            try arrayFirstIndexStart(ctx, output, global, args, length);
+        return try array_ops.qjsTypedArraySearchScan(ctx.runtime, object, search_mode, search_value, cursor, length);
+    }
     if (mode == .last_index_of and length > 1_000_000) {
         return try qjsArrayLastIndexSparseLarge(ctx, output, global, object, receiver_object_value, args, length, search_value);
     }
