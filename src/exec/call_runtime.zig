@@ -93,19 +93,26 @@ pub fn execCall(
     const func = stack.values[region_base];
     const args: []const core.JSValue = stack.values[region_base + 1 ..][0..argc];
 
+    // Fast path FIRST: a plain bytecode-to-bytecode call resolves to an inline
+    // target. resolveInlineTarget returns null for class constructors, so a super()
+    // call (whose callee is always a constructor) never resolves here — an inline
+    // result is provably NOT a super-constructor invocation, so the
+    // isCurrentSuperConstructor check below is unnecessary on this path. A
+    // host-output callee (console.log) is not a bytecode function either, so it
+    // also falls through to fastHostOutputCall. `this` binds undefined (arrow
+    // targets override with their lexical `this` inside resolveInlineTarget).
+    if (allow_inline) {
+        if (inline_calls.resolveInlineTarget(ctx, global, core.JSValue.undefinedValue(), func)) |target| {
+            return .{ .inline_call = .{ .target = target, .region_base = region_base, .argc = argc } };
+        }
+    }
+
     if (try builtin_glue.fastHostOutputCall(ctx.runtime, output, func, args)) {
         popOwnedStackRegion(ctx.runtime, stack, region_base);
         stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
         return .done;
     }
     const is_super_constructor = class_init_ops.isCurrentSuperConstructor(ctx, frame, func);
-    if (allow_inline and !is_super_constructor) {
-        // Plain call: no receiver on the stack, so the call binds `this` to
-        // undefined (arrow targets override this with their lexical `this`).
-        if (inline_calls.resolveInlineTarget(ctx, global, core.JSValue.undefinedValue(), func)) |target| {
-            return .{ .inline_call = .{ .target = target, .region_base = region_base, .argc = argc } };
-        }
-    }
     const arrow_super_this = if (is_super_constructor and !frame.function.flags.is_derived_class_constructor)
         class_init_ops.currentArrowLexicalSuperThis(ctx.runtime, frame)
     else
