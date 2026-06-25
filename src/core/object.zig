@@ -9825,8 +9825,14 @@ fn entryArrayValue(rt: *JSRuntime, key: atom.Atom, value: JSValue) !JSValue {
     errdefer Object.destroyFromHeader(rt, &arr.header);
     const key_value = try entriesAtomToStringValue(rt, key);
     defer key_value.free(rt);
-    try arr.defineOwnProperty(rt, atom.atomFromUInt32(0), descriptor.Descriptor.data(key_value, true, true, true));
-    try arr.defineOwnProperty(rt, atom.atomFromUInt32(1), descriptor.Descriptor.data(rooted_value, true, true, true));
+    // qjs js_create_array (quickjs.c:9601): pre-sized dense fast array instead of
+    // two per-element defineOwnProperty. key_value/rooted_value stay rooted (the
+    // root_frame above + the local defer) across the slice alloc; dups precede adopt.
+    const elements = try rt.memory.alloc(JSValue, 2);
+    elements[0] = key_value.dup();
+    elements[1] = rooted_value.dup();
+    arr.adoptDenseArrayElementsAssumingEmpty(elements);
+    arr.flags.may_have_indexed_properties = true;
     return arr.value();
 }
 

@@ -5460,8 +5460,14 @@ pub fn qjsObjectEntryArrayValue(
 
     key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, key);
 
-    try createDataPropertyOrThrow(ctx, output, global, entry_value, entry, core.atom.atomFromUInt32(0), key_value, caller_function, caller_frame);
-    try createDataPropertyOrThrow(ctx, output, global, entry_value, entry, core.atom.atomFromUInt32(1), value, caller_function, caller_frame);
+    // qjs js_create_array (quickjs.c:9601): a pre-sized dense fast array, not two
+    // per-element createDataPropertyOrThrow (atomFromUInt32 + Descriptor + define).
+    // The slice alloc precedes the dups; key_value/value stay rooted via root_frame.
+    const elements = try ctx.runtime.memory.alloc(core.JSValue, 2);
+    elements[0] = key_value.dup();
+    elements[1] = value.dup();
+    entry.adoptDenseArrayElementsAssumingEmpty(elements);
+    entry.flags.may_have_indexed_properties = true;
 
     return entry_value;
 }
