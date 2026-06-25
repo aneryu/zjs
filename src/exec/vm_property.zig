@@ -23,11 +23,6 @@ const atom_string = core.atom.predefinedId("String", .string).?;
 
 pub const Step = enum { done, continue_loop };
 
-const BorrowedArg = struct {
-    value: core.JSValue,
-    next_pc: usize,
-};
-
 const VarRefPut = struct {
     idx: u16,
     opc: u8,
@@ -105,39 +100,6 @@ pub const DecodedFalseBranch = struct {
     false_pc: usize,
 };
 
-pub const SimpleNumericRangeCall = struct {
-    kind: bytecode.function.SimpleNumericKind,
-    binop: u8,
-    rhs: i32 = 0,
-    capture0: i32 = 0,
-    capture0_slot: core.JSValue = core.JSValue.undefinedValue(),
-};
-
-const SimpleNumericRangeSource = struct {
-    fb: *const bytecode.FunctionBytecode,
-    captures: []const core.JSValue,
-};
-
-pub const SimpleNumericRangeArg = union(enum) {
-    induction,
-    int32: i32,
-};
-
-pub const GlobalSimpleNumericRangeArg = union(enum) {
-    global: core.Atom,
-    int32: i32,
-};
-
-const SimpleNumericLinearTerm = struct {
-    coefficient: i128,
-    offset: i128,
-};
-
-pub const InductionImmediateInt32Args = struct {
-    immediate: i32,
-    next_pc: usize,
-};
-
 pub const IntRangeDeltaBounds = struct {
     total: i128,
     min: i128,
@@ -147,11 +109,6 @@ pub const IntRangeDeltaBounds = struct {
 const DenseArrayModFieldIncrements = struct {
     values: [8]i32,
     len: usize,
-};
-
-pub const GlobalPropertyRangeDelta = union(enum) {
-    constant: i32,
-    periodic: DenseArrayModFieldIncrements,
 };
 
 pub fn decodeFalseBranch(code: []const u8, branch_pc: usize) ?DecodedFalseBranch {
@@ -174,48 +131,6 @@ pub fn decodeFalseBranch(code: []const u8, branch_pc: usize) ?DecodedFalseBranch
             break :blk .{ .true_pc = operand_pc + 4, .false_pc = @intCast(target_i64) };
         },
         else => null,
-    };
-}
-
-pub const BorrowedCallable = struct {
-    value: core.JSValue,
-    next_pc: usize,
-};
-
-pub fn borrowedSimpleCallable(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    pc: usize,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) ?BorrowedCallable {
-    if (pc >= function.code.len) return null;
-    const code = function.code;
-    return switch (code[pc]) {
-        op.get_var_ref0 => if (varRefReadableBorrowedForFastPath(function, frame, 0)) |value| .{ .value = value, .next_pc = pc + 1 } else null,
-        op.get_var_ref1 => if (varRefReadableBorrowedForFastPath(function, frame, 1)) |value| .{ .value = value, .next_pc = pc + 1 } else null,
-        op.get_var_ref2 => if (varRefReadableBorrowedForFastPath(function, frame, 2)) |value| .{ .value = value, .next_pc = pc + 1 } else null,
-        op.get_var_ref3 => if (varRefReadableBorrowedForFastPath(function, frame, 3)) |value| .{ .value = value, .next_pc = pc + 1 } else null,
-        op.get_var_ref, op.get_var_ref_check => blk: {
-            if (pc + 3 > code.len) return null;
-            const idx = readInt(u16, code[pc + 1 ..][0..2]);
-            const value = varRefReadableBorrowedForFastPath(function, frame, idx) orelse return null;
-            break :blk .{ .value = value, .next_pc = pc + 3 };
-        },
-        op.get_var, op.get_var_undef => blk: {
-            if (pc + 3 > code.len) return null;
-            const ref_idx = readInt(u16, code[pc + 1 ..][0..2]);
-            const atom_id = globalVarAtom(function, ref_idx) orelse return null;
-            const value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, pc, atom_id, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
-            break :blk .{ .value = value, .next_pc = pc + 3 };
-        },
-        else => if (decodeLocalGet(code, pc)) |get| blk: {
-            const value = localReadableBorrowed(frame, get.idx, get.checked) orelse return null;
-            break :blk .{ .value = value, .next_pc = get.next_pc };
-        } else null,
     };
 }
 
@@ -524,6 +439,7 @@ pub fn decodeBindingPut(code: []const u8, pc: usize) ?BindingPut {
 }
 
 pub fn globalVarAtom(function: *const bytecode.Bytecode, idx: u16) ?core.Atom {
+    if (idx < function.closure_var.len) return function.closure_var[idx].var_name;
     if (idx >= function.var_ref_names.len) return null;
     return function.var_ref_names[idx];
 }
@@ -559,70 +475,6 @@ pub fn decodeLocalPut(code: []const u8, pc: usize) ?LocalPut {
         },
         else => null,
     };
-}
-
-pub fn borrowedSimpleCallArg(frame: *const frame_mod.Frame, function: *const bytecode.Bytecode, pc: usize) ?BorrowedArg {
-    if (pc >= function.code.len) return null;
-    const code = function.code;
-    if (decodeVarRefGet(code, pc)) |get| {
-        return .{
-            .value = varRefReadableBorrowedForFastPath(function, frame, get.idx) orelse return null,
-            .next_pc = get.next_pc,
-        };
-    }
-    if (decodeLocalGet(code, pc)) |get| {
-        return .{
-            .value = localReadableBorrowed(frame, get.idx, get.checked) orelse return null,
-            .next_pc = get.next_pc,
-        };
-    }
-    switch (code[pc]) {
-        op.push_minus1 => return .{ .value = core.JSValue.int32(-1), .next_pc = pc + 1 },
-        op.push_0 => return .{ .value = core.JSValue.int32(0), .next_pc = pc + 1 },
-        op.push_1 => return .{ .value = core.JSValue.int32(1), .next_pc = pc + 1 },
-        op.push_2 => return .{ .value = core.JSValue.int32(2), .next_pc = pc + 1 },
-        op.push_3 => return .{ .value = core.JSValue.int32(3), .next_pc = pc + 1 },
-        op.push_4 => return .{ .value = core.JSValue.int32(4), .next_pc = pc + 1 },
-        op.push_5 => return .{ .value = core.JSValue.int32(5), .next_pc = pc + 1 },
-        op.push_6 => return .{ .value = core.JSValue.int32(6), .next_pc = pc + 1 },
-        op.push_7 => return .{ .value = core.JSValue.int32(7), .next_pc = pc + 1 },
-        op.push_i8 => {
-            if (pc + 2 > code.len) return null;
-            const value: i8 = @bitCast(code[pc + 1]);
-            return .{ .value = core.JSValue.int32(value), .next_pc = pc + 2 };
-        },
-        op.push_i16 => {
-            if (pc + 3 > code.len) return null;
-            return .{ .value = core.JSValue.int32(readInt(i16, code[pc + 1 ..][0..2])), .next_pc = pc + 3 };
-        },
-        op.push_i32 => {
-            if (pc + 5 > code.len) return null;
-            return .{ .value = core.JSValue.int32(readInt(i32, code[pc + 1 ..][0..4])), .next_pc = pc + 5 };
-        },
-        else => return null,
-    }
-}
-
-pub fn borrowedSimpleCallArgWithContext(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    pc: usize,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) ?BorrowedArg {
-    if (pc >= function.code.len) return null;
-    const code = function.code;
-    if (code[pc] == op.get_var or code[pc] == op.get_var_undef) {
-        if (pc + 3 > code.len) return null;
-        const ref_idx = readInt(u16, code[pc + 1 ..][0..2]);
-        const atom_id = globalVarAtom(function, ref_idx) orelse return null;
-        const value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, pc, atom_id, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
-        return .{ .value = value, .next_pc = pc + 3 };
-    }
-    return borrowedSimpleCallArg(frame, function, pc);
 }
 
 pub fn varRefReadableBorrowed(frame: *const frame_mod.Frame, idx: u16) ?core.JSValue {
@@ -665,167 +517,6 @@ pub fn varRefStoreWritableForFastPath(
     return true;
 }
 
-pub fn simpleNumericFunctionResult(rt: *core.JSRuntime, func: core.JSValue, args: []const core.JSValue) !?core.JSValue {
-    if (func.isFunctionBytecode()) {
-        const fb = call_runtime.functionBytecodeFromValue(func) orelse return null;
-        return try simpleNumericBytecodeResult(rt, fb, args, &.{});
-    }
-    const object = object_ops.functionObjectFromValue(func) orelse return null;
-    const function_value = object.functionBytecodeSlot().* orelse return null;
-    const fb = call_runtime.functionBytecodeFromValue(function_value) orelse return null;
-    return try simpleNumericBytecodeResult(rt, fb, args, object.functionCapturesSlot().*);
-}
-
-pub fn simpleNumericRangeCallable(func: core.JSValue) ?SimpleNumericRangeCall {
-    const callable: SimpleNumericRangeSource = if (func.isFunctionBytecode())
-        SimpleNumericRangeSource{
-            .fb = call_runtime.functionBytecodeFromValue(func) orelse return null,
-            .captures = @as([]const core.JSValue, &.{}),
-        }
-    else blk: {
-        const object = object_ops.functionObjectFromValue(func) orelse return null;
-        const function_value = object.functionBytecodeSlot().* orelse return null;
-        break :blk SimpleNumericRangeSource{
-            .fb = call_runtime.functionBytecodeFromValue(function_value) orelse return null,
-            .captures = @as([]const core.JSValue, object.functionCapturesSlot().*),
-        };
-    };
-    const fb = callable.fb;
-    const captures = callable.captures;
-    return switch (fb.simple_numeric_kind) {
-        .arg0_const => .{ .kind = .arg0_const, .binop = fb.simple_numeric_op, .rhs = fb.simple_numeric_rhs },
-        .arg0_arg1 => .{ .kind = .arg0_arg1, .binop = fb.simple_numeric_op },
-        .capture0_arg0 => blk: {
-            if (captures.len == 0) return null;
-            const capture_slot = captures[0];
-            const captured = slotValueBorrowed(capture_slot).asInt32() orelse return null;
-            break :blk .{
-                .kind = .capture0_arg0,
-                .binop = fb.simple_numeric_op,
-                .capture0 = captured,
-                .capture0_slot = capture_slot,
-            };
-        },
-        .capture0_post_inc_return => null,
-        .none => null,
-    };
-}
-
-fn simpleNumericBytecodeResult(
-    rt: *core.JSRuntime,
-    fb: *const bytecode.FunctionBytecode,
-    args: []const core.JSValue,
-    captures: []const core.JSValue,
-) !?core.JSValue {
-    return switch (fb.simple_numeric_kind) {
-        .arg0_const => {
-            if (args.len == 0 or !args[0].isNumber()) return null;
-            return try simpleNumericBinary(rt, fb.simple_numeric_op, args[0], core.JSValue.int32(fb.simple_numeric_rhs));
-        },
-        .arg0_arg1 => {
-            if (args.len < 2 or !args[0].isNumber() or !args[1].isNumber()) return null;
-            return try simpleNumericBinary(rt, fb.simple_numeric_op, args[0], args[1]);
-        },
-        .capture0_arg0 => {
-            if (args.len == 0 or !args[0].isNumber() or captures.len == 0) return null;
-            const captured = slotValueBorrowed(captures[0]);
-            if (!captured.isNumber()) return null;
-            return try simpleNumericBinary(rt, fb.simple_numeric_op, captured, args[0]);
-        },
-        .capture0_post_inc_return => try simpleCapture0PostIncReturn(rt, captures, args),
-        .none => null,
-    };
-}
-
-fn simpleCapture0PostIncReturn(rt: *core.JSRuntime, captures: []const core.JSValue, args: []const core.JSValue) !?core.JSValue {
-    if (args.len != 0 or captures.len == 0) return null;
-    const cell = varRefCellFromValue(captures[0]) orelse return null;
-    if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return null;
-    const current_value = cell.varRefValue();
-    const current = current_value.asInt32() orelse return null;
-    const updated = fastInt32Add(current, 1);
-    try cell.setVarRefValue(rt, updated);
-    return updated;
-}
-
-pub fn simpleNumericRangeLinearTerm(simple: SimpleNumericRangeCall, args: []const SimpleNumericRangeArg) ?SimpleNumericLinearTerm {
-    if (simple.binop != op.add and simple.binop != op.sub) return null;
-    return switch (simple.kind) {
-        .arg0_const => {
-            if (args.len == 0 or !simpleNumericRangeArgIsInduction(args[0])) return null;
-            return .{
-                .coefficient = 1,
-                .offset = switch (simple.binop) {
-                    op.add => simple.rhs,
-                    op.sub => -@as(i128, simple.rhs),
-                    else => unreachable,
-                },
-            };
-        },
-        .arg0_arg1 => {
-            if (args.len < 2) return null;
-            return switch (args[0]) {
-                .induction => switch (args[1]) {
-                    .int32 => |rhs| .{
-                        .coefficient = 1,
-                        .offset = switch (simple.binop) {
-                            op.add => rhs,
-                            op.sub => -@as(i128, rhs),
-                            else => unreachable,
-                        },
-                    },
-                    .induction => null,
-                },
-                .int32 => |lhs| switch (args[1]) {
-                    .induction => .{
-                        .coefficient = switch (simple.binop) {
-                            op.add => 1,
-                            op.sub => -1,
-                            else => unreachable,
-                        },
-                        .offset = lhs,
-                    },
-                    .int32 => null,
-                },
-            };
-        },
-        .capture0_arg0 => {
-            if (args.len == 0 or !simpleNumericRangeArgIsInduction(args[0])) return null;
-            return .{
-                .coefficient = switch (simple.binop) {
-                    op.add => 1,
-                    op.sub => -1,
-                    else => unreachable,
-                },
-                .offset = simple.capture0,
-            };
-        },
-        .capture0_post_inc_return => null,
-        .none => null,
-    };
-}
-
-fn simpleNumericRangeArgIsInduction(range_arg: SimpleNumericRangeArg) bool {
-    return switch (range_arg) {
-        .induction => true,
-        .int32 => false,
-    };
-}
-
-pub fn simpleNumericBinary(rt: *core.JSRuntime, binop: u8, lhs: core.JSValue, rhs: core.JSValue) !core.JSValue {
-    if (lhs.asInt32()) |lhs_int| {
-        if (rhs.asInt32()) |rhs_int| {
-            return switch (binop) {
-                op.add => fastInt32Add(lhs_int, rhs_int),
-                op.sub => fastInt32Sub(lhs_int, rhs_int),
-                op.mul => fastInt32Mul(lhs_int, rhs_int),
-                else => try value_ops.binary(rt, binop, lhs, rhs),
-            };
-        }
-    }
-    return try value_ops.binary(rt, binop, lhs, rhs);
-}
-
 pub fn slotValueBorrowed(slot: core.JSValue) core.JSValue {
     var current = slot;
     var depth: usize = 0;
@@ -849,12 +540,6 @@ pub const TypedArrayLengthPrintStore = struct {
 pub const TypedArrayLengthPrintGet = struct {
     idx: u16,
     next_pc: usize,
-};
-
-pub const StringSubstringImmediateCall = struct {
-    start: usize,
-    end: usize,
-    call_pc: usize,
 };
 
 const CollectionHostOutputKeyKind = enum { atom, local, int32 };
@@ -1122,40 +807,6 @@ pub fn backwardGotoTarget(code: []const u8, operand_pc: usize, goto_opc: u8) ?us
     return target;
 }
 
-pub const UriFourByteRangePlan = struct {
-    induction_atom: core.Atom,
-    induction_put_pc: usize,
-    string_store_atom: core.Atom,
-    string_store_pc: usize,
-    index_atom: core.Atom,
-    index_put_pc: usize,
-    low_atom: core.Atom,
-    low_put_pc: usize,
-    high_atom: core.Atom,
-    high_put_pc: usize,
-    high_completion_put: ?LocalPut = null,
-    branch_completion_put: ?LocalPut = null,
-    count_atom: core.Atom,
-    count_put_pc: usize,
-    count_completion_put: ?LocalPut = null,
-    induction_completion_put: ?LocalPut = null,
-    index_b3_atom: core.Atom,
-    index_b3_get_pc: usize,
-    limit: i32,
-    exit_pc: usize,
-};
-
-pub fn simpleStringCallableKind(func: core.JSValue) ?bytecode.function.SimpleStringKind {
-    if (func.isFunctionBytecode()) {
-        const fb = call_runtime.functionBytecodeFromValue(func) orelse return null;
-        return if (fb.simple_string_kind == .none) null else fb.simple_string_kind;
-    }
-    const object = object_ops.functionObjectFromValue(func) orelse return null;
-    const function_value = object.functionBytecodeSlot().* orelse return null;
-    const fb = call_runtime.functionBytecodeFromValue(function_value) orelse return null;
-    return if (fb.simple_string_kind == .none) null else fb.simple_string_kind;
-}
-
 pub const ImmediateInt32 = struct {
     value: i32,
     next_pc: usize,
@@ -1193,22 +844,6 @@ pub fn immediateInt32Operand(code: []const u8, pc: usize) ?ImmediateInt32 {
         else => null,
     };
 }
-
-pub const UriCall1Argument = struct {
-    value: core.JSValue,
-    next_pc: usize,
-    owned: bool,
-};
-
-pub const UriStrictEqIntArg = struct {
-    value: i32,
-    next_pc: usize,
-};
-
-pub const UriStrictEqBranch = struct {
-    true_pc: usize,
-    false_pc: usize,
-};
 
 // --- With-statement and reference opcode handlers moved to vm_property_ref.zig ---
 const vm_property_ref = @import("vm_property_ref.zig");
@@ -1380,7 +1015,7 @@ pub fn canUseFastGlobalVarLookup(
     if (!frame.current_function.isUndefined()) return false;
     if (frameHasVarRefBinding(function, frame, atom_id)) return false;
     if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
-    if (frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return false;
+    if (frame.evalLocalNames().len != 0 or frame.evalVarRefNames().len != 0) return false;
     return true;
 }
 
@@ -1398,7 +1033,7 @@ pub fn canUseInstalledGlobalDataIc(
     if (!eval_with_object.isUndefined()) return false;
     if (frameHasVarRefBinding(function, frame, atom_id)) return false;
     if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
-    if (frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return false;
+    if (frame.evalLocalNames().len != 0 or frame.evalVarRefNames().len != 0) return false;
     _ = global;
     if (ctx.lexicals) |env| {
         if (env.hasOwnProperty(atom_id)) return false;
@@ -1435,7 +1070,28 @@ fn functionLocalOrArgBindingShadowsGlobal(rt: *core.JSRuntime, function: *const 
     return false;
 }
 
-fn parentFunctionEvalBindingShadowsGlobal(rt: *core.JSRuntime, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
+/// Cheap per-frame-constant precondition for parentFunctionEvalBindingShadowsGlobal:
+/// only a closure created inside a direct eval carries an eval-parent link. The
+/// var_ref fast lanes call this first — fully inlined (one tag test + one header
+/// deref + one field load, no call to objectFromValue) so the common case
+/// (top-level code, ordinary closures) short-circuits to a single register test
+/// before resolving the atom or making the heavier name-comparison call.
+pub inline fn frameClosureHasEvalParent(frame: *const frame_mod.Frame) bool {
+    const cf = frame.current_function;
+    if (!cf.isObject()) return false;
+    const header = cf.refHeader() orelse return false;
+    const function_object: *core.Object = @fieldParentPtr("header", header);
+    return function_object.functionEvalParentFunction() != null;
+}
+
+/// True when this closure's enclosing (eval-containing) function introduced a
+/// runtime `var` binding with the same name — qjs's var_object_test
+/// (quickjs.c:33158-33167): a free var captured from a parent fd that owns a
+/// `_var_`/`_arg_var_` object resolves to that dynamic binding BEFORE the global
+/// cell. The global var_ref fast lane must defer to the slow scope-walk
+/// (lookupParentFunctionEvalBindingValue) whenever this holds. Gate calls behind
+/// frameClosureHasEvalParent so non-eval frames never reach the name walk.
+pub fn parentFunctionEvalBindingShadowsGlobal(rt: *core.JSRuntime, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
     const function_object = objectFromValue(frame.current_function) orelse return false;
     const parent_value = function_object.functionEvalParentFunction() orelse return false;
     const parent_object = objectFromValue(parent_value) orelse return false;
@@ -1460,7 +1116,7 @@ pub fn canFuseGlobalDataWrite(
     if (!eval_with_object.isUndefined()) return false;
     if (frameHasVarRefBinding(function, frame, atom_id)) return false;
     if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
-    if (frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return false;
+    if (frame.evalLocalNames().len != 0 or frame.evalVarRefNames().len != 0) return false;
     return true;
 }
 

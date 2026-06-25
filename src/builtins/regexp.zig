@@ -112,10 +112,6 @@ pub const internal_entries = regexpEntries: {
     break :regexpEntries [_]Entry{
         // Constructor + static.
         regexpConstructorEntry("RegExp", 2, @intFromEnum(ConstructorMethod.construct)),
-        // Internal-only construct record for parser-prevalidated literals; not
-        // installed as a property (no constructor object names this id), only
-        // dispatched through the construct record table.
-        regexpConstructorEntry("RegExp", 2, @intFromEnum(ConstructorMethod.construct_prevalidated)),
         regexpEntry("escape", 1, @intFromEnum(StaticMethod.escape), false),
         // Prototype methods (the subset `prototypeMethodId` maps and
         // `decodePrototypeMethodId` decodes).
@@ -186,19 +182,6 @@ fn regexpCall(host_call: InternalCall) HostError!core.JSValue {
     const caller_function = builtin_dispatch.callerBytecode(host_call);
     const caller_frame = builtin_dispatch.callerFrame(host_call);
 
-    if (id == @intFromEnum(ConstructorMethod.construct_prevalidated)) {
-        // Parser-prevalidated RegExp literal fast path: `args` are the already
-        // validated source/flags string values, so construct the object without
-        // recompiling the pattern (the validation the parser performed must not
-        // be repeated on every literal evaluation). Reachable only through the
-        // construct record table from the VM literal fusion sites.
-        const rt = ctx.runtime;
-        const source = if (args.len >= 1) args[0] else try createStringValue(rt, "");
-        defer if (args.len < 1) source.free(rt);
-        const stored_flags = if (args.len >= 2) args[1] else try createStringValue(rt, "");
-        defer if (args.len < 2) stored_flags.free(rt);
-        return constructPrevalidatedLiteralWithValues(rt, source, stored_flags, host_call.new_target);
-    }
     if (id == @intFromEnum(ConstructorMethod.construct)) {
         // `new RegExp(pattern, flags)` arrives through the construct record
         // path with `flags.constructor` set and the resolved instance prototype
@@ -296,18 +279,6 @@ pub fn constructLiteralWithValues(
     prototype: ?*core.Object,
 ) !core.JSValue {
     if (!validatePatternAndFlags(pattern, flags)) return error.SyntaxError;
-    return constructValidated(rt, source, stored_flags, prototype);
-}
-
-/// Construct a RegExp object for bytecode emitted by `parseRegExpLiteral`.
-/// The parser has already validated `pattern`/`flags`, so the execution path
-/// must not recompile the pattern on every literal evaluation.
-pub fn constructPrevalidatedLiteralWithValues(
-    rt: *core.JSRuntime,
-    source: core.JSValue,
-    stored_flags: core.JSValue,
-    prototype: ?*core.Object,
-) !core.JSValue {
     return constructValidated(rt, source, stored_flags, prototype);
 }
 

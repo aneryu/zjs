@@ -644,24 +644,6 @@ pub fn callStringReplaceMethod(
     return try callValueOrBytecode(ctx, output, global, search_value, replacer, &replace_args, caller_function, caller_frame);
 }
 
-pub fn callSimpleStringBytecode(
-    rt: *core.JSRuntime,
-    fb: *const bytecode.FunctionBytecode,
-    args: []const core.JSValue,
-) !?core.JSValue {
-    switch (fb.simple_string_kind) {
-        .percent_hex_byte => {
-            if (args.len == 0) return null;
-            const byte_i32 = args[0].asInt32() orelse return null;
-            const byte: u8 = @truncate(@as(u32, @bitCast(byte_i32)));
-            const cached = try rt.percentHexString(byte);
-            return cached.value().dup();
-        },
-        .none => {},
-    }
-    return null;
-}
-
 pub fn buildErrorStackStringValue(ctx: *core.JSContext, global: *core.Object, skip_name: ?[]const u8) !core.JSValue {
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(ctx.runtime.memory.allocator);
@@ -4276,6 +4258,21 @@ pub fn qjsArraySearchCall(
     }
     if (mode == .last_index_of) {
         var cursor = try arrayLastIndexStart(ctx, output, global, args, length);
+        // Dense fast scan (qjs js_array_lastIndexOf js_get_fast_array loop,
+        // quickjs.c:42476): if the receiver is still a dense fast array and the
+        // fromIndex coercion above did not resize it, scan the borrowed element
+        // slice directly — no per-element propertyAtomFromLengthIndex intern +
+        // generic getValueProperty. `===` runs no user code, so the slice stays
+        // valid for the whole loop.
+        if (!is_typed_array and object.isFastArray() and @as(usize, @intCast(object.arrayLength())) == length) {
+            const elements = object.arrayElements();
+            if (cursor > elements.len) cursor = elements.len;
+            while (cursor > 0) {
+                cursor -= 1;
+                if (try valuesStrictEqual(ctx.runtime, elements[cursor], search_value)) return lengthIndexValue(cursor);
+            }
+            return core.JSValue.int32(-1);
+        }
         while (cursor > 0) {
             cursor -= 1;
             const item = if (is_typed_array) blk: {
@@ -4293,6 +4290,20 @@ pub fn qjsArraySearchCall(
         }
     } else {
         var cursor = try arrayFirstIndexStart(ctx, output, global, args, length);
+        // Dense fast scan (qjs js_array_indexOf/includes js_get_fast_array dense
+        // loop, quickjs.c:42426-42483): see the lastIndexOf note above.
+        if (!is_typed_array and object.isFastArray() and @as(usize, @intCast(object.arrayLength())) == length) {
+            const elements = object.arrayElements();
+            while (cursor < elements.len) : (cursor += 1) {
+                const item = elements[cursor];
+                if (mode == .includes) {
+                    if (item.sameValueZero(search_value)) return core.JSValue.boolean(true);
+                } else {
+                    if (try valuesStrictEqual(ctx.runtime, item, search_value)) return lengthIndexValue(cursor);
+                }
+            }
+            return if (mode == .includes) core.JSValue.boolean(false) else core.JSValue.int32(-1);
+        }
         while (cursor < length) : (cursor += 1) {
             const item = if (is_typed_array) blk: {
                 if (mode != .includes) {
@@ -4587,9 +4598,28 @@ pub fn getFastStringPrimitiveDataProperty(
     return ownDataOrAutoInitPropertyValue(proto, atom_id);
 }
 
+/// Comptime bitset of the predefined atom ids whose name is a standard
+/// String.prototype method. Built from the SAME `prototypeMethodId` map, so the
+/// membership result is identical — but the per-access check below becomes an
+/// O(1) integer-indexed lookup instead of `atoms.name()` + a ~40-way
+/// `std.mem.eql` chain on every `s.method()` resolution. A user string equal to
+/// a method name interns to its predefined atom id (interning is by content),
+/// so dynamic atoms (id > predefined_count) are correctly never methods.
+const string_method_atom_bits = blk: {
+    @setEvalBranchQuota(400000);
+    var bits = [_]bool{false} ** (core.atom.predefined_count + 1);
+    for (core.atom.predefined_atoms) |pa| {
+        if (pa.kind == .string and string_id_lookup.prototypeMethodId(pa.name) != null) {
+            bits[pa.id] = true;
+        }
+    }
+    break :blk bits;
+};
+
 pub fn isStandardStringPrototypeMethodAtom(rt: *core.JSRuntime, atom_id: core.Atom) bool {
-    const name = rt.atoms.name(atom_id) orelse return false;
-    return string_id_lookup.prototypeMethodId(name) != null;
+    _ = rt;
+    if (core.atom.isTaggedInt(atom_id) or atom_id == 0 or atom_id > core.atom.predefined_count) return false;
+    return string_method_atom_bits[atom_id];
 }
 
 pub fn defineStringWrapperIndexProperty(rt: *core.JSRuntime, object: *core.Object, index: u32, unit: u16) !void {

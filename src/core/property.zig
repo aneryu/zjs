@@ -57,6 +57,15 @@ pub const AutoInitKind = enum(u8) {
     int32_constant,
     string_constant,
     empty_array,
+    /// Lazy `function.prototype` (qjs `JS_AUTOINIT_ID_PROTOTYPE`,
+    /// `js_instantiate_prototype` quickjs.c:17341): the prototype object and its
+    /// `constructor` back-reference are materialized only when `.prototype` is
+    /// first observed or the function is constructed. Avoids the per-function
+    /// prototype allocation AND the `func <-> prototype.constructor` reference
+    /// cycle (so a never-constructed closure is reclaimed by refcount instead of
+    /// the cycle collector). All payload is derived from the owner function
+    /// object at materialization, so a single interned descriptor is shared.
+    function_prototype,
 };
 
 pub const ArrayBuiltinMarker = enum(u8) {
@@ -150,7 +159,10 @@ pub const Slot = union(enum) {
             .auto_init => {},
             // The slot holds one ref on the cell (qjs add_property ref_count++);
             // release it (qjs free_property VARREF branch -> free_var_ref).
-            .var_ref => |cell| cell.valueRef().free(rt),
+            .var_ref => |cell| {
+                if (rt.gc.phase == .remove_cycles and cell.header.flags.cycle_visited and !cell.header.flags.cycle_preserved) return;
+                cell.valueRef().free(rt);
+            },
             .deleted => {},
         }
     }

@@ -136,7 +136,6 @@ pub const DynamicImportError = error{
     NotOpenForReading,
     NotOpenForWriting,
     NotRegExpLiteral,
-    NotSimpleNumericCall,
     OperationUnsupported,
     OutOfMemory,
     Overflow,

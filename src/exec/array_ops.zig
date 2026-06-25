@@ -33,7 +33,6 @@ const IteratorZipRecord = iter_vm.IteratorZipRecord;
 const RegExpMatch = string_ops.RegExpMatch;
 const SimpleCaptureSequenceAtom = regexp_fastpath.SimpleCaptureSequenceAtom;
 const SimpleClassPredicate = regexp_fastpath.SimpleClassPredicate;
-const SimpleNumericArg0Bytecode = call_runtime.SimpleNumericArg0Bytecode;
 const appendAtom = core.atom.appendAtom;
 const atomIdOrNameEql = call_runtime.atomIdOrNameEql;
 const atomListContains = core.atom.atomListContains;
@@ -93,8 +92,6 @@ const readInt = call_runtime.readInt;
 const sameObjectIdentity = object_ops.sameObjectIdentity;
 const setValueProperty = object_ops.setValueProperty;
 const simpleClassPredicateMatches = string_ops.simpleClassPredicateMatches;
-const simpleNumericArg0Callback = call_runtime.simpleNumericArg0Callback;
-const simpleNumericBinary = call_runtime.simpleNumericBinary;
 const slotValueBorrow = slot_ops.slotValueBorrow;
 const stringSliceValue = string_ops.stringSliceValue;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
@@ -200,11 +197,24 @@ pub fn qjsArrayMethodFastCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (callableObjectFromValue(func)) |function_object| {
-        if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*)) |native_ref| {
-            if (native_ref.domain == .iterator) {
-                if (try qjsIteratorCallForNativeRecord(ctx, output, global, receiver, native_ref.id, args, caller_function, caller_frame)) |value| return value;
-            }
+    // Every branch below requires `func` to be a NATIVE callable: the iterator
+    // branch and all ~20 cascade members each open with
+    // `callableObjectFromValue(func) orelse return null` (c_function /
+    // c_closure / bound_function). The overwhelmingly common method-call callee
+    // is a user *bytecode* function (e.g. `obj.m()`, `p.step()`), for which
+    // `callableObjectFromValue` is null — so the whole cascade degenerates into
+    // ~20 sequential no-op calls. Hoist the shared precondition and bail once.
+    //
+    // Faithful to qjs: a method call resolves its callee once via the property
+    // lookup, then dispatches by the resolved function's magic
+    // (`js_call_c_function`, quickjs.c:17562, reached from OP_call_method at
+    // quickjs.c:18220). qjs never scans the array-method set per call; this
+    // early-out moves zjs toward that structure for non-native-method receivers
+    // without changing any matched-method behavior.
+    const native_callable = callableObjectFromValue(func) orelse return null;
+    if (core.function.decodeNativeBuiltinId(native_callable.nativeFunctionIdSlot().*)) |native_ref| {
+        if (native_ref.domain == .iterator) {
+            if (try qjsIteratorCallForNativeRecord(ctx, output, global, receiver, native_ref.id, args, caller_function, caller_frame)) |value| return value;
         }
     }
     if (try qjsArrayIterationCall(ctx, output, global, receiver, func, args, caller_function, caller_frame)) |value| return value;
@@ -1714,11 +1724,6 @@ pub fn qjsArrayIterationCall(
         out = objectFromValue(out_value) orelse return error.TypeError;
         dense_map_output = mode == .map and out.?.canDefineDenseArrayDataPropertiesUnchecked();
     }
-    if (mode == .map and !is_typed_array and dense_map_output) {
-        if (simpleNumericArg0Callback(args[0])) |simple| {
-            if (try qjsDenseArrayMapSimpleNumericArg0(ctx.runtime, object, length, simple, out_value, out.?)) |value| return value;
-        }
-    }
 
     var cursor: usize = 0;
     while (cursor < length) : (cursor += 1) {
@@ -1800,68 +1805,6 @@ pub fn qjsArrayIterationCall(
         .find_index => core.JSValue.int32(-1),
         .find_last_index => core.JSValue.int32(-1),
     };
-}
-
-pub fn qjsDenseArrayMapSimpleNumericArg0(
-    rt: *core.JSRuntime,
-    source: *core.Object,
-    length: usize,
-    simple: SimpleNumericArg0Bytecode,
-    out_value: core.JSValue,
-    out: *core.Object,
-) !?core.JSValue {
-    if (!source.flags.is_array or source.arrayElementStorageMode() != .dense) return null;
-    if (length > std.math.maxInt(u32)) return null;
-    const elements = source.arrayElements();
-    if (length > elements.len) return null;
-
-    var index: usize = 0;
-    while (index < length) : (index += 1) {
-        const item = elements[index];
-        if (!item.isNumber()) return null;
-    }
-
-    index = 0;
-    while (index < length) : (index += 1) {
-        const item = elements[index];
-        const mapped = try simpleNumericBinary(rt, simple.binop, item, core.JSValue.int32(simple.rhs));
-        defer mapped.free(rt);
-        try out.defineDenseArrayDataPropertyUnchecked(rt, @intCast(index), mapped);
-    }
-    return out_value;
-}
-
-pub fn qjsArrayMapSimpleNumericArg0DefaultSpeciesFastCall(
-    rt: *core.JSRuntime,
-    global: *core.Object,
-    receiver: core.JSValue,
-    callback: core.JSValue,
-) !?core.JSValue {
-    const source = objectFromValue(receiver) orelse return null;
-    if (!source.flags.is_array or source.proxyTarget() != null or source.hasExoticMethods()) return null;
-    if (source.arrayElementStorageMode() != .dense) return null;
-    const length: usize = @intCast(source.arrayLength());
-    if (length > std.math.maxInt(u32)) return null;
-    const simple = simpleNumericArg0Callback(callback) orelse return null;
-
-    const elements = source.arrayElements();
-    if (length > elements.len) return null;
-    var index: usize = 0;
-    while (index < length) : (index += 1) {
-        const item = elements[index];
-        if (!item.isNumber()) return null;
-    }
-
-    const out_value = try defaultArraySpeciesCreate(rt, global, source, length) orelse return null;
-    errdefer out_value.free(rt);
-    const out = objectFromValue(out_value) orelse return error.TypeError;
-    if (!out.canDefineDenseArrayDataPropertiesUnchecked()) {
-        out_value.free(rt);
-        return null;
-    }
-    if (try qjsDenseArrayMapSimpleNumericArg0(rt, source, length, simple, out_value, out)) |mapped| return mapped;
-    out_value.free(rt);
-    return null;
 }
 
 pub fn qjsTypedArrayMapFilter(
@@ -5447,8 +5390,14 @@ pub fn qjsObjectEntryArrayValue(
 
     key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, key);
 
-    try createDataPropertyOrThrow(ctx, output, global, entry_value, entry, core.atom.atomFromUInt32(0), key_value, caller_function, caller_frame);
-    try createDataPropertyOrThrow(ctx, output, global, entry_value, entry, core.atom.atomFromUInt32(1), value, caller_function, caller_frame);
+    // qjs js_create_array (quickjs.c:9601): a pre-sized dense fast array, not two
+    // per-element createDataPropertyOrThrow (atomFromUInt32 + Descriptor + define).
+    // The slice alloc precedes the dups; key_value/value stay rooted via root_frame.
+    const elements = try ctx.runtime.memory.alloc(core.JSValue, 2);
+    elements[0] = key_value.dup();
+    elements[1] = value.dup();
+    entry.adoptDenseArrayElementsAssumingEmpty(elements);
+    entry.flags.may_have_indexed_properties = true;
 
     return entry_value;
 }

@@ -4899,6 +4899,12 @@ pub const Object = struct {
     }
 
     pub fn functionRealmGlobalPtr(self: *const Object) ?*Object {
+        // Function/generator payloads are checked FIRST: this accessor is on the
+        // per-call inline-target resolution hot path (resolveInlineTarget), where
+        // `self` is a bytecode function. Each object has exactly one payload kind,
+        // so the order is correctness-neutral — it only shortens the common case.
+        if (self.functionPayloadConst()) |payload| return payload.realm_global_ptr;
+        if (self.generatorPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.ordinaryPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.objectDataPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.iteratorPayloadConst()) |payload| return payload.realm_global_ptr;
@@ -4915,8 +4921,6 @@ pub const Object = struct {
         if (self.disposableStackPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.promisePayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.moduleNamespacePayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.functionPayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.generatorPayloadConst()) |payload| return payload.realm_global_ptr;
         return null;
     }
 
@@ -6945,6 +6949,10 @@ pub const Object = struct {
     /// from the function-object alloc, which would already be lethal
     /// to the running script anyway.)
     fn materializeAutoInit(self: *Object, index: usize, info: property.AutoInit) JSValue {
+        if (info.kind == .function_prototype) {
+            const materialized = self.materializeFunctionPrototypeAutoInit(info) orelse return JSValue.undefinedValue();
+            return self.finishMaterializedAutoInit(index, info, materialized);
+        }
         if (info.kind == .console) {
             const materialized = materializeConsoleAutoInit(info) orelse return JSValue.undefinedValue();
             return self.finishMaterializedAutoInit(index, info, materialized);
@@ -7488,6 +7496,35 @@ pub const Object = struct {
         const prototype_value = objectFromValue(object_ctor_value).?.getProperty(atom.ids.prototype);
         defer prototype_value.free(rt);
         return objectFromValue(prototype_value);
+    }
+
+    /// Materialize a lazy `function.prototype` placeholder (qjs
+    /// `js_instantiate_prototype`, quickjs.c:17341). `self` is the owner
+    /// function object; the prototype's [[Prototype]] is the function's realm
+    /// `Object.prototype`, and `constructor` points back at `self`
+    /// (writable, non-enumerable, configurable) — installed only here, so the
+    /// `func <-> prototype.constructor` cycle forms lazily, never for a
+    /// function whose `.prototype` is never observed.
+    fn materializeFunctionPrototypeAutoInit(self: *Object, info: property.AutoInit) ?JSValue {
+        const rt = info.rt;
+        const parent: ?*Object = if (self.functionRealmGlobalPtr()) |realm_global|
+            objectPrototypeFromGlobalForAutoInit(rt, realm_global)
+        else
+            null;
+        const prototype = Object.create(rt, class.ids.object, parent) catch return null;
+        var prototype_owned = true;
+        errdefer if (prototype_owned) Object.destroyFromHeader(rt, &prototype.header);
+        prototype.defineOwnProperty(rt, atom.ids.constructor, descriptor.Descriptor.data(self.value(), true, false, true)) catch return null;
+        prototype_owned = false;
+        return prototype.value();
+    }
+
+    /// Install the lazy `function.prototype` auto-init placeholder on a freshly
+    /// created function object. Shares the single interned descriptor so the
+    /// `auto_init_table` does not grow per function.
+    pub fn defineFunctionPrototypeAutoInit(self: *Object, rt: *JSRuntime, flags: property.Flags) !void {
+        const ref = try rt.functionPrototypeAutoInitRef();
+        try self.appendPreparedPropertyEntry(rt, atom.ids.prototype, flags, .{ .auto_init = ref });
     }
 
     fn arrayPrototypeFromGlobalForAutoInit(rt: *JSRuntime, global: *Object) ?*Object {
@@ -8513,6 +8550,14 @@ pub const Object = struct {
             }
             if (!entry_flags.writable) return error.ReadOnly;
             const entry = &self.properties[index];
+            if (entry.slot == .var_ref) {
+                const cell = entry.slot.var_ref;
+                const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
+                errdefer next_value.free(rt);
+                try cell.setVarRefValue(rt, next_value);
+                cell.varRefIsDeletedSlot().* = false;
+                return;
+            }
             const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
             const old_slot = entry.slot;
@@ -8561,9 +8606,13 @@ pub const Object = struct {
                             return true;
                         }
                     },
-                    // VARREF slots are written through the cell via putVar, never
-                    // here; refuse the fast path so we never overwrite the slot.
-                    .var_ref => return false,
+                    .var_ref => |cell| {
+                        const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
+                        errdefer next_value.free(rt);
+                        try cell.setVarRefValue(rt, next_value);
+                        cell.varRefIsDeletedSlot().* = false;
+                        return true;
+                    },
                     .auto_init, .accessor, .deleted => {},
                 }
             }
@@ -9171,6 +9220,16 @@ pub const Object = struct {
         const atom_id = self.propAtomAt(index);
         const merged = mergeDescriptor(self.propFlagsAt(index), self.properties[index].slot, desc);
         const next_flags = flagsFromDescriptor(merged);
+        if (self.properties[index].slot == .var_ref and merged.kind == .data) {
+            const cell = self.properties[index].slot.var_ref;
+            const next_value = dupPropertyDataValue(&rt.atoms, atom_id, merged.value);
+            errdefer next_value.free(rt);
+            try self.ensureUniqueShapeForMutation(rt);
+            try cell.setVarRefValue(rt, next_value);
+            cell.varRefIsDeletedSlot().* = false;
+            rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.bits());
+            return;
+        }
         const next_slot = slotFromDescriptor(&rt.atoms, atom_id, merged);
         var next_owned = true;
         errdefer if (next_owned) destroyPropertySlot(rt, atom_id, next_slot);
@@ -9564,7 +9623,14 @@ fn isCompatible(current_flags: property.Flags, current_slot: property.Slot, desc
     if ((desc.kind == .accessor) != current_is_accessor) return false;
     if (!current_is_accessor and !current_flags.writable) {
         if (desc.writable orelse false) return false;
-        if (desc.kind == .data and desc.value_present and !current_slot.data.sameValue(desc.value)) return false;
+        if (desc.kind == .data and desc.value_present) {
+            const current_value = switch (current_slot) {
+                .data => |value| value,
+                .var_ref => |cell| cell.varRefValue(),
+                else => JSValue.undefinedValue(),
+            };
+            if (!current_value.sameValue(desc.value)) return false;
+        }
     }
     if (current_is_accessor and desc.kind == .accessor) {
         if (current_slot != .accessor) return false;
@@ -9589,18 +9655,24 @@ fn mergeDescriptor(current_flags: property.Flags, current_slot: property.Slot, d
                 desc.enumerable orelse current_flags.enumerable,
                 desc.configurable orelse current_flags.configurable,
             ),
+            .var_ref => |cell| descriptor.Descriptor.data(
+                cell.varRefValue(),
+                current_flags.writable,
+                desc.enumerable orelse current_flags.enumerable,
+                desc.configurable orelse current_flags.configurable,
+            ),
             // Auto-init placeholders should be materialized by the
             // caller before reaching `mergeDescriptor`; defining
             // `Object.defineProperty(global, "Array", {})` (the only
             // way to hit this with a placeholder) materializes first
             // through the same getProperty path.
             .auto_init => desc,
-            .var_ref => desc,
             .deleted => desc,
         },
         .data => descriptor.Descriptor.data(
             if (desc.value_present) desc.value else switch (current_slot) {
                 .data => |value| value,
+                .var_ref => |cell| cell.varRefValue(),
                 else => desc.value,
             },
             desc.writable orelse if (current_flags.accessor) false else current_flags.writable,
@@ -9757,8 +9829,14 @@ fn entryArrayValue(rt: *JSRuntime, key: atom.Atom, value: JSValue) !JSValue {
     errdefer Object.destroyFromHeader(rt, &arr.header);
     const key_value = try entriesAtomToStringValue(rt, key);
     defer key_value.free(rt);
-    try arr.defineOwnProperty(rt, atom.atomFromUInt32(0), descriptor.Descriptor.data(key_value, true, true, true));
-    try arr.defineOwnProperty(rt, atom.atomFromUInt32(1), descriptor.Descriptor.data(rooted_value, true, true, true));
+    // qjs js_create_array (quickjs.c:9601): pre-sized dense fast array instead of
+    // two per-element defineOwnProperty. key_value/rooted_value stay rooted (the
+    // root_frame above + the local defer) across the slice alloc; dups precede adopt.
+    const elements = try rt.memory.alloc(JSValue, 2);
+    elements[0] = key_value.dup();
+    elements[1] = rooted_value.dup();
+    arr.adoptDenseArrayElementsAssumingEmpty(elements);
+    arr.flags.may_have_indexed_properties = true;
     return arr.value();
 }
 

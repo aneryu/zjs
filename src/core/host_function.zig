@@ -99,7 +99,6 @@ pub const CallbackError = error{
     NoSpaceLeft,
     NotExtensible,
     NotRegExpLiteral,
-    NotSimpleNumericCall,
     OutOfMemory,
     Overflow,
     Pc2LineOverflow,
@@ -648,14 +647,6 @@ pub const builtin_method_ids = struct {
 
         pub const ConstructorMethod = enum(u32) {
             construct = 1000,
-            // Internal construct selector for parser-prevalidated RegExp
-            // literals: the VM literal fast paths (`vm_regexp`,
-            // `vm_property_locals`) route their already-validated source/flags
-            // through the construct record under this id so the handler runs
-            // `constructPrevalidatedLiteralWithValues` (which skips
-            // recompilation) instead of `constructWithPrototype`. Not installed
-            // as a property; reachable only through the record table.
-            construct_prevalidated = 1001,
         };
 
         pub const PrototypeMethod = enum(u32) {

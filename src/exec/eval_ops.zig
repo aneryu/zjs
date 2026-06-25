@@ -544,10 +544,10 @@ pub fn directEval(
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
     var empty_locals: [0]core.JSValue = .{};
-    const inherited_local_names = if (caller_frame) |outer_frame| outer_frame.eval_local_names else &.{};
-    const inherited_locals = if (caller_frame) |outer_frame| outer_frame.eval_local_slots else empty_locals[0..];
-    const inherited_ref_names = if (caller_frame) |outer_frame| outer_frame.eval_var_ref_names else &.{};
-    const inherited_refs = if (caller_frame) |outer_frame| outer_frame.eval_var_refs else &.{};
+    const inherited_local_names = if (caller_frame) |outer_frame| outer_frame.evalLocalNames() else &.{};
+    const inherited_locals = if (caller_frame) |outer_frame| outer_frame.evalLocalSlots() else empty_locals[0..];
+    const inherited_ref_names = if (caller_frame) |outer_frame| outer_frame.evalVarRefNames() else &.{};
+    const inherited_refs = if (caller_frame) |outer_frame| outer_frame.evalVarRefs() else &.{};
     const outer_var_refs = try createDirectEvalOuterVarRefs(ctx, global, caller_function, caller_frame);
     defer freeAtomSlice(ctx.runtime, outer_var_refs.names);
     defer freeValueSlice(ctx.runtime, outer_var_refs.refs);

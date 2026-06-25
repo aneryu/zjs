@@ -84,125 +84,14 @@ fn pushImmediateInt32MaybeFuse(
     frame: *frame_mod.Frame,
     value: i32,
 ) !void {
-    // The runtime immediate-int fold scan (push-imm push-imm binop → folded
-    // constant) was net-NEGATIVE: profiling showed it was ~16.7% of zlib /
-    // ~8.4% of crypto, and bypassing it measured crypto +8.6% and zlib +15%
-    // (the ahead-scan cost exceeds the dispatch it saved). The stack-binary
-    // fusion (<stack-lhs> imm binop) below is kept; only the imm-imm prescan
-    // is removed. Unfused immediates simply execute as normal opcodes (same result).
-    try pushImmediateBinaryResultMaybeFuseStackBinary(stack, function, frame, core.JSValue.int32(value));
-}
-
-fn tryFoldImmediateInt32At(code: []const u8, pc: *usize, current: *const i32) ?core.JSValue {
-    const immediate = immediateInt32Operand(code, pc.*) orelse return null;
-    if (immediate.next_pc >= code.len) return null;
-    const result = fastInt32ImmediateBinary(code[immediate.next_pc], current.*, immediate.value) orelse return null;
-    pc.* = immediate.next_pc + 1;
-    return result;
-}
-
-fn tryFoldFollowingImmediateInt32Term(code: []const u8, pc: *usize, current: *const i32) ?core.JSValue {
-    const rhs = immediateInt32Operand(code, pc.*) orelse return null;
-    var rhs_value = rhs.value;
-    var rhs_pc = rhs.next_pc;
-    while (tryFoldImmediateInt32At(code, &rhs_pc, &rhs_value)) |rhs_result| {
-        rhs_value = rhs_result.asInt32() orelse return null;
-    }
-    if (rhs_pc >= code.len) return null;
-    const result = fastInt32ImmediateBinary(code[rhs_pc], current.*, rhs_value) orelse return null;
-    pc.* = rhs_pc + 1;
-    return result;
-}
-
-const ImmediateInt32 = struct {
-    value: i32,
-    next_pc: usize,
-};
-
-fn immediateInt32Operand(code: []const u8, pc: usize) ?ImmediateInt32 {
-    if (pc >= code.len) return null;
-    return switch (code[pc]) {
-        op.push_minus1 => .{ .value = -1, .next_pc = pc + 1 },
-        op.push_0 => .{ .value = 0, .next_pc = pc + 1 },
-        op.push_1 => .{ .value = 1, .next_pc = pc + 1 },
-        op.push_2 => .{ .value = 2, .next_pc = pc + 1 },
-        op.push_3 => .{ .value = 3, .next_pc = pc + 1 },
-        op.push_4 => .{ .value = 4, .next_pc = pc + 1 },
-        op.push_5 => .{ .value = 5, .next_pc = pc + 1 },
-        op.push_6 => .{ .value = 6, .next_pc = pc + 1 },
-        op.push_7 => .{ .value = 7, .next_pc = pc + 1 },
-        op.push_i8 => blk: {
-            if (pc + 2 > code.len) return null;
-            const rhs: i8 = @bitCast(code[pc + 1]);
-            break :blk .{ .value = rhs, .next_pc = pc + 2 };
-        },
-        op.push_i16 => blk: {
-            if (pc + 3 > code.len) return null;
-            break :blk .{ .value = readInt(i16, code[pc + 1 ..][0..2]), .next_pc = pc + 3 };
-        },
-        op.push_i32 => blk: {
-            if (pc + 5 > code.len) return null;
-            break :blk .{ .value = readInt(i32, code[pc + 1 ..][0..4]), .next_pc = pc + 5 };
-        },
-        else => null,
-    };
-}
-
-fn pushImmediateBinaryResultMaybeFuseStackBinary(
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    rhs_value: core.JSValue,
-) !void {
-    const rhs = rhs_value.asInt32() orelse {
-        stack.pushOwnedAssumeCapacity(rhs_value);
-        return;
-    };
-    if (frame.pc < function.code.len) {
-        if (stack.peekBorrowed()) |lhs_value| {
-            if (lhs_value.asInt32()) |lhs| {
-                if (fastInt32ImmediateBinary(function.code[frame.pc], lhs, rhs)) |result| {
-                    _ = try stack.pop();
-                    stack.pushOwnedAssumeCapacity(result);
-                    frame.pc += 1;
-                    return;
-                }
-            }
-        }
-    }
-    stack.pushOwnedAssumeCapacity(rhs_value);
-}
-
-fn fastInt32ImmediateBinary(opcode_id: u8, lhs: i32, rhs: i32) ?core.JSValue {
-    return switch (opcode_id) {
-        op.add => fastInt32Add(lhs, rhs),
-        op.sub => fastInt32Sub(lhs, rhs),
-        op.mul => fastInt32Mul(lhs, rhs),
-        op.sar => core.JSValue.int32(lhs >> @intCast(rhs & 31)),
-        op.@"and" => core.JSValue.int32(lhs & rhs),
-        op.@"or" => core.JSValue.int32(lhs | rhs),
-        op.xor => core.JSValue.int32(lhs ^ rhs),
-        else => null,
-    };
-}
-
-fn fastInt32Add(lhs: i32, rhs: i32) core.JSValue {
-    const result = @addWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.JSValue.int32(result[0]);
-    return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) + @as(f64, @floatFromInt(rhs)));
-}
-
-fn fastInt32Sub(lhs: i32, rhs: i32) core.JSValue {
-    const result = @subWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.JSValue.int32(result[0]);
-    return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) - @as(f64, @floatFromInt(rhs)));
-}
-
-fn fastInt32Mul(lhs: i32, rhs: i32) core.JSValue {
-    if ((lhs == 0 and rhs < 0) or (rhs == 0 and lhs < 0)) return core.JSValue.float64(-0.0);
-    const result = @mulWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.JSValue.int32(result[0]);
-    return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) * @as(f64, @floatFromInt(rhs)));
+    // qjs has no runtime push+binop fusion: every push opcode is a standalone
+    // `*sp++ = ...` and a following binop is a separate dispatch (quickjs.c
+    // 17879-17910). The threaded fast path (zjs_vm.zig push_i32/i16/i8) already
+    // pushes the immediate inline with no fusion; this is the non-threaded
+    // fallback, kept byte-identical to it — a plain push, no stack-lhs fold.
+    _ = function;
+    _ = frame;
+    stack.pushOwnedAssumeCapacity(core.JSValue.int32(value));
 }
 
 pub fn pushUndefined(stack: *stack_mod.Stack) !void {
@@ -309,25 +198,29 @@ pub noinline fn toObjectVm(
 pub noinline fn typeOf(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(ctx.runtime);
-    const text: []const u8 = if (value.isUndefined() or value_ops.isHTMLDDA(value))
-        "undefined"
+    // qjs `js_operator_typeof` returns a predefined atom and OP_typeof pushes
+    // `JS_AtomToString` of it — a refcount dup of the interned atom string, not
+    // a fresh allocation. The `typeof` result strings are all predefined string
+    // atoms here too, so resolve to the atom and dup its cached interned string.
+    const atom_id: core.Atom = if (value.isUndefined() or value_ops.isHTMLDDA(value))
+        core.atom.ids.undefined_
     else if (value.isNull())
-        "object"
+        core.atom.ids.type_object
     else if (value.isBool())
-        "boolean"
+        core.atom.ids.type_boolean
     else if (value.isBigInt())
-        "bigint"
+        core.atom.ids.type_bigint
     else if (value.isNumber())
-        "number"
+        core.atom.ids.type_number
     else if (value.isString())
-        "string"
+        core.atom.ids.type_string
     else if (value.isSymbol())
-        "symbol"
+        core.atom.ids.type_symbol
     else if (value.isFunctionBytecode() or functionObjectFromValue(value) != null or callableObjectFromValue(value) != null or proxyTargetIsCallable(value))
-        "function"
+        core.atom.ids.type_function
     else
-        "object";
-    const out = try value_ops.createStringValue(ctx.runtime, text);
+        core.atom.ids.type_object;
+    const out = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
     errdefer out.free(ctx.runtime);
     stack.pushOwnedAssumeCapacity(out);
 }

@@ -458,7 +458,6 @@ fn externalHostError(err: anyerror) HostError {
         error.NegativeExponent => error.NegativeExponent,
         error.NotExtensible => error.NotExtensible,
         error.NotRegExpLiteral => error.NotRegExpLiteral,
-        error.NotSimpleNumericCall => error.NotSimpleNumericCall,
         error.OutOfMemory => error.OutOfMemory,
         error.Overflow => error.Overflow,
         error.Pc2LineOverflow => error.Pc2LineOverflow,
@@ -3299,7 +3298,23 @@ fn printString(rt: *core.JSRuntime, writer: *std.Io.Writer, value: core.JSValue)
     const string_value = value.asStringBody() orelse return writer.writeAll("[string]");
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
-        .latin1 => |bytes| try writer.writeAll(bytes),
+        // latin1 is ISO-8859-1 (each byte is a U+0000..U+00FF code point), so a
+        // byte 0x80..0xFF must be UTF-8-encoded (2 bytes), not written raw —
+        // otherwise `console.log(String.fromCharCode(0xC9))` emits an invalid
+        // byte instead of `É`. ASCII runs are written in bulk.
+        .latin1 => |bytes| {
+            var start: usize = 0;
+            var i: usize = 0;
+            while (i < bytes.len) : (i += 1) {
+                const byte = bytes[i];
+                if (byte >= 0x80) {
+                    if (i > start) try writer.writeAll(bytes[start..i]);
+                    try writer.writeAll(&[_]u8{ 0xc0 | (byte >> 6), 0x80 | (byte & 0x3f) });
+                    start = i + 1;
+                }
+            }
+            if (bytes.len > start) try writer.writeAll(bytes[start..]);
+        },
         .utf16 => |units| {
             var it = std.unicode.Utf16LeIterator.init(units);
             while (it.nextCodepoint() catch null) |codepoint| {

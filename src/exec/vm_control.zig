@@ -37,18 +37,20 @@ pub const InterruptPoller = struct {
     }
 };
 
-pub fn returnTop(ctx: *core.JSContext, stack: *stack_mod.Stack, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
+pub inline fn returnTop(ctx: *core.JSContext, stack: *stack_mod.Stack, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
     if (generator) |generator_object| generator_object.generatorDoneSlot().* = true;
     const value = stack.peek() orelse core.JSValue.undefinedValue();
     return finishFunctionReturn(ctx, frame, value);
 }
 
-pub fn returnUndefined(ctx: *core.JSContext, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
+pub inline fn returnUndefined(ctx: *core.JSContext, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
     if (generator) |generator_object| generator_object.generatorDoneSlot().* = true;
     return finishFunctionReturn(ctx, frame, core.JSValue.undefinedValue());
 }
 
-pub fn finishFunctionReturn(ctx: *core.JSContext, frame: *frame_mod.Frame, value: core.JSValue) !core.JSValue {
+// Hot return-path passthrough: a non-derived-ctor frame returns the value verbatim.
+// Inlined so the per-return arm pays no call (it was ~1% of fib as a separate fn).
+pub inline fn finishFunctionReturn(ctx: *core.JSContext, frame: *frame_mod.Frame, value: core.JSValue) !core.JSValue {
     if (!frame.function.flags.is_derived_class_constructor) return value;
     if (value.isObject()) return value;
     defer value.free(ctx.runtime);

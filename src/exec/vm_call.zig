@@ -245,6 +245,16 @@ pub inline fn initFrameVarRefs(
 }
 
 fn initialClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode.function_def.ClosureVar) !core.JSValue {
+    switch (cv.closure_type) {
+        .global, .global_ref, .global_decl => {
+            if (cv.is_lexical) {
+                if (call_runtime.globalLexicalCell(ctx, cv.var_name)) |cell_value| return cell_value;
+            } else if (call_runtime.globalObjectVarRefCell(global, cv.var_name)) |cell_value| {
+                return cell_value;
+            }
+        },
+        else => {},
+    }
     const initial_value = switch (cv.closure_type) {
         .global, .global_ref, .global_decl => core.JSValue.uninitialized(),
         .module_decl, .module_import => core.JSValue.uninitialized(),
@@ -252,6 +262,7 @@ fn initialClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode
     };
     const cell = try core.VarRef.createClosed(ctx.runtime, initial_value);
     cell.varRefIsConstSlot().* = cv.is_const;
+    cell.is_lexical = cv.is_lexical;
     cell.varRefIsFunctionNameSlot().* = cv.var_kind == .function_name;
     return cell.valueRef();
 }
@@ -401,174 +412,6 @@ pub fn call(
     };
 }
 
-fn tryFastSimpleStringCall(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    argc: u16,
-) !bool {
-    if (argc != 1) return false;
-    if (stack.values.len < 2) return false;
-    const base = stack.values.len - 2;
-    const func = stack.values[base];
-    const kind = simpleStringCallableKind(func) orelse return false;
-    const arg = stack.values[base + 1];
-    const byte_i32 = arg.asInt32() orelse return false;
-
-    const result = switch (kind) {
-        .percent_hex_byte => blk: {
-            const byte: u8 = @truncate(@as(u32, @bitCast(byte_i32)));
-            const cached = try ctx.runtime.percentHexString(byte);
-            break :blk cached.value().dup();
-        },
-        .none => return false,
-    };
-    errdefer result.free(ctx.runtime);
-
-    var remaining: usize = 2;
-    while (remaining > 0) {
-        remaining -= 1;
-        const value = try stack.pop();
-        value.free(ctx.runtime);
-    }
-    try stack.pushOwned(result);
-    return true;
-}
-
-fn simpleStringCallableKind(func: core.JSValue) ?bytecode.function.SimpleStringKind {
-    if (func.isFunctionBytecode()) {
-        const fb = call_runtime.functionBytecodeFromValue(func) orelse return null;
-        return if (fb.simple_string_kind == .none) null else fb.simple_string_kind;
-    }
-    const object = object_ops.functionObjectFromValue(func) orelse return null;
-    const function_value = object.functionBytecodeSlot().* orelse return null;
-    const fb = call_runtime.functionBytecodeFromValue(function_value) orelse return null;
-    return if (fb.simple_string_kind == .none) null else fb.simple_string_kind;
-}
-
-fn tryFastSimpleNumericCall(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    argc: u16,
-) !bool {
-    if (argc > 2) return false;
-    const frame_len = @as(usize, argc) + 1;
-    if (stack.values.len < frame_len) return false;
-    const base = stack.values.len - frame_len;
-    const func = stack.values[base];
-    const simple = simpleNumericCallable(func) orelse return false;
-    if (argc == 0 and simple.kind != .capture0_post_inc_return) return false;
-    const args = stack.values[base + 1 .. stack.values.len];
-    const result = simpleNumericCallResult(ctx.runtime, simple, args) catch |err| switch (err) {
-        error.NotSimpleNumericCall => return false,
-        else => return err,
-    };
-    errdefer result.free(ctx.runtime);
-    var remaining = frame_len;
-    while (remaining > 0) {
-        remaining -= 1;
-        const value = try stack.pop();
-        value.free(ctx.runtime);
-    }
-    try stack.pushOwned(result);
-    return true;
-}
-
-const SimpleNumericCallable = struct {
-    kind: bytecode.function.SimpleNumericKind,
-    binop: u8,
-    rhs: i32,
-    capture0: ?core.JSValue = null,
-    capture0_slot: ?core.JSValue = null,
-};
-
-fn simpleNumericCallable(func: core.JSValue) ?SimpleNumericCallable {
-    if (func.isFunctionBytecode()) {
-        const fb = call_runtime.functionBytecodeFromValue(func) orelse return null;
-        return simpleNumericCallableFromBytecode(fb, null, null);
-    }
-    const object = object_ops.functionObjectFromValue(func) orelse return null;
-    const function_value = object.functionBytecodeSlot().* orelse return null;
-    const fb = call_runtime.functionBytecodeFromValue(function_value) orelse return null;
-    const captures = object.functionCapturesSlot().*;
-    const capture0_slot = if (captures.len != 0) captures[0] else null;
-    const capture0 = if (capture0_slot) |slot| slot_ops.slotValueBorrow(slot) else null;
-    return simpleNumericCallableFromBytecode(fb, capture0, capture0_slot);
-}
-
-fn simpleNumericCallableFromBytecode(fb: *const bytecode.FunctionBytecode, capture0: ?core.JSValue, capture0_slot: ?core.JSValue) ?SimpleNumericCallable {
-    return switch (fb.simple_numeric_kind) {
-        .arg0_const => .{ .kind = .arg0_const, .binop = fb.simple_numeric_op, .rhs = fb.simple_numeric_rhs },
-        .arg0_arg1 => .{ .kind = .arg0_arg1, .binop = fb.simple_numeric_op, .rhs = 0 },
-        .capture0_arg0 => .{ .kind = .capture0_arg0, .binop = fb.simple_numeric_op, .rhs = 0, .capture0 = capture0 orelse return null },
-        .capture0_post_inc_return => .{ .kind = .capture0_post_inc_return, .binop = 0, .rhs = 0, .capture0_slot = capture0_slot orelse return null },
-        .none => null,
-    };
-}
-
-fn simpleNumericCallResult(rt: *core.JSRuntime, simple: SimpleNumericCallable, args: []const core.JSValue) !core.JSValue {
-    return switch (simple.kind) {
-        .arg0_const => {
-            if (args.len == 0 or !args[0].isNumber()) return error.NotSimpleNumericCall;
-            return simpleNumericBinary(rt, simple.binop, args[0], core.JSValue.int32(simple.rhs));
-        },
-        .arg0_arg1 => {
-            if (args.len < 2 or !args[0].isNumber() or !args[1].isNumber()) return error.NotSimpleNumericCall;
-            return simpleNumericBinary(rt, simple.binop, args[0], args[1]);
-        },
-        .capture0_arg0 => {
-            if (args.len == 0 or !args[0].isNumber()) return error.NotSimpleNumericCall;
-            const captured = simple.capture0 orelse return error.NotSimpleNumericCall;
-            if (!captured.isNumber()) return error.NotSimpleNumericCall;
-            return simpleNumericBinary(rt, simple.binop, captured, args[0]);
-        },
-        .capture0_post_inc_return => try simpleCapture0PostIncReturn(rt, simple.capture0_slot orelse return error.NotSimpleNumericCall),
-        .none => error.NotSimpleNumericCall,
-    };
-}
-
-fn simpleCapture0PostIncReturn(rt: *core.JSRuntime, capture0_slot: core.JSValue) !core.JSValue {
-    const cell = slot_ops.varRefCellFromValue(capture0_slot) orelse return error.NotSimpleNumericCall;
-    if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return error.NotSimpleNumericCall;
-    const current_value = cell.varRefValue();
-    const current = current_value.asInt32() orelse return error.NotSimpleNumericCall;
-    const updated = fastInt32Add(current, 1);
-    try cell.setVarRefValue(rt, updated);
-    return updated;
-}
-
-fn simpleNumericBinary(rt: *core.JSRuntime, binop: u8, lhs: core.JSValue, rhs: core.JSValue) !core.JSValue {
-    if (lhs.asInt32()) |lhs_int| {
-        if (rhs.asInt32()) |rhs_int| {
-            return switch (binop) {
-                op.add => fastInt32Add(lhs_int, rhs_int),
-                op.sub => fastInt32Sub(lhs_int, rhs_int),
-                op.mul => fastInt32Mul(lhs_int, rhs_int),
-                else => try value_ops.binary(rt, binop, lhs, rhs),
-            };
-        }
-    }
-    return try value_ops.binary(rt, binop, lhs, rhs);
-}
-
-fn fastInt32Add(lhs: i32, rhs: i32) core.JSValue {
-    const result = @addWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.JSValue.int32(result[0]);
-    return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) + @as(f64, @floatFromInt(rhs)));
-}
-
-fn fastInt32Sub(lhs: i32, rhs: i32) core.JSValue {
-    const result = @subWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.JSValue.int32(result[0]);
-    return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) - @as(f64, @floatFromInt(rhs)));
-}
-
-fn fastInt32Mul(lhs: i32, rhs: i32) core.JSValue {
-    if ((lhs == 0 and rhs < 0) or (rhs == 0 and lhs < 0)) return core.JSValue.float64(-0.0);
-    const result = @mulWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.JSValue.int32(result[0]);
-    return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) * @as(f64, @floatFromInt(rhs)));
-}
-
 pub noinline fn tailCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -602,7 +445,6 @@ pub noinline fn callMethod(
 ) !CallStep {
     const argc = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
-    if (try tryFastSimpleNumericMethodCall(ctx, stack, argc)) return .done;
     // Inline frame fast path: a method call whose callable is a plain bytecode
     // function runs as an inline frame (like op.call), so method-position
     // recursion gets the logical call-depth limit instead of the shallow
@@ -666,93 +508,6 @@ pub noinline fn callMethod(
     errdefer result.free(ctx.runtime);
     try stack.pushOwned(result);
     return .done;
-}
-
-fn tryFastSimpleNumericMethodCall(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    argc: u16,
-) !bool {
-    if (argc != 0) return false;
-    const frame_len = @as(usize, argc) + 2;
-    if (stack.values.len < frame_len) return false;
-    const base = stack.values.len - frame_len;
-    const func = stack.values[base + 1];
-    const result = (try simplePreIncVarRef0CallResult(ctx.runtime, func)) orelse return false;
-    errdefer result.free(ctx.runtime);
-    var remaining = frame_len;
-    while (remaining > 0) {
-        remaining -= 1;
-        const value = try stack.pop();
-        value.free(ctx.runtime);
-    }
-    try stack.pushOwned(result);
-    return true;
-}
-
-fn simplePreIncVarRef0CallResult(rt: *core.JSRuntime, func: core.JSValue) !?core.JSValue {
-    const object = object_ops.functionObjectFromValue(func) orelse return null;
-    const function_value = object.functionBytecodeSlot().* orelse return null;
-    const fb = call_runtime.functionBytecodeFromValue(function_value) orelse return null;
-    if (fb.is_class_constructor or fb.func_kind != .normal) return null;
-    if (fb.var_count != 0 or fb.cpool_count != 0) return null;
-    if (!isPreIncVarRef0ReturnBytecode(fb.byte_code)) return null;
-
-    const captures = object.functionCapturesSlot().*;
-    if (captures.len == 0) return null;
-    const cell = slot_ops.varRefCellFromValue(captures[0]) orelse return null;
-    if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return null;
-    const current_value = cell.varRefValue();
-    const current = current_value.asInt32() orelse return null;
-    const updated = fastInt32Add(current, 1);
-    try cell.setVarRefValue(rt, updated);
-    return updated;
-}
-
-fn isPreIncVarRef0ReturnBytecode(code: []const u8) bool {
-    var pc: usize = 0;
-    if (!readVarRef0Get(code, &pc)) return false;
-    if (pc >= code.len or code[pc] != op.inc) return false;
-    pc += 1;
-    if (pc < code.len and code[pc] == op.dup) pc += 1;
-    if (!readVarRef0Put(code, &pc)) return false;
-    if (pc >= code.len or code[pc] != op.@"return") return false;
-    pc += 1;
-    return pc == code.len;
-}
-
-fn readVarRef0Get(code: []const u8, pc: *usize) bool {
-    if (pc.* >= code.len) return false;
-    return switch (code[pc.*]) {
-        op.get_var_ref0 => blk: {
-            pc.* += 1;
-            break :blk true;
-        },
-        op.get_var_ref, op.get_var_ref_check => blk: {
-            if (pc.* + 3 > code.len) break :blk false;
-            if (readInt(u16, code[pc.* + 1 ..][0..2]) != 0) break :blk false;
-            pc.* += 3;
-            break :blk true;
-        },
-        else => false,
-    };
-}
-
-fn readVarRef0Put(code: []const u8, pc: *usize) bool {
-    if (pc.* >= code.len) return false;
-    return switch (code[pc.*]) {
-        op.put_var_ref0 => blk: {
-            pc.* += 1;
-            break :blk true;
-        },
-        op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init => blk: {
-            if (pc.* + 3 > code.len) break :blk false;
-            if (readInt(u16, code[pc.* + 1 ..][0..2]) != 0) break :blk false;
-            pc.* += 3;
-            break :blk true;
-        },
-        else => false,
-    };
 }
 
 fn dropUnusedCallResult(
@@ -915,7 +670,7 @@ pub noinline fn apply(
     defer if (arrow_constructor_this) |value| value.free(ctx.runtime);
     const is_arrow_super_constructor = allow_class_constructor_call and arrow_super_this != null;
     const effective_this = if (allow_class_constructor_call and frame.function.flags.is_derived_class_constructor)
-        frame.constructor_this_value
+        frame.constructorThisValue()
     else if (arrow_constructor_this) |value|
         value
     else if (arrow_super_this) |value|
@@ -947,7 +702,7 @@ pub noinline fn apply(
     defer result.free(ctx.runtime);
     if (allow_class_constructor_call and frame.function.flags.is_derived_class_constructor) {
         if (slot_ops.varRefSlotIsUninitialized(frame.this_value)) {
-            const next_this = if (result.isObject()) result else frame.constructor_this_value;
+            const next_this = if (result.isObject()) result else frame.constructorThisValue();
             try slot_ops.setSlotValue(ctx, &frame.this_value, next_this.dup());
             class_init_ops.initializeCurrentConstructorClassInstanceElements(ctx, output, global, function, frame) catch |err| {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
@@ -1090,8 +845,9 @@ pub fn initCtor(
     if (frame.new_target.isUndefined()) return error.TypeError;
     const function_object = try property_ops.expectObject(frame.current_function);
     const super = function_object.functionSuperConstructor() orelse return error.TypeError;
-    const args = if (frame.original_args.len != 0)
-        frame.original_args[0..@min(frame.actual_arg_count, frame.original_args.len)]
+    const original_args = frame.originalArgs();
+    const args = if (original_args.len != 0)
+        original_args[0..@min(frame.actual_arg_count, original_args.len)]
     else
         frame.args[0..@min(frame.actual_arg_count, frame.args.len)];
     const result = try call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, super, args, function, frame, frame.new_target);

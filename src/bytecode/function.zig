@@ -124,8 +124,6 @@ pub const ClosureType = function_bytecode.ClosureType;
 pub const VarKind = function_bytecode.VarKind;
 pub const VarDef = function_bytecode.VarDef;
 pub const ClosureVar = function_bytecode.ClosureVar;
-pub const SimpleNumericKind = function_bytecode.SimpleNumericKind;
-pub const SimpleStringKind = function_bytecode.SimpleStringKind;
 pub const CallSiteKind = function_bytecode.CallSiteKind;
 pub const CallSite = function_bytecode.CallSite;
 

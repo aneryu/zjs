@@ -93,19 +93,22 @@ pub fn execCall(
     const func = stack.values[region_base];
     const args: []const core.JSValue = stack.values[region_base + 1 ..][0..argc];
 
-    if (try builtin_glue.fastHostOutputCall(ctx.runtime, output, func, args)) {
-        popOwnedStackRegion(ctx.runtime, stack, region_base);
-        stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
-        return .done;
-    }
-    const is_super_constructor = class_init_ops.isCurrentSuperConstructor(ctx, frame, func);
-    if (allow_inline and !is_super_constructor) {
-        // Plain call: no receiver on the stack, so the call binds `this` to
-        // undefined (arrow targets override this with their lexical `this`).
+    // Fast path FIRST: a plain bytecode-to-bytecode call resolves to an inline
+    // target. resolveInlineTarget returns null for class constructors, so a super()
+    // call (whose callee is always a constructor) never resolves here — an inline
+    // result is provably NOT a super-constructor invocation, so the
+    // isCurrentSuperConstructor check below is unnecessary on this path. `this`
+    // binds undefined (arrow targets override with their lexical `this` inside
+    // resolveInlineTarget). A non-bytecode callee (host fn / ctor) falls through to
+    // the general dispatch, which handles host-output (console.log) like any other
+    // host function — qjs has no per-call host-output fast path.
+    if (allow_inline) {
         if (inline_calls.resolveInlineTarget(ctx, global, core.JSValue.undefinedValue(), func)) |target| {
             return .{ .inline_call = .{ .target = target, .region_base = region_base, .argc = argc } };
         }
     }
+
+    const is_super_constructor = class_init_ops.isCurrentSuperConstructor(ctx, frame, func);
     const arrow_super_this = if (is_super_constructor and !frame.function.flags.is_derived_class_constructor)
         class_init_ops.currentArrowLexicalSuperThis(ctx.runtime, frame)
     else
@@ -118,7 +121,7 @@ pub fn execCall(
     defer if (arrow_constructor_this) |value| value.free(ctx.runtime);
     const is_arrow_super_constructor = is_super_constructor and arrow_super_this != null;
     const super_this = if (is_super_constructor and frame.function.flags.is_derived_class_constructor)
-        frame.constructor_this_value
+        frame.constructorThisValue()
     else if (arrow_constructor_this) |value|
         value
     else if (arrow_super_this) |value|
@@ -137,7 +140,7 @@ pub fn execCall(
     if (is_super_constructor and frame.function.flags.is_derived_class_constructor) {
         defer result.free(ctx.runtime);
         if (slot_ops.varRefSlotIsUninitialized(frame.this_value)) {
-            const next_this = if (result.isObject()) result else frame.constructor_this_value;
+            const next_this = if (result.isObject()) result else frame.constructorThisValue();
             try slot_ops.setSlotValue(ctx, &frame.this_value, next_this.dup());
             class_init_ops.initializeCurrentConstructorClassInstanceElements(ctx, output, global, function, frame) catch |err| {
                 if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
@@ -537,10 +540,6 @@ fn callValueOrBytecodeClassModeDispatch(
             }
             return callFunctionBytecodeModeState(ctx, func, func, initial_this, args, &.{}, output, global, &.{}, &.{}, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
         }
-        if (!allow_class_constructor_call) {
-            if (try string_ops.callSimpleStringBytecode(ctx.runtime, fb, args)) |value| return value;
-            if (try callSimpleNumericBytecode(ctx.runtime, fb, args, &.{})) |value| return value;
-        }
         return callFunctionBytecode(ctx, func, func, this_value, args, &.{}, output, global, &.{}, &.{});
     }
     if (object_ops.functionObjectFromValue(func)) |function_object| {
@@ -563,10 +562,6 @@ fn callValueOrBytecodeClassModeDispatch(
                 try class_init_ops.initializeClassInstanceElements(ctx, output, function_global, func, this_value, fb, caller_function, caller_frame);
             }
             return callFunctionBytecodeModeState(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNames(), function_object.functionEvalLocalRefs(), true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
-        }
-        if (!allow_class_constructor_call) {
-            if (try string_ops.callSimpleStringBytecode(ctx.runtime, fb, args)) |value| return value;
-            if (try callSimpleNumericBytecode(ctx.runtime, fb, args, function_object.functionCapturesSlot().*)) |value| return value;
         }
         const effective_this = function_object.functionLexicalThis() orelse this_value;
         const effective_new_target = if (fb.is_arrow_function) blk: {
@@ -1090,174 +1085,6 @@ test "callValueOrBytecodeClassMode roots inline args before bytecode frame alloc
     try std.testing.expect(rt.atoms.name(arg_atom) == null);
 }
 
-pub const SimpleNumericArg0Bytecode = struct {
-    binop: u8,
-    rhs: i32,
-};
-
-pub fn callSimpleNumericBytecode(
-    rt: *core.JSRuntime,
-    fb: *const bytecode.FunctionBytecode,
-    args: []const core.JSValue,
-    captures: []const core.JSValue,
-) !?core.JSValue {
-    switch (fb.simple_numeric_kind) {
-        .arg0_const => {
-            if (args.len == 0 or !args[0].isNumber()) return null;
-            return try simpleNumericBinary(rt, fb.simple_numeric_op, args[0], core.JSValue.int32(fb.simple_numeric_rhs));
-        },
-        .arg0_arg1 => {
-            if (args.len < 2 or !args[0].isNumber() or !args[1].isNumber()) return null;
-            return try simpleNumericBinary(rt, fb.simple_numeric_op, args[0], args[1]);
-        },
-        .capture0_arg0 => {
-            if (args.len == 0 or !args[0].isNumber() or captures.len == 0) return null;
-            const captured = slot_ops.slotValueBorrow(captures[0]);
-            if (!captured.isNumber()) return null;
-            return try simpleNumericBinary(rt, fb.simple_numeric_op, captured, args[0]);
-        },
-        .capture0_post_inc_return => return try callSimpleCapture0PostIncReturn(rt, captures),
-        .none => {},
-    }
-    return null;
-}
-
-fn callSimpleCapture0PostIncReturn(rt: *core.JSRuntime, captures: []const core.JSValue) !?core.JSValue {
-    if (captures.len == 0) return null;
-    const cell = slot_ops.varRefCellFromValue(captures[0]) orelse return null;
-    if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return null;
-    const current_value = cell.varRefValue();
-    const current = current_value.asInt32() orelse return null;
-    const updated = simpleInt32Add(current, 1);
-    try cell.setVarRefValue(rt, updated);
-    return updated;
-}
-
-pub fn simpleNumericCapture0Arg0Bytecode(fb: *const bytecode.FunctionBytecode) ?u8 {
-    if (fb.is_class_constructor or fb.func_kind != .normal) return null;
-    if (fb.var_count != 0 or fb.cpool_count != 0) return null;
-    if (fb.byte_code.len != 4) return null;
-    if (fb.byte_code[0] != op.get_var_ref0 or fb.byte_code[1] != op.get_arg0) return null;
-    const binop = fb.byte_code[2];
-    switch (binop) {
-        op.add, op.sub, op.mul, op.div, op.mod => {},
-        else => return null,
-    }
-    if (fb.byte_code[3] != op.@"return") return null;
-    return binop;
-}
-
-pub fn simpleNumericArg0Arg1Bytecode(fb: *const bytecode.FunctionBytecode) ?u8 {
-    if (fb.is_class_constructor or fb.func_kind != .normal) return null;
-    if (fb.var_count != 0 or fb.var_ref_count != 0 or fb.cpool_count != 0) return null;
-    if (fb.byte_code.len != 4) return null;
-    if (fb.byte_code[0] != op.get_arg0 or fb.byte_code[1] != op.get_arg1) return null;
-    const binop = fb.byte_code[2];
-    switch (binop) {
-        op.add, op.sub, op.mul, op.div, op.mod => {},
-        else => return null,
-    }
-    if (fb.byte_code[3] != op.@"return") return null;
-    return binop;
-}
-
-pub fn callSimpleNumericArg0Bytecode(
-    rt: *core.JSRuntime,
-    fb: *const bytecode.FunctionBytecode,
-    args: []const core.JSValue,
-) !?core.JSValue {
-    if (args.len == 0 or !args[0].isNumber()) return null;
-    const simple = cachedSimpleNumericArg0Bytecode(fb) orelse simpleNumericArg0Bytecode(fb) orelse return null;
-    return try simpleNumericBinary(rt, simple.binop, args[0], core.JSValue.int32(simple.rhs));
-}
-
-pub fn cachedSimpleNumericArg0Bytecode(fb: *const bytecode.FunctionBytecode) ?SimpleNumericArg0Bytecode {
-    if (fb.simple_numeric_kind != .arg0_const) return null;
-    return .{ .binop = fb.simple_numeric_op, .rhs = fb.simple_numeric_rhs };
-}
-
-pub fn simpleNumericArg0Bytecode(fb: *const bytecode.FunctionBytecode) ?SimpleNumericArg0Bytecode {
-    if (fb.is_class_constructor or fb.func_kind != .normal) return null;
-    if (fb.var_count != 0 or fb.var_ref_count != 0 or fb.cpool_count != 0) return null;
-    if (fb.byte_code.len < 4 or fb.byte_code[0] != op.get_arg0) return null;
-
-    var pc: usize = 1;
-    const rhs = simpleInlineIntConstant(fb.byte_code, &pc) orelse return null;
-    if (pc >= fb.byte_code.len) return null;
-    const binop = fb.byte_code[pc];
-    pc += 1;
-    switch (binop) {
-        op.add, op.sub, op.mul, op.div, op.mod => {},
-        else => return null,
-    }
-    if (pc >= fb.byte_code.len or fb.byte_code[pc] != op.@"return") return null;
-    pc += 1;
-    if (pc != fb.byte_code.len) return null;
-    return .{ .binop = binop, .rhs = rhs };
-}
-
-pub fn simpleInlineIntConstant(code: []const u8, pc: *usize) ?i32 {
-    if (pc.* >= code.len) return null;
-    const opcode_id = code[pc.*];
-    pc.* += 1;
-    return switch (opcode_id) {
-        op.push_minus1 => -1,
-        op.push_0 => 0,
-        op.push_1 => 1,
-        op.push_2 => 2,
-        op.push_3 => 3,
-        op.push_4 => 4,
-        op.push_5 => 5,
-        op.push_6 => 6,
-        op.push_7 => 7,
-        op.push_i8 => blk: {
-            if (pc.* >= code.len) return null;
-            const value: i8 = @bitCast(code[pc.*]);
-            pc.* += 1;
-            break :blk @as(i32, value);
-        },
-        op.push_i16 => blk: {
-            if (pc.* + 2 > code.len) return null;
-            const value = std.mem.readInt(i16, code[pc.*..][0..2], .little);
-            pc.* += 2;
-            break :blk @as(i32, value);
-        },
-        else => null,
-    };
-}
-
-pub fn simpleNumericBinary(rt: *core.JSRuntime, binop: u8, lhs: core.JSValue, rhs: core.JSValue) !core.JSValue {
-    if (lhs.asInt32()) |lhs_int| {
-        if (rhs.asInt32()) |rhs_int| {
-            return switch (binop) {
-                op.add => simpleInt32Add(lhs_int, rhs_int),
-                op.sub => simpleInt32Sub(lhs_int, rhs_int),
-                op.mul => simpleInt32Mul(lhs_int, rhs_int),
-                else => try value_ops.binary(rt, binop, lhs, rhs),
-            };
-        }
-    }
-    return try value_ops.binary(rt, binop, lhs, rhs);
-}
-
-pub fn simpleInt32Add(lhs: i32, rhs: i32) core.JSValue {
-    const result = @addWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.JSValue.int32(result[0]);
-    return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) + @as(f64, @floatFromInt(rhs)));
-}
-
-pub fn simpleInt32Sub(lhs: i32, rhs: i32) core.JSValue {
-    const result = @subWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.JSValue.int32(result[0]);
-    return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) - @as(f64, @floatFromInt(rhs)));
-}
-
-pub fn simpleInt32Mul(lhs: i32, rhs: i32) core.JSValue {
-    const result = @mulWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.JSValue.int32(result[0]);
-    return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) * @as(f64, @floatFromInt(rhs)));
-}
-
 // --- Class instance initialization moved to class_init_ops.zig ---
 const class_init_ops = @import("class_init_ops.zig");
 
@@ -1306,13 +1133,36 @@ pub fn ordinaryHasInstance(
         }
     }
     const object = object_ops.objectFromValue(value) orelse return false;
-    const proto_value = try object_ops.getValueProperty(ctx, output, global, constructor_value, core.atom.ids.prototype, caller_function, caller_frame);
+    // Fast `.prototype` read: a class constructor (and any non-proxy callable)
+    // carries `prototype` as an own data property, so read it directly without
+    // building/destroying a Descriptor (qjs reads JS_ATOM_prototype once,
+    // quickjs.c:8078). A normal function's lazy-autoinit prototype, an
+    // inherited/accessor prototype, or a proxy returns null here and falls to
+    // the generic getValueProperty (which materializes / traps correctly).
+    const proto_value = blk: {
+        if (object_ops.objectFromValue(constructor_value)) |co| {
+            if (!co.flags.is_proxy) {
+                if (co.getOwnDataPropertyValue(core.atom.ids.prototype)) |v| break :blk v.dup();
+            }
+        }
+        break :blk try object_ops.getValueProperty(ctx, output, global, constructor_value, core.atom.ids.prototype, caller_function, caller_frame);
+    };
     defer proto_value.free(ctx.runtime);
     const prototype = object_ops.objectFromValue(proto_value) orelse return error.TypeError;
-    var current = try object_ops.qjsObjectGetPrototypeOfStep(ctx, output, global, object, caller_function, caller_frame);
+    // Walk the prototype chain. The non-proxy step IS object.getPrototype() (a
+    // direct shape.proto deref); inline it and only call the trap-aware step for
+    // proxies / the throw-type-error intrinsic, mirroring qjs's p->shape->proto
+    // walk (quickjs.c:8087-8125) that bypasses [[GetPrototypeOf]] for ordinary
+    // objects.
+    var current: ?*core.Object = object;
     while (current) |candidate| {
-        if (candidate == prototype) return true;
-        current = try object_ops.qjsObjectGetPrototypeOfStep(ctx, output, global, candidate, caller_function, caller_frame);
+        const next = if (candidate.flags.is_proxy or object_ops.isThrowTypeErrorIntrinsicObject(candidate))
+            try object_ops.qjsObjectGetPrototypeOfStep(ctx, output, global, candidate, caller_function, caller_frame)
+        else
+            candidate.getPrototype();
+        const parent = next orelse return false;
+        if (parent == prototype) return true;
+        current = parent;
     }
     return false;
 }
@@ -2378,18 +2228,6 @@ pub fn collectCallerEvalRefs(
 
     names_out.* = names;
     refs_out.* = refs;
-}
-
-pub fn simpleNumericArg0Callback(callback: core.JSValue) ?SimpleNumericArg0Bytecode {
-    if (callback.isFunctionBytecode()) {
-        const fb = functionBytecodeFromValue(callback) orelse return null;
-        return cachedSimpleNumericArg0Bytecode(fb) orelse simpleNumericArg0Bytecode(fb);
-    }
-    const function_object = object_ops.functionObjectFromValue(callback) orelse return null;
-    if (function_object.functionCapturesSlot().*.len != 0) return null;
-    const function_value = function_object.functionBytecodeSlot().* orelse return null;
-    const fb = functionBytecodeFromValue(function_value) orelse return null;
-    return cachedSimpleNumericArg0Bytecode(fb) orelse simpleNumericArg0Bytecode(fb);
 }
 
 pub fn qjsCollectIteratorValues(
@@ -3729,6 +3567,92 @@ pub fn globalLexicalCell(ctx: *core.JSContext, atom_id: core.Atom) ?core.JSValue
     };
 }
 
+/// Return a fresh ref to the VarRef cell backing a global-object property.
+/// This is the non-lexical counterpart to `globalLexicalCell`: declared
+/// top-level `var`/function bindings are stored as JS_PROP_VARREF on the
+/// global object so closures can alias the property cell directly.
+pub fn globalObjectVarRefCell(global: *core.Object, atom_id: core.Atom) ?core.JSValue {
+    const index = global.findProperty(atom_id) orelse return null;
+    const flags = global.propFlagsAt(index);
+    if (flags.deleted or flags.accessor) return null;
+    return switch (global.properties[index].slot) {
+        .var_ref => |cell| cell.valueRef().dup(),
+        else => null,
+    };
+}
+
+/// Create the JS_PROP_VARREF slot backing a FRESH top-level `var`/function global.
+/// An already-existing global property is left entirely untouched (see below): we
+/// only materialize a cell when the binding is new, so closures can alias it.
+pub fn ensureGlobalObjectVarRefCell(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    atom_id: core.Atom,
+    configurable: bool,
+) !?core.JSValue {
+    const rt = ctx.runtime;
+    if (global.findProperty(atom_id)) |initial_index| {
+        if (global.propFlagsAt(initial_index).accessor) return null;
+        switch (global.properties[initial_index].slot) {
+            .var_ref => |cell| return cell.valueRef().dup(),
+            // qjs js_closure_define_global_var (quickjs.c:17171-17205): an EXISTING
+            // global property is never rebuilt into a fresh VARREF cell here. qjs
+            // hands back a detached uninitialized var_ref and leaves the property's
+            // slot AND its observable flags (writable/enumerable/configurable)
+            // untouched — a plain `var` redeclaration keeps its descriptor, and a
+            // function redeclaration's value+flags are applied afterwards by the
+            // ordinary global function-binding define path
+            // (slot_ops.defineGlobalFunctionBindingValue). Converting here would
+            // clobber the existing descriptor, because a var_ref slot derives its
+            // writable from is_const (masking the real flag). Returning null leaves
+            // the frame's closure-var slot as its initial detached uninitialized
+            // cell, matching qjs's detached-var_ref behaviour and routing access
+            // back through the ordinary global-object property path.
+            .data, .auto_init => return null,
+            .accessor, .deleted => return null,
+        }
+    }
+
+    const cell = try core.VarRef.createClosed(rt, core.JSValue.undefinedValue());
+    errdefer cell.valueRef().free(rt);
+    try global.appendPreparedPropertyEntry(
+        rt,
+        atom_id,
+        core.property.Flags.data(true, true, configurable),
+        .{ .var_ref = cell },
+    );
+    return cell.valueRef().dup();
+}
+
+/// qjs js_closure_define_global_var for non-lexical script globals: ensure the
+/// global object owns a VARREF property cell and rebind this frame's matching
+/// `.global` closure-var slots to alias it. Eval globals deliberately do not use
+/// this path because their bindings are configurable/deletable data properties.
+pub fn defineGlobalDeclVarCell(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    atom_id: core.Atom,
+    configurable: bool,
+) !bool {
+    const cell_value = (try ensureGlobalObjectVarRefCell(ctx, global, atom_id, configurable)) orelse return false;
+    defer cell_value.free(ctx.runtime);
+    var rebound = false;
+    for (function.var_ref_names, 0..) |name, idx| {
+        if (!atomIdOrNameEql(ctx.runtime, name, atom_id)) continue;
+        if (!closureVarIsNonLexicalGlobalSentinel(function, idx)) continue;
+        if (idx >= frame.var_refs.len) {
+            try frame_mod.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
+        }
+        const old_slot = frame.var_refs[idx];
+        frame.var_refs[idx] = cell_value.dup();
+        old_slot.free(ctx.runtime);
+        rebound = true;
+    }
+    return rebound;
+}
+
 /// Create-or-fetch the VarRef cell for a top-level lexical in ctx.lexicals,
 /// stored as a JS_PROP_VARREF slot (qjs js_closure_define_global_var). Returns
 /// a fresh ref the caller owns (for frame.var_refs[idx]). The slot holds its
@@ -4561,6 +4485,12 @@ fn directEvalGlobalVarNeedsRef(
     if (atom_id == eval_ret_atom) return false;
     if (gv.is_lexical) return false;
     if (directEvalSourceHasLexicalDeclarationName(rt, source, atom_id)) return false;
+    // qjs js_closure_define_global_var (quickjs.c:17059-17094): a name that resolves to a
+    // matching closure_var / local / prior-global binding sets `force_init = FALSE` (goto
+    // closure_found) BEFORE the force_init redirect. The binding-match guards must therefore
+    // run ahead of the force_init shortcut, otherwise an eval `function name(){}` declaration
+    // whose name resolves to an existing binding is wrongly steered into a stale temporary
+    // ref cell while the live global property keeps undefined.
     if (functionHasNonLexicalLocal(rt, function, atom_id)) return false;
     if (array_ops.atomSliceContains(rt, function_decl_names, atom_id)) return false;
     if (priorDirectEvalGlobalVarMatches(rt, function, global_var_index, atom_id)) return false;
@@ -4714,9 +4644,10 @@ pub fn publishDirectEvalVarRefs(
                         string_ops.replaceFrameVarRefBinding(ctx.runtime, frame, names[index], refs[index]);
                     }
                 }
-                frame.eval_var_ref_names = function_object.functionEvalLocalNames();
-                frame.eval_var_refs = function_object.functionEvalLocalRefs();
-                frame.eval_var_refs_republished = true;
+                const frame_cold = try frame.ensureCold(&ctx.runtime.memory);
+                frame_cold.eval_var_ref_names = function_object.functionEvalLocalNames();
+                frame_cold.eval_var_refs = function_object.functionEvalLocalRefs();
+                frame_cold.eval_var_refs_republished = true;
             }
         }
         return;
@@ -6572,8 +6503,12 @@ pub fn createIteratorResult(rt: *core.JSRuntime, global: *core.Object, value: co
 
     const object = try core.Object.create(rt, core.class.ids.object, object_ops.objectPrototypeFromGlobal(rt, global));
     errdefer core.Object.destroyFromHeader(rt, &object.header);
-    try object_ops.defineValueProperty(rt, object, "value", rooted_value);
-    try object_ops.defineValueProperty(rt, object, "done", core.JSValue.boolean(done));
+    // qjs js_create_iterator_result (quickjs.c:16768) keys on the predefined
+    // JS_ATOM_value / JS_ATOM_done constants; use the interned atom ids directly
+    // instead of re-interning the "value"/"done" byte strings per result (this
+    // runs once per generator/iterator step, a hot path).
+    try object.defineOwnProperty(rt, core.atom.ids.value, core.Descriptor.data(rooted_value, true, true, true));
+    try object.defineOwnProperty(rt, core.atom.ids.done, core.Descriptor.data(core.JSValue.boolean(done), true, true, true));
     return object.value();
 }
 
@@ -7585,11 +7520,11 @@ pub fn lookupEvalBindingValue(
     atom_id: core.Atom,
 ) ?core.JSValue {
     if (lookupNamedSlotValue(rt, eval_local_names, eval_local_slots, atom_id)) |value| return value;
-    if (!frame.eval_var_refs_republished) {
+    if (!frame.evalVarRefsRepublished()) {
         if (lookupNamedVarRef(rt, eval_var_ref_names, eval_var_refs, atom_id)) |value| return value;
     }
-    if (lookupNamedSlotValue(rt, frame.eval_local_names, frame.eval_local_slots, atom_id)) |value| return value;
-    if (lookupNamedVarRef(rt, frame.eval_var_ref_names, frame.eval_var_refs, atom_id)) |value| return value;
+    if (lookupNamedSlotValue(rt, frame.evalLocalNames(), frame.evalLocalSlots(), atom_id)) |value| return value;
+    if (lookupNamedVarRef(rt, frame.evalVarRefNames(), frame.evalVarRefs(), atom_id)) |value| return value;
     return null;
 }
 
@@ -7602,10 +7537,10 @@ pub fn lookupFrameFirstEvalBindingValue(
     frame: *frame_mod.Frame,
     atom_id: core.Atom,
 ) ?core.JSValue {
-    if (lookupNamedSlotValue(rt, frame.eval_local_names, frame.eval_local_slots, atom_id)) |value| return value;
-    if (lookupNamedVarRef(rt, frame.eval_var_ref_names, frame.eval_var_refs, atom_id)) |value| return value;
+    if (lookupNamedSlotValue(rt, frame.evalLocalNames(), frame.evalLocalSlots(), atom_id)) |value| return value;
+    if (lookupNamedVarRef(rt, frame.evalVarRefNames(), frame.evalVarRefs(), atom_id)) |value| return value;
     if (lookupNamedSlotValue(rt, eval_local_names, eval_local_slots, atom_id)) |value| return value;
-    if (!frame.eval_var_refs_republished) {
+    if (!frame.evalVarRefsRepublished()) {
         if (lookupNamedVarRef(rt, eval_var_ref_names, eval_var_refs, atom_id)) |value| return value;
     }
     return null;
@@ -7652,11 +7587,11 @@ pub fn deleteEvalBinding(
         if (deleteFrameLocalBinding(rt, function, frame, atom_id)) |deleted| return deleted;
     }
     if (deleteNamedSlotBinding(rt, eval_local_names, eval_local_slots, atom_id)) |deleted| return deleted;
-    if (!frame.eval_var_refs_republished) {
+    if (!frame.evalVarRefsRepublished()) {
         if (deleteNamedVarRefBinding(rt, eval_var_ref_names, eval_var_refs, atom_id)) |deleted| return deleted;
     }
-    if (deleteNamedSlotBinding(rt, frame.eval_local_names, frame.eval_local_slots, atom_id)) |deleted| return deleted;
-    if (deleteNamedVarRefBinding(rt, frame.eval_var_ref_names, frame.eval_var_refs, atom_id)) |deleted| return deleted;
+    if (deleteNamedSlotBinding(rt, frame.evalLocalNames(), frame.evalLocalSlots(), atom_id)) |deleted| return deleted;
+    if (deleteNamedVarRefBinding(rt, frame.evalVarRefNames(), frame.evalVarRefs(), atom_id)) |deleted| return deleted;
     return null;
 }
 
@@ -7798,6 +7733,9 @@ pub fn setFrameVarRefValue(
     for (function.var_ref_names, 0..) |name, idx| {
         if (name != atom_id) continue;
         if (idx >= frame.var_refs.len) try frame_mod.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
+        if (closureVarIsNonLexicalGlobalSentinel(function, idx) and slot_ops.varRefSlotIsUninitialized(frame.var_refs[idx])) {
+            return false;
+        }
         try slot_ops.setSlotValue(ctx, &frame.var_refs[idx], value);
         return true;
     }

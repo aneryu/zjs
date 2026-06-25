@@ -129,12 +129,12 @@ pub fn syncTopLevelGlobalLexicalLocal(
 ) !void {
     if (!enabled) return;
     if (!try ensureGlobalLexicalSyncSlots(ctx, function, global, frame)) return;
-    if (idx >= frame.global_lexical_sync_slots.len or !frame.global_lexical_sync_slots[idx]) return;
+    if (idx >= frame.globalLexicalSyncSlots().len or !frame.globalLexicalSyncSlots()[idx]) return;
     const atom_id = function.var_names[idx];
-    if (idx < frame.global_lexical_sync_indices.len) {
-        const property_index = frame.global_lexical_sync_indices[idx];
+    if (idx < frame.globalLexicalSyncIndices().len) {
+        const property_index = frame.globalLexicalSyncIndices()[idx];
         if (property_index != frame_mod.no_global_lexical_sync_index) {
-            const env = frame.global_lexical_sync_env orelse existingGlobalLexicalEnvForGlobal(ctx, global) orelse return;
+            const env = frame.globalLexicalSyncEnv() orelse existingGlobalLexicalEnvForGlobal(ctx, global) orelse return;
             if (try env.setOwnDataPropertyAtForLexicalSync(ctx.runtime, property_index, atom_id, slotValueBorrow(frame.locals[idx]))) return;
         }
     }
@@ -150,18 +150,18 @@ pub fn ensureGlobalLexicalSyncSlots(
     frame: *frame_mod.Frame,
 ) !bool {
     _ = global;
-    if (frame.global_lexical_sync_checked) return frame.global_lexical_sync_slots.len != 0;
+    if (frame.globalLexicalSyncChecked()) return frame.globalLexicalSyncSlots().len != 0;
     const env = existingGlobalLexicalEnv(ctx) orelse {
         // No global lexical env exists => this frame has no lexical slot to
         // mirror. Latch so the put_loc_check fast path stops re-probing (and
         // re-entering the noinline slow handler) on every iteration.
-        frame.global_lexical_sync_checked = true;
+        (try frame.ensureCold(&ctx.runtime.memory)).global_lexical_sync_checked = true;
         return false;
     };
-    frame.global_lexical_sync_env = env;
+    (try frame.ensureCold(&ctx.runtime.memory)).global_lexical_sync_env = env;
     const count = @min(function.var_names.len, function.var_is_lexical.len);
     if (count == 0) {
-        frame.global_lexical_sync_checked = true;
+        (try frame.ensureCold(&ctx.runtime.memory)).global_lexical_sync_checked = true;
         return false;
     }
     const slots = try ctx.runtime.memory.alloc(bool, count);
@@ -198,14 +198,15 @@ pub fn ensureGlobalLexicalSyncSlots(
         slots[idx] = true;
         has_sync_slot = true;
     }
-    frame.global_lexical_sync_checked = true;
+    const cold = try frame.ensureCold(&ctx.runtime.memory);
+    cold.global_lexical_sync_checked = true;
     if (!has_sync_slot) {
         ctx.runtime.memory.free(bool, slots);
         ctx.runtime.memory.free(usize, indices);
         return false;
     }
-    frame.global_lexical_sync_slots = slots;
-    frame.global_lexical_sync_indices = indices;
+    cold.global_lexical_sync_slots = slots;
+    cold.global_lexical_sync_indices = indices;
     return true;
 }
 
@@ -471,6 +472,18 @@ pub fn defineGlobalFunctionBindingValue(
     value: core.JSValue,
     configurable: bool,
 ) !void {
+    if (global.findProperty(atom_id)) |index| {
+        const flags = global.propFlagsAt(index);
+        if (!flags.deleted and !flags.accessor) {
+            if (global.properties[index].slot == .var_ref) {
+                const cell = global.properties[index].slot.var_ref;
+                try cell.setVarRefValue(rt, value.dup());
+                cell.varRefIsDeletedSlot().* = false;
+                return;
+            }
+        }
+    }
+
     const desc = if (global.getOwnProperty(rt, atom_id)) |current| blk: {
         defer current.destroy(rt);
         if (current.configurable == true) {

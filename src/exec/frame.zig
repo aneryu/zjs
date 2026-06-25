@@ -26,9 +26,9 @@ pub const EvalVarRefSnapshot = struct {
         return snapshot;
     }
 
-    pub fn install(self: *EvalVarRefSnapshot, frame: *Frame) void {
-        frame.eval_var_ref_names = self.names;
-        frame.eval_var_refs = self.refs.values;
+    pub fn install(self: *EvalVarRefSnapshot, cold: *Frame.FrameCold) void {
+        cold.eval_var_ref_names = self.names;
+        cold.eval_var_refs = self.refs.values;
     }
 
     pub fn deinit(self: *EvalVarRefSnapshot, rt: *JSRuntime) void {
@@ -226,64 +226,189 @@ pub const Frame = struct {
     function: *const bytecode.Bytecode,
     pc: usize = 0,
     this_value: JSValue = JSValue.undefinedValue(),
-    constructor_this_value: JSValue = JSValue.undefinedValue(),
     current_function: JSValue = JSValue.undefinedValue(),
     new_target: JSValue = JSValue.undefinedValue(),
-    arguments_object: ?JSValue = null,
     actual_arg_count: usize = 0,
     locals: []JSValue = &.{},
     args: []JSValue = &.{},
-    original_args: []JSValue = &.{},
     var_refs: []JSValue = &.{},
+    /// True when `var_refs` aliases the callee's closure captures array
+    /// (`functionCapturesSlot`) instead of an owned per-frame copy — qjs's
+    /// `var_refs = p->u.func.var_refs` borrow (quickjs.c:17844). Set only for a
+    /// no-eval, no-global-var inline call whose captures are all VarRef cells, so
+    /// every var_ref write goes through a cell (never the array element) and the
+    /// shared array is never mutated/realloced. Teardown then skips the per-element
+    /// free (the closure still owns the cells).
+    var_refs_borrowed: bool = false,
     open_var_refs: []?*core.VarRef = &.{},
     storage_values: []JSValue = &.{},
     storage_on_heap: bool = false,
-    eval_local_names: []const Atom = &.{},
-    eval_local_slots: []JSValue = &.{},
-    eval_var_ref_names: []const Atom = &.{},
-    eval_var_refs: []JSValue = &.{},
-    eval_var_refs_republished: bool = false,
-    global_lexical_sync_env: ?*Object = null,
-    global_lexical_sync_slots: []bool = &.{},
-    global_lexical_sync_indices: []usize = &.{},
-    global_lexical_sync_checked: bool = false,
+    /// Lazily-allocated side-struct holding the cold per-frame state a plain
+    /// inline call (fib, ordinary closures) never touches: direct-eval bindings,
+    /// global-lexical-sync, the derived-constructor `this`, and the `arguments`
+    /// object / original-args snapshot. `null` on the common path, so `Frame.init`
+    /// writes one null pointer instead of ~13 default fields and the hot Frame is
+    /// ~190B narrower — qjs keeps these off its 72B JSStackFrame (quickjs.c:407).
+    cold: ?*FrameCold = null,
     this_value_owned: bool = true,
-    constructor_this_value_owned: bool = false,
 
-    pub fn init(function: *const bytecode.Bytecode) Frame {
+    pub const FrameCold = struct {
+        eval_local_names: []const Atom = &.{},
+        eval_local_slots: []JSValue = &.{},
+        eval_var_ref_names: []const Atom = &.{},
+        eval_var_refs: []JSValue = &.{},
+        eval_var_refs_republished: bool = false,
+        global_lexical_sync_env: ?*Object = null,
+        global_lexical_sync_slots: []bool = &.{},
+        global_lexical_sync_indices: []usize = &.{},
+        global_lexical_sync_checked: bool = false,
+        constructor_this_value: JSValue = JSValue.undefinedValue(),
+        constructor_this_value_owned: bool = false,
+        arguments_object: ?JSValue = null,
+        original_args: []JSValue = &.{},
+    };
+
+    /// Allocate `cold` on first use (a frame that takes the eval / sync / ctor /
+    /// arguments path). The new struct is fully defaulted.
+    pub fn ensureCold(self: *Frame, account: *memory.MemoryAccount) !*FrameCold {
+        if (self.cold) |c| return c;
+        const c = try account.create(FrameCold);
+        c.* = .{};
+        self.cold = c;
+        return c;
+    }
+
+    pub fn freeColdBox(self: *Frame, account: *memory.MemoryAccount) void {
+        if (self.cold) |c| {
+            account.destroy(FrameCold, c);
+            self.cold = null;
+        }
+    }
+
+    /// Release every owned value/allocation held in `cold` (the derived-ctor
+    /// `this`, the `arguments` object, the original-args snapshot VALUES, and the
+    /// global-lexical-sync slice allocations) then free the box. Idempotent.
+    /// `eval_var_refs` is owned by the frame's `EvalVarRefSnapshot`, never here.
+    /// `original_args` VALUES must be released BEFORE the storage backing them is
+    /// reclaimed — call this before freeing `storage_values`.
+    pub fn freeCold(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
+        const c = self.cold orelse return;
+        if (c.constructor_this_value_owned) c.constructor_this_value.free(rt);
+        if (c.arguments_object) |value| value.free(rt);
+        releaseValueSliceNoReset(rt, c.original_args);
+        if (c.global_lexical_sync_slots.len != 0) account.free(bool, c.global_lexical_sync_slots);
+        if (c.global_lexical_sync_indices.len != 0) account.free(usize, c.global_lexical_sync_indices);
+        account.destroy(FrameCold, c);
+        self.cold = null;
+    }
+
+    /// Release ONLY the storage-coupled cold state — the original-args snapshot
+    /// VALUES and the global-lexical-sync allocations — resetting those fields to
+    /// their defaults while KEEPING the box and the eval / ctor / arguments state.
+    /// This matches the old `releaseOwnedStorage` semantics, which reset
+    /// original_args/sync but left eval_*/ctor_this/arguments_object intact so a
+    /// suspended generator retains them across resume.
+    pub fn releaseColdStorage(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
+        const c = self.cold orelse return;
+        releaseValueSliceNoReset(rt, c.original_args);
+        c.original_args = &.{};
+        if (c.global_lexical_sync_slots.len != 0) account.free(bool, c.global_lexical_sync_slots);
+        if (c.global_lexical_sync_indices.len != 0) account.free(usize, c.global_lexical_sync_indices);
+        c.global_lexical_sync_slots = &.{};
+        c.global_lexical_sync_indices = &.{};
+        c.global_lexical_sync_env = null;
+        c.global_lexical_sync_checked = false;
+    }
+
+    // ---- Cold-field read accessors (return the default when `cold == null`) ----
+    pub inline fn evalLocalNames(self: *const Frame) []const Atom {
+        return if (self.cold) |c| c.eval_local_names else &.{};
+    }
+    pub inline fn evalLocalSlots(self: *const Frame) []JSValue {
+        return if (self.cold) |c| c.eval_local_slots else &.{};
+    }
+    pub inline fn evalVarRefNames(self: *const Frame) []const Atom {
+        return if (self.cold) |c| c.eval_var_ref_names else &.{};
+    }
+    pub inline fn evalVarRefs(self: *const Frame) []JSValue {
+        return if (self.cold) |c| c.eval_var_refs else &.{};
+    }
+    pub inline fn evalVarRefsRepublished(self: *const Frame) bool {
+        return if (self.cold) |c| c.eval_var_refs_republished else false;
+    }
+    pub inline fn globalLexicalSyncEnv(self: *const Frame) ?*Object {
+        return if (self.cold) |c| c.global_lexical_sync_env else null;
+    }
+    pub inline fn globalLexicalSyncSlots(self: *const Frame) []bool {
+        return if (self.cold) |c| c.global_lexical_sync_slots else &.{};
+    }
+    pub inline fn globalLexicalSyncIndices(self: *const Frame) []usize {
+        return if (self.cold) |c| c.global_lexical_sync_indices else &.{};
+    }
+    pub inline fn globalLexicalSyncChecked(self: *const Frame) bool {
+        return if (self.cold) |c| c.global_lexical_sync_checked else false;
+    }
+    pub inline fn constructorThisValue(self: *const Frame) JSValue {
+        return if (self.cold) |c| c.constructor_this_value else JSValue.undefinedValue();
+    }
+    pub inline fn constructorThisValueOwned(self: *const Frame) bool {
+        return if (self.cold) |c| c.constructor_this_value_owned else false;
+    }
+    pub inline fn argumentsObject(self: *const Frame) ?JSValue {
+        return if (self.cold) |c| c.arguments_object else null;
+    }
+    pub inline fn originalArgs(self: *const Frame) []JSValue {
+        return if (self.cold) |c| c.original_args else &.{};
+    }
+
+    pub inline fn init(function: *const bytecode.Bytecode) Frame {
         return .{ .function = function };
     }
 
     pub fn initCallBindings(self: *Frame, rt: *JSRuntime, inputs: CallBindingInputs) !EvalVarRefSnapshot {
-        self.initCallBindingValues(inputs, .{});
+        try self.initCallBindingValues(&rt.memory, inputs, .{});
         errdefer self.releaseCallBindings(rt);
 
         return try self.initCallEvalBindings(rt, inputs);
     }
 
-    pub fn initCallBindingValues(self: *Frame, inputs: CallBindingInputs, modes: CallBindingModes) void {
+    pub fn initCallBindingValues(self: *Frame, account: *memory.MemoryAccount, inputs: CallBindingInputs, modes: CallBindingModes) !void {
         self.this_value = bindCallValue(inputs.initial_this_value, modes.this_value);
-        self.constructor_this_value = bindCallValue(inputs.constructor_this_value, modes.constructor_this_value);
         self.current_function = bindCallValue(inputs.current_function_value, modes.current_function);
         self.new_target = inputs.new_target_value;
         self.this_value_owned = modeOwnsValue(modes.this_value);
-        self.constructor_this_value_owned = modeOwnsValue(modes.constructor_this_value);
+        // ctor_this is undefined for every non-derived-constructor frame (owned
+        // undefined is a no-op to free), so only materialize `cold` when it is a
+        // real value. The inline path never reaches here (no derived ctors inline).
+        const ctor_value = bindCallValue(inputs.constructor_this_value, modes.constructor_this_value);
+        if (!ctor_value.isUndefined()) {
+            const c = try self.ensureCold(account);
+            c.constructor_this_value = ctor_value;
+            c.constructor_this_value_owned = modeOwnsValue(modes.constructor_this_value);
+        }
     }
 
     pub fn initCallEvalBindings(self: *Frame, rt: *JSRuntime, inputs: CallBindingInputs) !EvalVarRefSnapshot {
-        self.eval_local_names = if (inputs.inherited_eval_local_names.len != 0) inputs.inherited_eval_local_names else inputs.eval_local_names;
-        self.eval_local_slots = if (inputs.inherited_eval_local_names.len != 0) inputs.inherited_eval_local_slots else inputs.eval_local_slots;
+        const eval_local_names = if (inputs.inherited_eval_local_names.len != 0) inputs.inherited_eval_local_names else inputs.eval_local_names;
+        const eval_local_slots = if (inputs.inherited_eval_local_names.len != 0) inputs.inherited_eval_local_slots else inputs.eval_local_slots;
         const frame_eval_var_ref_names = if (inputs.inherited_eval_var_ref_names.len != 0) inputs.inherited_eval_var_ref_names else inputs.input_eval_var_ref_names;
         const frame_eval_var_refs = if (inputs.inherited_eval_var_ref_names.len != 0) inputs.inherited_eval_var_refs else inputs.input_eval_var_refs;
 
+        const has_eval = eval_local_names.len != 0 or eval_local_slots.len != 0 or
+            frame_eval_var_ref_names.len != 0 or frame_eval_var_refs.len != 0;
+        if (!has_eval) return .{};
+
+        const c = try self.ensureCold(&rt.memory);
+        c.eval_local_names = eval_local_names;
+        c.eval_local_slots = eval_local_slots;
         if (frame_eval_var_ref_names.len == 0 and frame_eval_var_refs.len == 0) {
-            self.eval_var_ref_names = &.{};
-            self.eval_var_refs = &.{};
+            c.eval_var_ref_names = &.{};
+            c.eval_var_refs = &.{};
             return .{};
         }
 
         var snapshot = try EvalVarRefSnapshot.init(rt, frame_eval_var_ref_names, frame_eval_var_refs);
-        snapshot.install(self);
+        snapshot.install(c);
         return snapshot;
     }
 
@@ -424,7 +549,7 @@ pub const Frame = struct {
             break :blk try self.allocOwnedStorage(account, args.len);
         };
         for (args, 0..) |arg, idx| original_args[idx] = arg.dup();
-        self.original_args = original_args;
+        (try self.ensureCold(account)).original_args = original_args;
     }
 
     pub fn installOwnedStorage(self: *Frame, storage: []JSValue) void {
@@ -448,104 +573,85 @@ pub const Frame = struct {
 
     fn releaseCallBindings(self: *Frame, rt: *JSRuntime) void {
         const this_value = self.this_value;
-        const constructor_this_value = self.constructor_this_value;
         const current_function = self.current_function;
         const new_target = self.new_target;
         const this_value_owned = self.this_value_owned;
-        const constructor_this_value_owned = self.constructor_this_value_owned;
         self.this_value = JSValue.undefinedValue();
-        self.constructor_this_value = JSValue.undefinedValue();
         self.current_function = JSValue.undefinedValue();
         self.new_target = JSValue.undefinedValue();
         self.this_value_owned = true;
-        self.constructor_this_value_owned = true;
-        self.eval_local_names = &.{};
-        self.eval_local_slots = &.{};
+        // Frees ctor_this (if owned) + the box; eval_local_* are borrowed.
+        self.freeCold(&rt.memory, rt);
         if (this_value_owned) this_value.free(rt);
-        if (constructor_this_value_owned) constructor_this_value.free(rt);
         current_function.free(rt);
         _ = new_target;
     }
 
     pub fn deinit(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
         const this_value = self.this_value;
-        const constructor_this_value = self.constructor_this_value;
         const current_function = self.current_function;
         const new_target = self.new_target;
-        const arguments_object = self.arguments_object;
         const this_value_owned = self.this_value_owned;
-        const constructor_this_value_owned = self.constructor_this_value_owned;
         self.this_value = JSValue.undefinedValue();
-        self.constructor_this_value = JSValue.undefinedValue();
         self.current_function = JSValue.undefinedValue();
         self.new_target = JSValue.undefinedValue();
-        self.arguments_object = null;
         self.this_value_owned = true;
-        self.constructor_this_value_owned = true;
 
         if (this_value_owned) this_value.free(rt);
-        if (constructor_this_value_owned) constructor_this_value.free(rt);
         current_function.free(rt);
         _ = new_target;
-        if (arguments_object) |value| value.free(rt);
 
+        // releaseOwnedStorage frees the storage slices + clears the storage-coupled
+        // cold state (original_args/sync). Then free the rest of cold (ctor_this,
+        // arguments_object) + the box — full teardown, no resume to retain it for.
         self.releaseOwnedStorage(account, rt);
-        self.eval_local_names = &.{};
-        self.eval_local_slots = &.{};
-        self.eval_var_ref_names = &.{};
-        self.eval_var_refs = &.{};
-        self.eval_var_refs_republished = false;
+        self.freeCold(account, rt);
     }
 
     pub inline fn deinitInlineCall(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
         if (self.this_value_owned) self.this_value.free(rt);
-        if (self.constructor_this_value_owned) self.constructor_this_value.free(rt);
         self.current_function.free(rt);
-        if (self.arguments_object) |value| value.free(rt);
 
         if (self.open_var_refs.len != 0) self.closeOpenVarRefs(rt);
 
         releaseValueSliceNoReset(rt, self.locals);
         releaseValueSliceNoReset(rt, self.args);
-        releaseValueSliceNoReset(rt, self.original_args);
-        releaseValueSliceNoReset(rt, self.var_refs);
+        // freeCold releases original_args VALUES before the storage backing them
+        // is freed below; also frees ctor_this/arguments_object + sync allocs + box.
+        if (self.cold != null) self.freeCold(account, rt);
+        // Borrowed var_refs alias the closure's captures (owned by the still-live
+        // function object); freeing them here would double-free on the next call.
+        if (!self.var_refs_borrowed) releaseValueSliceNoReset(rt, self.var_refs);
 
         if (self.storage_on_heap and self.storage_values.len != 0) account.free(JSValue, self.storage_values);
-        if (self.global_lexical_sync_slots.len != 0) account.free(bool, self.global_lexical_sync_slots);
-        if (self.global_lexical_sync_indices.len != 0) account.free(usize, self.global_lexical_sync_indices);
     }
 
     pub fn releaseOwnedStorage(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
         self.closeOpenVarRefs(rt);
         const locals = self.locals;
         const args = self.args;
-        const original_args = self.original_args;
-        const var_refs = self.var_refs;
+        // A borrowed var_refs aliases the closure captures (not owned here).
+        const var_refs: []JSValue = if (self.var_refs_borrowed) &.{} else self.var_refs;
         const storage_values = self.storage_values;
         const storage_on_heap = self.storage_on_heap;
-        const global_lexical_sync_slots = self.global_lexical_sync_slots;
-        const global_lexical_sync_indices = self.global_lexical_sync_indices;
 
         self.locals = &.{};
         self.args = &.{};
-        self.original_args = &.{};
         self.var_refs = &.{};
+        self.var_refs_borrowed = false;
         self.open_var_refs = &.{};
         self.storage_values = &.{};
         self.storage_on_heap = false;
-        self.global_lexical_sync_env = null;
-        self.global_lexical_sync_slots = &.{};
-        self.global_lexical_sync_indices = &.{};
-        self.global_lexical_sync_checked = false;
 
         releaseValueSlice(rt, locals);
         releaseValueSlice(rt, args);
-        releaseValueSlice(rt, original_args);
         releaseValueSlice(rt, var_refs);
+        // Frees original_args VALUES (which alias `storage_values`/the arena slab)
+        // + the sync allocs, BEFORE the storage backing is reclaimed below. KEEPS
+        // the box + eval/ctor/arguments so a generator retains them across resume.
+        if (self.cold != null) self.releaseColdStorage(account, rt);
 
         if (storage_on_heap and storage_values.len != 0) account.free(JSValue, storage_values);
-        if (global_lexical_sync_slots.len != 0) account.free(bool, global_lexical_sync_slots);
-        if (global_lexical_sync_indices.len != 0) account.free(usize, global_lexical_sync_indices);
     }
 
     pub fn findOpenVarRef(self: *Frame, slot: *JSValue) ?*core.VarRef {
