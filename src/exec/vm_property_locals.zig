@@ -35,21 +35,14 @@ const property_vm = @import("vm_property.zig");
 const vm_property_globals = @import("vm_property_globals.zig");
 const BindingGet = property_vm.BindingGet;
 const BindingPut = property_vm.BindingPut;
-const BorrowedCallable = property_vm.BorrowedCallable;
 const ImmediateInt32 = property_vm.ImmediateInt32;
-const InductionImmediateInt32Args = property_vm.InductionImmediateInt32Args;
 const IntRangeDeltaBounds = property_vm.IntRangeDeltaBounds;
 const LocalPut = property_vm.LocalPut;
-const SimpleNumericRangeArg = property_vm.SimpleNumericRangeArg;
-const SimpleNumericRangeCall = property_vm.SimpleNumericRangeCall;
 const Step = property_vm.Step;
 const atomStringValueForFastPath = property_vm.atomStringValueForFastPath;
 const backwardGotoTarget = property_vm.backwardGotoTarget;
 const bindingReadableBorrowed = property_vm.bindingReadableBorrowed;
 const bindingStoreWritableForFastPath = property_vm.bindingStoreWritableForFastPath;
-const borrowedSimpleCallArg = property_vm.borrowedSimpleCallArg;
-const borrowedSimpleCallArgWithContext = property_vm.borrowedSimpleCallArgWithContext;
-const borrowedSimpleCallable = property_vm.borrowedSimpleCallable;
 const canFuseGlobalDataWrite = property_vm.canFuseGlobalDataWrite;
 const canUseFastGlobalVarLookup = property_vm.canUseFastGlobalVarLookup;
 const decodeBindingGet = property_vm.decodeBindingGet;
@@ -64,8 +57,6 @@ const decodeLoopLimitGet = property_vm.decodeLoopLimitGet;
 const decodeOptionalLocalCompletionTail = property_vm.decodeOptionalLocalCompletionTail;
 const decodeOptionalUndefinedLocalCompletionTail = property_vm.decodeOptionalUndefinedLocalCompletionTail;
 const decodeStringSliceConstLocalStore = property_vm.decodeStringSliceConstLocalStore;
-const decodeVarRefGet = property_vm.decodeVarRefGet;
-const decodeVarRefPut = property_vm.decodeVarRefPut;
 const denseArrayModFieldInt32Increments = property_vm.denseArrayModFieldInt32Increments;
 const fastArrayPrototypeMethodIsDefault = property_vm.fastArrayPrototypeMethodIsDefault;
 const fastCollectionPrototypeMethodIsDefault = property_vm.fastCollectionPrototypeMethodIsDefault;
@@ -88,11 +79,6 @@ const ownPrototypeEntryIsNativeBuiltinDefault = property_vm.ownPrototypeEntryIsN
 const periodicNonNegativeDelta = property_vm.periodicNonNegativeDelta;
 const safeIntegerI128 = property_vm.safeIntegerI128;
 const sameBinding = property_vm.sameBinding;
-const simpleNumericBinary = property_vm.simpleNumericBinary;
-const simpleNumericFunctionResult = property_vm.simpleNumericFunctionResult;
-const simpleNumericRangeCallable = property_vm.simpleNumericRangeCallable;
-const simpleNumericRangeLinearTerm = property_vm.simpleNumericRangeLinearTerm;
-const simpleStringCallableKind = property_vm.simpleStringCallableKind;
 const slotValueBorrowed = property_vm.slotValueBorrowed;
 const storeBindingOwnedValue = property_vm.storeBindingOwnedValue;
 const storeLocalCompletionBorrowedValue = property_vm.storeLocalCompletionBorrowedValue;
@@ -316,8 +302,7 @@ pub fn varRef(
         op.get_var_ref, op.get_var_ref_check => {
             if (frame.pc + 2 > function.code.len) return error.TypeError;
             const idx = readInt(u16, function.code[frame.pc..][0..2]);
-            const next_pc = frame.pc + 2;
-            if (!canStartLongVarRefGetFusion(opc, function.code, next_pc) and try tryFastDirectVarRefGet(function, frame, stack, idx, 2)) return .done;
+            if (try tryFastDirectVarRefGet(function, frame, stack, idx, 2)) return .done;
             if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, idx, 2, catch_target, global)) return .continue_loop;
         },
         op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init => {
@@ -330,19 +315,19 @@ pub fn varRef(
         },
 
         op.get_var_ref0 => {
-            if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(function, frame, stack, 0, 0)) return .done;
+            if (try tryFastDirectVarRefGet(function, frame, stack, 0, 0)) return .done;
             if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, 0, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref1 => {
-            if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(function, frame, stack, 1, 0)) return .done;
+            if (try tryFastDirectVarRefGet(function, frame, stack, 1, 0)) return .done;
             if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, 1, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref2 => {
-            if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(function, frame, stack, 2, 0)) return .done;
+            if (try tryFastDirectVarRefGet(function, frame, stack, 2, 0)) return .done;
             if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, 2, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref3 => {
-            if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(function, frame, stack, 3, 0)) return .done;
+            if (try tryFastDirectVarRefGet(function, frame, stack, 3, 0)) return .done;
             if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, 3, 0, catch_target, global)) return .continue_loop;
         },
         op.put_var_ref0 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 0, 0, opc, eval_global_var_bindings, is_eval_code),
@@ -376,17 +361,6 @@ pub noinline fn varRefVm(
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-}
-
-fn canStartLongVarRefGetFusion(opc: u8, code: []const u8, pc: usize) bool {
-    return (opc == op.get_var_ref_check and canStartVarRefOrLocalGet(code, pc)) or
-        canStartShortVarRefGetFusion(code, pc);
-}
-
-fn canStartShortVarRefGetFusion(code: []const u8, pc: usize) bool {
-    return canStartBorrowedSimpleCallable(code, pc) or
-        canStartGlobalCall1(code, pc) or
-        canStartBorrowedSimpleCallArg(code, pc);
 }
 
 fn tryFastDirectVarRefGet(function: *const bytecode.Bytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack, idx: u16, consume: u8) !bool {
@@ -428,11 +402,6 @@ const SparseArrayLiteralLengthLocalInit = struct {
 const StringLiteralRef = struct {
     atom: ?core.Atom = null,
     next_pc: usize,
-};
-
-const SimpleNumericArg0ConstCall = struct {
-    binop: u8,
-    rhs: i32,
 };
 
 const Latin1PrefixIntLocalKey = struct {
@@ -642,134 +611,6 @@ fn decodeLatin1PrefixIntLocalKey(ctx: *core.JSContext, code: []const u8, pc: usi
     if (index_get.idx != local_idx) return null;
     if (index_get.next_pc >= code.len or code[index_get.next_pc] != op.add) return null;
     return .{ .prefix = prefix, .next_pc = index_get.next_pc + 1 };
-}
-
-fn parseInductionAndImmediateInt32Args(code: []const u8, pc: usize, local_idx: u16) ?InductionImmediateInt32Args {
-    if (decodeLocalGet(code, pc)) |arg0_get| {
-        if (arg0_get.idx != local_idx) return null;
-        const arg1 = immediateInt32Operand(code, arg0_get.next_pc) orelse return null;
-        return .{ .immediate = arg1.value, .next_pc = arg1.next_pc };
-    }
-    const arg0 = immediateInt32Operand(code, pc) orelse return null;
-    const arg1_get = decodeLocalGet(code, arg0.next_pc) orelse return null;
-    if (arg1_get.idx != local_idx) return null;
-    return .{ .immediate = arg0.value, .next_pc = arg1_get.next_pc };
-}
-
-fn decodeSimpleNumericRangeArg(code: []const u8, pc: usize, local_idx: u16) ?struct { arg: SimpleNumericRangeArg, next_pc: usize } {
-    if (decodeLocalGet(code, pc)) |get| {
-        if (get.idx != local_idx) return null;
-        return .{ .arg = .induction, .next_pc = get.next_pc };
-    }
-    const immediate = immediateInt32Operand(code, pc) orelse return null;
-    return .{ .arg = .{ .int32 = immediate.value }, .next_pc = immediate.next_pc };
-}
-
-fn canStartVarRefOrLocalGet(code: []const u8, pc: usize) bool {
-    if (pc >= code.len) return false;
-    return switch (code[pc]) {
-        op.get_var_ref,
-        op.get_var_ref_check,
-        op.get_var_ref0,
-        op.get_var_ref1,
-        op.get_var_ref2,
-        op.get_var_ref3,
-        op.get_loc,
-        op.get_loc8,
-        op.get_loc_check,
-        op.get_loc0,
-        op.get_loc1,
-        op.get_loc2,
-        op.get_loc3,
-        => true,
-        else => false,
-    };
-}
-
-fn canStartBorrowedSimpleCallable(code: []const u8, pc: usize) bool {
-    if (pc >= code.len) return false;
-    if (code[pc] == op.dup) return canStartBorrowedSimpleCallable(code, pc + 1);
-    return switch (code[pc]) {
-        op.get_var,
-        op.get_var_undef,
-        => pc + 3 <= code.len,
-        op.get_var_ref,
-        op.get_var_ref_check,
-        op.get_loc,
-        op.get_loc_check,
-        => pc + 3 <= code.len,
-        op.get_var_ref0,
-        op.get_var_ref1,
-        op.get_var_ref2,
-        op.get_var_ref3,
-        op.get_loc0,
-        op.get_loc1,
-        op.get_loc2,
-        op.get_loc3,
-        => true,
-        op.get_loc8 => pc + 2 <= code.len,
-        else => false,
-    };
-}
-
-fn canStartBorrowedSimpleCallArg(code: []const u8, pc: usize) bool {
-    if (pc >= code.len) return false;
-    return switch (code[pc]) {
-        op.get_var,
-        op.get_var_undef,
-        => pc + 3 <= code.len,
-        op.get_var_ref, op.get_var_ref_check, op.get_loc, op.get_loc_check, op.push_i16 => pc + 3 <= code.len,
-        op.get_loc8, op.push_i8 => pc + 2 <= code.len,
-        op.push_i32 => pc + 5 <= code.len,
-        op.get_var_ref0,
-        op.get_var_ref1,
-        op.get_var_ref2,
-        op.get_var_ref3,
-        op.get_loc0,
-        op.get_loc1,
-        op.get_loc2,
-        op.get_loc3,
-        op.push_minus1,
-        op.push_0,
-        op.push_1,
-        op.push_2,
-        op.push_3,
-        op.push_4,
-        op.push_5,
-        op.push_6,
-        op.push_7,
-        => true,
-        else => false,
-    };
-}
-
-fn canStartGlobalCall1(code: []const u8, pc: usize) bool {
-    return pc + 4 <= code.len and (code[pc] == op.get_var or code[pc] == op.get_var_undef) and code[pc + 3] == op.call1;
-}
-
-fn simpleNumericArg0ConstCallable(func: core.JSValue) ?SimpleNumericArg0ConstCall {
-    const fb = if (func.isFunctionBytecode())
-        call_runtime.functionBytecodeFromValue(func) orelse return null
-    else blk: {
-        const object = object_ops.functionObjectFromValue(func) orelse return null;
-        const function_value = object.functionBytecodeSlot().* orelse return null;
-        break :blk call_runtime.functionBytecodeFromValue(function_value) orelse return null;
-    };
-    if (fb.simple_numeric_kind != .arg0_const) return null;
-    return .{ .binop = fb.simple_numeric_op, .rhs = fb.simple_numeric_rhs };
-}
-
-fn simpleNumericRangeCallAliasesBinding(simple: SimpleNumericRangeCall, frame: *const frame_mod.Frame, binding: BindingGet) bool {
-    if (simple.kind != .capture0_arg0) return false;
-    if (varRefCellFromValue(simple.capture0_slot) == null) return false;
-    const raw_binding = if (binding.is_var_ref) blk: {
-        if (binding.idx >= frame.var_refs.len) return false;
-        break :blk frame.var_refs[binding.idx];
-    } else blk: {
-        if (binding.idx >= frame.locals.len) return false;
-        break :blk frame.locals[binding.idx];
-    };
-    return simple.capture0_slot.same(raw_binding);
 }
 
 const CheckedLocalInt32LoopCondition = struct {
@@ -1105,17 +946,6 @@ fn smallPushOpcodeIndex(opc: u8) ?usize {
         op.push_6 => 6,
         op.push_7 => 7,
         else => null,
-    };
-}
-
-fn simpleStringCallResultFromInt32(rt: *core.JSRuntime, kind: bytecode.function.SimpleStringKind, value: i32) !?core.JSValue {
-    return switch (kind) {
-        .percent_hex_byte => blk: {
-            const byte: u8 = @truncate(@as(u32, @bitCast(value)));
-            const cached = try rt.percentHexString(byte);
-            break :blk cached.value().dup();
-        },
-        .none => null,
     };
 }
 

@@ -458,7 +458,6 @@ fn externalHostError(err: anyerror) HostError {
         error.NegativeExponent => error.NegativeExponent,
         error.NotExtensible => error.NotExtensible,
         error.NotRegExpLiteral => error.NotRegExpLiteral,
-        error.NotSimpleNumericCall => error.NotSimpleNumericCall,
         error.OutOfMemory => error.OutOfMemory,
         error.Overflow => error.Overflow,
         error.Pc2LineOverflow => error.Pc2LineOverflow,

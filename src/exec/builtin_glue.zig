@@ -221,8 +221,7 @@ pub fn qjsGlobalParseFloat(
 /// `callArrayNativeFunctionRecord`: resolve the Array static methods
 /// (`from`/`of`/`isArray`) and the Array.prototype method record hub against
 /// the realm-aware exec ops, which stay in exec because they are also reached
-/// by the VM fast-call path (`qjsArrayMethodFastCall`) and the `array.map`
-/// opcode fusion (`tryFastMapCallDense`) — BOTH.
+/// by the VM fast-call path (`qjsArrayMethodFastCall`).
 ///
 /// `function_object` is nullable so the prepared (no-function-object) call path
 /// routes through this same record glue under the uniform dispatch model. Only

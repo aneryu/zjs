@@ -645,24 +645,6 @@ pub fn callStringReplaceMethod(
     return try callValueOrBytecode(ctx, output, global, search_value, replacer, &replace_args, caller_function, caller_frame);
 }
 
-pub fn callSimpleStringBytecode(
-    rt: *core.JSRuntime,
-    fb: *const bytecode.FunctionBytecode,
-    args: []const core.JSValue,
-) !?core.JSValue {
-    switch (fb.simple_string_kind) {
-        .percent_hex_byte => {
-            if (args.len == 0) return null;
-            const byte_i32 = args[0].asInt32() orelse return null;
-            const byte: u8 = @truncate(@as(u32, @bitCast(byte_i32)));
-            const cached = try rt.percentHexString(byte);
-            return cached.value().dup();
-        },
-        .none => {},
-    }
-    return null;
-}
-
 pub fn buildErrorStackStringValue(ctx: *core.JSContext, global: *core.Object, skip_name: ?[]const u8) !core.JSValue {
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(ctx.runtime.memory.allocator);

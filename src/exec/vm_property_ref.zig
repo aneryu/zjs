@@ -20,10 +20,8 @@ const varRefCellFromValue = slot_ops.varRefCellFromValue;
 const property_vm = @import("vm_property.zig");
 const Step = property_vm.Step;
 const decodeGlobalDataGet = property_vm.decodeGlobalDataGet;
-const decodeVarRefGet = property_vm.decodeVarRefGet;
 const frameHasVarRefBinding = property_vm.frameHasVarRefBinding;
 const hasObjectBinding = property_vm.hasObjectBinding;
-const simpleStringCallableKind = property_vm.simpleStringCallableKind;
 const stringFromValue = property_vm.stringFromValue;
 const varRefReadableBorrowed = property_vm.varRefReadableBorrowed;
 

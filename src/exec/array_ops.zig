@@ -33,7 +33,6 @@ const IteratorZipRecord = iter_vm.IteratorZipRecord;
 const RegExpMatch = string_ops.RegExpMatch;
 const SimpleCaptureSequenceAtom = regexp_fastpath.SimpleCaptureSequenceAtom;
 const SimpleClassPredicate = regexp_fastpath.SimpleClassPredicate;
-const SimpleNumericArg0Bytecode = call_runtime.SimpleNumericArg0Bytecode;
 const appendAtom = core.atom.appendAtom;
 const atomIdOrNameEql = call_runtime.atomIdOrNameEql;
 const atomListContains = core.atom.atomListContains;
@@ -93,8 +92,6 @@ const readInt = call_runtime.readInt;
 const sameObjectIdentity = object_ops.sameObjectIdentity;
 const setValueProperty = object_ops.setValueProperty;
 const simpleClassPredicateMatches = string_ops.simpleClassPredicateMatches;
-const simpleNumericArg0Callback = call_runtime.simpleNumericArg0Callback;
-const simpleNumericBinary = call_runtime.simpleNumericBinary;
 const slotValueBorrow = slot_ops.slotValueBorrow;
 const stringSliceValue = string_ops.stringSliceValue;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
@@ -1727,11 +1724,6 @@ pub fn qjsArrayIterationCall(
         out = objectFromValue(out_value) orelse return error.TypeError;
         dense_map_output = mode == .map and out.?.canDefineDenseArrayDataPropertiesUnchecked();
     }
-    if (mode == .map and !is_typed_array and dense_map_output) {
-        if (simpleNumericArg0Callback(args[0])) |simple| {
-            if (try qjsDenseArrayMapSimpleNumericArg0(ctx.runtime, object, length, simple, out_value, out.?)) |value| return value;
-        }
-    }
 
     var cursor: usize = 0;
     while (cursor < length) : (cursor += 1) {
@@ -1813,68 +1805,6 @@ pub fn qjsArrayIterationCall(
         .find_index => core.JSValue.int32(-1),
         .find_last_index => core.JSValue.int32(-1),
     };
-}
-
-pub fn qjsDenseArrayMapSimpleNumericArg0(
-    rt: *core.JSRuntime,
-    source: *core.Object,
-    length: usize,
-    simple: SimpleNumericArg0Bytecode,
-    out_value: core.JSValue,
-    out: *core.Object,
-) !?core.JSValue {
-    if (!source.flags.is_array or source.arrayElementStorageMode() != .dense) return null;
-    if (length > std.math.maxInt(u32)) return null;
-    const elements = source.arrayElements();
-    if (length > elements.len) return null;
-
-    var index: usize = 0;
-    while (index < length) : (index += 1) {
-        const item = elements[index];
-        if (!item.isNumber()) return null;
-    }
-
-    index = 0;
-    while (index < length) : (index += 1) {
-        const item = elements[index];
-        const mapped = try simpleNumericBinary(rt, simple.binop, item, core.JSValue.int32(simple.rhs));
-        defer mapped.free(rt);
-        try out.defineDenseArrayDataPropertyUnchecked(rt, @intCast(index), mapped);
-    }
-    return out_value;
-}
-
-pub fn qjsArrayMapSimpleNumericArg0DefaultSpeciesFastCall(
-    rt: *core.JSRuntime,
-    global: *core.Object,
-    receiver: core.JSValue,
-    callback: core.JSValue,
-) !?core.JSValue {
-    const source = objectFromValue(receiver) orelse return null;
-    if (!source.flags.is_array or source.proxyTarget() != null or source.hasExoticMethods()) return null;
-    if (source.arrayElementStorageMode() != .dense) return null;
-    const length: usize = @intCast(source.arrayLength());
-    if (length > std.math.maxInt(u32)) return null;
-    const simple = simpleNumericArg0Callback(callback) orelse return null;
-
-    const elements = source.arrayElements();
-    if (length > elements.len) return null;
-    var index: usize = 0;
-    while (index < length) : (index += 1) {
-        const item = elements[index];
-        if (!item.isNumber()) return null;
-    }
-
-    const out_value = try defaultArraySpeciesCreate(rt, global, source, length) orelse return null;
-    errdefer out_value.free(rt);
-    const out = objectFromValue(out_value) orelse return error.TypeError;
-    if (!out.canDefineDenseArrayDataPropertiesUnchecked()) {
-        out_value.free(rt);
-        return null;
-    }
-    if (try qjsDenseArrayMapSimpleNumericArg0(rt, source, length, simple, out_value, out)) |mapped| return mapped;
-    out_value.free(rt);
-    return null;
 }
 
 pub fn qjsTypedArrayMapFilter(

@@ -540,10 +540,6 @@ fn callValueOrBytecodeClassModeDispatch(
             }
             return callFunctionBytecodeModeState(ctx, func, func, initial_this, args, &.{}, output, global, &.{}, &.{}, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
         }
-        if (!allow_class_constructor_call) {
-            if (try string_ops.callSimpleStringBytecode(ctx.runtime, fb, args)) |value| return value;
-            if (try callSimpleNumericBytecode(ctx.runtime, fb, args, &.{})) |value| return value;
-        }
         return callFunctionBytecode(ctx, func, func, this_value, args, &.{}, output, global, &.{}, &.{});
     }
     if (object_ops.functionObjectFromValue(func)) |function_object| {
@@ -566,10 +562,6 @@ fn callValueOrBytecodeClassModeDispatch(
                 try class_init_ops.initializeClassInstanceElements(ctx, output, function_global, func, this_value, fb, caller_function, caller_frame);
             }
             return callFunctionBytecodeModeState(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNames(), function_object.functionEvalLocalRefs(), true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
-        }
-        if (!allow_class_constructor_call) {
-            if (try string_ops.callSimpleStringBytecode(ctx.runtime, fb, args)) |value| return value;
-            if (try callSimpleNumericBytecode(ctx.runtime, fb, args, function_object.functionCapturesSlot().*)) |value| return value;
         }
         const effective_this = function_object.functionLexicalThis() orelse this_value;
         const effective_new_target = if (fb.is_arrow_function) blk: {
@@ -1091,174 +1083,6 @@ test "callValueOrBytecodeClassMode roots inline args before bytecode frame alloc
     arg_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(arg_atom) == null);
-}
-
-pub const SimpleNumericArg0Bytecode = struct {
-    binop: u8,
-    rhs: i32,
-};
-
-pub fn callSimpleNumericBytecode(
-    rt: *core.JSRuntime,
-    fb: *const bytecode.FunctionBytecode,
-    args: []const core.JSValue,
-    captures: []const core.JSValue,
-) !?core.JSValue {
-    switch (fb.simple_numeric_kind) {
-        .arg0_const => {
-            if (args.len == 0 or !args[0].isNumber()) return null;
-            return try simpleNumericBinary(rt, fb.simple_numeric_op, args[0], core.JSValue.int32(fb.simple_numeric_rhs));
-        },
-        .arg0_arg1 => {
-            if (args.len < 2 or !args[0].isNumber() or !args[1].isNumber()) return null;
-            return try simpleNumericBinary(rt, fb.simple_numeric_op, args[0], args[1]);
-        },
-        .capture0_arg0 => {
-            if (args.len == 0 or !args[0].isNumber() or captures.len == 0) return null;
-            const captured = slot_ops.slotValueBorrow(captures[0]);
-            if (!captured.isNumber()) return null;
-            return try simpleNumericBinary(rt, fb.simple_numeric_op, captured, args[0]);
-        },
-        .capture0_post_inc_return => return try callSimpleCapture0PostIncReturn(rt, captures),
-        .none => {},
-    }
-    return null;
-}
-
-fn callSimpleCapture0PostIncReturn(rt: *core.JSRuntime, captures: []const core.JSValue) !?core.JSValue {
-    if (captures.len == 0) return null;
-    const cell = slot_ops.varRefCellFromValue(captures[0]) orelse return null;
-    if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return null;
-    const current_value = cell.varRefValue();
-    const current = current_value.asInt32() orelse return null;
-    const updated = simpleInt32Add(current, 1);
-    try cell.setVarRefValue(rt, updated);
-    return updated;
-}
-
-pub fn simpleNumericCapture0Arg0Bytecode(fb: *const bytecode.FunctionBytecode) ?u8 {
-    if (fb.is_class_constructor or fb.func_kind != .normal) return null;
-    if (fb.var_count != 0 or fb.cpool_count != 0) return null;
-    if (fb.byte_code.len != 4) return null;
-    if (fb.byte_code[0] != op.get_var_ref0 or fb.byte_code[1] != op.get_arg0) return null;
-    const binop = fb.byte_code[2];
-    switch (binop) {
-        op.add, op.sub, op.mul, op.div, op.mod => {},
-        else => return null,
-    }
-    if (fb.byte_code[3] != op.@"return") return null;
-    return binop;
-}
-
-pub fn simpleNumericArg0Arg1Bytecode(fb: *const bytecode.FunctionBytecode) ?u8 {
-    if (fb.is_class_constructor or fb.func_kind != .normal) return null;
-    if (fb.var_count != 0 or fb.var_ref_count != 0 or fb.cpool_count != 0) return null;
-    if (fb.byte_code.len != 4) return null;
-    if (fb.byte_code[0] != op.get_arg0 or fb.byte_code[1] != op.get_arg1) return null;
-    const binop = fb.byte_code[2];
-    switch (binop) {
-        op.add, op.sub, op.mul, op.div, op.mod => {},
-        else => return null,
-    }
-    if (fb.byte_code[3] != op.@"return") return null;
-    return binop;
-}
-
-pub fn callSimpleNumericArg0Bytecode(
-    rt: *core.JSRuntime,
-    fb: *const bytecode.FunctionBytecode,
-    args: []const core.JSValue,
-) !?core.JSValue {
-    if (args.len == 0 or !args[0].isNumber()) return null;
-    const simple = cachedSimpleNumericArg0Bytecode(fb) orelse simpleNumericArg0Bytecode(fb) orelse return null;
-    return try simpleNumericBinary(rt, simple.binop, args[0], core.JSValue.int32(simple.rhs));
-}
-
-pub fn cachedSimpleNumericArg0Bytecode(fb: *const bytecode.FunctionBytecode) ?SimpleNumericArg0Bytecode {
-    if (fb.simple_numeric_kind != .arg0_const) return null;
-    return .{ .binop = fb.simple_numeric_op, .rhs = fb.simple_numeric_rhs };
-}
-
-pub fn simpleNumericArg0Bytecode(fb: *const bytecode.FunctionBytecode) ?SimpleNumericArg0Bytecode {
-    if (fb.is_class_constructor or fb.func_kind != .normal) return null;
-    if (fb.var_count != 0 or fb.var_ref_count != 0 or fb.cpool_count != 0) return null;
-    if (fb.byte_code.len < 4 or fb.byte_code[0] != op.get_arg0) return null;
-
-    var pc: usize = 1;
-    const rhs = simpleInlineIntConstant(fb.byte_code, &pc) orelse return null;
-    if (pc >= fb.byte_code.len) return null;
-    const binop = fb.byte_code[pc];
-    pc += 1;
-    switch (binop) {
-        op.add, op.sub, op.mul, op.div, op.mod => {},
-        else => return null,
-    }
-    if (pc >= fb.byte_code.len or fb.byte_code[pc] != op.@"return") return null;
-    pc += 1;
-    if (pc != fb.byte_code.len) return null;
-    return .{ .binop = binop, .rhs = rhs };
-}
-
-pub fn simpleInlineIntConstant(code: []const u8, pc: *usize) ?i32 {
-    if (pc.* >= code.len) return null;
-    const opcode_id = code[pc.*];
-    pc.* += 1;
-    return switch (opcode_id) {
-        op.push_minus1 => -1,
-        op.push_0 => 0,
-        op.push_1 => 1,
-        op.push_2 => 2,
-        op.push_3 => 3,
-        op.push_4 => 4,
-        op.push_5 => 5,
-        op.push_6 => 6,
-        op.push_7 => 7,
-        op.push_i8 => blk: {
-            if (pc.* >= code.len) return null;
-            const value: i8 = @bitCast(code[pc.*]);
-            pc.* += 1;
-            break :blk @as(i32, value);
-        },
-        op.push_i16 => blk: {
-            if (pc.* + 2 > code.len) return null;
-            const value = std.mem.readInt(i16, code[pc.*..][0..2], .little);
-            pc.* += 2;
-            break :blk @as(i32, value);
-        },
-        else => null,
-    };
-}
-
-pub fn simpleNumericBinary(rt: *core.JSRuntime, binop: u8, lhs: core.JSValue, rhs: core.JSValue) !core.JSValue {
-    if (lhs.asInt32()) |lhs_int| {
-        if (rhs.asInt32()) |rhs_int| {
-            return switch (binop) {
-                op.add => simpleInt32Add(lhs_int, rhs_int),
-                op.sub => simpleInt32Sub(lhs_int, rhs_int),
-                op.mul => simpleInt32Mul(lhs_int, rhs_int),
-                else => try value_ops.binary(rt, binop, lhs, rhs),
-            };
-        }
-    }
-    return try value_ops.binary(rt, binop, lhs, rhs);
-}
-
-pub fn simpleInt32Add(lhs: i32, rhs: i32) core.JSValue {
-    const result = @addWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.JSValue.int32(result[0]);
-    return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) + @as(f64, @floatFromInt(rhs)));
-}
-
-pub fn simpleInt32Sub(lhs: i32, rhs: i32) core.JSValue {
-    const result = @subWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.JSValue.int32(result[0]);
-    return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) - @as(f64, @floatFromInt(rhs)));
-}
-
-pub fn simpleInt32Mul(lhs: i32, rhs: i32) core.JSValue {
-    const result = @mulWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.JSValue.int32(result[0]);
-    return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) * @as(f64, @floatFromInt(rhs)));
 }
 
 // --- Class instance initialization moved to class_init_ops.zig ---
@@ -2404,18 +2228,6 @@ pub fn collectCallerEvalRefs(
 
     names_out.* = names;
     refs_out.* = refs;
-}
-
-pub fn simpleNumericArg0Callback(callback: core.JSValue) ?SimpleNumericArg0Bytecode {
-    if (callback.isFunctionBytecode()) {
-        const fb = functionBytecodeFromValue(callback) orelse return null;
-        return cachedSimpleNumericArg0Bytecode(fb) orelse simpleNumericArg0Bytecode(fb);
-    }
-    const function_object = object_ops.functionObjectFromValue(callback) orelse return null;
-    if (function_object.functionCapturesSlot().*.len != 0) return null;
-    const function_value = function_object.functionBytecodeSlot().* orelse return null;
-    const fb = functionBytecodeFromValue(function_value) orelse return null;
-    return cachedSimpleNumericArg0Bytecode(fb) orelse simpleNumericArg0Bytecode(fb);
 }
 
 pub fn qjsCollectIteratorValues(

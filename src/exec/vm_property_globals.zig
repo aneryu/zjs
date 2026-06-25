@@ -32,28 +32,18 @@ const CollectionHostOutputKey = property_vm.CollectionHostOutputKey;
 const CollectionHostOutputKeyOperand = property_vm.CollectionHostOutputKeyOperand;
 const DecodedImmediateInt32 = property_vm.DecodedImmediateInt32;
 const FastGlobalReadValue = property_vm.FastGlobalReadValue;
-const GlobalPropertyRangeDelta = property_vm.GlobalPropertyRangeDelta;
-const GlobalSimpleNumericRangeArg = property_vm.GlobalSimpleNumericRangeArg;
 const LocalPut = property_vm.LocalPut;
 const NumberStaticLiteralResult = property_vm.NumberStaticLiteralResult;
-const SimpleNumericRangeArg = property_vm.SimpleNumericRangeArg;
 const Step = property_vm.Step;
 const StoredGlobalDataValue = property_vm.StoredGlobalDataValue;
 const StringNumberConstArg = property_vm.StringNumberConstArg;
 const StringNumberConstCall = property_vm.StringNumberConstCall;
-const StringSubstringImmediateCall = property_vm.StringSubstringImmediateCall;
 const TypedArrayLengthPrintGet = property_vm.TypedArrayLengthPrintGet;
 const TypedArrayLengthPrintStore = property_vm.TypedArrayLengthPrintStore;
-const UriCall1Argument = property_vm.UriCall1Argument;
-const UriFourByteRangePlan = property_vm.UriFourByteRangePlan;
-const UriStrictEqBranch = property_vm.UriStrictEqBranch;
-const UriStrictEqIntArg = property_vm.UriStrictEqIntArg;
 const arg = vm_property_locals.arg;
 const atomAsciiText = property_vm.atomAsciiText;
 const atomStringValueForFastPath = property_vm.atomStringValueForFastPath;
 const backwardGotoTarget = property_vm.backwardGotoTarget;
-const borrowedSimpleCallArgWithContext = property_vm.borrowedSimpleCallArgWithContext;
-const borrowedSimpleCallable = property_vm.borrowedSimpleCallable;
 const canFinishWithUndefinedAt = property_vm.canFinishWithUndefinedAt;
 const canFuseGlobalDataWrite = property_vm.canFuseGlobalDataWrite;
 const canUseFastGlobalVarLookup = property_vm.canUseFastGlobalVarLookup;
@@ -64,10 +54,6 @@ const decodeGlobalDataGet = property_vm.decodeGlobalDataGet;
 const decodeGlobalPut = property_vm.decodeGlobalPut;
 const decodeLocalGet = property_vm.decodeLocalGet;
 const decodeOptionalLocalCompletionTail = property_vm.decodeOptionalLocalCompletionTail;
-const decodeOptionalUndefinedLocalCompletionTail = property_vm.decodeOptionalUndefinedLocalCompletionTail;
-const decodeVarRefGet = property_vm.decodeVarRefGet;
-const decodeVarRefPut = property_vm.decodeVarRefPut;
-const denseArrayModFieldInt32Increments = property_vm.denseArrayModFieldInt32Increments;
 const fastArrayPrototypeMethodIsDefault = property_vm.fastArrayPrototypeMethodIsDefault;
 const fastCollectionPrototypeMethodIsDefault = property_vm.fastCollectionPrototypeMethodIsDefault;
 const fastDenseArrayElementValue = property_vm.fastDenseArrayElementValue;
@@ -83,19 +69,10 @@ const functionFrameBindingShadowsGlobal = property_vm.functionFrameBindingShadow
 const globalVarAtom = property_vm.globalVarAtom;
 const hasObjectBinding = property_vm.hasObjectBinding;
 const immediateInt32Operand = property_vm.immediateInt32Operand;
-const intRangeDeltaBounds = property_vm.intRangeDeltaBounds;
 const isHostOutputFunctionValue = property_vm.isHostOutputFunctionValue;
-const linearRangeDeltaBounds = property_vm.linearRangeDeltaBounds;
 const localReadableBorrowed = property_vm.localReadableBorrowed;
-const periodicNonNegativeDelta = property_vm.periodicNonNegativeDelta;
-const safeIntegerI128 = property_vm.safeIntegerI128;
-const simpleNumericFunctionResult = property_vm.simpleNumericFunctionResult;
-const simpleNumericRangeCallable = property_vm.simpleNumericRangeCallable;
-const simpleNumericRangeLinearTerm = property_vm.simpleNumericRangeLinearTerm;
-const simpleStringCallableKind = property_vm.simpleStringCallableKind;
 const slotValueBorrowed = property_vm.slotValueBorrowed;
 const storeLocalCompletionBorrowedValue = property_vm.storeLocalCompletionBorrowedValue;
-const stringFromCharCodeInt32Arg = property_vm.stringFromCharCodeInt32Arg;
 const stringFromValue = property_vm.stringFromValue;
 const varRefReadableBorrowed = property_vm.varRefReadableBorrowed;
 const varRefReadableBorrowedForFastPath = property_vm.varRefReadableBorrowedForFastPath;
@@ -756,166 +733,6 @@ fn pushImmediateBinaryResultMaybeFuseStackBinaryOrGlobalStore(
     try stack.pushOwned(rhs_value);
 }
 
-fn decodeUriFourByteRangePlan(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) ?UriFourByteRangePlan {
-    const code = function.code;
-    const callee_get = decodeVarRefGet(code, frame.pc) orelse return null;
-    const callee = varRefReadableBorrowedForFastPath(function, frame, callee_get.idx) orelse return null;
-    if (simpleStringCallableKind(callee) != .percent_hex_byte) return null;
-
-    const induction_get = decodeGlobalDataGet(function, callee_get.next_pc) orelse return null;
-    var pc = induction_get.next_pc;
-    if (pc + 2 > code.len or code[pc] != op.call1 or code[pc + 1] != op.add) return null;
-    const string_store_pc = pc + 2;
-    const string_store = decodeGlobalPut(function, string_store_pc) orelse return null;
-    pc = string_store.next_pc;
-
-    pc = expectImmediateInt32(code, pc, 240) orelse return null;
-    pc = expectImmediateInt32(code, pc, 7) orelse return null;
-    pc = expectOp(code, pc, op.@"and") orelse return null;
-    pc = expectImmediateInt32(code, pc, 0x40000) orelse return null;
-    pc = expectOp(code, pc, op.mul) orelse return null;
-    pc = expectImmediateInt32(code, pc, 160) orelse return null;
-    pc = expectImmediateInt32(code, pc, 0x3f) orelse return null;
-    pc = expectOp(code, pc, op.@"and") orelse return null;
-    pc = expectImmediateInt32(code, pc, 0x1000) orelse return null;
-    pc = expectOp(code, pc, op.mul) orelse return null;
-    pc = expectOp(code, pc, op.add) orelse return null;
-    const index_b3_get_pc = pc;
-    const index_b3_get = decodeGlobalDataGet(function, pc) orelse return null;
-    pc = index_b3_get.next_pc;
-    pc = expectImmediateInt32(code, pc, 0x3f) orelse return null;
-    pc = expectOp(code, pc, op.@"and") orelse return null;
-    pc = expectImmediateInt32(code, pc, 0x40) orelse return null;
-    pc = expectOp(code, pc, op.mul) orelse return null;
-    pc = expectOp(code, pc, op.add) orelse return null;
-    const index_b4_get = decodeGlobalDataGet(function, pc) orelse return null;
-    if (index_b4_get.atom != induction_get.atom) return null;
-    pc = index_b4_get.next_pc;
-    pc = expectImmediateInt32(code, pc, 0x3f) orelse return null;
-    pc = expectOp(code, pc, op.@"and") orelse return null;
-    pc = expectOp(code, pc, op.add) orelse return null;
-    const index_put_pc = pc;
-    const index_put = decodeGlobalPut(function, pc) orelse return null;
-    pc = index_put.next_pc;
-
-    const low_index_get = decodeGlobalDataGet(function, pc) orelse return null;
-    if (low_index_get.atom != index_put.atom) return null;
-    pc = low_index_get.next_pc;
-    pc = expectImmediateInt32(code, pc, 0x10000) orelse return null;
-    pc = expectOp(code, pc, op.sub) orelse return null;
-    pc = expectImmediateInt32(code, pc, 0x03ff) orelse return null;
-    pc = expectOp(code, pc, op.@"and") orelse return null;
-    pc = expectImmediateInt32(code, pc, 0xdc00) orelse return null;
-    pc = expectOp(code, pc, op.add) orelse return null;
-    const low_put_pc = pc;
-    const low_put = decodeGlobalPut(function, pc) orelse return null;
-    pc = low_put.next_pc;
-
-    const high_index_get = decodeGlobalDataGet(function, pc) orelse return null;
-    if (high_index_get.atom != index_put.atom) return null;
-    pc = high_index_get.next_pc;
-    pc = expectImmediateInt32(code, pc, 0x10000) orelse return null;
-    pc = expectOp(code, pc, op.sub) orelse return null;
-    pc = expectImmediateInt32(code, pc, 10) orelse return null;
-    pc = expectOp(code, pc, op.sar) orelse return null;
-    pc = expectImmediateInt32(code, pc, 0x03ff) orelse return null;
-    pc = expectOp(code, pc, op.@"and") orelse return null;
-    pc = expectImmediateInt32(code, pc, 0xd800) orelse return null;
-    pc = expectOp(code, pc, op.add) orelse return null;
-    const high_put_pc = pc;
-    const high_put = decodeGlobalPut(function, pc) orelse return null;
-    pc = high_put.next_pc;
-    const high_completion_tail = decodeOptionalUndefinedLocalCompletionTail(function, frame, pc) orelse return null;
-    pc = high_completion_tail.tail_pc;
-
-    const uri_get = decodeGlobalDataGet(function, pc) orelse return null;
-    const uri_callee = fastGlobalDataValueForAtomAtPcNoProfile(ctx, function, global, frame, pc, uri_get.atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
-    const uri_object = objectFromValue(uri_callee) orelse return null;
-    const uri_native_ref = core.function.decodeNativeBuiltinId(uri_object.nativeFunctionIdSlot().*) orelse return null;
-    if (uri_native_ref.domain != .uri or (uri_native_ref.id != 3 and uri_native_ref.id != 4)) return null;
-    pc = uri_get.next_pc;
-    const uri_arg_get = decodeGlobalDataGet(function, pc) orelse return null;
-    if (uri_arg_get.atom != string_store.atom) return null;
-    pc = uri_arg_get.next_pc;
-    pc = expectOp(code, pc, op.call1) orelse return null;
-
-    const string_get = decodeGlobalDataGet(function, pc) orelse return null;
-    if (string_get.atom != atom_string) return null;
-    const string_ctor = fastGlobalDataValueForAtomAtPcNoProfile(ctx, function, global, frame, pc, string_get.atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
-    pc = string_get.next_pc;
-    const method = decodeFieldAtom(code, pc, op.get_field2) orelse return null;
-    const native_ref = functionOwnNativeBuiltinRefForFastPath(function, pc, ctx.runtime, string_ctor, method.atom) orelse return null;
-    if (native_ref.domain != .string or native_ref.id != @intFromEnum(method_ids.string.StaticMethod.from_char_code)) return null;
-    pc = method.next_pc;
-    const high_get = decodeGlobalDataGet(function, pc) orelse return null;
-    if (high_get.atom != high_put.atom) return null;
-    pc = high_get.next_pc;
-    const low_get = decodeGlobalDataGet(function, pc) orelse return null;
-    if (low_get.atom != low_put.atom) return null;
-    pc = low_get.next_pc;
-    if (pc + 4 > code.len or code[pc] != op.call_method or readInt(u16, code[pc + 1 ..][0..2]) != 2) return null;
-    pc += 3;
-    pc = expectOp(code, pc, op.strict_eq) orelse return null;
-    const eq_branch = decodeFalseBranch(code, pc) orelse return null;
-
-    const branch_completion_tail = decodeOptionalUndefinedLocalCompletionTail(function, frame, eq_branch.true_pc) orelse return null;
-    const count_get = decodeGlobalDataGet(function, branch_completion_tail.tail_pc) orelse return null;
-    if (count_get.next_pc >= code.len or code[count_get.next_pc] != op.post_inc) return null;
-    const count_put_pc = count_get.next_pc + 1;
-    const count_put = decodeGlobalPut(function, count_put_pc) orelse return null;
-    if (count_put.atom != count_get.atom) return null;
-    const count_tail = decodeOptionalLocalCompletionTail(function, frame, count_put.next_pc) orelse return null;
-    if (count_tail.tail_pc != eq_branch.false_pc) return null;
-
-    const tail_get = decodeGlobalDataGet(function, eq_branch.false_pc) orelse return null;
-    if (tail_get.atom != induction_get.atom) return null;
-    if (tail_get.next_pc >= code.len or code[tail_get.next_pc] != op.post_inc) return null;
-    const induction_put_pc = tail_get.next_pc + 1;
-    const induction_put = decodeGlobalPut(function, induction_put_pc) orelse return null;
-    if (induction_put.atom != induction_get.atom) return null;
-    const induction_tail = decodeOptionalLocalCompletionTail(function, frame, induction_put.next_pc) orelse return null;
-    const goto_pc = induction_tail.tail_pc;
-    if (goto_pc >= code.len) return null;
-    const condition_pc = backwardGotoTarget(code, goto_pc + 1, code[goto_pc]) orelse return null;
-    const condition_get = decodeGlobalDataGet(function, condition_pc) orelse return null;
-    if (condition_get.atom != induction_get.atom) return null;
-    const limit = immediateInt32Operand(code, condition_get.next_pc) orelse return null;
-    if (limit.next_pc >= code.len or code[limit.next_pc] != op.lte) return null;
-    const exit_branch = decodeFalseBranch(code, limit.next_pc + 1) orelse return null;
-    if (exit_branch.true_pc != frame.pc - 5) return null;
-
-    return .{
-        .induction_atom = induction_get.atom,
-        .induction_put_pc = induction_put_pc,
-        .string_store_atom = string_store.atom,
-        .string_store_pc = string_store_pc,
-        .index_atom = index_put.atom,
-        .index_put_pc = index_put_pc,
-        .low_atom = low_put.atom,
-        .low_put_pc = low_put_pc,
-        .high_atom = high_put.atom,
-        .high_put_pc = high_put_pc,
-        .high_completion_put = high_completion_tail.completion_put,
-        .branch_completion_put = branch_completion_tail.completion_put,
-        .count_atom = count_get.atom,
-        .count_put_pc = count_put_pc,
-        .count_completion_put = count_tail.completion_put,
-        .induction_completion_put = induction_tail.completion_put,
-        .index_b3_atom = index_b3_get.atom,
-        .index_b3_get_pc = index_b3_get_pc,
-        .limit = limit.value,
-        .exit_pc = exit_branch.false_pc,
-    };
-}
-
 fn expectOp(code: []const u8, pc: usize, expected: u8) ?usize {
     if (pc >= code.len or code[pc] != expected) return null;
     return pc + 1;
@@ -925,16 +742,6 @@ fn expectImmediateInt32(code: []const u8, pc: usize, expected: i32) ?usize {
     const immediate = immediateInt32Operand(code, pc) orelse return null;
     if (immediate.value != expected) return null;
     return immediate.next_pc;
-}
-
-fn percentHexByte(high: u8, low: u8) ?u8 {
-    const high_value = percentHexNibble(high) orelse return null;
-    const low_value = percentHexNibble(low) orelse return null;
-    return (high_value << 4) | low_value;
-}
-
-fn percentHexNibble(byte: u8) ?u8 {
-    return unicode_lib.asciiUpperHexDigitValueByte(byte);
 }
 
 fn fastInt32ImmediateBinary(opcode_id: u8, lhs: i32, rhs: i32) ?core.JSValue {
@@ -948,130 +755,6 @@ fn fastInt32ImmediateBinary(opcode_id: u8, lhs: i32, rhs: i32) ?core.JSValue {
         op.xor => core.JSValue.int32(lhs ^ rhs),
         else => null,
     };
-}
-
-fn uriStrictEqIntArg(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    pc: usize,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) ?UriStrictEqIntArg {
-    if (pc >= function.code.len) return null;
-    const code = function.code;
-    switch (code[pc]) {
-        op.get_loc_check => {
-            if (pc + 3 > code.len) return null;
-            const idx = readInt(u16, code[pc + 1 ..][0..2]);
-            if (idx >= frame.locals.len) return null;
-            if (slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) return null;
-            const value = slotValueBorrowed(frame.locals[idx]);
-            return .{ .value = value.asInt32() orelse return null, .next_pc = pc + 3 };
-        },
-        op.get_var, op.get_var_undef => {
-            if (pc + 3 > code.len) return null;
-            const ref_idx = readInt(u16, code[pc + 1 ..][0..2]);
-            const atom_id = globalVarAtom(function, ref_idx) orelse return null;
-            const value = fastGlobalDataValueForAtomAtPcNoProfile(ctx, function, global, frame, pc, atom_id, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
-            return .{ .value = value.asInt32() orelse return null, .next_pc = pc + 3 };
-        },
-        op.get_var_ref, op.get_var_ref_check => {
-            if (pc + 3 > code.len) return null;
-            const idx = readInt(u16, code[pc + 1 ..][0..2]);
-            const value = varRefReadableBorrowedForFastPath(function, frame, idx) orelse return null;
-            return .{ .value = value.asInt32() orelse return null, .next_pc = pc + 3 };
-        },
-        op.get_var_ref0 => {
-            const value = varRefReadableBorrowedForFastPath(function, frame, 0) orelse return null;
-            return .{ .value = value.asInt32() orelse return null, .next_pc = pc + 1 };
-        },
-        op.get_var_ref1 => {
-            const value = varRefReadableBorrowedForFastPath(function, frame, 1) orelse return null;
-            return .{ .value = value.asInt32() orelse return null, .next_pc = pc + 1 };
-        },
-        op.get_var_ref2 => {
-            const value = varRefReadableBorrowedForFastPath(function, frame, 2) orelse return null;
-            return .{ .value = value.asInt32() orelse return null, .next_pc = pc + 1 };
-        },
-        op.get_var_ref3 => {
-            const value = varRefReadableBorrowedForFastPath(function, frame, 3) orelse return null;
-            return .{ .value = value.asInt32() orelse return null, .next_pc = pc + 1 };
-        },
-        else => {
-            const immediate = immediateInt32Operand(code, pc) orelse return null;
-            return .{ .value = immediate.value, .next_pc = immediate.next_pc };
-        },
-    }
-}
-
-fn uriCall1StringArgument(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    global: *core.Object,
-) !?UriCall1Argument {
-    if (frame.pc >= function.code.len) return null;
-    const code = function.code;
-    switch (code[frame.pc]) {
-        op.push_atom_value => {
-            if (frame.pc + 6 > code.len or code[frame.pc + 5] != op.call1) return null;
-            const atom_id = readInt(u32, code[frame.pc + 1 ..][0..4]);
-            const value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
-            return .{ .value = value, .next_pc = frame.pc + 6, .owned = true };
-        },
-        op.get_var_ref, op.get_var_ref_check => {
-            if (frame.pc + 4 > code.len or code[frame.pc + 3] != op.call1) return null;
-            const idx = readInt(u16, code[frame.pc + 1 ..][0..2]);
-            return uriCall1VarRefStringArgument(frame, idx, frame.pc + 4);
-        },
-        op.get_var_ref0 => return uriCall1VarRefStringArgument(frame, 0, frame.pc + 2),
-        op.get_var_ref1 => return uriCall1VarRefStringArgument(frame, 1, frame.pc + 2),
-        op.get_var_ref2 => return uriCall1VarRefStringArgument(frame, 2, frame.pc + 2),
-        op.get_var_ref3 => return uriCall1VarRefStringArgument(frame, 3, frame.pc + 2),
-        op.get_var, op.get_var_undef => {
-            if (frame.pc + 4 > code.len or code[frame.pc + 3] != op.call1) return null;
-            const ref_idx = readInt(u16, code[frame.pc + 1 ..][0..2]);
-            const atom_id = globalVarAtom(function, ref_idx) orelse return null;
-            return uriCall1GlobalStringArgument(ctx, function, frame, global, atom_id, frame.pc, frame.pc + 4);
-        },
-        else => return null,
-    }
-}
-
-fn uriCall1VarRefStringArgument(frame: *const frame_mod.Frame, idx: usize, next_pc: usize) ?UriCall1Argument {
-    if (idx >= frame.var_refs.len) return null;
-    const value = frame.var_refs[idx];
-    if (varRefCellFromValue(value)) |cell| {
-        if (cell.varRefIsDeletedSlot().*) return null;
-        const stored = cell.varRefValue();
-        if (!stored.isString() or stored.isUninitialized()) return null;
-        return .{ .value = stored, .next_pc = next_pc, .owned = false };
-    }
-    if (!value.isString() or value.isUninitialized()) return null;
-    return .{ .value = value, .next_pc = next_pc, .owned = false };
-}
-
-fn uriCall1GlobalStringArgument(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    global: *core.Object,
-    atom_id: core.Atom,
-    site_pc: usize,
-    next_pc: usize,
-) ?UriCall1Argument {
-    if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return null;
-    if (frameHasVarRefBinding(function, frame, atom_id)) return null;
-    if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |value| {
-        value.free(ctx.runtime);
-        return null;
-    }
-    const value = globalDataPropertyValueForFastPathNoProfile(ctx.runtime, global, function, site_pc, atom_id) orelse return null;
-    if (!value.isString()) return null;
-    return .{ .value = value, .next_pc = next_pc, .owned = false };
 }
 
 pub noinline fn putVar(

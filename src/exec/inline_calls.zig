@@ -61,8 +61,8 @@ pub const InlineTarget = struct {
 /// receiver `receiver` (`undefined` for plain calls, the property base for
 /// method calls). Mirrors the plain-call leg of
 /// `callValueOrBytecodeClassModeDispatch`; any condition that path
-/// special-cases (class constructors, cross-realm calls, simple-numeric/string
-/// fusion bodies, async/generator kinds) disqualifies the target so the slow
+/// special-cases (class constructors, cross-realm calls, async/generator kinds)
+/// disqualifies the target so the slow
 /// path keeps handling it. Direct-eval bindings on the function object are
 /// supported: `pushFrame` merges them into the frame's var-ref view like
 /// `callFunctionBytecodeModeState` does.
@@ -71,18 +71,13 @@ pub const InlineTarget = struct {
 /// the resolved `this_value` / `new_target` come from the lexical values
 /// captured on the function object (mirroring the slow path's arrow leg) and
 /// `pushFrame` boxes `this_value` through the same `coerceCallThis` primitive
-/// as the recursive path — the boxing rules stay in one place. Fusion arrows
-/// (`x => x + 1`) are still caught by the fusion check below and routed to the
-/// faster `callSimple*Bytecode` path.
+/// as the recursive path — the boxing rules stay in one place.
 pub inline fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, func: core.JSValue) ?InlineTarget {
     const function_object = object_ops.functionObjectFromValue(func) orelse return null;
     const function_value = function_object.functionBytecodeSlot().* orelse return null;
     const fb = call_runtime.functionBytecodeFromValue(function_value) orelse return null;
     if (fb.func_kind != .normal) return null;
     if (fb.is_class_constructor or fb.is_derived_class_constructor) return null;
-    // Fusion-recognizable bodies are handled by callSimple*Bytecode in the
-    // slow path with broader matching than the pre-call fast checks.
-    if (fb.simple_numeric_kind != .none or fb.simple_string_kind != .none) return null;
     const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
     if (function_global != global) return null;
     const this_value = if (fb.is_arrow_function)

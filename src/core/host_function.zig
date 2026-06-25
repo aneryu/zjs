@@ -99,7 +99,6 @@ pub const CallbackError = error{
     NoSpaceLeft,
     NotExtensible,
     NotRegExpLiteral,
-    NotSimpleNumericCall,
     OutOfMemory,
     Overflow,
     Pc2LineOverflow,
