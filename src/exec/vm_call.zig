@@ -613,7 +613,6 @@ pub noinline fn callMethod(
 ) !CallStep {
     const argc = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
-    if (try tryFastSimpleNumericMethodCall(ctx, stack, argc)) return .done;
     // Inline frame fast path: a method call whose callable is a plain bytecode
     // function runs as an inline frame (like op.call), so method-position
     // recursion gets the logical call-depth limit instead of the shallow
@@ -677,93 +676,6 @@ pub noinline fn callMethod(
     errdefer result.free(ctx.runtime);
     try stack.pushOwned(result);
     return .done;
-}
-
-fn tryFastSimpleNumericMethodCall(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    argc: u16,
-) !bool {
-    if (argc != 0) return false;
-    const frame_len = @as(usize, argc) + 2;
-    if (stack.values.len < frame_len) return false;
-    const base = stack.values.len - frame_len;
-    const func = stack.values[base + 1];
-    const result = (try simplePreIncVarRef0CallResult(ctx.runtime, func)) orelse return false;
-    errdefer result.free(ctx.runtime);
-    var remaining = frame_len;
-    while (remaining > 0) {
-        remaining -= 1;
-        const value = try stack.pop();
-        value.free(ctx.runtime);
-    }
-    try stack.pushOwned(result);
-    return true;
-}
-
-fn simplePreIncVarRef0CallResult(rt: *core.JSRuntime, func: core.JSValue) !?core.JSValue {
-    const object = object_ops.functionObjectFromValue(func) orelse return null;
-    const function_value = object.functionBytecodeSlot().* orelse return null;
-    const fb = call_runtime.functionBytecodeFromValue(function_value) orelse return null;
-    if (fb.is_class_constructor or fb.func_kind != .normal) return null;
-    if (fb.var_count != 0 or fb.cpool_count != 0) return null;
-    if (!isPreIncVarRef0ReturnBytecode(fb.byte_code)) return null;
-
-    const captures = object.functionCapturesSlot().*;
-    if (captures.len == 0) return null;
-    const cell = slot_ops.varRefCellFromValue(captures[0]) orelse return null;
-    if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return null;
-    const current_value = cell.varRefValue();
-    const current = current_value.asInt32() orelse return null;
-    const updated = fastInt32Add(current, 1);
-    try cell.setVarRefValue(rt, updated);
-    return updated;
-}
-
-fn isPreIncVarRef0ReturnBytecode(code: []const u8) bool {
-    var pc: usize = 0;
-    if (!readVarRef0Get(code, &pc)) return false;
-    if (pc >= code.len or code[pc] != op.inc) return false;
-    pc += 1;
-    if (pc < code.len and code[pc] == op.dup) pc += 1;
-    if (!readVarRef0Put(code, &pc)) return false;
-    if (pc >= code.len or code[pc] != op.@"return") return false;
-    pc += 1;
-    return pc == code.len;
-}
-
-fn readVarRef0Get(code: []const u8, pc: *usize) bool {
-    if (pc.* >= code.len) return false;
-    return switch (code[pc.*]) {
-        op.get_var_ref0 => blk: {
-            pc.* += 1;
-            break :blk true;
-        },
-        op.get_var_ref, op.get_var_ref_check => blk: {
-            if (pc.* + 3 > code.len) break :blk false;
-            if (readInt(u16, code[pc.* + 1 ..][0..2]) != 0) break :blk false;
-            pc.* += 3;
-            break :blk true;
-        },
-        else => false,
-    };
-}
-
-fn readVarRef0Put(code: []const u8, pc: *usize) bool {
-    if (pc.* >= code.len) return false;
-    return switch (code[pc.*]) {
-        op.put_var_ref0 => blk: {
-            pc.* += 1;
-            break :blk true;
-        },
-        op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init => blk: {
-            if (pc.* + 3 > code.len) break :blk false;
-            if (readInt(u16, code[pc.* + 1 ..][0..2]) != 0) break :blk false;
-            pc.* += 3;
-            break :blk true;
-        },
-        else => false,
-    };
 }
 
 fn dropUnusedCallResult(
