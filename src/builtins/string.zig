@@ -971,30 +971,75 @@ fn isAsciiTrim(byte: u8) bool {
     return byte == ' ' or byte == '\t' or byte == '\r' or byte == '\n';
 }
 
+fn codePointAtResolved(data: core.string.String.ResolvedData, len: usize, index: usize) CodePointSpan {
+    switch (data) {
+        // latin1 code units are never surrogates: each byte is one code point.
+        .latin1 => |bytes| return .{ .value = bytes[index], .start = index, .end = index + 1 },
+        .utf16 => |units| {
+            const first = units[index];
+            const next_index = index + 1;
+            if (isHighSurrogateUnit(first) and next_index < len) {
+                const second = units[next_index];
+                if (isLowSurrogateUnit(second)) {
+                    const value = 0x10000 + ((@as(u21, first) - 0xD800) << 10) + (@as(u21, second) - 0xDC00);
+                    return .{ .value = value, .start = index, .end = index + 2 };
+                }
+            }
+            return .{ .value = first, .start = index, .end = next_index };
+        },
+    }
+}
+
 fn unicodeCaseReceiver(rt: *core.JSRuntime, receiver: core.JSValue, to_lower: bool) !core.JSValue {
     const primitive = try toStringValueForMethod(rt, receiver);
     defer primitive.free(rt);
     const string_value = primitive.asStringBody() orelse return error.TypeError;
 
-    var units = std.ArrayList(u16).empty;
-    defer units.deinit(rt.memory.allocator);
+    // Resolve the source to its flat code-unit slice ONCE (decode code points from
+    // it directly instead of re-walking via codeUnitAt per char), and accumulate
+    // into a NARROW latin1 buffer that widens to UTF-16 only when an output unit
+    // exceeds 0xFF — so an ASCII string never materializes a UTF-16 result. qjs
+    // js_string_toLowerCase uses a pre-sized narrow string_buffer (quickjs.c:46510).
+    const data = string_value.resolveData();
+    const slen = string_value.len();
+
+    var latin1 = std.ArrayList(u8).empty;
+    defer latin1.deinit(rt.memory.allocator);
+    var wide = std.ArrayList(u16).empty;
+    defer wide.deinit(rt.memory.allocator);
+    var is_wide = false;
 
     var index: usize = 0;
-    while (index < string_value.len()) {
-        const span = codePointAtStringIndex(string_value.*, index);
+    while (index < slen) {
+        const span = codePointAtResolved(data, slen, index);
         index = span.end;
 
+        // The final-sigma test (Σ→ς) is the only branch that needs neighbour
+        // context; it is rare (lowercase Σ only) so it keeps the string_value walk.
         const mapping = if (to_lower and span.value == 0x03a3 and isFinalSigma(string_value.*, span.start, span.end))
             singleCaseMapping(0x03c2)
         else
             unicode.caseConvert(span.value, to_lower);
 
         for (mapping.codepoints[0..mapping.len]) |cp| {
-            try appendUtf16CodePoint(rt, &units, cp);
+            if (!is_wide and cp <= 0xff) {
+                try latin1.append(rt.memory.allocator, @intCast(cp));
+            } else {
+                if (!is_wide) {
+                    is_wide = true;
+                    try wide.ensureTotalCapacity(rt.memory.allocator, latin1.items.len + 1);
+                    for (latin1.items) |byte| wide.appendAssumeCapacity(byte);
+                    latin1.clearRetainingCapacity();
+                }
+                try appendUtf16CodePoint(rt, &wide, cp);
+            }
         }
     }
 
-    const string = try core.string.String.createUtf16(rt, units.items);
+    const string = if (is_wide)
+        try core.string.String.createUtf16(rt, wide.items)
+    else
+        try core.string.String.createLatin1(rt, latin1.items);
     return string.value();
 }
 
