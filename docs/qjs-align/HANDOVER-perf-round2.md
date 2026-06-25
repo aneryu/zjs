@@ -1,5 +1,43 @@
 # Handover — qjs-faithful perf alignment round 2 (2026-06-24)
 
+> **2026-06-25 round-5 addendum (frame monolithic rewrite — keystone landed).** The documented
+> multi-week frame rewrite was started. Profiling (post round-4, fib 3.46×) confirmed the targets:
+> **pushFrame 28% (frame setup), dispatchLoop 51% (opcode + per-call re-entry + broad codegen),
+> execCall 11% (call resolution).** Three gated commits this round (each test262 0/49775 + 1223 +
+> force-GC):
+> - **`9dfb819` Frame slim keystone (the documented A+B).** The 27-field Frame was value-initialized
+>   per call. Split the 13 cold fields a plain inline call never touches (eval_* 5, global_lexical_sync_*
+>   4, constructor_this_value(_owned) 2, arguments_object, original_args) into a lazily-allocated
+>   `Frame.FrameCold` reached via `frame.cold: ?*FrameCold`. Hot Frame keeps the per-call fields; init
+>   writes one null pointer, the hot Frame is ~190B narrower. Reads go through defaulting accessors;
+>   writes ensureCold(). `freeCold` (full teardown) vs `releaseColdStorage` (storage release / generator
+>   resume — keeps eval/ctor/arguments + box). External readers migrated via a 10-agent by-file workflow,
+>   all write sites reviewed. **fib 24.88B→24.63B (3.46×→3.43×); pushFrame 28%→24%.**
+> - **`b42bc70` zero-size OpcodeProfileScope when profiling compiled out — the round's standout.** The
+>   dispatch prologue constructed a 5-field inactive scope per cold re-entry (= per call/return) that the
+>   optimizer did NOT elide. Made it a zero-size struct (no-op deinit) when `zjs_enable_opcode_profile`
+>   is comptime-false (default). **fib 24.63B→23.95B (3.43×→3.33×)** — bigger than the keystone, and the
+>   biggest single fib win of the whole campaign. (Found via a background-build measurement; a concurrent
+>   synchronous build had reported a false 0M — the stale-binary hazard struck a THIRD time.)
+> - **`04f84d1` hoist function/generator payload in functionRealmGlobalPtr chain.** Correctness-neutral
+>   reorder (one payload per object); resolveInlineTarget reads it per call on a bytecode function.
+>   fib −36M (3.33×→3.328×).
+>
+> **Frame-rewrite status & remaining (honest).** Round-5 fib end-state **3.328× qjs (23.91B)**, down
+> from 3.46×. The **keystone (A+B) is done**; the remaining documented facets have **no cheap win** and
+> are genuinely multi-session:
+> - **(C) raw-sp operand stack** — Stack.deinit 2% + part of pushFrame; ~165 cold handlers take `*Stack`.
+> - **(E) threaded post-call resume / recursion model** — the real lever on dispatchLoop's per-call
+>   re-entry, but "make recursion the default" re-plumbs exception unwinding + generator/async suspend.
+>   The profile-scope win above is the *bounded* slice of (E) (per-re-entry prologue overhead); the rest
+>   needs the recursion rewrite.
+> - **(F) backtrace from the Entry chain** — needs the Machine reachable from the throw site (a ctx/TLS
+>   current-entry pointer); ~0.25% payoff, low ROI.
+> The residual **3.33×** is now dominated by (a) **pushFrame ~21%** = the arena-carve alloca-substitute
+> (structurally permanent — Zig has no variadic alloca, per the "Expected ceiling" analysis below) and
+> (b) **dispatchLoop ~56%** = LLVM-vs-gcc per-opcode codegen (NOT a faithful divergence). Neither is a
+> clean faithful target. The doc-estimated ~1.3–1.5× ceiling requires the full (C)+(E) deep rewrite.
+
 > **2026-06-25 round-4 addendum (frame-incremental + dense-array builds).** On top of round-3,
 > **4 more faithful slices**, each gated test262 0/49775 + 1223 + force-GC:
 > - **`5545cef` Slice A — frame teardown gate** (DIVERGENCE-CATALOG #4 / HANDOVER-frame-incremental).
