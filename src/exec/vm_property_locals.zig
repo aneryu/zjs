@@ -4,21 +4,11 @@ const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
-const method_ids = core.host_function.builtin_method_ids;
 const frame_mod = @import("frame.zig");
 const arith_vm = @import("vm_arith.zig");
 const property_ic = @import("property_ic.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
-
-// Parser-prevalidated RegExp literal construct record: the test-fusion fast
-// path constructs its RegExp through the record table (Phase 6b-3 STEP 4)
-// rather than naming `builtins.regexp` directly. The prevalidated construct
-// branch skips recompilation and reads only `args`/`new_target`.
-const regexp_construct_prevalidated_ref = core.function.NativeBuiltinRef{
-    .domain = .regexp,
-    .id = @intFromEnum(method_ids.regexp.ConstructorMethod.construct_prevalidated),
-};
 
 const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
@@ -110,13 +100,11 @@ pub noinline fn loc(
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     opc: u8,
-    allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
 ) !void {
-    _ = allow_loop_tail_fusion;
     _ = eval_local_names;
     _ = eval_var_ref_names;
     _ = eval_with_object;
@@ -194,13 +182,11 @@ pub noinline fn checkedLocVm(
     stack: *stack_mod.Stack,
     opc: u8,
     catch_target: *?usize,
-    allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
 ) !Step {
-    _ = allow_loop_tail_fusion;
     _ = eval_local_names;
     _ = eval_var_ref_names;
     _ = eval_with_object;
@@ -960,61 +946,6 @@ fn immediateShortBigIntI32Operand(code: []const u8, pc: usize) ?ImmediateShortBi
         .value = @intCast(readInt(i32, code[pc + 1 ..][0..4])),
         .next_pc = pc + 5,
     };
-}
-
-fn tryStoreStringFromCharCodeInt32LocalAppend(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    local_idx: u16,
-    char_code: i32,
-    add_pc: usize,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
-) !bool {
-    _ = allow_loop_tail_fusion;
-    const unit: u16 = @intCast(@as(u32, @bitCast(char_code)) & 0xffff);
-    if (unit > 0xff) return false;
-    const code = function.code;
-    if (add_pc >= code.len or code[add_pc] != op.add) return false;
-
-    var store_pc = add_pc + 1;
-    var drop_pc: ?usize = null;
-    if (store_pc < code.len and code[store_pc] == op.dup) {
-        store_pc += 1;
-        const candidate_store = decodeLocalPut(code, store_pc) orelse return false;
-        const candidate_drop_pc = candidate_store.operand_pc + candidate_store.consume;
-        if (candidate_drop_pc >= code.len or code[candidate_drop_pc] != op.drop) return false;
-        drop_pc = candidate_drop_pc;
-    }
-    const store = decodeLocalPut(code, store_pc) orelse return false;
-    if (store.idx != local_idx) return false;
-    if (local_idx >= frame.locals.len) return false;
-    if (slot_ops.varRefSlotIsUninitialized(frame.locals[local_idx])) return false;
-    if (local_idx < function.var_is_const.len and function.var_is_const[local_idx]) return false;
-
-    const lhs = slotValueBorrowed(frame.locals[local_idx]);
-    const lhs_string = stringFromValue(lhs) orelse return false;
-    if (lhs_string.isRope()) return false;
-    const byte: u8 = @intCast(unit);
-    const has_global_sync_mirror =
-        sync_global_lexical_locals and
-        frame.globalLexicalSyncChecked() and
-        local_idx < frame.globalLexicalSyncSlots().len and
-        frame.globalLexicalSyncSlots()[local_idx];
-    const max_ref_count: usize = if (has_global_sync_mirror) 2 else 1;
-    const lhs_header = lhs.refHeader() orelse return false;
-    const appended_in_place = @as(usize, @intCast(lhs_header.rc)) <= max_ref_count and
-        try lhs_string.appendLatin1InPlace(ctx.runtime, &.{byte});
-    if (!appended_in_place) {
-        const lhs_bytes = lhs_string.borrowLatin1() orelse return false;
-        const replacement = (try core.string.String.createLatin1Concat(ctx.runtime, lhs_bytes, &.{byte})).value();
-        try slot_ops.setSlotValue(ctx, &frame.locals[local_idx], replacement);
-    }
-    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, local_idx, sync_global_lexical_locals);
-    frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;
-    return true;
 }
 
 fn decodeStringLiteralRef(code: []const u8, pc: usize) ?StringLiteralRef {

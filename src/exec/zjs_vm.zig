@@ -1050,7 +1050,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     continue :sw opc;
                 }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                try vm_property_locals.loc(ctx, function, global, frame, stack, opc, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object);
+                try vm_property_locals.loc(ctx, function, global, frame, stack, opc, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object);
             },
 
             // Hot single-byte argument reads inlined into the dispatch (skip
@@ -1228,7 +1228,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     continue :sw opc;
                 }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object)) {
+                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object)) {
                     .done => continue,
                     .continue_loop => continue,
                 }
@@ -1258,7 +1258,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     continue :sw opc;
                 }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object)) {
+                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object)) {
                     .done => continue,
                     .continue_loop => continue,
                 }
@@ -1283,7 +1283,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     continue :sw opc;
                 }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object)) {
+                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object)) {
                     .done => {},
                     .continue_loop => continue,
                 }
@@ -1308,14 +1308,14 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     continue :sw opc;
                 }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object)) {
+                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.set_loc_uninitialized => {
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object)) {
+                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object)) {
                     .done => {},
                     .continue_loop => continue,
                 }
