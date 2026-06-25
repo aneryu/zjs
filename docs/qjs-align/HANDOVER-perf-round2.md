@@ -1,5 +1,43 @@
 # Handover — qjs-faithful perf alignment round 2 (2026-06-24)
 
+> **2026-06-25 round-7 addendum (delete the qjs-absent fusion layers).** Acting on round-6's
+> standing direction ("fast paths zjs has that qjs does NOT have can be deleted"), a 5-agent survey +
+> adversarial-verify workflow (`fusion-layer-survey`) classified every "fusion" site in the tree
+> against quickjs.c, then the qjs-absent ones were deleted in two gated commits (each test262 0/49775
+> + test 1223 + force-GC 1223). **~1960 lines removed across 23 files; fib 3.015×→3.005× (unchanged/
+> marginally better).**
+> - **`e03cc52` the simple-numeric/string call-fusion layer (the documented "cheat layer", −1556).**
+>   The per-function `fb.simple_numeric_kind`/`simple_string_kind` precompute that let a CALL skip the
+>   interpreter. Ground-truth (agent E): qjs has NO per-function body-kind — `JSFunctionBytecode`
+>   carries no such field (quickjs.c:685-724), `js_create_function` computes none (36024), and
+>   `JS_CallInternal` has no body-kind dispatch (17746-17878); qjs's only fusions are COMPILE-time
+>   peepholes (add_loc/inc_loc/dec_loc, 35395-35462) that still run the interpreter — those stay.
+>   Removed: fb fields + enums + finalize detection; the call_runtime/string_ops/vm_call call shortcuts;
+>   the var-ref-get suppression gates (`canStart*Fusion` — they only suppressed the faithful direct get
+>   so the look-ahead fused-call handlers could fire); the simple-numeric range/linear-term closed-form
+>   loop evaluator + the dead percent-hex URI four-byte loop fusion; the `Array.prototype.map`
+>   per-callback-body fusion (`qjsDenseArrayMapSimpleNumericArg0` — qjs `js_array_every` always JS_Calls,
+>   42204; the faithful dense-result build stays); the inline_calls disqualifier. Also fixed a latent −0
+>   divergence in the fusion's int32 multiply. **The fusion-targeted microbenches regress to the honest
+>   broad call tax (`return x+1` 1.91×→3.02×, `return a+b` 1.89×→2.97×) — the doctrine-sanctioned revert
+>   of a cheat; fib/accumulator/global read+write all flat.** ONE over-deletion was caught by the build:
+>   `decodeVarRefGet`/`decodeVarRefPut` (property_vm copies) are SHARED with the faithful
+>   `decodeBindingGet`/`decodeBindingPut`, not fusion-only — restored. (The verifier's "MY ADD" was wrong;
+>   the build is the backstop the doctrine relies on.)
+> - **`61c5d28` the remaining qjs-absent runtime fusions (imm / regexp-literal / loop-tail, −404).**
+>   All cold or already-dead, default-build-neutral. (1) the `<stack-lhs> imm binop` push fusion in
+>   vm_value.zig — qjs never fuses push+binop at runtime (17879-17910), and the threaded loop already
+>   pushes inline with no fusion; only the non-threaded fallback ran it. (2) the RegExp-literal
+>   `construct_prevalidated` ahead-scan (`tryPushLiteralFromAtomPair`, already dead) — qjs compiles the
+>   pattern at parse time as a push_const (26890-26910); the live `OP_regexp` → `pushLiteral` → `.construct`
+>   record is unchanged. (3) the vestigial `allow_loop_tail_fusion` param + orphan
+>   `tryStoreStringFromCharCodeInt32LocalAppend`. Perf identical to the prior commit.
+>
+> **Method note for the next round:** "qjs-absent" still needs the build + the perf check, not just a
+> source diff — a shared decode helper read as fusion-only (the decodeVarRef case) and a "cheat" bench
+> regressing to the honest tax are both expected; a *faithful* bench (fib) regressing would mean the
+> deletion removed something qjs has inline. None did.
+
 > **2026-06-25 round-6 addendum (frame-E threaded resume + qjs-absent fast-path deletion).** The
 > frame rewrite continued past the keystone with the threaded-resume facet, then pivoted (owner
 > guidance: "fast paths zjs has that qjs does NOT have can be deleted") to deleting qjs-absent fast
