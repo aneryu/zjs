@@ -458,9 +458,9 @@ pub fn addLocal(
         if (cell_opt == null and rhs_primitive.isString()) {
             const has_global_sync_mirror =
                 sync_global_lexical_locals and
-                frame.global_lexical_sync_checked and
-                idx < frame.global_lexical_sync_slots.len and
-                frame.global_lexical_sync_slots[idx];
+                frame.globalLexicalSyncChecked() and
+                idx < frame.globalLexicalSyncSlots().len and
+                frame.globalLexicalSyncSlots()[idx];
             const max_ref_count: usize = if (has_global_sync_mirror) 3 else 2;
             if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs_primitive, max_ref_count)) {
                 try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
@@ -542,7 +542,7 @@ fn canFuseGlobalDataWrite(
     if (!frame.current_function.isUndefined()) return false;
     if (frameHasVarRefBinding(function, frame, atom_id)) return false;
     if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
-    if (frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return false;
+    if (frame.evalLocalNames().len != 0 or frame.evalVarRefNames().len != 0) return false;
     return true;
 }
 

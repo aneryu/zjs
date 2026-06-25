@@ -118,7 +118,7 @@ pub fn execCall(
     defer if (arrow_constructor_this) |value| value.free(ctx.runtime);
     const is_arrow_super_constructor = is_super_constructor and arrow_super_this != null;
     const super_this = if (is_super_constructor and frame.function.flags.is_derived_class_constructor)
-        frame.constructor_this_value
+        frame.constructorThisValue()
     else if (arrow_constructor_this) |value|
         value
     else if (arrow_super_this) |value|
@@ -137,7 +137,7 @@ pub fn execCall(
     if (is_super_constructor and frame.function.flags.is_derived_class_constructor) {
         defer result.free(ctx.runtime);
         if (slot_ops.varRefSlotIsUninitialized(frame.this_value)) {
-            const next_this = if (result.isObject()) result else frame.constructor_this_value;
+            const next_this = if (result.isObject()) result else frame.constructorThisValue();
             try slot_ops.setSlotValue(ctx, &frame.this_value, next_this.dup());
             class_init_ops.initializeCurrentConstructorClassInstanceElements(ctx, output, global, function, frame) catch |err| {
                 if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
@@ -4829,9 +4829,10 @@ pub fn publishDirectEvalVarRefs(
                         string_ops.replaceFrameVarRefBinding(ctx.runtime, frame, names[index], refs[index]);
                     }
                 }
-                frame.eval_var_ref_names = function_object.functionEvalLocalNames();
-                frame.eval_var_refs = function_object.functionEvalLocalRefs();
-                frame.eval_var_refs_republished = true;
+                const frame_cold = try frame.ensureCold(&ctx.runtime.memory);
+                frame_cold.eval_var_ref_names = function_object.functionEvalLocalNames();
+                frame_cold.eval_var_refs = function_object.functionEvalLocalRefs();
+                frame_cold.eval_var_refs_republished = true;
             }
         }
         return;
@@ -7704,11 +7705,11 @@ pub fn lookupEvalBindingValue(
     atom_id: core.Atom,
 ) ?core.JSValue {
     if (lookupNamedSlotValue(rt, eval_local_names, eval_local_slots, atom_id)) |value| return value;
-    if (!frame.eval_var_refs_republished) {
+    if (!frame.evalVarRefsRepublished()) {
         if (lookupNamedVarRef(rt, eval_var_ref_names, eval_var_refs, atom_id)) |value| return value;
     }
-    if (lookupNamedSlotValue(rt, frame.eval_local_names, frame.eval_local_slots, atom_id)) |value| return value;
-    if (lookupNamedVarRef(rt, frame.eval_var_ref_names, frame.eval_var_refs, atom_id)) |value| return value;
+    if (lookupNamedSlotValue(rt, frame.evalLocalNames(), frame.evalLocalSlots(), atom_id)) |value| return value;
+    if (lookupNamedVarRef(rt, frame.evalVarRefNames(), frame.evalVarRefs(), atom_id)) |value| return value;
     return null;
 }
 
@@ -7721,10 +7722,10 @@ pub fn lookupFrameFirstEvalBindingValue(
     frame: *frame_mod.Frame,
     atom_id: core.Atom,
 ) ?core.JSValue {
-    if (lookupNamedSlotValue(rt, frame.eval_local_names, frame.eval_local_slots, atom_id)) |value| return value;
-    if (lookupNamedVarRef(rt, frame.eval_var_ref_names, frame.eval_var_refs, atom_id)) |value| return value;
+    if (lookupNamedSlotValue(rt, frame.evalLocalNames(), frame.evalLocalSlots(), atom_id)) |value| return value;
+    if (lookupNamedVarRef(rt, frame.evalVarRefNames(), frame.evalVarRefs(), atom_id)) |value| return value;
     if (lookupNamedSlotValue(rt, eval_local_names, eval_local_slots, atom_id)) |value| return value;
-    if (!frame.eval_var_refs_republished) {
+    if (!frame.evalVarRefsRepublished()) {
         if (lookupNamedVarRef(rt, eval_var_ref_names, eval_var_refs, atom_id)) |value| return value;
     }
     return null;
@@ -7771,11 +7772,11 @@ pub fn deleteEvalBinding(
         if (deleteFrameLocalBinding(rt, function, frame, atom_id)) |deleted| return deleted;
     }
     if (deleteNamedSlotBinding(rt, eval_local_names, eval_local_slots, atom_id)) |deleted| return deleted;
-    if (!frame.eval_var_refs_republished) {
+    if (!frame.evalVarRefsRepublished()) {
         if (deleteNamedVarRefBinding(rt, eval_var_ref_names, eval_var_refs, atom_id)) |deleted| return deleted;
     }
-    if (deleteNamedSlotBinding(rt, frame.eval_local_names, frame.eval_local_slots, atom_id)) |deleted| return deleted;
-    if (deleteNamedVarRefBinding(rt, frame.eval_var_ref_names, frame.eval_var_refs, atom_id)) |deleted| return deleted;
+    if (deleteNamedSlotBinding(rt, frame.evalLocalNames(), frame.evalLocalSlots(), atom_id)) |deleted| return deleted;
+    if (deleteNamedVarRefBinding(rt, frame.evalVarRefNames(), frame.evalVarRefs(), atom_id)) |deleted| return deleted;
     return null;
 }
 

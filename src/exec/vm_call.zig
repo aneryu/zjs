@@ -926,7 +926,7 @@ pub noinline fn apply(
     defer if (arrow_constructor_this) |value| value.free(ctx.runtime);
     const is_arrow_super_constructor = allow_class_constructor_call and arrow_super_this != null;
     const effective_this = if (allow_class_constructor_call and frame.function.flags.is_derived_class_constructor)
-        frame.constructor_this_value
+        frame.constructorThisValue()
     else if (arrow_constructor_this) |value|
         value
     else if (arrow_super_this) |value|
@@ -958,7 +958,7 @@ pub noinline fn apply(
     defer result.free(ctx.runtime);
     if (allow_class_constructor_call and frame.function.flags.is_derived_class_constructor) {
         if (slot_ops.varRefSlotIsUninitialized(frame.this_value)) {
-            const next_this = if (result.isObject()) result else frame.constructor_this_value;
+            const next_this = if (result.isObject()) result else frame.constructorThisValue();
             try slot_ops.setSlotValue(ctx, &frame.this_value, next_this.dup());
             class_init_ops.initializeCurrentConstructorClassInstanceElements(ctx, output, global, function, frame) catch |err| {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
@@ -1101,8 +1101,9 @@ pub fn initCtor(
     if (frame.new_target.isUndefined()) return error.TypeError;
     const function_object = try property_ops.expectObject(frame.current_function);
     const super = function_object.functionSuperConstructor() orelse return error.TypeError;
-    const args = if (frame.original_args.len != 0)
-        frame.original_args[0..@min(frame.actual_arg_count, frame.original_args.len)]
+    const original_args = frame.originalArgs();
+    const args = if (original_args.len != 0)
+        original_args[0..@min(frame.actual_arg_count, original_args.len)]
     else
         frame.args[0..@min(frame.actual_arg_count, frame.args.len)];
     const result = try call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, super, args, function, frame, frame.new_target);

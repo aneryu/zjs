@@ -126,8 +126,9 @@ inline fn decodeLocalOperand(opc: u8, reg_ip: [*]const u8) LocalOperand {
 
 inline fn localStoreNeedsSlowSync(frame: *const frame_mod.Frame, idx: u16, sync_global_lexical_locals: bool) bool {
     if (!sync_global_lexical_locals) return false;
-    if (!frame.global_lexical_sync_checked) return true;
-    return idx < frame.global_lexical_sync_slots.len and frame.global_lexical_sync_slots[idx];
+    if (!frame.globalLexicalSyncChecked()) return true;
+    const slots = frame.globalLexicalSyncSlots();
+    return idx < slots.len and slots[idx];
 }
 
 inline fn localFastPathNeedsGeneratorStopBoundary(stop_before_pc: ?usize) bool {
@@ -582,7 +583,7 @@ pub fn runWithArgsState(
     if (frame_windows.open_var_refs) |open_refs| frame_storage.installOpenVarRefSlots(open_refs) else if (open_var_ref_count != 0) try frame_storage.ensureOpenVarRefSlots(&ctx.runtime.memory, frame_arena, use_inline_frame_storage);
     try call_vm.initFrameVarRefs(ctx, global, entry_function, &frame_storage, var_refs, use_inline_frame_storage, frame_windows);
     if (entry_generator_state == null) {
-        try vm_property_globals.instantiateGlobalVarDeclarations(ctx, global, entry_function, &frame_storage, entry_is_eval_code, entry_eval_local_names, entry_eval_local_slots, frame_storage.eval_var_ref_names, frame_storage.eval_var_refs);
+        try vm_property_globals.instantiateGlobalVarDeclarations(ctx, global, entry_function, &frame_storage, entry_is_eval_code, entry_eval_local_names, entry_eval_local_slots, frame_storage.evalVarRefNames(), frame_storage.evalVarRefs());
     }
 
     const resume_state = try gen_async_vm.resumeExecutionState(ctx, entry_stack, entry_function, &frame_storage, entry_generator_state, resume_value);
@@ -699,8 +700,8 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
     var catch_target: *?usize = loop_state.catch_target_storage;
     var eval_local_names = entry_eval_local_names;
     var eval_local_slots = entry_eval_local_slots;
-    var eval_var_ref_names = frame_storage.eval_var_ref_names;
-    var eval_var_refs = frame_storage.eval_var_refs;
+    var eval_var_ref_names = frame_storage.evalVarRefNames();
+    var eval_var_refs = frame_storage.evalVarRefs();
     var eval_with_object = entry_eval_with_object;
     var eval_global_var_bindings = entry_eval_global_var_bindings;
     var is_eval_code = entry_is_eval_code;
@@ -744,8 +745,8 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 catch_target = loop_state.catch_target_storage;
                 eval_local_names = entry_eval_local_names;
                 eval_local_slots = entry_eval_local_slots;
-                eval_var_ref_names = frame_storage.eval_var_ref_names;
-                eval_var_refs = frame_storage.eval_var_refs;
+                eval_var_ref_names = frame_storage.evalVarRefNames();
+                eval_var_refs = frame_storage.evalVarRefs();
                 eval_with_object = entry_eval_with_object;
                 eval_global_var_bindings = entry_eval_global_var_bindings;
                 is_eval_code = entry_is_eval_code;
@@ -763,8 +764,8 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 catch_target = &entry.catch_target;
                 eval_local_names = &.{};
                 eval_local_slots = &.{};
-                eval_var_ref_names = entry.frame.eval_var_ref_names;
-                eval_var_refs = entry.frame.eval_var_refs;
+                eval_var_ref_names = entry.frame.evalVarRefNames();
+                eval_var_refs = entry.frame.evalVarRefs();
                 eval_with_object = core.JSValue.undefinedValue();
                 eval_global_var_bindings = false;
                 is_eval_code = false;

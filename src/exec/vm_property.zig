@@ -1381,7 +1381,7 @@ pub fn canUseFastGlobalVarLookup(
     if (!frame.current_function.isUndefined()) return false;
     if (frameHasVarRefBinding(function, frame, atom_id)) return false;
     if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
-    if (frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return false;
+    if (frame.evalLocalNames().len != 0 or frame.evalVarRefNames().len != 0) return false;
     return true;
 }
 
@@ -1399,7 +1399,7 @@ pub fn canUseInstalledGlobalDataIc(
     if (!eval_with_object.isUndefined()) return false;
     if (frameHasVarRefBinding(function, frame, atom_id)) return false;
     if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
-    if (frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return false;
+    if (frame.evalLocalNames().len != 0 or frame.evalVarRefNames().len != 0) return false;
     _ = global;
     if (ctx.lexicals) |env| {
         if (env.hasOwnProperty(atom_id)) return false;
@@ -1482,7 +1482,7 @@ pub fn canFuseGlobalDataWrite(
     if (!eval_with_object.isUndefined()) return false;
     if (frameHasVarRefBinding(function, frame, atom_id)) return false;
     if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
-    if (frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return false;
+    if (frame.evalLocalNames().len != 0 or frame.evalVarRefNames().len != 0) return false;
     return true;
 }
 

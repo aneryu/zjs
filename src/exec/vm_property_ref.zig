@@ -178,7 +178,7 @@ pub fn makeVarRef(
         try stack.pushOwned(key_value);
         return;
     }
-    if (!frame.eval_var_refs_republished) {
+    if (!frame.evalVarRefsRepublished()) {
         if (makeEvalVarRef(ctx.runtime, eval_var_ref_names, eval_var_refs, atom_id)) |ref_value| {
             defer ref_value.free(ctx.runtime);
             const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
@@ -188,7 +188,7 @@ pub fn makeVarRef(
             return;
         }
     }
-    if (try makeEvalBindingRef(ctx, frame.eval_local_names, frame.eval_local_slots, atom_id)) |ref_value| {
+    if (try makeEvalBindingRef(ctx, frame.evalLocalNames(), frame.evalLocalSlots(), atom_id)) |ref_value| {
         defer ref_value.free(ctx.runtime);
         const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
         errdefer key_value.free(ctx.runtime);
@@ -196,7 +196,7 @@ pub fn makeVarRef(
         try stack.pushOwned(key_value);
         return;
     }
-    if (makeEvalVarRef(ctx.runtime, frame.eval_var_ref_names, frame.eval_var_refs, atom_id)) |ref_value| {
+    if (makeEvalVarRef(ctx.runtime, frame.evalVarRefNames(), frame.evalVarRefs(), atom_id)) |ref_value| {
         defer ref_value.free(ctx.runtime);
         const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
         errdefer key_value.free(ctx.runtime);

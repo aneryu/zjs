@@ -126,8 +126,8 @@ pub inline fn hasDynamicGlobalOverlay(
     return !eval_with_object.isUndefined() or
         eval_local_names.len != 0 or
         eval_var_ref_names.len != 0 or
-        frame.eval_local_names.len != 0 or
-        frame.eval_var_ref_names.len != 0;
+        frame.evalLocalNames().len != 0 or
+        frame.evalVarRefNames().len != 0;
 }
 
 inline fn closureVarAt(function: *const bytecode.Bytecode, idx: u16) ?bytecode.function_def.ClosureVar {
@@ -196,7 +196,7 @@ inline fn inactiveGlobalOverlayState(
     }
     if (!frame.current_function.isUndefined()) return false;
     if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
-    if (frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return false;
+    if (frame.evalLocalNames().len != 0 or frame.evalVarRefNames().len != 0) return false;
     if (function.var_ref_names.len != 0 and frame.var_refs.len != 0 and frameHasVarRefBinding(function, frame, atom_id)) return false;
     return true;
 }
@@ -1164,20 +1164,20 @@ pub noinline fn putVar(
     }
     if (try assignDirectEvalGlobalNamedSlot(ctx, global, function, eval_local_names, eval_local_slots, atom_id, value)) return .continue_loop;
     if (try call_runtime.setNamedSlotValue(ctx, global, eval_local_names, eval_local_slots, atom_id, value)) return .continue_loop;
-    if (!frame.eval_var_refs_republished) {
+    if (!frame.evalVarRefsRepublished()) {
         if (call_runtime.setNamedVarRefValue(ctx, eval_var_ref_names, eval_var_refs, atom_id, value, runtime_strict or strict_unresolved_get_var, false) catch |err| {
             if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         }) return .continue_loop;
     }
-    if (try call_runtime.setNamedSlotValue(ctx, global, frame.eval_local_names, frame.eval_local_slots, atom_id, value)) return .continue_loop;
-    if (call_runtime.setNamedVarRefValue(ctx, frame.eval_var_ref_names, frame.eval_var_refs, atom_id, value, runtime_strict or strict_unresolved_get_var, false) catch |err| {
+    if (try call_runtime.setNamedSlotValue(ctx, global, frame.evalLocalNames(), frame.evalLocalSlots(), atom_id, value)) return .continue_loop;
+    if (call_runtime.setNamedVarRefValue(ctx, frame.evalVarRefNames(), frame.evalVarRefs(), atom_id, value, runtime_strict or strict_unresolved_get_var, false) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     }) return .continue_loop;
     if (atom_id == core.atom.ids.arguments and eval_ops.directEvalShouldExposeImplicitArguments(frame)) {
-        const old_value = frame.arguments_object;
-        frame.arguments_object = value;
+        const old_value = frame.argumentsObject();
+        (try frame.ensureCold(&ctx.runtime.memory)).arguments_object = value;
         if (old_value) |stored| stored.free(ctx.runtime);
         return .continue_loop;
     }
@@ -1359,7 +1359,7 @@ fn canUseFastGlobalUndefinedLookup(
     if (!frame.current_function.isUndefined()) return false;
     if (frameHasVarRefBinding(function, frame, core.atom.ids.undefined_)) return false;
     if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
-    if (frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return false;
+    if (frame.evalLocalNames().len != 0 or frame.evalVarRefNames().len != 0) return false;
     return true;
 }
 

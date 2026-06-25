@@ -159,12 +159,14 @@ fn resumeExecutionStateRaw(
     frame.storage_on_heap = frame.storage_values.len != 0;
     frame.locals = generator.generatorFrameLocals();
     frame.args = generator.generatorFrameArgs();
-    frame.original_args = &.{};
     frame.var_refs = generator.generatorFrameVarRefs();
-    frame.global_lexical_sync_slots = &.{};
-    frame.global_lexical_sync_indices = &.{};
-    frame.global_lexical_sync_env = null;
-    frame.global_lexical_sync_checked = false;
+    if (frame.cold) |c| {
+        c.original_args = &.{};
+        c.global_lexical_sync_slots = &.{};
+        c.global_lexical_sync_indices = &.{};
+        c.global_lexical_sync_env = null;
+        c.global_lexical_sync_checked = false;
+    }
     generator.generatorFrameStorageSlot().* = &.{};
     generator.generatorFrameLocalsSlot().* = &.{};
     generator.generatorFrameArgsSlot().* = &.{};

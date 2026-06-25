@@ -154,7 +154,7 @@ fn canUseFastGlobalUndefinedLookup(
     if (!frame.current_function.isUndefined()) return false;
     if (frameHasVarRefBinding(function, frame, core.atom.ids.undefined_)) return false;
     if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
-    if (frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return false;
+    if (frame.evalLocalNames().len != 0 or frame.evalVarRefNames().len != 0) return false;
     return true;
 }
 

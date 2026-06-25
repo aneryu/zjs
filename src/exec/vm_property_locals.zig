@@ -1075,7 +1075,7 @@ fn fastGlobalDataValueForRange(
     if (!eval_with_object.isUndefined()) return null;
     if (frameHasVarRefBinding(function, frame, atom_id)) return null;
     if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return null;
-    if (frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return null;
+    if (frame.evalLocalNames().len != 0 or frame.evalVarRefNames().len != 0) return null;
     if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
@@ -1170,9 +1170,9 @@ fn tryStoreStringFromCharCodeInt32LocalAppend(
     const byte: u8 = @intCast(unit);
     const has_global_sync_mirror =
         sync_global_lexical_locals and
-        frame.global_lexical_sync_checked and
-        local_idx < frame.global_lexical_sync_slots.len and
-        frame.global_lexical_sync_slots[local_idx];
+        frame.globalLexicalSyncChecked() and
+        local_idx < frame.globalLexicalSyncSlots().len and
+        frame.globalLexicalSyncSlots()[local_idx];
     const max_ref_count: usize = if (has_global_sync_mirror) 2 else 1;
     const lhs_header = lhs.refHeader() orelse return false;
     const appended_in_place = @as(usize, @intCast(lhs_header.rc)) <= max_ref_count and

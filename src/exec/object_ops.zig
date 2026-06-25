@@ -306,8 +306,8 @@ pub fn createBytecodeFunctionObject(
         .{ .value = &rooted_value },
     };
     var eval_local_slots = input_eval_local_slots;
-    const capture_eval_var_ref_names = if (frame.eval_var_refs_republished) frame.eval_var_ref_names else eval_var_ref_names;
-    const capture_eval_var_refs_source = if (frame.eval_var_refs_republished) frame.eval_var_refs else input_eval_var_refs;
+    const capture_eval_var_ref_names = if (frame.evalVarRefsRepublished()) frame.evalVarRefNames() else eval_var_ref_names;
+    const capture_eval_var_refs_source = if (frame.evalVarRefsRepublished()) frame.evalVarRefs() else input_eval_var_refs;
     var eval_var_refs_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, capture_eval_var_refs_source);
     defer eval_var_refs_buffer.deinit(ctx.runtime);
     const eval_var_refs = eval_var_refs_buffer.values;
@@ -373,7 +373,7 @@ pub fn createBytecodeFunctionObject(
             if (function_object.functionArrowConstructorThis()) |constructor_this| try object.setOptionalValueSlot(ctx.runtime, try object.functionArrowConstructorThisSlot(ctx.runtime), constructor_this.dup());
         } else |_| {}
         if (frame.function.flags.is_derived_class_constructor) {
-            try object.setOptionalValueSlot(ctx.runtime, try object.functionArrowConstructorThisSlot(ctx.runtime), frame.constructor_this_value.dup());
+            try object.setOptionalValueSlot(ctx.runtime, try object.functionArrowConstructorThisSlot(ctx.runtime), frame.constructorThisValue().dup());
         }
         if (!frame.new_target.isUndefined()) {
             try object.setOptionalValueSlot(ctx.runtime, try object.functionArrowNewTargetSlot(ctx.runtime), frame.new_target.dup());
@@ -2592,8 +2592,8 @@ pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: 
         !currentFrameFunctionIsStrict(frame) and frame.function.flags.has_simple_parameter_list;
     const args = if (mapped)
         frame.args[0..@min(frame.actual_arg_count, frame.args.len)]
-    else if (frame.original_args.len != 0)
-        frame.original_args[0..@min(frame.actual_arg_count, frame.original_args.len)]
+    else if (frame.originalArgs().len != 0)
+        frame.originalArgs()[0..@min(frame.actual_arg_count, frame.originalArgs().len)]
     else
         frame.args[0..@min(frame.actual_arg_count, frame.args.len)];
     const object = try core.Object.create(ctx.runtime, if (mapped) core.class.ids.mapped_arguments else core.class.ids.arguments, objectPrototypeFromGlobal(ctx.runtime, global));
@@ -2656,21 +2656,21 @@ pub fn isThrowTypeErrorIntrinsicObject(object: *core.Object) bool {
 }
 
 pub fn frameArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: *frame_mod.Frame) !core.JSValue {
-    if (frame.arguments_object) |value| return value.dup();
+    if (frame.argumentsObject()) |value| return value.dup();
     const value = try createArgumentsObject(ctx, global, frame, null);
-    frame.arguments_object = value.dup();
+    (try frame.ensureCold(&ctx.runtime.memory)).arguments_object = value.dup();
     return value;
 }
 
 pub fn frameArgumentsObjectForSpecialObject(ctx: *core.JSContext, global: *core.Object, frame: *frame_mod.Frame, subtype: u8) !core.JSValue {
-    if (frame.arguments_object) |value| return value.dup();
+    if (frame.argumentsObject()) |value| return value.dup();
     const mapped_override: ?bool = switch (subtype) {
         0 => false,
         1 => true,
         else => null,
     };
     const value = try createArgumentsObject(ctx, global, frame, mapped_override);
-    frame.arguments_object = value.dup();
+    (try frame.ensureCold(&ctx.runtime.memory)).arguments_object = value.dup();
     return value;
 }
 
@@ -4176,11 +4176,11 @@ pub fn capturedArgumentsObject(
     frame: *frame_mod.Frame,
 ) ?core.JSValue {
     if (lookupNamedSlotValue(rt, eval_local_names, eval_local_slots, core.atom.ids.arguments)) |value| return value;
-    if (!frame.eval_var_refs_republished) {
+    if (!frame.evalVarRefsRepublished()) {
         if (lookupNamedVarRef(rt, eval_var_ref_names, eval_var_refs, core.atom.ids.arguments)) |value| return value;
     }
-    if (lookupNamedSlotValue(rt, frame.eval_local_names, frame.eval_local_slots, core.atom.ids.arguments)) |value| return value;
-    if (lookupNamedVarRef(rt, frame.eval_var_ref_names, frame.eval_var_refs, core.atom.ids.arguments)) |value| return value;
+    if (lookupNamedSlotValue(rt, frame.evalLocalNames(), frame.evalLocalSlots(), core.atom.ids.arguments)) |value| return value;
+    if (lookupNamedVarRef(rt, frame.evalVarRefNames(), frame.evalVarRefs(), core.atom.ids.arguments)) |value| return value;
     return null;
 }
 
