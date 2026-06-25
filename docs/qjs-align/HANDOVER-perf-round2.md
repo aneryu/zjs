@@ -1,5 +1,52 @@
 # Handover — qjs-faithful perf alignment round 2 (2026-06-24)
 
+> **2026-06-25 round-6 addendum (frame-E threaded resume + qjs-absent fast-path deletion).** The
+> frame rewrite continued past the keystone with the threaded-resume facet, then pivoted (owner
+> guidance: "fast paths zjs has that qjs does NOT have can be deleted") to deleting qjs-absent fast
+> paths. **fib 3.26× → 3.01× this round** (continuing from round-5's 3.46×→3.26×; campaign start 3.64×).
+> Each gated test262 0/49775 + 1223 + force-GC 1223. **Lesson burned repeatedly: estimates were wrong
+> every time — measure on a fresh `zig build zjs`. The stale-binary hazard struck a 4th and 5th time.**
+> - **`b822492` hoist inline-invariant per-level locals** (3.328×→3.277×, −368M). The prologue re-set
+>   all 17 per-level locals per frame switch; 10 are constants for every inline frame — set once on
+>   entering the inline regime (`inline_invariants_set`), skip on inline→inline switches.
+> - **`e23d30c` inline returnTop/finishFunctionReturn** (3.277×→3.257×, −139M).
+> - **`207676f` threaded post-call/post-return resume** (3.257×→3.189×, **−489M**). The inline call/
+>   return arms `continue`d through the cold prologue every time; now a `reloadInlineTopFrame` helper
+>   reloads the dispatch registers from the top Entry and `continue :sw` straight into the next opcode,
+>   skipping the prologue (gated on `inline_invariants_set`; L0/exception/generator stay cold). qjs's
+>   `*sp++ = ret; opcode = *pc++; BREAK` analog. Bigger than estimated — the compiler keeps reg_* live.
+> - **`29869d9` inline Stack.deinit + Frame.init** (3.189×→3.122×, **−480M**). Frame.init inline lets
+>   the compiler elide the dead default writes setupInlineEntry immediately overwrites.
+> - **`dada9d3` execCall: try resolveInlineTarget FIRST** (3.122×→3.032×, **−645M**). Skips
+>   fastHostOutputCall + isCurrentSuperConstructor for inline calls — safe because resolveInlineTarget
+>   returns null for constructors (super never resolves inline) and host fns aren't bytecode.
+> - **`67daad1` delete fastHostOutputCall** (3.032×→3.012×, −147M). A per-call console.log probe qjs
+>   lacks; console.log now dispatches as an ordinary host fn.
+> - **`e5296a8` delete the method-position simple-numeric fusion probe** (method 11.43B→11.31B). The
+>   ++var-ref pattern probe qjs lacks; the ++c-via-method case still computes via the slow path.
+>
+> **Round-6 end-state: fib 3.012× (21.64B), method 3.062×.** Profiling: dispatchLoop ~52%, pushFrame
+> ~25%, execCall ~12%, teardown ~8%. pushFrame (the arena-carve alloca substitute) and dispatchLoop
+> (LLVM-vs-gcc codegen) remain the structural floor.
+>
+> **qjs-absent fast-path deletion — survey done, more to delete (owner direction).** A 5-agent survey
+> (`qjs-absent-fastpath-survey`) ranked zjs fast paths qjs lacks. DONE: fastHostOutputCall, the method
+> fusion probe. REMAINING (each deletes a qjs-absent probe, aligns, may regress a non-fib bench):
+> - **the simple_numeric_kind/simple_string_kind fusion layer** (inline_calls.zig resolveInlineTarget
+>   filter + callSimpleNumericBytecode/callSimpleStringBytecode + the parser detection) — qjs has no
+>   fusion; deleting it routes those fns through the normal interpreter (regresses accumulator/getter
+>   benches, the documented "cheat layer" the doctrine says to revert).
+> - **method-dispatch native fast paths** (vm_call.zig:fastNativeMethodCall + array_ops.zig:
+>   qjsArrayMethodFastCall cascade) — qjs dispatches native methods uniformly by magic in
+>   js_call_c_function; the ~20-member cascade + the redundant fastNativeMethodCall probe can route
+>   through the generic vmNativeCallableDispatch / qjsArrayPrototypeNativeRecord. Measure mapget +
+>   array methods for regression (the generic switch should be ≥ the cascade).
+> - NOT deletable (survey over-flagged; they are FAITHFUL): property ICs (qjsGetFieldFast,
+>   fastDenseArrayElementValue — qjs has get_ic/put_ic + fast_array), threaded dispatch arms
+>   (push_const etc. — qjs computed-goto), int32/float64 arith fast paths (qjs has identical inline
+>   paths), plain_undefined_this (deleting it makes eager-this MORE expensive — the real fix is lazy
+>   this, not deletion).
+
 > **2026-06-25 round-5 addendum (frame monolithic rewrite — keystone landed).** The documented
 > multi-week frame rewrite was started. Profiling (post round-4, fib 3.46×) confirmed the targets:
 > **pushFrame 28% (frame setup), dispatchLoop 51% (opcode + per-call re-entry + broad codegen),
