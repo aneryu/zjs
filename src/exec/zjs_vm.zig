@@ -93,6 +93,52 @@ inline fn syncDown(
     stack.values = reg_base[0 .. (@intFromPtr(reg_sp) - @intFromPtr(reg_base)) / @sizeOf(core.JSValue)];
 }
 
+/// Threaded post-call / post-return resume: reload the dispatch loop's per-level
+/// locals + registers from the machine's top inline Entry and fetch the next
+/// opcode, WITHOUT re-entering the cold prologue (no `switched` branch, no
+/// fall-through bound check, no generator stop check). Used by the inline call /
+/// return arms while in the inline regime (the 10 inline-invariant locals are
+/// already established), so a deep recursion resumes straight into the next
+/// opcode — qjs's post-OP_call `*sp++ = ret; opcode = *pc++; BREAK`
+/// (quickjs.c:18199-18201) is the structural analog. Returns the opcode to
+/// `continue :sw`; advances `reg_ip` and `frame.pc` past it.
+inline fn reloadInlineTopFrame(
+    machine: *inline_calls.Machine,
+    function: *(*const bytecode.Bytecode),
+    stack: *(*stack_mod.Stack),
+    frame: *(*frame_mod.Frame),
+    catch_target: *(*?usize),
+    eval_var_ref_names: *[]const core.Atom,
+    eval_var_refs: *[]core.JSValue,
+    strict_unresolved_get_var: *bool,
+    reg_ip: *[*]const u8,
+    reg_code_end: *[*]const u8,
+    reg_base: *[*]core.JSValue,
+    reg_sp: *[*]core.JSValue,
+    reg_var_buf: *[*]core.JSValue,
+    reg_arg_buf: *[*]core.JSValue,
+) u8 {
+    const entry = machine.topEntry();
+    function.* = entry.function;
+    stack.* = &entry.stack;
+    frame.* = &entry.frame;
+    catch_target.* = &entry.catch_target;
+    eval_var_ref_names.* = entry.frame.evalVarRefNames();
+    eval_var_refs.* = entry.frame.evalVarRefs();
+    strict_unresolved_get_var.* = entry.function.flags.is_strict or entry.function.flags.runtime_strict;
+    reg_ip.* = entry.function.code.ptr + entry.frame.pc;
+    reg_code_end.* = entry.function.code.ptr + entry.function.code.len;
+    reg_base.* = entry.stack.values.ptr;
+    reg_sp.* = entry.stack.values.ptr + entry.stack.values.len;
+    reg_var_buf.* = entry.frame.locals.ptr;
+    reg_arg_buf.* = entry.frame.args.ptr;
+    machine.switched = false;
+    const next = reg_ip.*[0];
+    reg_ip.* += 1;
+    entry.frame.pc += 1;
+    return next;
+}
+
 const LocalOperand = struct {
     idx: u16,
     consume: u8,
@@ -1344,18 +1390,33 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 if (machine.depth == 0) return control_vm.returnTop(ctx, stack, frame, generator_state);
                 try machine.popReturn(try control_vm.returnTop(ctx, stack, frame, null));
+                // Threaded resume into the caller (still inline): reload + dispatch
+                // its next opcode, skipping the cold prologue. qjs resumes the caller
+                // inline after JS_CallInternal returns (no per-return interrupt poll).
+                if (machine.depth > 0 and inline_invariants_set) {
+                    opc = reloadInlineTopFrame(machine, &function, &stack, &frame, &catch_target, &eval_var_ref_names, &eval_var_refs, &strict_unresolved_get_var, &reg_ip, &reg_code_end, &reg_base, &reg_sp, &reg_var_buf, &reg_arg_buf);
+                    continue :sw opc;
+                }
                 continue;
             },
             op.return_undef => {
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 if (machine.depth == 0) return control_vm.returnUndefined(ctx, frame, generator_state);
                 try machine.popReturn(try control_vm.returnUndefined(ctx, frame, null));
+                if (machine.depth > 0 and inline_invariants_set) {
+                    opc = reloadInlineTopFrame(machine, &function, &stack, &frame, &catch_target, &eval_var_ref_names, &eval_var_refs, &strict_unresolved_get_var, &reg_ip, &reg_code_end, &reg_base, &reg_sp, &reg_var_buf, &reg_arg_buf);
+                    continue :sw opc;
+                }
                 continue;
             },
             op.return_async => {
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 if (machine.depth == 0) return control_vm.returnTop(ctx, stack, frame, generator_state);
                 try machine.popReturn(try control_vm.returnTop(ctx, stack, frame, null));
+                if (machine.depth > 0 and inline_invariants_set) {
+                    opc = reloadInlineTopFrame(machine, &function, &stack, &frame, &catch_target, &eval_var_ref_names, &eval_var_refs, &strict_unresolved_get_var, &reg_ip, &reg_code_end, &reg_base, &reg_sp, &reg_var_buf, &reg_arg_buf);
+                    continue :sw opc;
+                }
                 continue;
             },
 
@@ -1881,6 +1942,16 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                             if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
                             return err;
                         };
+                        // Threaded resume into the callee while already deep in the
+                        // inline regime (invariants established): reload + dispatch
+                        // straight into the callee's first opcode, skipping the cold
+                        // prologue. The first push from L0 (invariants not yet set)
+                        // falls through to `continue` so the prologue establishes them.
+                        if (inline_invariants_set) {
+                            try interrupt_poller.poll(ctx.runtime); // qjs polls at call entry
+                            opc = reloadInlineTopFrame(machine, &function, &stack, &frame, &catch_target, &eval_var_ref_names, &eval_var_refs, &strict_unresolved_get_var, &reg_ip, &reg_code_end, &reg_base, &reg_sp, &reg_var_buf, &reg_arg_buf);
+                            continue :sw opc;
+                        }
                         continue;
                     },
                 }
@@ -1941,6 +2012,16 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                             if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
                             return err;
                         };
+                        // Threaded resume into the callee while already deep in the
+                        // inline regime (invariants established): reload + dispatch
+                        // straight into the callee's first opcode, skipping the cold
+                        // prologue. The first push from L0 (invariants not yet set)
+                        // falls through to `continue` so the prologue establishes them.
+                        if (inline_invariants_set) {
+                            try interrupt_poller.poll(ctx.runtime); // qjs polls at call entry
+                            opc = reloadInlineTopFrame(machine, &function, &stack, &frame, &catch_target, &eval_var_ref_names, &eval_var_refs, &strict_unresolved_get_var, &reg_ip, &reg_code_end, &reg_base, &reg_sp, &reg_var_buf, &reg_arg_buf);
+                            continue :sw opc;
+                        }
                         continue;
                     },
                 }
