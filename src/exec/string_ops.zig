@@ -4916,6 +4916,86 @@ pub fn isLowSurrogateUnit(unit: u16) bool {
 // record table via `callStringBody`/`callStringCharAtBody` (Phase 6b-3 STEP 5),
 // so exec no longer names them directly.
 
+// qjs JS_STRING_LEN_MAX (quickjs.c:212): js_string_pad throws RangeError when the
+// requested length exceeds it (quickjs.c:46331).
+const js_string_len_max: usize = (1 << 30) - 1;
+
+/// A narrow-first pad accumulator mirroring qjs's StringBuffer (js_string_pad,
+/// quickjs.c:46304-46356): source/fill code units are copied into a latin1 (u8)
+/// buffer and only widened to UTF-16 when a unit exceeds 0xFF, so an all-latin1
+/// pad never materializes a UTF-16 result. It operates on code UNITS (surrogate
+/// halves are copied verbatim, matching string_buffer_concat) and tiles the fill
+/// by repetition+remainder rather than per character.
+const PadBuffer = struct {
+    allocator: std.mem.Allocator,
+    latin1: std.ArrayList(u8) = .empty,
+    wide: std.ArrayList(u16) = .empty,
+    is_wide: bool = false,
+
+    fn deinit(self: *PadBuffer) void {
+        self.latin1.deinit(self.allocator);
+        self.wide.deinit(self.allocator);
+    }
+
+    fn widen(self: *PadBuffer) !void {
+        self.is_wide = true;
+        try self.wide.ensureTotalCapacity(self.allocator, self.latin1.items.len);
+        for (self.latin1.items) |byte| self.wide.appendAssumeCapacity(byte);
+        self.latin1.clearRetainingCapacity();
+    }
+
+    fn ensureCapacity(self: *PadBuffer, additional: usize) !void {
+        if (self.is_wide)
+            try self.wide.ensureUnusedCapacity(self.allocator, additional)
+        else
+            try self.latin1.ensureUnusedCapacity(self.allocator, additional);
+    }
+
+    /// Appends `count` code units of `data` starting at `start`, widening on the
+    /// first >0xFF unit encountered (mirrors string_buffer_concat's widen path).
+    fn appendUnits(self: *PadBuffer, data: core.string.String.ResolvedData, start: usize, count: usize) !void {
+        switch (data) {
+            // latin1 units are all <= 0xFF: copy flat, no widen check needed.
+            .latin1 => |bytes| {
+                const chunk = bytes[start .. start + count];
+                if (self.is_wide) {
+                    try self.wide.ensureUnusedCapacity(self.allocator, count);
+                    for (chunk) |byte| self.wide.appendAssumeCapacity(byte);
+                } else {
+                    try self.latin1.appendSlice(self.allocator, chunk);
+                }
+            },
+            .utf16 => |units| {
+                const chunk = units[start .. start + count];
+                try self.ensureCapacity(count);
+                var i: usize = 0;
+                while (i < chunk.len) : (i += 1) {
+                    const unit = chunk[i];
+                    if (!self.is_wide) {
+                        if (unit <= 0xff) {
+                            self.latin1.appendAssumeCapacity(@intCast(unit));
+                            continue;
+                        }
+                        // Widen, then reserve room for the rest of this chunk
+                        // (already-copied units moved into `wide`).
+                        try self.widen();
+                        try self.wide.ensureUnusedCapacity(self.allocator, chunk.len - i);
+                    }
+                    self.wide.appendAssumeCapacity(unit);
+                }
+            },
+        }
+    }
+
+    fn finish(self: *PadBuffer, rt: *core.JSRuntime) !core.JSValue {
+        const string = if (self.is_wide)
+            try core.string.String.createUtf16(rt, self.wide.items)
+        else
+            try core.string.String.createLatin1(rt, self.latin1.items);
+        return string.value();
+    }
+};
+
 pub fn qjsStringPad(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -4930,42 +5010,53 @@ pub fn qjsStringPad(
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
 
-    var source_units = std.ArrayList(u16).empty;
-    defer source_units.deinit(ctx.runtime.memory.allocator);
-    try appendStringValueUnits(ctx.runtime, &source_units, string_value);
+    // Resolve the source to its flat code-unit slice ONCE (no per-char UTF-16
+    // copy of the whole source — qjs reads p->len from the JSString directly,
+    // quickjs.c:46313-46314).
+    const source = string_value.asStringBody() orelse return error.TypeError;
+    try source.ensureFlat(ctx.runtime);
+    const source_data = source.resolveData();
+    const source_len = source_data.len();
 
     const max_length_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const target_length = try coercion_ops.toLengthIndex(ctx, output, global, max_length_value);
-    if (target_length <= source_units.items.len) return string_value.dup();
+    if (target_length <= source_len) return string_value.dup();
 
     const fill_value = if (args.len >= 2 and !args[1].isUndefined()) blk: {
         break :blk try toStringForAnnexB(ctx, output, global, args[1], caller_function, caller_frame);
     } else try value_ops.createStringValue(ctx.runtime, " ");
     defer fill_value.free(ctx.runtime);
 
-    var fill_units = std.ArrayList(u16).empty;
-    defer fill_units.deinit(ctx.runtime.memory.allocator);
-    try appendStringValueUnits(ctx.runtime, &fill_units, fill_value);
-    if (fill_units.items.len == 0) return string_value.dup();
+    const fill = fill_value.asStringBody() orelse return error.TypeError;
+    try fill.ensureFlat(ctx.runtime);
+    const fill_data = fill.resolveData();
+    const fill_len = fill_data.len();
+    if (fill_len == 0) return string_value.dup();
 
-    const fill_length = target_length - source_units.items.len;
-    var out = std.ArrayList(u16).empty;
-    defer out.deinit(ctx.runtime.memory.allocator);
-    if (method_id == 34) {
-        try appendRepeatedFillUnits(ctx.runtime, &out, fill_units.items, fill_length);
-        try out.appendSlice(ctx.runtime.memory.allocator, source_units.items);
-    } else {
-        try out.appendSlice(ctx.runtime.memory.allocator, source_units.items);
-        try appendRepeatedFillUnits(ctx.runtime, &out, fill_units.items, fill_length);
-    }
-    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
-}
+    // qjs caps the result at JS_STRING_LEN_MAX (quickjs.c:46331-46334); without
+    // this an out-of-range maxLength would attempt a multi-GiB allocation instead
+    // of the spec/qjs RangeError.
+    if (target_length > js_string_len_max) return throwRangeErrorMessage(ctx, global, "invalid string length");
+    const pad_count = target_length - source_len;
 
-fn appendRepeatedFillUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), fill: []const u16, length: usize) !void {
-    var index: usize = 0;
-    while (index < length) : (index += 1) {
-        try out.append(rt.memory.allocator, fill[index % fill.len]);
+    var buffer = PadBuffer{ .allocator = ctx.runtime.memory.allocator };
+    defer buffer.deinit();
+    try buffer.ensureCapacity(target_length);
+
+    // padEnd: source first, then fill. padStart: fill first, then source.
+    // (quickjs.c:46338-46356, magic 0 = padStart / 1 = padEnd; here 34 = start.)
+    if (method_id == 35) try buffer.appendUnits(source_data, 0, source_len);
+
+    var remaining = pad_count;
+    while (remaining > 0) {
+        const chunk = @min(remaining, fill_len);
+        try buffer.appendUnits(fill_data, 0, chunk);
+        remaining -= chunk;
     }
+
+    if (method_id == 34) try buffer.appendUnits(source_data, 0, source_len);
+
+    return buffer.finish(ctx.runtime);
 }
 
 pub fn qjsStringNormalize(
