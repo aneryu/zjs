@@ -69,14 +69,39 @@ verified, then cherry-picked + the integrated union re-gated whole.
 > (NULL-desc existence) and Object.assign (single ENUM_ONLY CopyDataProperties) are faithful skips.
 > Object.keys 1.84× is a SEPARATE lever (GPN-walk/array-build), NOT this batch's.
 
-### Next batch (ranked, faithful/bounded/independent — re-measured)
-1. **typed-array element WRITE** (`put_array_el`; qjs JS_SetPropertyValue quickjs.c:9947) — the sibling
-   of the read fast path. MEDIUM: the value conversion can detach the buffer, so the bounds check must
-   follow the conversion (qjs :9987). ~1 day, independent.
-2. **String padStart/padEnd** resolve-once + narrow latin1 buffer (qjs js_string_pad quickjs.c:46300) —
-   gap 3.83×; LOW, reuses the shipped toUpper/toLower template (`77005ac`).
-3. **Object.keys/values descriptor-skip** — sequence AFTER hasOwnProperty/assign so it reuses the
-   enum-only probe; the GPN-walk/array-build lever.
+### Shipped round-9 (parallel worktree batch, integrated + union-gated 0/49775 + 1226 + force-GC)
+| slice | qjs anchor | effect |
+|---|---|---|
+| typed-array element WRITE all kinds | JS_SetPropertyValue quickjs.c:9947 | Float64 write 4.56×→2.89× |
+| String padStart/padEnd narrow latin1 buffer | js_string_pad quickjs.c:46300 | 4.6×→4.2×; also added the JS_STRING_LEN_MAX RangeError (was unbounded) |
+
+> **Integration-gate catch:** the TA-write fast path delegated to `typedArraySetElement` which checks
+> in-bounds/immutable validity FIRST and silently no-ops on an OOB/immutable element — swallowing the
+> `ToNumber(BigInt)`/`ToNumber(Symbol)` TypeError that IntegerIndexedElementSet requires BEFORE the
+> validity check. Only the **integrated union test262** caught it (1/49775,
+> `internals/Set/bigint-tonumber.js` makeImmutableArrayBuffer variant) — the worktree agents can't run
+> test262 (no submodule). Fix: punt BigInt/Symbol values (throwing conversions) to the slow path;
+> Number/String/Boolean/null/undefined have non-throwing conversions so validity-first is observably
+> identical (they stay fast). **Lesson: ALWAYS re-run the full test262 gate on the integrated union;
+> a slice green on its own base is not green in the union.**
+
+### Shipped round-10 (parallel worktree batch of 6, integrated + union-gated 0/49775 + 1226 + force-GC)
+The biggest raw gaps in the whole campaign — all faithful (qjs has a dense/memmove/raw-scan fast path zjs lacked):
+| slice | qjs anchor | effect |
+|---|---|---|
+| TypedArray.set same-class @memmove | js_typed_array_set_internal quickjs.c:57584 | **322×→3.30×** (used @memmove not copyForwards — aliasing-safe) |
+| Array.reverse dense in-place swap | js_array_reverse quickjs.c:42835 | **228×→1.19×** |
+| TypedArray indexOf/lastIndexOf/includes raw scan | js_typed_array_indexOf quickjs.c:58072 | **indexOf 51.77×→1.07×, includes 34.67×→~1.3×**; deliberately does NOT reproduce qjs's Int8 lastIndexOf sign-extension bug (V8/Node agree) |
+| TypedArray.fill coerce-once + memset/strided | js_typed_array_fill quickjs.c:57979 | **33.48×→3.86×** |
+| String for-of single-byte/latin1 cache | js_new_string_char quickjs.c:3953 | 12.71×→~broad-tax floor |
+| Object spread `{...o}` ENUM_ONLY snapshot | JS_CopyDataProperties quickjs.c:16920 | 2.50×→2.25×; **also fixed a real bug** — baseline diverged from qjs when a getter mutated a later key's enumerability/existence (now up-front snapshot, matches qjs) |
+
+### Next batch (ranked, faithful/bounded/independent)
+1. **Object.keys/values descriptor-skip** — the GPN-walk/array-build lever (1.85×/1.82×); reuses the
+   enum-only probe; object_ops.zig GPN walk vs qjs JS_GetOwnPropertyNames2 quickjs.c:40388.
+2. **TypedArray subarray/copyWithin/join** dense bulk paths (array_ops.zig; same family as set/fill).
+3. **String repeat / split(simple separator)** resolve-once (string_ops.zig; same template as pad).
+4. Re-sweep the remaining categories (the round-10 scout deferred copyWithin, typed-slice, repeat).
 
 ## ✅ Shipped round-4 (each: test262 0/49775 + 1223 unit + 1223 force-GC)
 
