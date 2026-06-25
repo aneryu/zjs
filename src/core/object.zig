@@ -6915,6 +6915,47 @@ pub const Object = struct {
         return null;
     }
 
+    /// Snapshot of an own key's enumerable bit, read straight off the shape
+    /// flags (or the always-enumerable dense-array slot) without allocating a
+    /// `Descriptor`. Mirrors the enumerability that `getOwnProperty` would
+    /// report for the cheap, non-throwing, non-exotic cases.
+    ///
+    /// `.descriptor` means "this key cannot be resolved off the shape cheaply
+    /// or could observably throw -- fall back to the full descriptor probe".
+    /// This is the same boundary QuickJS draws in `JS_CopyDataProperties`
+    /// (quickjs.c:16920): it requests `JS_GPN_ENUM_ONLY` for an ordinary
+    /// source so the per-key enumerable test is skipped, but clears it for an
+    /// exotic source with a `get_own_property_names` hook so the descriptor
+    /// test runs per key.
+    pub const OwnEnumerable = enum { enumerable, not_enumerable, descriptor };
+
+    pub fn ownPropertyEnumerableKind(self: *const Object, rt: *const JSRuntime, atom_id: atom.Atom) OwnEnumerable {
+        // Exotic get-own-property hooks (test-only in this build) can report
+        // an enumerability that differs from the shape, exactly the case
+        // QuickJS drops JS_GPN_ENUM_ONLY for -- defer to the descriptor probe.
+        if (self.exoticMethods(rt)) |methods| {
+            if (methods.get_own_property != null) return .descriptor;
+        }
+        // Typed arrays (canonical numeric index) and module-namespace bindings
+        // need detached/range/TDZ checks that the descriptor path performs and
+        // that can observably throw; never snapshot those off the shape.
+        if (isTypedArrayObject(self)) return .descriptor;
+        if (self.moduleNamespacePayloadConst() != null) return .descriptor;
+
+        if (self.flags.is_array and atom_id == atom.ids.length) return .not_enumerable;
+        if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex) {
+            if (self.regexpLastIndex() != null) return .not_enumerable;
+        }
+        if (self.findProperty(atom_id)) |index| {
+            return if (self.propFlagsAt(index).enumerable) .enumerable else .not_enumerable;
+        }
+        // Dense array elements are always enumerable (data, w/e/c).
+        if (self.denseArrayElement(atom_id) != null) return .enumerable;
+        // Key vanished between key enumeration and now: QuickJS's
+        // JS_GetOwnPropertyInternal returns 0 here and the copy `continue`s.
+        return .not_enumerable;
+    }
+
     pub fn hasOwnProperty(self: *const Object, atom_id: atom.Atom) bool {
         if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex and self.regexpLastIndex() != null) return true;
         return self.findProperty(atom_id) != null or self.denseArrayElement(atom_id) != null;

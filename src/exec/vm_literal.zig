@@ -390,6 +390,64 @@ pub noinline fn copyDataProperties(
         return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
     defer core.Object.freeKeys(rt, keys);
 
+    // qjs JS_CopyDataProperties (quickjs.c:16920) requests JS_GPN_ENUM_ONLY
+    // for an ordinary (non-exotic) source, so the per-key enumerable
+    // descriptor probe is folded into the key enumeration up-front: the key
+    // set is already enumerable-filtered before the copy loop runs any
+    // user getter, and each surviving key takes a single JS_GetProperty.
+    // Only an exotic source with a get_own_property_names hook (a Proxy, or
+    // a typed array / module namespace here) keeps JS_GPN_ENUM_ONLY cleared,
+    // so its descriptor test stays interleaved with the per-key get (trap
+    // ordering for a proxy: gopd:k, get:k, ...).
+    const source_is_ordinary = source.proxyTarget() == null and
+        !core.object.isTypedArrayObject(source) and
+        @constCast(source).moduleNamespacePayload() == null;
+    if (source_is_ordinary) {
+        // Up-front enumerable snapshot. getOwnProperty for an ordinary source
+        // never invokes a user getter (it surfaces the getter function, not
+        // its result), so resolving every key's enumerability here is free of
+        // observable side effects -- and it freezes which keys copy before any
+        // value getter can mutate a later key's enumerability/existence
+        // (qjs ENUM_ONLY snapshots tab_atom once up front).
+        const copy_flags = try rt.memory.alloc(bool, keys.len);
+        defer rt.memory.free(bool, copy_flags);
+        for (keys, copy_flags) |key, *copy| {
+            copy.* = switch (source.ownPropertyEnumerableKind(rt, key)) {
+                .enumerable => true,
+                .not_enumerable => false,
+                // Ordinary sources never yield `.descriptor` here (typed
+                // arrays / module namespaces are routed to the interleaved
+                // path above); fall back defensively if that ever changes.
+                .descriptor => blk: {
+                    const maybe_desc = object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, source, key) catch |err|
+                        return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
+                    const desc = maybe_desc orelse break :blk false;
+                    defer desc.destroy(rt);
+                    break :blk (desc.enumerable orelse false);
+                },
+            };
+        }
+        for (keys, copy_flags) |key, copy| {
+            if (!copy) continue;
+            const value = object_ops.getValueProperty(ctx, output, global, rooted_source_value, key, caller_function, caller_frame) catch |err|
+                return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
+            var rooted_value = value;
+            defer value.free(rt);
+            var value_root_values = [_]core.runtime.ValueRootValue{
+                .{ .value = &rooted_value },
+            };
+            const value_root_frame = core.runtime.ValueRootFrame{
+                .previous = rt.active_value_roots,
+                .values = &value_root_values,
+            };
+            rt.active_value_roots = &value_root_frame;
+            defer rt.active_value_roots = value_root_frame.previous;
+            property_ops.defineDataProperty(rt, target, key, rooted_value) catch |err|
+                return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
+        }
+        return .done;
+    }
+
     for (keys) |key| {
         const maybe_desc = object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, source, key) catch |err|
             return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
