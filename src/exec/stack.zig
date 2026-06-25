@@ -27,7 +27,7 @@ pub const Stack = struct {
         };
     }
 
-    pub fn deinit(self: *Stack, rt: anytype) void {
+    pub inline fn deinit(self: *Stack, rt: anytype) void {
         const values = self.values;
         const capacity = self.capacity;
         const arena_window = self.arena_window;

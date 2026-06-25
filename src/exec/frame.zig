@@ -361,7 +361,7 @@ pub const Frame = struct {
         return if (self.cold) |c| c.original_args else &.{};
     }
 
-    pub fn init(function: *const bytecode.Bytecode) Frame {
+    pub inline fn init(function: *const bytecode.Bytecode) Frame {
         return .{ .function = function };
     }
 
