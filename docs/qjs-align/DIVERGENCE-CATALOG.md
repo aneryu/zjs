@@ -32,13 +32,15 @@ Ranked by `unlock × commonality / (risk × effort)`:
    reader audit). Unlocks `new Array(n)` 5–10× (375M→150M) + the map/filter/slice/Array.from
    dense-output cluster. Real MEDIUM risk (hole semantics in a[i]/for-in/Object.keys/length-write/
    JSON; test262 Array holes/sparse/length-write). The single biggest *bounded* structural unlock.
-4. **Frame incremental gates — a real shipping window exists** (~4–5% of fib, ~1.1B insn, several
-   small/medium FAITHFUL slices short of the monolithic rewrite). **Step-by-step gated plan written:
-   `docs/qjs-align/HANDOVER-frame-incremental.md`** — Slice A teardown gate for no-eval frames (~437M),
-   B backtrace-pop gate (optional), C var_refs borrow-not-copy (~263M, scales with captures), D
-   lazy-this + borrowed cur_func (~263M), with the load-bearing refcount-ledger invariants (force-GC
-   is the critical gate). The **bulk** (pushFrame 23% + teardown 7% = ~30% of fib) still needs the
-   monolithic frame collapse (`FRAME-STRUCTURAL-ALIGN.md`).
+4. **Frame incremental gates — Slice A + C SHIPPED (round-4)**, Slice D deferred, B low-priority.
+   `docs/qjs-align/HANDOVER-frame-incremental.md`. **Slice A** teardown gate for no-eval frames
+   (`5545cef`, fib 26.16B→25.35B, *bigger than the ~437M estimate*). **Slice C** var_refs borrow
+   (`698824e`, fib 25.35B→24.88B, gated on `simple_frame && !has_eval_call && global_vars.len==0 &&
+   all-cells`; a 5-agent adversarial workflow proved the naive borrow UNSAFE on 4 paths first — see
+   round-4 handover). **Slice D deferred** (cur_func is a MOVE not a dup = no refcount win; the
+   plain-undefined-`this` fast path already skips coerceCallThis for fib → marginal fib payoff +
+   this-coercion risk). The **bulk** (pushFrame 23% + teardown 7% = ~30% of fib) still needs the
+   monolithic frame collapse (`FRAME-STRUCTURAL-ALIGN.md`) — fib is 3.46× after A+C.
 5. **Map/Set per-op (get/set 7.63×, add/has 6.3×)** — NOT a hash-table gap (collection.zig already
    uses open-chained hashing); the cost is the general **call path** to reach the native op, so this
    is coupled to the frame/call-machinery, not a standalone fix.
@@ -48,7 +50,22 @@ Ranked by `unlock × commonality / (risk × effort)`:
 
 `new Array(n)` and `s.replace` boxing corrections from the first sweep still stand (below).
 
-## ✅ Shipped this round (each: test262 0/49775 + 1223 unit + 1223 force-GC)
+## ✅ Shipped round-4 (each: test262 0/49775 + 1223 unit + 1223 force-GC)
+
+| slice | commit | effect |
+|---|---|---|
+| frame teardown gate (Slice A) | `5545cef` | fib 26.16B→25.35B (3.64×→3.53×); every plain call |
+| var_refs borrow (Slice C) | `698824e` | fib 25.35B→24.88B (3.53×→3.46×); scales w/ captures |
+| Map/Set entries dense pair | `a5e6218` | Map.entries 4.41×→1.87× (js_create_array build) |
+| Object.entries dense pair | `9252d94` | Object.entries 1.61×→1.44× (same dense build) |
+
+> **Correction:** closure length/name laziness is NOT faithful — qjs `js_function_set_properties`
+> (quickjs.c:5853) EAGERLY defines both; only `prototype` is autoinit. closure-per-iter 3.73× is
+> broad tax, not a divergence. The reusable win from this round is the **dense small-array build**
+> (`adoptDenseArrayElementsAssumingEmpty` = qjs `js_create_array`), applicable wherever a small
+> known-length array is built per-element via `defineOwnProperty(atomFromUInt32)`.
+
+## ✅ Shipped round-3 (each: test262 0/49775 + 1223 unit + 1223 force-GC)
 
 | slice | commit | effect |
 |---|---|---|

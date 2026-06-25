@@ -1,5 +1,43 @@
 # Handover — qjs-faithful perf alignment round 2 (2026-06-24)
 
+> **2026-06-25 round-4 addendum (frame-incremental + dense-array builds).** On top of round-3,
+> **4 more faithful slices**, each gated test262 0/49775 + 1223 + force-GC:
+> - **`5545cef` Slice A — frame teardown gate** (DIVERGENCE-CATALOG #4 / HANDOVER-frame-incremental).
+>   `teardownInlineEntry` ran `eval_snapshot.deinit` + `freeEvalResources` (both non-inlined) every
+>   call; for a no-eval frame both are provable no-ops. A `simple_frame` flag (= `!need_eval_var_refs`)
+>   gates them. **fib 26.16B→25.35B (3.64×→3.53×)**; broad (every plain call).
+> - **`698824e` Slice C — var_refs borrow.** `initFrameVarRefs` carved+`.dup()`'d every closure
+>   capture per call, freed each at teardown; qjs borrows `var_refs = p->u.func.var_refs`
+>   (quickjs.c:17844). zjs now aliases the captures array when EVERY mutation is provably cell-routed
+>   and the array is never realloced — gated on `simple_frame && !has_eval_call && global_vars.len==0
+>   && all-captures-are-cells`; a `var_refs_borrowed` flag skips the teardown free. **A 5-agent
+>   adversarial workflow proved the naive borrow UNSAFE on 4 paths** (non-cell captures, eval
+>   `replaceFrameVarRefBinding`, global_decl rebind, teardown double-free under recursion) — the four
+>   conjuncts eliminate all four. **fib 25.35B→24.88B (3.53×→3.46×)**; scales with capture count.
+>   force-GC is the load-bearing gate.
+> - **`a5e6218` Map/Set entries dense pair + `9252d94` Object.entries dense pair.** Both built the
+>   `[k,v]` pair with two per-element `defineOwnProperty(atomFromUInt32)`; qjs's `js_create_array`
+>   (quickjs.c:9601) pre-sizes a dense fast array + direct slot writes. zjs now allocs a 2-slot slice,
+>   dups after the alloc (no GC between dup and adopt; components stay rooted/collection-alive), and
+>   `adoptDenseArrayElementsAssumingEmpty` + sets `may_have_indexed_properties`. **Map.entries
+>   4.41×→1.87×, Object.entries 1.61×→1.44×.** The dense-build primitive is reusable for ANY
+>   small known-length array currently built per-element (Array.from/map/filter dense output — but
+>   those couple to the count/length split and the per-callback frame tax).
+>
+> **Corrections to the round-3 catalog:** (1) **closure length/name is NOT a faithful lazy target.**
+> qjs `js_closure`→`js_function_set_properties` (quickjs.c:5853) EAGERLY defines both via
+> `JS_DefinePropertyValue`; only `prototype` is autoinit (`JS_AUTOINIT_ID_PROTOTYPE`, the only
+> autoinit id). The catalog's "qjs makes those lazy autoinit too" was wrong — making them lazy would
+> DIVERGE. closure-per-iter 3.73× is broad tax (zjs already matches qjs's eager length/name+lazy
+> prototype). (2) Slice D (lazy-`this`/non-owning cur_func) deferred: cur_func is already a MOVE not a
+> dup (no refcount win), and the plain-undefined-`this` fast path already avoids `coerceCallThis` for
+> fib, so D's fib payoff is marginal + carries this-coercion-semantics risk. Slice B (backtrace pop
+> gate) stays low-priority. **Session end-state (clean binary):** fib 3.46×, method 3.15×,
+> proto_method 3.49×, mapget 2.78×, mapentries 1.86×, closure 3.73×, foreach 4.00×. Branch
+> `qjs-faithful-perf-round2`, not merged/pushed. **The stale-binary hazard bit again** — measured
+> Object benchmarks at 150–166× off a leftover force-GC binary before catching it; ALWAYS
+> `zig build zjs` before `perf`.
+
 > **2026-06-25 round-3 addendum.** On top of the round-2 commits below, a measurement-driven
 > sweep (`docs/qjs-align/DIVERGENCE-CATALOG.md`, 28 faithful divergences found) shipped **9 more
 > faithful slices**, each gated test262 0/49775 + 1223 + force-GC:
