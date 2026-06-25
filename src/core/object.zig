@@ -4899,6 +4899,12 @@ pub const Object = struct {
     }
 
     pub fn functionRealmGlobalPtr(self: *const Object) ?*Object {
+        // Function/generator payloads are checked FIRST: this accessor is on the
+        // per-call inline-target resolution hot path (resolveInlineTarget), where
+        // `self` is a bytecode function. Each object has exactly one payload kind,
+        // so the order is correctness-neutral — it only shortens the common case.
+        if (self.functionPayloadConst()) |payload| return payload.realm_global_ptr;
+        if (self.generatorPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.ordinaryPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.objectDataPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.iteratorPayloadConst()) |payload| return payload.realm_global_ptr;
@@ -4915,8 +4921,6 @@ pub const Object = struct {
         if (self.disposableStackPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.promisePayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.moduleNamespacePayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.functionPayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.generatorPayloadConst()) |payload| return payload.realm_global_ptr;
         return null;
     }
 
