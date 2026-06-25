@@ -1,3 +1,12 @@
+> ⚠️ 2026-06-25 SUPERSEDED for the frame-model rewrite by `FRAME-MODEL-ONESHOT-BLUEPRINT.md`
+> (ground-truthed against the live tree). Facets **E/F here cite a DELETED mechanism** (`Path B`,
+> `zjs_recursive_call`, `callInlineRecursive`, `zjs_vm.zig:1855`) — none exist; the real
+> return/resume is loop-in-place + the already-landed threaded resume (`machine.switched` +
+> `reloadInlineTopFrame`), which IS qjs's `OP_call→JS_CallInternal→BREAK` analog. The slim-9-field
+> and borrow-cur_func pillars are REJECTED (see below). The ONE genuine structural change —
+> deleting the parallel `ActiveBacktraceFrame` per-call node and walking the Machine Entry chain
+> (faithful to qjs `build_backtrace` quickjs.c:7571) — LANDED 2026-06-25 (this commit).
+>
 > ⚠️ 2026-06-24 UPDATE — parts of this design were DISPROVEN by source verification.
 > See `HANDOVER-call-dispatch-align.md`: "borrow cur_func" is a non-diff (takeSourceSlot is a
 > move, not a dup — same refcount as qjs); Frame slim (B3) has low benefit (teardown cost is the

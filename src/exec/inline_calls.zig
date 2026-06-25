@@ -114,9 +114,6 @@ pub const Entry = struct {
     catch_target: ?usize,
     arena_mark: core.VmStackArena.Mark,
     profile_guard: vm_call.CallProfileGuard,
-    /// Resolver/data are installed once when the slot is allocated; push/pop
-    /// only relink `previous` for each call.
-    backtrace_frame: core.ActiveBacktraceFrame,
     /// Owned merged slices backing `view.var_ref_names` / the frame's
     /// var-ref initialization when the callee carries direct-eval bindings
     /// (mirrors `callFunctionBytecodeModeState`'s combined slices). The
@@ -136,6 +133,31 @@ pub const Entry = struct {
 
 const entries_per_chunk: usize = 16;
 const max_chunks: usize = 512;
+
+/// One backtrace node per VM invocation — qjs's `current_stack_frame`
+/// granularity. It walks this invocation's whole frame group: the inline
+/// Machine Entry chain (innermost first) then the L0 frame. `machine` is null
+/// during pre-dispatch frame setup (depth 0); the L0 frame alone covers it.
+/// Replaces the former per-call `ActiveBacktraceFrame` push/pop, faithful to
+/// qjs walking the same frame chain it executes on (quickjs.c:7571).
+pub const MachineBacktrace = struct {
+    l0_frame: *frame_mod.Frame,
+    machine: ?*Machine = null,
+};
+
+/// Indexed `ActiveBacktraceResolver` for `MachineBacktrace`: index 0 is the
+/// innermost inline frame, walking outward to the L0 frame; null past the end.
+pub fn resolveMachineBacktrace(data: ?*const anyopaque, index: usize) ?core.ActiveBacktraceSnapshot {
+    const holder: *const MachineBacktrace = @ptrCast(@alignCast(data.?));
+    if (holder.machine) |machine| {
+        const depth = machine.depth;
+        if (index < depth) return exception_ops.frameBacktraceSnapshot(&machine.entryAt(depth - 1 - index).frame);
+        if (index == depth) return exception_ops.frameBacktraceSnapshot(holder.l0_frame);
+        return null;
+    }
+    if (index == 0) return exception_ops.frameBacktraceSnapshot(holder.l0_frame);
+    return null;
+}
 
 pub const Machine = struct {
     ctx: *core.JSContext,
@@ -196,7 +218,7 @@ pub const Machine = struct {
         return self.entryAt(self.depth - 1);
     }
 
-    fn entryAt(self: *Machine, index: usize) *Entry {
+    pub fn entryAt(self: *Machine, index: usize) *Entry {
         return &self.chunks[index / entries_per_chunk][index % entries_per_chunk];
     }
 
@@ -212,12 +234,6 @@ pub const Machine = struct {
                 self.chunks = try self.ctx.runtime.memory.alloc(*[entries_per_chunk]Entry, max_chunks);
             }
             const chunk = try self.ctx.runtime.memory.create([entries_per_chunk]Entry);
-            for (chunk) |*entry| {
-                entry.backtrace_frame = .{
-                    .data = &entry.frame,
-                    .resolver = exception_ops.resolveActiveBacktraceFrame,
-                };
-            }
             self.chunks[chunk_index] = chunk;
             self.chunk_count += 1;
         }
@@ -301,8 +317,8 @@ pub const Machine = struct {
 
         entry.frame = frame_mod.Frame.init(entry.function);
         errdefer entry.frame.deinit(&rt.memory, rt);
-        ctx.pushActiveBacktraceFrame(&entry.backtrace_frame);
-        errdefer ctx.popActiveBacktraceFrame(&entry.backtrace_frame);
+        // No per-call backtrace node: the invocation's single MachineBacktrace
+        // (zjs_vm.runWithArgsState) walks this Entry directly via the chain.
 
         // Mirror qjs's inline prologue for the common plain-call receiver:
         // strict keeps undefined, sloppy uses the global object. Arrow,
@@ -719,7 +735,6 @@ pub const Machine = struct {
         entry.frame.deinitInlineCall(&rt.memory, rt);
         if (!entry.simple_frame) freeEvalResources(rt, entry);
         rt.vm_stack.restore(entry.arena_mark);
-        ctx.popActiveBacktraceFrame(&entry.backtrace_frame);
         entry.profile_guard.deinit();
     }
 

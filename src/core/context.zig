@@ -55,7 +55,13 @@ pub const ActiveBacktraceSnapshot = struct {
     backtrace_barrier: bool = false,
 };
 
-pub const ActiveBacktraceResolver = *const fn (?*const anyopaque) ActiveBacktraceSnapshot;
+/// Resolves the active frame at `index` within this node's frame group
+/// (index 0 = innermost; null past the last frame). One node now represents a
+/// whole VM invocation — its inline Machine Entry chain (innermost first) then
+/// the L0 frame — so the backtrace walk indexes the live Entry chain directly
+/// instead of a per-call parallel node, faithful to qjs's single prev_frame
+/// walk (quickjs.c:7571).
+pub const ActiveBacktraceResolver = *const fn (?*const anyopaque, usize) ?ActiveBacktraceSnapshot;
 
 pub const BacktraceLocation = struct {
     line_num: i32,
@@ -805,12 +811,21 @@ pub const JSContext = struct {
     }
 
     pub fn snapshotBacktraceFrames(self: *JSContext) ![]BacktraceFrame {
+        // Each active node now resolves a whole frame GROUP (a VM invocation's
+        // inline Entry chain + its L0 frame), enumerated innermost-first via the
+        // indexed resolver until it returns null. A `backtrace_barrier` frame
+        // stops the entire walk (and is itself excluded), matching qjs.
         var active_count: usize = 0;
-        var active = self.current_backtrace_frame;
-        while (active) |frame| {
-            if (frame.resolver(frame.data).backtrace_barrier) break;
-            active_count += 1;
-            active = frame.previous;
+        {
+            var active = self.current_backtrace_frame;
+            count: while (active) |frame| {
+                var index: usize = 0;
+                while (frame.resolver(frame.data, index)) |snapshot| : (index += 1) {
+                    if (snapshot.backtrace_barrier) break :count;
+                    active_count += 1;
+                }
+                active = frame.previous;
+            }
         }
 
         const total = self.backtrace_frames.len + active_count;
@@ -821,13 +836,21 @@ pub const JSContext = struct {
             frames[idx] = self.dupBacktraceFrame(frame);
         }
 
+        // Fill the active section so the innermost frame lands LAST (the array
+        // order is [persistent (outer)..., oldest-active...innermost]), the same
+        // order the previous per-node walk produced.
         var active_index = active_count;
-        active = self.current_backtrace_frame;
-        while (active) |frame| {
-            if (frame.resolver(frame.data).backtrace_barrier) break;
-            active_index -= 1;
-            frames[self.backtrace_frames.len + active_index] = self.dupActiveBacktraceFrame(frame.*);
-            active = frame.previous;
+        {
+            var active = self.current_backtrace_frame;
+            fill: while (active) |frame| {
+                var index: usize = 0;
+                while (frame.resolver(frame.data, index)) |snapshot| : (index += 1) {
+                    if (snapshot.backtrace_barrier) break :fill;
+                    active_index -= 1;
+                    frames[self.backtrace_frames.len + active_index] = self.dupActiveBacktraceFrameFromSnapshot(snapshot);
+                }
+                active = frame.previous;
+            }
         }
         return frames;
     }
@@ -854,8 +877,7 @@ pub const JSContext = struct {
         };
     }
 
-    fn dupActiveBacktraceFrame(self: *JSContext, frame: ActiveBacktraceFrame) BacktraceFrame {
-        const snapshot = frame.resolver(frame.data);
+    fn dupActiveBacktraceFrameFromSnapshot(self: *JSContext, snapshot: ActiveBacktraceSnapshot) BacktraceFrame {
         return .{
             .function_name = self.runtime.atoms.dup(snapshot.function_name),
             .filename = self.runtime.atoms.dup(snapshot.filename),

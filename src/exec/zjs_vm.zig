@@ -552,9 +552,15 @@ pub fn runWithArgsState(
         if (break_var_ref_cycles_on_exit) _ = ctx.runtime.runObjectCycleRemoval();
     }
     defer frame_storage.deinit(&ctx.runtime.memory, ctx.runtime);
+    // Single backtrace node for this whole VM invocation (qjs's
+    // `current_stack_frame` granularity). It covers the L0 frame during the
+    // pre-dispatch setup below (machine == null, depth 0) and walks the inline
+    // Machine's Entry chain once `machine` is attached after init — replacing
+    // the former per-inline-call backtrace push/pop.
+    var machine_backtrace = inline_calls.MachineBacktrace{ .l0_frame = &frame_storage };
     var active_backtrace_frame = core.ActiveBacktraceFrame{
-        .data = &frame_storage,
-        .resolver = exception_ops.resolveActiveBacktraceFrame,
+        .data = &machine_backtrace,
+        .resolver = inline_calls.resolveMachineBacktrace,
     };
     ctx.pushActiveBacktraceFrame(&active_backtrace_frame);
     defer ctx.popActiveBacktraceFrame(&active_backtrace_frame);
@@ -641,6 +647,7 @@ pub fn runWithArgsState(
 
     var machine = inline_calls.Machine.init(ctx, output, global, &frame_storage, entry_stack, &catch_target_storage);
     defer machine.deinit();
+    machine_backtrace.machine = &machine;
 
     var loop_state = LoopState{
         .ctx = ctx,
