@@ -46,7 +46,7 @@
   { "dir": "built-ins/Symbol", "passed": 98, "failed": 0, "known_failed": 0 },
   { "dir": "built-ins/ThrowTypeError", "passed": 14, "failed": 0, "known_failed": 0 },
   { "dir": "built-ins/TypedArray", "passed": 1446, "failed": 0, "known_failed": 0 },
-  { "dir": "built-ins/TypedArrayConstructors", "passed": 738, "failed": 0, "known_failed": 0 },
+  { "dir": "built-ins/TypedArrayConstructors", "passed": 737, "failed": 1, "known_failed": 0 },
   { "dir": "built-ins/Uint8Array", "passed": 70, "failed": 0, "known_failed": 0 },
   { "dir": "built-ins/WeakMap", "passed": 141, "failed": 0, "known_failed": 0 },
   { "dir": "built-ins/WeakRef", "passed": 29, "failed": 0, "known_failed": 0 },

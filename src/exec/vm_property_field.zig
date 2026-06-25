@@ -679,6 +679,15 @@ pub fn putTypedArrayElementFast(rt: *core.JSRuntime, obj: core.JSValue, key: cor
     // canonical typedArraySetElement only coerces primitives, so an object value
     // punts to the slow path; the numeric-primitive write is the fast case.
     if (value.isObject()) return .not_typed_array;
+    // A BigInt or Symbol value has a ToNumber that THROWS a TypeError, and per
+    // IntegerIndexedElementSet (ToNumber at spec step 6) that throw must happen
+    // BEFORE the in-bounds/immutable validity check. typedArraySetElement does the
+    // validity check first (silent no-op on OOB/immutable), which would swallow the
+    // throw for an out-of-bounds / immutable-buffer element — so punt these
+    // throwing-conversion values to the slow path, which converts first. (Number /
+    // string / boolean / null / undefined have non-throwing conversions, so the
+    // validity-check-first order is observably identical for them — they stay fast.)
+    if (value.isBigInt() or value.isSymbol()) return .not_typed_array;
     if (!core.object.isTypedArrayObject(object)) return .not_typed_array;
     const kind = object.typedArrayKind();
     // BigInt64/BigUint64 punt to the slow path (it converts via JS_ToBigInt64).
