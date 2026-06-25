@@ -1409,13 +1409,26 @@ fn stringValueFromSearchArgument(rt: *core.JSRuntime, value: core.JSValue) !core
     return createStringValue(rt, bytes.items);
 }
 
-fn stringMatchesAtUnits(haystack: *core.string.String, needle: *core.string.String, start: usize) bool {
-    if (start > haystack.len() or needle.len() > haystack.len() - start) return false;
+fn stringMatchesAtResolved(
+    haystack: core.string.String.ResolvedData,
+    needle: core.string.String.ResolvedData,
+    hlen: usize,
+    nlen: usize,
+    start: usize,
+) bool {
+    if (start > hlen or nlen > hlen - start) return false;
     var offset: usize = 0;
-    while (offset < needle.len()) : (offset += 1) {
-        if (haystack.codeUnitAt(start + offset) != needle.codeUnitAt(offset)) return false;
+    while (offset < nlen) : (offset += 1) {
+        if (resolvedUnitAt(haystack, start + offset) != resolvedUnitAt(needle, offset)) return false;
     }
     return true;
+}
+
+// startsWith / endsWith call this once per op; resolve the flat slices once
+// (hoisting the slice/rope parent-chain walk out of the per-char loop) instead
+// of `codeUnitAt` per character — same resolve-once pattern as stringIndexOfUnits.
+fn stringMatchesAtUnits(haystack: *core.string.String, needle: *core.string.String, start: usize) bool {
+    return stringMatchesAtResolved(haystack.resolveData(), needle.resolveData(), haystack.len(), needle.len(), start);
 }
 
 inline fn resolvedUnitAt(data: core.string.String.ResolvedData, i: usize) u16 {
@@ -1451,12 +1464,21 @@ fn stringIndexOfUnits(haystack: *core.string.String, needle: *core.string.String
 }
 
 fn stringLastIndexOfUnits(haystack: *core.string.String, needle: *core.string.String, start: usize) ?usize {
-    if (needle.len() == 0) return @min(start, haystack.len());
-    if (needle.len() > haystack.len()) return null;
-    var index = @min(start, haystack.len() - needle.len()) + 1;
+    const hlen = haystack.len();
+    const nlen = needle.len();
+    if (nlen == 0) return @min(start, hlen);
+    if (nlen > hlen) return null;
+    // Resolve both flat slices ONCE outside the per-position loop (the prior
+    // code re-walked the slice/rope chain via codeUnitAt for every character of
+    // every candidate position) and first-char-skip, mirroring stringIndexOfUnits.
+    const h = haystack.resolveData();
+    const n = needle.resolveData();
+    const first = resolvedUnitAt(n, 0);
+    var index = @min(start, hlen - nlen) + 1;
     while (index > 0) {
         index -= 1;
-        if (stringMatchesAtUnits(haystack, needle, index)) return index;
+        if (resolvedUnitAt(h, index) != first) continue;
+        if (stringMatchesAtResolved(h, n, hlen, nlen, index)) return index;
     }
     return null;
 }
