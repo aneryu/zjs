@@ -16,11 +16,11 @@ A second data-driven survey (re-measure + scope/ROI audit of each candidate) ran
 remaining work and **inverted the going-in assumption** (count/length split was NOT the best ROI).
 Ranked by `unlock × commonality / (risk × effort)`:
 
-1. **String resolve-once cleanups — DONE** (`bfae525` indexOf, `bd263cc` startsWith/endsWith/
-   lastIndexOf). Was #1: near-free (the resolve-once template ships), 3–6.5× → ~2.5–3×.
-   REMAINING in this bucket: `toUpperCase`/`toLowerCase` (3×, *medium* — needs resolve-once
-   **+** a narrow latin1 output buffer that widens lazily, `unicodeCaseReceiver` string.zig:974,
-   qjs string_buffer quickjs.c:46510).
+1. **String resolve-once cleanups — DONE** (`bfae525` indexOf/includes/split, `bd263cc`
+   startsWith/endsWith/lastIndexOf, `77005ac` toUpperCase/toLowerCase resolve-once + narrow latin1
+   buffer 3×→1.69×). Bucket complete. **Bonus** (`5da7105`): surfaced + fixed a pre-existing broad
+   bug — `printString` (call.zig:3298) emitted latin1 bytes 0x80–0xFF raw, so `console.log("café")`
+   / `String.fromCharCode(0xC9)` mis-printed everywhere; now UTF-8-encoded (matches qjs).
 2. **Object descriptor-materialization skips** (hasOwnProperty 4.13×, Object.values 2.45×,
    entries 1.64× — all common). Materialize a full Descriptor (DupValue+destroy) per key when
    only existence/enumerability is needed. *Medium*, NOT a quick swap: `Object.hasOwnProperty`
@@ -33,11 +33,12 @@ Ranked by `unlock × commonality / (risk × effort)`:
    dense-output cluster. Real MEDIUM risk (hole semantics in a[i]/for-in/Object.keys/length-write/
    JSON; test262 Array holes/sparse/length-write). The single biggest *bounded* structural unlock.
 4. **Frame incremental gates — a real shipping window exists** (~4–5% of fib, ~1.1B insn, several
-   small/medium FAITHFUL slices short of the monolithic rewrite): eval-snapshot deinit gate (~437M,
-   ~2-line — skip `entry.eval_snapshot.deinit`/`ValueRootBuffer.deinit` when `eval_names.len==0`),
-   backtrace-pop gate (~100–200M), var_refs borrow-not-copy (~263M, scales with capture count),
-   lazy-this + borrowed cur_func (~263M). The **bulk** (pushFrame 23% + teardown 7% = ~30% of fib)
-   still needs the monolithic frame collapse.
+   small/medium FAITHFUL slices short of the monolithic rewrite). **Step-by-step gated plan written:
+   `docs/qjs-align/HANDOVER-frame-incremental.md`** — Slice A teardown gate for no-eval frames (~437M),
+   B backtrace-pop gate (optional), C var_refs borrow-not-copy (~263M, scales with captures), D
+   lazy-this + borrowed cur_func (~263M), with the load-bearing refcount-ledger invariants (force-GC
+   is the critical gate). The **bulk** (pushFrame 23% + teardown 7% = ~30% of fib) still needs the
+   monolithic frame collapse (`FRAME-STRUCTURAL-ALIGN.md`).
 5. **Map/Set per-op (get/set 7.63×, add/has 6.3×)** — NOT a hash-table gap (collection.zig already
    uses open-chained hashing); the cost is the general **call path** to reach the native op, so this
    is coupled to the frame/call-machinery, not a standalone fix.
