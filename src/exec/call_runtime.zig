@@ -97,21 +97,17 @@ pub fn execCall(
     // target. resolveInlineTarget returns null for class constructors, so a super()
     // call (whose callee is always a constructor) never resolves here — an inline
     // result is provably NOT a super-constructor invocation, so the
-    // isCurrentSuperConstructor check below is unnecessary on this path. A
-    // host-output callee (console.log) is not a bytecode function either, so it
-    // also falls through to fastHostOutputCall. `this` binds undefined (arrow
-    // targets override with their lexical `this` inside resolveInlineTarget).
+    // isCurrentSuperConstructor check below is unnecessary on this path. `this`
+    // binds undefined (arrow targets override with their lexical `this` inside
+    // resolveInlineTarget). A non-bytecode callee (host fn / ctor) falls through to
+    // the general dispatch, which handles host-output (console.log) like any other
+    // host function — qjs has no per-call host-output fast path.
     if (allow_inline) {
         if (inline_calls.resolveInlineTarget(ctx, global, core.JSValue.undefinedValue(), func)) |target| {
             return .{ .inline_call = .{ .target = target, .region_base = region_base, .argc = argc } };
         }
     }
 
-    if (try builtin_glue.fastHostOutputCall(ctx.runtime, output, func, args)) {
-        popOwnedStackRegion(ctx.runtime, stack, region_base);
-        stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
-        return .done;
-    }
     const is_super_constructor = class_init_ops.isCurrentSuperConstructor(ctx, frame, func);
     const arrow_super_this = if (is_super_constructor and !frame.function.flags.is_derived_class_constructor)
         class_init_ops.currentArrowLexicalSuperThis(ctx.runtime, frame)
