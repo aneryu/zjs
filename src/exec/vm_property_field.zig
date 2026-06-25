@@ -588,7 +588,13 @@ pub noinline fn arrayElement(
                 };
                 unreachable;
             }
-            if (try putInt32TypedArrayElementFast(ctx.runtime, obj, key, value)) return .continue_loop;
+            switch (putTypedArrayElementFast(ctx.runtime, obj, key, value) catch |err| {
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                return err;
+            }) {
+                .handled => return .continue_loop,
+                .not_typed_array => {},
+            }
             if (try array_ops.putDenseArrayElementFast(ctx.runtime, obj, key, value)) return .continue_loop;
             const key_value = object_ops.toPropertyKeyValue(ctx, output, global, key, function, frame) catch |err| {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
@@ -646,30 +652,44 @@ pub fn fastTypedArrayElementValue(rt: *core.JSRuntime, obj: core.JSValue, key: c
     return core.typed_array.typedArrayGetIndex(rt, object, index) catch null;
 }
 
-fn putInt32TypedArrayElementFast(rt: *core.JSRuntime, obj: core.JSValue, key: core.JSValue, value: core.JSValue) !bool {
-    _ = rt;
-    const object = objectFromValue(obj) orelse return false;
-    const key_int = key.asInt32() orelse return false;
-    if (key_int < 0) return false;
-    const value_int = value.asInt32() orelse return false;
-    if (object.typedArrayKind() != 6 or object.typedArrayElementSize() != 4) return false;
-    const fixed_len = object.typedArrayFixedLength() orelse return false;
-    const buffer_value = object.typedArrayBuffer() orelse return false;
-    const buffer = objectFromValue(buffer_value) orelse return false;
-    if (buffer.class_id != core.class.ids.array_buffer and buffer.class_id != core.class.ids.shared_array_buffer) return false;
-    if (buffer.arrayBufferImmutable()) return false;
-    if (buffer.arrayBufferDetached()) return true;
+pub const TypedArrayWriteFast = enum { not_typed_array, handled };
 
-    const bytes = buffer.byteStorage();
-    const byte_offset = object.typedArrayByteOffset();
-    if (byte_offset > bytes.len) return true;
-    const byte_len = std.math.mul(usize, @as(usize, fixed_len), @as(usize, 4)) catch return false;
-    if (byte_len > bytes.len - byte_offset) return true;
+/// qjs JS_SetPropertyValue (quickjs.c:9947) typed-array arm: a single
+/// per-class_id store that, for each numeric element kind, converts the value
+/// (which can run user code via valueOf/Symbol.toPrimitive and DETACH/RESIZE the
+/// buffer) and stores into the typed buffer after a bounds RE-check. The
+/// convert-first / recheck-after / silent-no-op-on-OOB ordering (qjs comment at
+/// quickjs.c:9987 + the `ta_out_of_bound: return TRUE` leg) lives in the
+/// canonical `typedArraySetElement` helper, which this fast probe delegates to as
+/// the single source of truth for the value->bytes mapping.
+///
+/// Returns `.not_typed_array` when obj/key do not select a numeric typed-array
+/// element (fall through to the dense/slow path); `.handled` when the write was
+/// performed or correctly turned into a no-op (OOB / detached after conversion).
+/// BigInt64/BigUint64 (kinds 11/12) punt to the slow path. A conversion that
+/// throws (e.g. BigInt assigned to a non-BigInt array) surfaces as a Zig error
+/// for the caller to route through handleCatchableRuntimeError.
+pub fn putTypedArrayElementFast(rt: *core.JSRuntime, obj: core.JSValue, key: core.JSValue, value: core.JSValue) !TypedArrayWriteFast {
+    const object = objectFromValue(obj) orelse return .not_typed_array;
+    const key_int = key.asInt32() orelse return .not_typed_array;
+    if (key_int < 0) return .not_typed_array;
+    // A value object needs ToPrimitive (valueOf / Symbol.toPrimitive), which runs
+    // user code and needs the full interpreter context (ctx/output/global) — that
+    // conversion lives in the slow path's coerceTypedArrayElementForSet. The
+    // canonical typedArraySetElement only coerces primitives, so an object value
+    // punts to the slow path; the numeric-primitive write is the fast case.
+    if (value.isObject()) return .not_typed_array;
+    if (!core.object.isTypedArrayObject(object)) return .not_typed_array;
+    const kind = object.typedArrayKind();
+    // BigInt64/BigUint64 punt to the slow path (it converts via JS_ToBigInt64).
+    if (kind == 11 or kind == 12) return .not_typed_array;
     const index: u32 = @intCast(key_int);
-    if (index >= fixed_len) return true;
-    const offset = byte_offset + @as(usize, index) * 4;
-    std.mem.writeInt(i32, bytes[offset..][0..4], value_int, .little);
-    return true;
+    // typedArraySetElement mirrors qjs exactly: immutable reject (silent no-op),
+    // convert into a scratch buffer FIRST (user code may detach/resize), then
+    // re-check the in-bounds/attached state and store. OOB after conversion is a
+    // silent no-op (qjs `ta_out_of_bound: return TRUE`), not a throw.
+    _ = try core.typed_array.typedArraySetElement(rt, object, index, value);
+    return .handled;
 }
 
 fn fastRegExpPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {

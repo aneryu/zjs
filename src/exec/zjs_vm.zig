@@ -1892,19 +1892,31 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                         reg_ip += 1;
                         continue :sw opc;
                     } else if (opc == op.put_array_el) {
-                        // n_pop=3,n_push=0. In-bounds dense store only (the
-                        // non-erroring setFastArrayElementDup leg of the slow
-                        // path's putDenseArrayElementFast); out-of-bounds /
-                        // append / grow / typed-array / proxy break to slow.
-                        // Matches the slow path: it dups the value into the slot,
-                        // frees the old element, and the caller frees obj/key/val.
+                        // n_pop=3,n_push=0. In-bounds dense store (the non-erroring
+                        // setFastArrayElementDup leg of putDenseArrayElementFast) and
+                        // the numeric typed-array store (qjs JS_SetPropertyValue's
+                        // per-class_id arm, quickjs.c:9947). Out-of-bounds append /
+                        // grow / proxy / object-value (needs ToPrimitive) / BigInt
+                        // break to slow. Matches the slow path: it dups/coerces the
+                        // value into the slot and the caller frees obj/key/val.
                         const value = (reg_sp - 1)[0];
                         const key = (reg_sp - 2)[0];
                         const idx_i32 = key.asInt32() orelse break :array_el_fast;
                         if (idx_i32 < 0) break :array_el_fast;
                         const obj = (reg_sp - 3)[0];
                         const object = class_vm.objectFromValue(obj) orelse break :array_el_fast;
-                        if (!object.setFastArrayElementDup(ctx.runtime, @intCast(idx_i32), value)) break :array_el_fast;
+                        if (!object.setFastArrayElementDup(ctx.runtime, @intCast(idx_i32), value)) {
+                            // Not a dense in-bounds store: try the numeric typed-array
+                            // fast write. It only handles primitive values (object
+                            // values need ToPrimitive user code) and kinds 1-10; an
+                            // (unreachable-for-numbers) conversion error or a non-typed
+                            // -array breaks to the slow arm, which re-runs and routes
+                            // the throw through handleCatchableRuntimeError.
+                            switch (vm_property_field.putTypedArrayElementFast(ctx.runtime, obj, key, value) catch break :array_el_fast) {
+                                .handled => {},
+                                .not_typed_array => break :array_el_fast,
+                            }
+                        }
                         value.free(ctx.runtime);
                         key.free(ctx.runtime);
                         obj.free(ctx.runtime);
