@@ -50,6 +50,34 @@ Ranked by `unlock × commonality / (risk × effort)`:
 
 `new Array(n)` and `s.replace` boxing corrections from the first sweep still stand (below).
 
+## ✅ Shipped round-8 — parallel worktree batch (branch `qjs-faithful-round8-batch`, integrated union gated test262 0/49775 + 1226 unit + 1226 force-GC)
+
+A parallel batch: each slice implemented in an isolated worktree, self-gated + adversarially
+verified, then cherry-picked + the integrated union re-gated whole.
+
+| slice | commit | qjs anchor | effect |
+|---|---|---|---|
+| single backtrace chain (delete per-call ActiveBacktraceFrame, walk Machine Entry chain) | `29e93a6` | build_backtrace quickjs.c:7571 | perf-neutral; the one genuine structural piece of the frame-model rewrite (D) — see FRAME-MODEL-ONESHOT-BLUEPRINT.md |
+| typed-array inline element READ (all 12 kinds) | `dce71dd` | JS_GetPropertyValue quickjs.c:9029 | Float64 3.68×→2.83×, Uint8 3.59×→2.75× |
+| Array.prototype.slice dense bulk copy | `2886a1f` | js_array_slice fast case quickjs.c:42967 + js_create_array 9601 | **dense slice 6.87×→1.36×** (biggest single win); sparse/Symbol.species fall through to the slow loop |
+| hasOwnProperty existence-only probe (NULL-desc) | `25b30aa` | JS_GetOwnPropertyInternal desc==NULL quickjs.c:8854 | 2.34×→2.13×; preserves TDZ ReferenceError + AUTOINIT no-materialize; Proxy keeps the descriptor/trap path |
+| Object.assign single ENUM_ONLY walk | `23682e6` | js_object_assign→CopyDataProperties quickjs.c:16920 | collapses the two-pass per-key-Descriptor to one enumerable-snapshot pass for ORDINARY sources; Proxy/exotic keep the descriptor path; keys/values/entries untouched (qjs re-checks there, 40400) |
+
+> **Correction (verifier):** Object.keys/values/entries + propertyIsEnumerable are ALREADY faithful —
+> qjs builds a full per-key descriptor there on purpose (the "still enumerable" re-check at
+> quickjs.c:40400, because a getter/Proxy in the loop can mutate the shape). Only hasOwnProperty
+> (NULL-desc existence) and Object.assign (single ENUM_ONLY CopyDataProperties) are faithful skips.
+> Object.keys 1.84× is a SEPARATE lever (GPN-walk/array-build), NOT this batch's.
+
+### Next batch (ranked, faithful/bounded/independent — re-measured)
+1. **typed-array element WRITE** (`put_array_el`; qjs JS_SetPropertyValue quickjs.c:9947) — the sibling
+   of the read fast path. MEDIUM: the value conversion can detach the buffer, so the bounds check must
+   follow the conversion (qjs :9987). ~1 day, independent.
+2. **String padStart/padEnd** resolve-once + narrow latin1 buffer (qjs js_string_pad quickjs.c:46300) —
+   gap 3.83×; LOW, reuses the shipped toUpper/toLower template (`77005ac`).
+3. **Object.keys/values descriptor-skip** — sequence AFTER hasOwnProperty/assign so it reuses the
+   enum-only probe; the GPN-walk/array-build lever.
+
 ## ✅ Shipped round-4 (each: test262 0/49775 + 1223 unit + 1223 force-GC)
 
 | slice | commit | effect |
