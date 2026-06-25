@@ -1357,6 +1357,27 @@ pub fn qjsTypedArraySetCall(
             const source_length: usize = @intCast(try core.object.typedArrayLength(ctx.runtime, source_object));
             if (offset > target_length or source_length > target_length - offset) return error.RangeError;
 
+            // QuickJS js_typed_array_set_internal (quickjs.c:57584-57588): when the
+            // source and target share the same element class, copy the raw byte
+            // ranges with memmove and skip per-element box/unbox + re-bounds-check.
+            // memmove handles same-backing-buffer aliasing (overlapping src/dst).
+            if (source_object.typedArrayKind() == target.typedArrayKind()) {
+                const element_size: usize = target.typedArrayElementSize();
+                const byte_count = source_length * element_size;
+                if (byte_count != 0) {
+                    const target_buffer = try core.typed_array.typedArrayBufferObject(target);
+                    const source_buffer = try core.typed_array.typedArrayBufferObject(source_object);
+                    const dst_start = target.typedArrayByteOffset() + offset * element_size;
+                    const src_start = source_object.typedArrayByteOffset();
+                    @memmove(
+                        target_buffer.byteStorage()[dst_start..][0..byte_count],
+                        source_buffer.byteStorage()[src_start..][0..byte_count],
+                    );
+                }
+                return core.JSValue.undefinedValue();
+            }
+
+            // Mismatched element class: convert per element through the value path.
             const values = try ctx.runtime.memory.alloc(core.JSValue, source_length);
             var rooted_values: []core.JSValue = values[0..0];
             var values_root = ValueSliceRoot{};
