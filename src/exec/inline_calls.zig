@@ -130,6 +130,13 @@ pub const Entry = struct {
     /// `current_function` reference); only the slice storage is owned.
     merged_var_ref_names: []core.Atom,
     merged_var_refs: []core.JSValue,
+    /// True when the callee carries no direct-eval bindings: `eval_snapshot`
+    /// stays the empty default, `merged_*` stay empty, and `eval_function_view`
+    /// stays null. Teardown then skips `eval_snapshot.deinit` / `freeEvalResources`
+    /// entirely — both are provably no-ops for such a frame, but each is a
+    /// non-inlined call paid on every plain call. Mirrors qjs's `done:` epilogue
+    /// (quickjs.c:20698) freeing only what the frame actually allocated.
+    simple_frame: bool,
 };
 
 const entries_per_chunk: usize = 16;
@@ -271,6 +278,7 @@ pub const Machine = struct {
         entry.eval_function_view = null;
         entry.merged_var_ref_names = &.{};
         entry.merged_var_refs = &.{};
+        entry.simple_frame = true;
         entry.profile_guard = vm_call.enterCallProfile(rt);
         errdefer entry.profile_guard.deinit();
         errdefer freeEvalResources(rt, entry);
@@ -362,6 +370,11 @@ pub const Machine = struct {
         const borrow_source_args = canBorrowSourceArgs(entry.function, source);
         const storage_arg_count: usize = if (borrow_source_args) 0 else frame_arg_count;
         const need_eval_var_refs = eval_names.len != 0 or eval_refs.len != 0;
+        // `eval_function_view` is only built when BOTH eval_names and eval_refs
+        // are non-empty, so `!need_eval_var_refs` (the OR) already implies the
+        // view is null and no merged slices exist — exactly the precondition
+        // under which `eval_snapshot.deinit` / `freeEvalResources` are no-ops.
+        entry.simple_frame = !need_eval_var_refs;
         const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(entry.function, frame_arg_count);
         const slab = frame_mod.FrameSlab.carve(
             &rt.memory,
@@ -666,10 +679,12 @@ pub const Machine = struct {
     /// bookkeeping. Shared by the Machine (popTeardown) and the recursion path.
     pub fn teardownInlineEntry(ctx: *core.JSContext, entry: *Entry) void {
         const rt = ctx.runtime;
-        entry.eval_snapshot.deinit(rt);
+        // For a simple frame (no direct-eval bindings) the snapshot and eval
+        // resources are the empty defaults — skip both non-inlined calls.
+        if (!entry.simple_frame) entry.eval_snapshot.deinit(rt);
         entry.stack.deinit(rt);
         entry.frame.deinitInlineCall(&rt.memory, rt);
-        freeEvalResources(rt, entry);
+        if (!entry.simple_frame) freeEvalResources(rt, entry);
         rt.vm_stack.restore(entry.arena_mark);
         ctx.popActiveBacktraceFrame(&entry.backtrace_frame);
         entry.profile_guard.deinit();
