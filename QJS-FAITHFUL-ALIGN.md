@@ -88,7 +88,7 @@ Phase 3  叶子：GC-无关忠实对齐 + 余下赢回退 + global-var 稳定 ce
 ### Phase 3 — 叶子（GC-无关忠实对齐 + 赢回退 + 大杠杆）
 
 GC-无关忠实对齐：
-- [~] 属性槽 40B tagged-union → **16B untagged**（**DEFERRED**：侵入性大，shape-flags 派生 kind 引发深度 test-infra 级联，codex 未收敛；messy 态在 git stash） qjs `JSProperty`（rank 4，property.zig:125-134 vs quickjs.c:947-963）。
+- [x] 属性槽 40B tagged-union → **16B untagged**（**DONE 2026-06-26 `040f3ba`（L2）**：裸 untagged `Slot` union、kind 由 shape `Flags`（JS_PROP_TMASK）派生、`Accessor`=2×`?*gc.Header`；复用 codex stash 表示设计（它停滞在 mega-commit-on-stale-base + flag-less test harness,非设计问题）；落地关键=§4 纪律(typed-API chokepoint `propKindAt`/`asDataAt`、单一 `setEntryKindAndSlot` 配对 mutator、`destroy/dup` flags-by-signature 编译期逼出所有 caller、同 shot 修 exec.zig harness、保留 var_ref 环守卫);**Debug 裸 union 安全 tag 把 kind/slot desync 变响亮 panic**(抓到 3 个真 desync)。门禁 test262 0/49775(0 意外,6 known)+1227+force-GC) qjs `JSProperty`（property.zig vs quickjs.c:947-963）。
 - [x] create 路径删冗余第二次 `findProperty`（rank 5，object.zig:8880/9240）—— prop_create 1.95×。
 - [x] fast-array 增长改 realloc/remap（rank 6，object.zig:3382）；`Array.push` 多参快路径（rank 12）。
 - [x] 算术臂接上 `tryInt32BinaryWindow`（rank 7，vm_arith.zig:175 零调用者）；`bothInt` 单测试（rank 10）。
@@ -108,7 +108,7 @@ GC-无关忠实对齐：
 - [x] **global-var var_ref cell（已落地 2026-06-24）**：全局 `var`/function 声明建 `JS_PROP_VARREF` cell（qjs `js_closure_define_global_var`）、`.global` 闭包变量别名该 cell、OP_get_var/OP_put_var 直接 deref（qjs OP_get_var 二合一）。**global-read 76.6B→31.3B（7.08×→2.45× over 真实 baseline）、global-write 69.4B→23.3B（6.70×→2.98×）、fib 中性零回归**。33 个作用域回归全修（4 阶段，每阶段 test262 0/49775 + 1223 单测 + force-GC）：① `directEvalGlobalVarNeedsRef` 排序对齐 qjs（force_init 让位 binding-match，17059-17071）② threaded get_var/put_var lane 补 generator stop-boundary 守卫 ③ 既有全局属性不再转 var_ref（qjs 17171-17205 detached var_ref）④ fast lane 加 parent-eval-shadow 守卫（qjs var_object_test 33158-33167）。详见 `docs/qjs-align/HANDOVER-global-varref.md`。**余**：编译期 `parent_has_eval` 标志（零运行期开销，eliminate ④ 的 per-access 守卫）是后续忠实精炼；发现一个**预存** TDZ bug（hoisted 函数前向引用顶层 let，clean HEAD 同样失败、test262 不可见）。
 - [ ] **builtin 方法上 prototype**：每个 builtin 方法物化为各 prototype 的真 own-property（qjs 结构）。
       method_call_loop 7.06×。须解 null-proto 内部数组的方法解析。
-- [ ] array `count`/`length` 拆分 → qjs 尾部虚 hole 表示（撤 zjs 的 count==length 融合）；审计每个 reader。
+- [x] array `count`/`length` 拆分 → qjs 尾部虚 hole 表示（撤 zjs 的 count==length 融合）。**DONE 2026-06-26 `9e81f1c`（L3）**:加 `array_length: u32` Object 字段(非 qjs prop[0].u.value——与 zjs 既有 count/capacity 字段惯例一致、且与 L2 解耦);`new Array(n)` 现 born-dense holes;**去险关键=zjs 数组层本就 count-aware 写的**(`[count,length)` 分支是「正确的死代码」,拆分激活而非重写它们→可一次性);agent 额外修 4 个潜伏 bug(slice OOB/fill 漏洞/map 丢值/proxy-set trap),门禁抓到第 5 个(indexOf/lastIndexOf/includes dense 扫漏洞→加 `arrayElements().len==length` 守卫 fall through 原型感知循环)。门禁 test262 0 新增+1227+force-GC。蓝图 docs/qjs-align/L3-ARRAY-COUNT-LENGTH-SPLIT.md。
 - [ ] 热属性/数组 opcode 臂寄存器驻留（rank 14，依赖 1/4/5/9 先落）。
 
 ## 4. do_not_align（全量忠实后近乎清空）
