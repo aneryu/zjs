@@ -144,6 +144,10 @@ const bp_type_mask = (1 << bp_type_bits) - 1;
 const no_slot_value = std.math.maxInt(usize);
 const StackElem = usize;
 
+inline fn safetyChecks() bool {
+    return builtin.mode != .ReleaseFast and builtin.mode != .ReleaseSmall;
+}
+
 const REExecContext = struct {
     allocator: std.mem.Allocator,
     cbuf: Input,
@@ -216,11 +220,6 @@ fn slotOptional(value: usize) ?usize {
 pub fn captureSlotValue(value: usize) ?usize {
     return slotOptional(value);
 }
-
-const CharRead = struct {
-    code_point: u21,
-    next: usize,
-};
 
 pub fn captureCount(bytecode: []const u8) usize {
     if (bytecode.len <= re_header_capture_count) return 0;
@@ -371,6 +370,9 @@ fn execCaptureSlotsParsed(
     defer ctx.deinit();
 
     @memset(capture[0 .. header.capture_count * 2], no_slot_value);
+    if (safetyChecks()) {
+        @memset(capture[header.capture_count * 2 .. header.capture_count * 2 + header.register_count], no_slot_value);
+    }
     return if (try lreExecBacktrack(&ctx, capture, header_len, initial_cptr)) .match else .no_match;
 }
 
@@ -385,7 +387,7 @@ pub fn testMatchWithOptions(allocator: std.mem.Allocator, bytecode: []const u8, 
 
 inline fn decodeExecState(meta: usize) !REExecStateEnum {
     const type_value = meta & bp_type_mask;
-    if (type_value > @intFromEnum(REExecStateEnum.negative_lookahead)) return error.BytecodeCorrupt;
+    if (safetyChecks() and type_value > @intFromEnum(REExecStateEnum.negative_lookahead)) return error.BytecodeCorrupt;
     return @enumFromInt(type_value);
 }
 
@@ -428,7 +430,11 @@ const ExecState = struct {
     }
 
     inline fn checkStackSpace(self: *ExecState, n: usize) !void {
-        if (self.stack_end < self.sp or self.stack_end - self.sp < n) {
+        const needs_grow = if (safetyChecks())
+            self.stack_end < self.sp or self.stack_end - self.sp < n
+        else
+            self.stack_end - self.sp < n;
+        if (needs_grow) {
             @branchHint(.unlikely);
             try self.s.stackRealloc(self.sp + n);
             self.stack_end = self.s.stack_size;
@@ -528,8 +534,12 @@ const ExecState = struct {
     }
 
     inline fn saveCapture(self: *ExecState, idx: usize, value: usize) !void {
-        if (idx >= self.s.alloc_count) return error.BytecodeCorrupt;
+        if (safetyChecks() and idx >= self.s.alloc_count) return error.BytecodeCorrupt;
         try self.checkStackSpace(2);
+        self.saveCaptureAssumeSpace(idx, value);
+    }
+
+    inline fn saveCaptureAssumeSpace(self: *ExecState, idx: usize, value: usize) void {
         const pos = self.sp;
         const stack_buf = self.s.stack_buf;
         stack_buf[pos] = idx;
@@ -539,22 +549,18 @@ const ExecState = struct {
     }
 
     inline fn saveCaptureCheck(self: *ExecState, idx: usize, value: usize) !void {
-        if (idx >= self.s.alloc_count) return error.BytecodeCorrupt;
-        var stack_buf = self.s.stack_buf;
+        if (safetyChecks() and idx >= self.s.alloc_count) return error.BytecodeCorrupt;
+        const stack_buf = self.s.stack_buf;
         var sp1 = self.sp;
         while (true) {
             if (sp1 > self.bp) {
-                if (sp1 < 2) return error.BytecodeCorrupt;
+                if (safetyChecks() and sp1 < 2) return error.BytecodeCorrupt;
                 if (stack_buf[sp1 - 2] == idx) break;
                 sp1 -= 2;
             } else {
                 try self.checkStackSpace(2);
-                stack_buf = self.s.stack_buf;
-                const pos = self.sp;
-                stack_buf[pos] = idx;
-                stack_buf[pos + 1] = self.capture[idx];
-                self.sp = pos + 2;
-                break;
+                self.saveCaptureAssumeSpace(idx, value);
+                return;
             }
         }
         self.capture[idx] = value;
@@ -566,54 +572,57 @@ const ExecState = struct {
 
     inline fn readRegisterValue(self: *const ExecState, register: usize) !usize {
         const slot = self.registerSlot(register);
-        if (slot >= self.s.alloc_count) return error.BytecodeCorrupt;
+        if (safetyChecks() and slot >= self.s.alloc_count) return error.BytecodeCorrupt;
         const value = self.capture[slot];
-        if (value == no_slot_value) return error.BytecodeCorrupt;
+        if (safetyChecks() and value == no_slot_value) return error.BytecodeCorrupt;
         return value;
     }
 
-    inline fn readCharAtBounded(self: *const ExecState, pos: usize, end: usize) ?CharRead {
-        if (end > self.cbuf_end) return null;
+    inline fn getCharAtBounded(self: *const ExecState, pos: *usize, end: usize) ?u21 {
+        if (safetyChecks() and end > self.cbuf_end) return null;
         if (self.cbuf_type == .latin1) {
-            if (pos >= end) return null;
-            return .{ .code_point = self.s.cbuf_latin1[pos], .next = pos + 1 };
+            if (safetyChecks() and pos.* >= end) return null;
+            const code_point: u21 = self.s.cbuf_latin1[pos.*];
+            pos.* += 1;
+            return code_point;
         }
         const units = self.s.cbuf_utf16;
-        if (pos >= end) return null;
-        var code_point: u21 = units[pos];
-        var next = pos + 1;
+        if (safetyChecks() and pos.* >= end) return null;
+        var next = pos.* + 1;
+        var code_point: u21 = units[pos.*];
         if (self.cbuf_type == .utf16_unicode and isHiSurrogate(code_point) and next < end and isLoSurrogate(units[next])) {
             code_point = fromSurrogate(@intCast(code_point), units[next]);
             next += 1;
         }
-        return .{ .code_point = code_point, .next = next };
+        pos.* = next;
+        return code_point;
     }
 
-    inline fn readPrevCharAtBounded(self: *const ExecState, pos: usize, start: usize) ?CharRead {
-        if (pos <= start or start > self.cbuf_end) return null;
+    inline fn getPrevCharAtBounded(self: *const ExecState, pos: *usize, start: usize) ?u21 {
+        if (safetyChecks() and (pos.* <= start or start > self.cbuf_end)) return null;
         if (self.cbuf_type == .latin1) {
-            if (pos > self.cbuf_end) return null;
-            return .{ .code_point = self.s.cbuf_latin1[pos - 1], .next = pos - 1 };
+            if (safetyChecks() and pos.* > self.cbuf_end) return null;
+            pos.* -= 1;
+            return self.s.cbuf_latin1[pos.*];
         }
         const units = self.s.cbuf_utf16;
-        if (pos > self.cbuf_end) return null;
-        var prev = pos - 1;
+        if (safetyChecks() and pos.* > self.cbuf_end) return null;
+        var prev = pos.* - 1;
         var code_point: u21 = units[prev];
         if (self.cbuf_type == .utf16_unicode and isLoSurrogate(code_point) and prev > start and isHiSurrogate(units[prev - 1])) {
             prev -= 1;
             code_point = fromSurrogate(units[prev], @intCast(code_point));
         }
-        return .{ .code_point = code_point, .next = prev };
+        pos.* = prev;
+        return code_point;
     }
 
-    inline fn getChar(self: *ExecState) ?u21 {
+    inline fn getCharUnchecked(self: *ExecState) u21 {
         if (self.cbuf_type == .latin1) {
-            if (self.cptr >= self.cbuf_end) return null;
             const code_point: u21 = self.s.cbuf_latin1[self.cptr];
             self.cptr += 1;
             return code_point;
         }
-        if (self.cptr >= self.cbuf_end) return null;
         const units = self.s.cbuf_utf16;
         var code_point: u21 = units[self.cptr];
         self.cptr += 1;
@@ -622,6 +631,11 @@ const ExecState = struct {
             self.cptr += 1;
         }
         return code_point;
+    }
+
+    inline fn getChar(self: *ExecState) ?u21 {
+        if (self.cptr >= self.cbuf_end) return null;
+        return self.getCharUnchecked();
     }
 
     inline fn peekChar(self: *const ExecState) ?u21 {
@@ -727,22 +741,20 @@ fn lreExecBacktrack(
                 .negative_lookahead_match => {
                     const items = st.s.stack_buf;
                     while (true) {
-                        var typ: REExecStateEnum = undefined;
                         if (st.bp == 0) return error.BytecodeCorrupt;
-                        typ = try decodeExecState(items[st.bp - 1]);
                         while (st.sp > st.bp) {
-                            if (st.sp < 2) return error.BytecodeCorrupt;
+                            if (safetyChecks() and st.sp < 2) return error.BytecodeCorrupt;
                             const slot = items[st.sp - 2];
-                            if (slot >= st.s.alloc_count) return error.BytecodeCorrupt;
+                            if (safetyChecks() and slot >= st.s.alloc_count) return error.BytecodeCorrupt;
                             st.capture[slot] = items[st.sp - 1];
                             st.sp -= 2;
                         }
-                        if (st.sp < frame_entry_count) return error.BytecodeCorrupt;
+                        if (safetyChecks() and st.sp < frame_entry_count) return error.BytecodeCorrupt;
                         st.pc = @ptrFromInt(items[st.sp - 3]);
                         try st.ensurePc(st.pc, 0);
                         st.cptr = items[st.sp - 2];
                         const meta = items[st.sp - 1];
-                        typ = try decodeExecState(meta);
+                        const typ = try decodeExecState(meta);
                         st.bp = execStatePrevBp(meta);
                         st.sp -= frame_entry_count;
                         if (typ == .negative_lookahead) break;
@@ -752,7 +764,7 @@ fn lreExecBacktrack(
                 .char32, .char32_i => {
                     const expected = try st.getU32();
                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
-                    var c = st.getChar() orelse return error.BytecodeCorrupt;
+                    var c = st.getCharUnchecked();
                     if (opcode == .char32_i) {
                         c = canonicalize(c, st.s.is_unicode);
                     }
@@ -762,7 +774,7 @@ fn lreExecBacktrack(
                 .char, .char_i => {
                     const expected: u32 = try st.getU16();
                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
-                    var c = st.getChar() orelse return error.BytecodeCorrupt;
+                    var c = st.getCharUnchecked();
                     if (opcode == .char_i) {
                         c = canonicalize(c, st.s.is_unicode);
                     }
@@ -806,24 +818,24 @@ fn lreExecBacktrack(
                 },
                 .dot => {
                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
-                    const c = st.getChar() orelse return error.BytecodeCorrupt;
+                    const c = st.getCharUnchecked();
                     if (isLineTerminator(c)) break :dispatch_once;
                     continue :main;
                 },
                 .any => {
                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
-                    _ = st.getChar() orelse return error.BytecodeCorrupt;
+                    _ = st.getCharUnchecked();
                     continue :main;
                 },
                 .space => {
                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
-                    const c = st.getChar() orelse return error.BytecodeCorrupt;
+                    const c = st.getCharUnchecked();
                     if (!isSpace(c)) break :dispatch_once;
                     continue :main;
                 },
                 .not_space => {
                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
-                    const c = st.getChar() orelse return error.BytecodeCorrupt;
+                    const c = st.getCharUnchecked();
                     if (isSpace(c)) break :dispatch_once;
                     continue :main;
                 },
@@ -839,20 +851,31 @@ fn lreExecBacktrack(
                     const last = try st.readU8At(st.pc + 1);
                     st.pc += 2;
                     if (last >= st.s.capture_count or first > last) return error.BytecodeCorrupt;
-                    const count = (@as(usize, last) - @as(usize, first) + 1) * 2;
+                    const count = (@as(usize, last) - @as(usize, first) + 1) * 4;
                     try st.checkStackSpace(count);
+                    var pos = st.sp;
+                    const stack_buf = st.s.stack_buf;
                     while (first <= last) : (first += 1) {
-                        const slot = @as(usize, first) * 2;
-                        try st.saveCapture(slot, no_slot_value);
-                        try st.saveCapture(slot + 1, no_slot_value);
+                        var slot = @as(usize, first) * 2;
+                        if (safetyChecks() and slot + 1 >= st.s.alloc_count) return error.BytecodeCorrupt;
+                        stack_buf[pos] = slot;
+                        stack_buf[pos + 1] = st.capture[slot];
+                        st.capture[slot] = no_slot_value;
+                        pos += 2;
+                        slot += 1;
+                        stack_buf[pos] = slot;
+                        stack_buf[pos + 1] = st.capture[slot];
+                        st.capture[slot] = no_slot_value;
+                        pos += 2;
                     }
+                    st.sp = pos;
                     continue :main;
                 },
                 .set_i32 => {
                     const reg = try st.readU8At(st.pc);
                     const value = try st.readU32At(st.pc + 1);
                     st.pc += 5;
-                    if (reg >= st.s.register_count or reg >= register_count_max) return error.BytecodeCorrupt;
+                    if (safetyChecks() and (reg >= st.s.register_count or reg >= register_count_max)) return error.BytecodeCorrupt;
                     try st.saveCaptureCheck(st.registerSlot(reg), value);
                     continue :main;
                 },
@@ -860,9 +883,9 @@ fn lreExecBacktrack(
                     const reg = try st.readU8At(st.pc);
                     const offset: i32 = @bitCast(try st.readU32At(st.pc + 1));
                     st.pc += 5;
-                    if (reg >= st.s.register_count or reg >= register_count_max) return error.BytecodeCorrupt;
+                    if (safetyChecks() and (reg >= st.s.register_count or reg >= register_count_max)) return error.BytecodeCorrupt;
                     const value = try st.readRegisterValue(reg);
-                    if (value == 0) return error.BytecodeCorrupt;
+                    if (safetyChecks() and value == 0) return error.BytecodeCorrupt;
                     const next_value = value - 1;
                     try st.saveCaptureCheck(st.registerSlot(reg), next_value);
                     if (next_value != 0) {
@@ -876,11 +899,11 @@ fn lreExecBacktrack(
                     const limit = try st.readU32At(st.pc + 1);
                     const offset: i32 = @bitCast(try st.readU32At(st.pc + 5));
                     st.pc += 9;
-                    if (reg >= st.s.register_count or reg >= register_count_max) return error.BytecodeCorrupt;
+                    if (safetyChecks() and (reg >= st.s.register_count or reg >= register_count_max)) return error.BytecodeCorrupt;
                     const needs_advance_check = opcode == .loop_check_adv_split_goto_first or opcode == .loop_check_adv_split_next_first;
-                    if (needs_advance_check and (@as(usize, reg) + 1 >= st.s.register_count or @as(usize, reg) + 1 >= register_count_max)) return error.BytecodeCorrupt;
+                    if (safetyChecks() and needs_advance_check and (@as(usize, reg) + 1 >= st.s.register_count or @as(usize, reg) + 1 >= register_count_max)) return error.BytecodeCorrupt;
                     const value = try st.readRegisterValue(reg);
-                    if (value == 0) return error.BytecodeCorrupt;
+                    if (safetyChecks() and value == 0) return error.BytecodeCorrupt;
                     const next_value = value - 1;
                     try st.saveCaptureCheck(st.registerSlot(reg), next_value);
                     if (next_value > limit) {
@@ -904,14 +927,14 @@ fn lreExecBacktrack(
                 .set_char_pos => {
                     const reg = try st.readU8At(st.pc);
                     st.pc += 1;
-                    if (reg >= st.s.register_count or reg >= register_count_max) return error.BytecodeCorrupt;
+                    if (safetyChecks() and (reg >= st.s.register_count or reg >= register_count_max)) return error.BytecodeCorrupt;
                     try st.saveCaptureCheck(st.registerSlot(reg), st.cptr);
                     continue :main;
                 },
                 .check_advance => {
                     const reg = try st.readU8At(st.pc);
                     st.pc += 1;
-                    if (reg >= st.s.register_count or reg >= register_count_max) return error.BytecodeCorrupt;
+                    if (safetyChecks() and (reg >= st.s.register_count or reg >= register_count_max)) return error.BytecodeCorrupt;
                     if ((try st.readRegisterValue(reg)) == st.cptr) break :dispatch_once;
                     continue :main;
                 },
@@ -950,28 +973,25 @@ fn lreExecBacktrack(
                                 var capture_pos = capture_start;
                                 while (capture_pos < capture_end) {
                                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
-                                    var c1 = st.readCharAtBounded(capture_pos, capture_end) orelse return error.BytecodeCorrupt;
-                                    var c2_code = st.getChar() orelse break :dispatch_once;
-                                    capture_pos = c1.next;
+                                    var c1 = st.getCharAtBounded(&capture_pos, capture_end) orelse return error.BytecodeCorrupt;
+                                    var c2_code = st.getCharUnchecked();
                                     if (opcode == .back_reference_i) {
-                                        c1.code_point = canonicalize(c1.code_point, st.s.is_unicode);
+                                        c1 = canonicalize(c1, st.s.is_unicode);
                                         c2_code = canonicalize(c2_code, st.s.is_unicode);
                                     }
-                                    if (c1.code_point != c2_code) break :dispatch_once;
+                                    if (c1 != c2_code) break :dispatch_once;
                                 }
                             } else {
                                 var capture_pos = capture_end;
                                 while (capture_pos > capture_start) {
                                     if (st.cptr == 0) break :dispatch_once;
-                                    var c1 = st.readPrevCharAtBounded(capture_pos, capture_start) orelse return error.BytecodeCorrupt;
-                                    var c2 = st.readPrevCharAtBounded(st.cptr, 0) orelse break :dispatch_once;
-                                    capture_pos = c1.next;
-                                    st.cptr = c2.next;
+                                    var c1 = st.getPrevCharAtBounded(&capture_pos, capture_start) orelse return error.BytecodeCorrupt;
+                                    var c2 = st.getPrevCharAtBounded(&st.cptr, 0) orelse break :dispatch_once;
                                     if (opcode == .backward_back_reference_i) {
-                                        c1.code_point = canonicalize(c1.code_point, st.s.is_unicode);
-                                        c2.code_point = canonicalize(c2.code_point, st.s.is_unicode);
+                                        c1 = canonicalize(c1, st.s.is_unicode);
+                                        c2 = canonicalize(c2, st.s.is_unicode);
                                     }
-                                    if (c1.code_point != c2.code_point) break :dispatch_once;
+                                    if (c1 != c2) break :dispatch_once;
                                 }
                             }
                             break;
@@ -985,7 +1005,7 @@ fn lreExecBacktrack(
                     try st.ensurePc(st.pc, @as(usize, n) * 4);
                     range_match: {
                         if (st.cptr >= st.cbuf_end) break :dispatch_once;
-                        var c = st.getChar() orelse return error.BytecodeCorrupt;
+                        var c = st.getCharUnchecked();
                         if (opcode == .range_i) c = canonicalize(c, st.s.is_unicode);
                         var idx_min: usize = 0;
                         var low = ExecState.readU16UncheckedAt(st.pc);
@@ -1018,7 +1038,7 @@ fn lreExecBacktrack(
                     try st.ensurePc(st.pc, @as(usize, n) * 8);
                     range32_match: {
                         if (st.cptr >= st.cbuf_end) break :dispatch_once;
-                        var c = st.getChar() orelse return error.BytecodeCorrupt;
+                        var c = st.getCharUnchecked();
                         if (opcode == .range32_i) c = canonicalize(c, st.s.is_unicode);
                         var idx_min: usize = 0;
                         var low = ExecState.readU32UncheckedAt(st.pc);
@@ -1057,14 +1077,14 @@ fn lreExecBacktrack(
         while (true) {
             if (st.bp == 0) return false;
             while (st.sp > st.bp) {
-                if (st.sp < 2) return error.BytecodeCorrupt;
+                if (safetyChecks() and st.sp < 2) return error.BytecodeCorrupt;
                 const slot = items[st.sp - 2];
-                if (slot >= st.s.alloc_count) return error.BytecodeCorrupt;
+                if (safetyChecks() and slot >= st.s.alloc_count) return error.BytecodeCorrupt;
                 st.capture[slot] = items[st.sp - 1];
                 st.sp -= 2;
             }
 
-            if (st.sp < frame_entry_count) return error.BytecodeCorrupt;
+            if (safetyChecks() and st.sp < frame_entry_count) return error.BytecodeCorrupt;
             st.pc = @ptrFromInt(items[st.sp - 3]);
             try st.ensurePc(st.pc, 0);
             st.cptr = items[st.sp - 2];
