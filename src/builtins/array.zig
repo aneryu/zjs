@@ -111,10 +111,9 @@ pub fn legacyPrototypeMethodId(name: []const u8) ?u32 {
 /// exec ops stay in exec (`exec/array_ops.zig`): the prototype hub
 /// (`qjsArrayPrototypeNativeRecord`) and its leaf method bodies are BOTH —
 /// reached through this record table AND directly by the VM's residual
-/// fast-array fast-call (`qjsArrayMethodFastCall`), the realm-fallback name
-/// cascade (`call_runtime.callValueOrBytecodeClassModeDispatch`), and the
-/// `array.map` opcode fusion (`tryFastMapCallDense`) — so per the client model
-/// the implementation core stays in exec and builtins hosts only this thin
+/// fast-array fast-call (`qjsArrayMethodFastCall`) and the realm-fallback name
+/// cascade (`call_runtime.callValueOrBytecodeClassModeDispatch`) — so per the
+/// client model the implementation core stays in exec and builtins hosts only this thin
 /// record entry. (Phase 6b-relocate inventory: unlike String — whose six
 /// movable bodies were reachable only through `stringCall` — almost every
 /// Array.prototype / Array static body here is reached by the opcode-bound
@@ -302,8 +301,10 @@ pub fn constructConstructorWithPrototype(rt: *core.JSRuntime, args: []const core
         const length = arrayLengthFromNumber(args[0]) orelse return error.RangeError;
         const object = try core.Object.createArray(rt, prototype);
         errdefer core.Object.destroyFromHeader(rt, &object.header);
+        // new Array(n): fast array with count=0, length=n, slots [0,n) holes.
+        // Faithful to js_array_constructor -> set_array_length (quickjs.c:9447-9455);
+        // no sparse conversion. This is the holey-prealloc unblock.
         object.setArrayLength(length);
-        if (length != 0) object.setArraySparseLength(length);
         return object.value();
     }
     return constructWithPrototype(rt, args, prototype);

@@ -428,87 +428,18 @@ pub const TypedArrayPayload = struct {
 
 pub const RegExpPayload = struct {
     source: ?JSValue = null,
-    flags: ?JSValue = null,
     last_index: ?JSValue = null,
     compiled_bytecode: []u8 = &.{},
-    fast_pattern_kind: RegExpFastPatternKind = .none,
-    fast_simple_class_alternation: RegExpSimpleClassAlternationPattern = .{},
-    fast_simple_capture_sequence: RegExpSimpleCaptureSequencePattern = .{},
     last_index_writable: bool = true,
     realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *RegExpPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.source);
-        destroyOptionalValue(rt, &self.flags);
         destroyOptionalValue(rt, &self.last_index);
         const old_bytecode = self.compiled_bytecode;
         self.compiled_bytecode = &.{};
-        self.fast_pattern_kind = .none;
-        self.fast_simple_class_alternation = .{};
-        self.fast_simple_capture_sequence = .{};
         if (old_bytecode.len != 0) rt.memory.free(u8, old_bytecode);
     }
-};
-
-pub const RegExpFastPatternKind = enum(u8) {
-    none,
-    simple_class_alternation,
-    simple_capture_sequence,
-};
-
-pub const RegExpSimpleClassPredicate = enum(u8) {
-    generic,
-    ascii_digit,
-    ascii_not_digit,
-    ascii_word,
-    ascii_not_word,
-    ascii_lower,
-    ascii_alpha,
-    ascii_decimal,
-};
-
-pub const RegExpSimpleClassAtomKind = enum(u8) {
-    literal,
-    class,
-};
-
-pub const RegExpSimpleClassSequenceAtom = struct {
-    kind: RegExpSimpleClassAtomKind = .literal,
-    literal: u16 = 0,
-    class_source: []const u8 = "",
-    class_predicate: RegExpSimpleClassPredicate = .generic,
-    min_repeat: usize = 1,
-    max_repeat: usize = 1,
-};
-
-pub const RegExpSimpleClassSequencePattern = struct {
-    atoms: [16]RegExpSimpleClassSequenceAtom = undefined,
-    len: usize = 0,
-    anchor_start: bool = false,
-    anchor_end: bool = false,
-};
-
-pub const RegExpSimpleClassAlternationPattern = struct {
-    alternatives: [8]RegExpSimpleClassSequencePattern = undefined,
-    len: usize = 0,
-};
-
-pub const RegExpSimpleCaptureSequenceAtom = struct {
-    kind: RegExpSimpleClassAtomKind = .literal,
-    literal: u16 = 0,
-    class_source: []const u8 = "",
-    class_predicate: RegExpSimpleClassPredicate = .generic,
-    capture_index: ?usize = null,
-    min_repeat: usize = 1,
-    max_repeat: usize = 1,
-};
-
-pub const RegExpSimpleCaptureSequencePattern = struct {
-    atoms: [16]RegExpSimpleCaptureSequenceAtom = undefined,
-    len: usize = 0,
-    capture_count: usize = 0,
-    anchor_start: bool = false,
-    anchor_end: bool = false,
 };
 
 pub const BoundFunctionPayload = struct {
@@ -843,6 +774,7 @@ pub const FunctionRarePayload = struct {
     array_iterator_kind: u8 = 0,
     iterator_identity: bool = false,
     array_iterator_next: bool = false,
+    generator_next: bool = false,
     throw_type_error_intrinsic: bool = false,
     async_iterator_async_dispose: bool = false,
     async_generator_method: bool = false,
@@ -1148,6 +1080,11 @@ fn exoticMethodsForClassId(class_id: class.ClassId) ?*const ExoticMethods {
     };
 }
 
+/// Three-state result of an existence-only binding probe (no value `dup`).
+/// `uninitialized` mirrors qjs's TDZ VARREF case where the existence path
+/// (quickjs.c:8856-8860) still raises `ReferenceErrorUninitialized`.
+pub const BindingExistence = enum { absent, present, uninitialized };
+
 pub const Object = struct {
     header: gc.GCObjectHeader,
     class_payload: class.Payload = null,
@@ -1156,6 +1093,13 @@ pub const Object = struct {
     array_values: [*]JSValue = undefined,
     array_count: u32 = 0,
     array_capacity: u32 = 0,
+    /// JS-observable `.length` for arrays. Distinct from `array_count` (the
+    /// dense element extent): an array may carry `array_length > array_count`
+    /// with the slots `[array_count, array_length)` being HOLES (resolve up the
+    /// prototype chain; never own; not enumerated). Semantically mirrors qjs
+    /// `p->prop[0].u.value` (set_array_length / add_fast_array_element). Invariant:
+    /// `array_length >= array_count` for arrays. Unused for non-arrays.
+    array_length: u32 = 0,
     class_id: class.ClassId,
     flags: ObjectFlags = .{},
     class_payload_kind: class.PayloadKind = .none,
@@ -1685,7 +1629,8 @@ pub const Object = struct {
         self.flags.has_property_storage = false;
         for (old_properties, 0..) |entry, index| {
             const entry_atom = if (index < old_shape_props.len) old_shape_props[index].atom_id else atom.null_atom;
-            destroyPropertySlot(rt, entry_atom, entry.slot);
+            const entry_flags = if (index < old_shape_props.len) property.Flags.fromBits(old_shape_props[index].flags) else property.Flags{};
+            destroyPropertySlot(rt, entry_atom, entry_flags, entry.slot);
         }
         if (old_property_capacity != 0) rt.memory.free(property.Entry, old_properties.ptr[0..old_property_capacity]);
         self.destroyOrdinaryPayload(rt);
@@ -1893,13 +1838,11 @@ pub const Object = struct {
             if (payload.cells.len != 0) return true;
         }
         if (self.functionRealmGlobalPtr() != null) return true;
-        for (self.properties) |entry| {
-            switch (entry.slot) {
-                .auto_init => |id| {
-                    const info = property.autoInitAt(rt, id).*;
-                    if (info.host_function_realm_global != 0) return true;
-                },
-                else => {},
+        const scanned = @min(self.properties.len, self.shape_ref.prop_count);
+        for (self.properties[0..scanned], 0..) |entry, index| {
+            if (self.propFlagsAt(index).isAutoInit()) {
+                const info = property.autoInitAt(rt, entry.slot.auto_init).*;
+                if (info.host_function_realm_global != 0) return true;
             }
         }
         return false;
@@ -1920,13 +1863,11 @@ pub const Object = struct {
                 const identity = @intFromPtr(&realm_global.header) & ~@as(usize, 1);
                 if (rt.borrowedWeakCleanupRealmIdentityMatches(identity)) return true;
             }
-            for (self.properties) |entry| {
-                switch (entry.slot) {
-                    .auto_init => |id| {
-                        const info = property.autoInitAt(rt, id).*;
-                        if (info.host_function_realm_global != 0 and rt.borrowedWeakCleanupRealmIdentityMatches(info.host_function_realm_global)) return true;
-                    },
-                    else => {},
+            const scanned = @min(self.properties.len, self.shape_ref.prop_count);
+            for (self.properties[0..scanned], 0..) |entry, index| {
+                if (self.propFlagsAt(index).isAutoInit()) {
+                    const info = property.autoInitAt(rt, entry.slot.auto_init).*;
+                    if (info.host_function_realm_global != 0 and rt.borrowedWeakCleanupRealmIdentityMatches(info.host_function_realm_global)) return true;
                 }
             }
         }
@@ -2118,13 +2059,11 @@ pub const Object = struct {
     }
 
     fn clearAutoInitRealmGlobals(self: *Object, rt: *JSRuntime, matcher: BorrowedIdentityMatcher) void {
-        for (self.properties) |*entry| {
-            switch (entry.slot) {
-                .auto_init => |id| {
-                    const info = property.autoInitAt(rt, id);
-                    if (matcher.matches(rt, info.host_function_realm_global)) info.host_function_realm_global = 0;
-                },
-                else => {},
+        const scanned = @min(self.properties.len, self.shape_ref.prop_count);
+        for (self.properties[0..scanned], 0..) |*entry, index| {
+            if (self.propFlagsAt(index).isAutoInit()) {
+                const info = property.autoInitAt(rt, entry.slot.auto_init);
+                if (matcher.matches(rt, info.host_function_realm_global)) info.host_function_realm_global = 0;
             }
         }
     }
@@ -2157,20 +2096,21 @@ pub const Object = struct {
 
     pub fn arrayLengthSlot(self: *Object) *u32 {
         std.debug.assert(self.flags.is_array);
-        return &self.array_count;
+        return &self.array_length;
     }
 
     pub fn arrayLength(self: *const Object) u32 {
-        return if (self.flags.is_array) self.array_count else 0;
+        return if (self.flags.is_array) self.array_length else 0;
     }
 
+    /// Set the JS-observable `.length` only. Faithful to qjs `set_array_length`
+    /// (quickjs.c:9447-9455): growing length above capacity keeps `fast_array`
+    /// (the slots `[array_count, length)` simply become holes), it does NOT
+    /// drop to sparse and it NEVER touches `array_count`. Callers that must
+    /// also shrink the dense extent pair this with `truncateArrayElements`.
     pub fn setArrayLength(self: *Object, length: u32) void {
         std.debug.assert(self.flags.is_array);
-        if (self.flags.fast_array and @as(usize, @intCast(length)) > self.array_capacity) {
-            std.debug.assert(self.array_count == 0);
-            self.flags.fast_array = false;
-        }
-        self.array_count = length;
+        self.array_length = length;
     }
 
     pub fn hasExoticMethods(self: *const Object) bool {
@@ -3103,17 +3043,6 @@ pub const Object = struct {
         return null;
     }
 
-    pub fn regexpFlagsSlot(self: *Object) *?JSValue {
-        if (self.regExpPayload()) |payload| return &payload.flags;
-        std.debug.assert(self.class_payload_kind == .regexp);
-        unreachable;
-    }
-
-    pub fn regexpFlags(self: *const Object) ?JSValue {
-        if (self.regExpPayloadConst()) |payload| return payload.flags;
-        return null;
-    }
-
     pub fn regexpLastIndexSlot(self: *Object) *?JSValue {
         if (self.regExpPayload()) |payload| return &payload.last_index;
         std.debug.assert(self.class_payload_kind == .regexp);
@@ -3141,38 +3070,6 @@ pub const Object = struct {
         return &.{};
     }
 
-    pub fn regexpSimpleClassAlternationCache(self: *const Object) ?RegExpSimpleClassAlternationPattern {
-        const payload = self.regExpPayloadConst() orelse return null;
-        if (payload.fast_pattern_kind != .simple_class_alternation) return null;
-        return payload.fast_simple_class_alternation;
-    }
-
-    pub fn setRegexpSimpleClassAlternationCache(self: *Object, pattern: RegExpSimpleClassAlternationPattern) void {
-        if (self.regExpPayload()) |payload| {
-            payload.fast_pattern_kind = .simple_class_alternation;
-            payload.fast_simple_class_alternation = pattern;
-            return;
-        }
-        std.debug.assert(self.class_payload_kind == .regexp);
-        unreachable;
-    }
-
-    pub fn regexpSimpleCaptureSequenceCache(self: *const Object) ?RegExpSimpleCaptureSequencePattern {
-        const payload = self.regExpPayloadConst() orelse return null;
-        if (payload.fast_pattern_kind != .simple_capture_sequence) return null;
-        return payload.fast_simple_capture_sequence;
-    }
-
-    pub fn setRegexpSimpleCaptureSequenceCache(self: *Object, pattern: RegExpSimpleCaptureSequencePattern) void {
-        if (self.regExpPayload()) |payload| {
-            payload.fast_pattern_kind = .simple_capture_sequence;
-            payload.fast_simple_capture_sequence = pattern;
-            return;
-        }
-        std.debug.assert(self.class_payload_kind == .regexp);
-        unreachable;
-    }
-
     pub fn clearRegexpCompiledBytecode(self: *Object, rt: *JSRuntime) void {
         if (self.regExpPayload()) |payload| {
             if (payload.compiled_bytecode.len != 0) {
@@ -3180,9 +3077,6 @@ pub const Object = struct {
                 payload.compiled_bytecode = &.{};
                 rt.memory.free(u8, compiled_bytecode);
             }
-            payload.fast_pattern_kind = .none;
-            payload.fast_simple_class_alternation = .{};
-            payload.fast_simple_capture_sequence = .{};
             return;
         }
         std.debug.assert(self.class_payload_kind == .regexp);
@@ -3200,9 +3094,6 @@ pub const Object = struct {
             @memcpy(owned, bytecode);
             const old_bytecode = payload.compiled_bytecode;
             payload.compiled_bytecode = owned;
-            payload.fast_pattern_kind = .none;
-            payload.fast_simple_class_alternation = .{};
-            payload.fast_simple_capture_sequence = .{};
             if (old_bytecode.len != 0) rt.memory.free(u8, old_bytecode);
         } else {
             std.debug.assert(self.class_payload_kind == .regexp);
@@ -3349,12 +3240,14 @@ pub const Object = struct {
     pub fn arrayElements(self: *const Object) []JSValue {
         if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return &.{};
         std.debug.assert(self.array_capacity >= self.array_count);
+        std.debug.assert(self.array_length >= self.array_count);
         return self.array_values[0..@as(usize, @intCast(self.array_count))];
     }
 
     fn arrayElementsMut(self: *Object) []JSValue {
         if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return &.{};
         std.debug.assert(self.array_capacity >= self.array_count);
+        std.debug.assert(self.array_length >= self.array_count);
         return self.array_values[0..@as(usize, @intCast(self.array_count))];
     }
 
@@ -3407,6 +3300,8 @@ pub const Object = struct {
         self.array_values = elements.ptr;
         self.array_count = @intCast(elements.len);
         self.array_capacity = @intCast(elements.len);
+        // Fully-dense adoption: the logical length equals the dense extent.
+        self.array_length = @intCast(elements.len);
         self.flags.fast_array = true;
     }
 
@@ -3419,7 +3314,10 @@ pub const Object = struct {
     pub fn setArraySparseLength(self: *Object, length: u32) void {
         std.debug.assert(self.flags.is_array);
         std.debug.assert(self.array_capacity == 0);
-        self.array_count = length;
+        // Sparse arrays carry no dense extent: count is 0, length is the
+        // JS-observable `.length`. (Invariant 5: sparse => array_count == 0.)
+        self.array_count = 0;
+        self.array_length = length;
         self.flags.fast_array = false;
     }
 
@@ -3427,12 +3325,26 @@ pub const Object = struct {
         std.debug.assert(self.flags.is_array);
         std.debug.assert(self.array_capacity == 0);
         self.array_count = 0;
+        self.array_length = 0;
         self.flags.fast_array = true;
     }
 
     pub fn takeLastFastArrayElement(self: *Object) ?JSValue {
         if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return null;
         self.array_count -= 1;
+        return self.array_values[@intCast(self.array_count)];
+    }
+
+    /// Pop the last element of a FULLY DENSE fast array (count == length),
+    /// lowering BOTH the dense extent and the JS `.length` by one. Returns null
+    /// for an empty or holey array (`length > count`) so the caller falls back
+    /// to the generic [[Delete last]] + set-length path that handles tail holes.
+    /// Mirrors the pop fast path's "delete last, length-=1" pair.
+    pub fn takeLastFullyDenseFastArrayElement(self: *Object) ?JSValue {
+        if (!self.flags.is_array or !self.flags.fast_array) return null;
+        if (self.array_count == 0 or self.array_count != self.array_length) return null;
+        self.array_count -= 1;
+        self.array_length -= 1;
         return self.array_values[@intCast(self.array_count)];
     }
 
@@ -3458,6 +3370,7 @@ pub const Object = struct {
         const allocated = self.allocatedArrayElements();
         self.array_count = 0;
         self.array_capacity = 0;
+        self.array_length = 0;
         self.flags.fast_array = false;
         if (allocated.len != 0) rt.memory.free(JSValue, allocated);
     }
@@ -3985,6 +3898,17 @@ pub const Object = struct {
     pub fn isArrayIteratorNextFunction(self: *const Object) bool {
         if (self.functionRarePayloadConst()) |payload| return payload.array_iterator_next;
         return false;
+    }
+
+    pub fn isGeneratorNextFunction(self: *const Object) bool {
+        if (self.functionRarePayloadConst()) |payload| return payload.generator_next;
+        return false;
+    }
+
+    pub fn addGeneratorNextFunction(self: *Object, rt: *JSRuntime) bool {
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        payload.generator_next = true;
+        return true;
     }
 
     pub fn isThrowTypeErrorIntrinsicFunction(self: *const Object) bool {
@@ -4899,6 +4823,12 @@ pub const Object = struct {
     }
 
     pub fn functionRealmGlobalPtr(self: *const Object) ?*Object {
+        // Function/generator payloads are checked FIRST: this accessor is on the
+        // per-call inline-target resolution hot path (resolveInlineTarget), where
+        // `self` is a bytecode function. Each object has exactly one payload kind,
+        // so the order is correctness-neutral — it only shortens the common case.
+        if (self.functionPayloadConst()) |payload| return payload.realm_global_ptr;
+        if (self.generatorPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.ordinaryPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.objectDataPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.iteratorPayloadConst()) |payload| return payload.realm_global_ptr;
@@ -4915,8 +4845,6 @@ pub const Object = struct {
         if (self.disposableStackPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.promisePayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.moduleNamespacePayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.functionPayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.generatorPayloadConst()) |payload| return payload.realm_global_ptr;
         return null;
     }
 
@@ -5303,6 +5231,25 @@ pub const Object = struct {
 
     pub fn moduleNamespaceOwnBindingValue(self: Object, atom_id: atom.Atom) ?JSValue {
         return self.moduleNamespaceBindingValue(atom_id);
+    }
+
+    /// Existence-only probe for a module-namespace binding. Mirrors
+    /// `moduleNamespaceBindingValue` but performs NO `dup` -- it reports
+    /// presence and, separately, whether the cell is still uninitialized
+    /// (qjs `JS_GetOwnPropertyInternal` desc==NULL VARREF branch,
+    /// quickjs.c:8856-8860). Module-namespace bindings are stored as
+    /// VARREF cells in qjs's namespace property table, so the existence
+    /// path throws `ReferenceErrorUninitialized` when the cell is in TDZ.
+    pub fn moduleNamespaceBindingExists(self: Object, atom_id: atom.Atom) BindingExistence {
+        if (self.class_id != class.ids.module_ns) return .absent;
+        const payload = @constCast(&self).moduleNamespacePayload() orelse return .absent;
+        for (payload.names, 0..) |name, idx| {
+            if (name != atom_id or idx >= payload.cells.len) continue;
+            const cell = varRefCellFromValue(payload.cells[idx]) orelse return .present;
+            if (cell.varRefValue().isUninitialized()) return .uninitialized;
+            return .present;
+        }
+        return .absent;
     }
 
     fn destroyModuleNamespacePayload(self: *Object, rt: *JSRuntime) void {
@@ -6044,22 +5991,39 @@ pub const Object = struct {
         for (self.shape_ref.props[0..self.shape_ref.prop_count]) |*prop| {
             try Helper.callVisitSymbol(visitor, &prop.atom_id);
         }
-        for (self.properties) |*entry| {
-            switch (entry.slot) {
-                .data => |*stored| try Helper.callVisitValue(visitor, stored),
-                .accessor => |*stored_accessor| {
-                    try Helper.callVisitValue(visitor, &stored_accessor.getter);
-                    try Helper.callVisitValue(visitor, &stored_accessor.setter);
+        // Only entries with a matching shape property record carry a derivable
+        // kind. A property mid-`appendPreparedPropertyEntry` can have an entry
+        // pushed before the shape transition completes (the shape-storage alloc
+        // can trigger force-GC); such an over-hang entry has no shape prop yet,
+        // so clamp to the shape's prop_count (matching `shapeProps()`). Its value
+        // is a freshly-created object that is not yet a cycle member, so skipping
+        // it for this trace cannot collect it prematurely.
+        const traced_prop_count = @min(self.properties.len, self.shape_ref.prop_count);
+        for (self.properties[0..traced_prop_count], 0..) |*entry, index| {
+            const slot_flags = self.propFlagsAt(index);
+            if (slot_flags.deleted) continue;
+            switch (slot_flags.kind) {
+                .data => try Helper.callVisitValue(visitor, &entry.slot.data),
+                .accessor => {
+                    // Accessor getter/setter are `?*gc.Header`, not JSValue, so
+                    // round-trip through value space: read -> visit (the visitor
+                    // may rewrite under a moving collector) -> sync back.
+                    var getter_value = entry.slot.accessor.getterValue();
+                    try Helper.callVisitValue(visitor, &getter_value);
+                    entry.slot.accessor.syncGetterFromVisitedValue(getter_value);
+                    var setter_value = entry.slot.accessor.setterValue();
+                    try Helper.callVisitValue(visitor, &setter_value);
+                    entry.slot.accessor.syncSetterFromVisitedValue(setter_value);
                 },
                 // JS_PROP_VARREF: the slot owns a ref on a cell (global lexical
                 // bindings). Visit it so GC keeps the cell alive; without this a
                 // cell only reachable through ctx.lexicals would be collected
                 // (UAF). Visitors read the value by value, so a stack temp is safe.
-                .var_ref => |cell| {
-                    var cell_value = cell.valueRef();
+                .var_ref => {
+                    var cell_value = entry.slot.var_ref.valueRef();
                     try Helper.callVisitValue(visitor, &cell_value);
                 },
-                else => {},
+                .auto_init => {},
             }
         }
         if (self.ordinaryPayload()) |payload| {
@@ -6214,7 +6178,6 @@ pub const Object = struct {
         }
         if (self.regExpPayload()) |payload| {
             try Helper.traceOptValue(visitor, &payload.source);
-            try Helper.traceOptValue(visitor, &payload.flags);
             try Helper.traceOptValue(visitor, &payload.last_index);
         }
         if (self.moduleNamespacePayload()) |payload| {
@@ -6630,7 +6593,11 @@ pub const Object = struct {
     ) ObjectGraphError!usize {
         var count: usize = 0;
         count += countOptionalFunctionBytecodeRef(self.cachedIteratorNext(rt), function_bytecode);
-        for (self.properties) |entry| count += countSlotFunctionBytecodeRefs(entry.slot, function_bytecode);
+        // Clamp to the shape's prop_count: a mid-append over-hang entry has no
+        // shape prop yet (no derivable kind) and is a freshly-created value, so
+        // it cannot reference this bytecode anyway.
+        const counted = @min(self.properties.len, self.shape_ref.prop_count);
+        for (self.properties[0..counted], 0..) |entry, index| count += countSlotFunctionBytecodeRefs(self.propFlagsAt(index), entry.slot, function_bytecode);
         if (self.realmPayloadConst()) |payload| {
             if (payload.shared_lazy_native_functions) |cache| {
                 for (cache) |maybe_cached| count += countOptionalFunctionBytecodeRef(maybe_cached, function_bytecode);
@@ -6748,7 +6715,6 @@ pub const Object = struct {
         count += countOptionalFunctionBytecodeRef(self.promiseReactionArg(), function_bytecode);
         for (self.promiseReactions()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.regexpSource(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.regexpFlags(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.regexpLastIndex(), function_bytecode);
         if (self.moduleNamespacePayloadConst()) |payload| {
             for (payload.cells) |cell| count += countFunctionBytecodeValueRef(cell, function_bytecode);
@@ -6771,12 +6737,13 @@ pub const Object = struct {
         return context.count;
     }
 
-    fn countSlotFunctionBytecodeRefs(slot: property.Slot, function_bytecode: *const FunctionBytecode) usize {
-        return switch (slot) {
-            .data => |stored| countFunctionBytecodeValueRef(stored, function_bytecode),
-            .accessor => |entry| countFunctionBytecodeValueRef(entry.getter, function_bytecode) +
-                countFunctionBytecodeValueRef(entry.setter, function_bytecode),
-            .auto_init, .deleted => 0,
+    fn countSlotFunctionBytecodeRefs(flags: property.Flags, slot: property.Slot, function_bytecode: *const FunctionBytecode) usize {
+        if (flags.deleted) return 0;
+        return switch (flags.kind) {
+            .data => countFunctionBytecodeValueRef(slot.data, function_bytecode),
+            .accessor => countFunctionBytecodeValueRef(slot.accessor.getterValue(), function_bytecode) +
+                countFunctionBytecodeValueRef(slot.accessor.setterValue(), function_bytecode),
+            .var_ref, .auto_init => 0,
         };
     }
 
@@ -6850,7 +6817,7 @@ pub const Object = struct {
             // mirrors `getProperty`'s first-access promotion -- after
             // materialization the slot is `.data` or `.accessor` and
             // re-reads are ordinary fast-path loads.
-            if (entry.slot == .auto_init) {
+            if (entry_flags.isAutoInit()) {
                 const info = property.autoInit(entry.slot.auto_init).*;
                 // `materializeAutoInit` returns a fresh ref for
                 // `getProperty` semantics. On success the slot is promoted
@@ -6859,9 +6826,13 @@ pub const Object = struct {
                 // fallback descriptor directly instead of passing the
                 // placeholder to `fromSlot`.
                 const transient = materializeAutoInit(@constCast(self), index, info);
-                const after_materialize = self.properties[index];
-                if (after_materialize.slot == .auto_init) {
-                    if (entry_flags.accessor) {
+                if (self.propFlagsAt(index).isAutoInit()) {
+                    // OOM fallback: the placeholder did not promote. An auto_init
+                    // that materializes into an accessor is `info.kind ==
+                    // .native_accessor` (the only accessor-shaped placeholder);
+                    // all others promote to data. The kind flag is still
+                    // `.auto_init` here so derive the shape from `info`.
+                    if (info.kind == .native_accessor) {
                         return descriptor.Descriptor.accessor(
                             transient,
                             JSValue.undefinedValue(),
@@ -6877,7 +6848,7 @@ pub const Object = struct {
                     );
                 }
                 transient.free(info.rt);
-                return descriptor.Descriptor.fromSlot(self.propFlagsAt(index), after_materialize.slot);
+                return descriptor.Descriptor.fromSlot(self.propFlagsAt(index), self.properties[index].slot);
             }
             return descriptor.Descriptor.fromSlot(entry_flags, entry.slot);
         }
@@ -6887,9 +6858,124 @@ pub const Object = struct {
         return null;
     }
 
+    /// Snapshot of an own key's enumerable bit, read straight off the shape
+    /// flags (or the always-enumerable dense-array slot) without allocating a
+    /// `Descriptor`. Mirrors the enumerability that `getOwnProperty` would
+    /// report for the cheap, non-throwing, non-exotic cases.
+    ///
+    /// `.descriptor` means "this key cannot be resolved off the shape cheaply
+    /// or could observably throw -- fall back to the full descriptor probe".
+    /// This is the same boundary QuickJS draws in `JS_CopyDataProperties`
+    /// (quickjs.c:16920): it requests `JS_GPN_ENUM_ONLY` for an ordinary
+    /// source so the per-key enumerable test is skipped, but clears it for an
+    /// exotic source with a `get_own_property_names` hook so the descriptor
+    /// test runs per key.
+    pub const OwnEnumerable = enum { enumerable, not_enumerable, descriptor };
+
+    pub fn ownPropertyEnumerableKind(self: *const Object, rt: *const JSRuntime, atom_id: atom.Atom) OwnEnumerable {
+        // Exotic get-own-property hooks (test-only in this build) can report
+        // an enumerability that differs from the shape, exactly the case
+        // QuickJS drops JS_GPN_ENUM_ONLY for -- defer to the descriptor probe.
+        if (self.exoticMethods(rt)) |methods| {
+            if (methods.get_own_property != null) return .descriptor;
+        }
+        // Typed arrays (canonical numeric index) and module-namespace bindings
+        // need detached/range/TDZ checks that the descriptor path performs and
+        // that can observably throw; never snapshot those off the shape.
+        if (isTypedArrayObject(self)) return .descriptor;
+        if (self.moduleNamespacePayloadConst() != null) return .descriptor;
+
+        if (self.flags.is_array and atom_id == atom.ids.length) return .not_enumerable;
+        if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex) {
+            if (self.regexpLastIndex() != null) return .not_enumerable;
+        }
+        if (self.findProperty(atom_id)) |index| {
+            return if (self.propFlagsAt(index).enumerable) .enumerable else .not_enumerable;
+        }
+        // Dense array elements are always enumerable (data, w/e/c).
+        if (self.denseArrayElement(atom_id) != null) return .enumerable;
+        // Key vanished between key enumeration and now: QuickJS's
+        // JS_GetOwnPropertyInternal returns 0 here and the copy `continue`s.
+        return .not_enumerable;
+    }
+
     pub fn hasOwnProperty(self: *const Object, atom_id: atom.Atom) bool {
         if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex and self.regexpLastIndex() != null) return true;
         return self.findProperty(atom_id) != null or self.denseArrayElement(atom_id) != null;
+    }
+
+    /// Complete existence-only own-property probe -- the desc==NULL mode of
+    /// qjs `JS_GetOwnPropertyInternal` (quickjs.c:8854 else-branch). It walks
+    /// the SAME kind cascade as `getOwnProperty` but reports only presence,
+    /// performing NO `JS_DupValue` and DELAYING auto-init instantiation
+    /// ("nothing to do", quickjs.c:8862). It throws `ReferenceError` for an
+    /// uninitialized VARREF / module-namespace binding, matching qjs
+    /// quickjs.c:8856-8860. Exotic numeric indices (fast/dense arrays,
+    /// regexp lastIndex) and module-namespace bindings are covered here;
+    /// the typed-array canonical-index existence and the proxy trap live in
+    /// the `proxyAware` wrapper, parallel to `getOwnProperty` vs
+    /// `proxyAwareOwnPropertyDescriptor`.
+    pub fn existsOwnProperty(self: *const Object, rt: *JSRuntime, atom_id: atom.Atom) !bool {
+        // Exotic `get_own_property` hook (quickjs.c:8884-8890). The hook
+        // builds a full descriptor; we destroy it immediately, but for the
+        // non-test class set this hook is never installed (see
+        // `exoticMethodsForClassId`) so the cost is paid only by the exotic
+        // classes that genuinely need it -- still no dup leaks past us.
+        if (self.exoticMethods(rt)) |methods| {
+            if (methods.get_own_property) |hook| {
+                if (hook(@constCast(self), atom_id)) |desc| {
+                    desc.destroy(rt);
+                    return true;
+                }
+            }
+        }
+        // Module-namespace binding (quickjs.c:8856-8860 VARREF existence
+        // path). Presence with NO dup; TDZ raises ReferenceError.
+        switch (self.moduleNamespaceBindingExists(atom_id)) {
+            .present => return true,
+            .uninitialized => return error.ReferenceError,
+            .absent => {},
+        }
+        if (self.flags.is_array and atom_id == atom.ids.length) return true;
+        if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex and self.regexpLastIndex() != null) return true;
+        if (self.findProperty(atom_id)) |index| {
+            const entry = self.properties[index];
+            if (self.propFlagsAt(index).deleted) return false;
+            // VARREF existence path (quickjs.c:8856-8860): an uninitialized
+            // cell still throws ReferenceError even though desc==NULL.
+            if (self.propKindAt(index) == .var_ref) {
+                if (entry.slot.var_ref.varRefValue().isUninitialized()) return error.ReferenceError;
+            }
+            // AUTOINIT: qjs "nothing to do" (quickjs.c:8862) -- report
+            // presence WITHOUT materializing the placeholder.
+            return true;
+        }
+        if (self.denseArrayElement(atom_id) != null) return true;
+        return false;
+    }
+
+    /// Read just the enumerable bit of an own property, mirroring the
+    /// `prs->flags & JS_PROP_ENUMERABLE` inline test in qjs's
+    /// `JS_GetOwnPropertyNamesInternal` ENUM_ONLY shape walk
+    /// (quickjs.c:8628). Returns `null` when the key is absent. This
+    /// reads the flag straight off the shape without materializing a
+    /// `Descriptor` (no value dup, no getter), which is what lets
+    /// `Object.assign` collapse to a single ENUM_ONLY pass for ordinary
+    /// objects. Only valid for non-proxy/non-exotic sources; proxy/exotic
+    /// sources keep the descriptor path (qjs clears ENUM_ONLY there).
+    pub fn ownPropertyEnumerable(self: *const Object, atom_id: atom.Atom) ?bool {
+        // Synthetic, always-non-enumerable own keys mirror qjs's
+        // length/lastIndex which carry no JS_PROP_ENUMERABLE flag.
+        if (self.flags.is_array and atom_id == atom.ids.length) return false;
+        if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex and self.regexpLastIndex() != null) return false;
+        if (self.findProperty(atom_id)) |index| {
+            return self.propFlagsAt(index).enumerable;
+        }
+        // Dense array index elements are enumerable data properties in
+        // qjs's fast_array (the GPN walk includes them unconditionally
+        // under ENUM_ONLY).
+        if (self.denseArrayElement(atom_id) != null) return true;
+        return null;
     }
 
     pub fn hasProperty(self: *const Object, atom_id: atom.Atom) bool {
@@ -6905,9 +6991,9 @@ pub const Object = struct {
         if (self.flags.is_array and atom_id == atom.ids.length) return arrayLengthValue(self.arrayLength());
         if (self.findProperty(atom_id)) |index| {
             const entry = self.properties[index];
-            return switch (entry.slot) {
-                .data => |stored_value| stored_value.dup(),
-                .accessor => |accessor| accessor.getter.dup(),
+            return switch (self.propKindAt(index)) {
+                .data => entry.slot.data.dup(),
+                .accessor => entry.slot.accessor.getterValue().dup(),
                 // First-access materialization for `auto_init`
                 // placeholders. We need to mutate `self.properties[index]`
                 // to replace the placeholder with the real value;
@@ -6918,12 +7004,11 @@ pub const Object = struct {
                 // gives us a writable handle without changing every
                 // caller. Matches QuickJS's `JS_AutoInitProperty` which
                 // also mutates the property record in place on read.
-                .auto_init => |id| materializeAutoInit(@constCast(self), index, property.autoInit(id).*),
+                .auto_init => materializeAutoInit(@constCast(self), index, property.autoInit(entry.slot.auto_init).*),
                 // JS_PROP_VARREF: auto-deref the cell (qjs JS_GetPropertyInternal
                 // 8281-8285). TDZ (uninitialized) is surfaced to the caller; the
                 // dedicated getVar path does the ReferenceError throw.
-                .var_ref => |cell| cell.varRefValue().dup(),
-                .deleted => JSValue.undefinedValue(),
+                .var_ref => entry.slot.var_ref.varRefValue().dup(),
             };
         }
         if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex) {
@@ -6945,6 +7030,10 @@ pub const Object = struct {
     /// from the function-object alloc, which would already be lethal
     /// to the running script anyway.)
     fn materializeAutoInit(self: *Object, index: usize, info: property.AutoInit) JSValue {
+        if (info.kind == .function_prototype) {
+            const materialized = self.materializeFunctionPrototypeAutoInit(info) orelse return JSValue.undefinedValue();
+            return self.finishMaterializedAutoInit(index, info, materialized);
+        }
         if (info.kind == .console) {
             const materialized = materializeConsoleAutoInit(info) orelse return JSValue.undefinedValue();
             return self.finishMaterializedAutoInit(index, info, materialized);
@@ -7001,7 +7090,10 @@ pub const Object = struct {
                     return JSValue.undefinedValue();
                 }
                 const cached_value = cached.dup();
-                self.installMaterializedAutoInit(index, cached_value);
+                if (!self.installMaterializedAutoInit(info.rt, index, cached_value)) {
+                    cached_value.free(info.rt);
+                    return JSValue.undefinedValue();
+                }
                 return cached_value.dup();
             }
         }
@@ -7019,37 +7111,66 @@ pub const Object = struct {
     }
 
     fn finishMaterializedAutoInit(self: *Object, index: usize, info: property.AutoInit, materialized: JSValue) JSValue {
-        _ = info;
-        self.installMaterializedAutoInit(index, materialized);
+        if (!self.installMaterializedAutoInit(info.rt, index, materialized)) {
+            materialized.free(info.rt);
+            return JSValue.undefinedValue();
+        }
         return materialized.dup();
     }
 
     fn finishMaterializedAccessorAutoInit(self: *Object, index: usize, info: property.AutoInit, materialized: property.Accessor) JSValue {
-        _ = info;
-        self.installMaterializedAccessorAutoInit(index, materialized);
-        return materialized.getter.dup();
+        if (!self.installMaterializedAccessorAutoInit(info.rt, index, materialized)) {
+            materialized.destroy(info.rt);
+            return JSValue.undefinedValue();
+        }
+        return materialized.getterValue().dup();
     }
 
-    fn installMaterializedAutoInit(self: *Object, index: usize, materialized: JSValue) void {
+    /// Promote an auto_init placeholder to a real `.data` slot AND flip the
+    /// shape `Flags.kind` from `.auto_init` to `.data` in lockstep. The shape
+    /// is made unique first so a placeholder shared by several objects is not
+    /// corrupted. Returns false (without installing) if the shape clone OOMs;
+    /// the caller then falls back to `undefined` and leaves the placeholder
+    /// intact for a later retry. Mirrors qjs `JS_AutoInitProperty` clearing the
+    /// `JS_PROP_TMASK` to NORMAL on materialization.
+    fn installMaterializedAutoInit(self: *Object, rt: *JSRuntime, index: usize, materialized: JSValue) bool {
+        const new_flags = self.propFlagsAt(index).withKind(.data);
+        self.ensureUniqueShapeForMutation(rt) catch return false;
         self.properties[index].slot = .{ .data = materialized };
+        rt.shapes.updatePropertyFlags(self.shape_ref, index, new_flags.bits());
+        return true;
     }
 
-    fn installMaterializedAccessorAutoInit(self: *Object, index: usize, materialized: property.Accessor) void {
-        // Accessor auto-init placeholders are installed with
-        // `flags.accessor` already set (asserted by the define paths),
-        // so the shape-side flags need no update here.
-        std.debug.assert(self.propFlagsAt(index).accessor);
+    fn installMaterializedAccessorAutoInit(self: *Object, rt: *JSRuntime, index: usize, materialized: property.Accessor) bool {
+        const new_flags = self.propFlagsAt(index).withKind(.accessor);
+        self.ensureUniqueShapeForMutation(rt) catch return false;
         self.properties[index].slot = .{ .accessor = materialized };
+        rt.shapes.updatePropertyFlags(self.shape_ref, index, new_flags.bits());
+        return true;
     }
 
     fn materializeAutoInitEntryForMutation(self: *Object, index: usize) !void {
         if (index >= self.properties.len) return error.IncompatibleDescriptor;
-        const entry = self.properties[index];
-        if (entry.slot != .auto_init) return;
-        const info = property.autoInit(entry.slot.auto_init).*;
+        if (!self.isAutoInitAt(index)) return;
+        const info = property.autoInit(self.properties[index].slot.auto_init).*;
         const transient = materializeAutoInit(self, index, info);
         transient.free(info.rt);
-        if (self.properties[index].slot == .auto_init) return error.OutOfMemory;
+        if (self.isAutoInitAt(index)) return error.OutOfMemory;
+    }
+
+    /// True if the own property at `index` is an accessor — either a
+    /// materialized accessor, or an auto_init placeholder destined to
+    /// materialize into one (`info.kind == .native_accessor`). Lets the
+    /// set/define paths preserve lazy materialization for data placeholders
+    /// while still forcing accessor placeholders through their accessor branch.
+    fn isAccessorOrAccessorPlaceholderAt(self: *const Object, index: usize) bool {
+        const flags = self.propFlagsAt(index);
+        if (flags.deleted) return false;
+        if (flags.kind == .accessor) return true;
+        if (flags.kind == .auto_init) {
+            return property.autoInit(self.properties[index].slot.auto_init).kind == .native_accessor;
+        }
+        return false;
     }
 
     fn materializeNumberConstantAutoInit(info: property.AutoInit) ?JSValue {
@@ -7129,10 +7250,7 @@ pub const Object = struct {
             }
             break :setter setter_value;
         } else JSValue.undefinedValue();
-        return .{
-            .getter = getter,
-            .setter = setter,
-        };
+        return property.Accessor.fromOwnedValues(getter, setter);
     }
 
     fn nativeAccessorAutoInitSetterLength(info: property.AutoInit) ?i32 {
@@ -7490,6 +7608,35 @@ pub const Object = struct {
         return objectFromValue(prototype_value);
     }
 
+    /// Materialize a lazy `function.prototype` placeholder (qjs
+    /// `js_instantiate_prototype`, quickjs.c:17341). `self` is the owner
+    /// function object; the prototype's [[Prototype]] is the function's realm
+    /// `Object.prototype`, and `constructor` points back at `self`
+    /// (writable, non-enumerable, configurable) — installed only here, so the
+    /// `func <-> prototype.constructor` cycle forms lazily, never for a
+    /// function whose `.prototype` is never observed.
+    fn materializeFunctionPrototypeAutoInit(self: *Object, info: property.AutoInit) ?JSValue {
+        const rt = info.rt;
+        const parent: ?*Object = if (self.functionRealmGlobalPtr()) |realm_global|
+            objectPrototypeFromGlobalForAutoInit(rt, realm_global)
+        else
+            null;
+        const prototype = Object.create(rt, class.ids.object, parent) catch return null;
+        var prototype_owned = true;
+        errdefer if (prototype_owned) Object.destroyFromHeader(rt, &prototype.header);
+        prototype.defineOwnProperty(rt, atom.ids.constructor, descriptor.Descriptor.data(self.value(), true, false, true)) catch return null;
+        prototype_owned = false;
+        return prototype.value();
+    }
+
+    /// Install the lazy `function.prototype` auto-init placeholder on a freshly
+    /// created function object. Shares the single interned descriptor so the
+    /// `auto_init_table` does not grow per function.
+    pub fn defineFunctionPrototypeAutoInit(self: *Object, rt: *JSRuntime, flags: property.Flags) !void {
+        const ref = try rt.functionPrototypeAutoInitRef();
+        try self.appendPreparedPropertyEntry(rt, atom.ids.prototype, flags.withKind(.auto_init), .{ .auto_init = ref });
+    }
+
     fn arrayPrototypeFromGlobalForAutoInit(rt: *JSRuntime, global: *Object) ?*Object {
         if (global.cachedRealmValue(.array_prototype)) |stored| {
             if (objectFromValue(stored)) |prototype| return prototype;
@@ -7511,11 +7658,8 @@ pub const Object = struct {
     pub fn getOwnDataObjectBorrowed(self: *const Object, atom_id: atom.Atom) ?*Object {
         if (self.hasExoticMethods()) return null;
         if (self.findProperty(atom_id)) |index| {
-            if (self.propFlagsAt(index).accessor) return null;
-            return switch (self.properties[index].slot) {
-                .data => |stored| objectFromValue(stored),
-                .var_ref, .auto_init, .accessor, .deleted => null,
-            };
+            const stored = self.asDataAt(index) orelse return null;
+            return objectFromValue(stored);
         }
         return null;
     }
@@ -7523,11 +7667,8 @@ pub const Object = struct {
     pub fn getOwnDataPropertyLookup(self: *const Object, atom_id: atom.Atom) ?DataPropertyLookup {
         if (self.hasExoticMethods()) return null;
         if (self.findProperty(atom_id)) |index| {
-            if (self.propFlagsAt(index).accessor) return null;
-            return switch (self.properties[index].slot) {
-                .data => |stored| .{ .index = index, .value = stored.dup() },
-                .var_ref, .auto_init, .accessor, .deleted => null,
-            };
+            const stored = self.asDataAt(index) orelse return null;
+            return .{ .index = index, .value = stored.dup() };
         }
         return null;
     }
@@ -7536,11 +7677,8 @@ pub const Object = struct {
         if (self.hasExoticMethods() or index >= self.shapeProps().len) return null;
         const prop = self.shape_ref.props[index];
         const prop_flags = property.Flags.fromBits(prop.flags);
-        if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.accessor) return null;
-        return switch (self.properties[index].slot) {
-            .data => |stored| stored.dup(),
-            .var_ref, .auto_init, .accessor, .deleted => null,
-        };
+        if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.kind != .data) return null;
+        return self.properties[index].slot.data.dup();
     }
 
     pub fn getDenseArrayElementValue(self: *const Object, index: u32) ?JSValue {
@@ -7648,13 +7786,14 @@ pub const Object = struct {
 
         if (self.findProperty(atom_id)) |index| {
             try self.ensureUniqueShapeForMutation(rt);
+            const old_flags = self.propFlagsAt(index);
             const entry = &self.properties[index];
             const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
             const old_slot = entry.slot;
             entry.slot = .{ .data = next_value };
             rt.shapes.updatePropertyFlags(self.shape_ref, index, property.Flags.data(true, true, true).bits());
-            destroyPropertySlot(rt, atom_id, old_slot);
+            destroyPropertySlot(rt, atom_id, old_flags, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
         }
@@ -7755,7 +7894,7 @@ pub const Object = struct {
         // (name, length, rt) triple stored in the runtime auto-init table.
         // The atom is still retained the same way `addProperty` would, via
         // `rt.shapes.addProperty` -> `atoms.dup`.
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = name,
             .length = length,
             .rt = rt,
@@ -7788,7 +7927,7 @@ pub const Object = struct {
         else
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = name,
             .length = length,
             .rt = rt,
@@ -7809,7 +7948,7 @@ pub const Object = struct {
         realm_global: ?*Object,
         getter_native_builtin_id: i32,
     ) !void {
-        std.debug.assert(flags.accessor);
+        std.debug.assert(flags.isAccessor());
         std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
@@ -7820,7 +7959,7 @@ pub const Object = struct {
         else
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = getter_name,
             .length = getter_length,
             .rt = rt,
@@ -7843,7 +7982,7 @@ pub const Object = struct {
         getter_native_builtin_id: i32,
         setter_native_builtin_id: i32,
     ) !void {
-        std.debug.assert(flags.accessor);
+        std.debug.assert(flags.isAccessor());
         std.debug.assert(setter_length > 0);
         std.debug.assert(setter_native_builtin_id >= 0);
         std.debug.assert(!self.hasExoticMethods());
@@ -7856,7 +7995,7 @@ pub const Object = struct {
         else
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = getter_name,
             .length = getter_length,
             .rt = rt,
@@ -7886,10 +8025,11 @@ pub const Object = struct {
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
         if (self.findProperty(atom_id)) |index| {
-            if (self.properties[index].slot != .auto_init) return error.TypeError;
-            if (self.propFlagsAt(index).bits() != flags.bits()) {
+            if (!self.isAutoInitAt(index)) return error.TypeError;
+            const ai_flags = flags.withKind(.auto_init);
+            if (self.propFlagsAt(index).bits() != ai_flags.bits()) {
                 try self.ensureUniqueShapeForMutation(rt);
-                rt.shapes.updatePropertyFlags(self.shape_ref, index, flags.bits());
+                rt.shapes.updatePropertyFlags(self.shape_ref, index, ai_flags.bits());
             }
             self.properties[index].slot = .{ .auto_init = try property.internAutoInit(rt, .{
                 .name = name,
@@ -7918,7 +8058,7 @@ pub const Object = struct {
         std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = "navigator",
             .length = 0,
             .rt = rt,
@@ -7941,7 +8081,7 @@ pub const Object = struct {
         std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = "console",
             .length = 0,
             .rt = rt,
@@ -7963,7 +8103,7 @@ pub const Object = struct {
         std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = "performance",
             .length = 0,
             .rt = rt,
@@ -7991,7 +8131,7 @@ pub const Object = struct {
         std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = name,
             .length = 0,
             .rt = rt,
@@ -8009,7 +8149,7 @@ pub const Object = struct {
     ) !void {
         std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = "[Symbol.unscopables]",
             .length = 0,
             .rt = rt,
@@ -8029,7 +8169,7 @@ pub const Object = struct {
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = name,
             .length = 0,
             .rt = rt,
@@ -8050,7 +8190,7 @@ pub const Object = struct {
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = name,
             .length = constant_value,
             .rt = rt,
@@ -8070,7 +8210,7 @@ pub const Object = struct {
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = bytes,
             .length = 0,
             .rt = rt,
@@ -8090,12 +8230,13 @@ pub const Object = struct {
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
-        std.debug.assert(!flags.accessor);
+        std.debug.assert(!flags.isAccessor());
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
         if (self.findProperty(atom_id)) |index| {
             if (!self.propFlagsAt(index).configurable) return error.IncompatibleDescriptor;
             try self.ensureUniqueShapeForMutation(rt);
+            const old_flags = self.propFlagsAt(index);
             const entry = &self.properties[index];
             const old_slot = entry.slot;
             entry.slot = .{ .auto_init = try property.internAutoInit(rt, .{
@@ -8105,13 +8246,13 @@ pub const Object = struct {
                 .kind = .empty_array,
                 .host_function_realm_global = @intFromPtr(realm_global),
             }) };
-            rt.shapes.updatePropertyFlags(self.shape_ref, index, flags.bits());
-            destroyPropertySlot(rt, atom_id, old_slot);
+            rt.shapes.updatePropertyFlags(self.shape_ref, index, flags.withKind(.auto_init).bits());
+            destroyPropertySlot(rt, atom_id, old_flags, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             try rt.registerBorrowedReferenceHolder(self);
             return;
         }
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = "empty array",
             .length = 0,
             .rt = rt,
@@ -8169,7 +8310,7 @@ pub const Object = struct {
         else
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = name,
             .length = length,
             .rt = rt,
@@ -8195,27 +8336,38 @@ pub const Object = struct {
     }
 
     pub fn appendDenseArrayIndex(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (!self.flags.is_array or index != self.arrayLength() or !self.flags.length_writable) return false;
+        // qjs add_fast_array_element (quickjs.c:9542-9570): the dense append
+        // gate is `idx == count`, NOT `idx == length`. A holey array (length >
+        // count) can append at `count`; `length` is bumped to `index+1` only
+        // when it grows past the current length.
+        if (!self.flags.is_array or index != self.array_count or !self.flags.length_writable) return false;
         if (self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
         if (!self.flags.extensible) return false;
         if (self.properties.len != 0 and self.findProperty(atom_id) != null) return false;
         if (self.getPrototype()) |proto| {
+            // Filling a hole (`index < array_length`) is an ordinary [[Set]] of a
+            // missing index that must consult inherited setters / proxy traps; a
+            // proxy or exotic anywhere in the chain can intercept it, so bail to
+            // the full [[Set]] path. (A true logical-end append `index ==
+            // array_length` needs only the inherited-data-property guard below.)
+            if (index < self.array_length and arrayPrototypeChainHasInterceptingSet(proto)) return false;
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt) and proto.hasProperty(atom_id)) return false;
         }
 
-        if (index != self.array_count) return false;
         const element_slot = try self.appendUninitializedFastArraySlot(rt);
         element_slot.* = new_value.dup();
+        if (index + 1 > self.array_length) self.array_length = index + 1;
         self.markIndexedProperties(rt);
         return true;
     }
 
     pub fn appendDenseArrayValues(self: *Object, rt: *JSRuntime, start: u32, values: []const JSValue) !bool {
         if (values.len == 0) return true;
-        if (!self.flags.is_array or start != self.arrayLength() or !self.flags.length_writable) return false;
+        // Dense append gate keys off the dense extent (array_count), not the
+        // logical length: a holey array appends at count. See add_fast_array_element.
+        if (!self.flags.is_array or start != self.array_count or !self.flags.length_writable) return false;
         if (self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
         if (!self.flags.extensible) return false;
-        if (start != self.array_count) return false;
         const added: u32 = std.math.cast(u32, values.len) orelse return false;
         const limit = std.math.add(u32, start, added) catch return false;
         if (limit > array.max_array_length) return false;
@@ -8239,13 +8391,14 @@ pub const Object = struct {
             element_index += 1;
         }
         self.setFastArrayCountAssumeCapacity(limit);
+        if (limit > self.array_length) self.array_length = limit;
         self.markIndexedProperties(rt);
         return true;
     }
 
     pub fn initDenseArrayIndexZeroAssumingEmpty(self: *Object, rt: *JSRuntime, new_value: JSValue) !void {
         std.debug.assert(self.flags.is_array);
-        std.debug.assert(self.arrayLength() == 0);
+        std.debug.assert(self.array_count == 0);
         std.debug.assert(self.flags.length_writable);
         std.debug.assert(self.flags.extensible);
         std.debug.assert(self.arrayElements().len == 0);
@@ -8253,28 +8406,30 @@ pub const Object = struct {
 
         const element_slot = try self.appendUninitializedFastArraySlot(rt);
         element_slot.* = new_value.dup();
+        if (self.array_length < 1) self.array_length = 1;
         self.markIndexedProperties(rt);
     }
 
     pub fn appendDenseArrayLiteralIndex(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !bool {
-        if (!self.flags.is_array or index != self.arrayLength() or !self.flags.length_writable) return false;
+        if (!self.flags.is_array or index != self.array_count or !self.flags.length_writable) return false;
         if (!self.flags.extensible) return false;
 
-        if (index != self.array_count) return false;
         const element_slot = try self.appendUninitializedFastArraySlot(rt);
         element_slot.* = new_value.dup();
+        if (index + 1 > self.array_length) self.array_length = index + 1;
         self.markIndexedProperties(rt);
         return true;
     }
 
     pub fn initDenseArrayLiteralValuesAssumingEmpty(self: *Object, rt: *JSRuntime, values: []const JSValue) !bool {
         if (!self.flags.is_array or !self.flags.length_writable or !self.flags.extensible) return false;
-        if (self.arrayLength() != 0 or self.properties.len != 0) return false;
+        if (self.array_count != 0 or self.array_length != 0 or self.properties.len != 0) return false;
         if (self.arrayElementStorageMode() != .dense) return false;
         if (values.len > array.max_array_length) return false;
 
         try self.ensureArrayElementCapacity(rt, values.len);
         self.setFastArrayCountAssumeCapacity(@intCast(values.len));
+        self.array_length = @intCast(values.len);
         for (values, 0..) |item, index| {
             const element_slot = &self.array_values[index];
             element_slot.* = item.dup();
@@ -8285,17 +8440,17 @@ pub const Object = struct {
 
     pub fn appendDenseArrayInt32Range(self: *Object, rt: *JSRuntime, start: u32, limit: u32) !bool {
         if (!self.flags.is_array or self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
-        if (start != self.arrayLength() or start >= limit or !self.flags.length_writable or !self.flags.extensible) return false;
+        if (start != self.array_count or start >= limit or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.getPrototype()) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
         }
 
         const start_index: usize = @intCast(start);
         const limit_index: usize = @intCast(limit);
-        if (start != self.array_count) return false;
 
         try self.ensureArrayElementCapacity(rt, limit_index);
         self.setFastArrayCountAssumeCapacity(limit);
+        if (limit > self.array_length) self.array_length = limit;
         self.markIndexedProperties(rt);
 
         var index = start_index;
@@ -8308,7 +8463,7 @@ pub const Object = struct {
     pub fn appendDenseArrayInt32ValueRange(self: *Object, rt: *JSRuntime, start_index: u32, start_value: i32, count: u32) !bool {
         if (count == 0) return true;
         if (!self.flags.is_array or self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
-        if (start_index != self.arrayLength() or !self.flags.length_writable or !self.flags.extensible) return false;
+        if (start_index != self.array_count or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.getPrototype()) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
         }
@@ -8322,10 +8477,10 @@ pub const Object = struct {
 
         const start_element: usize = @intCast(start_index);
         const limit_element: usize = @intCast(limit);
-        if (start_element != self.array_count) return false;
 
         try self.ensureArrayElementCapacity(rt, limit_element);
         self.setFastArrayCountAssumeCapacity(limit);
+        if (limit > self.array_length) self.array_length = limit;
         self.markIndexedProperties(rt);
 
         var offset: u32 = 0;
@@ -8342,7 +8497,7 @@ pub const Object = struct {
         if (start_index >= limit) return true;
         if (multiplier < 0 or mask < 0) return false;
         if (!self.flags.is_array or self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
-        if (start_index != self.arrayLength() or !self.flags.length_writable or !self.flags.extensible) return false;
+        if (start_index != self.array_count or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.getPrototype()) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
         }
@@ -8355,10 +8510,10 @@ pub const Object = struct {
 
         const start_element: usize = @intCast(start_index);
         const limit_element: usize = @intCast(limit);
-        if (start_element != self.array_count) return false;
 
         try self.ensureArrayElementCapacity(rt, limit_element);
         self.setFastArrayCountAssumeCapacity(limit);
+        if (limit > self.array_length) self.array_length = limit;
         self.markIndexedProperties(rt);
 
         var index = start_element;
@@ -8419,9 +8574,13 @@ pub const Object = struct {
         if (appended) {
             if (!self.flags.extensible) return false;
             if (index >= self.arrayLength() and !self.flags.length_writable) return false;
+            // Dense append stays on the fully-dense end (index == count == length);
+            // a holey array (count < length) falls through to the caller's slow
+            // path. This preserves the qjs add_fast_array_element invariant.
             if (index != self.arrayLength()) return false;
             try self.ensureArrayElementCapacity(rt, element_index + 1);
             self.setFastArrayCountAssumeCapacity(index + 1);
+            if (index + 1 > self.array_length) self.array_length = index + 1;
         }
 
         const next_value = new_value.dup();
@@ -8451,6 +8610,21 @@ pub const Object = struct {
         return true;
     }
 
+    /// True if any object in the prototype chain is a proxy or carries exotic
+    /// methods that could intercept a [[Set]] of an arbitrary key (e.g. a proxy
+    /// `set` trap). A dense fast-array append into a HOLE position relies on the
+    /// generic [[Set]] having found no inherited setter (faithful to qjs, which
+    /// reaches add_fast_array_element only after the prototype walk); such an
+    /// interceptor must be honored, so the dense append bails to the full path.
+    fn arrayPrototypeChainHasInterceptingSet(proto: *Object) bool {
+        var cursor: ?*Object = proto;
+        while (cursor) |object| {
+            if (object.proxyTarget() != null or object.hasExoticMethods()) return true;
+            cursor = object.getPrototype();
+        }
+        return false;
+    }
+
     pub fn canDefineDenseArrayDataPropertiesUnchecked(self: Object) bool {
         return self.flags.is_array and
             !self.hasExoticMethods() and
@@ -8470,6 +8644,7 @@ pub const Object = struct {
         if (appended) {
             try self.ensureArrayElementCapacity(rt, element_index + 1);
             self.setFastArrayCountAssumeCapacity(index + 1);
+            if (index + 1 > self.array_length) self.array_length = index + 1;
         }
 
         const next_value = new_value.dup();
@@ -8504,20 +8679,39 @@ pub const Object = struct {
             return;
         }
         if (self.findProperty(atom_id)) |index| {
-            const entry_flags = self.propFlagsAt(index);
-            if (entry_flags.accessor) {
+            // Accessor (or accessor-destined placeholder): materialize so the
+            // real getter/setter exist, then route to the setter.
+            if (self.isAccessorOrAccessorPlaceholderAt(index)) {
                 try self.materializeAutoInitEntryForMutation(index);
                 const entry = &self.properties[index];
-                if (entry.slot.accessor.setter.isUndefined()) return error.AccessorWithoutSetter;
+                if (entry.slot.accessor.setterIsUndefined()) return error.AccessorWithoutSetter;
                 return;
             }
+            const entry_flags = self.propFlagsAt(index);
             if (!entry_flags.writable) return error.ReadOnly;
             const entry = &self.properties[index];
+            if (entry_flags.kind == .var_ref) {
+                const cell = entry.slot.var_ref;
+                const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
+                errdefer next_value.free(rt);
+                try cell.setVarRefValue(rt, next_value);
+                cell.varRefIsDeletedSlot().* = false;
+                return;
+            }
+            // Data or data-destined auto_init placeholder: overwrite with the
+            // new value. A placeholder's lazy default is simply discarded; flip
+            // the kind to `.data` in lockstep so the cell and shape stay in sync.
             const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
-            const old_slot = entry.slot;
-            entry.slot = .{ .data = next_value };
-            destroyPropertySlot(rt, atom_id, old_slot);
+            if (entry_flags.kind == .data) {
+                const old_slot = entry.slot;
+                entry.slot = .{ .data = next_value };
+                destroyPropertySlot(rt, atom_id, entry_flags, old_slot);
+            } else {
+                // auto_init data placeholder: needs the shape kind flip.
+                try self.ensureUniqueShapeForMutation(rt);
+                self.setEntryKindAndSlot(rt, atom_id, index, entry_flags.withKind(.data), .{ .data = next_value });
+            }
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
         }
@@ -8527,13 +8721,14 @@ pub const Object = struct {
         var prototype = self.getPrototype();
         while (prototype) |proto| {
             if (proto.findProperty(atom_id)) |index| {
-                const inherited_flags = proto.propFlagsAt(index);
-                if (inherited_flags.accessor) {
+                const is_accessor = proto.isAccessorOrAccessorPlaceholderAt(index);
+                if (is_accessor) {
                     try proto.materializeAutoInitEntryForMutation(index);
+                    const inherited = proto.properties[index];
+                    if (inherited.slot.accessor.setterIsUndefined()) return error.AccessorWithoutSetter;
+                } else if (!proto.propFlagsAt(index).writable) {
+                    return error.ReadOnly;
                 }
-                const inherited = proto.properties[index];
-                if (inherited_flags.accessor and inherited.slot.accessor.setter.isUndefined()) return error.AccessorWithoutSetter;
-                if (!inherited_flags.accessor and !inherited_flags.writable) return error.ReadOnly;
             }
             prototype = proto.getPrototype();
         }
@@ -8550,83 +8745,68 @@ pub const Object = struct {
         }
         if (self.findProperty(atom_id)) |index| {
             const entry_flags = self.propFlagsAt(index);
-            if (entry_flags.accessor) return false;
+            // Accessor (incl. accessor-destined auto_init placeholder): not a
+            // writable data slot.
+            if (self.isAccessorOrAccessorPlaceholderAt(index)) return false;
             if (!entry_flags.writable) return false;
             const entry = &self.properties[index];
             if (atom_id != atom.ids.Private_brand) {
-                switch (entry.slot) {
-                    .data => |*stored| {
+                switch (entry_flags.kind) {
+                    .data => {
+                        const stored = &entry.slot.data;
                         if (!stored.requiresRefCount() and !new_value.requiresRefCount()) {
                             stored.* = new_value;
                             return true;
                         }
                     },
-                    // VARREF slots are written through the cell via putVar, never
-                    // here; refuse the fast path so we never overwrite the slot.
-                    .var_ref => return false,
-                    .auto_init, .accessor, .deleted => {},
+                    .var_ref => {
+                        const cell = entry.slot.var_ref;
+                        const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
+                        errdefer next_value.free(rt);
+                        try cell.setVarRefValue(rt, next_value);
+                        cell.varRefIsDeletedSlot().* = false;
+                        return true;
+                    },
+                    // Data-destined auto_init placeholder: overwrite with the new
+                    // value, discarding the lazy default, and flip the kind in
+                    // lockstep so the cell and shape stay in sync.
+                    .auto_init => {
+                        const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
+                        errdefer next_value.free(rt);
+                        try self.ensureUniqueShapeForMutation(rt);
+                        self.setEntryKindAndSlot(rt, atom_id, index, entry_flags.withKind(.data), .{ .data = next_value });
+                        self.pruneBorrowedReferenceHolderIfEmpty(rt);
+                        return true;
+                    },
+                    .accessor => unreachable, // excluded above
                 }
             }
+            // Data overwrite (Private_brand also lands here). Only reachable for
+            // the `.data` kind; var_ref/auto_init/accessor returned above.
             const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
             const old_slot = entry.slot;
             entry.slot = .{ .data = next_value };
-            destroyPropertySlot(rt, atom_id, old_slot);
+            destroyPropertySlot(rt, atom_id, entry_flags, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return true;
         }
         return false;
     }
 
-    pub inline fn setOwnDataPropertyAtForLexicalSync(self: *Object, rt: *JSRuntime, index: usize, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (self.hasExoticMethods() or index >= self.shapeProps().len) return false;
-        const prop = self.shape_ref.props[index];
-        const prop_flags = property.Flags.fromBits(prop.flags);
-        if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.accessor) return false;
-        const entry = &self.properties[index];
-        switch (entry.slot) {
-            .data => |*stored| {
-                if (!prop_flags.writable and !stored.isUninitialized()) return false;
-                if (atom_id == atom.ids.Private_brand) {
-                    const next = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
-                    errdefer next.free(rt);
-                    const old = stored.*;
-                    stored.* = next;
-                    destroyPropertySlot(rt, atom_id, .{ .data = old });
-                    return true;
-                }
-                if (!stored.requiresRefCount() and !new_value.requiresRefCount()) {
-                    stored.* = new_value;
-                    return true;
-                }
-                const next = new_value.dup();
-                errdefer next.free(rt);
-                const old = stored.*;
-                stored.* = next;
-                old.free(rt);
-                return true;
-            },
-            .var_ref, .auto_init, .accessor, .deleted => return false,
-        }
-    }
-
     pub inline fn setOwnDataPropertyAtForLexicalSyncOwned(self: *Object, rt: *JSRuntime, index: usize, atom_id: atom.Atom, new_value: JSValue) !bool {
         if (self.hasExoticMethods() or index >= self.shapeProps().len) return false;
         const prop = self.shape_ref.props[index];
         const prop_flags = property.Flags.fromBits(prop.flags);
-        if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.accessor) return false;
+        if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.kind != .data) return false;
         const entry = &self.properties[index];
-        switch (entry.slot) {
-            .data => |*stored| {
-                if (!prop_flags.writable and !stored.isUninitialized()) return false;
-                if (atom_id == atom.ids.Private_brand) return false;
-                const old = stored.*;
-                stored.* = new_value;
-                old.free(rt);
-                return true;
-            },
-            .var_ref, .auto_init, .accessor, .deleted => return false,
-        }
+        const stored = &entry.slot.data;
+        if (!prop_flags.writable and !stored.isUninitialized()) return false;
+        if (atom_id == atom.ids.Private_brand) return false;
+        const old = stored.*;
+        stored.* = new_value;
+        old.free(rt);
+        return true;
     }
 
     pub fn setOrDefineOwnDataPropertyForSimpleSet(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !bool {
@@ -8638,12 +8818,13 @@ pub const Object = struct {
         }
         if (self.findProperty(atom_id)) |index| {
             const entry_flags = self.propFlagsAt(index);
-            if (entry_flags.accessor) return false;
+            if (self.isAccessorOrAccessorPlaceholderAt(index)) return false;
             if (!entry_flags.writable) return false;
             const entry = &self.properties[index];
             if (atom_id != atom.ids.Private_brand) {
-                switch (entry.slot) {
-                    .data => |*stored| {
+                switch (entry_flags.kind) {
+                    .data => {
+                        const stored = &entry.slot.data;
                         if (!stored.requiresRefCount() and !new_value.requiresRefCount()) {
                             stored.* = new_value;
                             return true;
@@ -8652,14 +8833,23 @@ pub const Object = struct {
                     // VARREF slots are written through the cell via putVar, never
                     // here; refuse the fast path so we never overwrite the slot.
                     .var_ref => return false,
-                    .auto_init, .accessor, .deleted => {},
+                    // Data-destined auto_init placeholder: overwrite + flip kind.
+                    .auto_init => {
+                        const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
+                        errdefer next_value.free(rt);
+                        try self.ensureUniqueShapeForMutation(rt);
+                        self.setEntryKindAndSlot(rt, atom_id, index, entry_flags.withKind(.data), .{ .data = next_value });
+                        self.pruneBorrowedReferenceHolderIfEmpty(rt);
+                        return true;
+                    },
+                    .accessor => unreachable, // excluded above
                 }
             }
             const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
             const old_slot = entry.slot;
             entry.slot = .{ .data = next_value };
-            destroyPropertySlot(rt, atom_id, old_slot);
+            destroyPropertySlot(rt, atom_id, entry_flags, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return true;
         }
@@ -8747,22 +8937,20 @@ pub const Object = struct {
     }
 
     fn deleteOrdinaryPropertyAt(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, index: usize) bool {
-        if (!self.propFlagsAt(index).configurable) return false;
+        const old_flags = self.propFlagsAt(index);
+        if (!old_flags.configurable) return false;
         self.ensureUniqueShapeForMutation(rt) catch return false;
         const entry = &self.properties[index];
         const old_slot = entry.slot;
-        entry.slot = .deleted;
-        var entry_flags = self.propFlagsAt(index);
-        entry_flags.deleted = true;
-        entry_flags.accessor = false;
-        entry_flags.writable = false;
-        rt.shapes.markPropertyDeleted(self.shape_ref, index, entry_flags.bits());
+        // `deleted` is a flag bit, not a kind/arm: keep a harmless data cell.
+        entry.slot = .{ .data = JSValue.undefinedValue() };
+        rt.shapes.markPropertyDeleted(self.shape_ref, index, old_flags.asDeleted().bits());
         if (self.class_id == class.ids.mapped_arguments) {
             if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |mapped_index| {
                 if (mapped_index < self.argumentsVarRefs().len) self.deleteMappedArgumentsBinding(rt, mapped_index);
             }
         }
-        destroyPropertySlot(rt, atom_id, old_slot);
+        destroyPropertySlot(rt, atom_id, old_flags, old_slot);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
         return true;
     }
@@ -8781,6 +8969,15 @@ pub const Object = struct {
         if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |array_index| {
             const element_index: usize = @intCast(array_index);
             if (element_index < self.arrayElements().len) {
+                // T2: delete an in-dense element. We materialize the dense run
+                // to sparse index properties and delete the one index. This is
+                // observationally identical to qjs's tail-delete cheap hole
+                // (the index becomes absent, `.length` is preserved because the
+                // convert now restores `array_length`), and crucially it routes
+                // the element's finalizer through the deferred class-payload
+                // machinery instead of finalizing inline (finalizer-reentrancy
+                // safety — see "dense array delete defers element finalizer
+                // reentry"). The cheap inline tail-hole would re-enter.
                 self.convertDenseArrayElementsToSparseProperties(rt) catch return false;
                 const index = self.findProperty(atom_id) orelse return true;
                 return self.deleteOrdinaryPropertyAt(rt, atom_id, index);
@@ -8887,7 +9084,7 @@ pub const Object = struct {
         try self.seal(rt);
         for (0..self.properties.len) |index| {
             var entry_flags = self.propFlagsAt(index);
-            if (entry_flags.deleted or entry_flags.accessor or !entry_flags.writable) continue;
+            if (entry_flags.deleted or entry_flags.isAccessor() or !entry_flags.writable) continue;
             entry_flags.writable = false;
             rt.shapes.updatePropertyFlags(self.shape_ref, index, entry_flags.bits());
         }
@@ -8947,7 +9144,10 @@ pub const Object = struct {
             if (target_len != self.arrayLength() or (desc.writable orelse false)) return error.IncompatibleDescriptor;
         }
         if (target_len > self.arrayLength() and !self.flags.length_writable) return error.ReadOnly;
-        if (target_len > self.arrayLength()) try self.convertDenseArrayElementsToSparseProperties(rt);
+        // Growing `.length` keeps the fast array and just creates tail holes in
+        // `[count, target_len)` — faithful to set_array_length (quickjs.c:9447-9455),
+        // which leaves count untouched and never drops to sparse. (The trailing
+        // setArrayLength(target_len) below performs the grow.)
         if (target_len < self.arrayLength()) {
             var i = self.properties.len;
             while (i > 0) {
@@ -9009,7 +9209,12 @@ pub const Object = struct {
 
     pub fn convertDenseArrayElementsToSparseProperties(self: *Object, rt: *JSRuntime) !void {
         if (!self.flags.is_array or !self.flags.fast_array) return;
-        const old_length = self.array_count;
+        // Preserve the JS-observable length, not the dense extent. qjs
+        // convert_fast_array_to_array (quickjs.c:9244) materializes only the
+        // live `[0, count)` slots into index properties; the holes in
+        // `[count, length)` stay genuinely absent on the sparse array. Length
+        // is unchanged by the conversion.
+        const saved_length = self.array_length;
         const elements = self.arrayElements();
         for (elements, 0..) |stored, index| {
             const atom_id = atom.atomFromUInt32(@intCast(index));
@@ -9019,7 +9224,8 @@ pub const Object = struct {
         for (elements) |stored| stored.free(rt);
         self.array_count = 0;
         self.freeArrayElementBufferAfterMove(rt);
-        self.array_count = old_length;
+        // Sparse array: count stays 0, length is the JS-observable `.length`.
+        self.array_length = saved_length;
     }
 
     fn denseArrayElement(self: *const Object, atom_id: atom.Atom) ?JSValue {
@@ -9070,7 +9276,7 @@ pub const Object = struct {
         const atom_guard = rt.atoms.dup(atom_id);
         defer rt.atoms.free(atom_guard);
         var slot_owned = true;
-        errdefer if (slot_owned) destroyPropertySlot(rt, atom_id, slot);
+        errdefer if (slot_owned) destroyPropertySlot(rt, atom_id, entry_flags, slot);
 
         const old_len = self.properties.len;
         const old_capacity = self.propertyStorageCapacity();
@@ -9096,7 +9302,7 @@ pub const Object = struct {
 
         var inserted = true;
         errdefer if (inserted) {
-            destroyPropertySlot(rt, atom_id, self.properties[old_len].slot);
+            destroyPropertySlot(rt, atom_id, entry_flags, self.properties[old_len].slot);
             self.properties[old_len] = .{};
             self.properties = self.properties.ptr[0..old_len];
             self.flags.may_have_indexed_properties = old_may_have_indexed_properties;
@@ -9169,17 +9375,33 @@ pub const Object = struct {
 
     fn replaceProperty(self: *Object, rt: *JSRuntime, index: usize, desc: descriptor.Descriptor) !void {
         const atom_id = self.propAtomAt(index);
-        const merged = mergeDescriptor(self.propFlagsAt(index), self.properties[index].slot, desc);
+        const old_flags = self.propFlagsAt(index);
+        const merged = mergeDescriptor(old_flags, self.properties[index].slot, desc);
         const next_flags = flagsFromDescriptor(merged);
+        if (old_flags.kind == .var_ref and merged.kind == .data) {
+            // Redefining a VARREF property as data writes THROUGH the cell and
+            // keeps the var_ref slot (so closures still alias it). The kind flag
+            // therefore stays `.var_ref` — only w/e/c bits update; flipping the
+            // kind to `.data` here would desync the cell (slot=var_ref) from the
+            // shape (kind=data) and crash the next read.
+            const cell = self.properties[index].slot.var_ref;
+            const next_value = dupPropertyDataValue(&rt.atoms, atom_id, merged.value);
+            errdefer next_value.free(rt);
+            try self.ensureUniqueShapeForMutation(rt);
+            try cell.setVarRefValue(rt, next_value);
+            cell.varRefIsDeletedSlot().* = false;
+            rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.withKind(.var_ref).bits());
+            return;
+        }
         const next_slot = slotFromDescriptor(&rt.atoms, atom_id, merged);
         var next_owned = true;
-        errdefer if (next_owned) destroyPropertySlot(rt, atom_id, next_slot);
+        errdefer if (next_owned) destroyPropertySlot(rt, atom_id, next_flags, next_slot);
         try self.ensureUniqueShapeForMutation(rt);
         const old_slot = self.properties[index].slot;
         self.properties[index] = .{ .slot = next_slot };
         next_owned = false;
         rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.bits());
-        destroyPropertySlot(rt, atom_id, old_slot);
+        destroyPropertySlot(rt, atom_id, old_flags, old_slot);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
 
@@ -9193,6 +9415,71 @@ pub const Object = struct {
     /// Flags for the own property stored at `index` (see `propAtomAt`).
     pub inline fn propFlagsAt(self: *const Object, index: usize) property.Flags {
         return property.Flags.fromBits(self.shape_ref.props[index].flags);
+    }
+
+    // --- Typed property-slot API (L2 chokepoint) --------------------------
+    //
+    // The property value cell (`property.Slot`) is a 16B untagged union whose
+    // active arm is NOT discriminated in the cell; it is derived from the
+    // owning shape's `Flags.kind` (read via `propFlagsAt`). To keep the arm and
+    // the kind in lockstep, NO call site reads the union by tag — every kind
+    // decision flows through `propKindAt`/the typed getters below, and every
+    // slot+flag write flows through `setEntryKindAndSlot` (or the paired
+    // `slotFromDescriptor`/`flagsFromDescriptor` constructor).
+
+    /// Active arm of the property cell at `index` (derived from shape flags).
+    pub inline fn propKindAt(self: *const Object, index: usize) property.Kind {
+        return self.propFlagsAt(index).kind;
+    }
+
+    /// The stored data value at `index`, or null if the cell is not a data
+    /// property (accessor / var_ref / auto_init / deleted). Borrowed (no dup).
+    pub inline fn asDataAt(self: *const Object, index: usize) ?JSValue {
+        const flags = self.propFlagsAt(index);
+        if (flags.deleted or flags.kind != .data) return null;
+        return self.properties[index].slot.data;
+    }
+
+    /// The stored accessor at `index`, or null if not an accessor property.
+    pub inline fn asAccessorAt(self: *const Object, index: usize) ?property.Accessor {
+        const flags = self.propFlagsAt(index);
+        if (flags.deleted or flags.kind != .accessor) return null;
+        return self.properties[index].slot.accessor;
+    }
+
+    /// The var_ref cell at `index`, or null if not a var_ref property.
+    pub inline fn asVarRefAt(self: *const Object, index: usize) ?*var_ref_mod.VarRef {
+        const flags = self.propFlagsAt(index);
+        if (flags.deleted or flags.kind != .var_ref) return null;
+        return self.properties[index].slot.var_ref;
+    }
+
+    pub inline fn isAutoInitAt(self: *const Object, index: usize) bool {
+        return self.propFlagsAt(index).isAutoInit();
+    }
+
+    pub inline fn isVarRefAt(self: *const Object, index: usize) bool {
+        return self.propFlagsAt(index).isVarRef();
+    }
+
+    /// The single paired mutator for an EXISTING property entry: writes the
+    /// new slot arm AND the shape `Flags.kind` in lockstep, then releases the
+    /// old slot using the OLD flags. The caller must have ensured a unique
+    /// shape for mutation. `next_flags` carries the new kind; `next_slot` must
+    /// match `next_flags.kind`.
+    fn setEntryKindAndSlot(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        index: usize,
+        next_flags: property.Flags,
+        next_slot: property.Slot,
+    ) void {
+        const old_flags = self.propFlagsAt(index);
+        const old_slot = self.properties[index].slot;
+        self.properties[index].slot = next_slot;
+        rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.bits());
+        destroyPropertySlot(rt, atom_id, old_flags, old_slot);
     }
 
     pub const OwnDataPropertyFastLookup = struct {
@@ -9245,22 +9532,16 @@ pub const Object = struct {
     pub fn findOwnDataPropertyFast(self: *const Object, atom_id: atom.Atom) OwnDataPropertyFastResult {
         const lookup = self.findPropertyProbeTrusted(atom_id) orelse return .missing;
         const flags = property.Flags.fromBits(lookup.prop.flags);
-        if (flags.accessor) return .slow;
-        return switch (self.properties[lookup.index].slot) {
-            .data => |stored| .{ .value = .{ .index = lookup.index, .flags = flags, .value = stored } },
-            .var_ref, .auto_init, .accessor, .deleted => .slow,
-        };
+        if (flags.kind != .data) return .slow;
+        return .{ .value = .{ .index = lookup.index, .flags = flags, .value = self.properties[lookup.index].slot.data } };
     }
 
     pub fn findWritableOwnDataPropertyFast(self: *Object, atom_id: atom.Atom) ?WritableOwnDataPropertyFastLookup {
         const lookup = self.findPropertyProbeTrusted(atom_id) orelse return null;
         const flags = property.Flags.fromBits(lookup.prop.flags);
-        if (flags.accessor or !flags.writable) return null;
+        if (flags.kind != .data or !flags.writable) return null;
         const entry = &self.properties[lookup.index];
-        return switch (entry.slot) {
-            .data => |*stored| .{ .index = lookup.index, .flags = flags, .value = stored },
-            .var_ref, .auto_init, .accessor, .deleted => null,
-        };
+        return .{ .index = lookup.index, .flags = flags, .value = &entry.slot.data };
     }
 
     pub fn findProperty(self: *const Object, atom_id: atom.Atom) ?usize {
@@ -9387,10 +9668,7 @@ fn slotFromDescriptor(atoms: *atom.AtomTable, atom_id: atom.Atom, desc: descript
     return switch (desc.kind) {
         .generic => .{ .data = JSValue.undefinedValue() },
         .data => .{ .data = dupPropertyDataValue(atoms, atom_id, desc.value) },
-        .accessor => .{ .accessor = .{
-            .getter = desc.getter.dup(),
-            .setter = desc.setter.dup(),
-        } },
+        .accessor => .{ .accessor = property.Accessor.fromBorrowedValues(desc.getter, desc.setter) },
     };
 }
 
@@ -9403,18 +9681,13 @@ pub fn dupPropertyDataValue(atoms: *atom.AtomTable, atom_id: atom.Atom, value: J
     return value.dup();
 }
 
-pub fn destroyPropertySlot(rt: *JSRuntime, atom_id: atom.Atom, slot: property.Slot) void {
-    if (atom_id == atom.ids.Private_brand) {
-        switch (slot) {
-            .data => |value| {
-                if (value.asSymbolAtom()) |brand_atom| {
-                    if (rt.atoms.kind(brand_atom) == .private) rt.atoms.free(brand_atom);
-                }
-            },
-            .var_ref, .accessor, .auto_init, .deleted => {},
+pub fn destroyPropertySlot(rt: *JSRuntime, atom_id: atom.Atom, flags: property.Flags, slot: property.Slot) void {
+    if (atom_id == atom.ids.Private_brand and !flags.deleted and flags.kind == .data) {
+        if (slot.data.asSymbolAtom()) |brand_atom| {
+            if (rt.atoms.kind(brand_atom) == .private) rt.atoms.free(brand_atom);
         }
     }
-    slot.destroy(rt);
+    slot.destroy(flags, rt);
 }
 
 fn isTypedArrayObjectForSetFastPath(object: *const Object) bool {
@@ -9560,32 +9833,44 @@ fn isCompatible(current_flags: property.Flags, current_slot: property.Slot, desc
     }
     if (desc.kind == .generic) return true;
 
-    const current_is_accessor = current_flags.accessor;
+    const current_is_accessor = current_flags.isAccessor();
     if ((desc.kind == .accessor) != current_is_accessor) return false;
     if (!current_is_accessor and !current_flags.writable) {
         if (desc.writable orelse false) return false;
-        if (desc.kind == .data and desc.value_present and !current_slot.data.sameValue(desc.value)) return false;
+        if (desc.kind == .data and desc.value_present) {
+            const current_value = switch (current_flags.kind) {
+                .data => current_slot.data,
+                .var_ref => current_slot.var_ref.varRefValue(),
+                .accessor, .auto_init => JSValue.undefinedValue(),
+            };
+            if (!current_value.sameValue(desc.value)) return false;
+        }
     }
     if (current_is_accessor and desc.kind == .accessor) {
-        if (current_slot != .accessor) return false;
-        if (desc.getter_present and !current_slot.accessor.getter.sameValue(desc.getter)) return false;
-        if (desc.setter_present and !current_slot.accessor.setter.sameValue(desc.setter)) return false;
+        if (desc.getter_present and !current_slot.accessor.getterValue().sameValue(desc.getter)) return false;
+        if (desc.setter_present and !current_slot.accessor.setterValue().sameValue(desc.setter)) return false;
     }
     return true;
 }
 
 fn mergeDescriptor(current_flags: property.Flags, current_slot: property.Slot, desc: descriptor.Descriptor) descriptor.Descriptor {
     return switch (desc.kind) {
-        .generic => switch (current_slot) {
-            .data => |value| descriptor.Descriptor.data(
-                value,
+        .generic => switch (current_flags.kind) {
+            .data => descriptor.Descriptor.data(
+                current_slot.data,
                 current_flags.writable,
                 desc.enumerable orelse current_flags.enumerable,
                 desc.configurable orelse current_flags.configurable,
             ),
-            .accessor => |accessor| descriptor.Descriptor.accessor(
-                accessor.getter,
-                accessor.setter,
+            .accessor => descriptor.Descriptor.accessor(
+                current_slot.accessor.getterValue(),
+                current_slot.accessor.setterValue(),
+                desc.enumerable orelse current_flags.enumerable,
+                desc.configurable orelse current_flags.configurable,
+            ),
+            .var_ref => descriptor.Descriptor.data(
+                current_slot.var_ref.varRefValue(),
+                current_flags.writable,
                 desc.enumerable orelse current_flags.enumerable,
                 desc.configurable orelse current_flags.configurable,
             ),
@@ -9595,26 +9880,25 @@ fn mergeDescriptor(current_flags: property.Flags, current_slot: property.Slot, d
             // way to hit this with a placeholder) materializes first
             // through the same getProperty path.
             .auto_init => desc,
-            .var_ref => desc,
-            .deleted => desc,
         },
         .data => descriptor.Descriptor.data(
-            if (desc.value_present) desc.value else switch (current_slot) {
-                .data => |value| value,
-                else => desc.value,
+            if (desc.value_present) desc.value else switch (current_flags.kind) {
+                .data => current_slot.data,
+                .var_ref => current_slot.var_ref.varRefValue(),
+                .accessor, .auto_init => desc.value,
             },
-            desc.writable orelse if (current_flags.accessor) false else current_flags.writable,
+            desc.writable orelse if (current_flags.isAccessor()) false else current_flags.writable,
             desc.enumerable orelse current_flags.enumerable,
             desc.configurable orelse current_flags.configurable,
         ),
         .accessor => descriptor.Descriptor.accessor(
-            if (desc.getter_present) desc.getter else switch (current_slot) {
-                .accessor => |accessor| accessor.getter,
-                else => desc.getter,
+            if (desc.getter_present) desc.getter else switch (current_flags.kind) {
+                .accessor => current_slot.accessor.getterValue(),
+                .data, .var_ref, .auto_init => desc.getter,
             },
-            if (desc.setter_present) desc.setter else switch (current_slot) {
-                .accessor => |accessor| accessor.setter,
-                else => desc.setter,
+            if (desc.setter_present) desc.setter else switch (current_flags.kind) {
+                .accessor => current_slot.accessor.setterValue(),
+                .data, .var_ref, .auto_init => desc.setter,
             },
             desc.enumerable orelse current_flags.enumerable,
             desc.configurable orelse current_flags.configurable,
@@ -9757,8 +10041,14 @@ fn entryArrayValue(rt: *JSRuntime, key: atom.Atom, value: JSValue) !JSValue {
     errdefer Object.destroyFromHeader(rt, &arr.header);
     const key_value = try entriesAtomToStringValue(rt, key);
     defer key_value.free(rt);
-    try arr.defineOwnProperty(rt, atom.atomFromUInt32(0), descriptor.Descriptor.data(key_value, true, true, true));
-    try arr.defineOwnProperty(rt, atom.atomFromUInt32(1), descriptor.Descriptor.data(rooted_value, true, true, true));
+    // qjs js_create_array (quickjs.c:9601): pre-sized dense fast array instead of
+    // two per-element defineOwnProperty. key_value/rooted_value stay rooted (the
+    // root_frame above + the local defer) across the slice alloc; dups precede adopt.
+    const elements = try rt.memory.alloc(JSValue, 2);
+    elements[0] = key_value.dup();
+    elements[1] = rooted_value.dup();
+    arr.adoptDenseArrayElementsAssumingEmpty(elements);
+    arr.flags.may_have_indexed_properties = true;
     return arr.value();
 }
 

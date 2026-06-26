@@ -31,9 +31,6 @@ const string_ops = @import("string_ops.zig");
 const ActiveRootValueProbe = call_runtime.ActiveRootValueProbe;
 const IteratorZipRecord = iter_vm.IteratorZipRecord;
 const RegExpMatch = string_ops.RegExpMatch;
-const SimpleCaptureSequenceAtom = regexp_fastpath.SimpleCaptureSequenceAtom;
-const SimpleClassPredicate = regexp_fastpath.SimpleClassPredicate;
-const SimpleNumericArg0Bytecode = call_runtime.SimpleNumericArg0Bytecode;
 const appendAtom = core.atom.appendAtom;
 const atomIdOrNameEql = call_runtime.atomIdOrNameEql;
 const atomListContains = core.atom.atomListContains;
@@ -92,9 +89,6 @@ const qjsObjectEnumerableOwnPropertiesCall = object_ops.qjsObjectEnumerableOwnPr
 const readInt = call_runtime.readInt;
 const sameObjectIdentity = object_ops.sameObjectIdentity;
 const setValueProperty = object_ops.setValueProperty;
-const simpleClassPredicateMatches = string_ops.simpleClassPredicateMatches;
-const simpleNumericArg0Callback = call_runtime.simpleNumericArg0Callback;
-const simpleNumericBinary = call_runtime.simpleNumericBinary;
 const slotValueBorrow = slot_ops.slotValueBorrow;
 const stringSliceValue = string_ops.stringSliceValue;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
@@ -200,11 +194,24 @@ pub fn qjsArrayMethodFastCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (callableObjectFromValue(func)) |function_object| {
-        if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*)) |native_ref| {
-            if (native_ref.domain == .iterator) {
-                if (try qjsIteratorCallForNativeRecord(ctx, output, global, receiver, native_ref.id, args, caller_function, caller_frame)) |value| return value;
-            }
+    // Every branch below requires `func` to be a NATIVE callable: the iterator
+    // branch and all ~20 cascade members each open with
+    // `callableObjectFromValue(func) orelse return null` (c_function /
+    // c_closure / bound_function). The overwhelmingly common method-call callee
+    // is a user *bytecode* function (e.g. `obj.m()`, `p.step()`), for which
+    // `callableObjectFromValue` is null — so the whole cascade degenerates into
+    // ~20 sequential no-op calls. Hoist the shared precondition and bail once.
+    //
+    // Faithful to qjs: a method call resolves its callee once via the property
+    // lookup, then dispatches by the resolved function's magic
+    // (`js_call_c_function`, quickjs.c:17562, reached from OP_call_method at
+    // quickjs.c:18220). qjs never scans the array-method set per call; this
+    // early-out moves zjs toward that structure for non-native-method receivers
+    // without changing any matched-method behavior.
+    const native_callable = callableObjectFromValue(func) orelse return null;
+    if (core.function.decodeNativeBuiltinId(native_callable.nativeFunctionIdSlot().*)) |native_ref| {
+        if (native_ref.domain == .iterator) {
+            if (try qjsIteratorCallForNativeRecord(ctx, output, global, receiver, native_ref.id, args, caller_function, caller_frame)) |value| return value;
         }
     }
     if (try qjsArrayIterationCall(ctx, output, global, receiver, func, args, caller_function, caller_frame)) |value| return value;
@@ -445,37 +452,6 @@ pub fn throwRegExpAccessorTypeError(ctx: *core.JSContext, global: *core.Object, 
     } else try exception_ops.createNamedError(ctx, global, "TypeError", "RegExp object expected");
     _ = ctx.throwValue(error_value);
     return error.JSException;
-}
-
-pub fn simpleCaptureAtomsKnownDisjoint(first: SimpleCaptureSequenceAtom, second: SimpleCaptureSequenceAtom) bool {
-    if (first.kind == .literal and second.kind == .literal) return first.literal != second.literal;
-    if (first.kind == .literal and second.kind == .class) return !simpleClassPredicateMatches(second.class_predicate, second.class_source, first.literal);
-    if (first.kind == .class and second.kind == .literal) return !simpleClassPredicateMatches(first.class_predicate, first.class_source, second.literal);
-    if (first.kind != .class or second.kind != .class) return false;
-    return simpleClassPredicatesKnownDisjoint(first.class_predicate, second.class_predicate);
-}
-
-pub fn simpleClassPredicatesKnownDisjoint(first: SimpleClassPredicate, second: SimpleClassPredicate) bool {
-    return switch (first) {
-        .ascii_digit, .ascii_decimal => switch (second) {
-            .ascii_not_digit => true,
-            .ascii_lower, .ascii_alpha => true,
-            else => false,
-        },
-        .ascii_not_digit => switch (second) {
-            .ascii_digit, .ascii_decimal => true,
-            else => false,
-        },
-        .ascii_lower => switch (second) {
-            .ascii_digit, .ascii_decimal => true,
-            else => false,
-        },
-        .ascii_alpha => switch (second) {
-            .ascii_digit, .ascii_decimal => true,
-            else => false,
-        },
-        else => false,
-    };
 }
 
 pub fn createRegExpIndicesArray(rt: *core.JSRuntime, global: *core.Object, input_bytes: []const u8, found: RegExpMatch) !core.JSValue {
@@ -756,7 +732,7 @@ pub fn qjsTypedArrayConstructArrayLikeOwnDataFast(
     var first_index_property: ?usize = null;
     for (source_object.shapeProps(), 0..) |prop, property_index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
-        if (prop_flags.deleted or prop_flags.accessor) continue;
+        if (prop_flags.deleted or prop_flags.isAccessor()) continue;
         if (prop.atom_id == core.atom.atomFromUInt32(0)) {
             first_index_property = property_index;
             break;
@@ -805,11 +781,9 @@ pub fn typedArrayArrayLikeOwnDataFastPathUsable(source_object: *core.Object, fir
         if (property_index >= source_object.shapeProps().len) return false;
         const prop = source_object.shapeProps()[property_index];
         const prop_flags = core.property.Flags.fromBits(prop.flags);
-        if (prop.atom_id != core.atom.atomFromUInt32(@intCast(index)) or prop_flags.deleted or prop_flags.accessor) return false;
-        switch (source_object.properties[property_index].slot) {
-            .data => |stored| if (stored.isObject()) return false,
-            .var_ref, .auto_init, .accessor, .deleted => return false,
-        }
+        if (prop.atom_id != core.atom.atomFromUInt32(@intCast(index)) or prop_flags.deleted or prop_flags.isAccessor()) return false;
+        const stored = source_object.asDataAt(property_index) orelse return false;
+        if (stored.isObject()) return false;
     }
     return true;
 }
@@ -1347,6 +1321,27 @@ pub fn qjsTypedArraySetCall(
             const source_length: usize = @intCast(try core.object.typedArrayLength(ctx.runtime, source_object));
             if (offset > target_length or source_length > target_length - offset) return error.RangeError;
 
+            // QuickJS js_typed_array_set_internal (quickjs.c:57584-57588): when the
+            // source and target share the same element class, copy the raw byte
+            // ranges with memmove and skip per-element box/unbox + re-bounds-check.
+            // memmove handles same-backing-buffer aliasing (overlapping src/dst).
+            if (source_object.typedArrayKind() == target.typedArrayKind()) {
+                const element_size: usize = target.typedArrayElementSize();
+                const byte_count = source_length * element_size;
+                if (byte_count != 0) {
+                    const target_buffer = try core.typed_array.typedArrayBufferObject(target);
+                    const source_buffer = try core.typed_array.typedArrayBufferObject(source_object);
+                    const dst_start = target.typedArrayByteOffset() + offset * element_size;
+                    const src_start = source_object.typedArrayByteOffset();
+                    @memmove(
+                        target_buffer.byteStorage()[dst_start..][0..byte_count],
+                        source_buffer.byteStorage()[src_start..][0..byte_count],
+                    );
+                }
+                return core.JSValue.undefinedValue();
+            }
+
+            // Mismatched element class: convert per element through the value path.
             const values = try ctx.runtime.memory.alloc(core.JSValue, source_length);
             var rooted_values: []core.JSValue = values[0..0];
             var values_root = ValueSliceRoot{};
@@ -1714,11 +1709,6 @@ pub fn qjsArrayIterationCall(
         out = objectFromValue(out_value) orelse return error.TypeError;
         dense_map_output = mode == .map and out.?.canDefineDenseArrayDataPropertiesUnchecked();
     }
-    if (mode == .map and !is_typed_array and dense_map_output) {
-        if (simpleNumericArg0Callback(args[0])) |simple| {
-            if (try qjsDenseArrayMapSimpleNumericArg0(ctx.runtime, object, length, simple, out_value, out.?)) |value| return value;
-        }
-    }
 
     var cursor: usize = 0;
     while (cursor < length) : (cursor += 1) {
@@ -1762,7 +1752,15 @@ pub fn qjsArrayIterationCall(
         switch (mode) {
             .for_each => {},
             .map => {
-                if (dense_map_output and index <= std.math.maxInt(u32) and out.?.canDefineDenseArrayDataPropertiesUnchecked()) {
+                // The unchecked dense write only appends at the current count;
+                // when the source skipped holes the output index runs ahead of
+                // count, so require `index == count` (contiguous append) before
+                // taking it. A gap falls through to the index-define path, which
+                // materializes the output to sparse and preserves the hole.
+                if (dense_map_output and index <= std.math.maxInt(u32) and
+                    index == @as(usize, @intCast(out.?.fastArrayCount())) and
+                    out.?.canDefineDenseArrayDataPropertiesUnchecked())
+                {
                     try out.?.defineDenseArrayDataPropertyUnchecked(ctx.runtime, @intCast(index), callback_result);
                     continue;
                 }
@@ -1800,68 +1798,6 @@ pub fn qjsArrayIterationCall(
         .find_index => core.JSValue.int32(-1),
         .find_last_index => core.JSValue.int32(-1),
     };
-}
-
-pub fn qjsDenseArrayMapSimpleNumericArg0(
-    rt: *core.JSRuntime,
-    source: *core.Object,
-    length: usize,
-    simple: SimpleNumericArg0Bytecode,
-    out_value: core.JSValue,
-    out: *core.Object,
-) !?core.JSValue {
-    if (!source.flags.is_array or source.arrayElementStorageMode() != .dense) return null;
-    if (length > std.math.maxInt(u32)) return null;
-    const elements = source.arrayElements();
-    if (length > elements.len) return null;
-
-    var index: usize = 0;
-    while (index < length) : (index += 1) {
-        const item = elements[index];
-        if (!item.isNumber()) return null;
-    }
-
-    index = 0;
-    while (index < length) : (index += 1) {
-        const item = elements[index];
-        const mapped = try simpleNumericBinary(rt, simple.binop, item, core.JSValue.int32(simple.rhs));
-        defer mapped.free(rt);
-        try out.defineDenseArrayDataPropertyUnchecked(rt, @intCast(index), mapped);
-    }
-    return out_value;
-}
-
-pub fn qjsArrayMapSimpleNumericArg0DefaultSpeciesFastCall(
-    rt: *core.JSRuntime,
-    global: *core.Object,
-    receiver: core.JSValue,
-    callback: core.JSValue,
-) !?core.JSValue {
-    const source = objectFromValue(receiver) orelse return null;
-    if (!source.flags.is_array or source.proxyTarget() != null or source.hasExoticMethods()) return null;
-    if (source.arrayElementStorageMode() != .dense) return null;
-    const length: usize = @intCast(source.arrayLength());
-    if (length > std.math.maxInt(u32)) return null;
-    const simple = simpleNumericArg0Callback(callback) orelse return null;
-
-    const elements = source.arrayElements();
-    if (length > elements.len) return null;
-    var index: usize = 0;
-    while (index < length) : (index += 1) {
-        const item = elements[index];
-        if (!item.isNumber()) return null;
-    }
-
-    const out_value = try defaultArraySpeciesCreate(rt, global, source, length) orelse return null;
-    errdefer out_value.free(rt);
-    const out = objectFromValue(out_value) orelse return error.TypeError;
-    if (!out.canDefineDenseArrayDataPropertiesUnchecked()) {
-        out_value.free(rt);
-        return null;
-    }
-    if (try qjsDenseArrayMapSimpleNumericArg0(rt, source, length, simple, out_value, out)) |mapped| return mapped;
-    out_value.free(rt);
-    return null;
 }
 
 pub fn qjsTypedArrayMapFilter(
@@ -2126,6 +2062,278 @@ pub fn arrayMethodTypedArrayLength(rt: *core.JSRuntime, object: *core.Object, is
     return @intCast(try core.object.typedArrayLength(rt, object));
 }
 
+pub const TypedSearchMode = enum { index_of, last_index_of, includes };
+
+/// Raw-buffer typed scan for TypedArray indexOf/lastIndexOf/includes — mirrors
+/// qjs js_typed_array_indexOf (quickjs.c:58072, raw per-class scan :58179-58245).
+/// The search value is normalized ONCE against the element class with an early
+/// can't-fit short-circuit; then the backing buffer is scanned per element-kind
+/// (memchr for the u8 classes, typed-pointer compare otherwise) without boxing.
+///
+/// `start` is the already-fromIndex-coerced cursor as the existing zjs Array
+/// search produces it: for forward modes the inclusive first index `k`; for
+/// lastIndexOf the EXCLUSIVE upper bound (`k + 1`, matching the `cursor`/while
+/// loop in qjsArraySearchCall). `original_length` is the length read before the
+/// fromIndex coercion ran (which may resize a RAB via valueOf), used only for
+/// the qjs includes-undefined-out-of-bounds special case.
+pub fn qjsTypedArraySearchScan(
+    rt: *core.JSRuntime,
+    object: *core.Object,
+    mode: TypedSearchMode,
+    search_value: core.JSValue,
+    start: usize,
+    original_length: usize,
+) !core.JSValue {
+    const class_kind = object.typedArrayKind();
+    const elem_size = object.typedArrayElementSize();
+
+    // qjs: includes can find 'undefined' if searching out of bounds of a RAB
+    // that shrank during the fromIndex coercion (quickjs.c:58114-58119). The
+    // pre-coercion length stays > the current count, special == includes, the
+    // search value is undefined, and the (lastIndexOf-clamped) cursor is still
+    // < original_length.
+    const current_length = @as(usize, @intCast(try core.object.typedArrayLength(rt, object)));
+    if (mode == .includes and original_length > current_length and search_value.isUndefined()) {
+        const k_for_special = if (mode == .last_index_of) (if (start == 0) start else start - 1) else start;
+        if (k_for_special < original_length) return core.JSValue.boolean(true);
+    }
+
+    // RAB may have been resized by an evil valueOf in the fromIndex coercion;
+    // re-clamp the scan window to min(original, live) — qjs reads len ONCE at
+    // the top and then does len = min_int(len, p->u.array.count), so a buffer
+    // that GREW during coercion is still scanned only over the original window
+    // (quickjs.c:58122-58129).
+    const length = @min(original_length, current_length);
+    if (length == 0) return searchScanResult(mode, null);
+
+    // Translate the zjs cursor to qjs's k / stop / inc.
+    var k: usize = undefined;
+    var stop: usize = undefined;
+    const forward = mode != .last_index_of;
+    if (forward) {
+        k = @min(start, length);
+        stop = length;
+        if (k >= stop) return searchScanResult(mode, null);
+    } else {
+        // `start` is the exclusive upper bound; the highest index scanned is
+        // start - 1, re-clamped to length - 1.
+        if (start == 0) return searchScanResult(mode, null);
+        k = @min(start - 1, length - 1);
+        stop = 0; // inclusive lower bound for the backward loop
+    }
+
+    // Normalize the search value ONCE (quickjs.c:58131-58177). No coercion is
+    // run on the search value itself — only its tag is inspected.
+    var is_int = false;
+    var is_bigint = false;
+    var v64: i64 = 0;
+    var d: f64 = 0;
+    if (search_value.asInt32()) |int_value| {
+        is_int = true;
+        v64 = int_value;
+        d = @floatFromInt(int_value);
+    } else if (search_value.asFloat64()) |float_value| {
+        d = float_value;
+        if (d >= @as(f64, @floatFromInt(std.math.minInt(i64))) and d < 0x1p63) {
+            v64 = @intFromFloat(d);
+            is_int = (@as(f64, @floatFromInt(v64)) == d);
+        }
+    } else if (search_value.isBigInt()) {
+        switch (class_kind) {
+            11 => { // BigInt64Array: must fit int64
+                v64 = search_value.asInt64() orelse return searchScanResult(mode, null);
+            },
+            12 => { // BigUint64Array: non-negative and must fit uint64
+                const u = search_value.asUint64() orelse return searchScanResult(mode, null);
+                v64 = @bitCast(u);
+            },
+            else => return searchScanResult(mode, null), // bigint can't match a non-bigint array
+        }
+        is_bigint = true;
+        d = 0;
+    } else {
+        return searchScanResult(mode, null);
+    }
+
+    const buffer = try core.typed_array.typedArrayBufferObject(object);
+    const base_offset = object.typedArrayByteOffset();
+    const bytes = buffer.byteStorage()[base_offset..][0 .. length * elem_size];
+
+    const res: ?usize = switch (class_kind) {
+        1 => blk: { // Int8
+            if (!(is_int and @as(i64, @as(i8, @truncate(v64))) == v64)) break :blk null;
+            break :blk scanU8(bytes, k, stop, forward, @bitCast(@as(i8, @truncate(v64))));
+        },
+        2, 3 => blk: { // Uint8, Uint8Clamped
+            if (!(is_int and @as(i64, @as(u8, @truncate(@as(u64, @bitCast(v64))))) == v64)) break :blk null;
+            break :blk scanU8(bytes, k, stop, forward, @truncate(@as(u64, @bitCast(v64))));
+        },
+        4 => blk: { // Int16
+            if (!(is_int and @as(i64, @as(i16, @truncate(v64))) == v64)) break :blk null;
+            break :blk scanElem(i16, bytes, k, stop, forward, @truncate(v64));
+        },
+        5 => blk: { // Uint16
+            if (!(is_int and @as(i64, @as(u16, @truncate(@as(u64, @bitCast(v64))))) == v64)) break :blk null;
+            break :blk scanElem(u16, bytes, k, stop, forward, @truncate(@as(u64, @bitCast(v64))));
+        },
+        6 => blk: { // Int32
+            if (!(is_int and @as(i64, @as(i32, @truncate(v64))) == v64)) break :blk null;
+            break :blk scanElem(i32, bytes, k, stop, forward, @truncate(v64));
+        },
+        7 => blk: { // Uint32
+            if (!(is_int and @as(i64, @as(u32, @truncate(@as(u64, @bitCast(v64))))) == v64)) break :blk null;
+            break :blk scanElem(u32, bytes, k, stop, forward, @truncate(@as(u64, @bitCast(v64))));
+        },
+        8 => blk: { // Float16
+            if (is_bigint) break :blk null;
+            break :blk scanFloat16(mode, bytes, k, stop, forward, d);
+        },
+        9 => blk: { // Float32
+            if (is_bigint) break :blk null;
+            break :blk scanFloat(f32, mode, bytes, k, stop, forward, d);
+        },
+        10 => blk: { // Float64
+            if (is_bigint) break :blk null;
+            break :blk scanFloat(f64, mode, bytes, k, stop, forward, d);
+        },
+        11 => blk: { // BigInt64
+            if (!is_bigint) break :blk null;
+            break :blk scanElem(i64, bytes, k, stop, forward, v64);
+        },
+        12 => blk: { // BigUint64
+            if (!is_bigint) break :blk null;
+            break :blk scanElem(u64, bytes, k, stop, forward, @bitCast(v64));
+        },
+        else => null,
+    };
+
+    return searchScanResult(mode, res);
+}
+
+fn searchScanResult(mode: TypedSearchMode, res: ?usize) core.JSValue {
+    if (mode == .includes) return core.JSValue.boolean(res != null);
+    return if (res) |index| lengthIndexValue(index) else core.JSValue.int32(-1);
+}
+
+fn scanU8(bytes: []const u8, k: usize, stop: usize, forward: bool, v: u8) ?usize {
+    if (forward) {
+        // qjs uses memchr over [k, len) for the u8 classes (quickjs.c:58192-58197).
+        const found = std.mem.indexOfScalarPos(u8, bytes[0..stop], k, v) orelse return null;
+        return found;
+    }
+    var i = k;
+    while (true) : (i -= 1) {
+        if (bytes[i] == v) return i;
+        if (i == stop) break;
+    }
+    return null;
+}
+
+fn scanElem(comptime T: type, bytes: []const u8, k: usize, stop: usize, forward: bool, v: T) ?usize {
+    const width = @sizeOf(T);
+    if (forward) {
+        var i = k;
+        while (i != stop) : (i += 1) {
+            if (std.mem.readInt(T, bytes[i * width ..][0..width], .little) == v) return i;
+        }
+        return null;
+    }
+    var i = k;
+    while (true) : (i -= 1) {
+        if (std.mem.readInt(T, bytes[i * width ..][0..width], .little) == v) return i;
+        if (i == stop) break;
+    }
+    return null;
+}
+
+fn readFloat(comptime T: type, bytes: []const u8, index: usize) T {
+    const Bits = std.meta.Int(.unsigned, @bitSizeOf(T));
+    const width = @sizeOf(T);
+    return @bitCast(std.mem.readInt(Bits, bytes[index * width ..][0..width], .little));
+}
+
+fn scanFloat16(mode: TypedSearchMode, bytes: []const u8, k: usize, stop: usize, forward: bool, d: f64) ?usize {
+    if (std.math.isNan(d)) {
+        // indexOf returns -1, includes finds NaN (quickjs.c:58249-58259).
+        if (mode != .includes) return null;
+        return scanFloatPredicate(f16, bytes, k, stop, forward, struct {
+            fn match(e: f16) bool {
+                return std.math.isNan(e);
+            }
+        }.match);
+    }
+    if (d == 0) {
+        // includes/indexOf both find +0 and -0 (quickjs.c:58260-58268).
+        return scanFloatPredicate(f16, bytes, k, stop, forward, struct {
+            fn match(e: f16) bool {
+                return e == 0;
+            }
+        }.match);
+    }
+    // d == fromfp16(tofp16(d)): only scan if the value roundtrips through f16.
+    const hf: f16 = @floatCast(d);
+    if (@as(f64, @floatCast(hf)) != d) return null;
+    const target = hf;
+    if (forward) {
+        var i = k;
+        while (i != stop) : (i += 1) {
+            if (readFloat(f16, bytes, i) == target) return i;
+        }
+        return null;
+    }
+    var i = k;
+    while (true) : (i -= 1) {
+        if (readFloat(f16, bytes, i) == target) return i;
+        if (i == stop) break;
+    }
+    return null;
+}
+
+fn scanFloat(comptime T: type, mode: TypedSearchMode, bytes: []const u8, k: usize, stop: usize, forward: bool, d: f64) ?usize {
+    if (std.math.isNan(d)) {
+        // indexOf returns -1, includes finds NaN (quickjs.c:58282-58292 / :58306-58316).
+        if (mode != .includes) return null;
+        return scanFloatPredicate(T, bytes, k, stop, forward, struct {
+            fn match(e: T) bool {
+                return std.math.isNan(e);
+            }
+        }.match);
+    }
+    // float32: only scan if (float)d == d roundtrips (quickjs.c:58293).
+    // float64: scan directly (quickjs.c:58317-58324). +0.0 == -0.0 matches both.
+    const target: T = @floatCast(d);
+    if (T == f32 and @as(f64, @floatCast(target)) != d) return null;
+    if (forward) {
+        var i = k;
+        while (i != stop) : (i += 1) {
+            if (readFloat(T, bytes, i) == target) return i;
+        }
+        return null;
+    }
+    var i = k;
+    while (true) : (i -= 1) {
+        if (readFloat(T, bytes, i) == target) return i;
+        if (i == stop) break;
+    }
+    return null;
+}
+
+fn scanFloatPredicate(comptime T: type, bytes: []const u8, k: usize, stop: usize, forward: bool, comptime match: fn (T) bool) ?usize {
+    if (forward) {
+        var i = k;
+        while (i != stop) : (i += 1) {
+            if (match(readFloat(T, bytes, i))) return i;
+        }
+        return null;
+    }
+    var i = k;
+    while (true) : (i -= 1) {
+        if (match(readFloat(T, bytes, i))) return i;
+        if (i == stop) break;
+    }
+    return null;
+}
+
 pub fn qjsArrayLastIndexSparseLarge(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2245,6 +2453,47 @@ pub fn qjsArraySliceCall(
     const count = if (end > start) end - start else 0;
     if (count > std.math.maxInt(u32)) return error.RangeError;
 
+    // qjs js_array_slice fast case (quickjs.c:42967-42971): when the species ctor is
+    // the default (JS_IsUndefined) AND the source is a dense fast array AND
+    // final <= count32, do ONE bulk dense copy via js_create_array (quickjs.c:9601 =
+    // JS_NewArray + expand_fast_array + count=len + JS_DupValue loop), skipping the
+    // per-element TryGetProperty/CreateDataProperty slow loop entirely.
+    // Gate on the dense extent (fastArrayCount), NOT the logical length: the
+    // bulk copy slices `arrayElements()` which is count-bounded, so the copied
+    // range must lie fully inside `[0, count)`. A holey tail (count < length)
+    // falls through to the per-element species path which reads via getProperty.
+    if (object.flags.is_array and !object.flags.is_proxy and
+        object.arrayElementStorageMode() == .dense and
+        (start + count) <= @as(usize, @intCast(object.fastArrayCount())))
+    {
+        if (arrayHasDefaultSpecies(ctx.runtime, global, object)) |array_proto| {
+            const out = try core.Object.createArray(ctx.runtime, array_proto);
+            var out_value = out.value();
+            errdefer out_value.free(ctx.runtime);
+
+            // memory.alloc can GC; root the fresh array across the allocation
+            // (mirror the entries-pair precedent at qjsObjectEntryArrayValue).
+            var root_values = [_]core.runtime.ValueRootValue{
+                .{ .value = &out_value },
+            };
+            const root_frame = core.runtime.ValueRootFrame{
+                .previous = ctx.runtime.active_value_roots,
+                .values = &root_values,
+            };
+            ctx.runtime.active_value_roots = &root_frame;
+            defer ctx.runtime.active_value_roots = root_frame.previous;
+
+            if (count > 0) {
+                const elements = try ctx.runtime.memory.alloc(core.JSValue, count);
+                const src = object.arrayElements()[start .. start + count];
+                for (src, 0..) |v, i| elements[i] = v.dup();
+                out.adoptDenseArrayElementsAssumingEmpty(elements);
+                out.flags.may_have_indexed_properties = true;
+            }
+            return out_value;
+        }
+    }
+
     const out_value = try arraySpeciesCreate(ctx, output, global, receiver_object_value, count, null, null);
     errdefer out_value.free(ctx.runtime);
     const out = try property_ops.expectObject(out_value);
@@ -2324,11 +2573,42 @@ pub fn qjsTypedArraySliceSubarrayCall(
 
     if (is_slice and count > 0) {
         if (try core.object.typedArrayDetached(object) or try core.object.typedArrayOutOfBounds(object)) return error.TypeError;
+        if (try core.object.typedArrayDetached(result_object) or try core.object.typedArrayOutOfBounds(result_object)) return error.TypeError;
         const current_length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
         const copy_count = if (current_length > start)
             @min(count, current_length - start)
         else
             0;
+        // Faithful to quickjs.c:58572-58575: when source and dest share class
+        // (same element kind => same byte layout), copy the raw byte range in
+        // one memcpy instead of per-element get/set. The element loop below
+        // handles every case this does not cover (differing class). Both arrays
+        // were just re-validated as non-detached / in-bounds, and the result
+        // was length-checked to hold >= count >= copy_count elements
+        // (qjsTypedArrayCreateWithLength:1905), so the byte ranges are valid.
+        if (copy_count > 0 and object.typedArrayKind() == result_object.typedArrayKind()) {
+            const element_size = object.typedArrayElementSize();
+            const src_buffer = objectFromValue(object.typedArrayBuffer() orelse return error.TypeError) orelse return error.TypeError;
+            const dst_buffer = objectFromValue(result_object.typedArrayBuffer() orelse return error.TypeError) orelse return error.TypeError;
+            const byte_count = copy_count * element_size;
+            const src_byte = object.typedArrayByteOffset() + start * element_size;
+            const dst_byte = result_object.typedArrayByteOffset();
+            const src_bytes = src_buffer.byteStorage()[src_byte .. src_byte + byte_count];
+            const dst_bytes = dst_buffer.byteStorage()[dst_byte .. dst_byte + byte_count];
+            // Faithful to slice_memcpy (quickjs.c:58519): plain memcpy when the
+            // ranges cannot overlap, byte-wise forward copy otherwise (a species
+            // typed array may alias the source buffer).
+            const dst_ptr = dst_bytes.ptr;
+            const src_ptr = src_bytes.ptr;
+            if (@intFromPtr(dst_ptr) + byte_count <= @intFromPtr(src_ptr) or
+                @intFromPtr(dst_ptr) >= @intFromPtr(src_ptr) + byte_count)
+            {
+                @memcpy(dst_bytes, src_bytes);
+            } else {
+                std.mem.copyForwards(u8, dst_bytes, src_bytes);
+            }
+            return result;
+        }
         var index: usize = 0;
         while (index < copy_count) : (index += 1) {
             const item = try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(start + index));
@@ -2679,9 +2959,8 @@ pub fn qjsArrayFillCall(
 
         const current_length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
         const capped_final = @min(final, current_length);
-        var index = start;
-        while (index < capped_final) : (index += 1) {
-            _ = try core.typed_array.typedArraySetIndex(ctx.runtime, object, @intCast(index), value);
+        if (start < capped_final) {
+            try core.typed_array.typedArrayFillRange(ctx.runtime, object, @intCast(start), @intCast(capped_final), value);
         }
         return receiver_object_value.dup();
     }
@@ -2709,7 +2988,12 @@ pub fn qjsArrayFillCall(
     } else raw_value.dup();
     defer value.free(ctx.runtime);
 
-    if (object.flags.is_array and !object.hasExoticMethods() and object.proxyTarget() == null and object.arrayElementStorageMode() == .dense and object.flags.extensible and arrayPrototypeChainHasNoIndexedProperties(object)) {
+    // The dense fast path appends/overwrites contiguously from `start`, so it
+    // is only valid when `start` lands within (or exactly at the end of) the
+    // dense extent. A holey array whose fill range begins past `array_count`
+    // (e.g. `new Array(5).fill(7,2,4)`) would otherwise no-op the leading
+    // appends; route those through the generic setValueProperty loop below.
+    if (object.flags.is_array and !object.hasExoticMethods() and object.proxyTarget() == null and object.arrayElementStorageMode() == .dense and object.flags.extensible and arrayPrototypeChainHasNoIndexedProperties(object) and start <= @as(usize, @intCast(object.fastArrayCount()))) {
         if (final <= @as(usize, @intCast(std.math.maxInt(u32))) + 1) {
             var dense_index = start;
             if (object.canDefineDenseArrayDataPropertiesUnchecked()) {
@@ -2882,15 +3166,19 @@ fn qjsArrayPopCallImpl(
 fn qjsFastDenseArrayPop(object: *core.Object) ?core.JSValue {
     if (!object.flags.is_array or !object.flags.length_writable) return null;
     if (!object.isFastArray()) return null;
-    return object.takeLastFastArrayElement();
+    // Only on a fully-dense array (count == length): pop removes a[length-1],
+    // which must be a live dense element. A holey array (length > count) has a
+    // hole at the logical end, so it falls back to the generic pop path.
+    return object.takeLastFullyDenseFastArrayElement();
 }
 
 pub fn qjsFastDensePrimitiveArrayPop(object: *core.Object) ?core.JSValue {
     if (!object.flags.is_array or !object.flags.length_writable) return null;
+    if (object.fastArrayCount() != object.arrayLength()) return null;
     const slot = object.borrowLastFastArrayElement() orelse return null;
     const value = slot.*;
     if (!qjsCanFastJoinPrimitive(value)) return null;
-    return object.takeLastFastArrayElement();
+    return object.takeLastFullyDenseFastArrayElement();
 }
 
 pub fn qjsArrayShiftCall(
@@ -2960,8 +3248,12 @@ pub fn qjsArrayShiftCall(
 fn qjsFastDenseArrayShift(object: *core.Object) ?core.JSValue {
     if (!object.flags.is_array or !object.flags.length_writable) return null;
     if (!object.isFastArray()) return null;
+    // Shift moves the whole [1, length) range down and lowers .length. Only run
+    // on a fully-dense array (count == length); a holey array (length > count)
+    // would mishandle the tail holes, so it falls back to the generic path.
+    if (object.fastArrayCount() != object.arrayLength()) return null;
     const values = object.fastArrayValuesMut();
-    if (values.len == 0) return core.JSValue.undefinedValue();
+    if (values.len == 0) return null;
 
     const first = values[0];
     if (values.len > 1) {
@@ -2969,7 +3261,66 @@ fn qjsFastDenseArrayShift(object: *core.Object) ?core.JSValue {
     }
     values[values.len - 1] = core.JSValue.undefinedValue();
     object.setFastArrayCountAssumeCapacity(@intCast(values.len - 1));
+    object.setArrayLength(@intCast(values.len - 1));
     return first;
+}
+
+/// Dense fast path for Array.prototype.unshift, mirroring the in-place bulk
+/// move of u.array.u.values in quickjs JS_CopySubArray's fast_array branch
+/// (quickjs.c:41624-41647). qjs's literal condition requires the destination
+/// index to already be in bounds, so its in-place branch never fires for the
+/// growing unshift shift; this routine performs the structurally identical
+/// move after growing capacity. Returns the new length on success, or null to
+/// fall through to the generic per-element unshiftMoveIndex path for anything
+/// not provably an ordinary dense array with no prototype index interactions.
+fn qjsFastDenseArrayUnshift(
+    rt: *core.JSRuntime,
+    receiver: core.JSValue,
+    object: *core.Object,
+    args: []const core.JSValue,
+) !?usize {
+    if (args.len == 0) return null;
+    // Receiver must BE the array (no primitive wrapper / proxy indirection),
+    // and an ordinary, extensible, length-writable dense fast array with no
+    // exotic [[Set]]/[[DefineOwnProperty]] behaviour.
+    if (objectFromValue(receiver) != object) return null;
+    if (!object.flags.is_array or !object.isFastArray()) return null;
+    if (object.hasExoticMethods() or object.proxyTarget() != null) return null;
+    if (!object.flags.length_writable or !object.flags.extensible) return null;
+    // Any inherited indexed property would make the generic [[Set]] of a
+    // shifted slot observe a prototype accessor; the dense move skips the
+    // prototype chain, so only proceed when the chain has no indexed props.
+    if (!arrayPrototypeChainHasNoIndexedProperties(object)) return null;
+
+    const length: usize = @intCast(object.arrayLength());
+    if (length != @as(usize, @intCast(object.fastArrayCount()))) return null;
+    const insert_count = args.len;
+    const new_length = length + insert_count;
+    if (new_length > core.array.max_array_length) return null;
+    const new_length_u32 = std.math.cast(u32, new_length) orelse return null;
+
+    // Grow first (may reallocate the backing buffer), then publish the new
+    // count so fastArrayValuesMut() exposes the full [0, new_length) range.
+    // The array was fully dense (count == length) on entry, so the new dense
+    // extent IS the new logical length; keep them in lock-step.
+    try object.fastArrayEnsureCapacity(rt, new_length_u32);
+    object.setFastArrayCountAssumeCapacity(new_length_u32);
+    object.setArrayLength(new_length_u32);
+    const values = object.fastArrayValuesMut();
+    // Move the existing [0, length) elements up by insert_count. This is a raw
+    // bit move (no dup/free); ownership of each original reference travels with
+    // it to its new slot, exactly like qjsFastDenseArrayShift's downward move.
+    if (length != 0) {
+        std.mem.copyBackwards(core.JSValue, values[insert_count..new_length], values[0..length]);
+    }
+    // Overwrite the now-stale [0, insert_count) head with fresh duplicates of
+    // the arguments. The previous bits there are aliases of values that now
+    // live in their moved-up slots, so they must NOT be freed here.
+    for (args, 0..) |item, index| {
+        values[index] = item.dup();
+    }
+    object.markIndexedProperties(rt);
+    return new_length;
 }
 
 pub fn qjsArrayUnshiftCall(
@@ -2991,6 +3342,10 @@ pub fn qjsArrayUnshiftCall(
     defer receiver_object_value.free(ctx.runtime);
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return error.TypeError;
+
+    if (try qjsFastDenseArrayUnshift(ctx.runtime, receiver, object, args)) |new_length_fast| {
+        return lengthIndexValue(new_length_fast);
+    }
 
     const length = if (object.flags.is_array)
         @as(usize, @intCast(object.arrayLength()))
@@ -3080,6 +3435,28 @@ pub fn qjsArrayReverseCall(
         defer length_value.free(ctx.runtime);
         break :blk try toLengthIndex(ctx, output, global, length_value);
     };
+
+    // Special case fast arrays (qjs js_array_reverse quickjs.c:42836-42847):
+    // js_get_fast_array(ctx, obj, &arrp, &count32) && count32 == len → bare
+    // pointer-swap loop, a pure JSValue permutation with no dup/free (matches
+    // qjs's set_value-free swap). count32 == len rejects tail holes; non-fast /
+    // sparse / proxy / array-like fall through to the generic loop below.
+    if (object.isFastArray() and object.fastArrayCount() == length) {
+        if (length > 1) {
+            const arrp = object.fastArrayValuesMut();
+            var ll: usize = 0;
+            var hh: usize = length - 1;
+            while (ll < hh) : ({
+                ll += 1;
+                hh -= 1;
+            }) {
+                const lval = arrp[ll];
+                arrp[ll] = arrp[hh];
+                arrp[hh] = lval;
+            }
+        }
+        return receiver_object_value;
+    }
 
     var lower: usize = 0;
     while (lower < length / 2) : (lower += 1) {
@@ -3297,7 +3674,12 @@ pub fn arraySpeciesCreate(
     return constructValueOrBytecode(ctx, output, global, species_value, &.{length_value}, caller_function, caller_frame);
 }
 
-pub fn defaultArraySpeciesCreate(rt: *core.JSRuntime, global: *core.Object, original: *core.Object, length: usize) !?core.JSValue {
+// Mirrors qjs JS_ArraySpeciesGetCtor returning JS_UNDEFINED (the default-species
+// case at quickjs.c:42962-42971): `original` is a plain non-proxy Array whose
+// constructor/prototype/Symbol.species chain is the unmodified builtin. When this
+// holds, ArraySpeciesCreate is allowed to produce a fresh plain Array. Returns the
+// realm's Array.prototype so callers can build that array.
+pub fn arrayHasDefaultSpecies(rt: *core.JSRuntime, global: *core.Object, original: *core.Object) ?*core.Object {
     if (!original.flags.is_array or original.proxyTarget() != null) return null;
     if (original.getOwnProperty(rt, core.atom.ids.constructor)) |desc| {
         desc.destroy(rt);
@@ -3327,6 +3709,12 @@ pub fn defaultArraySpeciesCreate(rt: *core.JSRuntime, global: *core.Object, orig
     }
     const getter = objectFromValue(species.getter) orelse return null;
     if (getter.arrayBuiltinMarker() != .species_getter) return null;
+
+    return array_proto;
+}
+
+pub fn defaultArraySpeciesCreate(rt: *core.JSRuntime, global: *core.Object, original: *core.Object, length: usize) !?core.JSValue {
+    const array_proto = arrayHasDefaultSpecies(rt, global, original) orelse return null;
 
     if (length > core.array.max_array_length) return error.RangeError;
 
@@ -3891,6 +4279,17 @@ pub fn qjsArrayMapCall(
 pub const ArraySortEntry = struct {
     value: core.JSValue,
     order: usize,
+    /// Faithful to quickjs ValueSlot.str (quickjs.c:43398): the default
+    /// (no user comparator) string comparator transcodes each element to a
+    /// byte key exactly once and caches it here. Owned by the runtime's
+    /// allocator; null until lazily computed. Never populated when a user
+    /// comparator is supplied (that path never calls ToString).
+    key: ?[]u8 = null,
+
+    pub fn freeEntry(self: ArraySortEntry, ctx: *core.JSContext) void {
+        self.value.free(ctx.runtime);
+        if (self.key) |bytes| ctx.runtime.memory.allocator.free(bytes);
+    }
 };
 
 pub fn qjsArraySortCall(
@@ -3937,7 +4336,7 @@ pub fn qjsArraySortCall(
 
     var entries = std.ArrayList(ArraySortEntry).empty;
     defer {
-        for (entries.items) |entry| entry.value.free(ctx.runtime);
+        for (entries.items) |entry| entry.freeEntry(ctx);
         entries.deinit(ctx.runtime.memory.allocator);
     }
 
@@ -3963,10 +4362,16 @@ pub fn qjsArraySortCall(
 
     index = 0;
     for (entries.items, 0..) |entry, sorted_index| {
-        const key = try propertyAtomFromLengthIndex(ctx.runtime, sorted_index);
-        defer key.deinit(ctx.runtime);
-        const result = try setValueProperty(ctx, output, global, receiver_object_value, key.atom, entry.value, caller_function, caller_frame);
-        result.free(ctx.runtime);
+        // Faithful to quickjs.c:43476: when the slot's original position equals
+        // its final sorted index the receiver already holds this value at this
+        // index, so skip the write entirely (matching qjs, which also skips the
+        // setter call in that case — observable for accessor/proxy receivers).
+        if (entry.order != sorted_index) {
+            const key = try propertyAtomFromLengthIndex(ctx.runtime, sorted_index);
+            defer key.deinit(ctx.runtime);
+            const result = try setValueProperty(ctx, output, global, receiver_object_value, key.atom, entry.value, caller_function, caller_frame);
+            result.free(ctx.runtime);
+        }
         index += 1;
     }
     while (index < entries.items.len + undefined_count) : (index += 1) {
@@ -4030,7 +4435,7 @@ pub fn stableArraySortEntries(
             var right = mid;
             var out_index = start;
             while (left < mid and right < end) : (out_index += 1) {
-                if (try arrayByCopySortCompare(ctx, output, global, typed_numeric_default, comparator, entries[right], entries[left], caller_function, caller_frame) < 0) {
+                if (try arrayByCopySortCompare(ctx, output, global, typed_numeric_default, comparator, &entries[right], &entries[left], caller_function, caller_frame) < 0) {
                     temp[out_index] = entries[right];
                     right += 1;
                 } else {
@@ -4139,7 +4544,7 @@ pub fn qjsArrayByCopyCall(
         errdefer out.value().free(ctx.runtime);
         var entries = std.ArrayList(ArraySortEntry).empty;
         defer {
-            for (entries.items) |entry| entry.value.free(ctx.runtime);
+            for (entries.items) |entry| entry.freeEntry(ctx);
             entries.deinit(ctx.runtime.memory.allocator);
         }
         var undefined_count: usize = 0;
@@ -4273,7 +4678,7 @@ pub fn qjsTypedArrayByCopyCall(
         const comparator = if (args.len >= 1 and !args[0].isUndefined()) args[0] else core.JSValue.undefinedValue();
         var entries = std.ArrayList(ArraySortEntry).empty;
         defer {
-            for (entries.items) |entry| entry.value.free(ctx.runtime);
+            for (entries.items) |entry| entry.freeEntry(ctx);
             entries.deinit(ctx.runtime.memory.allocator);
         }
 
@@ -4513,31 +4918,49 @@ pub fn arrayByCopySortCompare(
     global: *core.Object,
     typed_numeric_default: bool,
     comparator: core.JSValue,
-    lhs: ArraySortEntry,
-    rhs: ArraySortEntry,
+    lhs: *ArraySortEntry,
+    rhs: *ArraySortEntry,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !i32 {
     if (!comparator.isUndefined()) {
-        return arraySortCompare(ctx, output, global, comparator, lhs, rhs, caller_function, caller_frame);
+        return arraySortCompare(ctx, output, global, comparator, lhs.*, rhs.*, caller_function, caller_frame);
     }
-    if (typed_numeric_default) return typedArrayDefaultSortCompare(ctx.runtime, lhs, rhs);
-    const lhs_string = try toStringForAnnexB(ctx, output, global, lhs.value, caller_function, caller_frame);
-    defer lhs_string.free(ctx.runtime);
-    const rhs_string = try toStringForAnnexB(ctx, output, global, rhs.value, caller_function, caller_frame);
-    defer rhs_string.free(ctx.runtime);
-    var lhs_bytes = std.ArrayList(u8).empty;
-    defer lhs_bytes.deinit(ctx.runtime.memory.allocator);
-    try value_ops.appendRawString(ctx.runtime, &lhs_bytes, lhs_string);
-    var rhs_bytes = std.ArrayList(u8).empty;
-    defer rhs_bytes.deinit(ctx.runtime.memory.allocator);
-    try value_ops.appendRawString(ctx.runtime, &rhs_bytes, rhs_string);
-    const order = std.mem.order(u8, lhs_bytes.items, rhs_bytes.items);
+    if (typed_numeric_default) return typedArrayDefaultSortCompare(ctx.runtime, lhs.*, rhs.*);
+    // Faithful to quickjs js_array_cmp_generic (quickjs.c:43398-43410): convert
+    // each operand to its byte key exactly once, caching it on the slot, then
+    // compare the cached keys. Zero per-compare heap churn after the first
+    // ToString of each element.
+    const lhs_key = try arraySortStringKey(ctx, output, global, lhs, caller_function, caller_frame);
+    const rhs_key = try arraySortStringKey(ctx, output, global, rhs, caller_function, caller_frame);
+    const order = std.mem.order(u8, lhs_key, rhs_key);
     if (order == .lt) return -1;
     if (order == .gt) return 1;
     if (lhs.order < rhs.order) return -1;
     if (lhs.order > rhs.order) return 1;
     return 0;
+}
+
+/// Faithful to quickjs ValueSlot.str caching (quickjs.c:43398): lazily compute
+/// the transcoded byte key for a sort slot and cache it. Returns the cached
+/// bytes (owned by the entry, freed by ArraySortEntry.freeEntry).
+fn arraySortStringKey(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    entry: *ArraySortEntry,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) ![]const u8 {
+    if (entry.key) |bytes| return bytes;
+    const string_value = try toStringForAnnexB(ctx, output, global, entry.value, caller_function, caller_frame);
+    defer string_value.free(ctx.runtime);
+    var bytes = std.ArrayList(u8).empty;
+    errdefer bytes.deinit(ctx.runtime.memory.allocator);
+    try value_ops.appendRawString(ctx.runtime, &bytes, string_value);
+    const owned = try bytes.toOwnedSlice(ctx.runtime.memory.allocator);
+    entry.key = owned;
+    return owned;
 }
 
 pub fn typedArrayDefaultSortCompare(rt: *core.JSRuntime, lhs: ArraySortEntry, rhs: ArraySortEntry) !i32 {
@@ -5447,8 +5870,14 @@ pub fn qjsObjectEntryArrayValue(
 
     key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, key);
 
-    try createDataPropertyOrThrow(ctx, output, global, entry_value, entry, core.atom.atomFromUInt32(0), key_value, caller_function, caller_frame);
-    try createDataPropertyOrThrow(ctx, output, global, entry_value, entry, core.atom.atomFromUInt32(1), value, caller_function, caller_frame);
+    // qjs js_create_array (quickjs.c:9601): a pre-sized dense fast array, not two
+    // per-element createDataPropertyOrThrow (atomFromUInt32 + Descriptor + define).
+    // The slice alloc precedes the dups; key_value/value stay rooted via root_frame.
+    const elements = try ctx.runtime.memory.alloc(core.JSValue, 2);
+    elements[0] = key_value.dup();
+    elements[1] = value.dup();
+    entry.adoptDenseArrayElementsAssumingEmpty(elements);
+    entry.flags.may_have_indexed_properties = true;
 
     return entry_value;
 }
@@ -5599,6 +6028,27 @@ pub fn typedArrayCanonicalOwnDescriptor(rt: *core.JSRuntime, object: *core.Objec
             if (index >= length) return null;
             const value = try core.typed_array.typedArrayGetIndex(rt, object, index);
             return core.Descriptor.data(value, true, true, true);
+        },
+    }
+}
+
+/// Existence-only sibling of `typedArrayCanonicalOwnDescriptor` for the
+/// desc==NULL fast-array path (quickjs.c:8869-8882). Returns presence
+/// (`index < length`) for an in-bounds canonical numeric index WITHOUT
+/// materializing the element value. `null` means "this key is not a settled
+/// typed-array verdict -- fall through to the ordinary own-property probe",
+/// matching `typedArrayCanonicalOwnDescriptor` returning null for the
+/// `.none`/`.invalid`/out-of-range cases (those then resolve to FALSE via
+/// the regular cascade, exactly as in the descriptor path).
+pub fn typedArrayCanonicalIndexExists(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?bool {
+    if (!core.object.isTypedArrayObject(object)) return null;
+    switch (try core.object.typedArrayCanonicalNumericIndex(rt, atom_id)) {
+        .none => return null,
+        .invalid => return null,
+        .index => |index| {
+            const length = try core.object.typedArrayLength(rt, object);
+            if (index >= length) return null;
+            return true;
         },
     }
 }

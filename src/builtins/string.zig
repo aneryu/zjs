@@ -285,6 +285,24 @@ pub fn iteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
 
     const index: usize = @intCast((iterator_object.iteratorIndexSlot().*));
     const first = string_value.codeUnitAt(index);
+
+    // Single code unit (`c <= 0xffff`, non-surrogate-pair): qjs routes these
+    // through js_new_string_char (quickjs.c:3953-3962), which takes the latin1
+    // path for `c < 0x100`. Mirror that — `<= 0x7f` reuses the cached
+    // single-byte string (zero-alloc), `<= 0xff` builds a latin1 string;
+    // only `>= 0x100` and surrogate pairs reach the wide createUtf16.
+    if (first < 0x100) {
+        iterator_object.iteratorIndexSlot().* += 1;
+        const byte: u8 = @intCast(first);
+        if (byte <= 0x7f) {
+            if (try rt.singleByteString(byte)) |cached| {
+                return iteratorResult(rt, cached.value().dup(), false);
+            }
+        }
+        const out = try core.string.String.createLatin1(rt, &.{byte});
+        return iteratorResult(rt, out.value(), false);
+    }
+
     if (isHighSurrogateUnit(first) and index + 1 < string_value.len()) {
         const second = string_value.codeUnitAt(index + 1);
         if (isLowSurrogateUnit(second)) {
@@ -394,6 +412,7 @@ pub fn methodCall(rt: *core.JSRuntime, receiver: core.JSValue, id: u32, args: []
     if (id == 7) return containsReceiver(rt, receiver, args, .ends);
     if (id == 30) return atReceiver(rt, receiver, args);
     if (id == 27) return splitReceiver(rt, receiver, args);
+    if (id == 33) return repeatReceiver(rt, receiver, args);
     if (id == 28) return lastIndexOfReceiver(rt, receiver, args);
     if (id == 32) return sliceReceiver(rt, receiver, args);
     if (id == 38) return isWellFormedReceiver(rt, receiver);
@@ -971,30 +990,75 @@ fn isAsciiTrim(byte: u8) bool {
     return byte == ' ' or byte == '\t' or byte == '\r' or byte == '\n';
 }
 
+fn codePointAtResolved(data: core.string.String.ResolvedData, len: usize, index: usize) CodePointSpan {
+    switch (data) {
+        // latin1 code units are never surrogates: each byte is one code point.
+        .latin1 => |bytes| return .{ .value = bytes[index], .start = index, .end = index + 1 },
+        .utf16 => |units| {
+            const first = units[index];
+            const next_index = index + 1;
+            if (isHighSurrogateUnit(first) and next_index < len) {
+                const second = units[next_index];
+                if (isLowSurrogateUnit(second)) {
+                    const value = 0x10000 + ((@as(u21, first) - 0xD800) << 10) + (@as(u21, second) - 0xDC00);
+                    return .{ .value = value, .start = index, .end = index + 2 };
+                }
+            }
+            return .{ .value = first, .start = index, .end = next_index };
+        },
+    }
+}
+
 fn unicodeCaseReceiver(rt: *core.JSRuntime, receiver: core.JSValue, to_lower: bool) !core.JSValue {
     const primitive = try toStringValueForMethod(rt, receiver);
     defer primitive.free(rt);
     const string_value = primitive.asStringBody() orelse return error.TypeError;
 
-    var units = std.ArrayList(u16).empty;
-    defer units.deinit(rt.memory.allocator);
+    // Resolve the source to its flat code-unit slice ONCE (decode code points from
+    // it directly instead of re-walking via codeUnitAt per char), and accumulate
+    // into a NARROW latin1 buffer that widens to UTF-16 only when an output unit
+    // exceeds 0xFF — so an ASCII string never materializes a UTF-16 result. qjs
+    // js_string_toLowerCase uses a pre-sized narrow string_buffer (quickjs.c:46510).
+    const data = string_value.resolveData();
+    const slen = string_value.len();
+
+    var latin1 = std.ArrayList(u8).empty;
+    defer latin1.deinit(rt.memory.allocator);
+    var wide = std.ArrayList(u16).empty;
+    defer wide.deinit(rt.memory.allocator);
+    var is_wide = false;
 
     var index: usize = 0;
-    while (index < string_value.len()) {
-        const span = codePointAtStringIndex(string_value.*, index);
+    while (index < slen) {
+        const span = codePointAtResolved(data, slen, index);
         index = span.end;
 
+        // The final-sigma test (Σ→ς) is the only branch that needs neighbour
+        // context; it is rare (lowercase Σ only) so it keeps the string_value walk.
         const mapping = if (to_lower and span.value == 0x03a3 and isFinalSigma(string_value.*, span.start, span.end))
             singleCaseMapping(0x03c2)
         else
             unicode.caseConvert(span.value, to_lower);
 
         for (mapping.codepoints[0..mapping.len]) |cp| {
-            try appendUtf16CodePoint(rt, &units, cp);
+            if (!is_wide and cp <= 0xff) {
+                try latin1.append(rt.memory.allocator, @intCast(cp));
+            } else {
+                if (!is_wide) {
+                    is_wide = true;
+                    try wide.ensureTotalCapacity(rt.memory.allocator, latin1.items.len + 1);
+                    for (latin1.items) |byte| wide.appendAssumeCapacity(byte);
+                    latin1.clearRetainingCapacity();
+                }
+                try appendUtf16CodePoint(rt, &wide, cp);
+            }
         }
     }
 
-    const string = try core.string.String.createUtf16(rt, units.items);
+    const string = if (is_wide)
+        try core.string.String.createUtf16(rt, wide.items)
+    else
+        try core.string.String.createLatin1(rt, latin1.items);
     return string.value();
 }
 
@@ -1258,6 +1322,48 @@ fn stringSliceRange(rt: *core.JSRuntime, len_usize: usize, args: []const core.JS
     return .{ .start = @intCast(start), .end = @intCast(end) };
 }
 
+/// Resolve-once String.prototype.repeat for plain String / String-object
+/// receivers, mirroring QuickJS `js_string_repeat` (quickjs.c:46371): the
+/// receiver's already-flat code units are borrowed ONCE (no per-call
+/// transcode-copy of the slow `repeat(bytes)` path) and the result is built
+/// directly in a buffer pre-sized to `count * unit_len`, narrow latin1 stays
+/// narrow and only a source with >0xFF units (wide) widens to utf16 — the same
+/// lazy-widen shape as `pad` (commit 3ccd4f8). Non-String receivers fall
+/// through to the existing transcoding `repeat`. Count gate / empty-string
+/// returns / overflow guard reproduce the current `repeat` semantics exactly.
+fn repeatReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
+    const string_value = stringValueFromReceiver(receiver) orelse {
+        var bytes = std.ArrayList(u8).empty;
+        defer bytes.deinit(rt.memory.allocator);
+        try appendStringReceiverBytes(rt, &bytes, receiver);
+        return repeat(rt, bytes.items, args);
+    };
+
+    const count = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
+    if (count < 0 or count == std.math.maxInt(i64)) return error.RangeError;
+    try string_value.ensureFlat(rt);
+    const unit_len = string_value.len();
+    if (unit_len == 0 or count == 0) return createStringValue(rt, "");
+    const repeat_count: usize = @intCast(count);
+    const total = try std.math.mul(usize, unit_len, repeat_count);
+    switch (string_value.resolveData()) {
+        .latin1 => |src| {
+            var out = try rt.memory.allocator.alloc(u8, total);
+            defer rt.memory.allocator.free(out);
+            var index: usize = 0;
+            while (index < total) : (index += unit_len) @memcpy(out[index .. index + unit_len], src);
+            return createLatin1SliceValue(rt, out);
+        },
+        .utf16 => |src| {
+            var out = try rt.memory.allocator.alloc(u16, total);
+            defer rt.memory.allocator.free(out);
+            var index: usize = 0;
+            while (index < total) : (index += unit_len) @memcpy(out[index .. index + unit_len], src);
+            return (try core.string.String.createUtf16(rt, out)).value();
+        },
+    }
+}
+
 fn repeat(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     const count = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
     if (count < 0 or count == std.math.maxInt(i64)) return error.RangeError;
@@ -1409,34 +1515,76 @@ fn stringValueFromSearchArgument(rt: *core.JSRuntime, value: core.JSValue) !core
     return createStringValue(rt, bytes.items);
 }
 
-fn stringMatchesAtUnits(haystack: *core.string.String, needle: *core.string.String, start: usize) bool {
-    if (start > haystack.len() or needle.len() > haystack.len() - start) return false;
+fn stringMatchesAtResolved(
+    haystack: core.string.String.ResolvedData,
+    needle: core.string.String.ResolvedData,
+    hlen: usize,
+    nlen: usize,
+    start: usize,
+) bool {
+    if (start > hlen or nlen > hlen - start) return false;
     var offset: usize = 0;
-    while (offset < needle.len()) : (offset += 1) {
-        if (haystack.codeUnitAt(start + offset) != needle.codeUnitAt(offset)) return false;
+    while (offset < nlen) : (offset += 1) {
+        if (resolvedUnitAt(haystack, start + offset) != resolvedUnitAt(needle, offset)) return false;
     }
     return true;
 }
 
+// startsWith / endsWith call this once per op; resolve the flat slices once
+// (hoisting the slice/rope parent-chain walk out of the per-char loop) instead
+// of `codeUnitAt` per character — same resolve-once pattern as stringIndexOfUnits.
+fn stringMatchesAtUnits(haystack: *core.string.String, needle: *core.string.String, start: usize) bool {
+    return stringMatchesAtResolved(haystack.resolveData(), needle.resolveData(), haystack.len(), needle.len(), start);
+}
+
+inline fn resolvedUnitAt(data: core.string.String.ResolvedData, i: usize) u16 {
+    return switch (data) {
+        .latin1 => |bytes| bytes[i],
+        .utf16 => |units| units[i],
+    };
+}
+
 fn stringIndexOfUnits(haystack: *core.string.String, needle: *core.string.String, start: usize) ?usize {
-    if (start > haystack.len()) return null;
-    if (needle.len() == 0) return start;
-    if (needle.len() > haystack.len() - start) return null;
+    const hlen = haystack.len();
+    const nlen = needle.len();
+    if (start > hlen) return null;
+    if (nlen == 0) return start;
+    if (nlen > hlen - start) return null;
+    // Resolve both operands to their flat code-unit slice ONCE (qjs string_indexof
+    // hoists is_wide_char out of the loop, quickjs.c:45553/45579) instead of
+    // re-walking the slice/rope parent chain via `codeUnitAt` on every character,
+    // and first-char-skip so a non-matching position is rejected in a single read.
+    // The loop runs no allocations, so the resolved slices stay valid throughout.
+    const h = haystack.resolveData();
+    const n = needle.resolveData();
+    const first = resolvedUnitAt(n, 0);
     var index = start;
-    const limit = haystack.len() - needle.len();
+    const limit = hlen - nlen;
     while (index <= limit) : (index += 1) {
-        if (stringMatchesAtUnits(haystack, needle, index)) return index;
+        if (resolvedUnitAt(h, index) != first) continue;
+        var offset: usize = 1;
+        while (offset < nlen and resolvedUnitAt(h, index + offset) == resolvedUnitAt(n, offset)) : (offset += 1) {}
+        if (offset == nlen) return index;
     }
     return null;
 }
 
 fn stringLastIndexOfUnits(haystack: *core.string.String, needle: *core.string.String, start: usize) ?usize {
-    if (needle.len() == 0) return @min(start, haystack.len());
-    if (needle.len() > haystack.len()) return null;
-    var index = @min(start, haystack.len() - needle.len()) + 1;
+    const hlen = haystack.len();
+    const nlen = needle.len();
+    if (nlen == 0) return @min(start, hlen);
+    if (nlen > hlen) return null;
+    // Resolve both flat slices ONCE outside the per-position loop (the prior
+    // code re-walked the slice/rope chain via codeUnitAt for every character of
+    // every candidate position) and first-char-skip, mirroring stringIndexOfUnits.
+    const h = haystack.resolveData();
+    const n = needle.resolveData();
+    const first = resolvedUnitAt(n, 0);
+    var index = @min(start, hlen - nlen) + 1;
     while (index > 0) {
         index -= 1;
-        if (stringMatchesAtUnits(haystack, needle, index)) return index;
+        if (resolvedUnitAt(h, index) != first) continue;
+        if (stringMatchesAtResolved(h, n, hlen, nlen, index)) return index;
     }
     return null;
 }

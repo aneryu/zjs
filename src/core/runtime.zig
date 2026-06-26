@@ -603,12 +603,6 @@ const RecentAtomString = struct {
     string: *string.String,
 };
 
-const RegExpSimpleClassAlternationCacheEntry = struct {
-    source_atom: atom.Atom = atom.null_atom,
-    flags_atom: atom.Atom = atom.null_atom,
-    pattern: object_mod.RegExpSimpleClassAlternationPattern = .{},
-};
-
 pub const shared_lazy_native_function_slots = 12;
 pub const internal_destructuring_helper_slots = 14;
 const root_provider_inline_capacity = 1;
@@ -624,6 +618,12 @@ pub const JSRuntime = struct {
     shapes: shape.Registry,
     modules: module.Registry,
     auto_init_table: std.ArrayListUnmanaged(property.AutoInit) = .empty,
+    /// Shared, interned-once descriptor id for the lazy `function.prototype`
+    /// auto-init placeholder (`property.AutoInitKind.function_prototype`). All
+    /// functions reuse this single table entry; the materializer derives the
+    /// realm + constructor from the owner function object, so no per-function
+    /// descriptor is needed (avoids unbounded `auto_init_table` growth).
+    function_prototype_auto_init: ?property.AutoInitRef = null,
     materialize_builtin_namespace_cb: ?*const fn (rt: *JSRuntime, global: *Object, kind: property.AutoInitKind) anyerror!?JSValue = null,
     materialize_context_global_cb: ?*const fn (ctx: *context_mod.JSContext) anyerror!*Object = null,
     /// Bootstrap install seam: builds the standard global object. Seeded from the
@@ -719,8 +719,6 @@ pub const JSRuntime = struct {
     /// regexp literals in particular alternate between source and flags atoms.
     recent_atom_strings: [4]?RecentAtomString = @splat(null),
     recent_atom_string_next: usize = 0,
-    regexp_simple_class_alternation_cache: [8]?RegExpSimpleClassAlternationCacheEntry = @splat(null),
-    regexp_simple_class_alternation_cache_next: usize = 0,
     /// Lazy cache for uppercase percent-escaped byte strings (`%00`..`%FF`).
     /// This is a general URI hot-path cache, not a fixture shortcut:
     /// ECMAScript URI helpers and decimal-to-percent harnesses both
@@ -859,8 +857,6 @@ pub const JSRuntime = struct {
         rt.recent_two_unit_string = null;
         rt.recent_atom_strings = @splat(null);
         rt.recent_atom_string_next = 0;
-        rt.regexp_simple_class_alternation_cache = @splat(null);
-        rt.regexp_simple_class_alternation_cache_next = 0;
         rt.percent_hex_strings = @splat(null);
         rt.small_int_strings = @splat(null);
         rt.internal_destructuring_helpers = @splat(null);
@@ -901,14 +897,6 @@ pub const JSRuntime = struct {
             if (cached) |stored| JSValue.string(&stored.string.header).free(self);
         }
         self.recent_atom_string_next = 0;
-        for (&self.regexp_simple_class_alternation_cache) |*slot| {
-            if (slot.*) |entry| {
-                slot.* = null;
-                self.atoms.free(entry.source_atom);
-                self.atoms.free(entry.flags_atom);
-            }
-        }
-        self.regexp_simple_class_alternation_cache_next = 0;
         const empty_string = self.empty_string;
         self.empty_string = null;
         if (empty_string) |cached| JSValue.string(&cached.header).free(self);
@@ -1876,6 +1864,20 @@ pub const JSRuntime = struct {
         return self.gc.stats.allocation_debt;
     }
 
+    /// Interned-once shared descriptor for the lazy `function.prototype`
+    /// auto-init placeholder. Created on first use and cached on the runtime.
+    pub fn functionPrototypeAutoInitRef(self: *JSRuntime) !property.AutoInitRef {
+        if (self.function_prototype_auto_init) |ref| return ref;
+        const ref = try property.internAutoInit(self, .{
+            .name = "",
+            .length = 0,
+            .rt = self,
+            .kind = .function_prototype,
+        });
+        self.function_prototype_auto_init = ref;
+        return ref;
+    }
+
     pub fn gcStats(self: JSRuntime) gc.Stats {
         var stats = self.gc.statsSnapshot();
         stats.weak_ref_count = self.weakReferenceCount();
@@ -2063,39 +2065,6 @@ pub const JSRuntime = struct {
         self.recent_atom_string_next = (slot_index + 1) % self.recent_atom_strings.len;
         if (old) |stored| JSValue.string(&stored.string.header).free(self);
         return created;
-    }
-
-    pub fn cachedRegExpSimpleClassAlternation(self: *JSRuntime, source_atom: atom.Atom, flags_atom: atom.Atom) ?object_mod.RegExpSimpleClassAlternationPattern {
-        for (self.regexp_simple_class_alternation_cache) |slot| {
-            if (slot) |entry| {
-                if (entry.source_atom == source_atom and entry.flags_atom == flags_atom) return entry.pattern;
-            }
-        }
-        return null;
-    }
-
-    pub fn setRegExpSimpleClassAlternationCache(self: *JSRuntime, source_atom: atom.Atom, flags_atom: atom.Atom, pattern: object_mod.RegExpSimpleClassAlternationPattern) void {
-        for (&self.regexp_simple_class_alternation_cache) |*slot| {
-            if (slot.*) |entry| {
-                if (entry.source_atom == source_atom and entry.flags_atom == flags_atom) {
-                    slot.*.?.pattern = pattern;
-                    return;
-                }
-            }
-        }
-
-        const slot_index = self.regexp_simple_class_alternation_cache_next % self.regexp_simple_class_alternation_cache.len;
-        const old = self.regexp_simple_class_alternation_cache[slot_index];
-        self.regexp_simple_class_alternation_cache[slot_index] = .{
-            .source_atom = self.atoms.dup(source_atom),
-            .flags_atom = self.atoms.dup(flags_atom),
-            .pattern = pattern,
-        };
-        if (old) |entry| {
-            self.atoms.free(entry.source_atom);
-            self.atoms.free(entry.flags_atom);
-        }
-        self.regexp_simple_class_alternation_cache_next = (slot_index + 1) % self.regexp_simple_class_alternation_cache.len;
     }
 
     /// Return a borrowed cached uppercase `%XX` string for a byte. Callers

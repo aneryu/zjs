@@ -93,6 +93,52 @@ inline fn syncDown(
     stack.values = reg_base[0 .. (@intFromPtr(reg_sp) - @intFromPtr(reg_base)) / @sizeOf(core.JSValue)];
 }
 
+/// Threaded post-call / post-return resume: reload the dispatch loop's per-level
+/// locals + registers from the machine's top inline Entry and fetch the next
+/// opcode, WITHOUT re-entering the cold prologue (no `switched` branch, no
+/// fall-through bound check, no generator stop check). Used by the inline call /
+/// return arms while in the inline regime (the 10 inline-invariant locals are
+/// already established), so a deep recursion resumes straight into the next
+/// opcode — qjs's post-OP_call `*sp++ = ret; opcode = *pc++; BREAK`
+/// (quickjs.c:18199-18201) is the structural analog. Returns the opcode to
+/// `continue :sw`; advances `reg_ip` and `frame.pc` past it.
+inline fn reloadInlineTopFrame(
+    machine: *inline_calls.Machine,
+    function: *(*const bytecode.Bytecode),
+    stack: *(*stack_mod.Stack),
+    frame: *(*frame_mod.Frame),
+    catch_target: *(*?usize),
+    eval_var_ref_names: *[]const core.Atom,
+    eval_var_refs: *[]core.JSValue,
+    strict_unresolved_get_var: *bool,
+    reg_ip: *[*]const u8,
+    reg_code_end: *[*]const u8,
+    reg_base: *[*]core.JSValue,
+    reg_sp: *[*]core.JSValue,
+    reg_var_buf: *[*]core.JSValue,
+    reg_arg_buf: *[*]core.JSValue,
+) u8 {
+    const entry = machine.topEntry();
+    function.* = entry.function;
+    stack.* = &entry.stack;
+    frame.* = &entry.frame;
+    catch_target.* = &entry.catch_target;
+    eval_var_ref_names.* = entry.frame.evalVarRefNames();
+    eval_var_refs.* = entry.frame.evalVarRefs();
+    strict_unresolved_get_var.* = entry.function.flags.is_strict or entry.function.flags.runtime_strict;
+    reg_ip.* = entry.function.code.ptr + entry.frame.pc;
+    reg_code_end.* = entry.function.code.ptr + entry.function.code.len;
+    reg_base.* = entry.stack.values.ptr;
+    reg_sp.* = entry.stack.values.ptr + entry.stack.values.len;
+    reg_var_buf.* = entry.frame.locals.ptr;
+    reg_arg_buf.* = entry.frame.args.ptr;
+    machine.switched = false;
+    const next = reg_ip.*[0];
+    reg_ip.* += 1;
+    entry.frame.pc += 1;
+    return next;
+}
+
 const LocalOperand = struct {
     idx: u16,
     consume: u8,
@@ -122,12 +168,6 @@ inline fn decodeLocalOperand(opc: u8, reg_ip: [*]const u8) LocalOperand {
         },
         else => unreachable,
     };
-}
-
-inline fn localStoreNeedsSlowSync(frame: *const frame_mod.Frame, idx: u16, sync_global_lexical_locals: bool) bool {
-    if (!sync_global_lexical_locals) return false;
-    if (!frame.global_lexical_sync_checked) return true;
-    return idx < frame.global_lexical_sync_slots.len and frame.global_lexical_sync_slots[idx];
 }
 
 inline fn localFastPathNeedsGeneratorStopBoundary(stop_before_pc: ?usize) bool {
@@ -208,10 +248,7 @@ inline fn dispatchFieldOwnDataIcValue(
         return null;
     }
     if (entry.slot_index >= object.properties.len) return null;
-    return switch (object.properties[entry.slot_index].slot) {
-        .data => |stored| stored,
-        .var_ref, .auto_init, .accessor, .deleted => null,
-    };
+    return object.asDataAt(entry.slot_index);
 }
 
 inline fn dispatchFieldOwnDataIcStoreOwned(
@@ -237,26 +274,11 @@ inline fn dispatchFieldOwnDataIcStoreOwned(
     if (entry.slot_index >= object.shapeProps().len) return false;
     const prop = object.shapeProps()[entry.slot_index];
     const prop_flags = core.property.Flags.fromBits(prop.flags);
-    if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.accessor or !prop_flags.writable) return false;
+    if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.kind != .data or !prop_flags.writable) return false;
     const property_entry = &object.properties[entry.slot_index];
-    return switch (property_entry.slot) {
-        .data => blk: {
-            const old_slot = property_entry.slot;
-            property_entry.slot = .{ .data = value };
-            core.object.destroyPropertySlot(rt, atom_id, old_slot);
-            break :blk true;
-        },
-        .var_ref, .auto_init, .accessor, .deleted => false,
-    };
-}
-
-inline fn tryDispatchInt32BinaryWindow(base: [*]core.JSValue, sp_len: *usize, binop: u8) bool {
-    const n = sp_len.*;
-    if (n < 2) return false;
-    const ints = core.JSValue.asInt32Pair(base[n - 2], base[n - 1]) orelse return false;
-    const result = dispatchFastBinaryInt32(binop, ints.lhs, ints.rhs) orelse return false;
-    base[n - 2] = result;
-    sp_len.* = n - 1;
+    const old_slot = property_entry.slot;
+    property_entry.slot = .{ .data = value };
+    core.object.destroyPropertySlot(rt, atom_id, prop_flags, old_slot);
     return true;
 }
 
@@ -305,6 +327,45 @@ pub fn runWithOutput(
     return runWithArgs(ctx, stack, function, this_value, &.{}, &.{}, output, global_object, true, false, false, &.{}, &.{}, &.{}, &.{});
 }
 
+/// Host eval-mode entry (`ctx.eval(.eval_direct/.eval_indirect)`). Runs the
+/// compiled eval source through the EVAL runner contract — `is_eval_code = true`,
+/// `sync_global_lexical_locals = false` — exactly as the in-VM `eval()` builtin
+/// (`eval_ops.zig` runWithArgsState site). The script runner (`runWithOutput`)
+/// hardcodes `is_eval_code = false` + `sync = true`, which is the SCRIPT contract
+/// and is wrong for eval code: it materialises a redundant `ctx.lexicals`
+/// property next to the eval frame-local. qjs keeps top-level `let`/`const`/`class`
+/// in a `JS_EVAL_TYPE_DIRECT`/`INDIRECT` eval as `add_scope_var` frame locals
+/// (discarded with the eval frame; no global cell, no env property —
+/// `quickjs.c:24362-24372` requires GLOBAL/MODULE for the cell). With
+/// `eval_global_var_bindings = (mode == .eval_indirect)` an indirect eval still
+/// registers its top-level `var`/function declarations on the global object as
+/// configurable data properties (non-lexical), matching the in-VM builtin and
+/// `parser.zig:176`.
+pub fn runEvalWithOutput(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    output: ?*std.Io.Writer,
+    eval_global_var_bindings: bool,
+) !core.JSValue {
+    const global_object = try contextGlobal(ctx);
+    const this_value = if (function.flags.is_module or function.flags.runtime_strict) core.JSValue.undefinedValue() else global_object.value();
+    return runWithCallEnv(.{
+        .ctx = ctx,
+        .stack = stack,
+        .function = function,
+        .initial_this_value = this_value,
+        .output = output,
+        .global = global_object,
+        .break_var_ref_cycles_on_exit = true,
+        .eval_global_var_bindings = eval_global_var_bindings,
+        .is_eval_code = true,
+    }) catch |err| {
+        if (!ctx.preserve_uncaught_exception and err != error.JSException and ctx.hasException()) ctx.clearException();
+        return err;
+    };
+}
+
 pub fn runWithOutputAndVarRefs(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
@@ -327,7 +388,7 @@ pub fn runModuleWithOutputAndVarRefsState(
     resume_value: ?core.JSValue,
 ) !core.JSValue {
     const global_object = try contextGlobal(ctx);
-    return runWithArgsState(ctx, stack, function, core.JSValue.undefinedValue(), &.{}, var_refs, output, global_object, false, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, module_state, resume_value, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), true, true);
+    return runWithArgsState(ctx, stack, function, core.JSValue.undefinedValue(), &.{}, var_refs, output, global_object, false, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, module_state, resume_value, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), true);
 }
 
 /// Lazily build and cache the per-context global object. Subsequent
@@ -390,7 +451,7 @@ pub fn runWithArgs(
     eval_var_ref_names: []const core.Atom,
     input_eval_var_refs: []const core.JSValue,
 ) !core.JSValue {
-    return runWithArgsState(ctx, stack, function, initial_this_value, args, var_refs, output, global, break_var_ref_cycles_on_exit, strict_unresolved_get_var, stop_on_yield, eval_local_names, eval_local_slots, eval_var_ref_names, input_eval_var_refs, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), true, false) catch |err| {
+    return runWithArgsState(ctx, stack, function, initial_this_value, args, var_refs, output, global, break_var_ref_cycles_on_exit, strict_unresolved_get_var, stop_on_yield, eval_local_names, eval_local_slots, eval_var_ref_names, input_eval_var_refs, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), false) catch |err| {
         if (!ctx.preserve_uncaught_exception and err != error.JSException and ctx.hasException()) ctx.clearException();
         return err;
     };
@@ -429,7 +490,6 @@ pub const CallEnv = struct {
     eval_global_var_bindings: bool = false,
     is_eval_code: bool = false,
     eval_with_object: core.JSValue = core.JSValue.undefinedValue(),
-    sync_global_lexical_locals: bool = false,
     suspend_on_module_await: bool = false,
 };
 
@@ -463,7 +523,6 @@ pub fn runWithCallEnv(env: CallEnv) HostError!core.JSValue {
         env.eval_global_var_bindings,
         env.is_eval_code,
         env.eval_with_object,
-        env.sync_global_lexical_locals,
         env.suspend_on_module_await,
     );
 }
@@ -497,7 +556,6 @@ pub fn runWithArgsState(
     entry_eval_global_var_bindings: bool,
     entry_is_eval_code: bool,
     entry_eval_with_object: core.JSValue,
-    entry_sync_global_lexical_locals: bool,
     entry_suspend_on_module_await: bool,
 ) HostError!core.JSValue {
     const call_depth_guard = try call_vm.enterCallDepth(ctx, global);
@@ -515,9 +573,15 @@ pub fn runWithArgsState(
         if (break_var_ref_cycles_on_exit) _ = ctx.runtime.runObjectCycleRemoval();
     }
     defer frame_storage.deinit(&ctx.runtime.memory, ctx.runtime);
+    // Single backtrace node for this whole VM invocation (qjs's
+    // `current_stack_frame` granularity). It covers the L0 frame during the
+    // pre-dispatch setup below (machine == null, depth 0) and walks the inline
+    // Machine's Entry chain once `machine` is attached after init — replacing
+    // the former per-inline-call backtrace push/pop.
+    var machine_backtrace = inline_calls.MachineBacktrace{ .l0_frame = &frame_storage };
     var active_backtrace_frame = core.ActiveBacktraceFrame{
-        .data = &frame_storage,
-        .resolver = exception_ops.resolveActiveBacktraceFrame,
+        .data = &machine_backtrace,
+        .resolver = inline_calls.resolveMachineBacktrace,
     };
     ctx.pushActiveBacktraceFrame(&active_backtrace_frame);
     defer ctx.popActiveBacktraceFrame(&active_backtrace_frame);
@@ -542,57 +606,80 @@ pub fn runWithArgsState(
     const need_original_args = argumentsNeedsOriginalSnapshot(entry_function);
     const frame_arg_count = frame_mod.frameArgCount(entry_function, args.len);
     const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(entry_function, frame_arg_count);
-    const slab = if (frame_arena) |arena| blk: {
-        if (frame_mod.FrameSlab.carve(
-            &ctx.runtime.memory,
-            arena,
-            frame_arg_count,
-            frame_mod.originalArgCount(args.len, need_original_args),
-            entry_function.var_count,
-            @as(usize, entry_function.stack_size) + 1,
-            frame_mod.frameVarRefStorageCount(entry_function, var_refs),
-            open_var_ref_count,
-        )) |windows| break :blk windows;
-        const heap_windows = try frame_mod.FrameSlab.allocHeap(
-            &ctx.runtime.memory,
-            frame_arg_count,
-            frame_mod.originalArgCount(args.len, need_original_args),
-            entry_function.var_count,
-            0,
-            frame_mod.frameVarRefStorageCount(entry_function, var_refs),
-            open_var_ref_count,
-        );
-        frame_storage.installOwnedStorage(heap_windows.storage);
-        break :blk heap_windows;
-    } else blk: {
-        const heap_windows = try frame_mod.FrameSlab.allocHeap(
-            &ctx.runtime.memory,
-            frame_arg_count,
-            frame_mod.originalArgCount(args.len, need_original_args),
-            entry_function.var_count,
-            0,
-            frame_mod.frameVarRefStorageCount(entry_function, var_refs),
-            open_var_ref_count,
-        );
-        frame_storage.installOwnedStorage(heap_windows.storage);
-        break :blk heap_windows;
-    };
-    const frame_windows = frame_mod.FrameStorageWindows{
-        .args = if (slab.args.len != 0) slab.args else null,
-        .original_args = if (slab.original_args.len != 0) slab.original_args else null,
-        .locals = if (slab.locals.len != 0) slab.locals else null,
-        .var_refs = if (slab.var_refs.len != 0) slab.var_refs else null,
-        .open_var_refs = if (slab.open_var_refs.len != 0) slab.open_var_refs else null,
-    };
-    if (entry_stack.capacity == 0 and slab.stack.len != 0) {
-        entry_stack.* = stack_mod.Stack.initArenaWindow(&ctx.runtime.memory, ctx.runtime.stack_size, slab.stack);
+    // A STARTED generator/async resume (pc != 0) immediately frees any frame slab built
+    // here and swaps in the generator's PRESERVED buffers (vm_gen_async.zig:157-173), so
+    // allocating + initializing a throwaway slab + re-duping args + rebuilding var_refs is
+    // pure waste — qjs allocates the generator frame ONCE at creation and resumes on it
+    // (JS_CALL_FLAG_GENERATOR early-out, quickjs.c:17790). First creation (pc == 0) still
+    // builds the slab (it becomes the generator's working frame), so gate on pc != 0.
+    //
+    // EXCEPT a generator that needs the UNMAPPED `arguments` snapshot (strict / non-simple
+    // params): `initArguments` rebuilds `original_args` from generatorArgs on EVERY resume
+    // (it is NOT preserved in the generator frame buffers — resumeExecutionStateRaw clears
+    // it at line 164), so those keep the full path. For every other started resume the
+    // preserved buffers cover locals/args/var_refs; the only remaining initArguments output
+    // is the mapped-arguments count (frame.args is already the preserved buffer), which we
+    // set directly — identical to what initArguments would store (`actual_arg_count = args.len`).
+    const is_started_resume = if (entry_generator_state) |gen| gen.generatorPc() != 0 else false;
+    const skip_resume_slab = is_started_resume and !need_original_args;
+    if (!skip_resume_slab) {
+        const slab = if (frame_arena) |arena| blk: {
+            if (frame_mod.FrameSlab.carve(
+                &ctx.runtime.memory,
+                arena,
+                frame_arg_count,
+                frame_mod.originalArgCount(args.len, need_original_args),
+                entry_function.var_count,
+                @as(usize, entry_function.stack_size) + 1,
+                frame_mod.frameVarRefStorageCount(entry_function, var_refs),
+                open_var_ref_count,
+            )) |windows| break :blk windows;
+            const heap_windows = try frame_mod.FrameSlab.allocHeap(
+                &ctx.runtime.memory,
+                frame_arg_count,
+                frame_mod.originalArgCount(args.len, need_original_args),
+                entry_function.var_count,
+                0,
+                frame_mod.frameVarRefStorageCount(entry_function, var_refs),
+                open_var_ref_count,
+            );
+            frame_storage.installOwnedStorage(heap_windows.storage);
+            break :blk heap_windows;
+        } else blk: {
+            const heap_windows = try frame_mod.FrameSlab.allocHeap(
+                &ctx.runtime.memory,
+                frame_arg_count,
+                frame_mod.originalArgCount(args.len, need_original_args),
+                entry_function.var_count,
+                0,
+                frame_mod.frameVarRefStorageCount(entry_function, var_refs),
+                open_var_ref_count,
+            );
+            frame_storage.installOwnedStorage(heap_windows.storage);
+            break :blk heap_windows;
+        };
+        const frame_windows = frame_mod.FrameStorageWindows{
+            .args = if (slab.args.len != 0) slab.args else null,
+            .original_args = if (slab.original_args.len != 0) slab.original_args else null,
+            .locals = if (slab.locals.len != 0) slab.locals else null,
+            .var_refs = if (slab.var_refs.len != 0) slab.var_refs else null,
+            .open_var_refs = if (slab.open_var_refs.len != 0) slab.open_var_refs else null,
+        };
+        if (entry_stack.capacity == 0 and slab.stack.len != 0) {
+            entry_stack.* = stack_mod.Stack.initArenaWindow(&ctx.runtime.memory, ctx.runtime.stack_size, slab.stack);
+        }
+        try call_vm.initFrameLocals(ctx, entry_function, &frame_storage, entry_eval_local_names, entry_eval_local_slots, use_inline_frame_storage, frame_windows);
+        try frame_storage.initArguments(&ctx.runtime.memory, frame_arena, args, use_inline_frame_storage, need_original_args, frame_windows);
+        if (frame_windows.open_var_refs) |open_refs| frame_storage.installOpenVarRefSlots(open_refs) else if (open_var_ref_count != 0) try frame_storage.ensureOpenVarRefSlots(&ctx.runtime.memory, frame_arena, use_inline_frame_storage);
+        try call_vm.initFrameVarRefs(ctx, global, entry_function, &frame_storage, var_refs, use_inline_frame_storage, frame_windows);
+    } else {
+        // Skipped the slab; resumeExecutionStateRaw installs the preserved frame.args. The
+        // mapped `arguments` object still reads frame.actual_arg_count, so set it the same way
+        // initArguments would have (args == generatorArgs() here, so this is byte-identical).
+        frame_storage.actual_arg_count = args.len;
     }
-    try call_vm.initFrameLocals(ctx, entry_function, &frame_storage, entry_eval_local_names, entry_eval_local_slots, use_inline_frame_storage, frame_windows);
-    try frame_storage.initArguments(&ctx.runtime.memory, frame_arena, args, use_inline_frame_storage, need_original_args, frame_windows);
-    if (frame_windows.open_var_refs) |open_refs| frame_storage.installOpenVarRefSlots(open_refs) else if (open_var_ref_count != 0) try frame_storage.ensureOpenVarRefSlots(&ctx.runtime.memory, frame_arena, use_inline_frame_storage);
-    try call_vm.initFrameVarRefs(ctx, global, entry_function, &frame_storage, var_refs, use_inline_frame_storage, frame_windows);
     if (entry_generator_state == null) {
-        try vm_property_globals.instantiateGlobalVarDeclarations(ctx, global, entry_function, &frame_storage, entry_is_eval_code, entry_eval_local_names, entry_eval_local_slots, frame_storage.eval_var_ref_names, frame_storage.eval_var_refs);
+        try vm_property_globals.instantiateGlobalVarDeclarations(ctx, global, entry_function, &frame_storage, entry_is_eval_code, entry_eval_local_names, entry_eval_local_slots, frame_storage.evalVarRefNames(), frame_storage.evalVarRefs());
     }
 
     const resume_state = try gen_async_vm.resumeExecutionState(ctx, entry_stack, entry_function, &frame_storage, entry_generator_state, resume_value);
@@ -604,6 +691,7 @@ pub fn runWithArgsState(
 
     var machine = inline_calls.Machine.init(ctx, output, global, &frame_storage, entry_stack, &catch_target_storage);
     defer machine.deinit();
+    machine_backtrace.machine = &machine;
 
     var loop_state = LoopState{
         .ctx = ctx,
@@ -619,7 +707,6 @@ pub fn runWithArgsState(
         .entry_eval_with_object = entry_eval_with_object,
         .entry_eval_global_var_bindings = entry_eval_global_var_bindings,
         .entry_is_eval_code = entry_is_eval_code,
-        .entry_sync_global_lexical_locals = entry_sync_global_lexical_locals,
         .entry_strict_unresolved_get_var = entry_strict_unresolved_get_var,
         .entry_generator_state = entry_generator_state,
         .entry_stop_on_yield = entry_stop_on_yield,
@@ -670,7 +757,6 @@ const LoopState = struct {
     entry_eval_with_object: core.JSValue,
     entry_eval_global_var_bindings: bool,
     entry_is_eval_code: bool,
-    entry_sync_global_lexical_locals: bool,
     entry_strict_unresolved_get_var: bool,
     entry_generator_state: ?*core.Object,
     entry_stop_on_yield: bool,
@@ -691,7 +777,6 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
     const entry_eval_with_object = loop_state.entry_eval_with_object;
     const entry_eval_global_var_bindings = loop_state.entry_eval_global_var_bindings;
     const entry_is_eval_code = loop_state.entry_is_eval_code;
-    const entry_sync_global_lexical_locals = loop_state.entry_sync_global_lexical_locals;
     const entry_strict_unresolved_get_var = loop_state.entry_strict_unresolved_get_var;
     const entry_generator_state = loop_state.entry_generator_state;
     const entry_stop_on_yield = loop_state.entry_stop_on_yield;
@@ -709,18 +794,24 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
     var catch_target: *?usize = loop_state.catch_target_storage;
     var eval_local_names = entry_eval_local_names;
     var eval_local_slots = entry_eval_local_slots;
-    var eval_var_ref_names = frame_storage.eval_var_ref_names;
-    var eval_var_refs = frame_storage.eval_var_refs;
+    var eval_var_ref_names = frame_storage.evalVarRefNames();
+    var eval_var_refs = frame_storage.evalVarRefs();
     var eval_with_object = entry_eval_with_object;
     var eval_global_var_bindings = entry_eval_global_var_bindings;
     var is_eval_code = entry_is_eval_code;
-    var sync_global_lexical_locals = entry_sync_global_lexical_locals;
     var strict_unresolved_get_var = entry_strict_unresolved_get_var;
     var generator_state = entry_generator_state;
     var stop_on_yield = entry_stop_on_yield;
     var stop_before_pc = entry_stop_before_pc;
     var suspend_on_module_await = entry_suspend_on_module_await;
     machine.switched = true;
+    // For an inline (depth>0) frame these 10 per-level locals are always the same
+    // constants (no eval, no generator, not eval-code). They only change at the
+    // L0<->inline boundary, so the prologue sets them ONCE on entering the inline
+    // regime and skips them on every inline->inline frame switch — fib recurses
+    // deep, so almost every switch is inline->inline. Reset to false whenever the
+    // depth==0 (L0) branch runs so the next inline entry re-establishes them.
+    var inline_invariants_set = false;
 
     var interrupt_poller = control_vm.InterruptPoller.init(ctx.runtime);
     // `opc` lives across `continue :sw` threaded re-dispatch so combined arms
@@ -744,6 +835,15 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
     // so threaded get_arg0..3 read args without reloading frame.args from memory.
     var reg_arg_buf: [*]core.JSValue = undefined;
     var reg_code_end: [*]const u8 = undefined;
+    // Frame-invariant generator stop-boundary guard, hoisted out of the per-op
+    // local fast paths. `stop_before_pc` is a per-invocation parameter assigned
+    // ONLY in the `machine.switched` block above the canonical reload point;
+    // generator suspend/resume re-enters through a fresh dispatchLoop call, so
+    // it never changes within a straight-line threaded run. The handlers tested
+    // `localFastPathNeedsGeneratorStopBoundary(stop_before_pc)` (an ?usize
+    // null-check) on every get/put/set/inc/dec/add_loc; precompute it once at
+    // the reload point so the hot threaded arms test a register-resident bool.
+    var local_fast_blocked_by_generator: bool = false;
     while (true) {
         if (machine.switched) {
             machine.switched = false;
@@ -754,36 +854,43 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 catch_target = loop_state.catch_target_storage;
                 eval_local_names = entry_eval_local_names;
                 eval_local_slots = entry_eval_local_slots;
-                eval_var_ref_names = frame_storage.eval_var_ref_names;
-                eval_var_refs = frame_storage.eval_var_refs;
+                eval_var_ref_names = frame_storage.evalVarRefNames();
+                eval_var_refs = frame_storage.evalVarRefs();
                 eval_with_object = entry_eval_with_object;
                 eval_global_var_bindings = entry_eval_global_var_bindings;
                 is_eval_code = entry_is_eval_code;
-                sync_global_lexical_locals = entry_sync_global_lexical_locals;
                 strict_unresolved_get_var = entry_strict_unresolved_get_var;
                 generator_state = entry_generator_state;
                 stop_on_yield = entry_stop_on_yield;
                 stop_before_pc = entry_stop_before_pc;
                 suspend_on_module_await = entry_suspend_on_module_await;
+                // Left the inline regime: the next inline entry must re-establish
+                // the inline invariants (L0 may be eval/generator/eval-code).
+                inline_invariants_set = false;
             } else {
                 const entry = machine.topEntry();
                 function = entry.function;
                 stack = &entry.stack;
                 frame = &entry.frame;
                 catch_target = &entry.catch_target;
-                eval_local_names = &.{};
-                eval_local_slots = &.{};
-                eval_var_ref_names = entry.frame.eval_var_ref_names;
-                eval_var_refs = entry.frame.eval_var_refs;
-                eval_with_object = core.JSValue.undefinedValue();
-                eval_global_var_bindings = false;
-                is_eval_code = false;
-                sync_global_lexical_locals = false;
+                eval_var_ref_names = entry.frame.evalVarRefNames();
+                eval_var_refs = entry.frame.evalVarRefs();
                 strict_unresolved_get_var = entry.function.flags.is_strict or entry.function.flags.runtime_strict;
-                generator_state = null;
-                stop_on_yield = false;
-                stop_before_pc = null;
-                suspend_on_module_await = false;
+                // The 10 inline-invariant locals are identical for every inline
+                // frame; set them once when entering the inline regime, then skip
+                // on every inline->inline switch (the common deep-recursion case).
+                if (!inline_invariants_set) {
+                    eval_local_names = &.{};
+                    eval_local_slots = &.{};
+                    eval_with_object = core.JSValue.undefinedValue();
+                    eval_global_var_bindings = false;
+                    is_eval_code = false;
+                    generator_state = null;
+                    stop_on_yield = false;
+                    stop_before_pc = null;
+                    suspend_on_module_await = false;
+                    inline_invariants_set = true;
+                }
             }
         }
         // Canonical register reload: runs after the switched-block frame refresh and
@@ -795,6 +902,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
         reg_sp = stack.values.ptr + stack.values.len;
         reg_var_buf = frame.locals.ptr;
         reg_arg_buf = frame.args.ptr;
+        local_fast_blocked_by_generator = localFastPathNeedsGeneratorStopBoundary(stop_before_pc);
         if (frame.pc >= function.code.len) {
             if (machine.depth == 0) break;
             const fallthrough_value = stack.peek() orelse core.JSValue.undefinedValue();
@@ -960,7 +1068,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             // handlers.
             op.get_loc, op.put_loc, op.set_loc, op.get_loc8, op.put_loc8, op.set_loc8, op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3, op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.set_loc0, op.set_loc1, op.set_loc2, op.set_loc3 => {
                 if (comptime thread_dispatch) local_fast: {
-                    if (localFastPathNeedsGeneratorStopBoundary(stop_before_pc)) break :local_fast;
+                    if (local_fast_blocked_by_generator) break :local_fast;
                     const operand = decodeLocalOperand(opc, reg_ip);
                     const idx = operand.idx;
                     const old_v = reg_var_buf[idx];
@@ -973,7 +1081,6 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                             reg_sp += 1;
                         },
                         op.put_loc, op.put_loc8, op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3 => {
-                            if (localStoreNeedsSlowSync(frame, idx, sync_global_lexical_locals)) break :local_fast;
                             const value = (reg_sp - 1)[0];
                             if (slot_ops.varRefCellFromValue(value) != null) break :local_fast;
                             reg_ip += operand.consume;
@@ -982,7 +1089,6 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                             old_v.free(ctx.runtime);
                         },
                         op.set_loc, op.set_loc8, op.set_loc0, op.set_loc1, op.set_loc2, op.set_loc3 => {
-                            if (localStoreNeedsSlowSync(frame, idx, sync_global_lexical_locals)) break :local_fast;
                             const value = (reg_sp - 1)[0];
                             if (slot_ops.varRefCellFromValue(value) != null) break :local_fast;
                             const assigned = value.dup();
@@ -997,7 +1103,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     continue :sw opc;
                 }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                try vm_property_locals.loc(ctx, function, global, frame, stack, opc, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object);
+                try vm_property_locals.loc(ctx, function, global, frame, stack, opc, eval_local_names, eval_var_ref_names, eval_with_object);
             },
 
             // Hot single-byte argument reads inlined into the dispatch (skip
@@ -1162,7 +1268,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             // var-ref / TDZ slots fall through to the full handler.
             op.get_loc_check, op.get_loc_checkthis => {
                 if (comptime thread_dispatch) get_loc_check_fast: {
-                    if (localFastPathNeedsGeneratorStopBoundary(stop_before_pc)) break :get_loc_check_fast;
+                    if (local_fast_blocked_by_generator) break :get_loc_check_fast;
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     const slot = reg_var_buf[idx];
                     if (slot_ops.varRefCellFromValue(slot) != null) break :get_loc_check_fast;
@@ -1175,7 +1281,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     continue :sw opc;
                 }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object)) {
+                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, eval_local_names, eval_var_ref_names, eval_with_object)) {
                     .done => continue,
                     .continue_loop => continue,
                 }
@@ -1186,13 +1292,12 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             // handler.
             op.put_loc_check => {
                 if (comptime thread_dispatch) put_loc_check_fast: {
-                    if (localFastPathNeedsGeneratorStopBoundary(stop_before_pc)) break :put_loc_check_fast;
+                    if (local_fast_blocked_by_generator) break :put_loc_check_fast;
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     const old_v = reg_var_buf[idx];
                     if (slot_ops.varRefCellFromValue(old_v) != null) break :put_loc_check_fast;
                     if (old_v.isUninitialized()) break :put_loc_check_fast;
                     if (idx < function.var_is_const.len and function.var_is_const[idx]) break :put_loc_check_fast;
-                    if (localStoreNeedsSlowSync(frame, idx, sync_global_lexical_locals)) break :put_loc_check_fast;
                     const value = (reg_sp - 1)[0];
                     if (slot_ops.varRefCellFromValue(value) != null) break :put_loc_check_fast;
 
@@ -1205,19 +1310,18 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     continue :sw opc;
                 }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object)) {
+                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, eval_local_names, eval_var_ref_names, eval_with_object)) {
                     .done => continue,
                     .continue_loop => continue,
                 }
             },
             op.set_loc_check => {
                 if (comptime thread_dispatch) set_loc_check_fast: {
-                    if (localFastPathNeedsGeneratorStopBoundary(stop_before_pc)) break :set_loc_check_fast;
+                    if (local_fast_blocked_by_generator) break :set_loc_check_fast;
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     const old_v = reg_var_buf[idx];
                     if (slot_ops.varRefCellFromValue(old_v) != null) break :set_loc_check_fast;
                     if (old_v.isUninitialized()) break :set_loc_check_fast;
-                    if (localStoreNeedsSlowSync(frame, idx, sync_global_lexical_locals)) break :set_loc_check_fast;
                     const value = (reg_sp - 1)[0];
                     if (slot_ops.varRefCellFromValue(value) != null) break :set_loc_check_fast;
                     const assigned = value.dup();
@@ -1230,19 +1334,18 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     continue :sw opc;
                 }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object)) {
+                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, eval_local_names, eval_var_ref_names, eval_with_object)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.put_loc_check_init => {
                 if (comptime thread_dispatch) put_loc_check_init_fast: {
-                    if (localFastPathNeedsGeneratorStopBoundary(stop_before_pc)) break :put_loc_check_init_fast;
+                    if (local_fast_blocked_by_generator) break :put_loc_check_init_fast;
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     const old_v = reg_var_buf[idx];
                     if (slot_ops.varRefCellFromValue(old_v) != null) break :put_loc_check_init_fast;
                     if (isDerivedConstructorThisLocal(function, idx)) break :put_loc_check_init_fast;
-                    if (localStoreNeedsSlowSync(frame, idx, sync_global_lexical_locals)) break :put_loc_check_init_fast;
                     const value = (reg_sp - 1)[0];
                     if (slot_ops.varRefCellFromValue(value) != null) break :put_loc_check_init_fast;
 
@@ -1255,14 +1358,14 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     continue :sw opc;
                 }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object)) {
+                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, eval_local_names, eval_var_ref_names, eval_with_object)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.set_loc_uninitialized => {
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object)) {
+                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, eval_local_names, eval_var_ref_names, eval_with_object)) {
                     .done => {},
                     .continue_loop => continue,
                 }
@@ -1337,33 +1440,83 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 if (machine.depth == 0) return control_vm.returnTop(ctx, stack, frame, generator_state);
                 try machine.popReturn(try control_vm.returnTop(ctx, stack, frame, null));
+                // Threaded resume into the caller (still inline): reload + dispatch
+                // its next opcode, skipping the cold prologue. qjs resumes the caller
+                // inline after JS_CallInternal returns (no per-return interrupt poll).
+                if (machine.depth > 0 and inline_invariants_set) {
+                    opc = reloadInlineTopFrame(machine, &function, &stack, &frame, &catch_target, &eval_var_ref_names, &eval_var_refs, &strict_unresolved_get_var, &reg_ip, &reg_code_end, &reg_base, &reg_sp, &reg_var_buf, &reg_arg_buf);
+                    continue :sw opc;
+                }
                 continue;
             },
             op.return_undef => {
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 if (machine.depth == 0) return control_vm.returnUndefined(ctx, frame, generator_state);
                 try machine.popReturn(try control_vm.returnUndefined(ctx, frame, null));
+                if (machine.depth > 0 and inline_invariants_set) {
+                    opc = reloadInlineTopFrame(machine, &function, &stack, &frame, &catch_target, &eval_var_ref_names, &eval_var_refs, &strict_unresolved_get_var, &reg_ip, &reg_code_end, &reg_base, &reg_sp, &reg_var_buf, &reg_arg_buf);
+                    continue :sw opc;
+                }
                 continue;
             },
             op.return_async => {
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 if (machine.depth == 0) return control_vm.returnTop(ctx, stack, frame, generator_state);
                 try machine.popReturn(try control_vm.returnTop(ctx, stack, frame, null));
+                if (machine.depth > 0 and inline_invariants_set) {
+                    opc = reloadInlineTopFrame(machine, &function, &stack, &frame, &catch_target, &eval_var_ref_names, &eval_var_refs, &strict_unresolved_get_var, &reg_ip, &reg_code_end, &reg_base, &reg_sp, &reg_var_buf, &reg_arg_buf);
+                    continue :sw opc;
+                }
                 continue;
             },
 
             // ---- Binary arithmetic ----
             op.add, op.sub, op.mul, op.div, op.mod, op.pow, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor => {
-                if (comptime thread_dispatch) {
-                    if (opc != op.pow) {
-                        var sp_len = (@intFromPtr(reg_sp) - @intFromPtr(reg_base)) / @sizeOf(core.JSValue);
-                        if (tryDispatchInt32BinaryWindow(reg_base, &sp_len, opc)) {
-                            reg_sp = reg_base + sp_len;
-                            opc = reg_ip[0];
-                            reg_ip += 1;
-                            continue :sw opc;
-                        }
+                if (comptime thread_dispatch) bin_int_fast: {
+                    // Register-resident int32 fast path operating directly on
+                    // reg_sp (mirrors the lean op.lt arm), avoiding the sp_len
+                    // round-trip (ptr-diff divide + by-pointer helper + reg_sp
+                    // recompute) the prior window-helper path paid.
+                    if (opc == op.pow) break :bin_int_fast;
+                    const a = (reg_sp - 2)[0].asInt32() orelse break :bin_int_fast;
+                    const b = (reg_sp - 1)[0].asInt32() orelse break :bin_int_fast;
+                    const result = dispatchFastBinaryInt32(opc, a, b) orelse break :bin_int_fast;
+                    (reg_sp - 2)[0] = result;
+                    reg_sp -= 1;
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
+                }
+                if (comptime thread_dispatch) bin_float_fast: {
+                    // Inline float64 fast path mirroring qjs's OP_add/sub/mul
+                    // `JS_TAG_IS_FLOAT64` branch (quickjs.c:19710-19728): for two
+                    // number operands where the int32 path above did not apply
+                    // (≥1 float64, or an int32 add/sub/mul that overflowed), compute
+                    // in f64 and canonicalize EXACTLY like value_ops.binaryNumber
+                    // (numberToValue), avoiding the binaryVm→toPrimitive→binary
+                    // call cascade + pop/defer-free traffic. Only the float-math
+                    // ops qualify: bitwise/shift need ToInt32 (not float math) and
+                    // pow has no fast path; `add` with a string operand is excluded
+                    // because asNumber() is null for strings (→ slow stringAdd).
+                    switch (opc) {
+                        op.add, op.sub, op.mul, op.div, op.mod => {},
+                        else => break :bin_float_fast,
                     }
+                    const fa = (reg_sp - 2)[0].asNumber() orelse break :bin_float_fast;
+                    const fb = (reg_sp - 1)[0].asNumber() orelse break :bin_float_fast;
+                    const fout = switch (opc) {
+                        op.add => fa + fb,
+                        op.sub => fa - fb,
+                        op.mul => fa * fb,
+                        op.div => fa / fb,
+                        op.mod => @rem(fa, fb),
+                        else => unreachable,
+                    };
+                    (reg_sp - 2)[0] = value_ops_mod.numberToValue(fout);
+                    reg_sp -= 1;
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
                 }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 // Inline int32 fast path: replaces binaryVm->binary call frames
@@ -1584,8 +1737,27 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
 
             // ---- Variable access ----
             op.get_var, op.get_var_undef => {
+                if (comptime thread_dispatch) get_var_fast: {
+                    if (local_fast_blocked_by_generator) break :get_var_fast;
+                    if (vm_property_globals.hasDynamicGlobalOverlay(frame, eval_local_names, eval_var_ref_names, eval_with_object)) break :get_var_fast;
+                    const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
+                    if (idx >= frame.var_refs.len) break :get_var_fast;
+                    const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :get_var_fast;
+                    if (cell.is_deleted) break :get_var_fast;
+                    const v = cell.pvalue.*;
+                    if (v.isUninitialized()) break :get_var_fast;
+                    if (core.VarRef.fromValue(v) != null) break :get_var_fast;
+                    if (vm_property_globals.globalLexicalShadowsGlobalForIdx(ctx, global, function, idx)) break :get_var_fast;
+                    if (vm_property_globals.parentEvalShadowsGlobalForIdx(ctx.runtime, frame, function, idx)) break :get_var_fast;
+                    reg_ip += 2;
+                    reg_sp[0] = v.dup();
+                    reg_sp += 1;
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
+                }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                switch (try vm_property_globals.getVar(ctx, output, global, stack, function, frame, catch_target, opc, sync_global_lexical_locals, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, eval_with_object)) {
+                switch (try vm_property_globals.getVar(ctx, output, global, stack, function, frame, catch_target, opc, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, eval_with_object)) {
                     .done => {},
                     .continue_loop => continue,
                 }
@@ -1616,6 +1788,26 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 }
             },
             op.put_var => {
+                if (comptime thread_dispatch) put_var_fast: {
+                    if (local_fast_blocked_by_generator) break :put_var_fast;
+                    if (vm_property_globals.hasDynamicGlobalOverlay(frame, eval_local_names, eval_var_ref_names, eval_with_object)) break :put_var_fast;
+                    const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
+                    if (idx >= frame.var_refs.len) break :put_var_fast;
+                    const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :put_var_fast;
+                    if (cell.is_deleted or cell.is_const or cell.is_function_name) break :put_var_fast;
+                    const cur = cell.pvalue.*;
+                    if (cur.isUninitialized()) break :put_var_fast;
+                    if (core.VarRef.fromValue(cur) != null) break :put_var_fast;
+                    if (vm_property_globals.globalLexicalShadowsGlobalForIdx(ctx, global, function, idx)) break :put_var_fast;
+                    if (vm_property_globals.parentEvalShadowsGlobalForIdx(ctx.runtime, frame, function, idx)) break :put_var_fast;
+                    reg_ip += 2;
+                    reg_sp -= 1;
+                    cell.pvalue.* = reg_sp[0];
+                    cur.free(ctx.runtime);
+                    opc = reg_ip[0];
+                    reg_ip += 1;
+                    continue :sw opc;
+                }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
                 switch (try vm_property_globals.putVar(ctx, output, global, stack, function, frame, catch_target, strict_unresolved_get_var, eval_global_var_bindings, is_eval_code, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, eval_with_object)) {
                     .done => {},
@@ -1667,7 +1859,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     continue :sw opc;
                 }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                switch (try vm_property_field.field(ctx, output, global, stack, function, frame, catch_target, opc, sync_global_lexical_locals)) {
+                switch (try vm_property_field.field(ctx, output, global, stack, function, frame, catch_target, opc)) {
                     .done => {},
                     .continue_loop => continue,
                 }
@@ -1690,7 +1882,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     continue :sw opc;
                 }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                switch (try vm_property_field.field(ctx, output, global, stack, function, frame, catch_target, opc, sync_global_lexical_locals)) {
+                switch (try vm_property_field.field(ctx, output, global, stack, function, frame, catch_target, opc)) {
                     .done => {},
                     .continue_loop => continue,
                 }
@@ -1724,12 +1916,17 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     // el2/el3 (different stack shapes) stay on the slow arm.
                     if (opc == op.get_array_el) {
                         // n_pop=2,n_push=1. Byte-identical to the arrayElement
-                        // dense leg: pop key+obj (free both), pushOwned the dup'd
+                        // dense/typed legs: pop key+obj (free both), pushOwned the
                         // element. fastDenseArrayElementValue gates on object +
-                        // non-negative int key + fast-array-in-bounds.
+                        // non-negative int key + fast-array-in-bounds; the typed
+                        // fall-through mirrors qjs's JS_GetPropertyValue class_id
+                        // switch (quickjs.c:9029) so `ta[i]` reads inline instead of
+                        // syncing down to the generic property path.
                         const obj = (reg_sp - 2)[0];
                         const key = (reg_sp - 1)[0];
-                        const val = vm_property_field.fastDenseArrayElementValue(obj, key) orelse break :array_el_fast;
+                        const val = vm_property_field.fastDenseArrayElementValue(obj, key) orelse
+                            vm_property_field.fastTypedArrayElementValue(ctx.runtime, obj, key) orelse
+                            break :array_el_fast;
                         key.free(ctx.runtime);
                         obj.free(ctx.runtime);
                         (reg_sp - 2)[0] = val;
@@ -1738,19 +1935,31 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                         reg_ip += 1;
                         continue :sw opc;
                     } else if (opc == op.put_array_el) {
-                        // n_pop=3,n_push=0. In-bounds dense store only (the
-                        // non-erroring setFastArrayElementDup leg of the slow
-                        // path's putDenseArrayElementFast); out-of-bounds /
-                        // append / grow / typed-array / proxy break to slow.
-                        // Matches the slow path: it dups the value into the slot,
-                        // frees the old element, and the caller frees obj/key/val.
+                        // n_pop=3,n_push=0. In-bounds dense store (the non-erroring
+                        // setFastArrayElementDup leg of putDenseArrayElementFast) and
+                        // the numeric typed-array store (qjs JS_SetPropertyValue's
+                        // per-class_id arm, quickjs.c:9947). Out-of-bounds append /
+                        // grow / proxy / object-value (needs ToPrimitive) / BigInt
+                        // break to slow. Matches the slow path: it dups/coerces the
+                        // value into the slot and the caller frees obj/key/val.
                         const value = (reg_sp - 1)[0];
                         const key = (reg_sp - 2)[0];
                         const idx_i32 = key.asInt32() orelse break :array_el_fast;
                         if (idx_i32 < 0) break :array_el_fast;
                         const obj = (reg_sp - 3)[0];
                         const object = class_vm.objectFromValue(obj) orelse break :array_el_fast;
-                        if (!object.setFastArrayElementDup(ctx.runtime, @intCast(idx_i32), value)) break :array_el_fast;
+                        if (!object.setFastArrayElementDup(ctx.runtime, @intCast(idx_i32), value)) {
+                            // Not a dense in-bounds store: try the numeric typed-array
+                            // fast write. It only handles primitive values (object
+                            // values need ToPrimitive user code) and kinds 1-10; an
+                            // (unreachable-for-numbers) conversion error or a non-typed
+                            // -array breaks to the slow arm, which re-runs and routes
+                            // the throw through handleCatchableRuntimeError.
+                            switch (vm_property_field.putTypedArrayElementFast(ctx.runtime, obj, key, value) catch break :array_el_fast) {
+                                .handled => {},
+                                .not_typed_array => break :array_el_fast,
+                            }
+                        }
                         value.free(ctx.runtime);
                         key.free(ctx.runtime);
                         obj.free(ctx.runtime);
@@ -1800,6 +2009,16 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                             if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
                             return err;
                         };
+                        // Threaded resume into the callee while already deep in the
+                        // inline regime (invariants established): reload + dispatch
+                        // straight into the callee's first opcode, skipping the cold
+                        // prologue. The first push from L0 (invariants not yet set)
+                        // falls through to `continue` so the prologue establishes them.
+                        if (inline_invariants_set) {
+                            try interrupt_poller.poll(ctx.runtime); // qjs polls at call entry
+                            opc = reloadInlineTopFrame(machine, &function, &stack, &frame, &catch_target, &eval_var_ref_names, &eval_var_refs, &strict_unresolved_get_var, &reg_ip, &reg_code_end, &reg_base, &reg_sp, &reg_var_buf, &reg_arg_buf);
+                            continue :sw opc;
+                        }
                         continue;
                     },
                 }
@@ -1860,6 +2079,16 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                             if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
                             return err;
                         };
+                        // Threaded resume into the callee while already deep in the
+                        // inline regime (invariants established): reload + dispatch
+                        // straight into the callee's first opcode, skipping the cold
+                        // prologue. The first push from L0 (invariants not yet set)
+                        // falls through to `continue` so the prologue establishes them.
+                        if (inline_invariants_set) {
+                            try interrupt_poller.poll(ctx.runtime); // qjs polls at call entry
+                            opc = reloadInlineTopFrame(machine, &function, &stack, &frame, &catch_target, &eval_var_ref_names, &eval_var_refs, &strict_unresolved_get_var, &reg_ip, &reg_code_end, &reg_base, &reg_sp, &reg_var_buf, &reg_arg_buf);
+                            continue :sw opc;
+                        }
                         continue;
                     },
                 }
@@ -2225,10 +2454,9 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
             op.inc_loc, op.dec_loc => {
                 if (comptime thread_dispatch) update_local_fast: {
-                    if (localFastPathNeedsGeneratorStopBoundary(stop_before_pc)) break :update_local_fast;
+                    if (local_fast_blocked_by_generator) break :update_local_fast;
                     const idx: u16 = reg_ip[0];
                     if (idx >= frame.locals.len) break :update_local_fast;
-                    if (localStoreNeedsSlowSync(frame, idx, sync_global_lexical_locals)) break :update_local_fast;
                     const old_v = reg_var_buf[idx];
                     if (slot_ops.varRefCellFromValue(old_v) != null) break :update_local_fast;
                     const int_value = old_v.asInt32() orelse break :update_local_fast;
@@ -2239,7 +2467,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     continue :sw opc;
                 }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                switch (try arith_vm.updateLocalVm(ctx, stack, function, global, frame, catch_target, opc, output, sync_global_lexical_locals)) {
+                switch (try arith_vm.updateLocalVm(ctx, stack, function, global, frame, catch_target, opc, output)) {
                     .done => {},
                     .continue_loop => continue,
                 }
@@ -2250,10 +2478,9 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     // fast path mirrors inc_loc (same local-store guards) plus the
                     // rhs pop; fastInt32Add folds overflow to a double, so no extra
                     // break needed. Both operands int32 here (no refcount).
-                    if (localFastPathNeedsGeneratorStopBoundary(stop_before_pc)) break :add_local_fast;
+                    if (local_fast_blocked_by_generator) break :add_local_fast;
                     const idx: u16 = reg_ip[0];
                     if (idx >= frame.locals.len) break :add_local_fast;
-                    if (localStoreNeedsSlowSync(frame, idx, sync_global_lexical_locals)) break :add_local_fast;
                     const old_v = reg_var_buf[idx];
                     if (slot_ops.varRefCellFromValue(old_v) != null) break :add_local_fast;
                     const lhs = old_v.asInt32() orelse break :add_local_fast;
@@ -2266,7 +2493,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     continue :sw opc;
                 }
                 syncDown(function, frame, stack, reg_ip, reg_base, reg_sp);
-                switch (try arith_vm.addLocalVm(ctx, stack, function, global, frame, catch_target, output, sync_global_lexical_locals)) {
+                switch (try arith_vm.addLocalVm(ctx, stack, function, global, frame, catch_target, output)) {
                     .done => {},
                     .continue_loop => continue,
                 }

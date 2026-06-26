@@ -75,19 +75,6 @@ pub const GlobalVar = struct {
     var_name: atom.Atom,
 };
 
-pub const SimpleNumericKind = enum(u8) {
-    none,
-    arg0_const,
-    arg0_arg1,
-    capture0_arg0,
-    capture0_post_inc_return,
-};
-
-pub const SimpleStringKind = enum(u8) {
-    none,
-    percent_hex_byte,
-};
-
 pub const CallSiteKind = enum(u8) {
     prop_atom,
 };
@@ -179,10 +166,6 @@ pub const FunctionBytecode = struct {
     var_ref_count: u16 = 0,
     closure_var_count: u16 = 0,
     cpool_count: i32 = 0,
-    simple_numeric_kind: SimpleNumericKind = .none,
-    simple_numeric_op: u8 = 0,
-    simple_numeric_rhs: i32 = 0,
-    simple_string_kind: SimpleStringKind = .none,
     ic_slots: []ic.Slot = &.{},
     ic_site_ids: []usize = &.{},
     ic_sites: []ic.Site = &.{},

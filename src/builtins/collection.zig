@@ -1020,7 +1020,12 @@ fn assertAndShiftExpected(rt: *core.JSRuntime, globals: []globals_mod.Slot, actu
         defer next.free(rt);
         try expects.defineOwnProperty(rt, core.atom.atomFromUInt32(index - 1), core.Descriptor.data(next, true, true, true));
     }
-    expects.setArrayLength(expects.arrayLength() - 1);
+    // Drop the now-duplicated tail: lower the dense extent (no-op when the
+    // copy-down already converted to sparse) before lowering .length, so we
+    // never leave array_length < array_count.
+    const shrunk = expects.arrayLength() - 1;
+    expects.truncateArrayElements(rt, shrunk);
+    expects.setArrayLength(shrunk);
 }
 
 fn getGlobalObjectProperty(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8) !core.JSValue {

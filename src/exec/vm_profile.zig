@@ -1,7 +1,12 @@
 const build_options = @import("build_options");
 const core = @import("../core/root.zig");
 
-pub const OpcodeProfileScope = struct {
+/// When opcode profiling is compiled out (the default), this is a zero-size
+/// struct whose `deinit` is a no-op the optimizer elides entirely — the dispatch
+/// prologue pays nothing per cold re-entry. Only the profiling build carries the
+/// real 5-field timing scope. (Constructing the 5-field inactive struct per cold
+/// re-entry cost ~3% of fib; a zero-size struct removes it.)
+pub const OpcodeProfileScope = if (build_options.zjs_enable_opcode_profile) struct {
     rt: *core.JSRuntime,
     opcode: u8,
     previous: core.profile.ActiveState,
@@ -15,18 +20,14 @@ pub const OpcodeProfileScope = struct {
         }
         core.profile.restoreOpcode(self.previous);
     }
+} else struct {
+    pub inline fn deinit(self: OpcodeProfileScope) void {
+        _ = self;
+    }
 };
 
 pub fn enterOpcode(rt: *core.JSRuntime, opcode: u8) OpcodeProfileScope {
-    if (comptime !build_options.zjs_enable_opcode_profile) {
-        return .{
-            .rt = rt,
-            .opcode = opcode,
-            .previous = .{ .profile = null, .opcode = null },
-            .start_ns = 0,
-            .active = false,
-        };
-    }
+    if (comptime !build_options.zjs_enable_opcode_profile) return .{};
     // Touch the thread-local profile state only when a profile is attached;
     // TLV access is expensive on the per-opcode hot path.
     if (rt.opcode_profile == null) {

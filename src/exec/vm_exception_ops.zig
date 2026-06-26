@@ -334,13 +334,12 @@ pub fn resolveBacktraceLocation(data: ?*const anyopaque, target_pc: usize) core.
     return sourceLocationFromPc2Line(function, target_pc) orelse .{ .line_num = function.line_num, .col_num = function.col_num };
 }
 
-pub fn resolveActiveBacktraceFrame(data: ?*const anyopaque) core.ActiveBacktraceSnapshot {
-    const frame: *const frame_mod.Frame = @ptrCast(@alignCast(data orelse return .{
-        .function_name = core.atom.ids.empty_string,
-        .filename = core.atom.ids.empty_string,
-        .line_num = 1,
-        .col_num = 1,
-    }));
+/// Snapshot one live VM frame for the backtrace walk. Shared by the
+/// per-invocation `resolveMachineBacktrace` (inline_calls.zig), which walks the
+/// Machine's Entry chain + L0 frame directly — faithful to qjs's single
+/// `current_stack_frame -> prev_frame` walk (quickjs.c:7571), with no per-call
+/// parallel backtrace node.
+pub fn frameBacktraceSnapshot(frame: *const frame_mod.Frame) core.ActiveBacktraceSnapshot {
     const function = frame.function;
     return .{
         .function_name = function.name,

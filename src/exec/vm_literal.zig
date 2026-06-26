@@ -154,7 +154,7 @@ fn canUseFastGlobalUndefinedLookup(
     if (!frame.current_function.isUndefined()) return false;
     if (frameHasVarRefBinding(function, frame, core.atom.ids.undefined_)) return false;
     if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
-    if (frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return false;
+    if (frame.evalLocalNames().len != 0 or frame.evalVarRefNames().len != 0) return false;
     return true;
 }
 
@@ -208,10 +208,16 @@ pub noinline fn defineField(
 
     const target = try property_ops.expectObject(obj);
     const effective_atom = call_runtime.remapPrivateAtomForOperation(ctx.runtime, frame, target, atom_id);
-    if (target.flags.is_array and effective_atom == core.atom.ids.length) {
+    if (target.flags.is_array and effective_atom == core.atom.ids.length and
+        target.flags.length_writable and target.properties.len == 0)
+    {
         if (value.asInt32()) |length| {
             const new_len: u32 = @intCast(@max(length, 0));
-            if (new_len > target.arrayLength()) try target.convertDenseArrayElementsToSparseProperties(ctx.runtime);
+            // No index properties to delete, so the length set reduces to the
+            // dense case: growth keeps the fast array (tail holes), shrink frees
+            // the dense tail via truncateArrayElements. No sparse conversion
+            // either way — faithful to set_array_length (quickjs.c:9447-9455).
+            // Arrays carrying index properties fall through to defineArrayLength.
             target.truncateArrayElements(ctx.runtime, new_len);
             target.setArrayLength(new_len);
             return .done;
@@ -315,23 +321,12 @@ pub fn appendSpreadValues(
     const array_value = stack.peek() orelse return error.StackUnderflow;
     defer array_value.free(ctx.runtime);
     const array = try property_ops.expectObject(array_value);
-    var out_index = index.asInt32() orelse 0;
-    const source = property_ops.expectObject(iterable) catch null;
-    if (source) |source_object| {
-        if (source_object.flags.is_array) {
-            var source_index: u32 = 0;
-            while (source_index < source_object.arrayLength()) : (source_index += 1) {
-                const item = source_object.getProperty(core.atom.atomFromUInt32(source_index));
-                defer item.free(ctx.runtime);
-                try property_ops.defineDataProperty(ctx.runtime, array, core.atom.atomFromUInt32(@intCast(out_index)), item);
-                out_index += 1;
-            }
-        } else {
-            out_index = try call_runtime.appendIteratorValues(ctx, output, global, array, iterable, out_index);
-        }
-    } else {
-        out_index = try call_runtime.appendIteratorValues(ctx, output, global, array, iterable, out_index);
-    }
+    const start_index = index.asInt32() orelse 0;
+    // Faithful to qjs js_append_enumerate (quickjs.c:16814): resolve @@iterator
+    // and create the iterator, taking the dense bulk copy ONLY when the Array
+    // iterator protocol is un-tampered. The former `is_array`-only fast path
+    // silently ignored a user-patched src[Symbol.iterator] / %ArrayIteratorPrototype%.next.
+    const out_index = try call_runtime.appendSpreadValuesEnumerate(ctx, output, global, array, iterable, start_index);
     try stack.pushOwned(core.JSValue.int32(out_index));
 }
 
@@ -389,6 +384,64 @@ pub noinline fn copyDataProperties(
     const keys = object_ops.objectRestOwnKeys(ctx, output, global, source) catch |err|
         return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
     defer core.Object.freeKeys(rt, keys);
+
+    // qjs JS_CopyDataProperties (quickjs.c:16920) requests JS_GPN_ENUM_ONLY
+    // for an ordinary (non-exotic) source, so the per-key enumerable
+    // descriptor probe is folded into the key enumeration up-front: the key
+    // set is already enumerable-filtered before the copy loop runs any
+    // user getter, and each surviving key takes a single JS_GetProperty.
+    // Only an exotic source with a get_own_property_names hook (a Proxy, or
+    // a typed array / module namespace here) keeps JS_GPN_ENUM_ONLY cleared,
+    // so its descriptor test stays interleaved with the per-key get (trap
+    // ordering for a proxy: gopd:k, get:k, ...).
+    const source_is_ordinary = source.proxyTarget() == null and
+        !core.object.isTypedArrayObject(source) and
+        @constCast(source).moduleNamespacePayload() == null;
+    if (source_is_ordinary) {
+        // Up-front enumerable snapshot. getOwnProperty for an ordinary source
+        // never invokes a user getter (it surfaces the getter function, not
+        // its result), so resolving every key's enumerability here is free of
+        // observable side effects -- and it freezes which keys copy before any
+        // value getter can mutate a later key's enumerability/existence
+        // (qjs ENUM_ONLY snapshots tab_atom once up front).
+        const copy_flags = try rt.memory.alloc(bool, keys.len);
+        defer rt.memory.free(bool, copy_flags);
+        for (keys, copy_flags) |key, *copy| {
+            copy.* = switch (source.ownPropertyEnumerableKind(rt, key)) {
+                .enumerable => true,
+                .not_enumerable => false,
+                // Ordinary sources never yield `.descriptor` here (typed
+                // arrays / module namespaces are routed to the interleaved
+                // path above); fall back defensively if that ever changes.
+                .descriptor => blk: {
+                    const maybe_desc = object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, source, key) catch |err|
+                        return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
+                    const desc = maybe_desc orelse break :blk false;
+                    defer desc.destroy(rt);
+                    break :blk (desc.enumerable orelse false);
+                },
+            };
+        }
+        for (keys, copy_flags) |key, copy| {
+            if (!copy) continue;
+            const value = object_ops.getValueProperty(ctx, output, global, rooted_source_value, key, caller_function, caller_frame) catch |err|
+                return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
+            var rooted_value = value;
+            defer value.free(rt);
+            var value_root_values = [_]core.runtime.ValueRootValue{
+                .{ .value = &rooted_value },
+            };
+            const value_root_frame = core.runtime.ValueRootFrame{
+                .previous = rt.active_value_roots,
+                .values = &value_root_values,
+            };
+            rt.active_value_roots = &value_root_frame;
+            defer rt.active_value_roots = value_root_frame.previous;
+            property_ops.defineDataProperty(rt, target, key, rooted_value) catch |err|
+                return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
+        }
+        return .done;
+    }
 
     for (keys) |key| {
         const maybe_desc = object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, source, key) catch |err|

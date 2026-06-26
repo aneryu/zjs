@@ -286,8 +286,16 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
         for (fd.cpool, cpool) |value, *out| out.* = value.dup();
         fb.cpool = cpool;
     }
-    cacheSimpleNumericBytecode(fb);
     bytecode_function.installCachedBytecodeView(fb, &fb_mod.blockSlice(block, bytecode_function.Bytecode, execution_view_off, 1)[0]);
+
+    if (std.c.getenv("ZJS_DISASM") != null) {
+        const dump = @import("../dump.zig");
+        var disbuf: [65536]u8 = undefined;
+        var diswriter = std.Io.Writer.fixed(&disbuf);
+        const view = bytecode_function.asBytecodeView(fb, rt);
+        dump.dumpBytecode(&diswriter, &view, .{ .show_raw_bytes = true }) catch {};
+        std.debug.print("{s}\n", .{diswriter.buffered()});
+    }
 
     try rt.gc.addWithSize(&fb.header, fb.heapByteSize());
     registered = true;
@@ -309,217 +317,6 @@ fn findGeneratorBodyMarker(code: []const u8) ?usize {
         }
     }
     return null;
-}
-
-fn cacheSimpleNumericBytecode(fb: *bytecode_function.FunctionBytecode) void {
-    fb.simple_numeric_kind = .none;
-    fb.simple_numeric_op = 0;
-    fb.simple_numeric_rhs = 0;
-    fb.simple_string_kind = .none;
-
-    const op = opcode.op;
-    if (fb.is_class_constructor or fb.func_kind != .normal) return;
-
-    if (fb.var_count == 0 and fb.var_ref_count == 0 and fb.cpool_count == 0) {
-        if (simpleNumericArg0Const(fb.byte_code)) |simple| {
-            fb.simple_numeric_kind = .arg0_const;
-            fb.simple_numeric_op = simple.binop;
-            fb.simple_numeric_rhs = simple.rhs;
-            return;
-        }
-        if (fb.byte_code.len == 4 and
-            fb.byte_code[0] == op.get_arg0 and
-            fb.byte_code[1] == op.get_arg1 and
-            isSimpleNumericBinop(fb.byte_code[2]) and
-            fb.byte_code[3] == op.@"return")
-        {
-            fb.simple_numeric_kind = .arg0_arg1;
-            fb.simple_numeric_op = fb.byte_code[2];
-            return;
-        }
-    }
-
-    if (fb.var_count == 0 and fb.cpool_count == 0 and
-        fb.byte_code.len == 4 and
-        fb.byte_code[0] == op.get_var_ref0 and
-        fb.byte_code[1] == op.get_arg0 and
-        isSimpleNumericBinop(fb.byte_code[2]) and
-        fb.byte_code[3] == op.@"return")
-    {
-        fb.simple_numeric_kind = .capture0_arg0;
-        fb.simple_numeric_op = fb.byte_code[2];
-        return;
-    }
-
-    if (simpleCapture0PostIncReturn(fb)) {
-        fb.simple_numeric_kind = .capture0_post_inc_return;
-        return;
-    }
-
-    if (simplePercentHexBytecode(fb)) fb.simple_string_kind = .percent_hex_byte;
-}
-
-const SimpleNumericArg0Const = struct {
-    binop: u8,
-    rhs: i32,
-};
-
-fn simpleNumericArg0Const(code: []const u8) ?SimpleNumericArg0Const {
-    const op = opcode.op;
-    if (code.len < 4 or code[0] != op.get_arg0) return null;
-
-    var pc: usize = 1;
-    const rhs = simpleInlineIntConstant(code, &pc) orelse return null;
-    if (pc >= code.len) return null;
-    const binop = code[pc];
-    pc += 1;
-    if (!isSimpleNumericBinop(binop)) return null;
-    if (pc >= code.len or code[pc] != op.@"return") return null;
-    pc += 1;
-    if (pc != code.len) return null;
-    return .{ .binop = binop, .rhs = rhs };
-}
-
-fn simpleInlineIntConstant(code: []const u8, pc: *usize) ?i32 {
-    const op = opcode.op;
-    if (pc.* >= code.len) return null;
-    const opcode_id = code[pc.*];
-    pc.* += 1;
-    return switch (opcode_id) {
-        op.push_minus1 => -1,
-        op.push_0 => 0,
-        op.push_1 => 1,
-        op.push_2 => 2,
-        op.push_3 => 3,
-        op.push_4 => 4,
-        op.push_5 => 5,
-        op.push_6 => 6,
-        op.push_7 => 7,
-        op.push_i8 => blk: {
-            if (pc.* >= code.len) return null;
-            const value: i8 = @bitCast(code[pc.*]);
-            pc.* += 1;
-            break :blk @as(i32, value);
-        },
-        op.push_i16 => blk: {
-            if (pc.* + 2 > code.len) return null;
-            const value = std.mem.readInt(i16, code[pc.*..][0..2], .little);
-            pc.* += 2;
-            break :blk @as(i32, value);
-        },
-        else => null,
-    };
-}
-
-fn isSimpleNumericBinop(opcode_id: u8) bool {
-    const op = opcode.op;
-    return switch (opcode_id) {
-        op.add, op.sub, op.mul, op.div, op.mod => true,
-        else => false,
-    };
-}
-
-const VarRefOp = struct {
-    idx: u16,
-    next_pc: usize,
-};
-
-fn decodeVarRefGet(code: []const u8, pc: usize) ?VarRefOp {
-    const op = opcode.op;
-    if (pc >= code.len) return null;
-    return switch (code[pc]) {
-        op.get_var_ref, op.get_var_ref_check => blk: {
-            if (pc + 3 > code.len) return null;
-            break :blk .{
-                .idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little),
-                .next_pc = pc + 3,
-            };
-        },
-        op.get_var_ref0, op.get_var_ref1, op.get_var_ref2, op.get_var_ref3 => .{
-            .idx = @intCast(code[pc] - op.get_var_ref0),
-            .next_pc = pc + 1,
-        },
-        else => null,
-    };
-}
-
-fn decodeVarRefPut(code: []const u8, pc: usize) ?VarRefOp {
-    const op = opcode.op;
-    if (pc >= code.len) return null;
-    return switch (code[pc]) {
-        op.put_var_ref, op.put_var_ref_check => blk: {
-            if (pc + 3 > code.len) return null;
-            break :blk .{
-                .idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little),
-                .next_pc = pc + 3,
-            };
-        },
-        op.put_var_ref0, op.put_var_ref1, op.put_var_ref2, op.put_var_ref3 => .{
-            .idx = @intCast(code[pc] - op.put_var_ref0),
-            .next_pc = pc + 1,
-        },
-        else => null,
-    };
-}
-
-fn simpleCapture0PostIncReturn(fb: *const bytecode_function.FunctionBytecode) bool {
-    const op = opcode.op;
-    if (fb.is_class_constructor or fb.func_kind != .normal) return false;
-    if (fb.var_count != 0 or fb.cpool_count != 0) return false;
-
-    const code = fb.byte_code;
-    const first_get = decodeVarRefGet(code, 0) orelse return false;
-    if (first_get.idx != 0) return false;
-    var pc = first_get.next_pc;
-    if (pc >= code.len or code[pc] != op.post_inc) return false;
-    pc += 1;
-    const put = decodeVarRefPut(code, pc) orelse return false;
-    if (put.idx != 0) return false;
-    pc = put.next_pc;
-    if (pc >= code.len or code[pc] != op.drop) return false;
-    pc += 1;
-    const second_get = decodeVarRefGet(code, pc) orelse return false;
-    if (second_get.idx != 0) return false;
-    pc = second_get.next_pc;
-    if (pc >= code.len or code[pc] != op.@"return") return false;
-    pc += 1;
-    return pc == code.len;
-}
-
-fn simplePercentHexBytecode(fb: *const bytecode_function.FunctionBytecode) bool {
-    const op = opcode.op;
-    const code = fb.byte_code;
-    if (fb.var_count != 1 or fb.var_ref_count != 0 or fb.cpool_count != 0) return false;
-    if (code.len != 28) return false;
-    if (code[0] != op.push_atom_value or
-        code[5] != op.put_loc0 or
-        code[6] != op.push_atom_value or
-        code[11] != op.get_loc0 or
-        code[12] != op.get_arg0 or
-        code[13] != op.push_4 or
-        code[14] != op.sar or
-        code[15] != op.push_i8 or
-        code[16] != 15 or
-        code[17] != op.@"and" or
-        code[18] != op.get_array_el or
-        code[19] != op.add or
-        code[20] != op.get_loc0 or
-        code[21] != op.get_arg0 or
-        code[22] != op.push_i8 or
-        code[23] != 15 or
-        code[24] != op.@"and" or
-        code[25] != op.get_array_el or
-        code[26] != op.add or
-        code[27] != op.@"return")
-    {
-        return false;
-    }
-
-    const hex_atom = std.mem.readInt(atom.Atom, code[1..][0..4], .little);
-    const percent_atom = std.mem.readInt(atom.Atom, code[7..][0..4], .little);
-    const hex = fb.atoms.name(hex_atom) orelse return false;
-    const percent = fb.atoms.name(percent_atom) orelse return false;
-    return std.mem.eql(u8, hex, "0123456789ABCDEF") and std.mem.eql(u8, percent, "%");
 }
 
 /// Run all pipeline phases on a compile/execution `Bytecode`.
@@ -710,9 +507,56 @@ fn decodePutLoc(code: []const u8, pc: usize) ?LocOp {
     };
 }
 
+/// A single-value, side-effect-free, no-pop operand op that may legally sit
+/// between `get_loc(n)` and `add` in the add_loc fuse pattern. Mirrors the
+/// operand set in QuickJS's add_loc peephole (quickjs.c:35417-35458:
+/// push_atom_value / push_i32 / get_loc / get_arg / get_var_ref), extended with
+/// zjs's compact push encodings. All are nPop=0/nPush=1 with no control flow,
+/// so replacing `get_loc(n) W add put_loc(n)` with `W add_loc(n)` is value- and
+/// stack-neutral. (scope ops sharing push_minus1..push_7 ids are already gone:
+/// resolve_variables runs before this pass.)
+fn isFusableAddLocOperand(op_id: u8) bool {
+    const op = opcode.op;
+    return switch (op_id) {
+        op.push_i32,
+        op.push_const,
+        op.push_const8,
+        op.push_atom_value,
+        op.push_minus1,
+        op.push_0,
+        op.push_1,
+        op.push_2,
+        op.push_3,
+        op.push_4,
+        op.push_5,
+        op.push_6,
+        op.push_7,
+        op.get_loc,
+        op.get_loc8,
+        op.get_loc0,
+        op.get_loc1,
+        op.get_loc2,
+        op.get_loc3,
+        op.get_arg,
+        op.get_arg0,
+        op.get_arg1,
+        op.get_arg2,
+        op.get_arg3,
+        op.get_var_ref,
+        op.get_var_ref0,
+        op.get_var_ref1,
+        op.get_var_ref2,
+        op.get_var_ref3,
+        => true,
+        else => false,
+    };
+}
+
 /// Peephole pass: fuse a contiguous `get_locN; inc/dec; put_locN` triple
 /// (same local index, idx < 256) into a single 2-byte `inc_loc`/`dec_loc`
 /// (`loc8` format), matching QuickJS's `OP_inc_loc` / `OP_dec_loc`.
+/// Also fuses `get_locN; W; add; put_locN` (W a single-value operand op) into
+/// `W; add_loc(n)`, QuickJS's add_loc peephole (quickjs.c:35417-35458).
 ///
 /// Modeled on the tail of `resolve_variables.run`: at this pipeline stage
 /// jump operands are ABSOLUTE u32 targets and `OP_label` markers (size 5)
@@ -767,6 +611,40 @@ pub fn fuseIncLoc(function: *bytecode_function.Bytecode, mem: *memory_mod.Memory
                             out_idx += 2;
                             i = put_pc + put.size;
                             continue;
+                        }
+                    }
+                }
+            }
+
+            // get_loc(n); W; add; put_loc(n)  ->  W; add_loc(n)
+            // (QuickJS add_loc peephole, quickjs.c:35417-35458). W is a single
+            // side-effect-free value op. Contiguity guarantees no OP_label (and
+            // thus no jump target) lands inside the match, so it is jump-safe by
+            // the same argument as the inc/dec fuse above.
+            if (get.idx < 256) {
+                const w_pc = i + get.size;
+                if (w_pc < code.len and isFusableAddLocOperand(code[w_pc])) {
+                    const w_size = fuseInstrSize(code[w_pc]);
+                    const add_pc = w_pc + w_size;
+                    if (add_pc < code.len and code[add_pc] == op.add) {
+                        const put2_pc = add_pc + 1; // add is size 1
+                        if (put2_pc < code.len) {
+                            if (decodePutLoc(code, put2_pc)) |put| {
+                                if (put.idx == get.idx) {
+                                    // Copy W verbatim, then emit add_loc(n).
+                                    if (i + get.size + w_size > code.len) return error.InvalidBytecode;
+                                    @memcpy(output[out_idx .. out_idx + w_size], code[w_pc .. w_pc + w_size]);
+                                    pc_map[w_pc] = out_idx;
+                                    out_idx += w_size;
+                                    output[out_idx] = op.add_loc;
+                                    output[out_idx + 1] = @intCast(get.idx);
+                                    pc_map[add_pc] = out_idx;
+                                    pc_map[put2_pc] = out_idx;
+                                    out_idx += 2;
+                                    i = put2_pc + put.size;
+                                    continue;
+                                }
+                            }
                         }
                     }
                 }

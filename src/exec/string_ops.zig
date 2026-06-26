@@ -8,7 +8,6 @@ const method_ids = core.host_function.builtin_method_ids;
 const string_id_lookup = core.host_function.builtin_method_id_lookup.string;
 const regexp_adapter = @import("../libs/regexp.zig").js_adapter;
 const unicode_lib = @import("../libs/unicode.zig");
-const emoji = @import("../libs/unicode.zig").emoji;
 const call_mod = @import("call.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const frame_mod = @import("frame.zig");
@@ -24,13 +23,6 @@ const error_stack_ops = @import("error_stack_ops.zig");
 const object_ops = @import("object_ops.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
 const RegExpCapture = call_runtime.RegExpCapture;
-const SimpleAsciiLiteralClassPlusLiteral = regexp_fastpath.SimpleAsciiLiteralClassPlusLiteral;
-const SimpleCaptureSequenceAtom = regexp_fastpath.SimpleCaptureSequenceAtom;
-const SimpleCaptureSequencePattern = regexp_fastpath.SimpleCaptureSequencePattern;
-const SimpleClassAlternationPattern = regexp_fastpath.SimpleClassAlternationPattern;
-const SimpleClassPredicate = regexp_fastpath.SimpleClassPredicate;
-const SimpleClassSequenceAtom = regexp_fastpath.SimpleClassSequenceAtom;
-const SimpleClassSequencePattern = regexp_fastpath.SimpleClassSequencePattern;
 const ValueSliceRoot = array_ops.ValueSliceRoot;
 const anchoredBinaryPropertyName = object_ops.anchoredBinaryPropertyName;
 const appendBacktraceFunctionName = error_stack_ops.appendBacktraceFunctionName;
@@ -52,10 +44,6 @@ const bytecodeFunctionObjectTag = object_ops.bytecodeFunctionObjectTag;
 const callObjectToPrimitiveMethod = object_ops.callObjectToPrimitiveMethod;
 const callValueOrBytecode = call_runtime.callValueOrBytecode;
 const callableObjectFromValue = object_ops.callableObjectFromValue;
-const classEscapeIsQuantified = regexp_fastpath.classEscapeIsQuantified;
-const classEscapeKindIndex = regexp_fastpath.classEscapeKindIndex;
-const classEscapeRunLengthLatin1 = regexp_fastpath.classEscapeRunLengthLatin1;
-const classEscapeRunLengthUtf16 = regexp_fastpath.classEscapeRunLengthUtf16;
 const clearRegExpLegacySlot = regexp_fastpath.clearRegExpLegacySlot;
 const constructValueOrBytecode = call_runtime.constructValueOrBytecode;
 const constructorPrototypeFromGlobal = object_ops.constructorPrototypeFromGlobal;
@@ -209,7 +197,6 @@ const isPhagsPaScriptExtensionsName = call_runtime.isPhagsPaScriptExtensionsName
 const isPhagsPaScriptName = call_runtime.isPhagsPaScriptName;
 const isPhoenicianScriptExtensionsName = call_runtime.isPhoenicianScriptExtensionsName;
 const isPhoenicianScriptName = call_runtime.isPhoenicianScriptName;
-const isPlainAsciiRegExpLiteral = regexp_fastpath.isPlainAsciiRegExpLiteral;
 const isPsalterPahlaviScriptExtensionsName = call_runtime.isPsalterPahlaviScriptExtensionsName;
 const isPsalterPahlaviScriptName = call_runtime.isPsalterPahlaviScriptName;
 const isPunctuationGeneralCategoryName = call_runtime.isPunctuationGeneralCategoryName;
@@ -310,15 +297,9 @@ const isYiScriptExtensionsName = call_runtime.isYiScriptExtensionsName;
 const isYiScriptName = call_runtime.isYiScriptName;
 const isZanabazarSquareScriptExtensionsName = call_runtime.isZanabazarSquareScriptExtensionsName;
 const isZanabazarSquareScriptName = call_runtime.isZanabazarSquareScriptName;
-const leadingAlternationCharacterClassSource = regexp_fastpath.leadingAlternationCharacterClassSource;
 const lengthIndexValue = array_ops.lengthIndexValue;
-const lowSurrogateLiteralAt = regexp_fastpath.lowSurrogateLiteralAt;
 const objectFromValue = object_ops.objectFromValue;
 const ownDataOrAutoInitPropertyValue = object_ops.ownDataOrAutoInitPropertyValue;
-const parseSimpleClassSequenceSource = regexp_fastpath.parseSimpleClassSequenceSource;
-const parseSimpleUnicodeLiteralSource = regexp_fastpath.parseSimpleUnicodeLiteralSource;
-const parseSurrogatePairClassSource = regexp_fastpath.parseSurrogatePairClassSource;
-const parseUnicodeAstralSpecialSource = regexp_fastpath.parseUnicodeAstralSpecialSource;
 const primitiveObjectForAccess = object_ops.primitiveObjectForAccess;
 const propertyAtomFromLengthIndex = object_ops.propertyAtomFromLengthIndex;
 const propertyEscapePattern = object_ops.propertyEscapePattern;
@@ -327,27 +308,15 @@ const qjsArrayLastIndexSparseLarge = array_ops.qjsArrayLastIndexSparseLarge;
 const qjsIteratorPrototype = object_ops.qjsIteratorPrototype;
 const qjsRegExpConstructCall = regexp_fastpath.qjsRegExpConstructCall;
 const qjsRegExpExecGeneric = regexp_fastpath.qjsRegExpExecGeneric;
-const qjsRegExpExecSimpleUnicodeLiteral = regexp_fastpath.qjsRegExpExecSimpleUnicodeLiteral;
 const qjsRegExpSpeciesConstructor = regexp_fastpath.qjsRegExpSpeciesConstructor;
 const readUnicodePropertyClassEscape = object_ops.readUnicodePropertyClassEscape;
 const regExpConstructorFromGlobal = regexp_fastpath.regExpConstructorFromGlobal;
 const regExpExecPropertyIsDefault = object_ops.regExpExecPropertyIsDefault;
 const regExpFlagsAreFullUnicode = regexp_fastpath.regExpFlagsAreFullUnicode;
-const regexpBorrowedLatin1SourceFlags = regexp_fastpath.regexpBorrowedLatin1SourceFlags;
 const regexpInternalFlagsContain = regexp_fastpath.regexpInternalFlagsContain;
-const regexpInternalSimpleQuantifiedClassSource = regexp_fastpath.regexpInternalSimpleQuantifiedClassSource;
-const regexpSimpleCaptureSequencePattern = regexp_fastpath.regexpSimpleCaptureSequencePattern;
 const setRegExpLastIndexZero = regexp_fastpath.setRegExpLastIndexZero;
 const setValueProperty = object_ops.setValueProperty;
 const setValuePropertyStrict = object_ops.setValuePropertyStrict;
-const simpleCaptureSequenceAtLatin1 = regexp_fastpath.simpleCaptureSequenceAtLatin1;
-const simpleCaptureSequenceAtUtf16 = regexp_fastpath.simpleCaptureSequenceAtUtf16;
-const simpleClassSequenceAtLatin1 = regexp_fastpath.simpleClassSequenceAtLatin1;
-const simpleClassSequenceAtUtf16 = regexp_fastpath.simpleClassSequenceAtUtf16;
-const simpleUnicodeLiteralAt = regexp_fastpath.simpleUnicodeLiteralAt;
-const singleLowSurrogateLiteralSource = regexp_fastpath.singleLowSurrogateLiteralSource;
-const standaloneCharacterClassSource = regexp_fastpath.standaloneCharacterClassSource;
-const surrogatePairClassAt = regexp_fastpath.surrogatePairClassAt;
 
 const throwRangeErrorMessage = exception_ops.throwRangeErrorMessage;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
@@ -358,7 +327,6 @@ const toPrimitiveForNumber = coercion_ops.toPrimitiveForNumber;
 const toUint16CodeUnit = coercion_ops.toUint16CodeUnit;
 const toUint32Number = coercion_ops.toUint32Number;
 const uint32NumberValue = coercion_ops.uint32NumberValue;
-const unicodeAstralSpecialAt = regexp_fastpath.unicodeAstralSpecialAt;
 const unicodePropertyOnlyClassBody = object_ops.unicodePropertyOnlyClassBody;
 const unicodePropertyOnlyClassSource = object_ops.unicodePropertyOnlyClassSource;
 const updateRegExpLegacyStaticsNoCaptures = regexp_fastpath.updateRegExpLegacyStaticsNoCaptures;
@@ -513,7 +481,6 @@ pub fn qjsStringReplace(
     }
     const search_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const replacement_input = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    if (try qjsStringReplaceFastRegExp(ctx, output, global, this_value, search_input, replacement_input, caller_function, caller_frame)) |value| return value;
     if (try callStringReplaceMethod(ctx, output, global, this_value, search_input, replacement_input, caller_function, caller_frame)) |value| return value;
 
     const source_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
@@ -566,65 +533,6 @@ pub fn qjsStringReplace(
     return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
 }
 
-pub fn qjsStringReplaceFastRegExp(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    search_value: core.JSValue,
-    replace_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    if (isCallableValue(replace_value)) return null;
-    const regexp_object = objectFromValue(search_value) orelse return null;
-    if (regexp_object.class_id != core.class.ids.regexp) return null;
-    const replace_atom = core.atom.predefinedId("Symbol.replace", .symbol) orelse return null;
-    if (regexp_object.hasOwnProperty(replace_atom)) return null;
-
-    if (regexpInternalFlagsContain(regexp_object, 'g')) {
-        if (regexpInternalSimpleQuantifiedClassSource(regexp_object)) |fast_source| {
-            try setRegExpLastIndexZero(ctx.runtime, regexp_object);
-            const string_value = if (this_value.isString())
-                this_value.dup()
-            else
-                try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-            defer string_value.free(ctx.runtime);
-            const replacement_string = if (replace_value.isString())
-                replace_value.dup()
-            else
-                try toStringForAnnexB(ctx, output, global, replace_value, caller_function, caller_frame);
-            defer replacement_string.free(ctx.runtime);
-            if (replaceSingleUnitGlobalSimpleClassEscape(string_value, replacement_string, fast_source)) |fast| return fast;
-            return try replaceGlobalSimpleClassEscape(ctx.runtime, string_value, replacement_string, fast_source);
-        }
-    }
-
-    var flags = std.ArrayList(u8).empty;
-    defer flags.deinit(ctx.runtime.memory.allocator);
-    if (!try appendRegExpFlags(ctx.runtime, regexp_object, &flags)) return null;
-    if (std.mem.indexOfScalar(u8, flags.items, 'g') == null) return null;
-
-    var source = std.ArrayList(u8).empty;
-    defer source.deinit(ctx.runtime.memory.allocator);
-    if (!try appendRegExpSource(ctx.runtime, regexp_object, &source)) return null;
-    if (!classEscapeIsQuantified(source.items) or !isSimpleStringClassEscapeSource(source.items)) return null;
-
-    try setRegExpLastIndexZero(ctx.runtime, regexp_object);
-    const string_value = if (this_value.isString())
-        this_value.dup()
-    else
-        try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
-    const replacement_string = if (replace_value.isString())
-        replace_value.dup()
-    else
-        try toStringForAnnexB(ctx, output, global, replace_value, caller_function, caller_frame);
-    defer replacement_string.free(ctx.runtime);
-    if (replaceSingleUnitGlobalSimpleClassEscape(string_value, replacement_string, source.items)) |fast| return fast;
-    return try replaceGlobalSimpleClassEscape(ctx.runtime, string_value, replacement_string, source.items);
-}
-
 pub fn callStringReplaceMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -643,24 +551,6 @@ pub fn callStringReplaceMethod(
     if (!isCallableValue(replacer)) return error.TypeError;
     const replace_args = [_]core.JSValue{ this_value, replace_value };
     return try callValueOrBytecode(ctx, output, global, search_value, replacer, &replace_args, caller_function, caller_frame);
-}
-
-pub fn callSimpleStringBytecode(
-    rt: *core.JSRuntime,
-    fb: *const bytecode.FunctionBytecode,
-    args: []const core.JSValue,
-) !?core.JSValue {
-    switch (fb.simple_string_kind) {
-        .percent_hex_byte => {
-            if (args.len == 0) return null;
-            const byte_i32 = args[0].asInt32() orelse return null;
-            const byte: u8 = @truncate(@as(u32, @bitCast(byte_i32)));
-            const cached = try rt.percentHexString(byte);
-            return cached.value().dup();
-        },
-        .none => {},
-    }
-    return null;
 }
 
 pub fn buildErrorStackStringValue(ctx: *core.JSContext, global: *core.Object, skip_name: ?[]const u8) !core.JSValue {
@@ -880,15 +770,11 @@ pub fn qjsStringFromCodePointDenseArray(rt: *core.JSRuntime, array: *core.Object
         if (prop_flags.deleted) continue;
         const index = core.array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;
         if (index >= array.arrayLength()) continue;
-        if (prop_flags.accessor) return null;
-        const value = switch (array.properties[property_index].slot) {
-            .data => |stored| stored,
-            // Array elements never carry `auto_init` placeholders --
-            // those only appear for builtin method tables installed via
-            // `defineAutoInitProperty` -- but the switch must be
-            // exhaustive after the auto-init slot variant was added.
-            .var_ref, .accessor, .auto_init, .deleted => return null,
-        };
+        if (prop_flags.isAccessor()) return null;
+        // Array elements never carry `auto_init` placeholders -- those only
+        // appear for builtin method tables installed via
+        // `defineAutoInitProperty`; only the `.data` kind is valid here.
+        const value = array.asDataAt(property_index) orelse return null;
         const number = value_ops.numberValue(value) orelse return null;
         const code_point = validStringCodePoint(number) orelse return error.RangeError;
         if (code_points[index] == null) seen += 1;
@@ -1010,109 +896,6 @@ pub fn qjsRegExpToString(
     return value_ops.createStringValue(ctx.runtime, bytes.items);
 }
 
-const SimpleLatin1LiteralPlusLiteral = struct {
-    repeat: u8,
-    tail: ?u8,
-};
-
-fn isPlainLatin1RegExpLiteral(unit: u8) bool {
-    return unit >= 0x80 or isPlainAsciiRegExpLiteral(unit);
-}
-
-fn parseSimpleLatin1LiteralPlusLiteral(source: []const u8, flags: []const u8) ?SimpleLatin1LiteralPlusLiteral {
-    if (flags.len != 0 or source.len < 2 or source[1] != '+') return null;
-    const repeat = source[0];
-    if (!isPlainLatin1RegExpLiteral(repeat)) return null;
-
-    if (source.len == 2) {
-        return .{ .repeat = repeat, .tail = null };
-    }
-
-    if (source.len != 3) return null;
-    const tail = source[2];
-    if (!isPlainLatin1RegExpLiteral(tail)) return null;
-    return .{ .repeat = repeat, .tail = tail };
-}
-
-pub fn simpleLatin1LiteralPlusLiteralMatch(source: []const u8, flags: []const u8, string_value: core.JSValue) ?bool {
-    const pattern = parseSimpleLatin1LiteralPlusLiteral(source, flags) orelse return null;
-    const string_object = string_value.asStringBody() orelse return null;
-    return switch (string_object.resolveData()) {
-        .latin1 => |bytes| simpleLatin1LiteralPlusLiteralMatchBytesPattern(pattern, bytes),
-        .utf16 => |units| simpleLatin1LiteralPlusLiteralMatchUtf16Pattern(pattern, units),
-    };
-}
-
-pub fn simpleLatin1LiteralPlusLiteralMatchBytes(source: []const u8, flags: []const u8, input: []const u8) ?bool {
-    const pattern = parseSimpleLatin1LiteralPlusLiteral(source, flags) orelse return null;
-    return simpleLatin1LiteralPlusLiteralMatchBytesPattern(pattern, input);
-}
-
-fn simpleLatin1LiteralPlusLiteralMatchBytesPattern(pattern: SimpleLatin1LiteralPlusLiteral, input: []const u8) bool {
-    const repeat = pattern.repeat;
-    if (pattern.tail == null) return std.mem.indexOfScalar(u8, input, repeat) != null;
-    const tail = pattern.tail.?;
-    var i: usize = 0;
-    while (i < input.len) : (i += 1) {
-        if (input[i] != repeat) continue;
-        var j = i + 1;
-        while (j < input.len and input[j] == repeat) : (j += 1) {}
-        if (j < input.len and input[j] == tail) return true;
-    }
-    return false;
-}
-
-fn simpleLatin1LiteralPlusLiteralMatchUtf16Pattern(pattern: SimpleLatin1LiteralPlusLiteral, input: []const u16) bool {
-    const repeat: u16 = pattern.repeat;
-    if (pattern.tail == null) return std.mem.indexOfScalar(u16, input, repeat) != null;
-    const tail: u16 = pattern.tail.?;
-    var i: usize = 0;
-    while (i < input.len) : (i += 1) {
-        if (input[i] != repeat) continue;
-        var j = i + 1;
-        while (j < input.len and input[j] == repeat) : (j += 1) {}
-        if (j < input.len and input[j] == tail) return true;
-    }
-    return false;
-}
-
-pub fn simpleAsciiLiteralPlusLiteralMatch(source: []const u8, flags: []const u8, string_value: core.JSValue) ?bool {
-    return simpleLatin1LiteralPlusLiteralMatch(source, flags, string_value);
-}
-
-pub fn simpleAsciiLiteralPlusLiteralMatchBytes(source: []const u8, flags: []const u8, input: []const u8) ?bool {
-    return simpleLatin1LiteralPlusLiteralMatchBytes(source, flags, input);
-}
-
-pub fn simpleAsciiLiteralClassPlusLiteralMatchBytes(pattern: SimpleAsciiLiteralClassPlusLiteral, input: []const u8) bool {
-    var search_start: usize = 0;
-    while (search_start <= input.len) {
-        const start = if (pattern.prefix.len == 0) search_start else blk: {
-            const relative = std.mem.indexOf(u8, input[search_start..], pattern.prefix) orelse return false;
-            break :blk search_start + relative;
-        };
-
-        var class_end = start + pattern.prefix.len;
-        const class_min_end = class_end + 1;
-        while (class_end < input.len and core.regexp.classMatchesUtf16Unit(pattern.class_source, input[class_end])) : (class_end += 1) {}
-        if (class_end >= class_min_end) {
-            if (pattern.suffix.len == 0) return true;
-
-            var suffix_start = class_end;
-            while (suffix_start >= class_min_end) {
-                if (suffix_start + pattern.suffix.len <= input.len and std.mem.eql(u8, input[suffix_start .. suffix_start + pattern.suffix.len], pattern.suffix)) {
-                    return true;
-                }
-                if (suffix_start == class_min_end) break;
-                suffix_start -= 1;
-            }
-        }
-
-        search_start = start + 1;
-    }
-    return false;
-}
-
 pub fn latin1StringSlice(value: core.JSValue) ?[]const u8 {
     const string_object = value.asStringBody() orelse return null;
     return switch (string_object.resolveData()) {
@@ -1121,11 +904,11 @@ pub fn latin1StringSlice(value: core.JSValue) ?[]const u8 {
     };
 }
 
-pub fn regexpInternalStringValue(object: *core.Object, source: bool) !core.JSValue {
+pub fn regexpInternalStringValue(rt: *core.JSRuntime, object: *core.Object, source: bool) !core.JSValue {
     if (source) {
         return (object.regexpSource() orelse return error.TypeError).dup();
     }
-    return (object.regexpFlags() orelse return error.TypeError).dup();
+    return regexp_adapter.flagsStringValueFromBytecode(rt, object.regexpCompiledBytecode());
 }
 
 pub fn qjsRegExpSymbolSearch(
@@ -1460,10 +1243,7 @@ pub fn qjsRegExpSymbolSearchGeneric(
         try setValuePropertyStrict(ctx, output, global, rx, core.atom.ids.lastIndex, core.JSValue.int32(0), caller_function, caller_frame);
     }
 
-    const result = if (try qjsRegExpExecSimpleUnicodeLiteral(ctx, output, global, rx, string_value, caller_function, caller_frame)) |value|
-        value
-    else
-        try qjsRegExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
+    const result = try qjsRegExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
     defer result.free(ctx.runtime);
 
     const current = try getValueProperty(ctx, output, global, rx, core.atom.ids.lastIndex, caller_function, caller_frame);
@@ -1494,7 +1274,6 @@ pub fn qjsRegExpSymbolMatchGeneric(
     defer flags.deinit(ctx.runtime.memory.allocator);
     try value_ops.appendRawString(ctx.runtime, &flags, flags_string);
     if (std.mem.indexOfScalar(u8, flags.items, 'g') == null) {
-        if (try qjsRegExpExecSimpleUnicodeLiteral(ctx, output, global, rx, string_value, caller_function, caller_frame)) |value| return value;
         return qjsRegExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
     }
 
@@ -1556,17 +1335,6 @@ pub fn qjsRegExpSymbolReplaceGeneric(
     const full_unicode = try regExpFlagsAreFullUnicode(ctx.runtime, flags_string);
     if (is_global) {
         try setValuePropertyStrict(ctx, output, global, rx, core.atom.ids.lastIndex, core.JSValue.int32(0), caller_function, caller_frame);
-    }
-    if (is_global and !functional_replace) {
-        if (objectFromValue(rx)) |regexp_object| {
-            var source = std.ArrayList(u8).empty;
-            defer source.deinit(ctx.runtime.memory.allocator);
-            if (try appendRegExpSource(ctx.runtime, regexp_object, &source)) {
-                if (replaceSingleUnitGlobalSimpleClassEscape(string_value, replacement_string, source.items)) |fast| return fast;
-                if (try replaceGlobalSimpleClassEscape(ctx.runtime, string_value, replacement_string, source.items)) |fast| return fast;
-            }
-            if (try replaceGlobalSimpleCaptureSequence(ctx, output, global, rx, regexp_object, string_value, replacement_string, flags_string, caller_function, caller_frame)) |fast| return fast;
-        }
     }
     if (!functional_replace and !stringValueContainsUnitByte(replacement_string, '$') and try regExpExecPropertyIsDefault(ctx, output, global, rx, caller_function, caller_frame)) {
         return qjsRegExpSymbolReplaceLiteral(ctx, output, global, rx, string_value, replacement_string, is_global, full_unicode, caller_function, caller_frame);
@@ -1725,192 +1493,6 @@ pub fn captureReplaceLiteralMatch(
     const string_len = try stringLengthIndex(ctx.runtime, string_value);
     const index = @min(try toLengthIndex(ctx, output, global, index_value), string_len);
     return .{ .result = result, .matched = matched, .index = index };
-}
-
-pub fn replaceSingleUnitGlobalSimpleClassEscape(
-    string_value: core.JSValue,
-    replacement_string: core.JSValue,
-    source: []const u8,
-) ?core.JSValue {
-    if (!classEscapeIsQuantified(source) or !isSimpleStringClassEscapeSource(source)) return null;
-    const string_object = string_value.asStringBody() orelse return null;
-    const unit = switch (string_object.resolveData()) {
-        .latin1 => |bytes| blk: {
-            if (bytes.len != 1) return null;
-            break :blk @as(u16, bytes[0]);
-        },
-        .utf16 => |units| blk: {
-            if (units.len != 1) return null;
-            break :blk units[0];
-        },
-    };
-    return if (classEscapeUnitMatches(source, unit)) replacement_string.dup() else string_value.dup();
-}
-
-pub fn replaceGlobalSimpleClassEscape(
-    rt: *core.JSRuntime,
-    string_value: core.JSValue,
-    replacement_string: core.JSValue,
-    source: []const u8,
-) !?core.JSValue {
-    if (!classEscapeIsQuantified(source) or !isSimpleStringClassEscapeSource(source)) return null;
-    const string_object = string_value.asStringBody() orelse return null;
-
-    var replacement_units = std.ArrayList(u16).empty;
-    defer replacement_units.deinit(rt.memory.allocator);
-    try appendStringValueUnits(rt, &replacement_units, replacement_string);
-
-    var out = std.ArrayList(u16).empty;
-    defer out.deinit(rt.memory.allocator);
-    switch (string_object.resolveData()) {
-        .latin1 => |bytes| {
-            var index: usize = 0;
-            while (index < bytes.len) {
-                const unit: u16 = bytes[index];
-                if (classEscapeUnitMatches(source, unit)) {
-                    try out.appendSlice(rt.memory.allocator, replacement_units.items);
-                    index += classEscapeRunLengthLatin1(source, bytes, index);
-                } else {
-                    try out.append(rt.memory.allocator, unit);
-                    index += 1;
-                }
-            }
-        },
-        .utf16 => |units| {
-            var index: usize = 0;
-            while (index < units.len) {
-                const unit = units[index];
-                if (classEscapeUnitMatches(source, unit)) {
-                    try out.appendSlice(rt.memory.allocator, replacement_units.items);
-                    index += classEscapeRunLengthUtf16(source, units, index);
-                } else {
-                    try out.append(rt.memory.allocator, unit);
-                    index += 1;
-                }
-            }
-        },
-    }
-    return (try core.string.String.createUtf16(rt, out.items)).value();
-}
-
-pub const FastReplacementPart = union(enum) {
-    literal: []const u8,
-    capture: usize,
-    dollar,
-};
-
-pub const FastReplacementPattern = struct {
-    parts: [32]FastReplacementPart = undefined,
-    len: usize = 0,
-
-    pub fn append(self: *FastReplacementPattern, part: FastReplacementPart) bool {
-        if (self.len >= self.parts.len) return false;
-        self.parts[self.len] = part;
-        self.len += 1;
-        return true;
-    }
-};
-
-pub fn replaceGlobalSimpleCaptureSequence(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    rx: core.JSValue,
-    regexp_object: *core.Object,
-    string_value: core.JSValue,
-    replacement_string: core.JSValue,
-    flags_string: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    const borrowed = regexpBorrowedLatin1SourceFlags(regexp_object) orelse return null;
-    const observed_flags = latin1StringSlice(flags_string) orelse return null;
-    if (!std.mem.eql(u8, observed_flags, borrowed.flags)) return null;
-    if (std.mem.indexOfScalar(u8, borrowed.flags, 'g') == null) return null;
-    if (std.mem.indexOfScalar(u8, borrowed.flags, 'y') != null) return null;
-    if (!try regExpExecPropertyIsDefault(ctx, output, global, rx, caller_function, caller_frame)) return null;
-
-    const pattern = regexpSimpleCaptureSequencePattern(regexp_object, borrowed.source, borrowed.flags) orelse return null;
-    const input = latin1StringSlice(string_value) orelse return null;
-    const replacement = latin1StringSlice(replacement_string) orelse return null;
-    const replacement_pattern = parseFastReplacementPattern(replacement, pattern.capture_count) orelse return null;
-
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(ctx.runtime.memory.allocator);
-    var next_source_position: usize = 0;
-    var search_start: usize = 0;
-    var last_match: ?RegExpMatch = null;
-
-    while (search_start <= input.len) {
-        const found = simpleCaptureSequenceMatchLatin1(pattern, input, search_start, false, borrowed.flags) orelse break;
-        if (found.index < next_source_position) break;
-        try out.appendSlice(ctx.runtime.memory.allocator, input[next_source_position..found.index]);
-        try appendFastReplacement(ctx.runtime, &out, input, found, replacement_pattern);
-        next_source_position = found.index + found.len;
-        last_match = found;
-        search_start = if (found.len == 0) @min(input.len + 1, found.index + 1) else next_source_position;
-    }
-
-    const final_match = last_match orelse return string_value.dup();
-    try out.appendSlice(ctx.runtime.memory.allocator, input[next_source_position..]);
-    try updateRegExpLegacyStaticsForMatch(ctx.runtime, global, string_value, final_match);
-    return (try core.string.String.createLatin1(ctx.runtime, out.items)).value();
-}
-
-pub fn parseFastReplacementPattern(replacement: []const u8, capture_count: usize) ?FastReplacementPattern {
-    var pattern = FastReplacementPattern{};
-    var literal_start: usize = 0;
-    var index: usize = 0;
-    while (index < replacement.len) {
-        if (replacement[index] != '$') {
-            index += 1;
-            continue;
-        }
-        if (index + 1 >= replacement.len) return null;
-        const next = replacement[index + 1];
-        switch (next) {
-            '$' => {
-                if (literal_start < index and !pattern.append(.{ .literal = replacement[literal_start..index] })) return null;
-                if (!pattern.append(.dollar)) return null;
-                index += 2;
-                literal_start = index;
-            },
-            '1'...'9' => {
-                var capture_index: usize = next - '0';
-                var consumed: usize = 1;
-                if (index + 2 < replacement.len and unicode_lib.isAsciiDigitByte(replacement[index + 2])) {
-                    const two_digit = capture_index * 10 + (replacement[index + 2] - '0');
-                    if (two_digit >= 1 and two_digit <= capture_count) {
-                        capture_index = two_digit;
-                        consumed = 2;
-                    }
-                }
-                if (capture_index == 0 or capture_index > capture_count) return null;
-                if (literal_start < index and !pattern.append(.{ .literal = replacement[literal_start..index] })) return null;
-                if (!pattern.append(.{ .capture = capture_index - 1 })) return null;
-                index += 1 + consumed;
-                literal_start = index;
-            },
-            else => return null,
-        }
-    }
-    if (literal_start < replacement.len and !pattern.append(.{ .literal = replacement[literal_start..] })) return null;
-    return pattern;
-}
-
-pub fn appendFastReplacement(rt: *core.JSRuntime, out: *std.ArrayList(u8), input: []const u8, found: RegExpMatch, replacement: FastReplacementPattern) !void {
-    for (replacement.parts[0..replacement.len]) |part| {
-        switch (part) {
-            .literal => |bytes| try out.appendSlice(rt.memory.allocator, bytes),
-            .dollar => try out.append(rt.memory.allocator, '$'),
-            .capture => |capture_index| {
-                if (capture_index >= found.capture_count) continue;
-                const capture = found.captures[capture_index];
-                if (capture.undefined) continue;
-                try out.appendSlice(rt.memory.allocator, input[capture.start .. capture.start + capture.len]);
-            },
-        }
-    }
 }
 
 pub fn appendStringValueUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: core.JSValue) !void {
@@ -2238,18 +1820,6 @@ pub fn nativeFunctionMatcherUnicodeClassAsciiResult(source: []const u8, flags: [
     if (is_id_continue and unicode_lib.isAsciiDigitByte(byte)) return true;
     if (is_id_continue and byte == '_') return true;
     return false;
-}
-
-pub fn stringValueUnits(string_value: core.JSValue) ?emoji.StringUnits {
-    const string_object = string_value.asStringBody() orelse return null;
-    switch (string_object.resolveData()) {
-        .latin1 => |bytes| {
-            return .{ .latin1 = bytes };
-        },
-        .utf16 => |units| {
-            return .{ .utf16 = units };
-        },
-    }
 }
 
 pub fn findPropertyEscapeMatch(source: []const u8, string_value: core.JSValue, start_index: usize, sticky: bool) ?RegExpMatch {
@@ -3095,65 +2665,11 @@ pub fn qjsRegExpMatch(rt: *core.JSRuntime, global: *core.Object, regexp: core.JS
     return out.value();
 }
 
-pub fn unicodeLowSurrogateLiteralMatch(source: []const u8, value: core.JSValue, start: usize, sticky: bool) ?RegExpMatch {
-    const unit = singleLowSurrogateLiteralSource(source) orelse return null;
-    const string_value = value.asStringBody() orelse return null;
-    if (start > string_value.len()) return null;
-    if (sticky) return lowSurrogateLiteralAt(unit, string_value.*, start);
-    var index = start;
-    while (index < string_value.len()) {
-        if (lowSurrogateLiteralAt(unit, string_value.*, index)) |found| return found;
-        index = advanceStringIndexStringValue(string_value.*, index, true);
-    }
-    return null;
-}
-
 pub fn advanceStringIndexStringValue(string_value: core.string.String, index: usize, unicode: bool) usize {
     if (!unicode or index + 1 >= string_value.len()) return index + 1;
     const first = string_value.codeUnitAt(index);
     const second = string_value.codeUnitAt(index + 1);
     return index + if (isHighSurrogateUnit(first) and isLowSurrogateUnit(second)) @as(usize, 2) else 1;
-}
-
-pub fn findCharacterClassSourceMatch(value: core.JSValue, source: []const u8, start: usize, sticky: bool) ?RegExpMatch {
-    const string_value = value.asStringBody() orelse return null;
-    switch (string_value.resolveData()) {
-        .latin1 => |bytes| {
-            if (sticky) {
-                if (start >= bytes.len or !core.regexp.classMatchesUtf16Unit(source, bytes[start])) return null;
-                return RegExpMatch{ .index = start, .len = 1 };
-            }
-            var index = start;
-            while (index < bytes.len) : (index += 1) {
-                if (!core.regexp.classMatchesUtf16Unit(source, bytes[index])) continue;
-                return RegExpMatch{ .index = index, .len = 1 };
-            }
-        },
-        .utf16 => |units| {
-            if (sticky) {
-                if (start >= units.len or !core.regexp.classMatchesUtf16Unit(source, units[start])) return null;
-                return RegExpMatch{ .index = start, .len = 1 };
-            }
-            var index = start;
-            while (index < units.len) : (index += 1) {
-                if (!core.regexp.classMatchesUtf16Unit(source, units[index])) continue;
-                return RegExpMatch{ .index = index, .len = 1 };
-            }
-        },
-    }
-    return null;
-}
-
-pub fn findStandaloneCharacterClassMatch(value: core.JSValue, source: []const u8, start: usize, sticky: bool) ?RegExpMatch {
-    const class_source = standaloneCharacterClassSource(source) orelse return null;
-    return findCharacterClassSourceMatch(value, class_source, start, sticky);
-}
-
-pub fn findLeadingAlternationCharacterClassSingleUnitMatch(rt: *core.JSRuntime, value: core.JSValue, source: []const u8, start: usize, sticky: bool) ?RegExpMatch {
-    const class_source = leadingAlternationCharacterClassSource(source) orelse return null;
-    const input_len = stringLengthIndex(rt, value) catch return null;
-    if (input_len != 1) return null;
-    return findCharacterClassSourceMatch(value, class_source, start, sticky);
 }
 
 pub fn findStringUnitMatch(value: core.JSValue, unit: u16, start: usize) ?usize {
@@ -3176,149 +2692,6 @@ pub fn findStringUnitMatch(value: core.JSValue, unit: u16, start: usize) ?usize 
     return null;
 }
 
-pub fn simpleUnicodeLiteralMatch(source: []const u8, value: core.JSValue, start: usize, sticky: bool, flags: []const u8) ?RegExpMatch {
-    const pattern = parseSimpleUnicodeLiteralSource(source) orelse return null;
-    const string_value = value.asStringBody() orelse return null;
-    if (start > string_value.len()) return null;
-    if (sticky) return simpleUnicodeLiteralAt(pattern, string_value.*, start, flags);
-    var index = start;
-    while (index <= string_value.len()) : (index += 1) {
-        if (simpleUnicodeLiteralAt(pattern, string_value.*, index, flags)) |found| return found;
-    }
-    return null;
-}
-
-pub fn simpleClassSequenceMatch(source: []const u8, value: core.JSValue, start: usize, sticky: bool, flags: []const u8) ?RegExpMatch {
-    const pattern = parseSimpleClassSequenceSource(source, flags) orelse return null;
-    return simpleClassSequenceMatchPattern(pattern, value, start, sticky, flags);
-}
-
-pub fn simpleClassSequenceMatchPattern(pattern: SimpleClassSequencePattern, value: core.JSValue, start: usize, sticky: bool, flags: []const u8) ?RegExpMatch {
-    const string_value = value.asStringBody() orelse return null;
-    return switch (string_value.resolveData()) {
-        .latin1 => |bytes| simpleClassSequenceMatchLatin1(pattern, bytes, start, sticky, flags),
-        .utf16 => |units| simpleClassSequenceMatchUtf16(pattern, units, start, sticky, flags),
-    };
-}
-
-pub fn simpleClassAlternationMatchPattern(pattern: SimpleClassAlternationPattern, value: core.JSValue, start: usize, sticky: bool, flags: []const u8) ?RegExpMatch {
-    const string_value = value.asStringBody() orelse return null;
-    return switch (string_value.resolveData()) {
-        .latin1 => |bytes| simpleClassAlternationMatchLatin1(pattern, bytes, start, sticky, flags),
-        .utf16 => |units| simpleClassAlternationMatchUtf16(pattern, units, start, sticky, flags),
-    };
-}
-
-pub fn simpleCaptureSequenceMatchPattern(pattern: SimpleCaptureSequencePattern, value: core.JSValue, start: usize, sticky: bool, flags: []const u8) ?RegExpMatch {
-    const string_value = value.asStringBody() orelse return null;
-    return switch (string_value.resolveData()) {
-        .latin1 => |bytes| simpleCaptureSequenceMatchLatin1(pattern, bytes, start, sticky, flags),
-        .utf16 => |units| simpleCaptureSequenceMatchUtf16(pattern, units, start, sticky, flags),
-    };
-}
-
-pub fn simpleClassSequenceMatchLatin1(pattern: SimpleClassSequencePattern, bytes: []const u8, start: usize, sticky: bool, flags: []const u8) ?RegExpMatch {
-    if (start > bytes.len) return null;
-    if (sticky) return simpleClassSequenceAtLatin1(pattern, bytes, start, flags);
-    var index = start;
-    while (index <= bytes.len) : (index += 1) {
-        if (simpleClassSequenceAtLatin1(pattern, bytes, index, flags)) |found| return found;
-    }
-    return null;
-}
-
-pub fn simpleClassSequenceMatchUtf16(pattern: SimpleClassSequencePattern, units: []const u16, start: usize, sticky: bool, flags: []const u8) ?RegExpMatch {
-    if (start > units.len) return null;
-    if (sticky) return simpleClassSequenceAtUtf16(pattern, units, start, flags);
-    var index = start;
-    while (index <= units.len) : (index += 1) {
-        if (simpleClassSequenceAtUtf16(pattern, units, index, flags)) |found| return found;
-    }
-    return null;
-}
-
-pub fn simpleClassAlternationMatchLatin1(pattern: SimpleClassAlternationPattern, bytes: []const u8, start: usize, sticky: bool, flags: []const u8) ?RegExpMatch {
-    if (start > bytes.len) return null;
-    if (sticky) {
-        for (pattern.alternatives[0..pattern.len]) |alternative| {
-            if (simpleClassSequenceAtLatin1(alternative, bytes, start, flags)) |found| return found;
-        }
-        return null;
-    }
-
-    var index = start;
-    while (index <= bytes.len) : (index += 1) {
-        for (pattern.alternatives[0..pattern.len]) |alternative| {
-            if (simpleClassSequenceAtLatin1(alternative, bytes, index, flags)) |found| return found;
-        }
-    }
-    return null;
-}
-
-pub fn simpleClassAlternationMatchUtf16(pattern: SimpleClassAlternationPattern, units: []const u16, start: usize, sticky: bool, flags: []const u8) ?RegExpMatch {
-    if (start > units.len) return null;
-    if (sticky) {
-        for (pattern.alternatives[0..pattern.len]) |alternative| {
-            if (simpleClassSequenceAtUtf16(alternative, units, start, flags)) |found| return found;
-        }
-        return null;
-    }
-
-    var index = start;
-    while (index <= units.len) : (index += 1) {
-        for (pattern.alternatives[0..pattern.len]) |alternative| {
-            if (simpleClassSequenceAtUtf16(alternative, units, index, flags)) |found| return found;
-        }
-    }
-    return null;
-}
-
-pub fn simpleCaptureSequenceMatchLatin1(pattern: SimpleCaptureSequencePattern, bytes: []const u8, start: usize, sticky: bool, flags: []const u8) ?RegExpMatch {
-    if (start > bytes.len) return null;
-    if (sticky) return simpleCaptureSequenceAtLatin1(pattern, bytes, start, flags);
-    var index = start;
-    while (index <= bytes.len) : (index += 1) {
-        if (simpleCaptureSequenceAtLatin1(pattern, bytes, index, flags)) |found| return found;
-    }
-    return null;
-}
-
-pub fn simpleCaptureSequenceMatchUtf16(pattern: SimpleCaptureSequencePattern, units: []const u16, start: usize, sticky: bool, flags: []const u8) ?RegExpMatch {
-    if (start > units.len) return null;
-    if (sticky) return simpleCaptureSequenceAtUtf16(pattern, units, start, flags);
-    var index = start;
-    while (index <= units.len) : (index += 1) {
-        if (simpleCaptureSequenceAtUtf16(pattern, units, index, flags)) |found| return found;
-    }
-    return null;
-}
-
-pub fn simpleClassSequenceAtomMatches(atom: SimpleClassSequenceAtom, unit: u16) bool {
-    return switch (atom.kind) {
-        .literal => atom.literal == unit,
-        .class => simpleClassPredicateMatches(atom.class_predicate, atom.class_source, unit),
-    };
-}
-
-pub fn simpleCaptureSequenceAtomMatches(atom: SimpleCaptureSequenceAtom, unit: u16) bool {
-    return switch (atom.kind) {
-        .literal => atom.literal == unit,
-        .class => simpleClassPredicateMatches(atom.class_predicate, atom.class_source, unit),
-    };
-}
-
-pub fn simpleClassPredicateMatches(predicate: SimpleClassPredicate, source: []const u8, unit: u16) bool {
-    return switch (predicate) {
-        .generic => core.regexp.classMatchesUtf16Unit(source, unit),
-        .ascii_digit, .ascii_decimal => isAsciiDigitUnit(unit),
-        .ascii_not_digit => !isAsciiDigitUnit(unit),
-        .ascii_word => isAsciiWordUnit(unit),
-        .ascii_not_word => !isAsciiWordUnit(unit),
-        .ascii_lower => unicode_lib.isAsciiLowerUnit(unit),
-        .ascii_alpha => unicode_lib.isAsciiAlphaUnit(unit),
-    };
-}
-
 pub fn isStringLineStartPosition(string_value: core.string.String, pos: usize, multiline: bool) bool {
     if (pos == 0) return true;
     if (!multiline or pos > string_value.len()) return false;
@@ -3329,34 +2702,6 @@ pub fn isStringLineEndPosition(string_value: core.string.String, pos: usize, mul
     if (pos == string_value.len()) return true;
     if (!multiline or pos > string_value.len()) return false;
     return isLineTerminatorUnit(string_value.codeUnitAt(pos));
-}
-
-pub fn unicodeSurrogatePairClassMatch(source: []const u8, value: core.JSValue, start: usize, sticky: bool, unicode: bool) ?RegExpMatch {
-    if (!unicode) return null;
-    const pattern = parseSurrogatePairClassSource(source) orelse return null;
-    const string_value = value.asStringBody() orelse return null;
-    if (start > string_value.len()) return null;
-    if (sticky) return surrogatePairClassAt(pattern, string_value.*, start);
-    var index = start;
-    while (index + 1 < string_value.len()) : (index += 1) {
-        if (surrogatePairClassAt(pattern, string_value.*, index)) |found| return found;
-    }
-    return null;
-}
-
-pub fn unicodeAstralSpecialMatch(source: []const u8, value: core.JSValue, start: usize, sticky: bool, unicode: bool) ?RegExpMatch {
-    if (!unicode) return null;
-    const pattern = parseUnicodeAstralSpecialSource(source) orelse return null;
-    const string_value = value.asStringBody() orelse return null;
-    if (start > string_value.len()) return null;
-    if (sticky) return unicodeAstralSpecialAt(pattern, string_value.*, start);
-    var index = start;
-    while (index < string_value.len()) {
-        if (unicodeAstralSpecialAt(pattern, string_value.*, index)) |found| return found;
-        const cp = stringCodePointAt(string_value.*, index) orelse break;
-        index += cp.len;
-    }
-    return null;
 }
 
 pub fn stringCodePointAt(string_value: core.string.String, pos: usize) ?struct { value: u21, len: usize } {
@@ -3463,50 +2808,6 @@ pub fn anchoredSingleNonWhitespaceMatches(string_value: core.JSValue, unicode: b
             return units.len == 1 and !isEcmaWhitespaceOrLineTerminator(units[0]);
         },
     }
-}
-
-pub fn isSimpleStringClassEscapeSource(source: []const u8) bool {
-    const kind_index = classEscapeKindIndex(source) orelse return false;
-    const kind = source[kind_index];
-    if (std.mem.indexOfScalar(u8, "dDsSwW", kind) == null) return false;
-    return source.len == kind_index + 1 or
-        (source.len == kind_index + 2 and source[kind_index + 1] == '+');
-}
-
-pub fn findStringClassEscapeMatch(string_value: core.JSValue, source: []const u8, start: usize) ?RegExpMatch {
-    const string_object = string_value.asStringBody() orelse return null;
-    switch (string_object.resolveData()) {
-        .latin1 => |bytes| {
-            var index = start;
-            while (index < bytes.len) : (index += 1) {
-                if (!classEscapeUnitMatches(source, bytes[index])) continue;
-                const len = classEscapeRunLengthLatin1(source, bytes, index);
-                return RegExpMatch{ .index = index, .len = len };
-            }
-        },
-        .utf16 => |units| {
-            var index = start;
-            while (index < units.len) : (index += 1) {
-                if (!classEscapeUnitMatches(source, units[index])) continue;
-                const len = classEscapeRunLengthUtf16(source, units, index);
-                return RegExpMatch{ .index = index, .len = len };
-            }
-        },
-    }
-    return null;
-}
-
-pub fn classEscapeUnitMatches(source: []const u8, unit: u16) bool {
-    const kind_index = classEscapeKindIndex(source) orelse return false;
-    return switch (source[kind_index]) {
-        'd' => isAsciiDigitUnit(unit),
-        'D' => !isAsciiDigitUnit(unit),
-        's' => isEcmaWhitespaceOrLineTerminator(unit),
-        'S' => !isEcmaWhitespaceOrLineTerminator(unit),
-        'w' => isAsciiWordUnit(unit),
-        'W' => !isAsciiWordUnit(unit),
-        else => false,
-    };
 }
 
 pub fn anchoredComplementClassMatches(source: []const u8, string_value: core.JSValue) bool {
@@ -4284,11 +3585,43 @@ pub fn qjsArraySearchCall(
     if (length == 0) return if (mode == .includes) core.JSValue.boolean(false) else core.JSValue.int32(-1);
 
     const search_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    // Typed arrays: raw-buffer per-class scan (qjs js_typed_array_indexOf,
+    // quickjs.c:58072 / :58179-58245). Normalize the search value once with an
+    // early can't-fit short-circuit, then scan the backing buffer per element
+    // kind instead of boxing each element through typedArrayGetIndex. The
+    // fromIndex coercion below mirrors what the generic loop already ran.
+    if (is_typed_array) {
+        const search_mode: array_ops.TypedSearchMode = switch (mode) {
+            .index_of => .index_of,
+            .last_index_of => .last_index_of,
+            .includes => .includes,
+        };
+        const cursor = if (mode == .last_index_of)
+            try arrayLastIndexStart(ctx, output, global, args, length)
+        else
+            try arrayFirstIndexStart(ctx, output, global, args, length);
+        return try array_ops.qjsTypedArraySearchScan(ctx.runtime, object, search_mode, search_value, cursor, length);
+    }
     if (mode == .last_index_of and length > 1_000_000) {
         return try qjsArrayLastIndexSparseLarge(ctx, output, global, object, receiver_object_value, args, length, search_value);
     }
     if (mode == .last_index_of) {
         var cursor = try arrayLastIndexStart(ctx, output, global, args, length);
+        // Dense fast scan (qjs js_array_lastIndexOf js_get_fast_array loop,
+        // quickjs.c:42476): if the receiver is still a dense fast array and the
+        // fromIndex coercion above did not resize it, scan the borrowed element
+        // slice directly — no per-element propertyAtomFromLengthIndex intern +
+        // generic getValueProperty. `===` runs no user code, so the slice stays
+        // valid for the whole loop.
+        if (!is_typed_array and object.isFastArray() and @as(usize, @intCast(object.arrayLength())) == length and object.arrayElements().len == length) {
+            const elements = object.arrayElements();
+            if (cursor > elements.len) cursor = elements.len;
+            while (cursor > 0) {
+                cursor -= 1;
+                if (try valuesStrictEqual(ctx.runtime, elements[cursor], search_value)) return lengthIndexValue(cursor);
+            }
+            return core.JSValue.int32(-1);
+        }
         while (cursor > 0) {
             cursor -= 1;
             const item = if (is_typed_array) blk: {
@@ -4306,6 +3639,24 @@ pub fn qjsArraySearchCall(
         }
     } else {
         var cursor = try arrayFirstIndexStart(ctx, output, global, args, length);
+        // Dense fast PREFIX scan, then fall through to the generic tail (qjs
+        // js_array_indexOf/includes: js_get_fast_array dense loop over [0, count) then the
+        // generic loop over [count, len) for the tail holes, quickjs.c:42426-42483). Unlike
+        // a full-density gate, this also fast-scans the dense prefix of an L3 holey fast
+        // array (array_count < length) before the proto-aware tail.
+        if (!is_typed_array and object.isFastArray()) {
+            const elements = object.arrayElements();
+            const dense_end = @min(elements.len, length);
+            while (cursor < dense_end) : (cursor += 1) {
+                const item = elements[cursor];
+                if (mode == .includes) {
+                    if (item.sameValueZero(search_value)) return core.JSValue.boolean(true);
+                } else {
+                    if (try valuesStrictEqual(ctx.runtime, item, search_value)) return lengthIndexValue(cursor);
+                }
+            }
+            // cursor == dense_end; the generic loop below covers [dense_end, length) holes.
+        }
         while (cursor < length) : (cursor += 1) {
             const item = if (is_typed_array) blk: {
                 if (mode != .includes) {
@@ -4600,9 +3951,28 @@ pub fn getFastStringPrimitiveDataProperty(
     return ownDataOrAutoInitPropertyValue(proto, atom_id);
 }
 
+/// Comptime bitset of the predefined atom ids whose name is a standard
+/// String.prototype method. Built from the SAME `prototypeMethodId` map, so the
+/// membership result is identical — but the per-access check below becomes an
+/// O(1) integer-indexed lookup instead of `atoms.name()` + a ~40-way
+/// `std.mem.eql` chain on every `s.method()` resolution. A user string equal to
+/// a method name interns to its predefined atom id (interning is by content),
+/// so dynamic atoms (id > predefined_count) are correctly never methods.
+const string_method_atom_bits = blk: {
+    @setEvalBranchQuota(400000);
+    var bits = [_]bool{false} ** (core.atom.predefined_count + 1);
+    for (core.atom.predefined_atoms) |pa| {
+        if (pa.kind == .string and string_id_lookup.prototypeMethodId(pa.name) != null) {
+            bits[pa.id] = true;
+        }
+    }
+    break :blk bits;
+};
+
 pub fn isStandardStringPrototypeMethodAtom(rt: *core.JSRuntime, atom_id: core.Atom) bool {
-    const name = rt.atoms.name(atom_id) orelse return false;
-    return string_id_lookup.prototypeMethodId(name) != null;
+    _ = rt;
+    if (core.atom.isTaggedInt(atom_id) or atom_id == 0 or atom_id > core.atom.predefined_count) return false;
+    return string_method_atom_bits[atom_id];
 }
 
 pub fn defineStringWrapperIndexProperty(rt: *core.JSRuntime, object: *core.Object, index: u32, unit: u16) !void {
@@ -4899,6 +4269,86 @@ pub fn isLowSurrogateUnit(unit: u16) bool {
 // record table via `callStringBody`/`callStringCharAtBody` (Phase 6b-3 STEP 5),
 // so exec no longer names them directly.
 
+// qjs JS_STRING_LEN_MAX (quickjs.c:212): js_string_pad throws RangeError when the
+// requested length exceeds it (quickjs.c:46331).
+const js_string_len_max: usize = (1 << 30) - 1;
+
+/// A narrow-first pad accumulator mirroring qjs's StringBuffer (js_string_pad,
+/// quickjs.c:46304-46356): source/fill code units are copied into a latin1 (u8)
+/// buffer and only widened to UTF-16 when a unit exceeds 0xFF, so an all-latin1
+/// pad never materializes a UTF-16 result. It operates on code UNITS (surrogate
+/// halves are copied verbatim, matching string_buffer_concat) and tiles the fill
+/// by repetition+remainder rather than per character.
+const PadBuffer = struct {
+    allocator: std.mem.Allocator,
+    latin1: std.ArrayList(u8) = .empty,
+    wide: std.ArrayList(u16) = .empty,
+    is_wide: bool = false,
+
+    fn deinit(self: *PadBuffer) void {
+        self.latin1.deinit(self.allocator);
+        self.wide.deinit(self.allocator);
+    }
+
+    fn widen(self: *PadBuffer) !void {
+        self.is_wide = true;
+        try self.wide.ensureTotalCapacity(self.allocator, self.latin1.items.len);
+        for (self.latin1.items) |byte| self.wide.appendAssumeCapacity(byte);
+        self.latin1.clearRetainingCapacity();
+    }
+
+    fn ensureCapacity(self: *PadBuffer, additional: usize) !void {
+        if (self.is_wide)
+            try self.wide.ensureUnusedCapacity(self.allocator, additional)
+        else
+            try self.latin1.ensureUnusedCapacity(self.allocator, additional);
+    }
+
+    /// Appends `count` code units of `data` starting at `start`, widening on the
+    /// first >0xFF unit encountered (mirrors string_buffer_concat's widen path).
+    fn appendUnits(self: *PadBuffer, data: core.string.String.ResolvedData, start: usize, count: usize) !void {
+        switch (data) {
+            // latin1 units are all <= 0xFF: copy flat, no widen check needed.
+            .latin1 => |bytes| {
+                const chunk = bytes[start .. start + count];
+                if (self.is_wide) {
+                    try self.wide.ensureUnusedCapacity(self.allocator, count);
+                    for (chunk) |byte| self.wide.appendAssumeCapacity(byte);
+                } else {
+                    try self.latin1.appendSlice(self.allocator, chunk);
+                }
+            },
+            .utf16 => |units| {
+                const chunk = units[start .. start + count];
+                try self.ensureCapacity(count);
+                var i: usize = 0;
+                while (i < chunk.len) : (i += 1) {
+                    const unit = chunk[i];
+                    if (!self.is_wide) {
+                        if (unit <= 0xff) {
+                            self.latin1.appendAssumeCapacity(@intCast(unit));
+                            continue;
+                        }
+                        // Widen, then reserve room for the rest of this chunk
+                        // (already-copied units moved into `wide`).
+                        try self.widen();
+                        try self.wide.ensureUnusedCapacity(self.allocator, chunk.len - i);
+                    }
+                    self.wide.appendAssumeCapacity(unit);
+                }
+            },
+        }
+    }
+
+    fn finish(self: *PadBuffer, rt: *core.JSRuntime) !core.JSValue {
+        const string = if (self.is_wide)
+            try core.string.String.createUtf16(rt, self.wide.items)
+        else
+            try core.string.String.createLatin1(rt, self.latin1.items);
+        return string.value();
+    }
+};
+
 pub fn qjsStringPad(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -4913,42 +4363,53 @@ pub fn qjsStringPad(
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
 
-    var source_units = std.ArrayList(u16).empty;
-    defer source_units.deinit(ctx.runtime.memory.allocator);
-    try appendStringValueUnits(ctx.runtime, &source_units, string_value);
+    // Resolve the source to its flat code-unit slice ONCE (no per-char UTF-16
+    // copy of the whole source — qjs reads p->len from the JSString directly,
+    // quickjs.c:46313-46314).
+    const source = string_value.asStringBody() orelse return error.TypeError;
+    try source.ensureFlat(ctx.runtime);
+    const source_data = source.resolveData();
+    const source_len = source_data.len();
 
     const max_length_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const target_length = try coercion_ops.toLengthIndex(ctx, output, global, max_length_value);
-    if (target_length <= source_units.items.len) return string_value.dup();
+    if (target_length <= source_len) return string_value.dup();
 
     const fill_value = if (args.len >= 2 and !args[1].isUndefined()) blk: {
         break :blk try toStringForAnnexB(ctx, output, global, args[1], caller_function, caller_frame);
     } else try value_ops.createStringValue(ctx.runtime, " ");
     defer fill_value.free(ctx.runtime);
 
-    var fill_units = std.ArrayList(u16).empty;
-    defer fill_units.deinit(ctx.runtime.memory.allocator);
-    try appendStringValueUnits(ctx.runtime, &fill_units, fill_value);
-    if (fill_units.items.len == 0) return string_value.dup();
+    const fill = fill_value.asStringBody() orelse return error.TypeError;
+    try fill.ensureFlat(ctx.runtime);
+    const fill_data = fill.resolveData();
+    const fill_len = fill_data.len();
+    if (fill_len == 0) return string_value.dup();
 
-    const fill_length = target_length - source_units.items.len;
-    var out = std.ArrayList(u16).empty;
-    defer out.deinit(ctx.runtime.memory.allocator);
-    if (method_id == 34) {
-        try appendRepeatedFillUnits(ctx.runtime, &out, fill_units.items, fill_length);
-        try out.appendSlice(ctx.runtime.memory.allocator, source_units.items);
-    } else {
-        try out.appendSlice(ctx.runtime.memory.allocator, source_units.items);
-        try appendRepeatedFillUnits(ctx.runtime, &out, fill_units.items, fill_length);
-    }
-    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
-}
+    // qjs caps the result at JS_STRING_LEN_MAX (quickjs.c:46331-46334); without
+    // this an out-of-range maxLength would attempt a multi-GiB allocation instead
+    // of the spec/qjs RangeError.
+    if (target_length > js_string_len_max) return throwRangeErrorMessage(ctx, global, "invalid string length");
+    const pad_count = target_length - source_len;
 
-fn appendRepeatedFillUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), fill: []const u16, length: usize) !void {
-    var index: usize = 0;
-    while (index < length) : (index += 1) {
-        try out.append(rt.memory.allocator, fill[index % fill.len]);
+    var buffer = PadBuffer{ .allocator = ctx.runtime.memory.allocator };
+    defer buffer.deinit();
+    try buffer.ensureCapacity(target_length);
+
+    // padEnd: source first, then fill. padStart: fill first, then source.
+    // (quickjs.c:46338-46356, magic 0 = padStart / 1 = padEnd; here 34 = start.)
+    if (method_id == 35) try buffer.appendUnits(source_data, 0, source_len);
+
+    var remaining = pad_count;
+    while (remaining > 0) {
+        const chunk = @min(remaining, fill_len);
+        try buffer.appendUnits(fill_data, 0, chunk);
+        remaining -= chunk;
     }
+
+    if (method_id == 34) try buffer.appendUnits(source_data, 0, source_len);
+
+    return buffer.finish(ctx.runtime);
 }
 
 pub fn qjsStringNormalize(

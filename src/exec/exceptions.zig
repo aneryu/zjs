@@ -42,7 +42,6 @@ pub const RuntimeError = error{
     NegativeExponent,
     NotExtensible,
     NotRegExpLiteral,
-    NotSimpleNumericCall,
     OutOfMemory,
     Overflow,
     Pc2LineOverflow,

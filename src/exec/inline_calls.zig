@@ -61,8 +61,8 @@ pub const InlineTarget = struct {
 /// receiver `receiver` (`undefined` for plain calls, the property base for
 /// method calls). Mirrors the plain-call leg of
 /// `callValueOrBytecodeClassModeDispatch`; any condition that path
-/// special-cases (class constructors, cross-realm calls, simple-numeric/string
-/// fusion bodies, async/generator kinds) disqualifies the target so the slow
+/// special-cases (class constructors, cross-realm calls, async/generator kinds)
+/// disqualifies the target so the slow
 /// path keeps handling it. Direct-eval bindings on the function object are
 /// supported: `pushFrame` merges them into the frame's var-ref view like
 /// `callFunctionBytecodeModeState` does.
@@ -71,18 +71,13 @@ pub const InlineTarget = struct {
 /// the resolved `this_value` / `new_target` come from the lexical values
 /// captured on the function object (mirroring the slow path's arrow leg) and
 /// `pushFrame` boxes `this_value` through the same `coerceCallThis` primitive
-/// as the recursive path — the boxing rules stay in one place. Fusion arrows
-/// (`x => x + 1`) are still caught by the fusion check below and routed to the
-/// faster `callSimple*Bytecode` path.
+/// as the recursive path — the boxing rules stay in one place.
 pub inline fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, func: core.JSValue) ?InlineTarget {
     const function_object = object_ops.functionObjectFromValue(func) orelse return null;
     const function_value = function_object.functionBytecodeSlot().* orelse return null;
     const fb = call_runtime.functionBytecodeFromValue(function_value) orelse return null;
     if (fb.func_kind != .normal) return null;
     if (fb.is_class_constructor or fb.is_derived_class_constructor) return null;
-    // Fusion-recognizable bodies are handled by callSimple*Bytecode in the
-    // slow path with broader matching than the pre-call fast checks.
-    if (fb.simple_numeric_kind != .none or fb.simple_string_kind != .none) return null;
     const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
     if (function_global != global) return null;
     const this_value = if (fb.is_arrow_function)
@@ -119,9 +114,6 @@ pub const Entry = struct {
     catch_target: ?usize,
     arena_mark: core.VmStackArena.Mark,
     profile_guard: vm_call.CallProfileGuard,
-    /// Resolver/data are installed once when the slot is allocated; push/pop
-    /// only relink `previous` for each call.
-    backtrace_frame: core.ActiveBacktraceFrame,
     /// Owned merged slices backing `view.var_ref_names` / the frame's
     /// var-ref initialization when the callee carries direct-eval bindings
     /// (mirrors `callFunctionBytecodeModeState`'s combined slices). The
@@ -130,10 +122,42 @@ pub const Entry = struct {
     /// `current_function` reference); only the slice storage is owned.
     merged_var_ref_names: []core.Atom,
     merged_var_refs: []core.JSValue,
+    /// True when the callee carries no direct-eval bindings: `eval_snapshot`
+    /// stays the empty default, `merged_*` stay empty, and `eval_function_view`
+    /// stays null. Teardown then skips `eval_snapshot.deinit` / `freeEvalResources`
+    /// entirely — both are provably no-ops for such a frame, but each is a
+    /// non-inlined call paid on every plain call. Mirrors qjs's `done:` epilogue
+    /// (quickjs.c:20698) freeing only what the frame actually allocated.
+    simple_frame: bool,
 };
 
 const entries_per_chunk: usize = 16;
 const max_chunks: usize = 512;
+
+/// One backtrace node per VM invocation — qjs's `current_stack_frame`
+/// granularity. It walks this invocation's whole frame group: the inline
+/// Machine Entry chain (innermost first) then the L0 frame. `machine` is null
+/// during pre-dispatch frame setup (depth 0); the L0 frame alone covers it.
+/// Replaces the former per-call `ActiveBacktraceFrame` push/pop, faithful to
+/// qjs walking the same frame chain it executes on (quickjs.c:7571).
+pub const MachineBacktrace = struct {
+    l0_frame: *frame_mod.Frame,
+    machine: ?*Machine = null,
+};
+
+/// Indexed `ActiveBacktraceResolver` for `MachineBacktrace`: index 0 is the
+/// innermost inline frame, walking outward to the L0 frame; null past the end.
+pub fn resolveMachineBacktrace(data: ?*const anyopaque, index: usize) ?core.ActiveBacktraceSnapshot {
+    const holder: *const MachineBacktrace = @ptrCast(@alignCast(data.?));
+    if (holder.machine) |machine| {
+        const depth = machine.depth;
+        if (index < depth) return exception_ops.frameBacktraceSnapshot(&machine.entryAt(depth - 1 - index).frame);
+        if (index == depth) return exception_ops.frameBacktraceSnapshot(holder.l0_frame);
+        return null;
+    }
+    if (index == 0) return exception_ops.frameBacktraceSnapshot(holder.l0_frame);
+    return null;
+}
 
 pub const Machine = struct {
     ctx: *core.JSContext,
@@ -194,7 +218,7 @@ pub const Machine = struct {
         return self.entryAt(self.depth - 1);
     }
 
-    fn entryAt(self: *Machine, index: usize) *Entry {
+    pub fn entryAt(self: *Machine, index: usize) *Entry {
         return &self.chunks[index / entries_per_chunk][index % entries_per_chunk];
     }
 
@@ -210,12 +234,6 @@ pub const Machine = struct {
                 self.chunks = try self.ctx.runtime.memory.alloc(*[entries_per_chunk]Entry, max_chunks);
             }
             const chunk = try self.ctx.runtime.memory.create([entries_per_chunk]Entry);
-            for (chunk) |*entry| {
-                entry.backtrace_frame = .{
-                    .data = &entry.frame,
-                    .resolver = exception_ops.resolveActiveBacktraceFrame,
-                };
-            }
             self.chunks[chunk_index] = chunk;
             self.chunk_count += 1;
         }
@@ -271,6 +289,7 @@ pub const Machine = struct {
         entry.eval_function_view = null;
         entry.merged_var_ref_names = &.{};
         entry.merged_var_refs = &.{};
+        entry.simple_frame = true;
         entry.profile_guard = vm_call.enterCallProfile(rt);
         errdefer entry.profile_guard.deinit();
         errdefer freeEvalResources(rt, entry);
@@ -298,8 +317,8 @@ pub const Machine = struct {
 
         entry.frame = frame_mod.Frame.init(entry.function);
         errdefer entry.frame.deinit(&rt.memory, rt);
-        ctx.pushActiveBacktraceFrame(&entry.backtrace_frame);
-        errdefer ctx.popActiveBacktraceFrame(&entry.backtrace_frame);
+        // No per-call backtrace node: the invocation's single MachineBacktrace
+        // (zjs_vm.runWithArgsState) walks this Entry directly via the chain.
 
         // Mirror qjs's inline prologue for the common plain-call receiver:
         // strict keeps undefined, sloppy uses the global object. Arrow,
@@ -362,6 +381,31 @@ pub const Machine = struct {
         const borrow_source_args = canBorrowSourceArgs(entry.function, source);
         const storage_arg_count: usize = if (borrow_source_args) 0 else frame_arg_count;
         const need_eval_var_refs = eval_names.len != 0 or eval_refs.len != 0;
+        // `eval_function_view` is only built when BOTH eval_names and eval_refs
+        // are non-empty, so `!need_eval_var_refs` (the OR) already implies the
+        // view is null and no merged slices exist — exactly the precondition
+        // under which `eval_snapshot.deinit` / `freeEvalResources` are no-ops.
+        entry.simple_frame = !need_eval_var_refs;
+        // qjs `var_refs = p->u.func.var_refs` (quickjs.c:17844): borrow the callee's
+        // closure captures array directly instead of carving + dup-ing a per-frame
+        // copy. Only when every mutation of `frame.var_refs` is provably routed
+        // through a cell (never the array element) and the shared array is never
+        // realloced. The conjuncts gate exactly those escapes:
+        //   simple_frame        — branch-1 captures (no merged eval var-ref view)
+        //   !has_eval_call      — no `replaceFrameVarRefBinding` direct element write,
+        //                         no eval-introduced refs growing the array
+        //   global_vars.len==0  — no `defineGlobalDecl{Var,Lexical}Cell` rebind
+        //   all captures cells  — `setSlotValue` always writes into the cell, never
+        //                         `frame.var_refs[idx] = v` (no non-cell element)
+        // Captures.len == closure_var.len ≥ every bytecode var_ref idx, so
+        // `ensureVarRefsCapacity` never fires either. Teardown skips the per-element
+        // free (the still-live function object owns the cells).
+        const borrow_var_refs = entry.simple_frame and
+            !entry.function.flags.has_eval_call and
+            entry.function.global_vars.len == 0 and
+            frame_var_refs.len > 0 and
+            allVarRefCells(frame_var_refs);
+        const var_ref_storage_count: usize = if (borrow_var_refs) 0 else frame_mod.frameVarRefStorageCount(entry.function, frame_var_refs);
         const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(entry.function, frame_arg_count);
         const slab = frame_mod.FrameSlab.carve(
             &rt.memory,
@@ -370,7 +414,7 @@ pub const Machine = struct {
             frame_mod.originalArgCount(argc, need_original_snapshot),
             entry.function.var_count,
             @as(usize, entry.function.stack_size) + 1,
-            frame_mod.frameVarRefStorageCount(entry.function, frame_var_refs),
+            var_ref_storage_count,
             open_var_ref_count,
         ) orelse blk: {
             const heap_windows = try frame_mod.FrameSlab.allocHeap(
@@ -379,7 +423,7 @@ pub const Machine = struct {
                 frame_mod.originalArgCount(argc, need_original_snapshot),
                 entry.function.var_count,
                 @as(usize, entry.function.stack_size) + 1,
-                frame_mod.frameVarRefStorageCount(entry.function, frame_var_refs),
+                var_ref_storage_count,
                 open_var_ref_count,
             );
             entry.frame.installOwnedStorage(heap_windows.storage);
@@ -446,7 +490,13 @@ pub const Machine = struct {
         } else if (open_var_ref_count != 0) {
             try entry.frame.ensureOpenVarRefSlots(&rt.memory, &rt.vm_stack, true);
         }
-        if (frame_var_refs.len != 0 or entry.function.var_ref_names.len != 0) {
+        if (borrow_var_refs) {
+            // Alias the closure's captures (mutable slice; `simple_frame` guarantees
+            // no merge replaced it). The function object stays alive via
+            // `frame.current_function`, so the cells outlive the frame.
+            entry.frame.var_refs = target.function_object.functionCapturesSlot().*;
+            entry.frame.var_refs_borrowed = true;
+        } else if (frame_var_refs.len != 0 or entry.function.var_ref_names.len != 0) {
             try vm_call.initFrameVarRefs(ctx, global, entry.function, &entry.frame, frame_var_refs, true, frame_windows);
         }
     }
@@ -493,6 +543,18 @@ pub const Machine = struct {
             },
             .moved => |moved| moved.values[if (moved.has_receiver) 2 else 1..],
         };
+    }
+
+    /// Every capture is a VarRef cell — the precondition for borrowing the
+    /// closure captures array as `frame.var_refs`: with all-cells, every
+    /// `setSlotValue(&frame.var_refs[idx], ...)` writes through the cell and
+    /// never overwrites the array element, so the shared array is never mutated.
+    /// Cheaper than the dup loop it replaces (a tag test vs tag test + retain).
+    fn allVarRefCells(captures: []const core.JSValue) bool {
+        for (captures) |cap| {
+            if (core.VarRef.fromValue(cap) == null) return false;
+        }
+        return true;
     }
 
     fn canBorrowSourceArgs(function: *const bytecode.Bytecode, source: ArgsSource) bool {
@@ -666,12 +728,13 @@ pub const Machine = struct {
     /// bookkeeping. Shared by the Machine (popTeardown) and the recursion path.
     pub fn teardownInlineEntry(ctx: *core.JSContext, entry: *Entry) void {
         const rt = ctx.runtime;
-        entry.eval_snapshot.deinit(rt);
+        // For a simple frame (no direct-eval bindings) the snapshot and eval
+        // resources are the empty defaults — skip both non-inlined calls.
+        if (!entry.simple_frame) entry.eval_snapshot.deinit(rt);
         entry.stack.deinit(rt);
         entry.frame.deinitInlineCall(&rt.memory, rt);
-        freeEvalResources(rt, entry);
+        if (!entry.simple_frame) freeEvalResources(rt, entry);
         rt.vm_stack.restore(entry.arena_mark);
-        ctx.popActiveBacktraceFrame(&entry.backtrace_frame);
         entry.profile_guard.deinit();
     }
 

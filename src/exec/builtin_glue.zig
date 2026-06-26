@@ -221,8 +221,7 @@ pub fn qjsGlobalParseFloat(
 /// `callArrayNativeFunctionRecord`: resolve the Array static methods
 /// (`from`/`of`/`isArray`) and the Array.prototype method record hub against
 /// the realm-aware exec ops, which stay in exec because they are also reached
-/// by the VM fast-call path (`qjsArrayMethodFastCall`) and the `array.map`
-/// opcode fusion (`tryFastMapCallDense`) — BOTH.
+/// by the VM fast-call path (`qjsArrayMethodFastCall`).
 ///
 /// `function_object` is nullable so the prepared (no-function-object) call path
 /// routes through this same record glue under the uniform dispatch model. Only
@@ -563,13 +562,6 @@ pub fn callCollectionAdderFromVm(
 
 // Host output fast-path probes (moved from the VM call runtime).
 
-pub inline fn fastHostOutputCall(rt: *core.JSRuntime, output: ?*std.Io.Writer, func: core.JSValue, args: []const core.JSValue) !bool {
-    const object = object_ops.objectFromValue(func) orelse return false;
-    if (object.hostFunctionKind() != core.host_function.ids.output) return false;
-    try printHostOutputArgs(rt, output, args);
-    return true;
-}
-
 pub fn printHostOutputArgs(rt: *core.JSRuntime, output: ?*std.Io.Writer, args: []const core.JSValue) !void {
     if (output) |writer| {
         for (args, 0..) |arg, idx| {
@@ -585,7 +577,7 @@ pub fn globalHostOutputAutoInit(rt: *core.JSRuntime, global: *core.Object, atom_
     for (global.shapeProps(), 0..) |prop, property_index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
-        if (prop_flags.accessor) return false;
+        if (prop_flags.isAccessor()) return false;
         return switch (global.properties[property_index].slot) {
             .auto_init => |info| info.host_function_kind == core.host_function.ids.output or
                 (info.host_function_kind == core.host_function.ids.external_host and

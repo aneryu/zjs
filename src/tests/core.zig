@@ -2037,8 +2037,6 @@ test "regexp state uses payload storage" {
 
     const source = try core.string.String.createAscii(rt, "a+");
     defer source.value().free(rt);
-    const flags = try core.string.String.createAscii(rt, "g");
-    defer flags.value().free(rt);
 
     const regexp = try core.Object.create(rt, core.class.ids.regexp, null);
     defer regexp.value().free(rt);
@@ -2046,12 +2044,12 @@ test "regexp state uses payload storage" {
     try std.testing.expect(regexp.class_payload != null);
     try std.testing.expectEqual(core.class.PayloadKind.regexp, regexp.class_payload_kind);
     regexp.regexpSourceSlot().* = source.value().dup();
-    regexp.regexpFlagsSlot().* = flags.value().dup();
+    try regexp.setRegexpCompiledBytecode(rt, &.{ 1, 2, 3 });
     regexp.regexpLastIndexSlot().* = core.JSValue.int32(3);
     regexp.regexpLastIndexWritableSlot().* = false;
 
     try std.testing.expect(regexp.regexpSource() != null);
-    try std.testing.expect(regexp.regexpFlags() != null);
+    try std.testing.expectEqual(@as(usize, 3), regexp.regexpCompiledBytecode().len);
     try std.testing.expectEqual(@as(?i32, 3), regexp.regexpLastIndex().?.asInt32());
     try std.testing.expect(!regexp.regexpLastIndexWritable());
 }
@@ -3796,7 +3794,14 @@ test "shared lazy native function cache cycle is released by runtime cycle remov
     cached_value.free(rt);
     global.value().free(rt);
 
-    try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
+    // L2: materializing the cached auto-init placeholder now flips the owning
+    // shape's `Flags.kind` (auto_init -> data) in lockstep with the slot, which
+    // clones the global's (transition-cacheable) shape to a uniquely-owned one.
+    // The old shape is released by refcount at clone time, so it is reclaimed
+    // there instead of by cycle removal -- one fewer object in the cycle sweep
+    // (4 not 5). `expectNoLiveGc` below still confirms a fully-collected graph
+    // (liveCount==0, shapes.len==0), i.e. no leak.
+    try expectCycleReclaimedIncludingShapes(rt, 4, rt.runObjectCycleRemoval());
 }
 
 test "function bytecode constant object cycle is released by runtime cycle removal" {
@@ -5129,7 +5134,7 @@ test "regexp payload self-cycle is released by runtime cycle removal" {
 
     const regexp = try core.Object.create(rt, core.class.ids.regexp, null);
     regexp.regexpSourceSlot().* = regexp.value().dup();
-    regexp.regexpFlagsSlot().* = regexp.value().dup();
+    try regexp.setRegexpCompiledBytecode(rt, &.{ 1, 2, 3 });
     regexp.regexpLastIndexSlot().* = regexp.value().dup();
 
     regexp.value().free(rt);
@@ -5688,8 +5693,12 @@ test "accessor descriptors store getter setter placeholders" {
     const key = try rt.internAtom("accessor");
     defer rt.atoms.free(key);
 
-    const getter = try core.string.String.createAscii(rt, "getter");
-    const setter = try core.string.String.createAscii(rt, "setter");
+    // qjs `JSProperty` stores getter/setter as `JSObject*` (object or NULL);
+    // accessor get/set are always callable objects or undefined, so use object
+    // values here (the prior string placeholders relied on the old loose
+    // JSValue accessor cell that L2 replaced with object-header pointers).
+    const getter = try core.Object.create(rt, core.class.ids.object, null);
+    const setter = try core.Object.create(rt, core.class.ids.object, null);
     try obj.defineOwnProperty(rt, key, core.Descriptor.accessor(getter.value(), setter.value(), true, true));
     getter.value().free(rt);
     setter.value().free(rt);
@@ -5697,8 +5706,8 @@ test "accessor descriptors store getter setter placeholders" {
     const desc = obj.getOwnProperty(rt, key).?;
     defer desc.destroy(rt);
     try std.testing.expectEqual(core.descriptor.Kind.accessor, desc.kind);
-    try std.testing.expect(desc.getter.isString());
-    try std.testing.expect(desc.setter.isString());
+    try std.testing.expect(desc.getter.isObject());
+    try std.testing.expect(desc.setter.isObject());
 }
 
 test "prototype traversal and cycle checks are enforced" {

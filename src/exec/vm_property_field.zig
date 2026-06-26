@@ -28,14 +28,12 @@ const BindingPut = property_vm.BindingPut;
 const DecodedFalseBranch = property_vm.DecodedFalseBranch;
 const GlobalBindingGet = property_vm.GlobalBindingGet;
 const GlobalBindingPut = property_vm.GlobalBindingPut;
-const InductionImmediateInt32Args = property_vm.InductionImmediateInt32Args;
 const LoopLimitGet = property_vm.LoopLimitGet;
 const Step = property_vm.Step;
 const atomAsciiText = property_vm.atomAsciiText;
 const atomStringValueForFastPath = property_vm.atomStringValueForFastPath;
 const bindingReadableBorrowed = property_vm.bindingReadableBorrowed;
 const bindingStoreWritableForFastPath = property_vm.bindingStoreWritableForFastPath;
-const borrowedSimpleCallArg = property_vm.borrowedSimpleCallArg;
 const decodeBindingGet = property_vm.decodeBindingGet;
 const decodeBindingPut = property_vm.decodeBindingPut;
 const decodeFalseBranch = property_vm.decodeFalseBranch;
@@ -58,7 +56,6 @@ const loopLimitReadableInt32 = property_vm.loopLimitReadableInt32;
 const mathMinMaxInductionRangeSum = property_vm.mathMinMaxInductionRangeSum;
 const mathMinMaxPrimitive2 = property_vm.mathMinMaxPrimitive2;
 const sameBinding = property_vm.sameBinding;
-const simpleNumericBinary = property_vm.simpleNumericBinary;
 const slotValueBorrowed = property_vm.slotValueBorrowed;
 const storeBindingOwnedValue = property_vm.storeBindingOwnedValue;
 const storeLocalCompletionBorrowedValue = property_vm.storeLocalCompletionBorrowedValue;
@@ -232,9 +229,7 @@ pub noinline fn field(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     opc: u8,
-    sync_global_lexical_locals: bool,
 ) !Step {
-    _ = sync_global_lexical_locals;
     const site_pc = frame.pc - 1;
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
@@ -415,9 +410,10 @@ fn setArrayLengthForPutFieldFastPath(
             if (index >= new_len) return false;
         }
         object.truncateArrayElements(rt, new_len);
-    } else if (new_len > object.arrayLength()) {
-        return false;
     }
+    // Growth keeps the fast array and just extends `.length` into tail holes
+    // (faithful to set_array_length quickjs.c:9447-9455 — count is unchanged,
+    // no sparse conversion). This is the `arr.length = bigger` fast path.
     object.setArrayLength(new_len);
     return true;
 }
@@ -465,7 +461,7 @@ pub noinline fn arrayElement(
                 try stack.pushOwned(value);
                 return .done;
             }
-            if (fastInt32TypedArrayElementValue(obj, key)) |value| {
+            if (fastTypedArrayElementValue(ctx.runtime, obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
                 try stack.pushOwned(value);
                 return .done;
@@ -508,7 +504,7 @@ pub noinline fn arrayElement(
                 old_value.free(ctx.runtime);
                 return .done;
             }
-            if (fastInt32TypedArrayElementValue(obj, key)) |value| {
+            if (fastTypedArrayElementValue(ctx.runtime, obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
                 const old_value = stack.values[stack.values.len - 1];
                 stack.values[stack.values.len - 1] = value;
@@ -553,7 +549,7 @@ pub noinline fn arrayElement(
                 try stack.pushOwned(value);
                 return .done;
             }
-            if (fastInt32TypedArrayElementValue(obj, key)) |value| {
+            if (fastTypedArrayElementValue(ctx.runtime, obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
                 try stack.pushOwned(value);
                 return .done;
@@ -591,7 +587,13 @@ pub noinline fn arrayElement(
                 };
                 unreachable;
             }
-            if (try putInt32TypedArrayElementFast(ctx.runtime, obj, key, value)) return .continue_loop;
+            switch (putTypedArrayElementFast(ctx.runtime, obj, key, value) catch |err| {
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                return err;
+            }) {
+                .handled => return .continue_loop,
+                .not_typed_array => {},
+            }
             if (try array_ops.putDenseArrayElementFast(ctx.runtime, obj, key, value)) return .continue_loop;
             const key_value = object_ops.toPropertyKeyValue(ctx, output, global, key, function, frame) catch |err| {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
@@ -612,12 +614,25 @@ pub noinline fn arrayElement(
     return .done;
 }
 
-fn fastInt32TypedArrayElementValue(obj: core.JSValue, key: core.JSValue) ?core.JSValue {
+// Inline typed-array element read for `obj[int]`, mirroring qjs's
+// `JS_GetPropertyValue` per-`class_id` switch (quickjs.c:9029) which reads the
+// element straight from the typed storage (`int8_ptr/.../double_ptr`) after a
+// single bounds check. Covers every non-BigInt element kind (Int8/Uint8/
+// Uint8Clamped/Int16/Uint16/Int32/Uint32/Float16/Float32/Float64 — kinds 1..10),
+// which are all allocation-free; BigInt64/BigUint64 (kinds 11/12) return null so
+// the value flows through the (correct, allocating) generic path. The byte→value
+// mapping is delegated to the canonical `typedArrayGetIndex` (one source of truth
+// with the slow path / DataView), so no kind-specific decoder is duplicated here.
+pub fn fastTypedArrayElementValue(rt: *core.JSRuntime, obj: core.JSValue, key: core.JSValue) ?core.JSValue {
     const object = objectFromValue(obj) orelse return null;
     const key_int = key.asInt32() orelse return null;
     if (key_int < 0) return null;
-    if (object.typedArrayKind() != 6 or object.typedArrayElementSize() != 4) return null;
+    // Non-BigInt, fixed-length, real typed array only. element_size==0 means the
+    // object is not a typed array; kinds 11/12 are BigInt (skip — they allocate).
+    const kind = object.typedArrayKind();
+    if (kind < 1 or kind > 10) return null;
     const fixed_len = object.typedArrayFixedLength() orelse return null;
+    const element_size = object.typedArrayElementSize();
     const buffer_value = object.typedArrayBuffer() orelse return null;
     const buffer = objectFromValue(buffer_value) orelse return null;
     if (buffer.class_id != core.class.ids.array_buffer and buffer.class_id != core.class.ids.shared_array_buffer) return null;
@@ -626,38 +641,63 @@ fn fastInt32TypedArrayElementValue(obj: core.JSValue, key: core.JSValue) ?core.J
     const bytes = buffer.byteStorage();
     const byte_offset = object.typedArrayByteOffset();
     if (byte_offset > bytes.len) return core.JSValue.undefinedValue();
-    const byte_len = std.math.mul(usize, @as(usize, fixed_len), @as(usize, 4)) catch return null;
+    const byte_len = std.math.mul(usize, @as(usize, fixed_len), @as(usize, element_size)) catch return null;
     if (byte_len > bytes.len - byte_offset) return core.JSValue.undefinedValue();
     const index: u32 = @intCast(key_int);
     if (index >= fixed_len) return core.JSValue.undefinedValue();
-    const offset = byte_offset + @as(usize, index) * 4;
-    return core.JSValue.int32(std.mem.readInt(i32, bytes[offset..][0..4], .little));
+    // All bounds/detach/length conditions above match typedArrayGetIndex's own
+    // gating, so for kinds 1..10 it cannot error here (no allocation) — but route
+    // any unexpected error to the slow path rather than swallowing it.
+    return core.typed_array.typedArrayGetIndex(rt, object, index) catch null;
 }
 
-fn putInt32TypedArrayElementFast(rt: *core.JSRuntime, obj: core.JSValue, key: core.JSValue, value: core.JSValue) !bool {
-    _ = rt;
-    const object = objectFromValue(obj) orelse return false;
-    const key_int = key.asInt32() orelse return false;
-    if (key_int < 0) return false;
-    const value_int = value.asInt32() orelse return false;
-    if (object.typedArrayKind() != 6 or object.typedArrayElementSize() != 4) return false;
-    const fixed_len = object.typedArrayFixedLength() orelse return false;
-    const buffer_value = object.typedArrayBuffer() orelse return false;
-    const buffer = objectFromValue(buffer_value) orelse return false;
-    if (buffer.class_id != core.class.ids.array_buffer and buffer.class_id != core.class.ids.shared_array_buffer) return false;
-    if (buffer.arrayBufferImmutable()) return false;
-    if (buffer.arrayBufferDetached()) return true;
+pub const TypedArrayWriteFast = enum { not_typed_array, handled };
 
-    const bytes = buffer.byteStorage();
-    const byte_offset = object.typedArrayByteOffset();
-    if (byte_offset > bytes.len) return true;
-    const byte_len = std.math.mul(usize, @as(usize, fixed_len), @as(usize, 4)) catch return false;
-    if (byte_len > bytes.len - byte_offset) return true;
+/// qjs JS_SetPropertyValue (quickjs.c:9947) typed-array arm: a single
+/// per-class_id store that, for each numeric element kind, converts the value
+/// (which can run user code via valueOf/Symbol.toPrimitive and DETACH/RESIZE the
+/// buffer) and stores into the typed buffer after a bounds RE-check. The
+/// convert-first / recheck-after / silent-no-op-on-OOB ordering (qjs comment at
+/// quickjs.c:9987 + the `ta_out_of_bound: return TRUE` leg) lives in the
+/// canonical `typedArraySetElement` helper, which this fast probe delegates to as
+/// the single source of truth for the value->bytes mapping.
+///
+/// Returns `.not_typed_array` when obj/key do not select a numeric typed-array
+/// element (fall through to the dense/slow path); `.handled` when the write was
+/// performed or correctly turned into a no-op (OOB / detached after conversion).
+/// BigInt64/BigUint64 (kinds 11/12) punt to the slow path. A conversion that
+/// throws (e.g. BigInt assigned to a non-BigInt array) surfaces as a Zig error
+/// for the caller to route through handleCatchableRuntimeError.
+pub fn putTypedArrayElementFast(rt: *core.JSRuntime, obj: core.JSValue, key: core.JSValue, value: core.JSValue) !TypedArrayWriteFast {
+    const object = objectFromValue(obj) orelse return .not_typed_array;
+    const key_int = key.asInt32() orelse return .not_typed_array;
+    if (key_int < 0) return .not_typed_array;
+    // A value object needs ToPrimitive (valueOf / Symbol.toPrimitive), which runs
+    // user code and needs the full interpreter context (ctx/output/global) — that
+    // conversion lives in the slow path's coerceTypedArrayElementForSet. The
+    // canonical typedArraySetElement only coerces primitives, so an object value
+    // punts to the slow path; the numeric-primitive write is the fast case.
+    if (value.isObject()) return .not_typed_array;
+    // A BigInt or Symbol value has a ToNumber that THROWS a TypeError, and per
+    // IntegerIndexedElementSet (ToNumber at spec step 6) that throw must happen
+    // BEFORE the in-bounds/immutable validity check. typedArraySetElement does the
+    // validity check first (silent no-op on OOB/immutable), which would swallow the
+    // throw for an out-of-bounds / immutable-buffer element — so punt these
+    // throwing-conversion values to the slow path, which converts first. (Number /
+    // string / boolean / null / undefined have non-throwing conversions, so the
+    // validity-check-first order is observably identical for them — they stay fast.)
+    if (value.isBigInt() or value.isSymbol()) return .not_typed_array;
+    if (!core.object.isTypedArrayObject(object)) return .not_typed_array;
+    const kind = object.typedArrayKind();
+    // BigInt64/BigUint64 punt to the slow path (it converts via JS_ToBigInt64).
+    if (kind == 11 or kind == 12) return .not_typed_array;
     const index: u32 = @intCast(key_int);
-    if (index >= fixed_len) return true;
-    const offset = byte_offset + @as(usize, index) * 4;
-    std.mem.writeInt(i32, bytes[offset..][0..4], value_int, .little);
-    return true;
+    // typedArraySetElement mirrors qjs exactly: immutable reject (silent no-op),
+    // convert into a scratch buffer FIRST (user code may detach/resize), then
+    // re-check the in-bounds/attached state and store. OOB after conversion is a
+    // silent no-op (qjs `ta_out_of_bound: return TRUE`), not a throw.
+    _ = try core.typed_array.typedArraySetElement(rt, object, index, value);
+    return .handled;
 }
 
 fn fastRegExpPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
