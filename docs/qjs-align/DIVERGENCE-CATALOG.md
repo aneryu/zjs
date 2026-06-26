@@ -130,8 +130,15 @@ divergence against current HEAD. Key **doc-staleness fixes**:
 3. **This qjs build has NO inline cache** (zero `get_ic`/`ic_watchpoint` hits — property reads go through
    `find_own_property` proto-walk every access). So zjs's IC is a **superset** zjs added to claw back the
    LLVM-vs-gcc dispatch tax; INLINE-CACHE-PLAN's "align to get_ic" (S4 poly/mega) is **not a faithful target**.
-   The one faithful IC item is **S3 global-lexical stable-cell** (qjs's var_ref cell), still un-shipped:
-   `let g` reads still name-lookup, and the `global_lexical_sync_*` mirror (slot_ops.zig:122-209) is fully intact.
+   The one faithful IC item was **S3 global-lexical** — but **the stale "let g reads still name-lookup" claim was
+   WRONG**: script top-level let/const reads were ALREADY a single `.global_decl` var_ref cell deref (da34bc1).
+   **A4 (`45e9f55`, 2026-06-26) RETIRED the `global_lexical_sync_*` mirror entirely** — the remaining divergence
+   was (1) top-level `class` routed via frame-slot+env+mirror instead of a cell (qjs define_var JS_VAR_DEF_LET) and
+   (2) host `ctx.eval` running eval modes through the SCRIPT runner (is_eval_code=false/sync=true), creating a
+   redundant ctx.lexicals property. Both fixed (class→cell; eval→is_eval_code=true/sync=false), mirror + the 7
+   `localStoreNeedsSlowSync` per-op guards deleted (now unconditional fast paths). The "stable-cell READ IC" sub-item
+   is MOOT — the read is already O(1) cell deref, not a name-lookup. Gate 0/49775 + 1227 + force-GC. Also fixed a
+   pre-existing leak (function/class value reflected onto globalThis from a .global_decl cell).
 4. **Builtin methods are ALREADY own-properties on each prototype** (function.zig:367 `defineMethodData`).
    "method on prototype" frontier is done; the residual is the proto-`get_field` IC tax (dispatch IC is
    own-data-only) + null-proto internal-array method resolution.
@@ -152,8 +159,9 @@ divergence against current HEAD. Key **doc-staleness fixes**:
 ### Next batch (ranked, faithful/bounded/independent — post round-11)
 1. **Array count/length split** (A1) — the single biggest *bounded* structural unlock (new Array(n) 19.5×);
    deferred high-risk C.3, 17 readers/11 need hole-handling. Needs a立项 flag-gated 5-stage plan.
-2. **S3 global-lexical stable-cell** + retire the `global_lexical_sync_*` mirror (faithful to qjs var_ref cell;
-   carries TDZ/eval/cross-realm risk — flag-gated, every stage 0/49775).
+2. ~~S3 global-lexical stable-cell + retire the mirror~~ — **DONE (A4 `45e9f55`)**. The read was already a cell
+   deref (stale catalog); A4 retired the mirror via class→cell + eval-runner-contract. Next faithful binding item:
+   the compile-time `parent_has_eval` flag (lower the per-access parent-eval-shadow guard to a Bytecode flag).
 3. **s.replace string-wrapper boxing 36.4×** — needs the string-wrapper exotic `own_keys` hook FIRST
    (mirror js_string_obj_get_length synthesis), then delete the per-index materialization loop (object_ops.zig:3101).
 4. **Cheap generator-next**: skip the throwaway resume entry-slab + result-object-free next step.

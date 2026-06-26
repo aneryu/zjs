@@ -48,7 +48,7 @@ Phase 3  叶子：GC-无关忠实对齐 + 余下赢回退 + global-var 稳定 ce
 
 - `QJS-FAITHFUL-ALIGN.md`（本文件）— 原则 + 验收门 + 相结构总图 + 各相状态。
 - `docs/qjs-align/` — **仍活跃的待办规格**（Phase 1 的施工蓝图 KEYSTONE + S1–S5 + Phase 2 规格已随 `e8c852b` 落地并退役，留存于 git 历史）：
-  - `INLINE-CACHE-PLAN.md` — IC：get/put_field 已落地，剩 S3 global-IC stable-cell + S4 poly/mega。
+  - `INLINE-CACHE-PLAN.md` — IC：get/put_field 已落地；**S3 = 退役 global_lexical_sync 镜像已 DONE（A4 `45e9f55`，2026-06-26）**（read-IC 子项 MOOT——script 顶层 let/const 读早是 cell deref，stale catalog 的「按名查找」是错的）；S4 poly/mega 非忠实目标（本版 qjs 无 IC）。
   - `GLOBAL-VARREF-PLAN.md` — ✅ 已落地（见 round-2 handover）。
   - `PHASE3-leaves-and-levers.md` — 余下叶子 + 大杠杆登记。
   - **`HANDOVER-perf-round2.md`（2026-06-24 收口，本轮总入口；2026-06-25 追加 method-dispatch slice）** — 5 commit（global var_ref 7×→2.35× · add_loc 融合累加 2.4×→1.3× · 全局绑定即权威 全局==局部 · **method-dispatch cascade hoist `b20d5b4`：`o.m(s)` 4.43×→2.30×、`p.step(s)` 4.85×→2.74×**）+ 方法论纠偏（对照 qjs 实现抹平偏离、perf 是结果）+ 关键事实（qjs 此机 16 字节非 8、NaN-boxing 是伪命题且预存编译失败）+ 剩余两深前沿。分支 `qjs-faithful-perf-round2`（叠 main 9fc72eb）。
