@@ -255,10 +255,7 @@ inline fn dispatchFieldOwnDataIcValue(
         return null;
     }
     if (entry.slot_index >= object.properties.len) return null;
-    return switch (object.properties[entry.slot_index].slot) {
-        .data => |stored| stored,
-        .var_ref, .auto_init, .accessor, .deleted => null,
-    };
+    return object.asDataAt(entry.slot_index);
 }
 
 inline fn dispatchFieldOwnDataIcStoreOwned(
@@ -284,17 +281,12 @@ inline fn dispatchFieldOwnDataIcStoreOwned(
     if (entry.slot_index >= object.shapeProps().len) return false;
     const prop = object.shapeProps()[entry.slot_index];
     const prop_flags = core.property.Flags.fromBits(prop.flags);
-    if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.accessor or !prop_flags.writable) return false;
+    if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.kind != .data or !prop_flags.writable) return false;
     const property_entry = &object.properties[entry.slot_index];
-    return switch (property_entry.slot) {
-        .data => blk: {
-            const old_slot = property_entry.slot;
-            property_entry.slot = .{ .data = value };
-            core.object.destroyPropertySlot(rt, atom_id, old_slot);
-            break :blk true;
-        },
-        .var_ref, .auto_init, .accessor, .deleted => false,
-    };
+    const old_slot = property_entry.slot;
+    property_entry.slot = .{ .data = value };
+    core.object.destroyPropertySlot(rt, atom_id, prop_flags, old_slot);
+    return true;
 }
 
 inline fn dispatchFastUpdateInt32(opcode_id: u8, value: i32) core.JSValue {

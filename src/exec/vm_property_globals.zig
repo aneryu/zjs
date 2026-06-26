@@ -210,10 +210,7 @@ inline fn cachedGlobalDataValue(
 ) ?core.JSValue {
     const index = cachedGlobalDataSlotIndex(function, global, site_pc, atom_id) orelse return null;
     if (index >= global.properties.len) return null;
-    return switch (global.properties[index].slot) {
-        .data => |stored| stored,
-        .var_ref, .auto_init, .accessor, .deleted => null,
-    };
+    return global.asDataAt(index);
 }
 
 inline fn pushBorrowedFast(stack: *stack_mod.Stack, value: core.JSValue) !void {
@@ -232,15 +229,13 @@ inline fn setCachedGlobalWritableDataAtOwned(
     value: core.JSValue,
 ) bool {
     const props = global.shapeProps();
-    if (index >= props.len or !core.property.Flags.fromBits(props[index].flags).writable) return false;
+    if (index >= props.len) return false;
+    const flags = core.property.Flags.fromBits(props[index].flags);
+    if (!flags.writable or flags.deleted or flags.kind != .data) return false;
     const entry = &global.properties[index];
-    switch (entry.slot) {
-        .data => {},
-        .var_ref, .auto_init, .accessor, .deleted => return false,
-    }
     const old_slot = entry.slot;
     entry.slot = .{ .data = value };
-    core.object.destroyPropertySlot(rt, atom_id, old_slot);
+    core.object.destroyPropertySlot(rt, atom_id, flags, old_slot);
     return true;
 }
 
@@ -470,11 +465,11 @@ fn globalDataOrAutoInitValueForReadFastPath(
     for (global.shapeProps(), 0..) |prop, property_index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
-        if (prop_flags.accessor) return null;
-        return switch (global.properties[property_index].slot) {
-            .data => |stored| .{ .value = stored, .owned = false },
+        if (prop_flags.isAccessor()) return null;
+        return switch (global.propKindAt(property_index)) {
+            .data => .{ .value = global.properties[property_index].slot.data, .owned = false },
             .auto_init => .{ .value = global.getProperty(atom_id), .owned = true },
-            .var_ref, .accessor, .deleted => null,
+            .var_ref, .accessor => null,
         };
     }
     return null;
@@ -950,15 +945,12 @@ fn globalOwnRejectedNonStrictSet(global: *core.Object, atom_id: core.Atom) bool 
     for (global.shapeProps(), 0..) |prop, property_index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
-        if (prop_flags.accessor) {
-            return switch (global.properties[property_index].slot) {
-                .accessor => |accessor| accessor.setter.isUndefined(),
-                .var_ref, .data, .auto_init, .deleted => false,
-            };
+        if (prop_flags.isAccessor()) {
+            return global.properties[property_index].slot.accessor.setterIsUndefined();
         }
-        return switch (global.properties[property_index].slot) {
+        return switch (global.propKindAt(property_index)) {
             .data => !prop_flags.writable,
-            .var_ref, .auto_init, .accessor, .deleted => false,
+            .var_ref, .auto_init, .accessor => false,
         };
     }
     return false;

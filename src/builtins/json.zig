@@ -1882,16 +1882,13 @@ fn qjsJsonAppendSimpleObject(
             buffer.shrinkRetainingCapacity(start);
             return .fallback;
         }
-        if (prop_flags.accessor) {
+        if (prop_flags.isAccessor()) {
             buffer.shrinkRetainingCapacity(start);
             return .fallback;
         }
-        const child_value = switch (object.properties[property_index].slot) {
-            .data => |stored| stored,
-            .var_ref, .auto_init, .accessor, .deleted => {
-                buffer.shrinkRetainingCapacity(start);
-                return .fallback;
-            },
+        const child_value = object.asDataAt(property_index) orelse {
+            buffer.shrinkRetainingCapacity(start);
+            return .fallback;
         };
         const property_start = buffer.items.len;
         if (emitted) try buffer.append(rt.memory.allocator, ',');

@@ -577,7 +577,7 @@ pub fn globalHostOutputAutoInit(rt: *core.JSRuntime, global: *core.Object, atom_
     for (global.shapeProps(), 0..) |prop, property_index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
-        if (prop_flags.accessor) return false;
+        if (prop_flags.isAccessor()) return false;
         return switch (global.properties[property_index].slot) {
             .auto_init => |info| info.host_function_kind == core.host_function.ids.output or
                 (info.host_function_kind == core.host_function.ids.external_host and

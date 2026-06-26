@@ -124,10 +124,10 @@ pub fn functionOwnNativeBuiltinRefForFastPath(
     for (object.shapeProps(), 0..) |prop, index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
-        if (prop_flags.accessor) return null;
-        switch (object.properties[index].slot) {
-            .data => |stored| {
-                const native_ref = nativeBuiltinRefFromFunctionValue(stored) orelse return null;
+        if (prop_flags.isAccessor()) return null;
+        switch (object.propKindAt(index)) {
+            .data => {
+                const native_ref = nativeBuiltinRefFromFunctionValue(object.properties[index].slot.data) orelse return null;
                 installOwnDataIcForObject(function, site_pc, rt, object, atom_id, index);
                 return native_ref;
             },
@@ -139,18 +139,16 @@ pub fn functionOwnNativeBuiltinRefForFastPath(
                     const current_prop = object.shapeProps()[index];
                     const current_flags = core.property.Flags.fromBits(current_prop.flags);
                     if (!current_flags.deleted and
-                        !current_flags.accessor and
-                        current_prop.atom_id == atom_id)
+                        !current_flags.isAccessor() and
+                        current_prop.atom_id == atom_id and
+                        current_flags.kind == .data)
                     {
-                        switch (object.properties[index].slot) {
-                            .data => installOwnDataIcForObject(function, site_pc, rt, object, atom_id, index),
-                            .auto_init, .accessor, .deleted => {},
-                        }
+                        installOwnDataIcForObject(function, site_pc, rt, object, atom_id, index);
                     }
                 }
                 return native_ref;
             },
-            .accessor, .deleted => return null,
+            .var_ref, .accessor => return null,
         }
     }
     return null;
@@ -463,11 +461,9 @@ fn fastImmediatePrototypeDataPropertyLookupForObject(rt: *core.JSRuntime, object
 
 fn fastOwnOrdinaryDataPropertyLookupForObject(object: *core.Object, atom_id: core.Atom) FastOwnDataLookup {
     const index = object.findProperty(atom_id) orelse return .missing;
-    if (object.propFlagsAt(index).accessor) return .slow;
-    return switch (object.properties[index].slot) {
-        .data => |stored| .{ .value = .{ .index = index, .value = stored } },
+    return switch (object.propKindAt(index)) {
+        .data => .{ .value = .{ .index = index, .value = object.properties[index].slot.data } },
         .var_ref, .auto_init, .accessor => .slow,
-        .deleted => .missing,
     };
 }
 
@@ -558,28 +554,30 @@ fn setOwnDataPropertyAt(rt: *core.JSRuntime, object: *core.Object, index: usize,
         return true;
     }
     const next_value = core.object.dupPropertyDataValue(&rt.atoms, atom_id, value);
-    errdefer core.object.destroyPropertySlot(rt, atom_id, .{ .data = next_value });
+    errdefer core.object.destroyPropertySlot(rt, atom_id, data_flags, .{ .data = next_value });
     const old_value = slot.value.*;
     slot.value.* = next_value;
-    core.object.destroyPropertySlot(rt, atom_id, .{ .data = old_value });
+    core.object.destroyPropertySlot(rt, atom_id, data_flags, .{ .data = old_value });
     return true;
 }
+
+/// `writableDataSlotAt` guarantees the slot is `.data`; destroy with a
+/// data-kind flag (the w/e/c bits are irrelevant to `destroyPropertySlot`).
+const data_flags = core.property.Flags{ .kind = .data, .writable = true };
 
 fn setOwnDataPropertyAtOwned(rt: *core.JSRuntime, object: *core.Object, index: usize, atom_id: core.Atom, value: core.JSValue) bool {
     const slot = writableDataSlotAt(object, index, atom_id) orelse return false;
     const old_slot = slot.entry.slot;
     slot.entry.slot = .{ .data = value };
-    core.object.destroyPropertySlot(rt, atom_id, old_slot);
+    core.object.destroyPropertySlot(rt, atom_id, data_flags, old_slot);
     return true;
 }
 
 fn fastOwnOrdinaryDataPropertyBorrowedValue(object: *core.Object, atom_id: core.Atom) FastOwnDataResult {
     const index = object.findProperty(atom_id) orelse return .missing;
-    if (object.propFlagsAt(index).accessor) return .slow;
-    return switch (object.properties[index].slot) {
-        .data => |stored| .{ .value = stored },
+    return switch (object.propKindAt(index)) {
+        .data => .{ .value = object.properties[index].slot.data },
         .var_ref, .auto_init, .accessor => .slow,
-        .deleted => .missing,
     };
 }
 
@@ -638,11 +636,9 @@ fn globalOwnDataPropertyBorrowedLookup(global: *core.Object, atom_id: core.Atom)
     for (global.shapeProps(), 0..) |prop, index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
-        if (prop_flags.accessor) return null;
-        return switch (global.properties[index].slot) {
-            .data => |stored| .{ .index = index, .value = stored },
-            .var_ref, .auto_init, .accessor, .deleted => null,
-        };
+        if (prop_flags.isAccessor()) return null;
+        if (prop_flags.kind != .data) return null;
+        return .{ .index = index, .value = global.properties[index].slot.data };
     }
     return null;
 }
@@ -836,7 +832,7 @@ fn setGlobalOwnWritableDataPropertyAt(rt: *core.JSRuntime, global: *core.Object,
     const next_value = core.object.dupPropertyDataValue(&rt.atoms, atom_id, new_value);
     const old_slot = slot.entry.slot;
     slot.entry.slot = .{ .data = next_value };
-    core.object.destroyPropertySlot(rt, atom_id, old_slot);
+    core.object.destroyPropertySlot(rt, atom_id, data_flags, old_slot);
     return true;
 }
 
@@ -844,7 +840,7 @@ fn setGlobalOwnWritableDataPropertyAtOwned(rt: *core.JSRuntime, global: *core.Ob
     const slot = writableDataSlotAt(global, index, atom_id) orelse return false;
     const old_slot = slot.entry.slot;
     slot.entry.slot = .{ .data = new_value };
-    core.object.destroyPropertySlot(rt, atom_id, old_slot);
+    core.object.destroyPropertySlot(rt, atom_id, data_flags, old_slot);
     return true;
 }
 
@@ -863,20 +859,15 @@ fn dataSlotAt(object: *core.Object, index: usize, atom_id: core.Atom) ?DataSlot 
     if (object.hasExoticMethods() or index >= object.shapeProps().len) return null;
     const prop = object.shapeProps()[index];
     const prop_flags = core.property.Flags.fromBits(prop.flags);
-    if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.accessor) return null;
+    if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.kind != .data) return null;
     const entry = &object.properties[index];
-    return switch (entry.slot) {
-        .data => |*stored| .{ .entry = entry, .value = stored },
-        .var_ref, .auto_init, .accessor, .deleted => null,
-    };
+    return .{ .entry = entry, .value = &entry.slot.data };
 }
 
 inline fn trustedDataPropertyBorrowedAt(object: *core.Object, index: usize) ?core.JSValue {
     if (index >= object.properties.len) return null;
-    return switch (object.properties[index].slot) {
-        .data => |stored| stored,
-        .var_ref, .auto_init, .accessor, .deleted => null,
-    };
+    if (object.propFlagsAt(index).kind != .data) return null;
+    return object.properties[index].slot.data;
 }
 
 test "fast own data property replacement retains private brand atom" {
@@ -1023,8 +1014,11 @@ test "global own data slot helpers reject readonly and accessor writes" {
     try std.testing.expect(!setGlobalOwnWritableDataPropertyAtOwned(rt, global, readonly_lookup.index, readonly_key, core.JSValue.int32(2)));
     try std.testing.expectEqual(@as(?i32, 1), globalOwnDataPropertyBorrowedAt(global, readonly_lookup.index, readonly_key).?.asInt32());
 
-    const getter = try core.string.String.createAscii(rt, "getter");
-    const setter = try core.string.String.createAscii(rt, "setter");
+    // Accessor get/set are stored as object headers (qjs `JSObject*`); use
+    // object values (the old loose JSValue accessor cell that allowed string
+    // placeholders was replaced by L2's object-header pointers).
+    const getter = try core.Object.create(rt, core.class.ids.object, null);
+    const setter = try core.Object.create(rt, core.class.ids.object, null);
     try global.defineOwnProperty(rt, accessor_key, core.Descriptor.accessor(getter.value(), setter.value(), true, true));
     getter.value().free(rt);
     setter.value().free(rt);

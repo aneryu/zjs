@@ -3561,10 +3561,8 @@ pub fn globalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom) ?core.JSValu
 pub fn globalLexicalCell(ctx: *core.JSContext, atom_id: core.Atom) ?core.JSValue {
     const env = existingGlobalLexicalEnv(ctx) orelse return null;
     const index = env.findProperty(atom_id) orelse return null;
-    return switch (env.properties[index].slot) {
-        .var_ref => |cell| cell.valueRef().dup(),
-        else => null,
-    };
+    const cell = env.asVarRefAt(index) orelse return null;
+    return cell.valueRef().dup();
 }
 
 /// Return a fresh ref to the VarRef cell backing a global-object property.
@@ -3573,12 +3571,8 @@ pub fn globalLexicalCell(ctx: *core.JSContext, atom_id: core.Atom) ?core.JSValue
 /// global object so closures can alias the property cell directly.
 pub fn globalObjectVarRefCell(global: *core.Object, atom_id: core.Atom) ?core.JSValue {
     const index = global.findProperty(atom_id) orelse return null;
-    const flags = global.propFlagsAt(index);
-    if (flags.deleted or flags.accessor) return null;
-    return switch (global.properties[index].slot) {
-        .var_ref => |cell| cell.valueRef().dup(),
-        else => null,
-    };
+    const cell = global.asVarRefAt(index) orelse return null;
+    return cell.valueRef().dup();
 }
 
 /// Create the JS_PROP_VARREF slot backing a FRESH top-level `var`/function global.
@@ -3592,25 +3586,22 @@ pub fn ensureGlobalObjectVarRefCell(
 ) !?core.JSValue {
     const rt = ctx.runtime;
     if (global.findProperty(atom_id)) |initial_index| {
-        if (global.propFlagsAt(initial_index).accessor) return null;
-        switch (global.properties[initial_index].slot) {
-            .var_ref => |cell| return cell.valueRef().dup(),
-            // qjs js_closure_define_global_var (quickjs.c:17171-17205): an EXISTING
-            // global property is never rebuilt into a fresh VARREF cell here. qjs
-            // hands back a detached uninitialized var_ref and leaves the property's
-            // slot AND its observable flags (writable/enumerable/configurable)
-            // untouched — a plain `var` redeclaration keeps its descriptor, and a
-            // function redeclaration's value+flags are applied afterwards by the
-            // ordinary global function-binding define path
-            // (slot_ops.defineGlobalFunctionBindingValue). Converting here would
-            // clobber the existing descriptor, because a var_ref slot derives its
-            // writable from is_const (masking the real flag). Returning null leaves
-            // the frame's closure-var slot as its initial detached uninitialized
-            // cell, matching qjs's detached-var_ref behaviour and routing access
-            // back through the ordinary global-object property path.
-            .data, .auto_init => return null,
-            .accessor, .deleted => return null,
-        }
+        if (global.propFlagsAt(initial_index).isAccessor()) return null;
+        if (global.asVarRefAt(initial_index)) |cell| return cell.valueRef().dup();
+        // qjs js_closure_define_global_var (quickjs.c:17171-17205): an EXISTING
+        // global property is never rebuilt into a fresh VARREF cell here. qjs
+        // hands back a detached uninitialized var_ref and leaves the property's
+        // slot AND its observable flags (writable/enumerable/configurable)
+        // untouched — a plain `var` redeclaration keeps its descriptor, and a
+        // function redeclaration's value+flags are applied afterwards by the
+        // ordinary global function-binding define path
+        // (slot_ops.defineGlobalFunctionBindingValue). Converting here would
+        // clobber the existing descriptor, because a var_ref slot derives its
+        // writable from is_const (masking the real flag). Returning null leaves
+        // the frame's closure-var slot as its initial detached uninitialized
+        // cell, matching qjs's detached-var_ref behaviour and routing access
+        // back through the ordinary global-object property path.
+        return null;
     }
 
     const cell = try core.VarRef.createClosed(rt, core.JSValue.undefinedValue());
@@ -3618,7 +3609,7 @@ pub fn ensureGlobalObjectVarRefCell(
     try global.appendPreparedPropertyEntry(
         rt,
         atom_id,
-        core.property.Flags.data(true, true, configurable),
+        core.property.Flags.varRef(true, true, configurable),
         .{ .var_ref = cell },
     );
     return cell.valueRef().dup();
@@ -3660,17 +3651,14 @@ pub fn defineGlobalDeclVarCell(
 pub fn ensureGlobalLexicalCell(ctx: *core.JSContext, atom_id: core.Atom, is_const: bool) !core.JSValue {
     const env = try globalLexicalEnv(ctx);
     if (env.findProperty(atom_id)) |index| {
-        switch (env.properties[index].slot) {
-            .var_ref => |cell| return cell.valueRef().dup(),
-            else => {},
-        }
+        if (env.asVarRefAt(index)) |cell| return cell.valueRef().dup();
     }
     const rt = ctx.runtime;
     const cell = try core.VarRef.createClosed(rt, core.JSValue.uninitialized());
     errdefer cell.valueRef().free(rt);
     cell.varRefIsConstSlot().* = is_const;
     cell.is_lexical = true;
-    try env.appendPreparedPropertyEntry(rt, atom_id, core.property.Flags.data(!is_const, false, false), .{ .var_ref = cell });
+    try env.appendPreparedPropertyEntry(rt, atom_id, core.property.Flags.varRef(!is_const, false, false), .{ .var_ref = cell });
     return cell.valueRef().dup();
 }
 
@@ -3722,15 +3710,12 @@ pub fn defineGlobalDeclLexicalCell(
 pub fn setGlobalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom, value: core.JSValue) !bool {
     const env = existingGlobalLexicalEnv(ctx) orelse return false;
     if (env.findProperty(atom_id)) |index| {
-        switch (env.properties[index].slot) {
-            // qjs JS_SetPropertyInternal VARREF: write through cell->pvalue,
-            // const guarded by cell->is_const. Shared cell => no write loss.
-            .var_ref => |cell| {
-                if (cell.is_const) return error.TypeError;
-                try cell.setVarRefValue(ctx.runtime, value.dup());
-                return true;
-            },
-            else => {},
+        // qjs JS_SetPropertyInternal VARREF: write through cell->pvalue,
+        // const guarded by cell->is_const. Shared cell => no write loss.
+        if (env.asVarRefAt(index)) |cell| {
+            if (cell.is_const) return error.TypeError;
+            try cell.setVarRefValue(ctx.runtime, value.dup());
+            return true;
         }
     }
     if (!env.hasOwnProperty(atom_id)) return false;
@@ -3767,8 +3752,9 @@ pub fn initializeGlobalLexicalValue(rt: *core.JSRuntime, env: *core.Object, atom
     for (env.shapeProps(), 0..) |prop, index| {
         if (prop.atom_id == core.atom.null_atom) continue;
         if (!atomIdOrNameEql(rt, prop.atom_id, atom_id)) continue;
-        switch (env.properties[index].slot) {
-            .data => |*stored| {
+        switch (env.propKindAt(index)) {
+            .data => {
+                const stored = &env.properties[index].slot.data;
                 if (!stored.isUninitialized()) return false;
                 const next = value.dup();
                 const old_value = stored.*;
@@ -3776,12 +3762,13 @@ pub fn initializeGlobalLexicalValue(rt: *core.JSRuntime, env: *core.Object, atom
                 old_value.free(rt);
                 return true;
             },
-            .var_ref => |cell| {
+            .var_ref => {
+                const cell = env.properties[index].slot.var_ref;
                 if (!cell.varRefValue().isUninitialized()) return false;
                 cell.setVarRefValue(rt, value.dup()) catch return false;
                 return true;
             },
-            else => return false,
+            .accessor, .auto_init => return false,
         }
     }
     return false;

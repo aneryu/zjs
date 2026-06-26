@@ -1194,7 +1194,7 @@ pub fn ownPrototypeEntryIsNativeBuiltinDefault(proto: *const core.Object, atom_i
     for (proto.shapeProps(), 0..) |prop, property_index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
-        if (prop_flags.accessor) return false;
+        if (prop_flags.isAccessor()) return false;
         return switch (proto.properties[property_index].slot) {
             .data => |method| nativeBuiltinFunctionValueMatches(method, domain, expected_id),
             .auto_init => |info| autoInitNativeBuiltinMatches(info, domain, expected_id),
@@ -1209,7 +1209,7 @@ fn ownPrototypeEntryIsCollectionNativeBuiltinDefault(proto: *const core.Object, 
     for (proto.shapeProps(), 0..) |prop, property_index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
-        if (prop_flags.accessor) return false;
+        if (prop_flags.isAccessor()) return false;
         return switch (proto.properties[property_index].slot) {
             .data => |method| nativeBuiltinFunctionValueMatchesCollectionOwner(method, expected_id, owner_class),
             .auto_init => |info| autoInitCollectionNativeBuiltinMatches(info, expected_id, owner_class),

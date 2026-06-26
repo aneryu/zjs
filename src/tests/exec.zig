@@ -457,7 +457,9 @@ pub const helpers = struct {
                 // below).
                 shared_engine_baseline_properties = std.heap.page_allocator.alloc(core.property.Entry, g.properties.len) catch unreachable;
                 for (g.properties, 0..) |entry, idx| {
-                    shared_engine_baseline_properties.?[idx] = .{ .slot = entry.slot.dup() };
+                    // Dup the slot using its kind (read from the shape flags); the
+                    // value cell is untagged so dup/destroy need the flags.
+                    shared_engine_baseline_properties.?[idx] = .{ .slot = entry.slot.dup(g.propFlagsAt(idx)) };
                 }
 
                 shared_engine_baseline_shape_props = std.heap.page_allocator.alloc(core.shape.Property, g.shape_ref.prop_count) catch unreachable;
@@ -507,6 +509,24 @@ pub const helpers = struct {
                 eng.context.lexicals = null;
                 env.value().free(eng.runtime);
             }
+            // Suppress allocation-triggered GC for the whole property restore.
+            // Restoring slots and shape flags is a multi-step swap that passes
+            // through transient states where a slot's arm and the live shape's
+            // `Flags.kind` disagree (e.g. a materialized `.data` slot while the
+            // baseline flags being restored say `.auto_init`). Under
+            // `-Dzjs_force_gc=true` the `restorePropertyLayout` storage alloc
+            // would otherwise run the cycle collector against that half-applied
+            // state and trace the wrong union arm. Making the restore atomic
+            // w.r.t. GC keeps the slot/flag pair consistent throughout.
+            const saved_trigger_fn = eng.runtime.memory.trigger_gc_fn;
+            const saved_trigger_ctx = eng.runtime.memory.trigger_gc_ctx;
+            eng.runtime.memory.trigger_gc_fn = null;
+            eng.runtime.memory.trigger_gc_ctx = null;
+            defer {
+                eng.runtime.memory.trigger_gc_fn = saved_trigger_fn;
+                eng.runtime.memory.trigger_gc_ctx = saved_trigger_ctx;
+            }
+
             // Remove any user-added properties (`var x = ...`,
             // `function f()`, ...) so the next test sees a clean global.
             // Standard globals (`Object`, `Array`, ...) and host helpers
@@ -515,22 +535,29 @@ pub const helpers = struct {
             // are kept.
             const baseline = shared_engine_baseline_property_count;
             if (global.properties.len > baseline) {
-                for (global.properties[baseline..]) |*entry| {
-                    entry.slot.destroy(eng.runtime);
-                    entry.slot = .deleted;
+                for (global.properties[baseline..], baseline..) |*entry, idx| {
+                    // Untagged value cell: destroy needs the kind (current shape
+                    // flags are still valid; restorePropertyLayout runs below).
+                    entry.slot.destroy(global.propFlagsAt(idx), eng.runtime);
+                    // `deleted` is a flag, not a slot arm: leave a harmless cell.
+                    entry.slot = .{ .data = core.JSValue.undefinedValue() };
                 }
                 global.properties = global.properties.ptr[0..baseline];
             }
 
             // Restore baseline properties below baseline to their original states
             if (shared_engine_baseline_properties) |baselines| {
-                // First, destroy current values below baseline
-                for (global.properties[0..baseline]) |entry| {
-                    entry.slot.destroy(eng.runtime);
+                // First, destroy current values below baseline using the CURRENT
+                // shape flags (the layout has not been restored yet).
+                for (global.properties[0..baseline], 0..) |entry, idx| {
+                    entry.slot.destroy(global.propFlagsAt(idx), eng.runtime);
                 }
-                // Second, restore baseline values (and dup them so they can be modified/freed again)
+                // Second, restore baseline values, dupping with the BASELINE
+                // flags snapshotted alongside the baseline slots (1:1 by index).
+                const baseline_shape_props = shared_engine_baseline_shape_props.?;
                 for (baselines, 0..) |base, idx| {
-                    global.properties[idx] = .{ .slot = base.slot.dup() };
+                    const base_flags = core.property.Flags.fromBits(baseline_shape_props[idx].flags);
+                    global.properties[idx] = .{ .slot = base.slot.dup(base_flags) };
                 }
             }
 

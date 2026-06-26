@@ -474,9 +474,8 @@ pub fn defineGlobalFunctionBindingValue(
 ) !void {
     if (global.findProperty(atom_id)) |index| {
         const flags = global.propFlagsAt(index);
-        if (!flags.deleted and !flags.accessor) {
-            if (global.properties[index].slot == .var_ref) {
-                const cell = global.properties[index].slot.var_ref;
+        if (!flags.deleted and !flags.isAccessor()) {
+            if (global.asVarRefAt(index)) |cell| {
                 try cell.setVarRefValue(rt, value.dup());
                 cell.varRefIsDeletedSlot().* = false;
                 return;

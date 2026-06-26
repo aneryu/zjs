@@ -1242,9 +1242,9 @@ fn bindAutoInitNativeRecordByAtom(rt: *core.JSRuntime, object: *core.Object, ato
     if (object.hasExoticMethods()) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
-        switch (entry.slot) {
-            .auto_init => |id| {
-                const info = core.property.autoInitAt(rt, id);
+        switch (object.propKindAt(property_index)) {
+            .auto_init => {
+                const info = core.property.autoInitAt(rt, entry.slot.auto_init);
                 info.native_builtin_id = native_id;
                 return true;
             },
@@ -1258,9 +1258,10 @@ fn tagAutoInitArrayBuiltinByAtom(rt: *core.JSRuntime, object: *core.Object, atom
     if (object.hasExoticMethods()) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
-        switch (entry.slot) {
-            .auto_init => |id| return setAutoInitArrayBuiltinMarker(core.property.autoInitAt(rt, id), marker),
-            .data => |value| {
+        switch (object.propKindAt(property_index)) {
+            .auto_init => return setAutoInitArrayBuiltinMarker(core.property.autoInitAt(rt, entry.slot.auto_init), marker),
+            .data => {
+                const value = entry.slot.data;
                 if (!value.isObject()) return false;
                 return expectObject(value).addArrayBuiltinMarker(rt, marker);
             },
@@ -1280,9 +1281,10 @@ fn tagAutoInitTypedArrayBuiltinByAtom(rt: *core.JSRuntime, object: *core.Object,
     if (object.hasExoticMethods()) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
-        switch (entry.slot) {
-            .auto_init => |id| return setAutoInitTypedArrayBuiltinMarker(core.property.autoInitAt(rt, id), marker),
-            .data => |value| {
+        switch (object.propKindAt(property_index)) {
+            .auto_init => return setAutoInitTypedArrayBuiltinMarker(core.property.autoInitAt(rt, entry.slot.auto_init), marker),
+            .data => {
+                const value = entry.slot.data;
                 if (!value.isObject()) return false;
                 return expectObject(value).addTypedArrayBuiltinMarker(rt, marker);
             },
@@ -1302,9 +1304,10 @@ fn tagAutoInitArrayIteratorKindByAtom(rt: *core.JSRuntime, object: *core.Object,
     if (object.hasExoticMethods()) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
-        switch (entry.slot) {
-            .auto_init => |id| return setAutoInitArrayIteratorKind(core.property.autoInitAt(rt, id), kind),
-            .data => |value| {
+        switch (object.propKindAt(property_index)) {
+            .auto_init => return setAutoInitArrayIteratorKind(core.property.autoInitAt(rt, entry.slot.auto_init), kind),
+            .data => {
+                const value = entry.slot.data;
                 if (!value.isObject()) return false;
                 return expectObject(value).addArrayIteratorKind(rt, kind);
             },
@@ -1324,13 +1327,14 @@ fn tagAutoInitIteratorIdentityByAtom(rt: *core.JSRuntime, object: *core.Object, 
     if (object.hasExoticMethods()) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
-        switch (entry.slot) {
-            .auto_init => |id| {
-                const info = core.property.autoInitAt(rt, id);
+        switch (object.propKindAt(property_index)) {
+            .auto_init => {
+                const info = core.property.autoInitAt(rt, entry.slot.auto_init);
                 info.iterator_identity = true;
                 return true;
             },
-            .data => |value| {
+            .data => {
+                const value = entry.slot.data;
                 if (!value.isObject()) return false;
                 return expectObject(value).addIteratorIdentityFunction(rt);
             },
@@ -1344,9 +1348,10 @@ fn tagAutoInitCollectionOwnerByAtom(rt: *core.JSRuntime, object: *core.Object, a
     if (object.hasExoticMethods()) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
-        switch (entry.slot) {
-            .auto_init => |id| return setAutoInitCollectionOwner(core.property.autoInitAt(rt, id), owner_class),
-            .data => |value| {
+        switch (object.propKindAt(property_index)) {
+            .auto_init => return setAutoInitCollectionOwner(core.property.autoInitAt(rt, entry.slot.auto_init), owner_class),
+            .data => {
+                const value = entry.slot.data;
                 if (!value.isObject()) return false;
                 return expectObject(value).addCollectionMethodOwnerClass(rt, owner_class);
             },
@@ -1366,9 +1371,10 @@ fn tagAutoInitDisposableStackMethodByAtom(rt: *core.JSRuntime, object: *core.Obj
     if (object.hasExoticMethods()) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
-        switch (entry.slot) {
-            .auto_init => |id| return setAutoInitDisposableStackMethod(core.property.autoInitAt(rt, id), method_id),
-            .data => |value| {
+        switch (object.propKindAt(property_index)) {
+            .auto_init => return setAutoInitDisposableStackMethod(core.property.autoInitAt(rt, entry.slot.auto_init), method_id),
+            .data => {
+                const value = entry.slot.data;
                 if (!value.isObject()) return false;
                 return expectObject(value).addDisposableStackMethod(rt, method_id);
             },
@@ -1388,9 +1394,10 @@ fn tagAutoInitAsyncDisposableStackMethodByAtom(rt: *core.JSRuntime, object: *cor
     if (object.hasExoticMethods()) return false;
     if (object.findProperty(atom_id)) |property_index| {
         const entry = &object.properties[property_index];
-        switch (entry.slot) {
-            .auto_init => |id| return setAutoInitAsyncDisposableStackMethod(core.property.autoInitAt(rt, id), method_id),
-            .data => |value| {
+        switch (object.propKindAt(property_index)) {
+            .auto_init => return setAutoInitAsyncDisposableStackMethod(core.property.autoInitAt(rt, entry.slot.auto_init), method_id),
+            .data => {
+                const value = entry.slot.data;
                 if (!value.isObject()) return false;
                 return expectObject(value).addAsyncDisposableStackMethod(rt, method_id);
             },
@@ -2859,16 +2866,15 @@ fn wireNativeFunctionPropertyPrototypesWithProto(rt: *core.JSRuntime, target: *c
     // the Function constructor.
     for (target.properties, 0..) |entry, property_index| {
         if (target.propFlagsAt(property_index).deleted) continue;
-        switch (entry.slot) {
-            .data => |value| try wireNativeFunctionPrototype(rt, value, function_proto),
-            .accessor => |accessor| {
-                try wireNativeFunctionPrototype(rt, accessor.getter, function_proto);
-                try wireNativeFunctionPrototype(rt, accessor.setter, function_proto);
+        switch (target.propKindAt(property_index)) {
+            .data => try wireNativeFunctionPrototype(rt, entry.slot.data, function_proto),
+            .accessor => {
+                try wireNativeFunctionPrototype(rt, entry.slot.accessor.getterValue(), function_proto);
+                try wireNativeFunctionPrototype(rt, entry.slot.accessor.setterValue(), function_proto);
             },
             // Auto-init placeholders self-wire on materialization.
             .auto_init => {},
             .var_ref => {},
-            .deleted => {},
         }
     }
 }

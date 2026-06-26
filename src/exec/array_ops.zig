@@ -766,7 +766,7 @@ pub fn qjsTypedArrayConstructArrayLikeOwnDataFast(
     var first_index_property: ?usize = null;
     for (source_object.shapeProps(), 0..) |prop, property_index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
-        if (prop_flags.deleted or prop_flags.accessor) continue;
+        if (prop_flags.deleted or prop_flags.isAccessor()) continue;
         if (prop.atom_id == core.atom.atomFromUInt32(0)) {
             first_index_property = property_index;
             break;
@@ -815,11 +815,9 @@ pub fn typedArrayArrayLikeOwnDataFastPathUsable(source_object: *core.Object, fir
         if (property_index >= source_object.shapeProps().len) return false;
         const prop = source_object.shapeProps()[property_index];
         const prop_flags = core.property.Flags.fromBits(prop.flags);
-        if (prop.atom_id != core.atom.atomFromUInt32(@intCast(index)) or prop_flags.deleted or prop_flags.accessor) return false;
-        switch (source_object.properties[property_index].slot) {
-            .data => |stored| if (stored.isObject()) return false,
-            .var_ref, .auto_init, .accessor, .deleted => return false,
-        }
+        if (prop.atom_id != core.atom.atomFromUInt32(@intCast(index)) or prop_flags.deleted or prop_flags.isAccessor()) return false;
+        const stored = source_object.asDataAt(property_index) orelse return false;
+        if (stored.isObject()) return false;
     }
     return true;
 }

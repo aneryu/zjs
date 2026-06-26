@@ -861,15 +861,11 @@ pub fn qjsStringFromCodePointDenseArray(rt: *core.JSRuntime, array: *core.Object
         if (prop_flags.deleted) continue;
         const index = core.array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;
         if (index >= array.arrayLength()) continue;
-        if (prop_flags.accessor) return null;
-        const value = switch (array.properties[property_index].slot) {
-            .data => |stored| stored,
-            // Array elements never carry `auto_init` placeholders --
-            // those only appear for builtin method tables installed via
-            // `defineAutoInitProperty` -- but the switch must be
-            // exhaustive after the auto-init slot variant was added.
-            .var_ref, .accessor, .auto_init, .deleted => return null,
-        };
+        if (prop_flags.isAccessor()) return null;
+        // Array elements never carry `auto_init` placeholders -- those only
+        // appear for builtin method tables installed via
+        // `defineAutoInitProperty`; only the `.data` kind is valid here.
+        const value = array.asDataAt(property_index) orelse return null;
         const number = value_ops.numberValue(value) orelse return null;
         const code_point = validStringCodePoint(number) orelse return error.RangeError;
         if (code_points[index] == null) seen += 1;

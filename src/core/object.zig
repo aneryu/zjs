@@ -1697,7 +1697,8 @@ pub const Object = struct {
         self.flags.has_property_storage = false;
         for (old_properties, 0..) |entry, index| {
             const entry_atom = if (index < old_shape_props.len) old_shape_props[index].atom_id else atom.null_atom;
-            destroyPropertySlot(rt, entry_atom, entry.slot);
+            const entry_flags = if (index < old_shape_props.len) property.Flags.fromBits(old_shape_props[index].flags) else property.Flags{};
+            destroyPropertySlot(rt, entry_atom, entry_flags, entry.slot);
         }
         if (old_property_capacity != 0) rt.memory.free(property.Entry, old_properties.ptr[0..old_property_capacity]);
         self.destroyOrdinaryPayload(rt);
@@ -1905,13 +1906,11 @@ pub const Object = struct {
             if (payload.cells.len != 0) return true;
         }
         if (self.functionRealmGlobalPtr() != null) return true;
-        for (self.properties) |entry| {
-            switch (entry.slot) {
-                .auto_init => |id| {
-                    const info = property.autoInitAt(rt, id).*;
-                    if (info.host_function_realm_global != 0) return true;
-                },
-                else => {},
+        const scanned = @min(self.properties.len, self.shape_ref.prop_count);
+        for (self.properties[0..scanned], 0..) |entry, index| {
+            if (self.propFlagsAt(index).isAutoInit()) {
+                const info = property.autoInitAt(rt, entry.slot.auto_init).*;
+                if (info.host_function_realm_global != 0) return true;
             }
         }
         return false;
@@ -1932,13 +1931,11 @@ pub const Object = struct {
                 const identity = @intFromPtr(&realm_global.header) & ~@as(usize, 1);
                 if (rt.borrowedWeakCleanupRealmIdentityMatches(identity)) return true;
             }
-            for (self.properties) |entry| {
-                switch (entry.slot) {
-                    .auto_init => |id| {
-                        const info = property.autoInitAt(rt, id).*;
-                        if (info.host_function_realm_global != 0 and rt.borrowedWeakCleanupRealmIdentityMatches(info.host_function_realm_global)) return true;
-                    },
-                    else => {},
+            const scanned = @min(self.properties.len, self.shape_ref.prop_count);
+            for (self.properties[0..scanned], 0..) |entry, index| {
+                if (self.propFlagsAt(index).isAutoInit()) {
+                    const info = property.autoInitAt(rt, entry.slot.auto_init).*;
+                    if (info.host_function_realm_global != 0 and rt.borrowedWeakCleanupRealmIdentityMatches(info.host_function_realm_global)) return true;
                 }
             }
         }
@@ -2130,13 +2127,11 @@ pub const Object = struct {
     }
 
     fn clearAutoInitRealmGlobals(self: *Object, rt: *JSRuntime, matcher: BorrowedIdentityMatcher) void {
-        for (self.properties) |*entry| {
-            switch (entry.slot) {
-                .auto_init => |id| {
-                    const info = property.autoInitAt(rt, id);
-                    if (matcher.matches(rt, info.host_function_realm_global)) info.host_function_realm_global = 0;
-                },
-                else => {},
+        const scanned = @min(self.properties.len, self.shape_ref.prop_count);
+        for (self.properties[0..scanned], 0..) |*entry, index| {
+            if (self.propFlagsAt(index).isAutoInit()) {
+                const info = property.autoInitAt(rt, entry.slot.auto_init);
+                if (matcher.matches(rt, info.host_function_realm_global)) info.host_function_realm_global = 0;
             }
         }
     }
@@ -6102,22 +6097,39 @@ pub const Object = struct {
         for (self.shape_ref.props[0..self.shape_ref.prop_count]) |*prop| {
             try Helper.callVisitSymbol(visitor, &prop.atom_id);
         }
-        for (self.properties) |*entry| {
-            switch (entry.slot) {
-                .data => |*stored| try Helper.callVisitValue(visitor, stored),
-                .accessor => |*stored_accessor| {
-                    try Helper.callVisitValue(visitor, &stored_accessor.getter);
-                    try Helper.callVisitValue(visitor, &stored_accessor.setter);
+        // Only entries with a matching shape property record carry a derivable
+        // kind. A property mid-`appendPreparedPropertyEntry` can have an entry
+        // pushed before the shape transition completes (the shape-storage alloc
+        // can trigger force-GC); such an over-hang entry has no shape prop yet,
+        // so clamp to the shape's prop_count (matching `shapeProps()`). Its value
+        // is a freshly-created object that is not yet a cycle member, so skipping
+        // it for this trace cannot collect it prematurely.
+        const traced_prop_count = @min(self.properties.len, self.shape_ref.prop_count);
+        for (self.properties[0..traced_prop_count], 0..) |*entry, index| {
+            const slot_flags = self.propFlagsAt(index);
+            if (slot_flags.deleted) continue;
+            switch (slot_flags.kind) {
+                .data => try Helper.callVisitValue(visitor, &entry.slot.data),
+                .accessor => {
+                    // Accessor getter/setter are `?*gc.Header`, not JSValue, so
+                    // round-trip through value space: read -> visit (the visitor
+                    // may rewrite under a moving collector) -> sync back.
+                    var getter_value = entry.slot.accessor.getterValue();
+                    try Helper.callVisitValue(visitor, &getter_value);
+                    entry.slot.accessor.syncGetterFromVisitedValue(getter_value);
+                    var setter_value = entry.slot.accessor.setterValue();
+                    try Helper.callVisitValue(visitor, &setter_value);
+                    entry.slot.accessor.syncSetterFromVisitedValue(setter_value);
                 },
                 // JS_PROP_VARREF: the slot owns a ref on a cell (global lexical
                 // bindings). Visit it so GC keeps the cell alive; without this a
                 // cell only reachable through ctx.lexicals would be collected
                 // (UAF). Visitors read the value by value, so a stack temp is safe.
-                .var_ref => |cell| {
-                    var cell_value = cell.valueRef();
+                .var_ref => {
+                    var cell_value = entry.slot.var_ref.valueRef();
                     try Helper.callVisitValue(visitor, &cell_value);
                 },
-                else => {},
+                .auto_init => {},
             }
         }
         if (self.ordinaryPayload()) |payload| {
@@ -6688,7 +6700,11 @@ pub const Object = struct {
     ) ObjectGraphError!usize {
         var count: usize = 0;
         count += countOptionalFunctionBytecodeRef(self.cachedIteratorNext(rt), function_bytecode);
-        for (self.properties) |entry| count += countSlotFunctionBytecodeRefs(entry.slot, function_bytecode);
+        // Clamp to the shape's prop_count: a mid-append over-hang entry has no
+        // shape prop yet (no derivable kind) and is a freshly-created value, so
+        // it cannot reference this bytecode anyway.
+        const counted = @min(self.properties.len, self.shape_ref.prop_count);
+        for (self.properties[0..counted], 0..) |entry, index| count += countSlotFunctionBytecodeRefs(self.propFlagsAt(index), entry.slot, function_bytecode);
         if (self.realmPayloadConst()) |payload| {
             if (payload.shared_lazy_native_functions) |cache| {
                 for (cache) |maybe_cached| count += countOptionalFunctionBytecodeRef(maybe_cached, function_bytecode);
@@ -6829,12 +6845,13 @@ pub const Object = struct {
         return context.count;
     }
 
-    fn countSlotFunctionBytecodeRefs(slot: property.Slot, function_bytecode: *const FunctionBytecode) usize {
-        return switch (slot) {
-            .data => |stored| countFunctionBytecodeValueRef(stored, function_bytecode),
-            .accessor => |entry| countFunctionBytecodeValueRef(entry.getter, function_bytecode) +
-                countFunctionBytecodeValueRef(entry.setter, function_bytecode),
-            .auto_init, .deleted => 0,
+    fn countSlotFunctionBytecodeRefs(flags: property.Flags, slot: property.Slot, function_bytecode: *const FunctionBytecode) usize {
+        if (flags.deleted) return 0;
+        return switch (flags.kind) {
+            .data => countFunctionBytecodeValueRef(slot.data, function_bytecode),
+            .accessor => countFunctionBytecodeValueRef(slot.accessor.getterValue(), function_bytecode) +
+                countFunctionBytecodeValueRef(slot.accessor.setterValue(), function_bytecode),
+            .var_ref, .auto_init => 0,
         };
     }
 
@@ -6908,7 +6925,7 @@ pub const Object = struct {
             // mirrors `getProperty`'s first-access promotion -- after
             // materialization the slot is `.data` or `.accessor` and
             // re-reads are ordinary fast-path loads.
-            if (entry.slot == .auto_init) {
+            if (entry_flags.isAutoInit()) {
                 const info = property.autoInit(entry.slot.auto_init).*;
                 // `materializeAutoInit` returns a fresh ref for
                 // `getProperty` semantics. On success the slot is promoted
@@ -6917,9 +6934,13 @@ pub const Object = struct {
                 // fallback descriptor directly instead of passing the
                 // placeholder to `fromSlot`.
                 const transient = materializeAutoInit(@constCast(self), index, info);
-                const after_materialize = self.properties[index];
-                if (after_materialize.slot == .auto_init) {
-                    if (entry_flags.accessor) {
+                if (self.propFlagsAt(index).isAutoInit()) {
+                    // OOM fallback: the placeholder did not promote. An auto_init
+                    // that materializes into an accessor is `info.kind ==
+                    // .native_accessor` (the only accessor-shaped placeholder);
+                    // all others promote to data. The kind flag is still
+                    // `.auto_init` here so derive the shape from `info`.
+                    if (info.kind == .native_accessor) {
                         return descriptor.Descriptor.accessor(
                             transient,
                             JSValue.undefinedValue(),
@@ -6935,7 +6956,7 @@ pub const Object = struct {
                     );
                 }
                 transient.free(info.rt);
-                return descriptor.Descriptor.fromSlot(self.propFlagsAt(index), after_materialize.slot);
+                return descriptor.Descriptor.fromSlot(self.propFlagsAt(index), self.properties[index].slot);
             }
             return descriptor.Descriptor.fromSlot(entry_flags, entry.slot);
         }
@@ -7030,7 +7051,7 @@ pub const Object = struct {
             if (self.propFlagsAt(index).deleted) return false;
             // VARREF existence path (quickjs.c:8856-8860): an uninitialized
             // cell still throws ReferenceError even though desc==NULL.
-            if (entry.slot == .var_ref) {
+            if (self.propKindAt(index) == .var_ref) {
                 if (entry.slot.var_ref.varRefValue().isUninitialized()) return error.ReferenceError;
             }
             // AUTOINIT: qjs "nothing to do" (quickjs.c:8862) -- report
@@ -7078,9 +7099,9 @@ pub const Object = struct {
         if (self.flags.is_array and atom_id == atom.ids.length) return arrayLengthValue(self.arrayLength());
         if (self.findProperty(atom_id)) |index| {
             const entry = self.properties[index];
-            return switch (entry.slot) {
-                .data => |stored_value| stored_value.dup(),
-                .accessor => |accessor| accessor.getter.dup(),
+            return switch (self.propKindAt(index)) {
+                .data => entry.slot.data.dup(),
+                .accessor => entry.slot.accessor.getterValue().dup(),
                 // First-access materialization for `auto_init`
                 // placeholders. We need to mutate `self.properties[index]`
                 // to replace the placeholder with the real value;
@@ -7091,12 +7112,11 @@ pub const Object = struct {
                 // gives us a writable handle without changing every
                 // caller. Matches QuickJS's `JS_AutoInitProperty` which
                 // also mutates the property record in place on read.
-                .auto_init => |id| materializeAutoInit(@constCast(self), index, property.autoInit(id).*),
+                .auto_init => materializeAutoInit(@constCast(self), index, property.autoInit(entry.slot.auto_init).*),
                 // JS_PROP_VARREF: auto-deref the cell (qjs JS_GetPropertyInternal
                 // 8281-8285). TDZ (uninitialized) is surfaced to the caller; the
                 // dedicated getVar path does the ReferenceError throw.
-                .var_ref => |cell| cell.varRefValue().dup(),
-                .deleted => JSValue.undefinedValue(),
+                .var_ref => entry.slot.var_ref.varRefValue().dup(),
             };
         }
         if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex) {
@@ -7178,7 +7198,10 @@ pub const Object = struct {
                     return JSValue.undefinedValue();
                 }
                 const cached_value = cached.dup();
-                self.installMaterializedAutoInit(index, cached_value);
+                if (!self.installMaterializedAutoInit(info.rt, index, cached_value)) {
+                    cached_value.free(info.rt);
+                    return JSValue.undefinedValue();
+                }
                 return cached_value.dup();
             }
         }
@@ -7196,37 +7219,66 @@ pub const Object = struct {
     }
 
     fn finishMaterializedAutoInit(self: *Object, index: usize, info: property.AutoInit, materialized: JSValue) JSValue {
-        _ = info;
-        self.installMaterializedAutoInit(index, materialized);
+        if (!self.installMaterializedAutoInit(info.rt, index, materialized)) {
+            materialized.free(info.rt);
+            return JSValue.undefinedValue();
+        }
         return materialized.dup();
     }
 
     fn finishMaterializedAccessorAutoInit(self: *Object, index: usize, info: property.AutoInit, materialized: property.Accessor) JSValue {
-        _ = info;
-        self.installMaterializedAccessorAutoInit(index, materialized);
-        return materialized.getter.dup();
+        if (!self.installMaterializedAccessorAutoInit(info.rt, index, materialized)) {
+            materialized.destroy(info.rt);
+            return JSValue.undefinedValue();
+        }
+        return materialized.getterValue().dup();
     }
 
-    fn installMaterializedAutoInit(self: *Object, index: usize, materialized: JSValue) void {
+    /// Promote an auto_init placeholder to a real `.data` slot AND flip the
+    /// shape `Flags.kind` from `.auto_init` to `.data` in lockstep. The shape
+    /// is made unique first so a placeholder shared by several objects is not
+    /// corrupted. Returns false (without installing) if the shape clone OOMs;
+    /// the caller then falls back to `undefined` and leaves the placeholder
+    /// intact for a later retry. Mirrors qjs `JS_AutoInitProperty` clearing the
+    /// `JS_PROP_TMASK` to NORMAL on materialization.
+    fn installMaterializedAutoInit(self: *Object, rt: *JSRuntime, index: usize, materialized: JSValue) bool {
+        const new_flags = self.propFlagsAt(index).withKind(.data);
+        self.ensureUniqueShapeForMutation(rt) catch return false;
         self.properties[index].slot = .{ .data = materialized };
+        rt.shapes.updatePropertyFlags(self.shape_ref, index, new_flags.bits());
+        return true;
     }
 
-    fn installMaterializedAccessorAutoInit(self: *Object, index: usize, materialized: property.Accessor) void {
-        // Accessor auto-init placeholders are installed with
-        // `flags.accessor` already set (asserted by the define paths),
-        // so the shape-side flags need no update here.
-        std.debug.assert(self.propFlagsAt(index).accessor);
+    fn installMaterializedAccessorAutoInit(self: *Object, rt: *JSRuntime, index: usize, materialized: property.Accessor) bool {
+        const new_flags = self.propFlagsAt(index).withKind(.accessor);
+        self.ensureUniqueShapeForMutation(rt) catch return false;
         self.properties[index].slot = .{ .accessor = materialized };
+        rt.shapes.updatePropertyFlags(self.shape_ref, index, new_flags.bits());
+        return true;
     }
 
     fn materializeAutoInitEntryForMutation(self: *Object, index: usize) !void {
         if (index >= self.properties.len) return error.IncompatibleDescriptor;
-        const entry = self.properties[index];
-        if (entry.slot != .auto_init) return;
-        const info = property.autoInit(entry.slot.auto_init).*;
+        if (!self.isAutoInitAt(index)) return;
+        const info = property.autoInit(self.properties[index].slot.auto_init).*;
         const transient = materializeAutoInit(self, index, info);
         transient.free(info.rt);
-        if (self.properties[index].slot == .auto_init) return error.OutOfMemory;
+        if (self.isAutoInitAt(index)) return error.OutOfMemory;
+    }
+
+    /// True if the own property at `index` is an accessor — either a
+    /// materialized accessor, or an auto_init placeholder destined to
+    /// materialize into one (`info.kind == .native_accessor`). Lets the
+    /// set/define paths preserve lazy materialization for data placeholders
+    /// while still forcing accessor placeholders through their accessor branch.
+    fn isAccessorOrAccessorPlaceholderAt(self: *const Object, index: usize) bool {
+        const flags = self.propFlagsAt(index);
+        if (flags.deleted) return false;
+        if (flags.kind == .accessor) return true;
+        if (flags.kind == .auto_init) {
+            return property.autoInit(self.properties[index].slot.auto_init).kind == .native_accessor;
+        }
+        return false;
     }
 
     fn materializeNumberConstantAutoInit(info: property.AutoInit) ?JSValue {
@@ -7306,10 +7358,7 @@ pub const Object = struct {
             }
             break :setter setter_value;
         } else JSValue.undefinedValue();
-        return .{
-            .getter = getter,
-            .setter = setter,
-        };
+        return property.Accessor.fromOwnedValues(getter, setter);
     }
 
     fn nativeAccessorAutoInitSetterLength(info: property.AutoInit) ?i32 {
@@ -7693,7 +7742,7 @@ pub const Object = struct {
     /// `auto_init_table` does not grow per function.
     pub fn defineFunctionPrototypeAutoInit(self: *Object, rt: *JSRuntime, flags: property.Flags) !void {
         const ref = try rt.functionPrototypeAutoInitRef();
-        try self.appendPreparedPropertyEntry(rt, atom.ids.prototype, flags, .{ .auto_init = ref });
+        try self.appendPreparedPropertyEntry(rt, atom.ids.prototype, flags.withKind(.auto_init), .{ .auto_init = ref });
     }
 
     fn arrayPrototypeFromGlobalForAutoInit(rt: *JSRuntime, global: *Object) ?*Object {
@@ -7717,11 +7766,8 @@ pub const Object = struct {
     pub fn getOwnDataObjectBorrowed(self: *const Object, atom_id: atom.Atom) ?*Object {
         if (self.hasExoticMethods()) return null;
         if (self.findProperty(atom_id)) |index| {
-            if (self.propFlagsAt(index).accessor) return null;
-            return switch (self.properties[index].slot) {
-                .data => |stored| objectFromValue(stored),
-                .var_ref, .auto_init, .accessor, .deleted => null,
-            };
+            const stored = self.asDataAt(index) orelse return null;
+            return objectFromValue(stored);
         }
         return null;
     }
@@ -7729,11 +7775,8 @@ pub const Object = struct {
     pub fn getOwnDataPropertyLookup(self: *const Object, atom_id: atom.Atom) ?DataPropertyLookup {
         if (self.hasExoticMethods()) return null;
         if (self.findProperty(atom_id)) |index| {
-            if (self.propFlagsAt(index).accessor) return null;
-            return switch (self.properties[index].slot) {
-                .data => |stored| .{ .index = index, .value = stored.dup() },
-                .var_ref, .auto_init, .accessor, .deleted => null,
-            };
+            const stored = self.asDataAt(index) orelse return null;
+            return .{ .index = index, .value = stored.dup() };
         }
         return null;
     }
@@ -7742,11 +7785,8 @@ pub const Object = struct {
         if (self.hasExoticMethods() or index >= self.shapeProps().len) return null;
         const prop = self.shape_ref.props[index];
         const prop_flags = property.Flags.fromBits(prop.flags);
-        if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.accessor) return null;
-        return switch (self.properties[index].slot) {
-            .data => |stored| stored.dup(),
-            .var_ref, .auto_init, .accessor, .deleted => null,
-        };
+        if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.kind != .data) return null;
+        return self.properties[index].slot.data.dup();
     }
 
     pub fn getDenseArrayElementValue(self: *const Object, index: u32) ?JSValue {
@@ -7854,13 +7894,14 @@ pub const Object = struct {
 
         if (self.findProperty(atom_id)) |index| {
             try self.ensureUniqueShapeForMutation(rt);
+            const old_flags = self.propFlagsAt(index);
             const entry = &self.properties[index];
             const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
             const old_slot = entry.slot;
             entry.slot = .{ .data = next_value };
             rt.shapes.updatePropertyFlags(self.shape_ref, index, property.Flags.data(true, true, true).bits());
-            destroyPropertySlot(rt, atom_id, old_slot);
+            destroyPropertySlot(rt, atom_id, old_flags, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
         }
@@ -7961,7 +8002,7 @@ pub const Object = struct {
         // (name, length, rt) triple stored in the runtime auto-init table.
         // The atom is still retained the same way `addProperty` would, via
         // `rt.shapes.addProperty` -> `atoms.dup`.
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = name,
             .length = length,
             .rt = rt,
@@ -7994,7 +8035,7 @@ pub const Object = struct {
         else
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = name,
             .length = length,
             .rt = rt,
@@ -8015,7 +8056,7 @@ pub const Object = struct {
         realm_global: ?*Object,
         getter_native_builtin_id: i32,
     ) !void {
-        std.debug.assert(flags.accessor);
+        std.debug.assert(flags.isAccessor());
         std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
@@ -8026,7 +8067,7 @@ pub const Object = struct {
         else
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = getter_name,
             .length = getter_length,
             .rt = rt,
@@ -8049,7 +8090,7 @@ pub const Object = struct {
         getter_native_builtin_id: i32,
         setter_native_builtin_id: i32,
     ) !void {
-        std.debug.assert(flags.accessor);
+        std.debug.assert(flags.isAccessor());
         std.debug.assert(setter_length > 0);
         std.debug.assert(setter_native_builtin_id >= 0);
         std.debug.assert(!self.hasExoticMethods());
@@ -8062,7 +8103,7 @@ pub const Object = struct {
         else
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = getter_name,
             .length = getter_length,
             .rt = rt,
@@ -8092,10 +8133,11 @@ pub const Object = struct {
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
         if (self.findProperty(atom_id)) |index| {
-            if (self.properties[index].slot != .auto_init) return error.TypeError;
-            if (self.propFlagsAt(index).bits() != flags.bits()) {
+            if (!self.isAutoInitAt(index)) return error.TypeError;
+            const ai_flags = flags.withKind(.auto_init);
+            if (self.propFlagsAt(index).bits() != ai_flags.bits()) {
                 try self.ensureUniqueShapeForMutation(rt);
-                rt.shapes.updatePropertyFlags(self.shape_ref, index, flags.bits());
+                rt.shapes.updatePropertyFlags(self.shape_ref, index, ai_flags.bits());
             }
             self.properties[index].slot = .{ .auto_init = try property.internAutoInit(rt, .{
                 .name = name,
@@ -8124,7 +8166,7 @@ pub const Object = struct {
         std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = "navigator",
             .length = 0,
             .rt = rt,
@@ -8147,7 +8189,7 @@ pub const Object = struct {
         std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = "console",
             .length = 0,
             .rt = rt,
@@ -8169,7 +8211,7 @@ pub const Object = struct {
         std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = "performance",
             .length = 0,
             .rt = rt,
@@ -8197,7 +8239,7 @@ pub const Object = struct {
         std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = name,
             .length = 0,
             .rt = rt,
@@ -8215,7 +8257,7 @@ pub const Object = struct {
     ) !void {
         std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = "[Symbol.unscopables]",
             .length = 0,
             .rt = rt,
@@ -8235,7 +8277,7 @@ pub const Object = struct {
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = name,
             .length = 0,
             .rt = rt,
@@ -8256,7 +8298,7 @@ pub const Object = struct {
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = name,
             .length = constant_value,
             .rt = rt,
@@ -8276,7 +8318,7 @@ pub const Object = struct {
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = bytes,
             .length = 0,
             .rt = rt,
@@ -8296,12 +8338,13 @@ pub const Object = struct {
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
-        std.debug.assert(!flags.accessor);
+        std.debug.assert(!flags.isAccessor());
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
         if (self.findProperty(atom_id)) |index| {
             if (!self.propFlagsAt(index).configurable) return error.IncompatibleDescriptor;
             try self.ensureUniqueShapeForMutation(rt);
+            const old_flags = self.propFlagsAt(index);
             const entry = &self.properties[index];
             const old_slot = entry.slot;
             entry.slot = .{ .auto_init = try property.internAutoInit(rt, .{
@@ -8311,13 +8354,13 @@ pub const Object = struct {
                 .kind = .empty_array,
                 .host_function_realm_global = @intFromPtr(realm_global),
             }) };
-            rt.shapes.updatePropertyFlags(self.shape_ref, index, flags.bits());
-            destroyPropertySlot(rt, atom_id, old_slot);
+            rt.shapes.updatePropertyFlags(self.shape_ref, index, flags.withKind(.auto_init).bits());
+            destroyPropertySlot(rt, atom_id, old_flags, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             try rt.registerBorrowedReferenceHolder(self);
             return;
         }
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = "empty array",
             .length = 0,
             .rt = rt,
@@ -8375,7 +8418,7 @@ pub const Object = struct {
         else
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
             .name = name,
             .length = length,
             .rt = rt,
@@ -8744,16 +8787,18 @@ pub const Object = struct {
             return;
         }
         if (self.findProperty(atom_id)) |index| {
-            const entry_flags = self.propFlagsAt(index);
-            if (entry_flags.accessor) {
+            // Accessor (or accessor-destined placeholder): materialize so the
+            // real getter/setter exist, then route to the setter.
+            if (self.isAccessorOrAccessorPlaceholderAt(index)) {
                 try self.materializeAutoInitEntryForMutation(index);
                 const entry = &self.properties[index];
-                if (entry.slot.accessor.setter.isUndefined()) return error.AccessorWithoutSetter;
+                if (entry.slot.accessor.setterIsUndefined()) return error.AccessorWithoutSetter;
                 return;
             }
+            const entry_flags = self.propFlagsAt(index);
             if (!entry_flags.writable) return error.ReadOnly;
             const entry = &self.properties[index];
-            if (entry.slot == .var_ref) {
+            if (entry_flags.kind == .var_ref) {
                 const cell = entry.slot.var_ref;
                 const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
                 errdefer next_value.free(rt);
@@ -8761,11 +8806,20 @@ pub const Object = struct {
                 cell.varRefIsDeletedSlot().* = false;
                 return;
             }
+            // Data or data-destined auto_init placeholder: overwrite with the
+            // new value. A placeholder's lazy default is simply discarded; flip
+            // the kind to `.data` in lockstep so the cell and shape stay in sync.
             const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
-            const old_slot = entry.slot;
-            entry.slot = .{ .data = next_value };
-            destroyPropertySlot(rt, atom_id, old_slot);
+            if (entry_flags.kind == .data) {
+                const old_slot = entry.slot;
+                entry.slot = .{ .data = next_value };
+                destroyPropertySlot(rt, atom_id, entry_flags, old_slot);
+            } else {
+                // auto_init data placeholder: needs the shape kind flip.
+                try self.ensureUniqueShapeForMutation(rt);
+                self.setEntryKindAndSlot(rt, atom_id, index, entry_flags.withKind(.data), .{ .data = next_value });
+            }
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
         }
@@ -8775,13 +8829,14 @@ pub const Object = struct {
         var prototype = self.getPrototype();
         while (prototype) |proto| {
             if (proto.findProperty(atom_id)) |index| {
-                const inherited_flags = proto.propFlagsAt(index);
-                if (inherited_flags.accessor) {
+                const is_accessor = proto.isAccessorOrAccessorPlaceholderAt(index);
+                if (is_accessor) {
                     try proto.materializeAutoInitEntryForMutation(index);
+                    const inherited = proto.properties[index];
+                    if (inherited.slot.accessor.setterIsUndefined()) return error.AccessorWithoutSetter;
+                } else if (!proto.propFlagsAt(index).writable) {
+                    return error.ReadOnly;
                 }
-                const inherited = proto.properties[index];
-                if (inherited_flags.accessor and inherited.slot.accessor.setter.isUndefined()) return error.AccessorWithoutSetter;
-                if (!inherited_flags.accessor and !inherited_flags.writable) return error.ReadOnly;
             }
             prototype = proto.getPrototype();
         }
@@ -8798,32 +8853,49 @@ pub const Object = struct {
         }
         if (self.findProperty(atom_id)) |index| {
             const entry_flags = self.propFlagsAt(index);
-            if (entry_flags.accessor) return false;
+            // Accessor (incl. accessor-destined auto_init placeholder): not a
+            // writable data slot.
+            if (self.isAccessorOrAccessorPlaceholderAt(index)) return false;
             if (!entry_flags.writable) return false;
             const entry = &self.properties[index];
             if (atom_id != atom.ids.Private_brand) {
-                switch (entry.slot) {
-                    .data => |*stored| {
+                switch (entry_flags.kind) {
+                    .data => {
+                        const stored = &entry.slot.data;
                         if (!stored.requiresRefCount() and !new_value.requiresRefCount()) {
                             stored.* = new_value;
                             return true;
                         }
                     },
-                    .var_ref => |cell| {
+                    .var_ref => {
+                        const cell = entry.slot.var_ref;
                         const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
                         errdefer next_value.free(rt);
                         try cell.setVarRefValue(rt, next_value);
                         cell.varRefIsDeletedSlot().* = false;
                         return true;
                     },
-                    .auto_init, .accessor, .deleted => {},
+                    // Data-destined auto_init placeholder: overwrite with the new
+                    // value, discarding the lazy default, and flip the kind in
+                    // lockstep so the cell and shape stay in sync.
+                    .auto_init => {
+                        const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
+                        errdefer next_value.free(rt);
+                        try self.ensureUniqueShapeForMutation(rt);
+                        self.setEntryKindAndSlot(rt, atom_id, index, entry_flags.withKind(.data), .{ .data = next_value });
+                        self.pruneBorrowedReferenceHolderIfEmpty(rt);
+                        return true;
+                    },
+                    .accessor => unreachable, // excluded above
                 }
             }
+            // Data overwrite (Private_brand also lands here). Only reachable for
+            // the `.data` kind; var_ref/auto_init/accessor returned above.
             const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
             const old_slot = entry.slot;
             entry.slot = .{ .data = next_value };
-            destroyPropertySlot(rt, atom_id, old_slot);
+            destroyPropertySlot(rt, atom_id, entry_flags, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return true;
         }
@@ -8834,51 +8906,43 @@ pub const Object = struct {
         if (self.hasExoticMethods() or index >= self.shapeProps().len) return false;
         const prop = self.shape_ref.props[index];
         const prop_flags = property.Flags.fromBits(prop.flags);
-        if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.accessor) return false;
+        if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.kind != .data) return false;
         const entry = &self.properties[index];
-        switch (entry.slot) {
-            .data => |*stored| {
-                if (!prop_flags.writable and !stored.isUninitialized()) return false;
-                if (atom_id == atom.ids.Private_brand) {
-                    const next = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
-                    errdefer next.free(rt);
-                    const old = stored.*;
-                    stored.* = next;
-                    destroyPropertySlot(rt, atom_id, .{ .data = old });
-                    return true;
-                }
-                if (!stored.requiresRefCount() and !new_value.requiresRefCount()) {
-                    stored.* = new_value;
-                    return true;
-                }
-                const next = new_value.dup();
-                errdefer next.free(rt);
-                const old = stored.*;
-                stored.* = next;
-                old.free(rt);
-                return true;
-            },
-            .var_ref, .auto_init, .accessor, .deleted => return false,
+        const stored = &entry.slot.data;
+        if (!prop_flags.writable and !stored.isUninitialized()) return false;
+        if (atom_id == atom.ids.Private_brand) {
+            const next = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
+            errdefer next.free(rt);
+            const old = stored.*;
+            stored.* = next;
+            destroyPropertySlot(rt, atom_id, prop_flags, .{ .data = old });
+            return true;
         }
+        if (!stored.requiresRefCount() and !new_value.requiresRefCount()) {
+            stored.* = new_value;
+            return true;
+        }
+        const next = new_value.dup();
+        errdefer next.free(rt);
+        const old = stored.*;
+        stored.* = next;
+        old.free(rt);
+        return true;
     }
 
     pub inline fn setOwnDataPropertyAtForLexicalSyncOwned(self: *Object, rt: *JSRuntime, index: usize, atom_id: atom.Atom, new_value: JSValue) !bool {
         if (self.hasExoticMethods() or index >= self.shapeProps().len) return false;
         const prop = self.shape_ref.props[index];
         const prop_flags = property.Flags.fromBits(prop.flags);
-        if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.accessor) return false;
+        if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.kind != .data) return false;
         const entry = &self.properties[index];
-        switch (entry.slot) {
-            .data => |*stored| {
-                if (!prop_flags.writable and !stored.isUninitialized()) return false;
-                if (atom_id == atom.ids.Private_brand) return false;
-                const old = stored.*;
-                stored.* = new_value;
-                old.free(rt);
-                return true;
-            },
-            .var_ref, .auto_init, .accessor, .deleted => return false,
-        }
+        const stored = &entry.slot.data;
+        if (!prop_flags.writable and !stored.isUninitialized()) return false;
+        if (atom_id == atom.ids.Private_brand) return false;
+        const old = stored.*;
+        stored.* = new_value;
+        old.free(rt);
+        return true;
     }
 
     pub fn setOrDefineOwnDataPropertyForSimpleSet(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !bool {
@@ -8890,12 +8954,13 @@ pub const Object = struct {
         }
         if (self.findProperty(atom_id)) |index| {
             const entry_flags = self.propFlagsAt(index);
-            if (entry_flags.accessor) return false;
+            if (self.isAccessorOrAccessorPlaceholderAt(index)) return false;
             if (!entry_flags.writable) return false;
             const entry = &self.properties[index];
             if (atom_id != atom.ids.Private_brand) {
-                switch (entry.slot) {
-                    .data => |*stored| {
+                switch (entry_flags.kind) {
+                    .data => {
+                        const stored = &entry.slot.data;
                         if (!stored.requiresRefCount() and !new_value.requiresRefCount()) {
                             stored.* = new_value;
                             return true;
@@ -8904,14 +8969,23 @@ pub const Object = struct {
                     // VARREF slots are written through the cell via putVar, never
                     // here; refuse the fast path so we never overwrite the slot.
                     .var_ref => return false,
-                    .auto_init, .accessor, .deleted => {},
+                    // Data-destined auto_init placeholder: overwrite + flip kind.
+                    .auto_init => {
+                        const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
+                        errdefer next_value.free(rt);
+                        try self.ensureUniqueShapeForMutation(rt);
+                        self.setEntryKindAndSlot(rt, atom_id, index, entry_flags.withKind(.data), .{ .data = next_value });
+                        self.pruneBorrowedReferenceHolderIfEmpty(rt);
+                        return true;
+                    },
+                    .accessor => unreachable, // excluded above
                 }
             }
             const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
             const old_slot = entry.slot;
             entry.slot = .{ .data = next_value };
-            destroyPropertySlot(rt, atom_id, old_slot);
+            destroyPropertySlot(rt, atom_id, entry_flags, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return true;
         }
@@ -8999,22 +9073,20 @@ pub const Object = struct {
     }
 
     fn deleteOrdinaryPropertyAt(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, index: usize) bool {
-        if (!self.propFlagsAt(index).configurable) return false;
+        const old_flags = self.propFlagsAt(index);
+        if (!old_flags.configurable) return false;
         self.ensureUniqueShapeForMutation(rt) catch return false;
         const entry = &self.properties[index];
         const old_slot = entry.slot;
-        entry.slot = .deleted;
-        var entry_flags = self.propFlagsAt(index);
-        entry_flags.deleted = true;
-        entry_flags.accessor = false;
-        entry_flags.writable = false;
-        rt.shapes.markPropertyDeleted(self.shape_ref, index, entry_flags.bits());
+        // `deleted` is a flag bit, not a kind/arm: keep a harmless data cell.
+        entry.slot = .{ .data = JSValue.undefinedValue() };
+        rt.shapes.markPropertyDeleted(self.shape_ref, index, old_flags.asDeleted().bits());
         if (self.class_id == class.ids.mapped_arguments) {
             if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |mapped_index| {
                 if (mapped_index < self.argumentsVarRefs().len) self.deleteMappedArgumentsBinding(rt, mapped_index);
             }
         }
-        destroyPropertySlot(rt, atom_id, old_slot);
+        destroyPropertySlot(rt, atom_id, old_flags, old_slot);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
         return true;
     }
@@ -9148,7 +9220,7 @@ pub const Object = struct {
         try self.seal(rt);
         for (0..self.properties.len) |index| {
             var entry_flags = self.propFlagsAt(index);
-            if (entry_flags.deleted or entry_flags.accessor or !entry_flags.writable) continue;
+            if (entry_flags.deleted or entry_flags.isAccessor() or !entry_flags.writable) continue;
             entry_flags.writable = false;
             rt.shapes.updatePropertyFlags(self.shape_ref, index, entry_flags.bits());
         }
@@ -9340,7 +9412,7 @@ pub const Object = struct {
         const atom_guard = rt.atoms.dup(atom_id);
         defer rt.atoms.free(atom_guard);
         var slot_owned = true;
-        errdefer if (slot_owned) destroyPropertySlot(rt, atom_id, slot);
+        errdefer if (slot_owned) destroyPropertySlot(rt, atom_id, entry_flags, slot);
 
         const old_len = self.properties.len;
         const old_capacity = self.propertyStorageCapacity();
@@ -9366,7 +9438,7 @@ pub const Object = struct {
 
         var inserted = true;
         errdefer if (inserted) {
-            destroyPropertySlot(rt, atom_id, self.properties[old_len].slot);
+            destroyPropertySlot(rt, atom_id, entry_flags, self.properties[old_len].slot);
             self.properties[old_len] = .{};
             self.properties = self.properties.ptr[0..old_len];
             self.flags.may_have_indexed_properties = old_may_have_indexed_properties;
@@ -9439,27 +9511,33 @@ pub const Object = struct {
 
     fn replaceProperty(self: *Object, rt: *JSRuntime, index: usize, desc: descriptor.Descriptor) !void {
         const atom_id = self.propAtomAt(index);
-        const merged = mergeDescriptor(self.propFlagsAt(index), self.properties[index].slot, desc);
+        const old_flags = self.propFlagsAt(index);
+        const merged = mergeDescriptor(old_flags, self.properties[index].slot, desc);
         const next_flags = flagsFromDescriptor(merged);
-        if (self.properties[index].slot == .var_ref and merged.kind == .data) {
+        if (old_flags.kind == .var_ref and merged.kind == .data) {
+            // Redefining a VARREF property as data writes THROUGH the cell and
+            // keeps the var_ref slot (so closures still alias it). The kind flag
+            // therefore stays `.var_ref` — only w/e/c bits update; flipping the
+            // kind to `.data` here would desync the cell (slot=var_ref) from the
+            // shape (kind=data) and crash the next read.
             const cell = self.properties[index].slot.var_ref;
             const next_value = dupPropertyDataValue(&rt.atoms, atom_id, merged.value);
             errdefer next_value.free(rt);
             try self.ensureUniqueShapeForMutation(rt);
             try cell.setVarRefValue(rt, next_value);
             cell.varRefIsDeletedSlot().* = false;
-            rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.bits());
+            rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.withKind(.var_ref).bits());
             return;
         }
         const next_slot = slotFromDescriptor(&rt.atoms, atom_id, merged);
         var next_owned = true;
-        errdefer if (next_owned) destroyPropertySlot(rt, atom_id, next_slot);
+        errdefer if (next_owned) destroyPropertySlot(rt, atom_id, next_flags, next_slot);
         try self.ensureUniqueShapeForMutation(rt);
         const old_slot = self.properties[index].slot;
         self.properties[index] = .{ .slot = next_slot };
         next_owned = false;
         rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.bits());
-        destroyPropertySlot(rt, atom_id, old_slot);
+        destroyPropertySlot(rt, atom_id, old_flags, old_slot);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
 
@@ -9473,6 +9551,71 @@ pub const Object = struct {
     /// Flags for the own property stored at `index` (see `propAtomAt`).
     pub inline fn propFlagsAt(self: *const Object, index: usize) property.Flags {
         return property.Flags.fromBits(self.shape_ref.props[index].flags);
+    }
+
+    // --- Typed property-slot API (L2 chokepoint) --------------------------
+    //
+    // The property value cell (`property.Slot`) is a 16B untagged union whose
+    // active arm is NOT discriminated in the cell; it is derived from the
+    // owning shape's `Flags.kind` (read via `propFlagsAt`). To keep the arm and
+    // the kind in lockstep, NO call site reads the union by tag — every kind
+    // decision flows through `propKindAt`/the typed getters below, and every
+    // slot+flag write flows through `setEntryKindAndSlot` (or the paired
+    // `slotFromDescriptor`/`flagsFromDescriptor` constructor).
+
+    /// Active arm of the property cell at `index` (derived from shape flags).
+    pub inline fn propKindAt(self: *const Object, index: usize) property.Kind {
+        return self.propFlagsAt(index).kind;
+    }
+
+    /// The stored data value at `index`, or null if the cell is not a data
+    /// property (accessor / var_ref / auto_init / deleted). Borrowed (no dup).
+    pub inline fn asDataAt(self: *const Object, index: usize) ?JSValue {
+        const flags = self.propFlagsAt(index);
+        if (flags.deleted or flags.kind != .data) return null;
+        return self.properties[index].slot.data;
+    }
+
+    /// The stored accessor at `index`, or null if not an accessor property.
+    pub inline fn asAccessorAt(self: *const Object, index: usize) ?property.Accessor {
+        const flags = self.propFlagsAt(index);
+        if (flags.deleted or flags.kind != .accessor) return null;
+        return self.properties[index].slot.accessor;
+    }
+
+    /// The var_ref cell at `index`, or null if not a var_ref property.
+    pub inline fn asVarRefAt(self: *const Object, index: usize) ?*var_ref_mod.VarRef {
+        const flags = self.propFlagsAt(index);
+        if (flags.deleted or flags.kind != .var_ref) return null;
+        return self.properties[index].slot.var_ref;
+    }
+
+    pub inline fn isAutoInitAt(self: *const Object, index: usize) bool {
+        return self.propFlagsAt(index).isAutoInit();
+    }
+
+    pub inline fn isVarRefAt(self: *const Object, index: usize) bool {
+        return self.propFlagsAt(index).isVarRef();
+    }
+
+    /// The single paired mutator for an EXISTING property entry: writes the
+    /// new slot arm AND the shape `Flags.kind` in lockstep, then releases the
+    /// old slot using the OLD flags. The caller must have ensured a unique
+    /// shape for mutation. `next_flags` carries the new kind; `next_slot` must
+    /// match `next_flags.kind`.
+    fn setEntryKindAndSlot(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        index: usize,
+        next_flags: property.Flags,
+        next_slot: property.Slot,
+    ) void {
+        const old_flags = self.propFlagsAt(index);
+        const old_slot = self.properties[index].slot;
+        self.properties[index].slot = next_slot;
+        rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.bits());
+        destroyPropertySlot(rt, atom_id, old_flags, old_slot);
     }
 
     pub const OwnDataPropertyFastLookup = struct {
@@ -9525,22 +9668,16 @@ pub const Object = struct {
     pub fn findOwnDataPropertyFast(self: *const Object, atom_id: atom.Atom) OwnDataPropertyFastResult {
         const lookup = self.findPropertyProbeTrusted(atom_id) orelse return .missing;
         const flags = property.Flags.fromBits(lookup.prop.flags);
-        if (flags.accessor) return .slow;
-        return switch (self.properties[lookup.index].slot) {
-            .data => |stored| .{ .value = .{ .index = lookup.index, .flags = flags, .value = stored } },
-            .var_ref, .auto_init, .accessor, .deleted => .slow,
-        };
+        if (flags.kind != .data) return .slow;
+        return .{ .value = .{ .index = lookup.index, .flags = flags, .value = self.properties[lookup.index].slot.data } };
     }
 
     pub fn findWritableOwnDataPropertyFast(self: *Object, atom_id: atom.Atom) ?WritableOwnDataPropertyFastLookup {
         const lookup = self.findPropertyProbeTrusted(atom_id) orelse return null;
         const flags = property.Flags.fromBits(lookup.prop.flags);
-        if (flags.accessor or !flags.writable) return null;
+        if (flags.kind != .data or !flags.writable) return null;
         const entry = &self.properties[lookup.index];
-        return switch (entry.slot) {
-            .data => |*stored| .{ .index = lookup.index, .flags = flags, .value = stored },
-            .var_ref, .auto_init, .accessor, .deleted => null,
-        };
+        return .{ .index = lookup.index, .flags = flags, .value = &entry.slot.data };
     }
 
     pub fn findProperty(self: *const Object, atom_id: atom.Atom) ?usize {
@@ -9667,10 +9804,7 @@ fn slotFromDescriptor(atoms: *atom.AtomTable, atom_id: atom.Atom, desc: descript
     return switch (desc.kind) {
         .generic => .{ .data = JSValue.undefinedValue() },
         .data => .{ .data = dupPropertyDataValue(atoms, atom_id, desc.value) },
-        .accessor => .{ .accessor = .{
-            .getter = desc.getter.dup(),
-            .setter = desc.setter.dup(),
-        } },
+        .accessor => .{ .accessor = property.Accessor.fromBorrowedValues(desc.getter, desc.setter) },
     };
 }
 
@@ -9683,18 +9817,13 @@ pub fn dupPropertyDataValue(atoms: *atom.AtomTable, atom_id: atom.Atom, value: J
     return value.dup();
 }
 
-pub fn destroyPropertySlot(rt: *JSRuntime, atom_id: atom.Atom, slot: property.Slot) void {
-    if (atom_id == atom.ids.Private_brand) {
-        switch (slot) {
-            .data => |value| {
-                if (value.asSymbolAtom()) |brand_atom| {
-                    if (rt.atoms.kind(brand_atom) == .private) rt.atoms.free(brand_atom);
-                }
-            },
-            .var_ref, .accessor, .auto_init, .deleted => {},
+pub fn destroyPropertySlot(rt: *JSRuntime, atom_id: atom.Atom, flags: property.Flags, slot: property.Slot) void {
+    if (atom_id == atom.ids.Private_brand and !flags.deleted and flags.kind == .data) {
+        if (slot.data.asSymbolAtom()) |brand_atom| {
+            if (rt.atoms.kind(brand_atom) == .private) rt.atoms.free(brand_atom);
         }
     }
-    slot.destroy(rt);
+    slot.destroy(flags, rt);
 }
 
 fn isTypedArrayObjectForSetFastPath(object: *const Object) bool {
@@ -9840,44 +9969,43 @@ fn isCompatible(current_flags: property.Flags, current_slot: property.Slot, desc
     }
     if (desc.kind == .generic) return true;
 
-    const current_is_accessor = current_flags.accessor;
+    const current_is_accessor = current_flags.isAccessor();
     if ((desc.kind == .accessor) != current_is_accessor) return false;
     if (!current_is_accessor and !current_flags.writable) {
         if (desc.writable orelse false) return false;
         if (desc.kind == .data and desc.value_present) {
-            const current_value = switch (current_slot) {
-                .data => |value| value,
-                .var_ref => |cell| cell.varRefValue(),
-                else => JSValue.undefinedValue(),
+            const current_value = switch (current_flags.kind) {
+                .data => current_slot.data,
+                .var_ref => current_slot.var_ref.varRefValue(),
+                .accessor, .auto_init => JSValue.undefinedValue(),
             };
             if (!current_value.sameValue(desc.value)) return false;
         }
     }
     if (current_is_accessor and desc.kind == .accessor) {
-        if (current_slot != .accessor) return false;
-        if (desc.getter_present and !current_slot.accessor.getter.sameValue(desc.getter)) return false;
-        if (desc.setter_present and !current_slot.accessor.setter.sameValue(desc.setter)) return false;
+        if (desc.getter_present and !current_slot.accessor.getterValue().sameValue(desc.getter)) return false;
+        if (desc.setter_present and !current_slot.accessor.setterValue().sameValue(desc.setter)) return false;
     }
     return true;
 }
 
 fn mergeDescriptor(current_flags: property.Flags, current_slot: property.Slot, desc: descriptor.Descriptor) descriptor.Descriptor {
     return switch (desc.kind) {
-        .generic => switch (current_slot) {
-            .data => |value| descriptor.Descriptor.data(
-                value,
+        .generic => switch (current_flags.kind) {
+            .data => descriptor.Descriptor.data(
+                current_slot.data,
                 current_flags.writable,
                 desc.enumerable orelse current_flags.enumerable,
                 desc.configurable orelse current_flags.configurable,
             ),
-            .accessor => |accessor| descriptor.Descriptor.accessor(
-                accessor.getter,
-                accessor.setter,
+            .accessor => descriptor.Descriptor.accessor(
+                current_slot.accessor.getterValue(),
+                current_slot.accessor.setterValue(),
                 desc.enumerable orelse current_flags.enumerable,
                 desc.configurable orelse current_flags.configurable,
             ),
-            .var_ref => |cell| descriptor.Descriptor.data(
-                cell.varRefValue(),
+            .var_ref => descriptor.Descriptor.data(
+                current_slot.var_ref.varRefValue(),
                 current_flags.writable,
                 desc.enumerable orelse current_flags.enumerable,
                 desc.configurable orelse current_flags.configurable,
@@ -9888,26 +10016,25 @@ fn mergeDescriptor(current_flags: property.Flags, current_slot: property.Slot, d
             // way to hit this with a placeholder) materializes first
             // through the same getProperty path.
             .auto_init => desc,
-            .deleted => desc,
         },
         .data => descriptor.Descriptor.data(
-            if (desc.value_present) desc.value else switch (current_slot) {
-                .data => |value| value,
-                .var_ref => |cell| cell.varRefValue(),
-                else => desc.value,
+            if (desc.value_present) desc.value else switch (current_flags.kind) {
+                .data => current_slot.data,
+                .var_ref => current_slot.var_ref.varRefValue(),
+                .accessor, .auto_init => desc.value,
             },
-            desc.writable orelse if (current_flags.accessor) false else current_flags.writable,
+            desc.writable orelse if (current_flags.isAccessor()) false else current_flags.writable,
             desc.enumerable orelse current_flags.enumerable,
             desc.configurable orelse current_flags.configurable,
         ),
         .accessor => descriptor.Descriptor.accessor(
-            if (desc.getter_present) desc.getter else switch (current_slot) {
-                .accessor => |accessor| accessor.getter,
-                else => desc.getter,
+            if (desc.getter_present) desc.getter else switch (current_flags.kind) {
+                .accessor => current_slot.accessor.getterValue(),
+                .data, .var_ref, .auto_init => desc.getter,
             },
-            if (desc.setter_present) desc.setter else switch (current_slot) {
-                .accessor => |accessor| accessor.setter,
-                else => desc.setter,
+            if (desc.setter_present) desc.setter else switch (current_flags.kind) {
+                .accessor => current_slot.accessor.setterValue(),
+                .data, .var_ref, .auto_init => desc.setter,
             },
             desc.enumerable orelse current_flags.enumerable,
             desc.configurable orelse current_flags.configurable,
