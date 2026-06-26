@@ -25,7 +25,7 @@ const std = @import("std");
 const atom_module = @import("../core/atom.zig");
 const core_bigint = @import("../core/bigint.zig");
 const core = @import("../core/root.zig");
-const regexp_validate = @import("../libs/regexp.zig").validate;
+const regexp_lib = @import("../libs/regexp.zig");
 const libs_bignum = @import("../libs/bigint.zig");
 const unicode = @import("../libs/unicode.zig");
 const memory = @import("../core/memory.zig");
@@ -5447,7 +5447,7 @@ fn parseRegExpLiteral(s: *ParseState) Error!void {
     s.token = try s.lex.rescanRegexp(slash_offset);
     const pattern = s.token.payload.regexp.pattern;
     const flags = s.token.payload.regexp.flags;
-    var compiled = regexp_validate.compilePatternAndFlags(s.function.memory.allocator, pattern, flags) catch |err| switch (err) {
+    var compiled = regexp_lib.compilePatternAndFlags(s.function.memory.allocator, pattern, flags) catch |err| switch (err) {
         error.OutOfMemory => return Error.OutOfMemory,
         else => return Error.InvalidRegExp,
     };

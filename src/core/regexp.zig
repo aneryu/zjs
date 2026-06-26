@@ -5,7 +5,7 @@
 //! `"\\d"`). It is the leaf used by the string replace/match fast paths in
 //! `exec/string_ops.zig` and carries no VM / opcode state: it depends only on
 //! `std`, `core.unicode` (ASCII / whitespace classifiers), and
-//! `libs/regexp.validate` (the supported-Unicode-property table). It lives
+//! `libs/regexp.zig` (the supported-Unicode-property table). It lives
 //! in core so the VM can consume it without importing builtins.
 //!
 //! The class-range parsing primitives (`readClassRangeAtom` / `ClassRangeAtom` /
@@ -16,7 +16,7 @@
 const std = @import("std");
 
 const unicode = @import("../libs/unicode.zig");
-const regexp_validate = @import("../libs/regexp.zig").validate;
+const regexp_lib = @import("../libs/regexp.zig");
 
 pub const ClassRangeAtomKind = enum { single, character_class };
 
@@ -247,7 +247,7 @@ pub fn consumeUnicodePropertyEscape(pattern: []const u8, index: *usize) bool {
     while (scan < pattern.len and pattern[scan] != '}') : (scan += 1) {}
     if (scan == name_start or scan >= pattern.len or pattern[scan] != '}') return true;
     const name = pattern[name_start..scan];
-    if (!regexp_validate.isSupportedUnicodePropertyExpression(name)) return true;
+    if (!regexp_lib.isSupportedUnicodePropertyExpression(name)) return true;
     index.* = scan + 1;
     return false;
 }

@@ -5,7 +5,6 @@ const bignum = @import("../libs/bigint.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const frontend = @import("../frontend/root.zig");
-const regexp_adapter = @import("../libs/regexp.zig").js_adapter;
 const unicode_lib = @import("../libs/unicode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_mod = @import("call.zig");
