@@ -99,8 +99,23 @@ generator) and sets `actual_arg_count` (read by the MAPPED `arguments`). First a
 `frame.actual_arg_count = args.len` on the skip path (byte-identical to initArguments, same `args`). Re-gate
 clean. **Perf:** generator-resume bench (1M resumes) 11.13B → 10.62B instructions (~4.6%, ~512 insns/resume).
 Gate: 13 generator + 7 arguments-object hand cases, `zig build test` 1227, **test262 `0/49775` (6 known)**,
-force-GC 1227. **Slice B (result-object-free for-of step, analog `fastMapSetForOfNext`) deferred** — touches
-the generator `next`/createIteratorResult return path.
+force-GC 1227.
+
+**Slice B (result-object-free for-of step) — DEFERRED after investigation; the audit's "quick analog to
+`fastMapSetForOfNext`" framing was optimistic.** Three findings make it materially bigger/riskier than slice A:
+(1) **No builtin-next detection infra for generators.** array/Map/Set fast paths key off a flag/id
+(`isArrayIteratorNextFunction`, `decodeNativeBuiltinId(.collection, iterator_next)`), but the generator `next`
+is a NAME-cascade dispatch (call_runtime.zig:733-742: AsyncFromSync → IteratorHelper → Wrap → Generator →
+RegExp → Array, tried in order) with no clean "is the pristine generator next" predicate — slice B must add one.
+(2) **Must refactor the CENTRAL `qjsGeneratorNext`.** Unlike Map/Set (cursor advance, no user code), each
+generator step RUNS user bytecode; the only thing skippable is the trailing `createIteratorResult`. Removing it
+means splitting/duplicating `qjsGeneratorNext` (shared by `.next()`, for-of, spread, destructuring, yield*) with
+delicate edge cases — **yield\*** (result is ALREADY an iterator-result object, returned as-is at
+call_runtime.zig:5413-5417), **async generators** (promise), done/throw/return — a dual-path divergence hazard.
+(3) **Marginal reward**: one 2-property `{value,done}` object per for-of step (the generator bytecode execution
+dominates). Per the program's discipline (correctness red line + no messy divergence + don't force a risky
+central-path refactor for a local win), slice B is left for a dedicated, carefully-scoped future pass — NOT a
+quick follow-on. Slice A already captured the main C3 win.
 
 ### Stale-doc corrections (supersede where they conflict)
 - **F1/F2 (value-refcount+GC, property/shape kind) ALREADY_DONE & faithful** at HEAD — any checkbox treating L2's 16B untagged slot or its refcount/teardown as open is stale.

@@ -109,7 +109,8 @@ Phase 3  叶子：GC-无关忠实对齐 + 余下赢回退 + global-var 稳定 ce
       块,gate `is_started_resume and !need_original_args`;qjs 帧创建时一次性分配、resume 直接续 `JS_CALL_FLAG_GENERATOR` 17790。
       **门禁抓到回归**:initArguments 还重建 unmapped `arguments` 快照 `original_args` + 设 `actual_arg_count`,首版漏 → 59 个
       arguments-object 回归 → 修(need_original_args 走全路径 + skip 路径补 actual_arg_count)。perf 1M resume 11.13B→10.62B(~4.6%)。
-      门禁 0/49775+1227+force-GC+13 gen+7 args。**slice B(result-obj-free for-of step)留后续**）。
+      门禁 0/49775+1227+force-GC+13 gen+7 args。**slice B(result-obj-free for-of step)调查后 DEFER**:audit 的「fastMapSetForOfNext 快速类比」
+      过于乐观——generator next 无 builtin 检测基建(name-cascade dispatch call_runtime.zig:733-742)、须重构中央 `qjsGeneratorNext`(yield\*/async/done/throw 边角 + 双路径分叉)、回报仅每步省一个小对象;为边际收益强推中央路径重构不符纪律,留专门 pass）。
 
 ### Phase 3 — 叶子（GC-无关忠实对齐 + 赢回退 + 大杠杆）
 
