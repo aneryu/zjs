@@ -4281,7 +4281,7 @@ pub fn qjsArraySearchCall(
         // slice directly — no per-element propertyAtomFromLengthIndex intern +
         // generic getValueProperty. `===` runs no user code, so the slice stays
         // valid for the whole loop.
-        if (!is_typed_array and object.isFastArray() and @as(usize, @intCast(object.arrayLength())) == length) {
+        if (!is_typed_array and object.isFastArray() and @as(usize, @intCast(object.arrayLength())) == length and object.arrayElements().len == length) {
             const elements = object.arrayElements();
             if (cursor > elements.len) cursor = elements.len;
             while (cursor > 0) {
@@ -4309,7 +4309,7 @@ pub fn qjsArraySearchCall(
         var cursor = try arrayFirstIndexStart(ctx, output, global, args, length);
         // Dense fast scan (qjs js_array_indexOf/includes js_get_fast_array dense
         // loop, quickjs.c:42426-42483): see the lastIndexOf note above.
-        if (!is_typed_array and object.isFastArray() and @as(usize, @intCast(object.arrayLength())) == length) {
+        if (!is_typed_array and object.isFastArray() and @as(usize, @intCast(object.arrayLength())) == length and object.arrayElements().len == length) {
             const elements = object.arrayElements();
             while (cursor < elements.len) : (cursor += 1) {
                 const item = elements[cursor];

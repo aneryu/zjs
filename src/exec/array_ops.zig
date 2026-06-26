@@ -1788,7 +1788,15 @@ pub fn qjsArrayIterationCall(
         switch (mode) {
             .for_each => {},
             .map => {
-                if (dense_map_output and index <= std.math.maxInt(u32) and out.?.canDefineDenseArrayDataPropertiesUnchecked()) {
+                // The unchecked dense write only appends at the current count;
+                // when the source skipped holes the output index runs ahead of
+                // count, so require `index == count` (contiguous append) before
+                // taking it. A gap falls through to the index-define path, which
+                // materializes the output to sparse and preserves the hole.
+                if (dense_map_output and index <= std.math.maxInt(u32) and
+                    index == @as(usize, @intCast(out.?.fastArrayCount())) and
+                    out.?.canDefineDenseArrayDataPropertiesUnchecked())
+                {
                     try out.?.defineDenseArrayDataPropertyUnchecked(ctx.runtime, @intCast(index), callback_result);
                     continue;
                 }
@@ -2486,9 +2494,13 @@ pub fn qjsArraySliceCall(
     // final <= count32, do ONE bulk dense copy via js_create_array (quickjs.c:9601 =
     // JS_NewArray + expand_fast_array + count=len + JS_DupValue loop), skipping the
     // per-element TryGetProperty/CreateDataProperty slow loop entirely.
+    // Gate on the dense extent (fastArrayCount), NOT the logical length: the
+    // bulk copy slices `arrayElements()` which is count-bounded, so the copied
+    // range must lie fully inside `[0, count)`. A holey tail (count < length)
+    // falls through to the per-element species path which reads via getProperty.
     if (object.flags.is_array and !object.flags.is_proxy and
         object.arrayElementStorageMode() == .dense and
-        (start + count) <= @as(usize, @intCast(object.arrayLength())))
+        (start + count) <= @as(usize, @intCast(object.fastArrayCount())))
     {
         if (arrayHasDefaultSpecies(ctx.runtime, global, object)) |array_proto| {
             const out = try core.Object.createArray(ctx.runtime, array_proto);
@@ -3012,7 +3024,12 @@ pub fn qjsArrayFillCall(
     } else raw_value.dup();
     defer value.free(ctx.runtime);
 
-    if (object.flags.is_array and !object.hasExoticMethods() and object.proxyTarget() == null and object.arrayElementStorageMode() == .dense and object.flags.extensible and arrayPrototypeChainHasNoIndexedProperties(object)) {
+    // The dense fast path appends/overwrites contiguously from `start`, so it
+    // is only valid when `start` lands within (or exactly at the end of) the
+    // dense extent. A holey array whose fill range begins past `array_count`
+    // (e.g. `new Array(5).fill(7,2,4)`) would otherwise no-op the leading
+    // appends; route those through the generic setValueProperty loop below.
+    if (object.flags.is_array and !object.hasExoticMethods() and object.proxyTarget() == null and object.arrayElementStorageMode() == .dense and object.flags.extensible and arrayPrototypeChainHasNoIndexedProperties(object) and start <= @as(usize, @intCast(object.fastArrayCount()))) {
         if (final <= @as(usize, @intCast(std.math.maxInt(u32))) + 1) {
             var dense_index = start;
             if (object.canDefineDenseArrayDataPropertiesUnchecked()) {
@@ -3185,15 +3202,19 @@ fn qjsArrayPopCallImpl(
 fn qjsFastDenseArrayPop(object: *core.Object) ?core.JSValue {
     if (!object.flags.is_array or !object.flags.length_writable) return null;
     if (!object.isFastArray()) return null;
-    return object.takeLastFastArrayElement();
+    // Only on a fully-dense array (count == length): pop removes a[length-1],
+    // which must be a live dense element. A holey array (length > count) has a
+    // hole at the logical end, so it falls back to the generic pop path.
+    return object.takeLastFullyDenseFastArrayElement();
 }
 
 pub fn qjsFastDensePrimitiveArrayPop(object: *core.Object) ?core.JSValue {
     if (!object.flags.is_array or !object.flags.length_writable) return null;
+    if (object.fastArrayCount() != object.arrayLength()) return null;
     const slot = object.borrowLastFastArrayElement() orelse return null;
     const value = slot.*;
     if (!qjsCanFastJoinPrimitive(value)) return null;
-    return object.takeLastFastArrayElement();
+    return object.takeLastFullyDenseFastArrayElement();
 }
 
 pub fn qjsArrayShiftCall(
@@ -3263,8 +3284,12 @@ pub fn qjsArrayShiftCall(
 fn qjsFastDenseArrayShift(object: *core.Object) ?core.JSValue {
     if (!object.flags.is_array or !object.flags.length_writable) return null;
     if (!object.isFastArray()) return null;
+    // Shift moves the whole [1, length) range down and lowers .length. Only run
+    // on a fully-dense array (count == length); a holey array (length > count)
+    // would mishandle the tail holes, so it falls back to the generic path.
+    if (object.fastArrayCount() != object.arrayLength()) return null;
     const values = object.fastArrayValuesMut();
-    if (values.len == 0) return core.JSValue.undefinedValue();
+    if (values.len == 0) return null;
 
     const first = values[0];
     if (values.len > 1) {
@@ -3272,6 +3297,7 @@ fn qjsFastDenseArrayShift(object: *core.Object) ?core.JSValue {
     }
     values[values.len - 1] = core.JSValue.undefinedValue();
     object.setFastArrayCountAssumeCapacity(@intCast(values.len - 1));
+    object.setArrayLength(@intCast(values.len - 1));
     return first;
 }
 
@@ -3311,8 +3337,11 @@ fn qjsFastDenseArrayUnshift(
 
     // Grow first (may reallocate the backing buffer), then publish the new
     // count so fastArrayValuesMut() exposes the full [0, new_length) range.
+    // The array was fully dense (count == length) on entry, so the new dense
+    // extent IS the new logical length; keep them in lock-step.
     try object.fastArrayEnsureCapacity(rt, new_length_u32);
     object.setFastArrayCountAssumeCapacity(new_length_u32);
+    object.setArrayLength(new_length_u32);
     const values = object.fastArrayValuesMut();
     // Move the existing [0, length) elements up by insert_count. This is a raw
     // bit move (no dup/free); ownership of each original reference travels with

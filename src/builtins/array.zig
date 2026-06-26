@@ -301,8 +301,10 @@ pub fn constructConstructorWithPrototype(rt: *core.JSRuntime, args: []const core
         const length = arrayLengthFromNumber(args[0]) orelse return error.RangeError;
         const object = try core.Object.createArray(rt, prototype);
         errdefer core.Object.destroyFromHeader(rt, &object.header);
+        // new Array(n): fast array with count=0, length=n, slots [0,n) holes.
+        // Faithful to js_array_constructor -> set_array_length (quickjs.c:9447-9455);
+        // no sparse conversion. This is the holey-prealloc unblock.
         object.setArrayLength(length);
-        if (length != 0) object.setArraySparseLength(length);
         return object.value();
     }
     return constructWithPrototype(rt, args, prototype);

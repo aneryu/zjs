@@ -412,9 +412,10 @@ fn setArrayLengthForPutFieldFastPath(
             if (index >= new_len) return false;
         }
         object.truncateArrayElements(rt, new_len);
-    } else if (new_len > object.arrayLength()) {
-        return false;
     }
+    // Growth keeps the fast array and just extends `.length` into tail holes
+    // (faithful to set_array_length quickjs.c:9447-9455 — count is unchanged,
+    // no sparse conversion). This is the `arr.length = bigger` fast path.
     object.setArrayLength(new_len);
     return true;
 }

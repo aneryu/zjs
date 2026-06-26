@@ -208,10 +208,16 @@ pub noinline fn defineField(
 
     const target = try property_ops.expectObject(obj);
     const effective_atom = call_runtime.remapPrivateAtomForOperation(ctx.runtime, frame, target, atom_id);
-    if (target.flags.is_array and effective_atom == core.atom.ids.length) {
+    if (target.flags.is_array and effective_atom == core.atom.ids.length and
+        target.flags.length_writable and target.properties.len == 0)
+    {
         if (value.asInt32()) |length| {
             const new_len: u32 = @intCast(@max(length, 0));
-            if (new_len > target.arrayLength()) try target.convertDenseArrayElementsToSparseProperties(ctx.runtime);
+            // No index properties to delete, so the length set reduces to the
+            // dense case: growth keeps the fast array (tail holes), shrink frees
+            // the dense tail via truncateArrayElements. No sparse conversion
+            // either way — faithful to set_array_length (quickjs.c:9447-9455).
+            // Arrays carrying index properties fall through to defineArrayLength.
             target.truncateArrayElements(ctx.runtime, new_len);
             target.setArrayLength(new_len);
             return .done;

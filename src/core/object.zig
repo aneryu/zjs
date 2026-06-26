@@ -1161,6 +1161,13 @@ pub const Object = struct {
     array_values: [*]JSValue = undefined,
     array_count: u32 = 0,
     array_capacity: u32 = 0,
+    /// JS-observable `.length` for arrays. Distinct from `array_count` (the
+    /// dense element extent): an array may carry `array_length > array_count`
+    /// with the slots `[array_count, array_length)` being HOLES (resolve up the
+    /// prototype chain; never own; not enumerated). Semantically mirrors qjs
+    /// `p->prop[0].u.value` (set_array_length / add_fast_array_element). Invariant:
+    /// `array_length >= array_count` for arrays. Unused for non-arrays.
+    array_length: u32 = 0,
     class_id: class.ClassId,
     flags: ObjectFlags = .{},
     class_payload_kind: class.PayloadKind = .none,
@@ -2162,20 +2169,21 @@ pub const Object = struct {
 
     pub fn arrayLengthSlot(self: *Object) *u32 {
         std.debug.assert(self.flags.is_array);
-        return &self.array_count;
+        return &self.array_length;
     }
 
     pub fn arrayLength(self: *const Object) u32 {
-        return if (self.flags.is_array) self.array_count else 0;
+        return if (self.flags.is_array) self.array_length else 0;
     }
 
+    /// Set the JS-observable `.length` only. Faithful to qjs `set_array_length`
+    /// (quickjs.c:9447-9455): growing length above capacity keeps `fast_array`
+    /// (the slots `[array_count, length)` simply become holes), it does NOT
+    /// drop to sparse and it NEVER touches `array_count`. Callers that must
+    /// also shrink the dense extent pair this with `truncateArrayElements`.
     pub fn setArrayLength(self: *Object, length: u32) void {
         std.debug.assert(self.flags.is_array);
-        if (self.flags.fast_array and @as(usize, @intCast(length)) > self.array_capacity) {
-            std.debug.assert(self.array_count == 0);
-            self.flags.fast_array = false;
-        }
-        self.array_count = length;
+        self.array_length = length;
     }
 
     pub fn hasExoticMethods(self: *const Object) bool {
@@ -3354,12 +3362,14 @@ pub const Object = struct {
     pub fn arrayElements(self: *const Object) []JSValue {
         if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return &.{};
         std.debug.assert(self.array_capacity >= self.array_count);
+        std.debug.assert(self.array_length >= self.array_count);
         return self.array_values[0..@as(usize, @intCast(self.array_count))];
     }
 
     fn arrayElementsMut(self: *Object) []JSValue {
         if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return &.{};
         std.debug.assert(self.array_capacity >= self.array_count);
+        std.debug.assert(self.array_length >= self.array_count);
         return self.array_values[0..@as(usize, @intCast(self.array_count))];
     }
 
@@ -3412,6 +3422,8 @@ pub const Object = struct {
         self.array_values = elements.ptr;
         self.array_count = @intCast(elements.len);
         self.array_capacity = @intCast(elements.len);
+        // Fully-dense adoption: the logical length equals the dense extent.
+        self.array_length = @intCast(elements.len);
         self.flags.fast_array = true;
     }
 
@@ -3424,7 +3436,10 @@ pub const Object = struct {
     pub fn setArraySparseLength(self: *Object, length: u32) void {
         std.debug.assert(self.flags.is_array);
         std.debug.assert(self.array_capacity == 0);
-        self.array_count = length;
+        // Sparse arrays carry no dense extent: count is 0, length is the
+        // JS-observable `.length`. (Invariant 5: sparse => array_count == 0.)
+        self.array_count = 0;
+        self.array_length = length;
         self.flags.fast_array = false;
     }
 
@@ -3432,12 +3447,26 @@ pub const Object = struct {
         std.debug.assert(self.flags.is_array);
         std.debug.assert(self.array_capacity == 0);
         self.array_count = 0;
+        self.array_length = 0;
         self.flags.fast_array = true;
     }
 
     pub fn takeLastFastArrayElement(self: *Object) ?JSValue {
         if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return null;
         self.array_count -= 1;
+        return self.array_values[@intCast(self.array_count)];
+    }
+
+    /// Pop the last element of a FULLY DENSE fast array (count == length),
+    /// lowering BOTH the dense extent and the JS `.length` by one. Returns null
+    /// for an empty or holey array (`length > count`) so the caller falls back
+    /// to the generic [[Delete last]] + set-length path that handles tail holes.
+    /// Mirrors the pop fast path's "delete last, length-=1" pair.
+    pub fn takeLastFullyDenseFastArrayElement(self: *Object) ?JSValue {
+        if (!self.flags.is_array or !self.flags.fast_array) return null;
+        if (self.array_count == 0 or self.array_count != self.array_length) return null;
+        self.array_count -= 1;
+        self.array_length -= 1;
         return self.array_values[@intCast(self.array_count)];
     }
 
@@ -3463,6 +3492,7 @@ pub const Object = struct {
         const allocated = self.allocatedArrayElements();
         self.array_count = 0;
         self.array_capacity = 0;
+        self.array_length = 0;
         self.flags.fast_array = false;
         if (allocated.len != 0) rt.memory.free(JSValue, allocated);
     }
@@ -8371,27 +8401,38 @@ pub const Object = struct {
     }
 
     pub fn appendDenseArrayIndex(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (!self.flags.is_array or index != self.arrayLength() or !self.flags.length_writable) return false;
+        // qjs add_fast_array_element (quickjs.c:9542-9570): the dense append
+        // gate is `idx == count`, NOT `idx == length`. A holey array (length >
+        // count) can append at `count`; `length` is bumped to `index+1` only
+        // when it grows past the current length.
+        if (!self.flags.is_array or index != self.array_count or !self.flags.length_writable) return false;
         if (self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
         if (!self.flags.extensible) return false;
         if (self.properties.len != 0 and self.findProperty(atom_id) != null) return false;
         if (self.getPrototype()) |proto| {
+            // Filling a hole (`index < array_length`) is an ordinary [[Set]] of a
+            // missing index that must consult inherited setters / proxy traps; a
+            // proxy or exotic anywhere in the chain can intercept it, so bail to
+            // the full [[Set]] path. (A true logical-end append `index ==
+            // array_length` needs only the inherited-data-property guard below.)
+            if (index < self.array_length and arrayPrototypeChainHasInterceptingSet(proto)) return false;
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt) and proto.hasProperty(atom_id)) return false;
         }
 
-        if (index != self.array_count) return false;
         const element_slot = try self.appendUninitializedFastArraySlot(rt);
         element_slot.* = new_value.dup();
+        if (index + 1 > self.array_length) self.array_length = index + 1;
         self.markIndexedProperties(rt);
         return true;
     }
 
     pub fn appendDenseArrayValues(self: *Object, rt: *JSRuntime, start: u32, values: []const JSValue) !bool {
         if (values.len == 0) return true;
-        if (!self.flags.is_array or start != self.arrayLength() or !self.flags.length_writable) return false;
+        // Dense append gate keys off the dense extent (array_count), not the
+        // logical length: a holey array appends at count. See add_fast_array_element.
+        if (!self.flags.is_array or start != self.array_count or !self.flags.length_writable) return false;
         if (self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
         if (!self.flags.extensible) return false;
-        if (start != self.array_count) return false;
         const added: u32 = std.math.cast(u32, values.len) orelse return false;
         const limit = std.math.add(u32, start, added) catch return false;
         if (limit > array.max_array_length) return false;
@@ -8415,13 +8456,14 @@ pub const Object = struct {
             element_index += 1;
         }
         self.setFastArrayCountAssumeCapacity(limit);
+        if (limit > self.array_length) self.array_length = limit;
         self.markIndexedProperties(rt);
         return true;
     }
 
     pub fn initDenseArrayIndexZeroAssumingEmpty(self: *Object, rt: *JSRuntime, new_value: JSValue) !void {
         std.debug.assert(self.flags.is_array);
-        std.debug.assert(self.arrayLength() == 0);
+        std.debug.assert(self.array_count == 0);
         std.debug.assert(self.flags.length_writable);
         std.debug.assert(self.flags.extensible);
         std.debug.assert(self.arrayElements().len == 0);
@@ -8429,28 +8471,30 @@ pub const Object = struct {
 
         const element_slot = try self.appendUninitializedFastArraySlot(rt);
         element_slot.* = new_value.dup();
+        if (self.array_length < 1) self.array_length = 1;
         self.markIndexedProperties(rt);
     }
 
     pub fn appendDenseArrayLiteralIndex(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !bool {
-        if (!self.flags.is_array or index != self.arrayLength() or !self.flags.length_writable) return false;
+        if (!self.flags.is_array or index != self.array_count or !self.flags.length_writable) return false;
         if (!self.flags.extensible) return false;
 
-        if (index != self.array_count) return false;
         const element_slot = try self.appendUninitializedFastArraySlot(rt);
         element_slot.* = new_value.dup();
+        if (index + 1 > self.array_length) self.array_length = index + 1;
         self.markIndexedProperties(rt);
         return true;
     }
 
     pub fn initDenseArrayLiteralValuesAssumingEmpty(self: *Object, rt: *JSRuntime, values: []const JSValue) !bool {
         if (!self.flags.is_array or !self.flags.length_writable or !self.flags.extensible) return false;
-        if (self.arrayLength() != 0 or self.properties.len != 0) return false;
+        if (self.array_count != 0 or self.array_length != 0 or self.properties.len != 0) return false;
         if (self.arrayElementStorageMode() != .dense) return false;
         if (values.len > array.max_array_length) return false;
 
         try self.ensureArrayElementCapacity(rt, values.len);
         self.setFastArrayCountAssumeCapacity(@intCast(values.len));
+        self.array_length = @intCast(values.len);
         for (values, 0..) |item, index| {
             const element_slot = &self.array_values[index];
             element_slot.* = item.dup();
@@ -8461,17 +8505,17 @@ pub const Object = struct {
 
     pub fn appendDenseArrayInt32Range(self: *Object, rt: *JSRuntime, start: u32, limit: u32) !bool {
         if (!self.flags.is_array or self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
-        if (start != self.arrayLength() or start >= limit or !self.flags.length_writable or !self.flags.extensible) return false;
+        if (start != self.array_count or start >= limit or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.getPrototype()) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
         }
 
         const start_index: usize = @intCast(start);
         const limit_index: usize = @intCast(limit);
-        if (start != self.array_count) return false;
 
         try self.ensureArrayElementCapacity(rt, limit_index);
         self.setFastArrayCountAssumeCapacity(limit);
+        if (limit > self.array_length) self.array_length = limit;
         self.markIndexedProperties(rt);
 
         var index = start_index;
@@ -8484,7 +8528,7 @@ pub const Object = struct {
     pub fn appendDenseArrayInt32ValueRange(self: *Object, rt: *JSRuntime, start_index: u32, start_value: i32, count: u32) !bool {
         if (count == 0) return true;
         if (!self.flags.is_array or self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
-        if (start_index != self.arrayLength() or !self.flags.length_writable or !self.flags.extensible) return false;
+        if (start_index != self.array_count or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.getPrototype()) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
         }
@@ -8498,10 +8542,10 @@ pub const Object = struct {
 
         const start_element: usize = @intCast(start_index);
         const limit_element: usize = @intCast(limit);
-        if (start_element != self.array_count) return false;
 
         try self.ensureArrayElementCapacity(rt, limit_element);
         self.setFastArrayCountAssumeCapacity(limit);
+        if (limit > self.array_length) self.array_length = limit;
         self.markIndexedProperties(rt);
 
         var offset: u32 = 0;
@@ -8518,7 +8562,7 @@ pub const Object = struct {
         if (start_index >= limit) return true;
         if (multiplier < 0 or mask < 0) return false;
         if (!self.flags.is_array or self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
-        if (start_index != self.arrayLength() or !self.flags.length_writable or !self.flags.extensible) return false;
+        if (start_index != self.array_count or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.getPrototype()) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
         }
@@ -8531,10 +8575,10 @@ pub const Object = struct {
 
         const start_element: usize = @intCast(start_index);
         const limit_element: usize = @intCast(limit);
-        if (start_element != self.array_count) return false;
 
         try self.ensureArrayElementCapacity(rt, limit_element);
         self.setFastArrayCountAssumeCapacity(limit);
+        if (limit > self.array_length) self.array_length = limit;
         self.markIndexedProperties(rt);
 
         var index = start_element;
@@ -8595,9 +8639,13 @@ pub const Object = struct {
         if (appended) {
             if (!self.flags.extensible) return false;
             if (index >= self.arrayLength() and !self.flags.length_writable) return false;
+            // Dense append stays on the fully-dense end (index == count == length);
+            // a holey array (count < length) falls through to the caller's slow
+            // path. This preserves the qjs add_fast_array_element invariant.
             if (index != self.arrayLength()) return false;
             try self.ensureArrayElementCapacity(rt, element_index + 1);
             self.setFastArrayCountAssumeCapacity(index + 1);
+            if (index + 1 > self.array_length) self.array_length = index + 1;
         }
 
         const next_value = new_value.dup();
@@ -8627,6 +8675,21 @@ pub const Object = struct {
         return true;
     }
 
+    /// True if any object in the prototype chain is a proxy or carries exotic
+    /// methods that could intercept a [[Set]] of an arbitrary key (e.g. a proxy
+    /// `set` trap). A dense fast-array append into a HOLE position relies on the
+    /// generic [[Set]] having found no inherited setter (faithful to qjs, which
+    /// reaches add_fast_array_element only after the prototype walk); such an
+    /// interceptor must be honored, so the dense append bails to the full path.
+    fn arrayPrototypeChainHasInterceptingSet(proto: *Object) bool {
+        var cursor: ?*Object = proto;
+        while (cursor) |object| {
+            if (object.proxyTarget() != null or object.hasExoticMethods()) return true;
+            cursor = object.getPrototype();
+        }
+        return false;
+    }
+
     pub fn canDefineDenseArrayDataPropertiesUnchecked(self: Object) bool {
         return self.flags.is_array and
             !self.hasExoticMethods() and
@@ -8646,6 +8709,7 @@ pub const Object = struct {
         if (appended) {
             try self.ensureArrayElementCapacity(rt, element_index + 1);
             self.setFastArrayCountAssumeCapacity(index + 1);
+            if (index + 1 > self.array_length) self.array_length = index + 1;
         }
 
         const next_value = new_value.dup();
@@ -8969,6 +9033,15 @@ pub const Object = struct {
         if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |array_index| {
             const element_index: usize = @intCast(array_index);
             if (element_index < self.arrayElements().len) {
+                // T2: delete an in-dense element. We materialize the dense run
+                // to sparse index properties and delete the one index. This is
+                // observationally identical to qjs's tail-delete cheap hole
+                // (the index becomes absent, `.length` is preserved because the
+                // convert now restores `array_length`), and crucially it routes
+                // the element's finalizer through the deferred class-payload
+                // machinery instead of finalizing inline (finalizer-reentrancy
+                // safety — see "dense array delete defers element finalizer
+                // reentry"). The cheap inline tail-hole would re-enter.
                 self.convertDenseArrayElementsToSparseProperties(rt) catch return false;
                 const index = self.findProperty(atom_id) orelse return true;
                 return self.deleteOrdinaryPropertyAt(rt, atom_id, index);
@@ -9135,7 +9208,10 @@ pub const Object = struct {
             if (target_len != self.arrayLength() or (desc.writable orelse false)) return error.IncompatibleDescriptor;
         }
         if (target_len > self.arrayLength() and !self.flags.length_writable) return error.ReadOnly;
-        if (target_len > self.arrayLength()) try self.convertDenseArrayElementsToSparseProperties(rt);
+        // Growing `.length` keeps the fast array and just creates tail holes in
+        // `[count, target_len)` — faithful to set_array_length (quickjs.c:9447-9455),
+        // which leaves count untouched and never drops to sparse. (The trailing
+        // setArrayLength(target_len) below performs the grow.)
         if (target_len < self.arrayLength()) {
             var i = self.properties.len;
             while (i > 0) {
@@ -9197,7 +9273,12 @@ pub const Object = struct {
 
     pub fn convertDenseArrayElementsToSparseProperties(self: *Object, rt: *JSRuntime) !void {
         if (!self.flags.is_array or !self.flags.fast_array) return;
-        const old_length = self.array_count;
+        // Preserve the JS-observable length, not the dense extent. qjs
+        // convert_fast_array_to_array (quickjs.c:9244) materializes only the
+        // live `[0, count)` slots into index properties; the holes in
+        // `[count, length)` stay genuinely absent on the sparse array. Length
+        // is unchanged by the conversion.
+        const saved_length = self.array_length;
         const elements = self.arrayElements();
         for (elements, 0..) |stored, index| {
             const atom_id = atom.atomFromUInt32(@intCast(index));
@@ -9207,7 +9288,8 @@ pub const Object = struct {
         for (elements) |stored| stored.free(rt);
         self.array_count = 0;
         self.freeArrayElementBufferAfterMove(rt);
-        self.array_count = old_length;
+        // Sparse array: count stays 0, length is the JS-observable `.length`.
+        self.array_length = saved_length;
     }
 
     fn denseArrayElement(self: *const Object, atom_id: atom.Atom) ?JSValue {
