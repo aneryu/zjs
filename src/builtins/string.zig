@@ -412,6 +412,7 @@ pub fn methodCall(rt: *core.JSRuntime, receiver: core.JSValue, id: u32, args: []
     if (id == 7) return containsReceiver(rt, receiver, args, .ends);
     if (id == 30) return atReceiver(rt, receiver, args);
     if (id == 27) return splitReceiver(rt, receiver, args);
+    if (id == 33) return repeatReceiver(rt, receiver, args);
     if (id == 28) return lastIndexOfReceiver(rt, receiver, args);
     if (id == 32) return sliceReceiver(rt, receiver, args);
     if (id == 38) return isWellFormedReceiver(rt, receiver);
@@ -1319,6 +1320,48 @@ fn stringSliceRange(rt: *core.JSRuntime, len_usize: usize, args: []const core.JS
     if (end < 0) end = @max(len + end, 0) else end = @min(end, len);
     if (end < start) end = start;
     return .{ .start = @intCast(start), .end = @intCast(end) };
+}
+
+/// Resolve-once String.prototype.repeat for plain String / String-object
+/// receivers, mirroring QuickJS `js_string_repeat` (quickjs.c:46371): the
+/// receiver's already-flat code units are borrowed ONCE (no per-call
+/// transcode-copy of the slow `repeat(bytes)` path) and the result is built
+/// directly in a buffer pre-sized to `count * unit_len`, narrow latin1 stays
+/// narrow and only a source with >0xFF units (wide) widens to utf16 — the same
+/// lazy-widen shape as `pad` (commit 3ccd4f8). Non-String receivers fall
+/// through to the existing transcoding `repeat`. Count gate / empty-string
+/// returns / overflow guard reproduce the current `repeat` semantics exactly.
+fn repeatReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
+    const string_value = stringValueFromReceiver(receiver) orelse {
+        var bytes = std.ArrayList(u8).empty;
+        defer bytes.deinit(rt.memory.allocator);
+        try appendStringReceiverBytes(rt, &bytes, receiver);
+        return repeat(rt, bytes.items, args);
+    };
+
+    const count = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
+    if (count < 0 or count == std.math.maxInt(i64)) return error.RangeError;
+    try string_value.ensureFlat(rt);
+    const unit_len = string_value.len();
+    if (unit_len == 0 or count == 0) return createStringValue(rt, "");
+    const repeat_count: usize = @intCast(count);
+    const total = try std.math.mul(usize, unit_len, repeat_count);
+    switch (string_value.resolveData()) {
+        .latin1 => |src| {
+            var out = try rt.memory.allocator.alloc(u8, total);
+            defer rt.memory.allocator.free(out);
+            var index: usize = 0;
+            while (index < total) : (index += unit_len) @memcpy(out[index .. index + unit_len], src);
+            return createLatin1SliceValue(rt, out);
+        },
+        .utf16 => |src| {
+            var out = try rt.memory.allocator.alloc(u16, total);
+            defer rt.memory.allocator.free(out);
+            var index: usize = 0;
+            while (index < total) : (index += unit_len) @memcpy(out[index .. index + unit_len], src);
+            return (try core.string.String.createUtf16(rt, out)).value();
+        },
+    }
 }
 
 fn repeat(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
