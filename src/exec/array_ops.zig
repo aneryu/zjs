@@ -2597,11 +2597,42 @@ pub fn qjsTypedArraySliceSubarrayCall(
 
     if (is_slice and count > 0) {
         if (try core.object.typedArrayDetached(object) or try core.object.typedArrayOutOfBounds(object)) return error.TypeError;
+        if (try core.object.typedArrayDetached(result_object) or try core.object.typedArrayOutOfBounds(result_object)) return error.TypeError;
         const current_length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
         const copy_count = if (current_length > start)
             @min(count, current_length - start)
         else
             0;
+        // Faithful to quickjs.c:58572-58575: when source and dest share class
+        // (same element kind => same byte layout), copy the raw byte range in
+        // one memcpy instead of per-element get/set. The element loop below
+        // handles every case this does not cover (differing class). Both arrays
+        // were just re-validated as non-detached / in-bounds, and the result
+        // was length-checked to hold >= count >= copy_count elements
+        // (qjsTypedArrayCreateWithLength:1905), so the byte ranges are valid.
+        if (copy_count > 0 and object.typedArrayKind() == result_object.typedArrayKind()) {
+            const element_size = object.typedArrayElementSize();
+            const src_buffer = objectFromValue(object.typedArrayBuffer() orelse return error.TypeError) orelse return error.TypeError;
+            const dst_buffer = objectFromValue(result_object.typedArrayBuffer() orelse return error.TypeError) orelse return error.TypeError;
+            const byte_count = copy_count * element_size;
+            const src_byte = object.typedArrayByteOffset() + start * element_size;
+            const dst_byte = result_object.typedArrayByteOffset();
+            const src_bytes = src_buffer.byteStorage()[src_byte .. src_byte + byte_count];
+            const dst_bytes = dst_buffer.byteStorage()[dst_byte .. dst_byte + byte_count];
+            // Faithful to slice_memcpy (quickjs.c:58519): plain memcpy when the
+            // ranges cannot overlap, byte-wise forward copy otherwise (a species
+            // typed array may alias the source buffer).
+            const dst_ptr = dst_bytes.ptr;
+            const src_ptr = src_bytes.ptr;
+            if (@intFromPtr(dst_ptr) + byte_count <= @intFromPtr(src_ptr) or
+                @intFromPtr(dst_ptr) >= @intFromPtr(src_ptr) + byte_count)
+            {
+                @memcpy(dst_bytes, src_bytes);
+            } else {
+                std.mem.copyForwards(u8, dst_bytes, src_bytes);
+            }
+            return result;
+        }
         var index: usize = 0;
         while (index < copy_count) : (index += 1) {
             const item = try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(start + index));
@@ -3244,6 +3275,61 @@ fn qjsFastDenseArrayShift(object: *core.Object) ?core.JSValue {
     return first;
 }
 
+/// Dense fast path for Array.prototype.unshift, mirroring the in-place bulk
+/// move of u.array.u.values in quickjs JS_CopySubArray's fast_array branch
+/// (quickjs.c:41624-41647). qjs's literal condition requires the destination
+/// index to already be in bounds, so its in-place branch never fires for the
+/// growing unshift shift; this routine performs the structurally identical
+/// move after growing capacity. Returns the new length on success, or null to
+/// fall through to the generic per-element unshiftMoveIndex path for anything
+/// not provably an ordinary dense array with no prototype index interactions.
+fn qjsFastDenseArrayUnshift(
+    rt: *core.JSRuntime,
+    receiver: core.JSValue,
+    object: *core.Object,
+    args: []const core.JSValue,
+) !?usize {
+    if (args.len == 0) return null;
+    // Receiver must BE the array (no primitive wrapper / proxy indirection),
+    // and an ordinary, extensible, length-writable dense fast array with no
+    // exotic [[Set]]/[[DefineOwnProperty]] behaviour.
+    if (objectFromValue(receiver) != object) return null;
+    if (!object.flags.is_array or !object.isFastArray()) return null;
+    if (object.hasExoticMethods() or object.proxyTarget() != null) return null;
+    if (!object.flags.length_writable or !object.flags.extensible) return null;
+    // Any inherited indexed property would make the generic [[Set]] of a
+    // shifted slot observe a prototype accessor; the dense move skips the
+    // prototype chain, so only proceed when the chain has no indexed props.
+    if (!arrayPrototypeChainHasNoIndexedProperties(object)) return null;
+
+    const length: usize = @intCast(object.arrayLength());
+    if (length != @as(usize, @intCast(object.fastArrayCount()))) return null;
+    const insert_count = args.len;
+    const new_length = length + insert_count;
+    if (new_length > core.array.max_array_length) return null;
+    const new_length_u32 = std.math.cast(u32, new_length) orelse return null;
+
+    // Grow first (may reallocate the backing buffer), then publish the new
+    // count so fastArrayValuesMut() exposes the full [0, new_length) range.
+    try object.fastArrayEnsureCapacity(rt, new_length_u32);
+    object.setFastArrayCountAssumeCapacity(new_length_u32);
+    const values = object.fastArrayValuesMut();
+    // Move the existing [0, length) elements up by insert_count. This is a raw
+    // bit move (no dup/free); ownership of each original reference travels with
+    // it to its new slot, exactly like qjsFastDenseArrayShift's downward move.
+    if (length != 0) {
+        std.mem.copyBackwards(core.JSValue, values[insert_count..new_length], values[0..length]);
+    }
+    // Overwrite the now-stale [0, insert_count) head with fresh duplicates of
+    // the arguments. The previous bits there are aliases of values that now
+    // live in their moved-up slots, so they must NOT be freed here.
+    for (args, 0..) |item, index| {
+        values[index] = item.dup();
+    }
+    object.markIndexedProperties(rt);
+    return new_length;
+}
+
 pub fn qjsArrayUnshiftCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -3263,6 +3349,10 @@ pub fn qjsArrayUnshiftCall(
     defer receiver_object_value.free(ctx.runtime);
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return error.TypeError;
+
+    if (try qjsFastDenseArrayUnshift(ctx.runtime, receiver, object, args)) |new_length_fast| {
+        return lengthIndexValue(new_length_fast);
+    }
 
     const length = if (object.flags.is_array)
         @as(usize, @intCast(object.arrayLength()))
@@ -4196,6 +4286,17 @@ pub fn qjsArrayMapCall(
 pub const ArraySortEntry = struct {
     value: core.JSValue,
     order: usize,
+    /// Faithful to quickjs ValueSlot.str (quickjs.c:43398): the default
+    /// (no user comparator) string comparator transcodes each element to a
+    /// byte key exactly once and caches it here. Owned by the runtime's
+    /// allocator; null until lazily computed. Never populated when a user
+    /// comparator is supplied (that path never calls ToString).
+    key: ?[]u8 = null,
+
+    pub fn freeEntry(self: ArraySortEntry, ctx: *core.JSContext) void {
+        self.value.free(ctx.runtime);
+        if (self.key) |bytes| ctx.runtime.memory.allocator.free(bytes);
+    }
 };
 
 pub fn qjsArraySortCall(
@@ -4242,7 +4343,7 @@ pub fn qjsArraySortCall(
 
     var entries = std.ArrayList(ArraySortEntry).empty;
     defer {
-        for (entries.items) |entry| entry.value.free(ctx.runtime);
+        for (entries.items) |entry| entry.freeEntry(ctx);
         entries.deinit(ctx.runtime.memory.allocator);
     }
 
@@ -4268,10 +4369,16 @@ pub fn qjsArraySortCall(
 
     index = 0;
     for (entries.items, 0..) |entry, sorted_index| {
-        const key = try propertyAtomFromLengthIndex(ctx.runtime, sorted_index);
-        defer key.deinit(ctx.runtime);
-        const result = try setValueProperty(ctx, output, global, receiver_object_value, key.atom, entry.value, caller_function, caller_frame);
-        result.free(ctx.runtime);
+        // Faithful to quickjs.c:43476: when the slot's original position equals
+        // its final sorted index the receiver already holds this value at this
+        // index, so skip the write entirely (matching qjs, which also skips the
+        // setter call in that case — observable for accessor/proxy receivers).
+        if (entry.order != sorted_index) {
+            const key = try propertyAtomFromLengthIndex(ctx.runtime, sorted_index);
+            defer key.deinit(ctx.runtime);
+            const result = try setValueProperty(ctx, output, global, receiver_object_value, key.atom, entry.value, caller_function, caller_frame);
+            result.free(ctx.runtime);
+        }
         index += 1;
     }
     while (index < entries.items.len + undefined_count) : (index += 1) {
@@ -4335,7 +4442,7 @@ pub fn stableArraySortEntries(
             var right = mid;
             var out_index = start;
             while (left < mid and right < end) : (out_index += 1) {
-                if (try arrayByCopySortCompare(ctx, output, global, typed_numeric_default, comparator, entries[right], entries[left], caller_function, caller_frame) < 0) {
+                if (try arrayByCopySortCompare(ctx, output, global, typed_numeric_default, comparator, &entries[right], &entries[left], caller_function, caller_frame) < 0) {
                     temp[out_index] = entries[right];
                     right += 1;
                 } else {
@@ -4444,7 +4551,7 @@ pub fn qjsArrayByCopyCall(
         errdefer out.value().free(ctx.runtime);
         var entries = std.ArrayList(ArraySortEntry).empty;
         defer {
-            for (entries.items) |entry| entry.value.free(ctx.runtime);
+            for (entries.items) |entry| entry.freeEntry(ctx);
             entries.deinit(ctx.runtime.memory.allocator);
         }
         var undefined_count: usize = 0;
@@ -4578,7 +4685,7 @@ pub fn qjsTypedArrayByCopyCall(
         const comparator = if (args.len >= 1 and !args[0].isUndefined()) args[0] else core.JSValue.undefinedValue();
         var entries = std.ArrayList(ArraySortEntry).empty;
         defer {
-            for (entries.items) |entry| entry.value.free(ctx.runtime);
+            for (entries.items) |entry| entry.freeEntry(ctx);
             entries.deinit(ctx.runtime.memory.allocator);
         }
 
@@ -4818,31 +4925,49 @@ pub fn arrayByCopySortCompare(
     global: *core.Object,
     typed_numeric_default: bool,
     comparator: core.JSValue,
-    lhs: ArraySortEntry,
-    rhs: ArraySortEntry,
+    lhs: *ArraySortEntry,
+    rhs: *ArraySortEntry,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !i32 {
     if (!comparator.isUndefined()) {
-        return arraySortCompare(ctx, output, global, comparator, lhs, rhs, caller_function, caller_frame);
+        return arraySortCompare(ctx, output, global, comparator, lhs.*, rhs.*, caller_function, caller_frame);
     }
-    if (typed_numeric_default) return typedArrayDefaultSortCompare(ctx.runtime, lhs, rhs);
-    const lhs_string = try toStringForAnnexB(ctx, output, global, lhs.value, caller_function, caller_frame);
-    defer lhs_string.free(ctx.runtime);
-    const rhs_string = try toStringForAnnexB(ctx, output, global, rhs.value, caller_function, caller_frame);
-    defer rhs_string.free(ctx.runtime);
-    var lhs_bytes = std.ArrayList(u8).empty;
-    defer lhs_bytes.deinit(ctx.runtime.memory.allocator);
-    try value_ops.appendRawString(ctx.runtime, &lhs_bytes, lhs_string);
-    var rhs_bytes = std.ArrayList(u8).empty;
-    defer rhs_bytes.deinit(ctx.runtime.memory.allocator);
-    try value_ops.appendRawString(ctx.runtime, &rhs_bytes, rhs_string);
-    const order = std.mem.order(u8, lhs_bytes.items, rhs_bytes.items);
+    if (typed_numeric_default) return typedArrayDefaultSortCompare(ctx.runtime, lhs.*, rhs.*);
+    // Faithful to quickjs js_array_cmp_generic (quickjs.c:43398-43410): convert
+    // each operand to its byte key exactly once, caching it on the slot, then
+    // compare the cached keys. Zero per-compare heap churn after the first
+    // ToString of each element.
+    const lhs_key = try arraySortStringKey(ctx, output, global, lhs, caller_function, caller_frame);
+    const rhs_key = try arraySortStringKey(ctx, output, global, rhs, caller_function, caller_frame);
+    const order = std.mem.order(u8, lhs_key, rhs_key);
     if (order == .lt) return -1;
     if (order == .gt) return 1;
     if (lhs.order < rhs.order) return -1;
     if (lhs.order > rhs.order) return 1;
     return 0;
+}
+
+/// Faithful to quickjs ValueSlot.str caching (quickjs.c:43398): lazily compute
+/// the transcoded byte key for a sort slot and cache it. Returns the cached
+/// bytes (owned by the entry, freed by ArraySortEntry.freeEntry).
+fn arraySortStringKey(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    entry: *ArraySortEntry,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) ![]const u8 {
+    if (entry.key) |bytes| return bytes;
+    const string_value = try toStringForAnnexB(ctx, output, global, entry.value, caller_function, caller_frame);
+    defer string_value.free(ctx.runtime);
+    var bytes = std.ArrayList(u8).empty;
+    errdefer bytes.deinit(ctx.runtime.memory.allocator);
+    try value_ops.appendRawString(ctx.runtime, &bytes, string_value);
+    const owned = try bytes.toOwnedSlice(ctx.runtime.memory.allocator);
+    entry.key = owned;
+    return owned;
 }
 
 pub fn typedArrayDefaultSortCompare(rt: *core.JSRuntime, lhs: ArraySortEntry, rhs: ArraySortEntry) !i32 {
