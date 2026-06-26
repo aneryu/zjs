@@ -167,14 +167,14 @@ fn runExecSlotsPhase(allocator: std.mem.Allocator, out: *std.Io.Writer, case: Ca
 
     var warmup: usize = 0;
     while (warmup < config.warmup) : (warmup += 1) {
-        _ = try regexp.engine.execCaptureSlotsSlice(allocator, bytecode, input, 0, capture_slots);
+        _ = try regexp.engine.execCaptureSlotsSliceTrustedWithOptions(allocator, bytecode, input, 0, .{}, capture_slots);
     }
 
     const start = monotonicNanos();
     var matches: usize = 0;
     var i: usize = 0;
     while (i < config.exec_iterations) : (i += 1) {
-        if (try regexp.engine.execCaptureSlotsSlice(allocator, bytecode, input, 0, capture_slots) == .match) matches += 1;
+        if (try regexp.engine.execCaptureSlotsSliceTrustedWithOptions(allocator, bytecode, input, 0, .{}, capture_slots) == .match) matches += 1;
     }
     const elapsed = elapsedNanosSince(start);
 

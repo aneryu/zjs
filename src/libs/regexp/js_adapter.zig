@@ -62,12 +62,13 @@ pub fn execOnString(compiled: Compiled, string_value: core.JSValue) ExecError!?M
     if (!string_value.isString()) return null;
     const string_object: *core.string.String = @fieldParentPtr("header", header);
 
-    const status = switch (string_object.resolveData()) {
-        .latin1 => |bytes| try regexp_bytecode.exec(std.heap.page_allocator, compiled.bytecode, .{ .latin1 = bytes }, 0),
-        .utf16 => |units| try regexp_bytecode.exec(std.heap.page_allocator, compiled.bytecode, .{ .utf16 = units }, 0),
+    var match: Match = undefined;
+    const result = switch (string_object.resolveData()) {
+        .latin1 => |bytes| try regexp_bytecode.execIntoMatchTrustedWithOptions(std.heap.page_allocator, compiled.bytecode, .{ .latin1 = bytes }, 0, .{}, &match),
+        .utf16 => |units| try regexp_bytecode.execIntoMatchTrustedWithOptions(std.heap.page_allocator, compiled.bytecode, .{ .utf16 = units }, 0, .{}, &match),
     };
-    return switch (status.result) {
-        .match => status.match,
+    return switch (result) {
+        .match => match,
         else => null,
     };
 }
@@ -94,8 +95,8 @@ pub fn execIntoMatchOnStringFromIndex(
 
     const options = execOptions(rt);
     return switch (string_object.resolveData()) {
-        .latin1 => |bytes| try regexp_bytecode.execIntoMatchWithOptions(rt.memory.allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index, options, out_match),
-        .utf16 => |units| try regexp_bytecode.execIntoMatchWithOptions(rt.memory.allocator, compiled.bytecode, .{ .utf16 = units }, start_index, options, out_match),
+        .latin1 => |bytes| try regexp_bytecode.execIntoMatchTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index, options, out_match),
+        .utf16 => |units| try regexp_bytecode.execIntoMatchTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .utf16 = units }, start_index, options, out_match),
     };
 }
 
@@ -111,8 +112,8 @@ pub fn execCaptureSlotsOnStringFromIndex(
 
     const options = execOptions(rt);
     return switch (string_object.resolveData()) {
-        .latin1 => |bytes| try regexp_bytecode.execCaptureSlotsSliceWithOptions(rt.memory.allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index, options, capture),
-        .utf16 => |units| try regexp_bytecode.execCaptureSlotsSliceWithOptions(rt.memory.allocator, compiled.bytecode, .{ .utf16 = units }, start_index, options, capture),
+        .latin1 => |bytes| try regexp_bytecode.execCaptureSlotsSliceTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index, options, capture),
+        .utf16 => |units| try regexp_bytecode.execCaptureSlotsSliceTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .utf16 = units }, start_index, options, capture),
     };
 }
 
@@ -126,8 +127,8 @@ pub fn testOnStringFromIndex(rt: *core.JSRuntime, compiled: Compiled, string_val
 
     const options = execOptions(rt);
     return switch (string_object.resolveData()) {
-        .latin1 => |bytes| try regexp_bytecode.testMatchWithOptions(rt.memory.allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index, options),
-        .utf16 => |units| try regexp_bytecode.testMatchWithOptions(rt.memory.allocator, compiled.bytecode, .{ .utf16 = units }, start_index, options),
+        .latin1 => |bytes| try regexp_bytecode.testMatchTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index, options),
+        .utf16 => |units| try regexp_bytecode.testMatchTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .utf16 = units }, start_index, options),
     };
 }
 
