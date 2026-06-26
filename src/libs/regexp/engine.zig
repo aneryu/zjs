@@ -5,6 +5,7 @@ const unicode = @import("../unicode.zig");
 pub const max_captures = 255;
 const register_count_max = 255;
 pub const max_exec_slots = max_captures * 2 + register_count_max;
+pub const small_exec_slots = 64;
 const static_stack_buf_count = 32;
 const interrupt_counter_init = 10000;
 
@@ -71,12 +72,64 @@ const REBytecodeHeader = struct {
     bytecode_len: usize,
 };
 
+const CaptureSlotBuffer = struct {
+    inline_slots: [small_exec_slots]usize = undefined,
+    heap_slots: []usize = &.{},
+    slots: []usize = &.{},
+
+    fn init(self: *CaptureSlotBuffer, allocator: std.mem.Allocator, count: usize) !void {
+        if (count <= self.inline_slots.len) {
+            self.slots = self.inline_slots[0..count];
+            return;
+        }
+        self.heap_slots = try allocator.alloc(usize, count);
+        self.slots = self.heap_slots;
+    }
+
+    fn deinit(self: *CaptureSlotBuffer, allocator: std.mem.Allocator) void {
+        if (self.heap_slots.len != 0) allocator.free(self.heap_slots);
+        self.* = .{};
+    }
+};
+
 const header_len = 8;
 const re_header_capture_count = 2;
 const re_header_register_count = 3;
 const re_header_bytecode_len = 4;
 const int32_max: u32 = 0x7fffffff;
 const group_name_trailer_len = 2;
+
+const lre_ctype_space: u8 = 1 << 0;
+const lre_ctype_digit: u8 = 1 << 1;
+const lre_ctype_upper: u8 = 1 << 2;
+const lre_ctype_lower: u8 = 1 << 3;
+const lre_ctype_under: u8 = 1 << 4;
+
+const lre_ctype_bits = buildLRECtypeBits();
+const lre_canonicalize_non_unicode_latin1 = buildLRECanonicalizeLatin1(false);
+const lre_canonicalize_unicode_latin1 = buildLRECanonicalizeLatin1(true);
+
+fn buildLRECtypeBits() [256]u8 {
+    var table: [256]u8 = @splat(0);
+    for (0..table.len) |i| {
+        const byte: u8 = @intCast(i);
+        if ((byte >= 0x09 and byte <= 0x0d) or byte == 0x20 or byte == 0xa0) table[i] |= lre_ctype_space;
+        if (byte >= '0' and byte <= '9') table[i] |= lre_ctype_digit;
+        if (byte >= 'A' and byte <= 'Z') table[i] |= lre_ctype_upper;
+        if (byte >= 'a' and byte <= 'z') table[i] |= lre_ctype_lower;
+        if (byte == '_') table[i] |= lre_ctype_under;
+    }
+    return table;
+}
+
+fn buildLRECanonicalizeLatin1(comptime is_unicode: bool) [256]u21 {
+    @setEvalBranchQuota(20000);
+    var table: [256]u21 = undefined;
+    for (0..table.len) |i| {
+        table[i] = unicode.regexpCanonicalize(@intCast(i), is_unicode);
+    }
+    return table;
+}
 
 const REOPCodeEnum = enum(u8) {
     invalid,
@@ -291,10 +344,13 @@ pub fn execIntoMatchWithOptions(
     out_match: *Match,
 ) !ExecResult {
     const header = try parseHeader(bytecode);
-    var capture: [max_exec_slots]usize = undefined;
-    const result = try execCaptureSlotsParsed(allocator, bytecode, input, start_index, options, header, &capture);
+    var capture_buf = CaptureSlotBuffer{};
+    try capture_buf.init(allocator, try checkedAllocCount(header));
+    defer capture_buf.deinit(allocator);
+
+    const result = try execCaptureSlotsParsed(allocator, bytecode, input, start_index, options, header, capture_buf.slots);
     if (result != .match) return result;
-    writeMatch(bytecode, header.capture_count, &capture, out_match);
+    writeMatch(bytecode, header.capture_count, capture_buf.slots.ptr, out_match);
     return .match;
 }
 
@@ -316,6 +372,27 @@ pub fn execCaptureSlotsWithOptions(
     options: ExecOptions,
     capture: *[max_exec_slots]usize,
 ) !ExecResult {
+    return execCaptureSlotsSliceWithOptions(allocator, bytecode, input, start_index, options, capture[0..]);
+}
+
+pub fn execCaptureSlotsSlice(
+    allocator: std.mem.Allocator,
+    bytecode: []const u8,
+    input: Input,
+    start_index: usize,
+    capture: []usize,
+) !ExecResult {
+    return execCaptureSlotsSliceWithOptions(allocator, bytecode, input, start_index, .{}, capture);
+}
+
+pub fn execCaptureSlotsSliceWithOptions(
+    allocator: std.mem.Allocator,
+    bytecode: []const u8,
+    input: Input,
+    start_index: usize,
+    options: ExecOptions,
+    capture: []usize,
+) !ExecResult {
     const header = try parseHeader(bytecode);
     return execCaptureSlotsParsed(allocator, bytecode, input, start_index, options, header, capture);
 }
@@ -327,10 +404,10 @@ fn execCaptureSlotsParsed(
     start_index: usize,
     options: ExecOptions,
     header: REBytecodeHeader,
-    capture: *[max_exec_slots]usize,
+    capture: []usize,
 ) !ExecResult {
-    if (header.capture_count == 0 or header.capture_count > max_captures) return error.BytecodeCorrupt;
-    if (header.register_count > register_count_max) return error.BytecodeCorrupt;
+    const alloc_count = try checkedAllocCount(header);
+    if (capture.len < alloc_count) return error.BytecodeCorrupt;
     if (start_index > input.len()) return .out_of_range;
     const cbuf_type: CbufType = switch (input) {
         .latin1 => .latin1,
@@ -357,7 +434,7 @@ fn execCaptureSlotsParsed(
         .bc_buf_end = header_len + header.bytecode_len,
         .capture_count = header.capture_count,
         .register_count = header.register_count,
-        .alloc_count = header.capture_count * 2 + header.register_count,
+        .alloc_count = alloc_count,
         .is_unicode = (header.flags & (flags.unicode | flags.unicode_sets)) != 0,
         .interrupt_counter = interrupt_counter_init,
         .@"opaque" = options.@"opaque",
@@ -371,9 +448,14 @@ fn execCaptureSlotsParsed(
 
     @memset(capture[0 .. header.capture_count * 2], no_slot_value);
     if (safetyChecks()) {
-        @memset(capture[header.capture_count * 2 .. header.capture_count * 2 + header.register_count], no_slot_value);
+        @memset(capture[header.capture_count * 2 .. alloc_count], no_slot_value);
     }
-    return if (try lreExecBacktrack(&ctx, capture, header_len, initial_cptr)) .match else .no_match;
+    const matched = switch (cbuf_type) {
+        .latin1 => try lreExecBacktrack(.latin1, &ctx, capture.ptr, header_len, initial_cptr),
+        .utf16_units => try lreExecBacktrack(.utf16_units, &ctx, capture.ptr, header_len, initial_cptr),
+        .utf16_unicode => try lreExecBacktrack(.utf16_unicode, &ctx, capture.ptr, header_len, initial_cptr),
+    };
+    return if (matched) .match else .no_match;
 }
 
 pub fn testMatch(allocator: std.mem.Allocator, bytecode: []const u8, input: Input, start_index: usize) !bool {
@@ -381,8 +463,11 @@ pub fn testMatch(allocator: std.mem.Allocator, bytecode: []const u8, input: Inpu
 }
 
 pub fn testMatchWithOptions(allocator: std.mem.Allocator, bytecode: []const u8, input: Input, start_index: usize, options: ExecOptions) !bool {
-    var capture: [max_exec_slots]usize = undefined;
-    return (try execCaptureSlotsWithOptions(allocator, bytecode, input, start_index, options, &capture)) == .match;
+    const header = try parseHeader(bytecode);
+    var capture_buf = CaptureSlotBuffer{};
+    try capture_buf.init(allocator, try checkedAllocCount(header));
+    defer capture_buf.deinit(allocator);
+    return (try execCaptureSlotsParsed(allocator, bytecode, input, start_index, options, header, capture_buf.slots)) == .match;
 }
 
 inline fn decodeExecState(meta: usize) !REExecStateEnum {
@@ -397,9 +482,12 @@ inline fn execStatePrevBp(meta: usize) usize {
 
 const ExecState = struct {
     s: *REExecContext,
-    capture: *[max_exec_slots]usize,
+    capture: [*]usize,
     pc: [*]const u8,
     bc_end: [*]const u8,
+    stack_buf: [*]usize,
+    cbuf_latin1: [*]const u8,
+    cbuf_utf16: [*]const u16,
     cptr: usize,
     sp: usize,
     bp: usize,
@@ -409,7 +497,7 @@ const ExecState = struct {
 
     fn init(
         s: *REExecContext,
-        capture: *[max_exec_slots]usize,
+        capture: [*]usize,
         initial_pc: usize,
         initial_cptr: usize,
     ) !ExecState {
@@ -420,6 +508,9 @@ const ExecState = struct {
             .capture = capture,
             .pc = bc_ptr + initial_pc,
             .bc_end = bc_ptr + s.bc_buf_end,
+            .stack_buf = s.stack_buf.ptr,
+            .cbuf_latin1 = s.cbuf_latin1.ptr,
+            .cbuf_utf16 = s.cbuf_utf16.ptr,
             .cptr = initial_cptr,
             .sp = 0,
             .bp = 0,
@@ -437,6 +528,7 @@ const ExecState = struct {
         if (needs_grow) {
             @branchHint(.unlikely);
             try self.s.stackRealloc(self.sp + n);
+            self.stack_buf = self.s.stack_buf.ptr;
             self.stack_end = self.s.stack_size;
         }
     }
@@ -451,12 +543,8 @@ const ExecState = struct {
 
     inline fn pcWithOffset(self: *const ExecState, offset: i32) ![*]const u8 {
         if (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSmall) {
-            const pc_addr = @intFromPtr(self.pc);
-            const next_addr = if (offset >= 0)
-                pc_addr + @as(usize, @intCast(offset))
-            else
-                pc_addr - @as(usize, @intCast(-@as(i64, offset)));
-            return @ptrFromInt(next_addr);
+            const delta: usize = @bitCast(@as(isize, offset));
+            return @ptrFromInt(@intFromPtr(self.pc) +% delta);
         }
         const base_addr = @intFromPtr(self.s.bc_buf.ptr);
         const pc_addr = @intFromPtr(self.pc);
@@ -525,7 +613,7 @@ const ExecState = struct {
     inline fn pushExecState(self: *ExecState, pc: [*]const u8, typ: REExecStateEnum) !void {
         try self.checkStackSpace(frame_entry_count);
         const pos = self.sp;
-        const stack_buf = self.s.stack_buf;
+        const stack_buf = self.stack_buf;
         stack_buf[pos] = @intFromPtr(pc);
         stack_buf[pos + 1] = self.cptr;
         stack_buf[pos + 2] = (self.bp << bp_type_bits) | @intFromEnum(typ);
@@ -541,7 +629,7 @@ const ExecState = struct {
 
     inline fn saveCaptureAssumeSpace(self: *ExecState, idx: usize, value: usize) void {
         const pos = self.sp;
-        const stack_buf = self.s.stack_buf;
+        const stack_buf = self.stack_buf;
         stack_buf[pos] = idx;
         stack_buf[pos + 1] = self.capture[idx];
         self.sp = pos + 2;
@@ -550,7 +638,7 @@ const ExecState = struct {
 
     inline fn saveCaptureCheck(self: *ExecState, idx: usize, value: usize) !void {
         if (safetyChecks() and idx >= self.s.alloc_count) return error.BytecodeCorrupt;
-        const stack_buf = self.s.stack_buf;
+        const stack_buf = self.stack_buf;
         var sp1 = self.sp;
         while (true) {
             if (sp1 > self.bp) {
@@ -578,118 +666,156 @@ const ExecState = struct {
         return value;
     }
 
-    inline fn getCharAtBounded(self: *const ExecState, pos: *usize, end: usize) ?u21 {
+    inline fn getCharAtBounded(self: *const ExecState, comptime cbuf_type: CbufType, pos: *usize, end: usize) ?u21 {
         if (safetyChecks() and end > self.cbuf_end) return null;
-        if (self.cbuf_type == .latin1) {
+        if (comptime cbuf_type == .latin1) {
             if (safetyChecks() and pos.* >= end) return null;
-            const code_point: u21 = self.s.cbuf_latin1[pos.*];
+            const code_point: u21 = self.cbuf_latin1[pos.*];
             pos.* += 1;
             return code_point;
         }
-        const units = self.s.cbuf_utf16;
+        const units = self.cbuf_utf16;
         if (safetyChecks() and pos.* >= end) return null;
         var next = pos.* + 1;
         var code_point: u21 = units[pos.*];
-        if (self.cbuf_type == .utf16_unicode and isHiSurrogate(code_point) and next < end and isLoSurrogate(units[next])) {
-            code_point = fromSurrogate(@intCast(code_point), units[next]);
-            next += 1;
+        if (comptime cbuf_type == .utf16_unicode) {
+            if (isHiSurrogate(code_point) and next < end and isLoSurrogate(units[next])) {
+                code_point = fromSurrogate(@intCast(code_point), units[next]);
+                next += 1;
+            }
         }
         pos.* = next;
         return code_point;
     }
 
-    inline fn getPrevCharAtBounded(self: *const ExecState, pos: *usize, start: usize) ?u21 {
+    inline fn getPrevCharAtBounded(self: *const ExecState, comptime cbuf_type: CbufType, pos: *usize, start: usize) ?u21 {
         if (safetyChecks() and (pos.* <= start or start > self.cbuf_end)) return null;
-        if (self.cbuf_type == .latin1) {
+        if (comptime cbuf_type == .latin1) {
             if (safetyChecks() and pos.* > self.cbuf_end) return null;
             pos.* -= 1;
-            return self.s.cbuf_latin1[pos.*];
+            return self.cbuf_latin1[pos.*];
         }
-        const units = self.s.cbuf_utf16;
+        const units = self.cbuf_utf16;
         if (safetyChecks() and pos.* > self.cbuf_end) return null;
         var prev = pos.* - 1;
         var code_point: u21 = units[prev];
-        if (self.cbuf_type == .utf16_unicode and isLoSurrogate(code_point) and prev > start and isHiSurrogate(units[prev - 1])) {
-            prev -= 1;
-            code_point = fromSurrogate(units[prev], @intCast(code_point));
+        if (comptime cbuf_type == .utf16_unicode) {
+            if (isLoSurrogate(code_point) and prev > start and isHiSurrogate(units[prev - 1])) {
+                prev -= 1;
+                code_point = fromSurrogate(units[prev], @intCast(code_point));
+            }
         }
         pos.* = prev;
         return code_point;
     }
 
-    inline fn getCharUnchecked(self: *ExecState) u21 {
-        if (self.cbuf_type == .latin1) {
-            const code_point: u21 = self.s.cbuf_latin1[self.cptr];
+    inline fn getCharUnchecked(self: *ExecState, comptime cbuf_type: CbufType) u21 {
+        if (comptime cbuf_type == .latin1) {
+            const code_point: u21 = self.cbuf_latin1[self.cptr];
             self.cptr += 1;
             return code_point;
         }
-        const units = self.s.cbuf_utf16;
+        const units = self.cbuf_utf16;
         var code_point: u21 = units[self.cptr];
         self.cptr += 1;
-        if (self.cbuf_type == .utf16_unicode and isHiSurrogate(code_point) and self.cptr < self.cbuf_end and isLoSurrogate(units[self.cptr])) {
-            code_point = fromSurrogate(@intCast(code_point), units[self.cptr]);
-            self.cptr += 1;
+        if (comptime cbuf_type == .utf16_unicode) {
+            if (isHiSurrogate(code_point) and self.cptr < self.cbuf_end and isLoSurrogate(units[self.cptr])) {
+                code_point = fromSurrogate(@intCast(code_point), units[self.cptr]);
+                self.cptr += 1;
+            }
         }
         return code_point;
     }
 
-    inline fn getChar(self: *ExecState) ?u21 {
-        if (self.cptr >= self.cbuf_end) return null;
-        return self.getCharUnchecked();
-    }
-
-    inline fn peekChar(self: *const ExecState) ?u21 {
-        if (self.cbuf_type == .latin1) {
+    inline fn peekChar(self: *const ExecState, comptime cbuf_type: CbufType) ?u21 {
+        if (comptime cbuf_type == .latin1) {
             if (self.cptr >= self.cbuf_end) return null;
-            return self.s.cbuf_latin1[self.cptr];
+            return self.cbuf_latin1[self.cptr];
         }
         if (self.cptr >= self.cbuf_end) return null;
-        const units = self.s.cbuf_utf16;
+        const units = self.cbuf_utf16;
         var code_point: u21 = units[self.cptr];
         const next = self.cptr + 1;
-        if (self.cbuf_type == .utf16_unicode and isHiSurrogate(code_point) and next < self.cbuf_end and isLoSurrogate(units[next])) {
-            code_point = fromSurrogate(@intCast(code_point), units[next]);
+        if (comptime cbuf_type == .utf16_unicode) {
+            if (isHiSurrogate(code_point) and next < self.cbuf_end and isLoSurrogate(units[next])) {
+                code_point = fromSurrogate(@intCast(code_point), units[next]);
+            }
         }
         return code_point;
     }
 
-    inline fn peekPrevChar(self: *const ExecState) ?u21 {
+    inline fn peekPrevChar(self: *const ExecState, comptime cbuf_type: CbufType) ?u21 {
         if (self.cptr == 0) return null;
-        if (self.cbuf_type == .latin1) {
+        if (comptime cbuf_type == .latin1) {
             if (self.cptr > self.cbuf_end) return null;
-            return self.s.cbuf_latin1[self.cptr - 1];
+            return self.cbuf_latin1[self.cptr - 1];
         }
         if (self.cptr > self.cbuf_end) return null;
-        const units = self.s.cbuf_utf16;
+        const units = self.cbuf_utf16;
         const prev = self.cptr - 1;
         var code_point: u21 = units[prev];
-        if (self.cbuf_type == .utf16_unicode and isLoSurrogate(code_point) and prev > 0 and isHiSurrogate(units[prev - 1])) {
-            code_point = fromSurrogate(units[prev - 1], @intCast(code_point));
+        if (comptime cbuf_type == .utf16_unicode) {
+            if (isLoSurrogate(code_point) and prev > 0 and isHiSurrogate(units[prev - 1])) {
+                code_point = fromSurrogate(units[prev - 1], @intCast(code_point));
+            }
         }
         return code_point;
     }
 
-    inline fn prevChar(self: *ExecState) !void {
+    inline fn prevChar(self: *ExecState, comptime cbuf_type: CbufType) !void {
         if (self.cptr == 0) return error.BytecodeCorrupt;
-        if (self.cbuf_type == .latin1) {
+        if (comptime cbuf_type == .latin1) {
             if (self.cptr > self.cbuf_end) return error.BytecodeCorrupt;
             self.cptr -= 1;
             return;
         }
         if (self.cptr > self.cbuf_end) return error.BytecodeCorrupt;
-        const units = self.s.cbuf_utf16;
+        const units = self.cbuf_utf16;
         var prev = self.cptr - 1;
         const code_point: u21 = units[prev];
-        if (self.cbuf_type == .utf16_unicode and isLoSurrogate(code_point) and prev > 0 and isHiSurrogate(units[prev - 1])) {
-            prev -= 1;
+        if (comptime cbuf_type == .utf16_unicode) {
+            if (isLoSurrogate(code_point) and prev > 0 and isHiSurrogate(units[prev - 1])) {
+                prev -= 1;
+            }
         }
         self.cptr = prev;
+    }
+
+    inline fn matchRawForward(self: *ExecState, comptime cbuf_type: CbufType, start: usize, end: usize) bool {
+        if (safetyChecks() and end < start) return false;
+        const len = end - start;
+        if (self.cptr > self.cbuf_end) return false;
+        if (self.cbuf_end - self.cptr < len) return false;
+        const input_start = self.cptr;
+        const input_end = input_start + len;
+        const matched = if (comptime cbuf_type == .latin1)
+            std.mem.eql(u8, self.cbuf_latin1[start..end], self.cbuf_latin1[input_start..input_end])
+        else
+            std.mem.eql(u16, self.cbuf_utf16[start..end], self.cbuf_utf16[input_start..input_end]);
+        if (!matched) return false;
+        self.cptr = input_end;
+        return true;
+    }
+
+    inline fn matchRawBackward(self: *ExecState, comptime cbuf_type: CbufType, start: usize, end: usize) bool {
+        if (safetyChecks() and end < start) return false;
+        const len = end - start;
+        if (self.cptr < len) return false;
+        const input_start = self.cptr - len;
+        const matched = if (comptime cbuf_type == .latin1)
+            std.mem.eql(u8, self.cbuf_latin1[start..end], self.cbuf_latin1[input_start..self.cptr])
+        else
+            std.mem.eql(u16, self.cbuf_utf16[start..end], self.cbuf_utf16[input_start..self.cptr]);
+        if (!matched) return false;
+        self.cptr = input_start;
+        return true;
     }
 };
 
 fn lreExecBacktrack(
+    comptime cbuf_type: CbufType,
     ctx: *REExecContext,
-    capture: *[max_exec_slots]usize,
+    capture: [*]usize,
     initial_pc: usize,
     initial_cptr: usize,
 ) !bool {
@@ -703,7 +829,7 @@ fn lreExecBacktrack(
                 .invalid => return error.BytecodeCorrupt,
                 .match => return true,
                 .lookahead_match => {
-                    const items = st.s.stack_buf;
+                    const items = st.stack_buf;
                     var sp1: usize = undefined;
                     const sp_top = st.sp;
                     var next_sp: usize = undefined;
@@ -739,7 +865,7 @@ fn lreExecBacktrack(
                     continue :main;
                 },
                 .negative_lookahead_match => {
-                    const items = st.s.stack_buf;
+                    const items = st.stack_buf;
                     while (true) {
                         if (st.bp == 0) return error.BytecodeCorrupt;
                         while (st.sp > st.bp) {
@@ -764,9 +890,9 @@ fn lreExecBacktrack(
                 .char32, .char32_i => {
                     const expected = try st.getU32();
                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
-                    var c = st.getCharUnchecked();
+                    var c = st.getCharUnchecked(cbuf_type);
                     if (opcode == .char32_i) {
-                        c = canonicalize(c, st.s.is_unicode);
+                        c = lreCanonicalize(c, st.s.is_unicode);
                     }
                     if (expected != @as(u32, c)) break :dispatch_once;
                     continue :main;
@@ -774,9 +900,9 @@ fn lreExecBacktrack(
                 .char, .char_i => {
                     const expected: u32 = try st.getU16();
                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
-                    var c = st.getCharUnchecked();
+                    var c = st.getCharUnchecked(cbuf_type);
                     if (opcode == .char_i) {
-                        c = canonicalize(c, st.s.is_unicode);
+                        c = lreCanonicalize(c, st.s.is_unicode);
                     }
                     if (expected != @as(u32, c)) break :dispatch_once;
                     continue :main;
@@ -805,38 +931,38 @@ fn lreExecBacktrack(
                 .line_start, .line_start_m => {
                     if (st.cptr == 0) continue :main;
                     if (opcode == .line_start) break :dispatch_once;
-                    const c = st.peekPrevChar() orelse return error.BytecodeCorrupt;
+                    const c = st.peekPrevChar(cbuf_type) orelse return error.BytecodeCorrupt;
                     if (!isLineTerminator(c)) break :dispatch_once;
                     continue :main;
                 },
                 .line_end, .line_end_m => {
                     if (st.cptr == st.cbuf_end) continue :main;
                     if (opcode == .line_end) break :dispatch_once;
-                    const c = st.peekChar() orelse return error.BytecodeCorrupt;
+                    const c = st.peekChar(cbuf_type) orelse return error.BytecodeCorrupt;
                     if (!isLineTerminator(c)) break :dispatch_once;
                     continue :main;
                 },
                 .dot => {
                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
-                    const c = st.getCharUnchecked();
+                    const c = st.getCharUnchecked(cbuf_type);
                     if (isLineTerminator(c)) break :dispatch_once;
                     continue :main;
                 },
                 .any => {
                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
-                    _ = st.getCharUnchecked();
+                    _ = st.getCharUnchecked(cbuf_type);
                     continue :main;
                 },
                 .space => {
                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
-                    const c = st.getCharUnchecked();
-                    if (!isSpace(c)) break :dispatch_once;
+                    const c = st.getCharUnchecked(cbuf_type);
+                    if (!lreIsSpace(c)) break :dispatch_once;
                     continue :main;
                 },
                 .not_space => {
                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
-                    const c = st.getCharUnchecked();
-                    if (isSpace(c)) break :dispatch_once;
+                    const c = st.getCharUnchecked(cbuf_type);
+                    if (lreIsSpace(c)) break :dispatch_once;
                     continue :main;
                 },
                 .save_start, .save_end => {
@@ -854,7 +980,7 @@ fn lreExecBacktrack(
                     const count = (@as(usize, last) - @as(usize, first) + 1) * 4;
                     try st.checkStackSpace(count);
                     var pos = st.sp;
-                    const stack_buf = st.s.stack_buf;
+                    const stack_buf = st.stack_buf;
                     while (first <= last) : (first += 1) {
                         var slot = @as(usize, first) * 2;
                         if (safetyChecks() and slot + 1 >= st.s.alloc_count) return error.BytecodeCorrupt;
@@ -943,13 +1069,13 @@ fn lreExecBacktrack(
                     const is_boundary = opcode == .word_boundary or opcode == .word_boundary_i;
                     const before = before: {
                         if (st.cptr == 0) break :before false;
-                        const c = st.peekPrevChar() orelse return error.BytecodeCorrupt;
+                        const c = st.peekPrevChar(cbuf_type) orelse return error.BytecodeCorrupt;
                         if (c < 256) break :before lreIsWordByte(@intCast(c));
                         break :before ignore_case and (c == 0x017f or c == 0x212a);
                     };
                     const after = after: {
                         if (st.cptr >= st.cbuf_end) break :after false;
-                        const c = st.peekChar() orelse return error.BytecodeCorrupt;
+                        const c = st.peekChar(cbuf_type) orelse return error.BytecodeCorrupt;
                         if (c < 256) break :after lreIsWordByte(@intCast(c));
                         break :after ignore_case and (c == 0x017f or c == 0x212a);
                     };
@@ -969,28 +1095,28 @@ fn lreExecBacktrack(
                         const capture_start = st.capture[@as(usize, capture_index) * 2];
                         const capture_end = st.capture[@as(usize, capture_index) * 2 + 1];
                         if (capture_start != no_slot_value and capture_end != no_slot_value) {
-                            if (opcode == .back_reference or opcode == .back_reference_i) {
+                            if (opcode == .back_reference) {
+                                if (!st.matchRawForward(cbuf_type, capture_start, capture_end)) break :dispatch_once;
+                            } else if (opcode == .backward_back_reference) {
+                                if (!st.matchRawBackward(cbuf_type, capture_start, capture_end)) break :dispatch_once;
+                            } else if (opcode == .back_reference_i) {
                                 var capture_pos = capture_start;
                                 while (capture_pos < capture_end) {
                                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
-                                    var c1 = st.getCharAtBounded(&capture_pos, capture_end) orelse return error.BytecodeCorrupt;
-                                    var c2_code = st.getCharUnchecked();
-                                    if (opcode == .back_reference_i) {
-                                        c1 = canonicalize(c1, st.s.is_unicode);
-                                        c2_code = canonicalize(c2_code, st.s.is_unicode);
-                                    }
+                                    var c1 = st.getCharAtBounded(cbuf_type, &capture_pos, capture_end) orelse return error.BytecodeCorrupt;
+                                    var c2_code = st.getCharUnchecked(cbuf_type);
+                                    c1 = lreCanonicalize(c1, st.s.is_unicode);
+                                    c2_code = lreCanonicalize(c2_code, st.s.is_unicode);
                                     if (c1 != c2_code) break :dispatch_once;
                                 }
                             } else {
                                 var capture_pos = capture_end;
                                 while (capture_pos > capture_start) {
                                     if (st.cptr == 0) break :dispatch_once;
-                                    var c1 = st.getPrevCharAtBounded(&capture_pos, capture_start) orelse return error.BytecodeCorrupt;
-                                    var c2 = st.getPrevCharAtBounded(&st.cptr, 0) orelse break :dispatch_once;
-                                    if (opcode == .backward_back_reference_i) {
-                                        c1 = canonicalize(c1, st.s.is_unicode);
-                                        c2 = canonicalize(c2, st.s.is_unicode);
-                                    }
+                                    var c1 = st.getPrevCharAtBounded(cbuf_type, &capture_pos, capture_start) orelse return error.BytecodeCorrupt;
+                                    var c2 = st.getPrevCharAtBounded(cbuf_type, &st.cptr, 0) orelse break :dispatch_once;
+                                    c1 = lreCanonicalize(c1, st.s.is_unicode);
+                                    c2 = lreCanonicalize(c2, st.s.is_unicode);
                                     if (c1 != c2) break :dispatch_once;
                                 }
                             }
@@ -1005,8 +1131,8 @@ fn lreExecBacktrack(
                     try st.ensurePc(st.pc, @as(usize, n) * 4);
                     range_match: {
                         if (st.cptr >= st.cbuf_end) break :dispatch_once;
-                        var c = st.getCharUnchecked();
-                        if (opcode == .range_i) c = canonicalize(c, st.s.is_unicode);
+                        var c = st.getCharUnchecked(cbuf_type);
+                        if (opcode == .range_i) c = lreCanonicalize(c, st.s.is_unicode);
                         var idx_min: usize = 0;
                         var low = ExecState.readU16UncheckedAt(st.pc);
                         if (c < low) break :dispatch_once;
@@ -1038,8 +1164,8 @@ fn lreExecBacktrack(
                     try st.ensurePc(st.pc, @as(usize, n) * 8);
                     range32_match: {
                         if (st.cptr >= st.cbuf_end) break :dispatch_once;
-                        var c = st.getCharUnchecked();
-                        if (opcode == .range32_i) c = canonicalize(c, st.s.is_unicode);
+                        var c = st.getCharUnchecked(cbuf_type);
+                        if (opcode == .range32_i) c = lreCanonicalize(c, st.s.is_unicode);
                         var idx_min: usize = 0;
                         var low = ExecState.readU32UncheckedAt(st.pc);
                         if (c < low) break :dispatch_once;
@@ -1066,14 +1192,14 @@ fn lreExecBacktrack(
                 },
                 .prev => {
                     if (st.cptr == 0) break :dispatch_once;
-                    try st.prevChar();
+                    try st.prevChar(cbuf_type);
                     continue :main;
                 },
             }
             continue :main;
         }
 
-        var items = st.s.stack_buf;
+        var items = st.stack_buf;
         while (true) {
             if (st.bp == 0) return false;
             while (st.sp > st.bp) {
@@ -1093,14 +1219,14 @@ fn lreExecBacktrack(
             st.bp = execStatePrevBp(meta);
             st.sp -= frame_entry_count;
             if (typ != .lookahead) break;
-            items = st.s.stack_buf;
+            items = st.stack_buf;
         }
         try st.s.pollTimeout();
         continue :main;
     }
 }
 
-fn writeMatch(bytecode: []const u8, total_capture_count: usize, captures: *const [max_exec_slots]usize, result: *Match) void {
+fn writeMatch(bytecode: []const u8, total_capture_count: usize, captures: [*]const usize, result: *Match) void {
     const start = slotOptional(captures[0]) orelse 0;
     const end = slotOptional(captures[1]) orelse start;
     result.* = .{
@@ -1131,20 +1257,46 @@ fn parseHeader(bytecode: []const u8) !REBytecodeHeader {
     };
 }
 
+fn checkedAllocCount(header: REBytecodeHeader) !usize {
+    if (header.capture_count == 0 or header.capture_count > max_captures) return error.BytecodeCorrupt;
+    if (header.register_count > register_count_max) return error.BytecodeCorrupt;
+    return header.capture_count * 2 + header.register_count;
+}
+
 inline fn decodeOp(byte: u8) ?REOPCodeEnum {
     if (byte > @intFromEnum(REOPCodeEnum.prev)) return null;
     return @enumFromInt(byte);
 }
 
-fn canonicalize(code_point: u21, is_unicode: bool) u21 {
+inline fn lreCanonicalize(code_point: u21, is_unicode: bool) u21 {
+    if (code_point < 128) {
+        if (is_unicode) {
+            if (code_point >= 'A' and code_point <= 'Z') return code_point - 'A' + 'a';
+        } else {
+            if (code_point >= 'a' and code_point <= 'z') return code_point - 'a' + 'A';
+        }
+        return code_point;
+    }
+    if (code_point < 256) {
+        const byte: u8 = @intCast(code_point);
+        return if (is_unicode)
+            lre_canonicalize_unicode_latin1[byte]
+        else
+            lre_canonicalize_non_unicode_latin1[byte];
+    }
     return unicode.regexpCanonicalize(code_point, is_unicode);
 }
 
-fn isLineTerminator(code_point: u21) bool {
-    return unicode.isEcmaLineTerminatorCodePoint(code_point);
+inline fn isLineTerminator(code_point: u21) bool {
+    return code_point == '\n' or code_point == '\r' or code_point == 0x2028 or code_point == 0x2029;
 }
 
-fn isSpace(code_point: u21) bool {
+inline fn lreIsSpaceByte(byte: u8) bool {
+    return (lre_ctype_bits[byte] & lre_ctype_space) != 0;
+}
+
+inline fn lreIsSpace(code_point: u21) bool {
+    if (code_point < 256) return lreIsSpaceByte(@intCast(code_point));
     return unicode.isEcmaWhitespaceOrLineTerminatorCodePoint(code_point);
 }
 
@@ -2066,7 +2218,7 @@ const REParseState = struct {
                 if (atom == .ranges) atom.ranges.deinit();
                 return error.InvalidPattern;
             }
-            const cp = if (self.ignore_case) canonicalize(atom.code_point, true) else atom.code_point;
+            const cp = if (self.ignore_case) lreCanonicalize(atom.code_point, true) else atom.code_point;
             try current.append(self.allocator, cp);
         }
         set.ranges.normalize();
@@ -2562,7 +2714,7 @@ const REParseState = struct {
         const copy = try ctx.s.allocator.dupe(u21, sequence);
         errdefer ctx.s.allocator.free(copy);
         if (ctx.s.ignore_case) {
-            for (copy) |*cp| cp.* = canonicalize(cp.*, true);
+            for (copy) |*cp| cp.* = lreCanonicalize(cp.*, true);
         }
         if (ctx.set.containsString(copy)) {
             ctx.s.allocator.free(copy);
@@ -2904,7 +3056,7 @@ const CharRange = unicode.CharRange;
 fn addAtomToCharRange(ranges: *CharRange, atom: REClassAtom, ignore_case: bool, is_unicode: bool) CompileError!void {
     switch (atom) {
         .code_point => |cp| {
-            const folded = if (ignore_case) canonicalize(cp, is_unicode) else cp;
+            const folded = if (ignore_case) lreCanonicalize(cp, is_unicode) else cp;
             try addInclusiveRange(ranges, folded, folded);
         },
         .ranges => |owned_ranges| {
@@ -3083,7 +3235,7 @@ fn loopSplitOp(greedy: bool, need_check_advance: bool) REOPCodeEnum {
 
 fn canonicalizeLiteral(cp: u21, ignore_case: bool, is_unicode: bool) u21 {
     if (!ignore_case) return cp;
-    return unicode.regexpCanonicalize(cp, is_unicode);
+    return lreCanonicalize(cp, is_unicode);
 }
 
 fn opByte(op: REOPCodeEnum) u8 {
@@ -3312,7 +3464,5 @@ inline fn isDigit(byte: u8) bool {
 }
 
 inline fn lreIsWordByte(byte: u8) bool {
-    return (byte >= 'A' and byte <= 'Z') or
-        (byte >= 'a' and byte <= 'z') or
-        isDigit(byte) or byte == '_';
+    return (lre_ctype_bits[byte] & (lre_ctype_upper | lre_ctype_lower | lre_ctype_under | lre_ctype_digit)) != 0;
 }

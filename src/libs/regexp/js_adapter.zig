@@ -6,6 +6,7 @@ const std = @import("std");
 
 pub const max_captures = regexp_bytecode.max_captures;
 pub const max_exec_slots = regexp_bytecode.max_exec_slots;
+pub const small_exec_slots = regexp_bytecode.small_exec_slots;
 pub const flag_bits = regexp_bytecode.flags;
 pub const Capture = regexp_bytecode.Capture;
 pub const Match = regexp_bytecode.Match;
@@ -103,15 +104,15 @@ pub fn execCaptureSlotsOnStringFromIndex(
     compiled: Compiled,
     string_value: core.JSValue,
     start_index: usize,
-    capture: *[max_exec_slots]usize,
+    capture: []usize,
 ) ExecError!ExecResult {
     const string_object = string_value.asStringBody() orelse return .not_available;
     try string_object.ensureFlat(rt);
 
     const options = execOptions(rt);
     return switch (string_object.resolveData()) {
-        .latin1 => |bytes| try regexp_bytecode.execCaptureSlotsWithOptions(rt.memory.allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index, options, capture),
-        .utf16 => |units| try regexp_bytecode.execCaptureSlotsWithOptions(rt.memory.allocator, compiled.bytecode, .{ .utf16 = units }, start_index, options, capture),
+        .latin1 => |bytes| try regexp_bytecode.execCaptureSlotsSliceWithOptions(rt.memory.allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index, options, capture),
+        .utf16 => |units| try regexp_bytecode.execCaptureSlotsSliceWithOptions(rt.memory.allocator, compiled.bytecode, .{ .utf16 = units }, start_index, options, capture),
     };
 }
 

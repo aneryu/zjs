@@ -809,8 +809,17 @@ pub fn qjsRegExpExecCompiledResult(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const rt = ctx.runtime;
-    var capture_slots: [regexp_adapter.max_exec_slots]usize = undefined;
-    const result = regexp_adapter.execCaptureSlotsOnStringFromIndex(rt, compiled, string_value, start_index, &capture_slots) catch |err| switch (err) {
+    const alloc_count = compiled.allocCount();
+    var inline_capture_slots: [regexp_adapter.small_exec_slots]usize = undefined;
+    var heap_capture_slots: []usize = &.{};
+    defer if (heap_capture_slots.len != 0) rt.memory.allocator.free(heap_capture_slots);
+    const capture_slots = if (alloc_count <= inline_capture_slots.len)
+        inline_capture_slots[0..alloc_count]
+    else capture: {
+        heap_capture_slots = try rt.memory.allocator.alloc(usize, alloc_count);
+        break :capture heap_capture_slots;
+    };
+    const result = regexp_adapter.execCaptureSlotsOnStringFromIndex(rt, compiled, string_value, start_index, capture_slots) catch |err| switch (err) {
         error.BytecodeCorrupt, error.Timeout => return null,
         else => return err,
     };
