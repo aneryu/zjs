@@ -29,7 +29,7 @@ is safe to build on.**
 
 | # | slice | verdict | ROI/risk | zjs anchor | qjs anchor |
 |---|---|---|---|---|---|
-| 1 | **C2 — derived-class construct: drop eager `this`-instance + prototype lookup** | DO_NEXT | med/med | call_runtime.zig:1554-1612 (eager createConstructorInstance UNCONDITIONAL at 1557/1580/1598, freed+discarded for derived); dispatch twins 534-541/556-564; dead fallbacks vm_call.zig:705, call_runtime.zig:143, object_ops.zig:377 | quickjs.c:20837-20838 (derived: `JS_CallInternal(func,JS_UNDEFINED,new_target)` — NO `js_create_from_ctor`) vs 20842 (base: eager); `js_create_from_ctor` 20783 |
+| 1 | **C2 — derived-class construct: drop eager `this`-instance + prototype lookup** → ✅ **SHIPPED 2026-06-26** | DONE | med/med | call_runtime.zig:1556-1571 + 1585-1600 (derived early-returns `callFunctionBytecodeConstruct(this=uninitialized, ctor_this=undefined)`; base keeps the eager `createConstructorInstance`); dispatch twins at 7058/7082 left for a follow-up (correct, not yet skipped) | quickjs.c:20837-20838 (derived: `JS_CallInternal(func,JS_UNDEFINED,new_target)` — NO `js_create_from_ctor`) vs 20842 (base: eager); `js_create_from_ctor` 20783 |
 | 2 | **S2 — spread/rest fast path missing iterator-override guard** ⚠️ **CORRECTNESS BUG → ✅ SHIPPED 2026-06-26** | DONE | med/low | NEW `call_runtime.appendSpreadValuesEnumerate` (vm_literal.zig:323-330 now delegates); reused `arrayIteratorKind`/`isArrayIteratorNextFunction`/`iteratorTargetSlot` (the `fastArrayForOfNext` pattern) | quickjs.c:16814 `js_append_enumerate` (resolve @@iterator + construct iterator; dense copy only when default Array Iterator value-kind + builtin `next` + fast-array + **`len==count`**, else `general_case`) |
 | 3 | **C3 — generator/async resume throwaway slab + per-step `{value,done}`** | DO_NEXT | med/med | zjs_vm.zig:609-643 (started resume STILL allocs fresh slab) + vm_gen_async.zig:157-173 (immediate release+swap = pure round-trip); generic forOfNext builds+discards result obj iterator_ops.zig:592-635,2417-2424 + call_runtime.zig:5315; analog `fastMapSetForOfNext` iterator_ops.zig:706-745 | quickjs.c:17790-17810 (`JS_CALL_FLAG_GENERATOR` early-out: frame already allocated, ZERO per-resume alloc) + 20906 (`async_func_init` allocs frame ONCE) + 16554-16571 (`JS_IteratorNext2` skips intermediate result obj) |
 | 4 | F3-residual — `qjsArraySearchCall` indexOf/includes density gate `count==length` skips dense prefix for holey-fast arrays | BACKLOG | low/low | string_ops.zig:4304-4319 (requires `arrayElements().len==length`); contrast faithful two-phase `indexSearch` builtins/array.zig:821-845 | quickjs.c:42426-42446 / 42476-42496 (scan dense `[n,count)` then generic `[count,len)`, NO count==len gate) |
@@ -56,6 +56,28 @@ hole-free fast array (`length == count`); else step the iterator generically. Re
 *iterator's* target (the `fastArrayForOfNext` pattern), so it stays correct even when `@@iterator` was
 repointed to another array's (possibly partially-consumed) iterator. Gate: 12/12 hand cases (incl. all 6
 formerly-wrong), `zig build test` 1227, **test262 `0/49775` (6 known)**, force-GC 1227.
+
+### ✅ C2 — derived-class construct, SHIPPED 2026-06-26
+**Was:** every `new Derived()` / `super()` eagerly allocated a `this`-instance via
+`createConstructorInstance` (Object.create + a `new_target.prototype` lookup) BEFORE running the
+derived body, even though a derived ctor's real `this` is produced by `super()` (which constructs at the
+base level via the threaded new.target). The eager instance was then freed/discarded.
+
+**Verification (not a blind deletion):** a controlled experiment (set `constructor_this=undefined` for
+all derived sites, keep behavior otherwise) produced byte-identical output across a 10-case derived-class
+suite — proving the eager instance was NOT load-bearing (super() builds the object from new.target,
+ignoring the threaded `super_this`). The audit's "dead eager alloc" framing was confirmed correct.
+
+**Fix:** for `is_derived_class_constructor`, `constructValueOrBytecodeWithNewTarget` now early-returns
+`callFunctionBytecodeConstruct(this=uninitialized, constructor_this=undefined)` — no instance, no
+prototype lookup (qjs `JS_CallConstructorInternal` quickjs.c:20837); base/ordinary ctors keep the eager
+`js_create_from_ctor` instance (20842). **Bonus correctness fix:** a derived ctor built via
+`Reflect.construct(D, args, NewTarget)` with a side-effecting `NewTarget.prototype` getter now reads it
+**once** (was **twice** — eager + base); empirically confirmed 2→1. Gate: 10/10 baseline-identical + 9
+edge cases (native Array/Error inheritance, private fields, nested arrow-super, new.target, throw,
+multi-instance), `zig build test` 1227, **test262 `0/49775` (6 known, clean rebuild)**, force-GC 1227.
+Follow-up: the 2 dispatch twins (`qjsReflectConstructGenericCallable` 7058/7082) still allocate the
+discarded instance for derived (correct, just not yet optimized — needs upstream `prototype`-ownership care).
 
 ### Stale-doc corrections (supersede where they conflict)
 - **F1/F2 (value-refcount+GC, property/shape kind) ALREADY_DONE & faithful** at HEAD — any checkbox treating L2's 16B untagged slot or its refcount/teardown as open is stale.

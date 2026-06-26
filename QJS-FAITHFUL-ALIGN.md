@@ -101,8 +101,10 @@ Phase 3  叶子：GC-无关忠实对齐 + 余下赢回退 + global-var 稳定 ce
 - [x] **S2** spread/rest 迭代器守卫 ⚠️ **正确性 bug → ✅ DONE 2026-06-26**（§0.4 红线优先;新 `appendSpreadValuesEnumerate` 忠实
       `js_append_enumerate`:总是解析 `@@iterator`+建迭代器,仅默认 Array Iterator(value)+builtin `next`+无 hole fast array(`len==count`)
       才 dense 拷贝,否则通用步进;从迭代器 target 读、对覆写后返回他数组迭代器仍正确。门禁 0/49775+1227+force-GC+12/12 手测)。
-- [ ] **C2** derived-ctor 删急切 `this`（call-machinery,call_runtime.zig:1554-1612 对每 derived `new` 急切建实例再丢弃;
-      须处理 super()/arrow-this-before-super TDZ;中等风险）。
+- [x] **C2** derived-ctor 删急切 `this` → ✅ **DONE 2026-06-26**（derived 早返回 `callFunctionBytecodeConstruct(this=uninitialized,
+      ctor_this=undefined)`,不建实例不查原型——qjs `JS_CallConstructorInternal` 20837;base 保留急切 `js_create_from_ctor` 20842。
+      受控实验证急切实例非 load-bearing(super() 用 new.target 在 base 建)。**bonus 修预存双读**:`Reflect.construct` + getter 原型 2→1。
+      门禁 0/49775+1227+force-GC+10 baseline+9 边界。dispatch 2 孪生站点(7058/7082)留后续)。
 - [ ] **C3** generator resume throwaway slab + per-step `{value,done}`（call-adjacent,zjs_vm.zig:609-643;碰共享 `runWithArgsState`）。
 
 ### Phase 3 — 叶子（GC-无关忠实对齐 + 赢回退 + 大杠杆）
