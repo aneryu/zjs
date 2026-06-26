@@ -606,6 +606,7 @@ pub fn forOfNext(
         try forof_ops.findForOfIteratorIndex(ctx.runtime, stack);
     if (try fastArrayForOfNext(ctx, stack, iterator_index)) return;
     if (try fastMapSetForOfNext(ctx, stack, iterator_index)) return;
+    if (try fastGeneratorForOfNext(ctx, output, global, stack, iterator_index)) return;
     const iterator_value = stack.values[iterator_index].dup();
     defer iterator_value.free(ctx.runtime);
     var value: core.JSValue = undefined;
@@ -742,6 +743,47 @@ fn fastMapSetForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_i
         return true;
     }
     return try finishMapSetForOfDone(ctx, stack, iterator_index, true);
+}
+
+/// Result-object-free for-of step for a pristine sync generator (qjs JS_IteratorNext2
+/// built-in fast path, quickjs.c:16548): when the iterator is a sync generator whose
+/// `next` is the un-overridden %GeneratorPrototype%.next, resume one step via
+/// `qjsSyncGeneratorStep` (returns the raw value+done) and push value + done straight onto
+/// the operand stack, skipping the per-step `{value, done}` iterator-result object the
+/// generic protocol (qjsGeneratorNext -> createIteratorResult) allocates. All `return false`
+/// bails are BEFORE the resume (the generator has not advanced), so falling through to the
+/// generic path never double-advances.
+fn fastGeneratorForOfNext(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    iterator_index: usize,
+) !bool {
+    if (iterator_index + 1 >= stack.values.len) return false;
+    const iterator = objectFromValue(stack.values[iterator_index]) orelse return false;
+    if (iterator.class_id != core.class.ids.generator) return false;
+    const next_function = objectFromValue(stack.values[iterator_index + 1]) orelse return false;
+    if (!next_function.isGeneratorNextFunction()) return false;
+
+    const receiver = stack.values[iterator_index].dup();
+    defer receiver.free(ctx.runtime);
+    // class_id == generator above guarantees a non-null step (null is returned only for
+    // non-sync-generator receivers, all checked BEFORE the resume runs any user code).
+    const step = (try call_runtime.qjsSyncGeneratorStep(ctx, output, global, receiver, &.{})) orelse return false;
+    const value = step.value;
+    errdefer value.free(ctx.runtime);
+    const done = step.done;
+
+    try stack.reserveAdditional(2);
+    if (done) {
+        const old_iterator = stack.values[iterator_index];
+        stack.values[iterator_index] = core.JSValue.undefinedValue();
+        old_iterator.free(ctx.runtime);
+    }
+    stack.pushOwnedAssumeCapacity(value);
+    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(done));
+    return true;
 }
 
 /// Build the `[key, value]` pair for a Map/Set entries iterator step. Mirrors

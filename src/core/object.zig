@@ -774,6 +774,7 @@ pub const FunctionRarePayload = struct {
     array_iterator_kind: u8 = 0,
     iterator_identity: bool = false,
     array_iterator_next: bool = false,
+    generator_next: bool = false,
     throw_type_error_intrinsic: bool = false,
     async_iterator_async_dispose: bool = false,
     async_generator_method: bool = false,
@@ -3897,6 +3898,17 @@ pub const Object = struct {
     pub fn isArrayIteratorNextFunction(self: *const Object) bool {
         if (self.functionRarePayloadConst()) |payload| return payload.array_iterator_next;
         return false;
+    }
+
+    pub fn isGeneratorNextFunction(self: *const Object) bool {
+        if (self.functionRarePayloadConst()) |payload| return payload.generator_next;
+        return false;
+    }
+
+    pub fn addGeneratorNextFunction(self: *Object, rt: *JSRuntime) bool {
+        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        payload.generator_next = true;
+        return true;
     }
 
     pub fn isThrowTypeErrorIntrinsicFunction(self: *const Object) bool {

@@ -207,6 +207,8 @@ pub fn installGeneratorPrototypeProperties(rt: *core.JSRuntime, object: *core.Ob
     try defineNativeDataMethod(rt, object, "next", 1);
     try defineNativeDataMethod(rt, object, "return", 1);
     try defineNativeDataMethod(rt, object, "throw", 1);
+    // NOTE: the for-of fast-path marker lives on each generator instance's OWN `next`
+    // (createGeneratorObject), which shadows this prototype `next`, so no flag is set here.
 
     const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
     const tag = try value_ops.createStringValue(rt, "Generator");
@@ -2383,6 +2385,11 @@ pub fn createGeneratorObject(
 
     const next = try core.function.nativeFunction(ctx.runtime, "next", 0);
     defer next.free(ctx.runtime);
+    // Flag this generator's own `next` so for-of can take the result-object-free fast
+    // step (fastGeneratorForOfNext). zjs gives each generator instance its OWN `next`
+    // (not %GeneratorPrototype%.next), so the marker must live here; a user `gen.next = …`
+    // override replaces this property with an unflagged function, so the fast path bails.
+    if (objectFromValue(next)) |next_object| _ = next_object.addGeneratorNextFunction(ctx.runtime);
     try defineValueProperty(ctx.runtime, object, "next", next);
     const return_fn = try core.function.nativeFunction(ctx.runtime, "return", 1);
     defer return_fn.free(ctx.runtime);

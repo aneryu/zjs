@@ -5418,6 +5418,81 @@ pub fn qjsGeneratorNext(
     return try createIteratorResult(ctx.runtime, generator_global, result, !object.generatorJustYielded());
 }
 
+/// A raw generator step result: the yielded/returned value + done flag, with no
+/// `{value, done}` iterator-result object built. The caller owns `value`.
+pub const GeneratorValueDone = struct {
+    value: core.JSValue,
+    done: bool,
+};
+
+/// Resume a SYNC generator one step and return (value, done) WITHOUT allocating the
+/// iterator-result object, so a for-of consumer can skip it (qjs JS_IteratorNext2
+/// built-in fast path, quickjs.c:16548). Returns null if `receiver` is not a sync
+/// generator (caller falls back to the generic protocol). This is a parallel impl of
+/// `qjsGeneratorNext`'s sync path — kept separate so the hot, widely-used qjsGeneratorNext
+/// (.next() / spread / destructuring / yield*) stays byte-for-byte untouched; BOTH paths
+/// are exercised by the test262 generator suite, so any divergence is caught. The
+/// yield*-delegation case (result is ALREADY an iterator-result object) is unwrapped here
+/// with the same done-then-conditional-value reads the generic for-of would do.
+pub fn qjsSyncGeneratorStep(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: core.JSValue,
+    args: []const core.JSValue,
+) !?GeneratorValueDone {
+    if (!receiver.isObject()) return null;
+    const object = property_ops.expectObject(receiver) catch return null;
+    if (object.class_id != core.class.ids.generator) return null; // sync generators only
+    if (object.generatorExecuting()) return error.TypeError;
+    const generator_global = object_ops.objectRealmGlobal(object) orelse global;
+    if (object.generatorDone()) return .{ .value = core.JSValue.undefinedValue(), .done = true };
+    const function_value = object.functionBytecodeSlot().* orelse return error.TypeError;
+    const stored_current_function = if (object.generatorCurrentFunction()) |value| value.dup() else null;
+    defer if (stored_current_function) |value| value.free(ctx.runtime);
+    const current_function_value = stored_current_function orelse receiver;
+    const resume_value = if (object.generatorPc() != 0 and args.len > 0) args[0] else core.JSValue.undefinedValue();
+    object.generatorExecutingSlot().* = true;
+    defer object.generatorExecutingSlot().* = false;
+    const result = callFunctionBytecodeModeState(
+        ctx,
+        function_value,
+        current_function_value,
+        object.generatorThis() orelse core.JSValue.undefinedValue(),
+        object.generatorArgs(),
+        object.functionCapturesSlot().*,
+        output,
+        generator_global,
+        object.functionEvalLocalNames(),
+        object.functionEvalLocalRefs(),
+        false,
+        object,
+        resume_value,
+        null,
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+    ) catch |err| {
+        object.generatorDoneSlot().* = true;
+        return err;
+    };
+    if (object.generatorJustYielded() and
+        (object.generatorYieldStarIterator() != null or generatorYieldStarSuspended(ctx.runtime, object)))
+    {
+        // yield* passthrough: `result` is already an iterator-result object — unwrap it
+        // exactly as the generic for-of step would (read .done, then .value only if !done).
+        defer result.free(ctx.runtime);
+        const done_key = core.atom.predefinedId("done", .string).?;
+        const done_value = try object_ops.getValueProperty(ctx, output, global, result, done_key, null, null);
+        defer done_value.free(ctx.runtime);
+        const done = value_ops.isTruthy(done_value);
+        if (done) return .{ .value = core.JSValue.undefinedValue(), .done = true };
+        const value_key = core.atom.predefinedId("value", .string).?;
+        const value = try object_ops.getValueProperty(ctx, output, global, result, value_key, null, null);
+        return .{ .value = value, .done = false };
+    }
+    return .{ .value = result, .done = !object.generatorJustYielded() };
+}
+
 pub fn generatorYieldStarSuspended(rt: *core.JSRuntime, object: *core.Object) bool {
     _ = rt;
     return object.generatorYieldStarSuspended();
