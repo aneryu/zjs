@@ -96,12 +96,68 @@ The biggest raw gaps in the whole campaign — all faithful (qjs has a dense/mem
 | String for-of single-byte/latin1 cache | js_new_string_char quickjs.c:3953 | 12.71×→~broad-tax floor |
 | Object spread `{...o}` ENUM_ONLY snapshot | JS_CopyDataProperties quickjs.c:16920 | 2.50×→2.25×; **also fixed a real bug** — baseline diverged from qjs when a getter mutated a later key's enumerability/existence (now up-front snapshot, matches qjs) |
 
-### Next batch (ranked, faithful/bounded/independent)
-1. **Object.keys/values descriptor-skip** — the GPN-walk/array-build lever (1.85×/1.82×); reuses the
-   enum-only probe; object_ops.zig GPN walk vs qjs JS_GetOwnPropertyNames2 quickjs.c:40388.
-2. **TypedArray subarray/copyWithin/join** dense bulk paths (array_ops.zig; same family as set/fill).
-3. **String repeat / split(simple separator)** resolve-once (string_ops.zig; same template as pad).
-4. Re-sweep the remaining categories (the round-10 scout deferred copyWithin, typed-slice, repeat).
+### Shipped round-11 (parallel worktree batch of 3, integrated + union-gated 0/49775 + 1226 + force-GC)
+Surfaced by the 2026-06-26 audit's fresh-sweep (NOT in the prior catalog) + the remaining cheap leaves:
+| slice | commit | qjs anchor | effect |
+|---|---|---|---|
+| Array.sort default cmp: cache ToString key once + skip-unmoved write | `c2c84dd` | js_array_sort ValueSlot.str quickjs.c:43398-43410 + pos==n write-skip 43476 | kills 2 ArrayList allocs **per comparison** (O(n log n)→O(n) ToString) + skips setValueProperty on non-moved entries; user-comparator path byte-identical |
+| TypedArray.slice same-class @memcpy | `c2c84dd` | slice_memcpy quickjs.c:58519/58572 | raw byte-range copy (overlap-safe) before the element loop; differing class falls through |
+| Array.unshift dense in-place bulk shift | `c2c84dd` | JS_CopySubArray fast_array quickjs.c:41624-41647 | fills the round-9/10 push/pop/shift gap; bails on !extensible/!length_writable/exotic/proxy/proto-indexed |
+| String.repeat resolve-once borrowed-slice | `b1f6bc0` | js_string_repeat quickjs.c:46371 | drops the per-call appendRawString transcode-into-ArrayList; narrow-stays-narrow lazy-widen (pad template) |
+| hoist frame-invariant generator stop-boundary guard out of get/put_loc hot path | `a6067f1` | get/put_loc carry ZERO per-op guards quickjs.c:18531-18596 | precompute the per-invocation `stop_before_pc` block-test once into a register bool; 9 hot sites now test a bool. idx-dependent lexical-sync guard + var-ref cell probe deliberately untouched |
+
+> **round-11 corrections to the prior "next batch" list:** (a) **String.split simple-separator was ALREADY
+> resolve-once** (splitReceiver fast path, string.zig:687-734) — no change needed. (b) **TypedArray
+> copyWithin/subarray/join are NOT leaves** — copyWithin already does raw-byte copyForwards/copyBackwards,
+> subarray already builds a view (no copy), and qjs's *own* join is per-element ("XXX: optimize" never done)
+> so zjs's loop is already faithful. **slice was the only real remaining TypedArray leaf.** (c) **Object.keys/
+> values descriptor build is FAITHFUL, not a skip** (see the 2026-06-26 audit corrections below) — dropped
+> from the batch.
+
+### 🔬 2026-06-26 full-HEAD audit corrections (stale-doc fixes — supersede entries above where they conflict)
+A 11-agent audit (9 documented-frontier verifications + 2 fresh independent sweeps) re-confirmed each remaining
+divergence against current HEAD. Key **doc-staleness fixes**:
+1. **map/filter dense output is ALREADY CLOSED.** §🟥/"Medium-deep" claim that map/filter/forEach build output
+   via per-element `defineOwnProperty(atomFromUInt32)` is **no longer true**: map uses
+   `defineDenseArrayDataPropertyUnchecked`, filter uses `appendDenseArrayIndex` — both dense, both matching
+   qjs `js_array_every`→`add_fast_array_element`. The count/length-split dependency is a **red herring** for
+   sequential map/filter (count==length grows together); it only matters for `new Array(n)` pre-sized holes.
+2. **Generator frame is PRESERVED across steps, NOT realloc'd.** The "frame re-allocated per step" claim is
+   misleading — locals/args/var_refs are pointer-swapped and kept (vm_gen_async.zig:82-94). What remains is a
+   throwaway entry-slab alloc/free per resume + a fresh `{value,done}` per step (both the same broad
+   call/frame tax). Cheap faithful win left: skip the throwaway slab + a result-object-free generator-next step
+   (analog to `fastMapSetForOfNext` be06930).
+3. **This qjs build has NO inline cache** (zero `get_ic`/`ic_watchpoint` hits — property reads go through
+   `find_own_property` proto-walk every access). So zjs's IC is a **superset** zjs added to claw back the
+   LLVM-vs-gcc dispatch tax; INLINE-CACHE-PLAN's "align to get_ic" (S4 poly/mega) is **not a faithful target**.
+   The one faithful IC item is **S3 global-lexical stable-cell** (qjs's var_ref cell), still un-shipped:
+   `let g` reads still name-lookup, and the `global_lexical_sync_*` mirror (slot_ops.zig:122-209) is fully intact.
+4. **Builtin methods are ALREADY own-properties on each prototype** (function.zig:367 `defineMethodData`).
+   "method on prototype" frontier is done; the residual is the proto-`get_field` IC tax (dispatch IC is
+   own-data-only) + null-proto internal-array method resolution.
+5. **Object.keys/values 1.85× is NOT faithfully eliminable.** qjs deliberately builds a full per-key descriptor
+   (+value dup) at quickjs.c:40400 for the still-enumerable recheck. zjs's per-key build IS faithful; residual
+   is GPN-walk + broad codegen. (Retracts the descriptor-skip framing at lines ~146-152.)
+6. **The regex.test 12× bench (`/a+b/`) never reaches the bytecode engine** — it's intercepted by the hand-rolled
+   recursive-descent fastpath (regexp_fastpath.zig:2575). So the 12× is call-machinery tax (shared) + recursion
+   vs flat-loop codegen, NOT "a different algorithm." engine.zig **is** a faithful libregexp port. The one genuine
+   structural engine divergence (only bites backtracking-heavy patterns): pushState heap-snapshots the FULL
+   capture+stack per branch (O(n)) vs qjs SAVE_CAPTURE single-pair undo-log (O(1)).
+7. **Anchor drift:** `primitiveObjectForAccess` is at object_ops.zig:**3082** (doc said 4702); property `Slot`
+   union is property.zig:**134-185** (doc said 125-134); the keys/values anchors object.zig:618/638 are stale.
+8. **Frame-model floor is ~1.3-1.5×, not 1.0×** — the ~30% pushFrame+teardown residual is mostly
+   **non-faithfully-eliminable** (zjs's re-entrant dispatch must store this/new_target/storage as Frame fields;
+   Zig has no variadic alloca). The slim-to-9 and borrow-cur_func pillars stay REJECTED.
+
+### Next batch (ranked, faithful/bounded/independent — post round-11)
+1. **Array count/length split** (A1) — the single biggest *bounded* structural unlock (new Array(n) 19.5×);
+   deferred high-risk C.3, 17 readers/11 need hole-handling. Needs a立项 flag-gated 5-stage plan.
+2. **S3 global-lexical stable-cell** + retire the `global_lexical_sync_*` mirror (faithful to qjs var_ref cell;
+   carries TDZ/eval/cross-realm risk — flag-gated, every stage 0/49775).
+3. **s.replace string-wrapper boxing 36.4×** — needs the string-wrapper exotic `own_keys` hook FIRST
+   (mirror js_string_obj_get_length synthesis), then delete the per-index materialization loop (object_ops.zig:3101).
+4. **Cheap generator-next**: skip the throwaway resume entry-slab + result-object-free next step.
+5. **regex engine snapshot→undo-log** (self-contained in engine.zig; only helps backtracking-heavy patterns).
 
 ## ✅ Shipped round-4 (each: test262 0/49775 + 1223 unit + 1223 force-GC)
 
