@@ -606,55 +606,78 @@ pub fn runWithArgsState(
     const need_original_args = argumentsNeedsOriginalSnapshot(entry_function);
     const frame_arg_count = frame_mod.frameArgCount(entry_function, args.len);
     const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(entry_function, frame_arg_count);
-    const slab = if (frame_arena) |arena| blk: {
-        if (frame_mod.FrameSlab.carve(
-            &ctx.runtime.memory,
-            arena,
-            frame_arg_count,
-            frame_mod.originalArgCount(args.len, need_original_args),
-            entry_function.var_count,
-            @as(usize, entry_function.stack_size) + 1,
-            frame_mod.frameVarRefStorageCount(entry_function, var_refs),
-            open_var_ref_count,
-        )) |windows| break :blk windows;
-        const heap_windows = try frame_mod.FrameSlab.allocHeap(
-            &ctx.runtime.memory,
-            frame_arg_count,
-            frame_mod.originalArgCount(args.len, need_original_args),
-            entry_function.var_count,
-            0,
-            frame_mod.frameVarRefStorageCount(entry_function, var_refs),
-            open_var_ref_count,
-        );
-        frame_storage.installOwnedStorage(heap_windows.storage);
-        break :blk heap_windows;
-    } else blk: {
-        const heap_windows = try frame_mod.FrameSlab.allocHeap(
-            &ctx.runtime.memory,
-            frame_arg_count,
-            frame_mod.originalArgCount(args.len, need_original_args),
-            entry_function.var_count,
-            0,
-            frame_mod.frameVarRefStorageCount(entry_function, var_refs),
-            open_var_ref_count,
-        );
-        frame_storage.installOwnedStorage(heap_windows.storage);
-        break :blk heap_windows;
-    };
-    const frame_windows = frame_mod.FrameStorageWindows{
-        .args = if (slab.args.len != 0) slab.args else null,
-        .original_args = if (slab.original_args.len != 0) slab.original_args else null,
-        .locals = if (slab.locals.len != 0) slab.locals else null,
-        .var_refs = if (slab.var_refs.len != 0) slab.var_refs else null,
-        .open_var_refs = if (slab.open_var_refs.len != 0) slab.open_var_refs else null,
-    };
-    if (entry_stack.capacity == 0 and slab.stack.len != 0) {
-        entry_stack.* = stack_mod.Stack.initArenaWindow(&ctx.runtime.memory, ctx.runtime.stack_size, slab.stack);
+    // A STARTED generator/async resume (pc != 0) immediately frees any frame slab built
+    // here and swaps in the generator's PRESERVED buffers (vm_gen_async.zig:157-173), so
+    // allocating + initializing a throwaway slab + re-duping args + rebuilding var_refs is
+    // pure waste — qjs allocates the generator frame ONCE at creation and resumes on it
+    // (JS_CALL_FLAG_GENERATOR early-out, quickjs.c:17790). First creation (pc == 0) still
+    // builds the slab (it becomes the generator's working frame), so gate on pc != 0.
+    //
+    // EXCEPT a generator that needs the UNMAPPED `arguments` snapshot (strict / non-simple
+    // params): `initArguments` rebuilds `original_args` from generatorArgs on EVERY resume
+    // (it is NOT preserved in the generator frame buffers — resumeExecutionStateRaw clears
+    // it at line 164), so those keep the full path. For every other started resume the
+    // preserved buffers cover locals/args/var_refs; the only remaining initArguments output
+    // is the mapped-arguments count (frame.args is already the preserved buffer), which we
+    // set directly — identical to what initArguments would store (`actual_arg_count = args.len`).
+    const is_started_resume = if (entry_generator_state) |gen| gen.generatorPc() != 0 else false;
+    const skip_resume_slab = is_started_resume and !need_original_args;
+    if (!skip_resume_slab) {
+        const slab = if (frame_arena) |arena| blk: {
+            if (frame_mod.FrameSlab.carve(
+                &ctx.runtime.memory,
+                arena,
+                frame_arg_count,
+                frame_mod.originalArgCount(args.len, need_original_args),
+                entry_function.var_count,
+                @as(usize, entry_function.stack_size) + 1,
+                frame_mod.frameVarRefStorageCount(entry_function, var_refs),
+                open_var_ref_count,
+            )) |windows| break :blk windows;
+            const heap_windows = try frame_mod.FrameSlab.allocHeap(
+                &ctx.runtime.memory,
+                frame_arg_count,
+                frame_mod.originalArgCount(args.len, need_original_args),
+                entry_function.var_count,
+                0,
+                frame_mod.frameVarRefStorageCount(entry_function, var_refs),
+                open_var_ref_count,
+            );
+            frame_storage.installOwnedStorage(heap_windows.storage);
+            break :blk heap_windows;
+        } else blk: {
+            const heap_windows = try frame_mod.FrameSlab.allocHeap(
+                &ctx.runtime.memory,
+                frame_arg_count,
+                frame_mod.originalArgCount(args.len, need_original_args),
+                entry_function.var_count,
+                0,
+                frame_mod.frameVarRefStorageCount(entry_function, var_refs),
+                open_var_ref_count,
+            );
+            frame_storage.installOwnedStorage(heap_windows.storage);
+            break :blk heap_windows;
+        };
+        const frame_windows = frame_mod.FrameStorageWindows{
+            .args = if (slab.args.len != 0) slab.args else null,
+            .original_args = if (slab.original_args.len != 0) slab.original_args else null,
+            .locals = if (slab.locals.len != 0) slab.locals else null,
+            .var_refs = if (slab.var_refs.len != 0) slab.var_refs else null,
+            .open_var_refs = if (slab.open_var_refs.len != 0) slab.open_var_refs else null,
+        };
+        if (entry_stack.capacity == 0 and slab.stack.len != 0) {
+            entry_stack.* = stack_mod.Stack.initArenaWindow(&ctx.runtime.memory, ctx.runtime.stack_size, slab.stack);
+        }
+        try call_vm.initFrameLocals(ctx, entry_function, &frame_storage, entry_eval_local_names, entry_eval_local_slots, use_inline_frame_storage, frame_windows);
+        try frame_storage.initArguments(&ctx.runtime.memory, frame_arena, args, use_inline_frame_storage, need_original_args, frame_windows);
+        if (frame_windows.open_var_refs) |open_refs| frame_storage.installOpenVarRefSlots(open_refs) else if (open_var_ref_count != 0) try frame_storage.ensureOpenVarRefSlots(&ctx.runtime.memory, frame_arena, use_inline_frame_storage);
+        try call_vm.initFrameVarRefs(ctx, global, entry_function, &frame_storage, var_refs, use_inline_frame_storage, frame_windows);
+    } else {
+        // Skipped the slab; resumeExecutionStateRaw installs the preserved frame.args. The
+        // mapped `arguments` object still reads frame.actual_arg_count, so set it the same way
+        // initArguments would have (args == generatorArgs() here, so this is byte-identical).
+        frame_storage.actual_arg_count = args.len;
     }
-    try call_vm.initFrameLocals(ctx, entry_function, &frame_storage, entry_eval_local_names, entry_eval_local_slots, use_inline_frame_storage, frame_windows);
-    try frame_storage.initArguments(&ctx.runtime.memory, frame_arena, args, use_inline_frame_storage, need_original_args, frame_windows);
-    if (frame_windows.open_var_refs) |open_refs| frame_storage.installOpenVarRefSlots(open_refs) else if (open_var_ref_count != 0) try frame_storage.ensureOpenVarRefSlots(&ctx.runtime.memory, frame_arena, use_inline_frame_storage);
-    try call_vm.initFrameVarRefs(ctx, global, entry_function, &frame_storage, var_refs, use_inline_frame_storage, frame_windows);
     if (entry_generator_state == null) {
         try vm_property_globals.instantiateGlobalVarDeclarations(ctx, global, entry_function, &frame_storage, entry_is_eval_code, entry_eval_local_names, entry_eval_local_slots, frame_storage.evalVarRefNames(), frame_storage.evalVarRefs());
     }
