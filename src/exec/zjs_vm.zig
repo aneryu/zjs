@@ -795,6 +795,15 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
     // so threaded get_arg0..3 read args without reloading frame.args from memory.
     var reg_arg_buf: [*]core.JSValue = undefined;
     var reg_code_end: [*]const u8 = undefined;
+    // Frame-invariant generator stop-boundary guard, hoisted out of the per-op
+    // local fast paths. `stop_before_pc` is a per-invocation parameter assigned
+    // ONLY in the `machine.switched` block above the canonical reload point;
+    // generator suspend/resume re-enters through a fresh dispatchLoop call, so
+    // it never changes within a straight-line threaded run. The handlers tested
+    // `localFastPathNeedsGeneratorStopBoundary(stop_before_pc)` (an ?usize
+    // null-check) on every get/put/set/inc/dec/add_loc; precompute it once at
+    // the reload point so the hot threaded arms test a register-resident bool.
+    var local_fast_blocked_by_generator: bool = false;
     while (true) {
         if (machine.switched) {
             machine.switched = false;
@@ -855,6 +864,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
         reg_sp = stack.values.ptr + stack.values.len;
         reg_var_buf = frame.locals.ptr;
         reg_arg_buf = frame.args.ptr;
+        local_fast_blocked_by_generator = localFastPathNeedsGeneratorStopBoundary(stop_before_pc);
         if (frame.pc >= function.code.len) {
             if (machine.depth == 0) break;
             const fallthrough_value = stack.peek() orelse core.JSValue.undefinedValue();
@@ -1020,7 +1030,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             // handlers.
             op.get_loc, op.put_loc, op.set_loc, op.get_loc8, op.put_loc8, op.set_loc8, op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3, op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.set_loc0, op.set_loc1, op.set_loc2, op.set_loc3 => {
                 if (comptime thread_dispatch) local_fast: {
-                    if (localFastPathNeedsGeneratorStopBoundary(stop_before_pc)) break :local_fast;
+                    if (local_fast_blocked_by_generator) break :local_fast;
                     const operand = decodeLocalOperand(opc, reg_ip);
                     const idx = operand.idx;
                     const old_v = reg_var_buf[idx];
@@ -1222,7 +1232,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             // var-ref / TDZ slots fall through to the full handler.
             op.get_loc_check, op.get_loc_checkthis => {
                 if (comptime thread_dispatch) get_loc_check_fast: {
-                    if (localFastPathNeedsGeneratorStopBoundary(stop_before_pc)) break :get_loc_check_fast;
+                    if (local_fast_blocked_by_generator) break :get_loc_check_fast;
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     const slot = reg_var_buf[idx];
                     if (slot_ops.varRefCellFromValue(slot) != null) break :get_loc_check_fast;
@@ -1246,7 +1256,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             // handler.
             op.put_loc_check => {
                 if (comptime thread_dispatch) put_loc_check_fast: {
-                    if (localFastPathNeedsGeneratorStopBoundary(stop_before_pc)) break :put_loc_check_fast;
+                    if (local_fast_blocked_by_generator) break :put_loc_check_fast;
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     const old_v = reg_var_buf[idx];
                     if (slot_ops.varRefCellFromValue(old_v) != null) break :put_loc_check_fast;
@@ -1272,7 +1282,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
             op.set_loc_check => {
                 if (comptime thread_dispatch) set_loc_check_fast: {
-                    if (localFastPathNeedsGeneratorStopBoundary(stop_before_pc)) break :set_loc_check_fast;
+                    if (local_fast_blocked_by_generator) break :set_loc_check_fast;
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     const old_v = reg_var_buf[idx];
                     if (slot_ops.varRefCellFromValue(old_v) != null) break :set_loc_check_fast;
@@ -1297,7 +1307,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
             op.put_loc_check_init => {
                 if (comptime thread_dispatch) put_loc_check_init_fast: {
-                    if (localFastPathNeedsGeneratorStopBoundary(stop_before_pc)) break :put_loc_check_init_fast;
+                    if (local_fast_blocked_by_generator) break :put_loc_check_init_fast;
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     const old_v = reg_var_buf[idx];
                     if (slot_ops.varRefCellFromValue(old_v) != null) break :put_loc_check_init_fast;
@@ -1695,7 +1705,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             // ---- Variable access ----
             op.get_var, op.get_var_undef => {
                 if (comptime thread_dispatch) get_var_fast: {
-                    if (localFastPathNeedsGeneratorStopBoundary(stop_before_pc)) break :get_var_fast;
+                    if (local_fast_blocked_by_generator) break :get_var_fast;
                     if (vm_property_globals.hasDynamicGlobalOverlay(frame, eval_local_names, eval_var_ref_names, eval_with_object)) break :get_var_fast;
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     if (idx >= frame.var_refs.len) break :get_var_fast;
@@ -1746,7 +1756,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
             op.put_var => {
                 if (comptime thread_dispatch) put_var_fast: {
-                    if (localFastPathNeedsGeneratorStopBoundary(stop_before_pc)) break :put_var_fast;
+                    if (local_fast_blocked_by_generator) break :put_var_fast;
                     if (vm_property_globals.hasDynamicGlobalOverlay(frame, eval_local_names, eval_var_ref_names, eval_with_object)) break :put_var_fast;
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     if (idx >= frame.var_refs.len) break :put_var_fast;
@@ -2411,7 +2421,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
             op.inc_loc, op.dec_loc => {
                 if (comptime thread_dispatch) update_local_fast: {
-                    if (localFastPathNeedsGeneratorStopBoundary(stop_before_pc)) break :update_local_fast;
+                    if (local_fast_blocked_by_generator) break :update_local_fast;
                     const idx: u16 = reg_ip[0];
                     if (idx >= frame.locals.len) break :update_local_fast;
                     if (localStoreNeedsSlowSync(frame, idx, sync_global_lexical_locals)) break :update_local_fast;
@@ -2436,7 +2446,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     // fast path mirrors inc_loc (same local-store guards) plus the
                     // rhs pop; fastInt32Add folds overflow to a double, so no extra
                     // break needed. Both operands int32 here (no refcount).
-                    if (localFastPathNeedsGeneratorStopBoundary(stop_before_pc)) break :add_local_fast;
+                    if (local_fast_blocked_by_generator) break :add_local_fast;
                     const idx: u16 = reg_ip[0];
                     if (idx >= frame.locals.len) break :add_local_fast;
                     if (localStoreNeedsSlowSync(frame, idx, sync_global_lexical_locals)) break :add_local_fast;
