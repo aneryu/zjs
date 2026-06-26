@@ -3639,11 +3639,15 @@ pub fn qjsArraySearchCall(
         }
     } else {
         var cursor = try arrayFirstIndexStart(ctx, output, global, args, length);
-        // Dense fast scan (qjs js_array_indexOf/includes js_get_fast_array dense
-        // loop, quickjs.c:42426-42483): see the lastIndexOf note above.
-        if (!is_typed_array and object.isFastArray() and @as(usize, @intCast(object.arrayLength())) == length and object.arrayElements().len == length) {
+        // Dense fast PREFIX scan, then fall through to the generic tail (qjs
+        // js_array_indexOf/includes: js_get_fast_array dense loop over [0, count) then the
+        // generic loop over [count, len) for the tail holes, quickjs.c:42426-42483). Unlike
+        // a full-density gate, this also fast-scans the dense prefix of an L3 holey fast
+        // array (array_count < length) before the proto-aware tail.
+        if (!is_typed_array and object.isFastArray()) {
             const elements = object.arrayElements();
-            while (cursor < elements.len) : (cursor += 1) {
+            const dense_end = @min(elements.len, length);
+            while (cursor < dense_end) : (cursor += 1) {
                 const item = elements[cursor];
                 if (mode == .includes) {
                     if (item.sameValueZero(search_value)) return core.JSValue.boolean(true);
@@ -3651,7 +3655,7 @@ pub fn qjsArraySearchCall(
                     if (try valuesStrictEqual(ctx.runtime, item, search_value)) return lengthIndexValue(cursor);
                 }
             }
-            return if (mode == .includes) core.JSValue.boolean(false) else core.JSValue.int32(-1);
+            // cursor == dense_end; the generic loop below covers [dense_end, length) holes.
         }
         while (cursor < length) : (cursor += 1) {
             const item = if (is_typed_array) blk: {
