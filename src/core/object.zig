@@ -428,87 +428,18 @@ pub const TypedArrayPayload = struct {
 
 pub const RegExpPayload = struct {
     source: ?JSValue = null,
-    flags: ?JSValue = null,
     last_index: ?JSValue = null,
     compiled_bytecode: []u8 = &.{},
-    fast_pattern_kind: RegExpFastPatternKind = .none,
-    fast_simple_class_alternation: RegExpSimpleClassAlternationPattern = .{},
-    fast_simple_capture_sequence: RegExpSimpleCaptureSequencePattern = .{},
     last_index_writable: bool = true,
     realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *RegExpPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.source);
-        destroyOptionalValue(rt, &self.flags);
         destroyOptionalValue(rt, &self.last_index);
         const old_bytecode = self.compiled_bytecode;
         self.compiled_bytecode = &.{};
-        self.fast_pattern_kind = .none;
-        self.fast_simple_class_alternation = .{};
-        self.fast_simple_capture_sequence = .{};
         if (old_bytecode.len != 0) rt.memory.free(u8, old_bytecode);
     }
-};
-
-pub const RegExpFastPatternKind = enum(u8) {
-    none,
-    simple_class_alternation,
-    simple_capture_sequence,
-};
-
-pub const RegExpSimpleClassPredicate = enum(u8) {
-    generic,
-    ascii_digit,
-    ascii_not_digit,
-    ascii_word,
-    ascii_not_word,
-    ascii_lower,
-    ascii_alpha,
-    ascii_decimal,
-};
-
-pub const RegExpSimpleClassAtomKind = enum(u8) {
-    literal,
-    class,
-};
-
-pub const RegExpSimpleClassSequenceAtom = struct {
-    kind: RegExpSimpleClassAtomKind = .literal,
-    literal: u16 = 0,
-    class_source: []const u8 = "",
-    class_predicate: RegExpSimpleClassPredicate = .generic,
-    min_repeat: usize = 1,
-    max_repeat: usize = 1,
-};
-
-pub const RegExpSimpleClassSequencePattern = struct {
-    atoms: [16]RegExpSimpleClassSequenceAtom = undefined,
-    len: usize = 0,
-    anchor_start: bool = false,
-    anchor_end: bool = false,
-};
-
-pub const RegExpSimpleClassAlternationPattern = struct {
-    alternatives: [8]RegExpSimpleClassSequencePattern = undefined,
-    len: usize = 0,
-};
-
-pub const RegExpSimpleCaptureSequenceAtom = struct {
-    kind: RegExpSimpleClassAtomKind = .literal,
-    literal: u16 = 0,
-    class_source: []const u8 = "",
-    class_predicate: RegExpSimpleClassPredicate = .generic,
-    capture_index: ?usize = null,
-    min_repeat: usize = 1,
-    max_repeat: usize = 1,
-};
-
-pub const RegExpSimpleCaptureSequencePattern = struct {
-    atoms: [16]RegExpSimpleCaptureSequenceAtom = undefined,
-    len: usize = 0,
-    capture_count: usize = 0,
-    anchor_start: bool = false,
-    anchor_end: bool = false,
 };
 
 pub const BoundFunctionPayload = struct {
@@ -3111,17 +3042,6 @@ pub const Object = struct {
         return null;
     }
 
-    pub fn regexpFlagsSlot(self: *Object) *?JSValue {
-        if (self.regExpPayload()) |payload| return &payload.flags;
-        std.debug.assert(self.class_payload_kind == .regexp);
-        unreachable;
-    }
-
-    pub fn regexpFlags(self: *const Object) ?JSValue {
-        if (self.regExpPayloadConst()) |payload| return payload.flags;
-        return null;
-    }
-
     pub fn regexpLastIndexSlot(self: *Object) *?JSValue {
         if (self.regExpPayload()) |payload| return &payload.last_index;
         std.debug.assert(self.class_payload_kind == .regexp);
@@ -3149,38 +3069,6 @@ pub const Object = struct {
         return &.{};
     }
 
-    pub fn regexpSimpleClassAlternationCache(self: *const Object) ?RegExpSimpleClassAlternationPattern {
-        const payload = self.regExpPayloadConst() orelse return null;
-        if (payload.fast_pattern_kind != .simple_class_alternation) return null;
-        return payload.fast_simple_class_alternation;
-    }
-
-    pub fn setRegexpSimpleClassAlternationCache(self: *Object, pattern: RegExpSimpleClassAlternationPattern) void {
-        if (self.regExpPayload()) |payload| {
-            payload.fast_pattern_kind = .simple_class_alternation;
-            payload.fast_simple_class_alternation = pattern;
-            return;
-        }
-        std.debug.assert(self.class_payload_kind == .regexp);
-        unreachable;
-    }
-
-    pub fn regexpSimpleCaptureSequenceCache(self: *const Object) ?RegExpSimpleCaptureSequencePattern {
-        const payload = self.regExpPayloadConst() orelse return null;
-        if (payload.fast_pattern_kind != .simple_capture_sequence) return null;
-        return payload.fast_simple_capture_sequence;
-    }
-
-    pub fn setRegexpSimpleCaptureSequenceCache(self: *Object, pattern: RegExpSimpleCaptureSequencePattern) void {
-        if (self.regExpPayload()) |payload| {
-            payload.fast_pattern_kind = .simple_capture_sequence;
-            payload.fast_simple_capture_sequence = pattern;
-            return;
-        }
-        std.debug.assert(self.class_payload_kind == .regexp);
-        unreachable;
-    }
-
     pub fn clearRegexpCompiledBytecode(self: *Object, rt: *JSRuntime) void {
         if (self.regExpPayload()) |payload| {
             if (payload.compiled_bytecode.len != 0) {
@@ -3188,9 +3076,6 @@ pub const Object = struct {
                 payload.compiled_bytecode = &.{};
                 rt.memory.free(u8, compiled_bytecode);
             }
-            payload.fast_pattern_kind = .none;
-            payload.fast_simple_class_alternation = .{};
-            payload.fast_simple_capture_sequence = .{};
             return;
         }
         std.debug.assert(self.class_payload_kind == .regexp);
@@ -3208,9 +3093,6 @@ pub const Object = struct {
             @memcpy(owned, bytecode);
             const old_bytecode = payload.compiled_bytecode;
             payload.compiled_bytecode = owned;
-            payload.fast_pattern_kind = .none;
-            payload.fast_simple_class_alternation = .{};
-            payload.fast_simple_capture_sequence = .{};
             if (old_bytecode.len != 0) rt.memory.free(u8, old_bytecode);
         } else {
             std.debug.assert(self.class_payload_kind == .regexp);
@@ -6284,7 +6166,6 @@ pub const Object = struct {
         }
         if (self.regExpPayload()) |payload| {
             try Helper.traceOptValue(visitor, &payload.source);
-            try Helper.traceOptValue(visitor, &payload.flags);
             try Helper.traceOptValue(visitor, &payload.last_index);
         }
         if (self.moduleNamespacePayload()) |payload| {
@@ -6822,7 +6703,6 @@ pub const Object = struct {
         count += countOptionalFunctionBytecodeRef(self.promiseReactionArg(), function_bytecode);
         for (self.promiseReactions()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.regexpSource(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.regexpFlags(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.regexpLastIndex(), function_bytecode);
         if (self.moduleNamespacePayloadConst()) |payload| {
             for (payload.cells) |cell| count += countFunctionBytecodeValueRef(cell, function_bytecode);

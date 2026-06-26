@@ -1,4 +1,5 @@
 const core = @import("../core/root.zig");
+const regexp_adapter = @import("../libs/regexp.zig").js_adapter;
 const regexp_validate = @import("../libs/regexp.zig").validate;
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
@@ -246,13 +247,15 @@ pub fn construct(rt: *core.JSRuntime, pattern: core.JSValue, flags: core.JSValue
 }
 
 pub fn constructLiteral(rt: *core.JSRuntime, pattern: []const u8, flags: []const u8, prototype: ?*core.Object) !core.JSValue {
-    if (!validatePatternAndFlags(pattern, flags)) return error.SyntaxError;
+    var compiled = compilePatternAndFlagsSyntax(rt, pattern, flags) catch |err| switch (err) {
+        error.InvalidPattern, error.Unsupported => return error.SyntaxError,
+        else => |other| return other,
+    };
+    defer compiled.deinit(rt.memory.allocator);
 
     var source_val = core.JSValue.undefinedValue();
-    var flags_val = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &source_val },
-        .{ .value = &flags_val },
     };
     const root_frame = core.runtime.ValueRootFrame{
         .previous = rt.active_value_roots,
@@ -262,12 +265,10 @@ pub fn constructLiteral(rt: *core.JSRuntime, pattern: []const u8, flags: []const
     defer rt.active_value_roots = root_frame.previous;
 
     defer source_val.free(rt);
-    defer flags_val.free(rt);
 
     source_val = (try core.string.String.createUtf8(rt, pattern)).value();
-    flags_val = (try core.string.String.createUtf8(rt, flags)).value();
 
-    return constructValidated(rt, source_val, flags_val, prototype);
+    return constructCompiled(rt, source_val, compiled.bytecode, prototype);
 }
 
 pub fn constructLiteralWithValues(
@@ -278,11 +279,26 @@ pub fn constructLiteralWithValues(
     flags: []const u8,
     prototype: ?*core.Object,
 ) !core.JSValue {
-    if (!validatePatternAndFlags(pattern, flags)) return error.SyntaxError;
-    return constructValidated(rt, source, stored_flags, prototype);
+    _ = stored_flags;
+    var compiled = compilePatternAndFlagsSyntax(rt, pattern, flags) catch |err| switch (err) {
+        error.InvalidPattern, error.Unsupported => return error.SyntaxError,
+        else => |other| return other,
+    };
+    defer compiled.deinit(rt.memory.allocator);
+    return constructCompiled(rt, source, compiled.bytecode, prototype);
 }
 
 pub fn constructWithPrototype(rt: *core.JSRuntime, pattern: core.JSValue, flags: core.JSValue, prototype: ?*core.Object) !core.JSValue {
+    if (flags.isUndefined()) {
+        if (regexpObjectFromValue(pattern)) |regexp_object| {
+            const source_val = try getInternalSource(regexp_object);
+            defer source_val.free(rt);
+            const bytecode = regexp_object.regexpCompiledBytecode();
+            if (bytecode.len == 0) return error.TypeError;
+            return constructCompiled(rt, source_val, bytecode, prototype);
+        }
+    }
+
     var source_val = core.JSValue.undefinedValue();
     var flags_val = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
@@ -308,21 +324,16 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, pattern: core.JSValue, flags:
         try regExpStringValue(rt, pattern);
 
     flags_val = if (flags.isUndefined() and pattern_object != null)
-        try getInternalFlags(pattern_object.?)
+        try getInternalFlags(rt, pattern_object.?)
     else if (flags.isUndefined())
         try createStringValue(rt, "")
     else
         try regExpStringValue(rt, flags);
 
-    var flag_bytes = std.ArrayList(u8).empty;
-    defer flag_bytes.deinit(rt.memory.allocator);
-    try appendValueString(rt, &flag_bytes, flags_val);
-    var source_bytes = std.ArrayList(u8).empty;
-    defer source_bytes.deinit(rt.memory.allocator);
-    try appendRegExpPatternString(rt, &source_bytes, source_val, flag_bytes.items);
-    if (!validatePatternAndFlags(source_bytes.items, flag_bytes.items)) return error.SyntaxError;
+    var compiled = try compileSourceAndFlags(rt, source_val, flags_val);
+    defer compiled.deinit(rt.memory.allocator);
 
-    return constructValidated(rt, source_val, flags_val, prototype);
+    return constructCompiled(rt, source_val, compiled.bytecode, prototype);
 }
 
 fn regExpStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
@@ -333,12 +344,29 @@ fn regExpStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     return try createStringValue(rt, bytes.items);
 }
 
-fn constructValidated(rt: *core.JSRuntime, source: core.JSValue, stored_flags: core.JSValue, prototype: ?*core.Object) !core.JSValue {
+fn compilePatternAndFlagsSyntax(rt: *core.JSRuntime, pattern: []const u8, flags: []const u8) !regexp_validate.Compiled {
+    return regexp_validate.compilePatternAndFlags(rt.memory.allocator, pattern, flags);
+}
+
+fn compileSourceAndFlags(rt: *core.JSRuntime, source: core.JSValue, flags: core.JSValue) !regexp_validate.Compiled {
+    var flag_bytes = std.ArrayList(u8).empty;
+    defer flag_bytes.deinit(rt.memory.allocator);
+    try appendValueString(rt, &flag_bytes, flags);
+
+    var source_bytes = std.ArrayList(u8).empty;
+    defer source_bytes.deinit(rt.memory.allocator);
+    try appendRegExpPatternString(rt, &source_bytes, source, flag_bytes.items);
+
+    return compilePatternAndFlagsSyntax(rt, source_bytes.items, flag_bytes.items) catch |err| switch (err) {
+        error.InvalidPattern, error.Unsupported => return error.SyntaxError,
+        else => |other| return other,
+    };
+}
+
+fn constructCompiled(rt: *core.JSRuntime, source: core.JSValue, bytecode: []const u8, prototype: ?*core.Object) !core.JSValue {
     var source_val = source;
-    var flags_val = stored_flags;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &source_val },
-        .{ .value = &flags_val },
     };
     const root_frame = core.runtime.ValueRootFrame{
         .previous = rt.active_value_roots,
@@ -351,46 +379,43 @@ fn constructValidated(rt: *core.JSRuntime, source: core.JSValue, stored_flags: c
     errdefer core.Object.destroyFromHeader(rt, &object.header);
 
     try object.setOptionalValueSlot(rt, object.regexpSourceSlot(), source_val.dup());
-    try object.setOptionalValueSlot(rt, object.regexpFlagsSlot(), flags_val.dup());
+    try object.setRegexpCompiledBytecode(rt, bytecode);
     try object.setOptionalValueSlot(rt, object.regexpLastIndexSlot(), core.JSValue.int32(0));
     object.regexpLastIndexWritableSlot().* = true;
     return object.value();
 }
 
-test "constructValidated roots source and flags while creating regexp object" {
+test "constructCompiled roots source while creating regexp object" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const source_atom = try rt.atoms.newValueSymbol("gc-regexp-source-symbol");
     const source_value = try rt.symbolValue(source_atom);
-    const flags_atom = try rt.atoms.newValueSymbol("gc-regexp-flags-symbol");
+    var compiled = try regexp_validate.compilePatternAndFlags(rt.memory.allocator, "a", "g");
+    defer compiled.deinit(rt.memory.allocator);
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const flags_value = try rt.symbolValue(flags_atom);
-    const regexp_value = try constructValidated(rt, source_value, flags_value, null);
+    const regexp_value = try constructCompiled(rt, source_value, compiled.bytecode, null);
     var regexp_alive = true;
     defer if (regexp_alive) regexp_value.free(rt);
     const regexp = regexpObjectFromValue(regexp_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(source_atom) != null);
-    try std.testing.expect(rt.atoms.name(flags_atom) != null);
     try std.testing.expect(regexp.regexpSource().?.same(source_value));
-    try std.testing.expect(regexp.regexpFlags().?.same(flags_value));
+    try std.testing.expect(regexp.regexpCompiledBytecode().len != 0);
 
     regexp_value.free(rt);
     regexp_alive = false;
     source_value.free(rt);
-    flags_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(source_atom) == null);
-    try std.testing.expect(rt.atoms.name(flags_atom) == null);
 }
 
 /// Pattern/flags early-error validation lives in `libs/regexp/validate.zig`
 /// (QuickJS: `js_compile_regexp` flag parsing plus `lre_compile`).
-pub const validatePatternAndFlags = regexp_validate.validatePatternAndFlags;
+pub const compilePatternAndFlags = regexp_validate.compilePatternAndFlags;
 
 fn isSimpleGlobalClassEscapePattern(pattern: []const u8, flags: []const u8) bool {
     if (flags.len != 1 or flags[0] != 'g') return false;
@@ -1238,15 +1263,11 @@ pub fn accessor(rt: *core.JSRuntime, object_value: core.JSValue, name: []const u
         defer source.free(rt);
         return escapedSource(rt, source);
     }
-    const flags = try getInternalFlags(object);
-    defer flags.free(rt);
-    if (std.mem.eql(u8, name, "flags")) return canonicalFlagsValue(rt, flags);
+    const flag_bits = try regexpFlagBits(object);
+    if (std.mem.eql(u8, name, "flags")) return canonicalFlagsValue(rt, flag_bits);
 
-    var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.memory.allocator);
-    try appendValueString(rt, &buffer, flags);
-    const present = if (regexpFlagChar(name)) |char|
-        std.mem.indexOfScalar(u8, buffer.items, char) != null
+    const present = if (regexpFlagBit(name)) |bit|
+        (flag_bits & bit) != 0
     else
         false;
     return core.JSValue.boolean(present);
@@ -1352,35 +1373,28 @@ pub fn escape(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
 fn toString(rt: *core.JSRuntime, object: *core.Object) !core.JSValue {
     const source = try getInternalSource(object);
     defer source.free(rt);
-    const flags = try getInternalFlags(object);
-    defer flags.free(rt);
+    const flag_bits = try regexpFlagBits(object);
 
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
     try buffer.append(rt.memory.allocator, '/');
     try appendValueString(rt, &buffer, source);
     try buffer.append(rt.memory.allocator, '/');
-    try appendCanonicalRegExpFlags(rt, &buffer, flags);
+    try appendCanonicalRegExpFlags(rt, &buffer, flag_bits);
 
     const str = try core.string.String.createUtf8(rt, buffer.items);
     return str.value();
 }
 
-fn canonicalFlagsValue(rt: *core.JSRuntime, flags: core.JSValue) !core.JSValue {
+fn canonicalFlagsValue(rt: *core.JSRuntime, flag_bits: u16) !core.JSValue {
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
-    try appendCanonicalRegExpFlags(rt, &buffer, flags);
+    try appendCanonicalRegExpFlags(rt, &buffer, flag_bits);
     return createStringValue(rt, buffer.items);
 }
 
-fn appendCanonicalRegExpFlags(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), flags: core.JSValue) !void {
-    var raw = std.ArrayList(u8).empty;
-    defer raw.deinit(rt.memory.allocator);
-    try appendValueString(rt, &raw, flags);
-    const order = "dgimsuvy";
-    for (order) |flag| {
-        if (std.mem.indexOfScalar(u8, raw.items, flag) != null) try buffer.append(rt.memory.allocator, flag);
-    }
+fn appendCanonicalRegExpFlags(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), flag_bits: u16) !void {
+    try regexp_adapter.appendCanonicalFlagsFromBits(rt.memory.allocator, buffer, flag_bits);
 }
 
 fn expectRegExpObject(value: core.JSValue) !*core.Object {
@@ -1413,8 +1427,23 @@ fn getInternalSource(object: *core.Object) !core.JSValue {
     return (object.regexpSource() orelse return error.TypeError).dup();
 }
 
-fn getInternalFlags(object: *core.Object) !core.JSValue {
-    return (object.regexpFlags() orelse return error.TypeError).dup();
+fn getInternalFlags(rt: *core.JSRuntime, object: *core.Object) !core.JSValue {
+    return regexp_adapter.flagsStringValueFromBytecode(rt, object.regexpCompiledBytecode());
+}
+
+fn regexpFlagBits(object: *core.Object) !u16 {
+    const bytecode = object.regexpCompiledBytecode();
+    if (bytecode.len == 0) return error.TypeError;
+    return regexp_adapter.flagBitsFromBytecode(bytecode);
+}
+
+fn bytecodeBytesFromValue(rt: *core.JSRuntime, value: core.JSValue) ![]const u8 {
+    const string_value = value.asStringBody() orelse return error.TypeError;
+    try string_value.ensureFlat(rt);
+    return switch (string_value.resolveData()) {
+        .latin1 => |bytes| bytes,
+        .utf16 => error.TypeError,
+    };
 }
 
 fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
@@ -1492,15 +1521,15 @@ fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *c
     }
 }
 
-fn regexpFlagChar(name: []const u8) ?u8 {
-    if (std.mem.eql(u8, name, "global")) return 'g';
-    if (std.mem.eql(u8, name, "ignoreCase")) return 'i';
-    if (std.mem.eql(u8, name, "multiline")) return 'm';
-    if (std.mem.eql(u8, name, "dotAll")) return 's';
-    if (std.mem.eql(u8, name, "unicode")) return 'u';
-    if (std.mem.eql(u8, name, "sticky")) return 'y';
-    if (std.mem.eql(u8, name, "hasIndices")) return 'd';
-    if (std.mem.eql(u8, name, "unicodeSets")) return 'v';
+fn regexpFlagBit(name: []const u8) ?u16 {
+    if (std.mem.eql(u8, name, "global")) return regexp_adapter.flag_bits.global;
+    if (std.mem.eql(u8, name, "ignoreCase")) return regexp_adapter.flag_bits.ignore_case;
+    if (std.mem.eql(u8, name, "multiline")) return regexp_adapter.flag_bits.multiline;
+    if (std.mem.eql(u8, name, "dotAll")) return regexp_adapter.flag_bits.dot_all;
+    if (std.mem.eql(u8, name, "unicode")) return regexp_adapter.flag_bits.unicode;
+    if (std.mem.eql(u8, name, "sticky")) return regexp_adapter.flag_bits.sticky;
+    if (std.mem.eql(u8, name, "hasIndices")) return regexp_adapter.flag_bits.indices;
+    if (std.mem.eql(u8, name, "unicodeSets")) return regexp_adapter.flag_bits.unicode_sets;
     return null;
 }
 

@@ -2037,8 +2037,6 @@ test "regexp state uses payload storage" {
 
     const source = try core.string.String.createAscii(rt, "a+");
     defer source.value().free(rt);
-    const flags = try core.string.String.createAscii(rt, "g");
-    defer flags.value().free(rt);
 
     const regexp = try core.Object.create(rt, core.class.ids.regexp, null);
     defer regexp.value().free(rt);
@@ -2046,12 +2044,12 @@ test "regexp state uses payload storage" {
     try std.testing.expect(regexp.class_payload != null);
     try std.testing.expectEqual(core.class.PayloadKind.regexp, regexp.class_payload_kind);
     regexp.regexpSourceSlot().* = source.value().dup();
-    regexp.regexpFlagsSlot().* = flags.value().dup();
+    try regexp.setRegexpCompiledBytecode(rt, &.{ 1, 2, 3 });
     regexp.regexpLastIndexSlot().* = core.JSValue.int32(3);
     regexp.regexpLastIndexWritableSlot().* = false;
 
     try std.testing.expect(regexp.regexpSource() != null);
-    try std.testing.expect(regexp.regexpFlags() != null);
+    try std.testing.expectEqual(@as(usize, 3), regexp.regexpCompiledBytecode().len);
     try std.testing.expectEqual(@as(?i32, 3), regexp.regexpLastIndex().?.asInt32());
     try std.testing.expect(!regexp.regexpLastIndexWritable());
 }
@@ -5136,7 +5134,7 @@ test "regexp payload self-cycle is released by runtime cycle removal" {
 
     const regexp = try core.Object.create(rt, core.class.ids.regexp, null);
     regexp.regexpSourceSlot().* = regexp.value().dup();
-    regexp.regexpFlagsSlot().* = regexp.value().dup();
+    try regexp.setRegexpCompiledBytecode(rt, &.{ 1, 2, 3 });
     regexp.regexpLastIndexSlot().* = regexp.value().dup();
 
     regexp.value().free(rt);

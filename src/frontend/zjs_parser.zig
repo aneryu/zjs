@@ -5447,7 +5447,11 @@ fn parseRegExpLiteral(s: *ParseState) Error!void {
     s.token = try s.lex.rescanRegexp(slash_offset);
     const pattern = s.token.payload.regexp.pattern;
     const flags = s.token.payload.regexp.flags;
-    if (!regexp_validate.validatePatternAndFlags(pattern, flags)) return Error.InvalidRegExp;
+    var compiled = regexp_validate.compilePatternAndFlags(s.function.memory.allocator, pattern, flags) catch |err| switch (err) {
+        error.OutOfMemory => return Error.OutOfMemory,
+        else => return Error.InvalidRegExp,
+    };
+    defer compiled.deinit(s.function.memory.allocator);
     try emitStringLiteralBytes(s, pattern);
     try emitStringLiteralBytes(s, flags);
     try s.emitOp(opcode.op.regexp);

@@ -31,8 +31,6 @@ const string_ops = @import("string_ops.zig");
 const ActiveRootValueProbe = call_runtime.ActiveRootValueProbe;
 const IteratorZipRecord = iter_vm.IteratorZipRecord;
 const RegExpMatch = string_ops.RegExpMatch;
-const SimpleCaptureSequenceAtom = regexp_fastpath.SimpleCaptureSequenceAtom;
-const SimpleClassPredicate = regexp_fastpath.SimpleClassPredicate;
 const appendAtom = core.atom.appendAtom;
 const atomIdOrNameEql = call_runtime.atomIdOrNameEql;
 const atomListContains = core.atom.atomListContains;
@@ -91,7 +89,6 @@ const qjsObjectEnumerableOwnPropertiesCall = object_ops.qjsObjectEnumerableOwnPr
 const readInt = call_runtime.readInt;
 const sameObjectIdentity = object_ops.sameObjectIdentity;
 const setValueProperty = object_ops.setValueProperty;
-const simpleClassPredicateMatches = string_ops.simpleClassPredicateMatches;
 const slotValueBorrow = slot_ops.slotValueBorrow;
 const stringSliceValue = string_ops.stringSliceValue;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
@@ -455,37 +452,6 @@ pub fn throwRegExpAccessorTypeError(ctx: *core.JSContext, global: *core.Object, 
     } else try exception_ops.createNamedError(ctx, global, "TypeError", "RegExp object expected");
     _ = ctx.throwValue(error_value);
     return error.JSException;
-}
-
-pub fn simpleCaptureAtomsKnownDisjoint(first: SimpleCaptureSequenceAtom, second: SimpleCaptureSequenceAtom) bool {
-    if (first.kind == .literal and second.kind == .literal) return first.literal != second.literal;
-    if (first.kind == .literal and second.kind == .class) return !simpleClassPredicateMatches(second.class_predicate, second.class_source, first.literal);
-    if (first.kind == .class and second.kind == .literal) return !simpleClassPredicateMatches(first.class_predicate, first.class_source, second.literal);
-    if (first.kind != .class or second.kind != .class) return false;
-    return simpleClassPredicatesKnownDisjoint(first.class_predicate, second.class_predicate);
-}
-
-pub fn simpleClassPredicatesKnownDisjoint(first: SimpleClassPredicate, second: SimpleClassPredicate) bool {
-    return switch (first) {
-        .ascii_digit, .ascii_decimal => switch (second) {
-            .ascii_not_digit => true,
-            .ascii_lower, .ascii_alpha => true,
-            else => false,
-        },
-        .ascii_not_digit => switch (second) {
-            .ascii_digit, .ascii_decimal => true,
-            else => false,
-        },
-        .ascii_lower => switch (second) {
-            .ascii_digit, .ascii_decimal => true,
-            else => false,
-        },
-        .ascii_alpha => switch (second) {
-            .ascii_digit, .ascii_decimal => true,
-            else => false,
-        },
-        else => false,
-    };
 }
 
 pub fn createRegExpIndicesArray(rt: *core.JSRuntime, global: *core.Object, input_bytes: []const u8, found: RegExpMatch) !core.JSValue {

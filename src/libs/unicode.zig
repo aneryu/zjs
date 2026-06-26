@@ -1091,12 +1091,13 @@ pub const CharRange = struct {
                 continue;
             }
             var end = read;
-            while (end + 3 < pts.len and pts[end + 2] <= pts[end + 1]) {
-                if (pts[end + 3] > pts[end + 1]) pts[end + 1] = pts[end + 3];
+            var hi = pts[read + 1];
+            while (end + 3 < pts.len and pts[end + 2] <= hi) {
                 end += 2;
+                if (pts[end + 1] > hi) hi = pts[end + 1];
             }
             pts[write] = pts[read];
-            pts[write + 1] = pts[end + 1];
+            pts[write + 1] = hi;
             write += 2;
             read = end + 2;
         }
