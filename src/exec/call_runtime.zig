@@ -1554,14 +1554,18 @@ pub fn constructValueOrBytecodeWithNewTarget(
     if (func.isFunctionBytecode()) {
         const fb = functionBytecodeFromValue(func) orelse return error.TypeError;
         if (fb.is_arrow_function or !fb.has_prototype or fb.func_kind == .generator or fb.func_kind == .async_generator) return error.TypeError;
+        // qjs JS_CallConstructorInternal (quickjs.c:20837): a DERIVED class ctor
+        // allocates NO instance and does NO prototype lookup — `this` stays
+        // uninitialized (TDZ) until super() builds the object via new.target and
+        // binds it. Only base/ordinary ctors get the eager js_create_from_ctor
+        // instance (quickjs.c:20842).
+        if (fb.is_derived_class_constructor) {
+            return try callFunctionBytecodeConstruct(ctx, func, func, core.JSValue.uninitialized(), args, &.{}, output, global, &.{}, &.{}, new_target, core.JSValue.undefinedValue());
+        }
         const instance = try createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
         errdefer instance.free(ctx.runtime);
-        if (!fb.is_derived_class_constructor) {
-            try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, instance, fb, caller_function, caller_frame);
-        }
-        const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
-        const constructor_this = if (fb.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
-        const result = try callFunctionBytecodeConstruct(ctx, func, func, initial_this, args, &.{}, output, global, &.{}, &.{}, new_target, constructor_this);
+        try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, instance, fb, caller_function, caller_frame);
+        const result = try callFunctionBytecodeConstruct(ctx, func, func, instance, args, &.{}, output, global, &.{}, &.{}, new_target, core.JSValue.undefinedValue());
         if (result.isObject()) {
             instance.free(ctx.runtime);
             return result;
@@ -1577,15 +1581,15 @@ pub fn constructValueOrBytecodeWithNewTarget(
             // This is the VM alignment fix for the "not a constructor" bug in top-level class decl in plain .js scripts
             // (the functionObjectFromValue path was not recognizing is_class_constructor and taking the ordinary path,
             // which rejected class ctors or used wrong initial_this for derived/fields init).
+            const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
+            // Derived class ctor: no eager instance / prototype lookup (qjs quickjs.c:20837); see above.
+            if (fb.is_derived_class_constructor) {
+                return try callFunctionBytecodeConstruct(ctx, function_value, func, core.JSValue.uninitialized(), args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNames(), function_object.functionEvalLocalRefs(), new_target, core.JSValue.undefinedValue());
+            }
             const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
             errdefer instance.free(ctx.runtime);
-            if (!fb.is_derived_class_constructor) {
-                try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, instance, fb, caller_function, caller_frame);
-            }
-            const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-            const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
-            const constructor_this = if (fb.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
-            const result = try callFunctionBytecodeConstruct(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNames(), function_object.functionEvalLocalRefs(), new_target, constructor_this);
+            try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, instance, fb, caller_function, caller_frame);
+            const result = try callFunctionBytecodeConstruct(ctx, function_value, func, instance, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNames(), function_object.functionEvalLocalRefs(), new_target, core.JSValue.undefinedValue());
             if (result.isObject()) {
                 instance.free(ctx.runtime);
                 return result;
