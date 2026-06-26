@@ -2741,6 +2741,105 @@ pub fn appendIteratorValues(
     return index;
 }
 
+/// Spread / rest append (`[...src]`, `f(...src)`), faithful to qjs
+/// `js_append_enumerate` (quickjs.c:16814). Always resolves `src[@@iterator]`
+/// and constructs the iterator, then takes the dense bulk copy ONLY when the
+/// Array iterator protocol is un-tampered: the constructed iterator is a default
+/// Array Iterator of `value` kind whose `next` is the builtin
+/// `js_array_iterator_next`, and its target is a hole-free fast array
+/// (`length == count`). Otherwise it steps the iterator through the generic
+/// protocol. The previous fast path keyed only on `flags.is_array`, so it
+/// silently ignored a user-overridden `src[Symbol.iterator]` or a patched
+/// `%ArrayIteratorPrototype%.next` (observably wrong vs spec AND qjs).
+///
+/// Reading densely from the *iterator's* current target (not from `src`) is the
+/// established faithful pattern of `fastArrayForOfNext` and stays correct even
+/// when `@@iterator` was repointed to another array's (possibly partially
+/// consumed) iterator — qjs reaches the same result via its `general_case`.
+pub fn appendSpreadValuesEnumerate(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    target: *core.Object,
+    source_value: core.JSValue,
+    start_index: i32,
+) !i32 {
+    const rt = ctx.runtime;
+    const source_object = property_ops.expectObject(source_value) catch null;
+
+    // Generators / async-generators ARE iterators (their @@iterator returns
+    // self); the generic helper handles them exactly as qjs's GetIterator does.
+    if (source_object) |so| {
+        if (so.class_id == core.class.ids.generator or so.class_id == core.class.ids.async_generator) {
+            return appendIteratorValues(ctx, output, global, target, source_value, start_index);
+        }
+    }
+
+    // iterator method = GetProperty(src, @@iterator)  (qjs quickjs.c:16834)
+    const iterator_method = try getIteratorMethod(ctx, output, global, source_value);
+    defer iterator_method.free(rt);
+    if (!isCallableValue(iterator_method)) {
+        _ = exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable") catch |err| return err;
+        return error.TypeError;
+    }
+
+    // enumobj = src[@@iterator]()  (qjs GetIterator, quickjs.c:16843)
+    const iterator_value = try callValueOrBytecode(ctx, output, global, source_value, iterator_method, &.{}, null, null);
+    defer iterator_value.free(rt);
+    const iterator = property_ops.expectObject(iterator_value) catch return error.TypeError;
+
+    // next = GetProperty(enumobj, "next")  (qjs quickjs.c:16846)
+    const next_method = blk: {
+        if (iterator.cachedIteratorNext(rt)) |stored| break :blk stored.dup();
+        const next_key = try rt.internAtom("next");
+        defer rt.atoms.free(next_key);
+        break :blk try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
+    };
+    defer next_method.free(rt);
+    if (!isCallableValue(next_method)) return error.TypeError;
+
+    var index = start_index;
+
+    // Fast path (qjs quickjs.c:16855-16866): default Array Iterator (value kind)
+    // + builtin `next` + hole-free fast-array target (`length == count`).
+    fast: {
+        const next_obj = object_ops.objectFromValue(next_method) orelse break :fast;
+        if (!next_obj.isArrayIteratorNextFunction()) break :fast;
+        if (iterator.class_id != core.class.ids.array_iterator) break :fast;
+        if (iterator.iteratorKindSlot().* != 2) break :fast; // 2 == ArrayIteratorKind.value
+        const target_value = (iterator.iteratorTargetSlot().*) orelse break :fast;
+        const target_obj = object_ops.objectFromValue(target_value) orelse break :fast;
+        if (!target_obj.flags.is_array or target_obj.hasExoticMethods() or target_obj.proxyTarget() != null) break :fast;
+        const elements = target_obj.arrayElements(); // len == array_count
+        const length: usize = @intCast(target_obj.arrayLength());
+        if (length != elements.len) break :fast; // qjs: len != count32 -> general_case
+        const cursor = iterator.iteratorIndexSlot().*;
+        if (cursor > elements.len) break :fast;
+        var i: usize = cursor;
+        while (i < elements.len) : (i += 1) {
+            const item = elements[i].dup();
+            defer item.free(rt);
+            try property_ops.defineDataProperty(rt, target, core.atom.atomFromUInt32(@intCast(index)), item);
+            index += 1;
+        }
+        iterator.iteratorIndexSlot().* = elements.len; // exhaust, matching a full drain
+        return index;
+    }
+
+    // General case (qjs quickjs.c:16868): step the constructed iterator.
+    while (true) {
+        const step = try iteratorStepValue(ctx, output, global, iterator_value);
+        if (step.done) {
+            step.value.free(rt);
+            break;
+        }
+        try property_ops.defineDataProperty(rt, target, core.atom.atomFromUInt32(@intCast(index)), step.value);
+        step.value.free(rt);
+        index += 1;
+    }
+    return index;
+}
+
 pub fn iteratorStepValue(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,

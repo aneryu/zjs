@@ -321,23 +321,12 @@ pub fn appendSpreadValues(
     const array_value = stack.peek() orelse return error.StackUnderflow;
     defer array_value.free(ctx.runtime);
     const array = try property_ops.expectObject(array_value);
-    var out_index = index.asInt32() orelse 0;
-    const source = property_ops.expectObject(iterable) catch null;
-    if (source) |source_object| {
-        if (source_object.flags.is_array) {
-            var source_index: u32 = 0;
-            while (source_index < source_object.arrayLength()) : (source_index += 1) {
-                const item = source_object.getProperty(core.atom.atomFromUInt32(source_index));
-                defer item.free(ctx.runtime);
-                try property_ops.defineDataProperty(ctx.runtime, array, core.atom.atomFromUInt32(@intCast(out_index)), item);
-                out_index += 1;
-            }
-        } else {
-            out_index = try call_runtime.appendIteratorValues(ctx, output, global, array, iterable, out_index);
-        }
-    } else {
-        out_index = try call_runtime.appendIteratorValues(ctx, output, global, array, iterable, out_index);
-    }
+    const start_index = index.asInt32() orelse 0;
+    // Faithful to qjs js_append_enumerate (quickjs.c:16814): resolve @@iterator
+    // and create the iterator, taking the dense bulk copy ONLY when the Array
+    // iterator protocol is un-tampered. The former `is_array`-only fast path
+    // silently ignored a user-patched src[Symbol.iterator] / %ArrayIteratorPrototype%.next.
+    const out_index = try call_runtime.appendSpreadValuesEnumerate(ctx, output, global, array, iterable, start_index);
     try stack.pushOwned(core.JSValue.int32(out_index));
 }
 
