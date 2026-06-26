@@ -105,7 +105,11 @@ Phase 3  叶子：GC-无关忠实对齐 + 余下赢回退 + global-var 稳定 ce
       ctor_this=undefined)`,不建实例不查原型——qjs `JS_CallConstructorInternal` 20837;base 保留急切 `js_create_from_ctor` 20842。
       受控实验证急切实例非 load-bearing(super() 用 new.target 在 base 建)。**bonus 修预存双读**:`Reflect.construct` + getter 原型 2→1。
       门禁 0/49775+1227+force-GC+10 baseline+9 边界。dispatch 2 孪生站点(7058/7082)留后续)。
-- [ ] **C3** generator resume throwaway slab + per-step `{value,done}`（call-adjacent,zjs_vm.zig:609-643;碰共享 `runWithArgsState`）。
+- [x] **C3 slice A** generator resume throwaway slab → ✅ **DONE 2026-06-26**（`runWithArgsState` 对已启动 resume 跳 slab+init
+      块,gate `is_started_resume and !need_original_args`;qjs 帧创建时一次性分配、resume 直接续 `JS_CALL_FLAG_GENERATOR` 17790。
+      **门禁抓到回归**:initArguments 还重建 unmapped `arguments` 快照 `original_args` + 设 `actual_arg_count`,首版漏 → 59 个
+      arguments-object 回归 → 修(need_original_args 走全路径 + skip 路径补 actual_arg_count)。perf 1M resume 11.13B→10.62B(~4.6%)。
+      门禁 0/49775+1227+force-GC+13 gen+7 args。**slice B(result-obj-free for-of step)留后续**）。
 
 ### Phase 3 — 叶子（GC-无关忠实对齐 + 赢回退 + 大杠杆）
 

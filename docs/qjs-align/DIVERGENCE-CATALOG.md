@@ -31,7 +31,7 @@ is safe to build on.**
 |---|---|---|---|---|---|
 | 1 | **C2 — derived-class construct: drop eager `this`-instance + prototype lookup** → ✅ **SHIPPED 2026-06-26** | DONE | med/med | call_runtime.zig:1556-1571 + 1585-1600 (derived early-returns `callFunctionBytecodeConstruct(this=uninitialized, ctor_this=undefined)`; base keeps the eager `createConstructorInstance`); dispatch twins at 7058/7082 left for a follow-up (correct, not yet skipped) | quickjs.c:20837-20838 (derived: `JS_CallInternal(func,JS_UNDEFINED,new_target)` — NO `js_create_from_ctor`) vs 20842 (base: eager); `js_create_from_ctor` 20783 |
 | 2 | **S2 — spread/rest fast path missing iterator-override guard** ⚠️ **CORRECTNESS BUG → ✅ SHIPPED 2026-06-26** | DONE | med/low | NEW `call_runtime.appendSpreadValuesEnumerate` (vm_literal.zig:323-330 now delegates); reused `arrayIteratorKind`/`isArrayIteratorNextFunction`/`iteratorTargetSlot` (the `fastArrayForOfNext` pattern) | quickjs.c:16814 `js_append_enumerate` (resolve @@iterator + construct iterator; dense copy only when default Array Iterator value-kind + builtin `next` + fast-array + **`len==count`**, else `general_case`) |
-| 3 | **C3 — generator/async resume throwaway slab + per-step `{value,done}`** | DO_NEXT | med/med | zjs_vm.zig:609-643 (started resume STILL allocs fresh slab) + vm_gen_async.zig:157-173 (immediate release+swap = pure round-trip); generic forOfNext builds+discards result obj iterator_ops.zig:592-635,2417-2424 + call_runtime.zig:5315; analog `fastMapSetForOfNext` iterator_ops.zig:706-745 | quickjs.c:17790-17810 (`JS_CALL_FLAG_GENERATOR` early-out: frame already allocated, ZERO per-resume alloc) + 20906 (`async_func_init` allocs frame ONCE) + 16554-16571 (`JS_IteratorNext2` skips intermediate result obj) |
+| 3 | **C3 — generator/async resume throwaway slab** (slice A) → ✅ **SHIPPED 2026-06-26** · slice B (per-step `{value,done}`) deferred | A DONE | med/med | zjs_vm.zig:617-676 (started resume now skips the slab+init block, gated `is_started_resume and !need_original_args`); vm_gen_async.zig:157-173 (preserved-buffer swap unchanged); slice B anchors iterator_ops.zig:592-635 + analog `fastMapSetForOfNext` 706-745 | quickjs.c:17790-17810 (`JS_CALL_FLAG_GENERATOR` early-out: frame already allocated, ZERO per-resume alloc) + 20906 (`async_func_init` allocs frame ONCE) + 16554-16571 (`JS_IteratorNext2`, slice B) |
 | 4 | F3-residual — `qjsArraySearchCall` indexOf/includes density gate `count==length` skips dense prefix for holey-fast arrays | BACKLOG | low/low | string_ops.zig:4304-4319 (requires `arrayElements().len==length`); contrast faithful two-phase `indexSearch` builtins/array.zig:821-845 | quickjs.c:42426-42446 / 42476-42496 (scan dense `[n,count)` then generic `[count,len)`, NO count==len gate) |
 | 5 | B1 — compile-time `parent_has_eval` flag (lower per-access parent-eval-shadow runtime guard to a Bytecode flag) | BACKLOG | low/med | vm_property.zig:1067 `frameClosureHasEvalParent` (4-5-load header chase paid by ALL global accesses) + vm_property_globals.zig:120; fast-lane sites zjs_vm.zig:1728,1779; flag → bytecode/function.zig:102 `Flags.reserved:u3`, set in pipeline/finalize.zig:111 | quickjs.c:33158 (`var_object_test` emitted ONLY if `var_object_idx>=0`, COMPILE-TIME) + 36064 (`add_eval_variables` only if `fd->has_eval_call`) |
 | 6 | L1 — string-wrapper exotic `[[OwnPropertyKeys]]` (lazy synthetic index keys vs materialize N char props) | BACKLOG | low/med | object_ops.zig:3101-3104 (materialization loop); read-side gaps objectRestOwnKeys 2151-2161, findPropertyDescriptor 3991-3995; in-repo template `typedArrayOwnKeys` array_ops.zig:5035 | quickjs.c:8757-8769 (`JS_GetOwnPropertyNamesInternal` synthesizes index atoms) + `js_string_get_own_property` 45178 |
@@ -78,6 +78,29 @@ edge cases (native Array/Error inheritance, private fields, nested arrow-super, 
 multi-instance), `zig build test` 1227, **test262 `0/49775` (6 known, clean rebuild)**, force-GC 1227.
 Follow-up: the 2 dispatch twins (`qjsReflectConstructGenericCallable` 7058/7082) still allocate the
 discarded instance for derived (correct, just not yet optimized — needs upstream `prototype`-ownership care).
+
+### ✅ C3 slice A — generator resume throwaway slab, SHIPPED 2026-06-26
+**Was:** a STARTED generator/async resume (generatorPc() != 0) ran the full `runWithArgsState` frame
+setup — heap-alloc a fresh slab + initFrameLocals + initArguments(re-dup args) + initFrameVarRefs — then
+`resumeExecutionStateRaw` (vm_gen_async.zig:157-173) immediately freed all of it and swapped in the
+generator's PRESERVED buffers. Pure alloc+dup+free round-trip per resume step.
+
+**Fix:** `runWithArgsState` skips the whole slab+init block when `is_started_resume and !need_original_args`;
+the frame's storage/locals/args/var_refs stay empty defaults until resumeExecutionStateRaw installs the
+preserved buffers. First creation (pc == 0) still builds the slab (it becomes the generator's frame). qjs
+allocates the generator frame ONCE at creation and resumes on it (`JS_CALL_FLAG_GENERATOR`, quickjs.c:17790).
+
+**Gate caught a regression the hand-tests + a read-only mapping agent missed** (lesson: full test262 is the
+oracle for frame-lifetime changes): `initArguments` has TWO resume-relevant side effects beyond filling the
+(replaced) frame.args — it rebuilds `original_args` (the UNMAPPED `arguments` snapshot, NOT preserved in the
+generator) and sets `actual_arg_count` (read by the MAPPED `arguments`). First attempt skipped both →
+**59 `language/arguments-object/*gen-meth*` regressions** (`arguments.length == 0`). Fix: gate on
+`!need_original_args` so snapshot-needing generators (strict / non-simple params) keep the full path, and set
+`frame.actual_arg_count = args.len` on the skip path (byte-identical to initArguments, same `args`). Re-gate
+clean. **Perf:** generator-resume bench (1M resumes) 11.13B → 10.62B instructions (~4.6%, ~512 insns/resume).
+Gate: 13 generator + 7 arguments-object hand cases, `zig build test` 1227, **test262 `0/49775` (6 known)**,
+force-GC 1227. **Slice B (result-object-free for-of step, analog `fastMapSetForOfNext`) deferred** — touches
+the generator `next`/createIteratorResult return path.
 
 ### Stale-doc corrections (supersede where they conflict)
 - **F1/F2 (value-refcount+GC, property/shape kind) ALREADY_DONE & faithful** at HEAD — any checkbox treating L2's 16B untagged slot or its refcount/teardown as open is stale.
