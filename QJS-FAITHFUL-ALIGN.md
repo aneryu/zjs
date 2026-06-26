@@ -109,8 +109,10 @@ Phase 3  叶子：GC-无关忠实对齐 + 余下赢回退 + global-var 稳定 ce
       块,gate `is_started_resume and !need_original_args`;qjs 帧创建时一次性分配、resume 直接续 `JS_CALL_FLAG_GENERATOR` 17790。
       **门禁抓到回归**:initArguments 还重建 unmapped `arguments` 快照 `original_args` + 设 `actual_arg_count`,首版漏 → 59 个
       arguments-object 回归 → 修(need_original_args 走全路径 + skip 路径补 actual_arg_count)。perf 1M resume 11.13B→10.62B(~4.6%)。
-      门禁 0/49775+1227+force-GC+13 gen+7 args。**slice B(result-obj-free for-of step)调查后 DEFER**:audit 的「fastMapSetForOfNext 快速类比」
-      过于乐观——generator next 无 builtin 检测基建(name-cascade dispatch call_runtime.zig:733-742)、须重构中央 `qjsGeneratorNext`(yield\*/async/done/throw 边角 + 双路径分叉)、回报仅每步省一个小对象;为边际收益强推中央路径重构不符纪律,留专门 pass）。
+      门禁 0/49775+1227+force-GC+13 gen+7 args。
+- [x] **C3 slice B** result-obj-free for-of step → ✅ **DONE 2026-06-26**（`fastGeneratorForOfNext` + `qjsSyncGeneratorStep`(并行不改中央 `qjsGeneratorNext`)
+      + per-instance-next flag。**关键发现**:zjs 给每个 generator 实例 own `next`/`return`/`slice`(object_ops.zig:2483,`it.next !== %GeneratorProto%.next`)→ flag 必须放实例 next(放 prototype 上 fast path 永不触发、perf 反升);移到实例 next 后 **3.7×**(10.62B→2.85B)——远超「省一个对象」,因为还跳过整条 `next()` 调用机制 + name-cascade,正是 qjs `JS_IteratorNext2`(16548)。覆写 `gen.next` → 非 flag → bail。门禁 0/49775+1227+force-GC+for-of override/break/yield*/throw 手测。
+      **邻近发现(独立切片)**:generator 实例急切分配 3 个 own 原生函数含一个伪 `slice`——非忠实(qjs 继承自 %GeneratorProto%、无 own、无 slice),浪费 + slice 几乎确定是遗留 bug）。
 
 ### Phase 3 — 叶子（GC-无关忠实对齐 + 赢回退 + 大杠杆）
 

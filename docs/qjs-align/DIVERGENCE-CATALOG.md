@@ -31,7 +31,7 @@ is safe to build on.**
 |---|---|---|---|---|---|
 | 1 | **C2 — derived-class construct: drop eager `this`-instance + prototype lookup** → ✅ **SHIPPED 2026-06-26** | DONE | med/med | call_runtime.zig:1556-1571 + 1585-1600 (derived early-returns `callFunctionBytecodeConstruct(this=uninitialized, ctor_this=undefined)`; base keeps the eager `createConstructorInstance`); dispatch twins at 7058/7082 left for a follow-up (correct, not yet skipped) | quickjs.c:20837-20838 (derived: `JS_CallInternal(func,JS_UNDEFINED,new_target)` — NO `js_create_from_ctor`) vs 20842 (base: eager); `js_create_from_ctor` 20783 |
 | 2 | **S2 — spread/rest fast path missing iterator-override guard** ⚠️ **CORRECTNESS BUG → ✅ SHIPPED 2026-06-26** | DONE | med/low | NEW `call_runtime.appendSpreadValuesEnumerate` (vm_literal.zig:323-330 now delegates); reused `arrayIteratorKind`/`isArrayIteratorNextFunction`/`iteratorTargetSlot` (the `fastArrayForOfNext` pattern) | quickjs.c:16814 `js_append_enumerate` (resolve @@iterator + construct iterator; dense copy only when default Array Iterator value-kind + builtin `next` + fast-array + **`len==count`**, else `general_case`) |
-| 3 | **C3 — generator/async resume throwaway slab** (slice A) → ✅ **SHIPPED 2026-06-26** · slice B (per-step `{value,done}`) deferred | A DONE | med/med | zjs_vm.zig:617-676 (started resume now skips the slab+init block, gated `is_started_resume and !need_original_args`); vm_gen_async.zig:157-173 (preserved-buffer swap unchanged); slice B anchors iterator_ops.zig:592-635 + analog `fastMapSetForOfNext` 706-745 | quickjs.c:17790-17810 (`JS_CALL_FLAG_GENERATOR` early-out: frame already allocated, ZERO per-resume alloc) + 20906 (`async_func_init` allocs frame ONCE) + 16554-16571 (`JS_IteratorNext2`, slice B) |
+| 3 | **C3 — generator throwaway slab (A) + result-object-free for-of step (B)** → ✅ **BOTH SHIPPED 2026-06-26** | A+B DONE | med→**high** / med | A: zjs_vm.zig:617-676 (started resume skips slab+init). B: `fastGeneratorForOfNext` iterator_ops.zig + `qjsSyncGeneratorStep` call_runtime.zig + per-instance-next flag object_ops.zig:2483 | quickjs.c:17790-17810 (`JS_CALL_FLAG_GENERATOR`, slice A) + 16548-16571 (`JS_IteratorNext2` builtin fast path, slice B) |
 | 4 | F3-residual — `qjsArraySearchCall` indexOf/includes density gate `count==length` skips dense prefix for holey-fast arrays | BACKLOG | low/low | string_ops.zig:4304-4319 (requires `arrayElements().len==length`); contrast faithful two-phase `indexSearch` builtins/array.zig:821-845 | quickjs.c:42426-42446 / 42476-42496 (scan dense `[n,count)` then generic `[count,len)`, NO count==len gate) |
 | 5 | B1 — compile-time `parent_has_eval` flag (lower per-access parent-eval-shadow runtime guard to a Bytecode flag) | BACKLOG | low/med | vm_property.zig:1067 `frameClosureHasEvalParent` (4-5-load header chase paid by ALL global accesses) + vm_property_globals.zig:120; fast-lane sites zjs_vm.zig:1728,1779; flag → bytecode/function.zig:102 `Flags.reserved:u3`, set in pipeline/finalize.zig:111 | quickjs.c:33158 (`var_object_test` emitted ONLY if `var_object_idx>=0`, COMPILE-TIME) + 36064 (`add_eval_variables` only if `fd->has_eval_call`) |
 | 6 | L1 — string-wrapper exotic `[[OwnPropertyKeys]]` (lazy synthetic index keys vs materialize N char props) | BACKLOG | low/med | object_ops.zig:3101-3104 (materialization loop); read-side gaps objectRestOwnKeys 2151-2161, findPropertyDescriptor 3991-3995; in-repo template `typedArrayOwnKeys` array_ops.zig:5035 | quickjs.c:8757-8769 (`JS_GetOwnPropertyNamesInternal` synthesizes index atoms) + `js_string_get_own_property` 45178 |
@@ -101,21 +101,31 @@ clean. **Perf:** generator-resume bench (1M resumes) 11.13B → 10.62B instructi
 Gate: 13 generator + 7 arguments-object hand cases, `zig build test` 1227, **test262 `0/49775` (6 known)**,
 force-GC 1227.
 
-**Slice B (result-object-free for-of step) — DEFERRED after investigation; the audit's "quick analog to
-`fastMapSetForOfNext`" framing was optimistic.** Three findings make it materially bigger/riskier than slice A:
-(1) **No builtin-next detection infra for generators.** array/Map/Set fast paths key off a flag/id
-(`isArrayIteratorNextFunction`, `decodeNativeBuiltinId(.collection, iterator_next)`), but the generator `next`
-is a NAME-cascade dispatch (call_runtime.zig:733-742: AsyncFromSync → IteratorHelper → Wrap → Generator →
-RegExp → Array, tried in order) with no clean "is the pristine generator next" predicate — slice B must add one.
-(2) **Must refactor the CENTRAL `qjsGeneratorNext`.** Unlike Map/Set (cursor advance, no user code), each
-generator step RUNS user bytecode; the only thing skippable is the trailing `createIteratorResult`. Removing it
-means splitting/duplicating `qjsGeneratorNext` (shared by `.next()`, for-of, spread, destructuring, yield*) with
-delicate edge cases — **yield\*** (result is ALREADY an iterator-result object, returned as-is at
-call_runtime.zig:5413-5417), **async generators** (promise), done/throw/return — a dual-path divergence hazard.
-(3) **Marginal reward**: one 2-property `{value,done}` object per for-of step (the generator bytecode execution
-dominates). Per the program's discipline (correctness red line + no messy divergence + don't force a risky
-central-path refactor for a local win), slice B is left for a dedicated, carefully-scoped future pass — NOT a
-quick follow-on. Slice A already captured the main C3 win.
+**Slice B (result-object-free for-of step) — SHIPPED 2026-06-26.** The going-in fear (bigger/riskier than A)
+held on shape but the win turned out **much larger** than "skip one object". Implementation:
+- **Detection infra** (added): no `.generator` native-builtin domain exists and the generator `next` is a
+  NAME-cascade dispatch (call_runtime.zig:733-742). Added a `generator_next` flag (object.zig, analog
+  `array_iterator_next`). **KEY discovery**: zjs gives each generator instance its OWN `next`/`return`/`slice`
+  via `defineValueProperty` (object_ops.zig:2483-2491) — `it.next !== %GeneratorPrototype%.next` — so the flag
+  must go on the per-instance `next` (createGeneratorObject), NOT the prototype `next` (which the own prop
+  shadows and which for-of never resolves). First flagged the prototype → fast path silently never triggered
+  (perf got WORSE, 10.62B→10.94B); moving the flag to the per-instance next fixed it.
+- **`qjsSyncGeneratorStep`** (call_runtime.zig): a parallel sync-generator step returning raw `(value, done)`
+  with NO `createIteratorResult` object; unwraps the yield\*-passthrough case internally (done-then-conditional-
+  value reads). Kept SEPARATE from the hot `qjsGeneratorNext` (untouched; both covered by test262).
+- **`fastGeneratorForOfNext`** (iterator_ops.zig, wired into `forOfNext` after the Map/Set fast path): for a
+  pristine sync-generator iterator, resume one step + push value/done straight onto the stack. All bails are
+  BEFORE the resume (no double-advance). Overridden `gen.next` → unflagged → bails to generic.
+- **Win = 3.7×** (for-of-over-generator bench 10.62B → **2.85B** instructions), far beyond "one object" because
+  the fast step ALSO skips the whole `next()` call machinery + name-cascade dispatch — exactly what qjs
+  `JS_IteratorNext2` does for builtin iterators (quickjs.c:16548). Gate: 13 generator + 7 args + for-of
+  override/break/yield\*/throw/spread/destructure hand cases, `zig build test` 1227, **test262 `0/49775`
+  (6 known)**, force-GC 1227.
+
+> **Adjacent finding (separate future slice):** each generator instance eagerly allocates 3 own native
+> functions — `next`, `return`, and a bogus **`slice`** (object_ops.zig:2483-2491) — a non-faithful divergence
+> (qjs generators inherit next/return/throw from %GeneratorPrototype%, have no own copies and certainly no
+> `slice`). Wasteful per-creation + the `slice` is almost certainly a leftover bug.
 
 ### Stale-doc corrections (supersede where they conflict)
 - **F1/F2 (value-refcount+GC, property/shape kind) ALREADY_DONE & faithful** at HEAD — any checkbox treating L2's 16B untagged slot or its refcount/teardown as open is stale.
