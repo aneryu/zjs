@@ -361,7 +361,6 @@ pub fn updateLocal(
     frame: *frame_mod.Frame,
     opcode_id: u8,
     output: ?*std.Io.Writer,
-    sync_global_lexical_locals: bool,
 ) !void {
     if (frame.pc >= function.code.len) return error.InvalidBytecode;
     const idx: u16 = function.code[frame.pc];
@@ -377,7 +376,6 @@ pub fn updateLocal(
             else => unreachable,
         };
         try slot_ops.setSlotValue(ctx, &frame.locals[idx], updated);
-        try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         return;
     }
     if (value.asShortBigInt()) |bigint_value| {
@@ -388,7 +386,6 @@ pub fn updateLocal(
         };
         if (value_ops.shortBigIntUnary(op_id, bigint_value)) |updated| {
             try slot_ops.setSlotValue(ctx, &frame.locals[idx], updated);
-            try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
             return;
         }
     }
@@ -402,7 +399,6 @@ pub fn updateLocal(
     };
     const updated = try value_ops.unary(ctx.runtime, op_id, primitive);
     try slot_ops.setSlotValue(ctx, &frame.locals[idx], updated);
-    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
 }
 
 pub noinline fn updateLocalVm(
@@ -414,9 +410,8 @@ pub noinline fn updateLocalVm(
     catch_target: *?usize,
     opcode_id: u8,
     output: ?*std.Io.Writer,
-    sync_global_lexical_locals: bool,
 ) !Step {
-    updateLocal(ctx, function, global, frame, opcode_id, output, sync_global_lexical_locals) catch |err| {
+    updateLocal(ctx, function, global, frame, opcode_id, output) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
@@ -430,7 +425,6 @@ pub fn addLocal(
     global: *core.Object,
     frame: *frame_mod.Frame,
     output: ?*std.Io.Writer,
-    sync_global_lexical_locals: bool,
 ) !void {
     if (frame.pc >= function.code.len) return error.InvalidBytecode;
     const idx: u16 = function.code[frame.pc];
@@ -451,19 +445,12 @@ pub fn addLocal(
 
         // QuickJS OP_add_loc appends into the local's string storage when the
         // accumulator is unshared. Reference accounting: the local slot plus
-        // our dup hold two references, and a
-        // synced top-level global-lexical mirror may hold a third reference to
-        // the same accumulator. This keeps `s += part` loops on a flat
-        // growable buffer instead of chaining rope nodes per iteration.
+        // our dup hold exactly two references to the accumulator (the retired
+        // global-lexical mirror could once hold a third — that branch is gone).
+        // This keeps `s += part` loops on a flat growable buffer instead of
+        // chaining rope nodes per iteration.
         if (cell_opt == null and rhs_primitive.isString()) {
-            const has_global_sync_mirror =
-                sync_global_lexical_locals and
-                frame.globalLexicalSyncChecked() and
-                idx < frame.globalLexicalSyncSlots().len and
-                frame.globalLexicalSyncSlots()[idx];
-            const max_ref_count: usize = if (has_global_sync_mirror) 3 else 2;
-            if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs_primitive, max_ref_count)) {
-                try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+            if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs_primitive, 2)) {
                 return;
             }
         }
@@ -471,7 +458,6 @@ pub fn addLocal(
         const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs_primitive);
 
         try slot_ops.setSlotValue(ctx, &frame.locals[idx], updated);
-        try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         return;
     }
 
@@ -481,7 +467,6 @@ pub fn addLocal(
         if (rhs.asInt32()) |rhs_int| {
             const updated = fastInt32Add(lhs_int, rhs_int);
             try slot_ops.setSlotValue(ctx, &frame.locals[idx], updated);
-            try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
             return;
         }
     }
@@ -489,7 +474,6 @@ pub fn addLocal(
         if (rhs.asShortBigInt()) |rhs_bigint| {
             if (value_ops.shortBigIntBinary(op.add, lhs_bigint, rhs_bigint)) |updated| {
                 try slot_ops.setSlotValue(ctx, &frame.locals[idx], updated);
-                try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
                 return;
             }
         }
@@ -501,7 +485,6 @@ pub fn addLocal(
     defer rhs_primitive.free(ctx.runtime);
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs_primitive, rhs_primitive);
     try slot_ops.setSlotValue(ctx, &frame.locals[idx], updated);
-    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
 }
 
 pub noinline fn addLocalVm(
@@ -512,9 +495,8 @@ pub noinline fn addLocalVm(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     output: ?*std.Io.Writer,
-    sync_global_lexical_locals: bool,
 ) !Step {
-    addLocal(ctx, stack, function, global, frame, output, sync_global_lexical_locals) catch |err| {
+    addLocal(ctx, stack, function, global, frame, output) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };

@@ -162,10 +162,6 @@ fn resumeExecutionStateRaw(
     frame.var_refs = generator.generatorFrameVarRefs();
     if (frame.cold) |c| {
         c.original_args = &.{};
-        c.global_lexical_sync_slots = &.{};
-        c.global_lexical_sync_indices = &.{};
-        c.global_lexical_sync_env = null;
-        c.global_lexical_sync_checked = false;
     }
     generator.generatorFrameStorageSlot().* = &.{};
     generator.generatorFrameLocalsSlot().* = &.{};

@@ -12652,7 +12652,15 @@ fn findCurrentScopeVar(s: *ParseState, atom_id: Atom) ?u16 {
 fn findCurrentTopLevelLexicalClosureVar(s: *ParseState, atom_id: Atom) ?u16 {
     if (s.scope_level != 0) return null;
     for (s.cur_func().closure_var, 0..) |cv, idx| {
-        if (cv.var_name == atom_id and cv.closure_type == .module_decl and cv.is_lexical) {
+        // A scope-0 lexical cell — `.module_decl` (module top-level let/const/class)
+        // OR `.global_decl` (script top-level let/const/class, qjs
+        // JS_CLOSURE_GLOBAL_DECL). The class redeclaration gate must reject a
+        // second top-level class that collides with EITHER (matches qjs
+        // "invalid redefinition of lexical identifier"; required since a script
+        // top-level class is now a `.global_decl` cell, not a frame scope var).
+        if (cv.var_name == atom_id and cv.is_lexical and
+            (cv.closure_type == .module_decl or cv.closure_type == .global_decl))
+        {
             return @intCast(idx);
         }
     }
@@ -15199,9 +15207,24 @@ fn parseClass(s: *ParseState, is_decl: bool) Error!void {
     var top_level_class_ref_idx: ?u16 = null;
     if (is_decl) {
         const class_atom = class_name orelse return Error.UnexpectedToken;
-        const class_decl_is_const = s.scope_level == 0 and s.top_level_lexical_as_module_ref;
-        class_decl_local_idx = @intCast(try s.addScopeVar(class_atom, .normal, true, class_decl_is_const));
-        try s.retrofitForwardLocalFunctionCapture(s.cur_func(), class_atom, class_decl_local_idx.?);
+        // Script-mode top-level class declaration → single global VarRef cell
+        // (qjs JS_CLOSURE_GLOBAL_DECL): mirrors the let/const handler at the
+        // `top_level_lexical_as_global_ref` predicate (~zjs_parser.zig:9562).
+        // The class OUTER binding routes to a `.global_decl` closure var with NO
+        // frame slot (no addScopeVar) — exactly like top-level let/const — so it
+        // does NOT become a scope-0 frame-local lexical that the now-removed
+        // `global_lexical_sync_*` mirror would have had to keep in step with the
+        // global env property. `<class_fields_init>` and the inner class-scope
+        // binding STAY frame-locals. qjs makes a top-level class a global cell
+        // (js_parse_class → define_var(JS_VAR_DEF_LET) → add_global_var +
+        // is_lexical, quickjs.c:24362-24372); no frame slot.
+        const script_top_level_class_cell = s.top_level_lexical_as_global_ref and
+            s.scope_level == 0 and s.cur_func_stack.len == 0 and !s.is_eval;
+        if (!script_top_level_class_cell) {
+            const class_decl_is_const = s.scope_level == 0 and s.top_level_lexical_as_module_ref;
+            class_decl_local_idx = @intCast(try s.addScopeVar(class_atom, .normal, true, class_decl_is_const));
+            try s.retrofitForwardLocalFunctionCapture(s.cur_func(), class_atom, class_decl_local_idx.?);
+        }
         class_fields_init_local_idx = @intCast(try s.addScopeVar(120, .normal, true, true)); // <class_fields_init>
         s.cur_func().vars[class_fields_init_local_idx.?].tdz_emitted_at_decl = true;
         if (s.scope_level == 0) {
@@ -15215,6 +15238,21 @@ fn parseClass(s: *ParseState, is_decl: bool) Error!void {
                     .var_name = class_atom,
                 }));
                 try s.retrofitForwardTopLevelModuleCapture(s.cur_func(), class_atom, top_level_class_ref_idx.?, true, false, .normal);
+            } else if (script_top_level_class_cell) {
+                // Script top-level class → `.global_decl` cell (qjs JS_CLOSURE_GLOBAL_DECL,
+                // a JS_VAR_DEF_LET binding, non-const). The cell is materialised by
+                // addGlobalVar's global_vars entry at instantiation, exactly as
+                // top-level let/const (~zjs_parser.zig:9568-9584).
+                top_level_class_ref_idx = @intCast(try s.cur_func().addClosureVar(.{
+                    .closure_type = .global_decl,
+                    .is_lexical = true,
+                    .is_const = false,
+                    .var_kind = .normal,
+                    .var_idx = @intCast(s.cur_func().closure_var.len),
+                    .var_name = class_atom,
+                }));
+                try s.retrofitForwardTopLevelModuleCapture(s.cur_func(), class_atom, top_level_class_ref_idx.?, true, false, .normal);
+                try s.addGlobalVar(class_atom, true, false);
             } else if (s.cur_func_stack.len == 0 and !s.is_eval) {
                 try s.addGlobalVar(class_atom, true, false);
             }
@@ -15351,6 +15389,17 @@ fn parseClass(s: *ParseState, is_decl: bool) Error!void {
         if (class_decl_local_idx) |local_idx| {
             const fields_idx = class_fields_init_local_idx orelse return Error.UnexpectedToken;
             try emitClassDeclLocalInitFromClassStack(s, local_idx, fields_idx, parsed_class_fields_init_child_index);
+        } else if (top_level_class_ref_idx != null) {
+            // Script top-level class cell (no frame slot): set up
+            // `<class_fields_init>`, drop the class prototype `define_class`
+            // pushed, and leave the constructor on the stack for the cell store
+            // (`emitPutVarRef` below). Mirrors the frame-local path's stack
+            // discipline (emitClassDeclLocalInitFromClassStack) minus the
+            // `set_loc` into the (non-existent) outer frame slot.
+            const fields_idx = class_fields_init_local_idx orelse return Error.UnexpectedToken;
+            try emitClassFieldsInitLocalInitFromClassStack(s, fields_idx, parsed_class_fields_init_child_index);
+            try s.emitOp(opcode.op.drop);
+            try s.emitCloseLoc(fields_idx);
         }
         if (class_name_local_idx) |local_idx| try s.emitCloseLoc(local_idx);
         if (top_level_class_ref_idx) |class_ref_idx| {

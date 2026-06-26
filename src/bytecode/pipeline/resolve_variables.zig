@@ -773,18 +773,6 @@ fn localTdzEmittedAtDecl(ctx: *const JSContext, loc_idx: u16) bool {
     return fd.vars[loc_idx].tdz_emitted_at_decl;
 }
 
-fn isTopLevelGlobalLexical(ctx: *const JSContext, atom_id: u32, loc_idx: u16) bool {
-    const fd = ctx.function_def orelse return false;
-    if (!fd.persist_global_lexical) return false;
-    if (loc_idx >= fd.vars.len) return false;
-    const vd = fd.vars[loc_idx];
-    if (!vd.is_lexical or vd.scope_level != 0) return false;
-    for (fd.global_vars) |gv| {
-        if (gv.var_name == atom_id and gv.is_lexical and gv.scope_level == 0) return true;
-    }
-    return false;
-}
-
 fn useUncheckedLexicalLocals(ctx: *const JSContext) bool {
     const fd = ctx.function_def orelse return false;
     return fd.use_short_opcodes;
@@ -1260,10 +1248,6 @@ pub fn run(ctx: *JSContext) !void {
                         const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op);
                         const form = selectVarRefForm(ctx, ref_op, ref_idx);
                         output_size += form.size;
-                    } else if (isTopLevelGlobalLexical(ctx, atom_id, loc_idx)) {
-                        output_size += 3;
-                        i += 7;
-                        continue;
                     } else if (blk: {
                         if (!isLexicalLocal(ctx, loc_idx)) break :blk false;
                         if (op == opcode.op.scope_get_var_checkthis) break :blk true;
@@ -1649,11 +1633,6 @@ pub fn run(ctx: *JSContext) !void {
                             else => unreachable,
                         }
                         out_idx += form.size;
-                    } else if (isTopLevelGlobalLexical(ctx, atom_id, loc_idx)) {
-                        try emitGlobalVarOp(ctx, output, &out_idx, lowerScopeVarOpGlobal(op), atom_id);
-                        in_atom_idx += 1;
-                        i += 7;
-                        continue;
                     } else if (blk: {
                         if (!isLexicalLocal(ctx, loc_idx)) break :blk false;
                         if (op == opcode.op.scope_get_var_checkthis) break :blk true;

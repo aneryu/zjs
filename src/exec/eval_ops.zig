@@ -663,7 +663,7 @@ pub fn directEval(
     };
     const eval_with_object = directEvalWithObject(ctx.runtime, caller_function, caller_frame);
     defer eval_with_object.free(ctx.runtime);
-    const result = try runWithArgsState(ctx, &nested_stack, &compiled.function, eval_this, &.{}, direct_eval_frame_var_refs, output, global, false, eval_strict, false, run_eval_local_names, run_eval_local_slots, outer_var_refs.names, outer_var_refs.refs, inherited_local_names, inherited_locals, inherited_ref_names, inherited_refs, null, null, null, eval_current_function, eval_new_target, core.JSValue.undefinedValue(), eval_global_var_bindings, true, eval_with_object, false, false);
+    const result = try runWithArgsState(ctx, &nested_stack, &compiled.function, eval_this, &.{}, direct_eval_frame_var_refs, output, global, false, eval_strict, false, run_eval_local_names, run_eval_local_slots, outer_var_refs.names, outer_var_refs.refs, inherited_local_names, inherited_locals, inherited_ref_names, inherited_refs, null, null, null, eval_current_function, eval_new_target, core.JSValue.undefinedValue(), eval_global_var_bindings, true, eval_with_object, false);
     errdefer result.free(ctx.runtime);
     try publishDirectEvalVarRefs(ctx, global, caller_frame, eval_var_names, eval_var_refs, eval_in_parameter_initializer, eval_global_var_bindings);
     return result;

@@ -13,10 +13,7 @@ const object_ops = @import("object_ops.zig");
 
 // Helpers that remain in call_runtime.zig (generic runtime utilities outside the
 // slot-operation cluster).
-const atomIdOrNameEql = call_runtime.atomIdOrNameEql;
 const ensureVarRefsCapacity = frame_mod.ensureVarRefsCapacity;
-const existingGlobalLexicalEnv = call_runtime.existingGlobalLexicalEnv;
-const existingGlobalLexicalEnvForGlobal = call_runtime.existingGlobalLexicalEnvForGlobal;
 const globalLexicalHas = call_runtime.globalLexicalHas;
 const globalLexicalHasForGlobal = call_runtime.globalLexicalHasForGlobal;
 const globalLexicalValue = call_runtime.globalLexicalValue;
@@ -65,7 +62,6 @@ pub noinline fn execPutLoc(
     idx: u16,
     consume: u8,
     opc: u8,
-    sync_global_lexical_locals: bool,
 ) !void {
     frame.pc += consume;
     _ = opc;
@@ -73,7 +69,6 @@ pub noinline fn execPutLoc(
     const value = try stack.pop();
     if (try assignDirectEvalGlobalVarLocalSlot(ctx, global, function, idx, &frame.locals[idx], value)) return;
     try setSlotValue(ctx, &frame.locals[idx], value);
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
 }
 
 pub fn execSetLoc(
@@ -85,7 +80,6 @@ pub fn execSetLoc(
     idx: u16,
     consume: u8,
     opc: u8,
-    sync_global_lexical_locals: bool,
 ) !void {
     frame.pc += consume;
     _ = opc;
@@ -94,7 +88,6 @@ pub fn execSetLoc(
     defer value.free(ctx.runtime);
     if (try assignDirectEvalGlobalVarLocalSlot(ctx, global, function, idx, &frame.locals[idx], value.dup())) return;
     try setSlotValue(ctx, &frame.locals[idx], value.dup());
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
 }
 
 fn assignDirectEvalGlobalVarLocalSlot(
@@ -116,97 +109,6 @@ fn assignDirectEvalGlobalVarLocalSlot(
 
     const next_value = global.getProperty(atom_id);
     try setSlotValue(ctx, slot, next_value);
-    return true;
-}
-
-pub fn syncTopLevelGlobalLexicalLocal(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    idx: usize,
-    enabled: bool,
-) !void {
-    if (!enabled) return;
-    if (!try ensureGlobalLexicalSyncSlots(ctx, function, global, frame)) return;
-    if (idx >= frame.globalLexicalSyncSlots().len or !frame.globalLexicalSyncSlots()[idx]) return;
-    const atom_id = function.var_names[idx];
-    if (idx < frame.globalLexicalSyncIndices().len) {
-        const property_index = frame.globalLexicalSyncIndices()[idx];
-        if (property_index != frame_mod.no_global_lexical_sync_index) {
-            const env = frame.globalLexicalSyncEnv() orelse existingGlobalLexicalEnvForGlobal(ctx, global) orelse return;
-            if (try env.setOwnDataPropertyAtForLexicalSync(ctx.runtime, property_index, atom_id, slotValueBorrow(frame.locals[idx]))) return;
-        }
-    }
-    const value = slotValueDup(frame.locals[idx]);
-    defer value.free(ctx.runtime);
-    _ = try setGlobalLexicalValueForGlobal(ctx, global, atom_id, value);
-}
-
-pub fn ensureGlobalLexicalSyncSlots(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-) !bool {
-    _ = global;
-    if (frame.globalLexicalSyncChecked()) return frame.globalLexicalSyncSlots().len != 0;
-    const env = existingGlobalLexicalEnv(ctx) orelse {
-        // No global lexical env exists => this frame has no lexical slot to
-        // mirror. Latch so the put_loc_check fast path stops re-probing (and
-        // re-entering the noinline slow handler) on every iteration.
-        (try frame.ensureCold(&ctx.runtime.memory)).global_lexical_sync_checked = true;
-        return false;
-    };
-    (try frame.ensureCold(&ctx.runtime.memory)).global_lexical_sync_env = env;
-    const count = @min(function.var_names.len, function.var_is_lexical.len);
-    if (count == 0) {
-        (try frame.ensureCold(&ctx.runtime.memory)).global_lexical_sync_checked = true;
-        return false;
-    }
-    const slots = try ctx.runtime.memory.alloc(bool, count);
-    errdefer ctx.runtime.memory.free(bool, slots);
-    @memset(slots, false);
-    const indices = try ctx.runtime.memory.alloc(usize, count);
-    errdefer ctx.runtime.memory.free(usize, indices);
-    @memset(indices, frame_mod.no_global_lexical_sync_index);
-    var has_sync_slot = false;
-    for (function.var_names[0..count], 0..) |atom_id, idx| {
-        if (!function.var_is_lexical[idx]) continue;
-        // Only a top-level (scope_level == 0) lexical binding mirrors the
-        // global lexical cell. A block-level shadower (scope_level > 0) that
-        // shares a name with a top-level `let`/`const` is a distinct frame
-        // local and must NOT write through to the global cell. Mirrors qjs,
-        // where a block `let` is `add_scope_var` (a pure frame local) with no
-        // tie to the JS_CLOSURE_GLOBAL_DECL cell (quickjs.c:24380 define_var
-        // gates global on scope_level == body_scope).
-        if (idx < function.var_scope_level.len and function.var_scope_level[idx] != 0) continue;
-        if (!env.hasOwnProperty(atom_id)) continue;
-        if (env.getOwnDataPropertyLookup(atom_id)) |lookup| {
-            indices[idx] = lookup.index;
-            lookup.value.free(ctx.runtime);
-        }
-        var duplicate_prior = false;
-        var prior_idx: usize = 0;
-        while (prior_idx < idx) : (prior_idx += 1) {
-            if (atomIdOrNameEql(ctx.runtime, function.var_names[prior_idx], atom_id)) {
-                duplicate_prior = true;
-                break;
-            }
-        }
-        if (duplicate_prior) continue;
-        slots[idx] = true;
-        has_sync_slot = true;
-    }
-    const cold = try frame.ensureCold(&ctx.runtime.memory);
-    cold.global_lexical_sync_checked = true;
-    if (!has_sync_slot) {
-        ctx.runtime.memory.free(bool, slots);
-        ctx.runtime.memory.free(usize, indices);
-        return false;
-    }
-    cold.global_lexical_sync_slots = slots;
-    cold.global_lexical_sync_indices = indices;
     return true;
 }
 
@@ -459,6 +361,13 @@ pub fn publishTopLevelFunctionVarRef(
     if (!value.isObject()) return;
     if (function.flags.is_module) return;
     if (is_eval_code and !eval_global_var_bindings) return;
+    // Only NON-lexical top-level bindings (`var`/`function` declarations) reflect
+    // their function value onto the global object. A top-level LEXICAL binding
+    // (`let`/`const`/`class`, a JS_CLOSURE_GLOBAL_DECL with is_lexical) lives in
+    // the global lexical environment record only — qjs never creates a global
+    // object property for it (a top-level `class A{}` / `let f = function(){}`
+    // must leave `globalThis.A` undefined; `language/global-code/decl-lex.js`).
+    if (idx < function.var_ref_is_lexical.len and function.var_ref_is_lexical[idx]) return;
     if (!sameObjectIdentity(frame.this_value, global.value())) return;
     const object = property_ops.expectObject(value) catch return;
     if (!isFunctionLikeClass(object.class_id)) return;

@@ -100,7 +100,6 @@ pub noinline fn loc(
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     opc: u8,
-    sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
@@ -113,15 +112,15 @@ pub noinline fn loc(
             const idx = readInt(u16, function.code[frame.pc..][0..2]);
             try slot_ops.execGetLoc(ctx, frame, stack, idx, 2, opc);
         },
-        op.put_loc => try slot_ops.execPutLoc(ctx, function, global, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc, sync_global_lexical_locals),
-        op.set_loc => try slot_ops.execSetLoc(ctx, function, global, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc, sync_global_lexical_locals),
+        op.put_loc => try slot_ops.execPutLoc(ctx, function, global, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
+        op.set_loc => try slot_ops.execSetLoc(ctx, function, global, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
 
         op.get_loc8 => {
             const idx = function.code[frame.pc];
             try slot_ops.execGetLoc(ctx, frame, stack, idx, 1, opc);
         },
-        op.put_loc8 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, function.code[frame.pc], 1, opc, sync_global_lexical_locals),
-        op.set_loc8 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, function.code[frame.pc], 1, opc, sync_global_lexical_locals),
+        op.put_loc8 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, function.code[frame.pc], 1, opc),
+        op.set_loc8 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, function.code[frame.pc], 1, opc),
 
         op.get_loc0 => {
             try slot_ops.execGetLoc(ctx, frame, stack, 0, 0, opc);
@@ -135,14 +134,14 @@ pub noinline fn loc(
         op.get_loc3 => {
             try slot_ops.execGetLoc(ctx, frame, stack, 3, 0, opc);
         },
-        op.put_loc0 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, 0, 0, opc, sync_global_lexical_locals),
-        op.put_loc1 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, 1, 0, opc, sync_global_lexical_locals),
-        op.put_loc2 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, 2, 0, opc, sync_global_lexical_locals),
-        op.put_loc3 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, 3, 0, opc, sync_global_lexical_locals),
-        op.set_loc0 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, 0, 0, opc, sync_global_lexical_locals),
-        op.set_loc1 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, 1, 0, opc, sync_global_lexical_locals),
-        op.set_loc2 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, 2, 0, opc, sync_global_lexical_locals),
-        op.set_loc3 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, 3, 0, opc, sync_global_lexical_locals),
+        op.put_loc0 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, 0, 0, opc),
+        op.put_loc1 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, 1, 0, opc),
+        op.put_loc2 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, 2, 0, opc),
+        op.put_loc3 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, 3, 0, opc),
+        op.set_loc0 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, 0, 0, opc),
+        op.set_loc1 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, 1, 0, opc),
+        op.set_loc2 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, 2, 0, opc),
+        op.set_loc3 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, 3, 0, opc),
         else => unreachable,
     }
 }
@@ -182,7 +181,6 @@ pub noinline fn checkedLocVm(
     stack: *stack_mod.Stack,
     opc: u8,
     catch_target: *?usize,
-    sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
@@ -230,7 +228,6 @@ pub noinline fn checkedLocVm(
                 return error.TypeError;
             }
             try slot_ops.setSlotValue(ctx, &frame.locals[idx], value);
-            try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         },
         op.set_loc_check => {
             if (slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) {
@@ -240,7 +237,6 @@ pub noinline fn checkedLocVm(
             }
             const value = stack.peek() orelse return error.StackUnderflow;
             try slot_ops.setSlotValue(ctx, &frame.locals[idx], value);
-            try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         },
         op.put_loc_check_init => {
             const is_derived_this = function.flags.is_derived_class_constructor and
@@ -260,7 +256,6 @@ pub noinline fn checkedLocVm(
             if (!constructor_this.isUndefined()) {
                 try slot_ops.setSlotValue(ctx, &frame.this_value, constructor_this.dup());
             }
-            try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         },
         else => unreachable,
     }
@@ -497,13 +492,13 @@ fn storeBindingInt32(
     frame: *frame_mod.Frame,
     binding: BindingPut,
     value: i32,
-    sync_global_lexical_locals: bool,
 ) !void {
+    _ = function;
+    _ = global;
     if (binding.is_var_ref) {
         try slot_ops.setSlotValue(ctx, &frame.var_refs[binding.idx], core.JSValue.int32(value));
     } else {
         try slot_ops.setSlotValue(ctx, &frame.locals[binding.idx], core.JSValue.int32(value));
-        try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, binding.idx, sync_global_lexical_locals);
     }
 }
 
@@ -515,12 +510,11 @@ fn storeBindingInt32WithCompletion(
     accumulator_put: BindingPut,
     completion_put: ?BindingPut,
     value: i32,
-    sync_global_lexical_locals: bool,
 ) !void {
-    try storeBindingInt32(ctx, function, global, frame, accumulator_put, value, sync_global_lexical_locals);
+    try storeBindingInt32(ctx, function, global, frame, accumulator_put, value);
     if (completion_put) |completion| {
         if (!sameBindingPut(accumulator_put, completion)) {
-            try storeBindingInt32(ctx, function, global, frame, completion, value, sync_global_lexical_locals);
+            try storeBindingInt32(ctx, function, global, frame, completion, value);
         }
     }
 }
@@ -533,16 +527,17 @@ fn storeBindingOwnedValueWithCompletion(
     accumulator_put: BindingPut,
     completion_put: ?BindingPut,
     value: core.JSValue,
-    sync_global_lexical_locals: bool,
 ) !void {
+    _ = function;
+    _ = global;
     if (completion_put) |completion| {
         if (!sameBindingPut(accumulator_put, completion)) {
-            try storeBindingOwnedValue(ctx, function, global, frame, accumulator_put, value.dup(), sync_global_lexical_locals);
-            try storeBindingOwnedValue(ctx, function, global, frame, completion, value, sync_global_lexical_locals);
+            try storeBindingOwnedValue(ctx, frame, accumulator_put, value.dup());
+            try storeBindingOwnedValue(ctx, frame, completion, value);
             return;
         }
     }
-    try storeBindingOwnedValue(ctx, function, global, frame, accumulator_put, value, sync_global_lexical_locals);
+    try storeBindingOwnedValue(ctx, frame, accumulator_put, value);
 }
 
 fn storeLocalInt32WithCompletion(
@@ -553,14 +548,13 @@ fn storeLocalInt32WithCompletion(
     idx: u16,
     completion_put: ?LocalPut,
     value: i32,
-    sync_global_lexical_locals: bool,
 ) !void {
+    _ = function;
+    _ = global;
     try slot_ops.setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(value));
-    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
     if (completion_put) |completion| {
         if (completion.idx != idx) {
             try slot_ops.setSlotValue(ctx, &frame.locals[completion.idx], core.JSValue.int32(value));
-            try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion.idx, sync_global_lexical_locals);
         }
     }
 }
@@ -573,19 +567,17 @@ fn storeLocalOwnedValueWithCompletion(
     idx: u16,
     completion_put: ?LocalPut,
     value: core.JSValue,
-    sync_global_lexical_locals: bool,
 ) !void {
+    _ = function;
+    _ = global;
     if (completion_put) |completion| {
         if (completion.idx != idx) {
             try slot_ops.setSlotValue(ctx, &frame.locals[idx], value.dup());
-            try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
             try slot_ops.setSlotValue(ctx, &frame.locals[completion.idx], value);
-            try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion.idx, sync_global_lexical_locals);
             return;
         }
     }
     try slot_ops.setSlotValue(ctx, &frame.locals[idx], value);
-    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
 }
 
 fn decodeLatin1PrefixIntLocalKey(ctx: *core.JSContext, code: []const u8, pc: usize, local_idx: u16) ?Latin1PrefixIntLocalKey {

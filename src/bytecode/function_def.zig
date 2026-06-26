@@ -211,7 +211,6 @@ pub const FunctionDef = struct {
     // Flags — packed as in QuickJS
     is_eval: bool = false,
     is_global_var: bool = false,
-    persist_global_lexical: bool = false,
     is_func_expr: bool = false,
     has_home_object: bool = false,
     has_prototype: bool = false,

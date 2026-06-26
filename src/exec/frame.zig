@@ -5,13 +5,10 @@ const atom = @import("../core/atom.zig");
 const Atom = atom.Atom;
 const core = @import("../core/root.zig");
 const memory = @import("../core/memory.zig");
-const Object = @import("../core/object.zig").Object;
 const runtime = @import("../core/runtime.zig");
 const JSRuntime = runtime.JSRuntime;
 const JSValue = @import("../core/value.zig").JSValue;
 const stack_mod = @import("stack.zig");
-
-pub const no_global_lexical_sync_index: usize = std.math.maxInt(usize);
 
 pub const EvalVarRefSnapshot = struct {
     names: []Atom = &.{},
@@ -258,10 +255,6 @@ pub const Frame = struct {
         eval_var_ref_names: []const Atom = &.{},
         eval_var_refs: []JSValue = &.{},
         eval_var_refs_republished: bool = false,
-        global_lexical_sync_env: ?*Object = null,
-        global_lexical_sync_slots: []bool = &.{},
-        global_lexical_sync_indices: []usize = &.{},
-        global_lexical_sync_checked: bool = false,
         constructor_this_value: JSValue = JSValue.undefinedValue(),
         constructor_this_value_owned: bool = false,
         arguments_object: ?JSValue = null,
@@ -286,38 +279,30 @@ pub const Frame = struct {
     }
 
     /// Release every owned value/allocation held in `cold` (the derived-ctor
-    /// `this`, the `arguments` object, the original-args snapshot VALUES, and the
-    /// global-lexical-sync slice allocations) then free the box. Idempotent.
-    /// `eval_var_refs` is owned by the frame's `EvalVarRefSnapshot`, never here.
-    /// `original_args` VALUES must be released BEFORE the storage backing them is
-    /// reclaimed — call this before freeing `storage_values`.
+    /// `this`, the `arguments` object, and the original-args snapshot VALUES)
+    /// then free the box. Idempotent. `eval_var_refs` is owned by the frame's
+    /// `EvalVarRefSnapshot`, never here. `original_args` VALUES must be released
+    /// BEFORE the storage backing them is reclaimed — call this before freeing
+    /// `storage_values`.
     pub fn freeCold(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
         const c = self.cold orelse return;
         if (c.constructor_this_value_owned) c.constructor_this_value.free(rt);
         if (c.arguments_object) |value| value.free(rt);
         releaseValueSliceNoReset(rt, c.original_args);
-        if (c.global_lexical_sync_slots.len != 0) account.free(bool, c.global_lexical_sync_slots);
-        if (c.global_lexical_sync_indices.len != 0) account.free(usize, c.global_lexical_sync_indices);
         account.destroy(FrameCold, c);
         self.cold = null;
     }
 
     /// Release ONLY the storage-coupled cold state — the original-args snapshot
-    /// VALUES and the global-lexical-sync allocations — resetting those fields to
-    /// their defaults while KEEPING the box and the eval / ctor / arguments state.
-    /// This matches the old `releaseOwnedStorage` semantics, which reset
-    /// original_args/sync but left eval_*/ctor_this/arguments_object intact so a
-    /// suspended generator retains them across resume.
+    /// VALUES — resetting that field to its default while KEEPING the box and the
+    /// eval / ctor / arguments state. This matches the old `releaseOwnedStorage`
+    /// semantics, which reset original_args but left eval_*/ctor_this/
+    /// arguments_object intact so a suspended generator retains them across resume.
     pub fn releaseColdStorage(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
+        _ = account;
         const c = self.cold orelse return;
         releaseValueSliceNoReset(rt, c.original_args);
         c.original_args = &.{};
-        if (c.global_lexical_sync_slots.len != 0) account.free(bool, c.global_lexical_sync_slots);
-        if (c.global_lexical_sync_indices.len != 0) account.free(usize, c.global_lexical_sync_indices);
-        c.global_lexical_sync_slots = &.{};
-        c.global_lexical_sync_indices = &.{};
-        c.global_lexical_sync_env = null;
-        c.global_lexical_sync_checked = false;
     }
 
     // ---- Cold-field read accessors (return the default when `cold == null`) ----
@@ -335,18 +320,6 @@ pub const Frame = struct {
     }
     pub inline fn evalVarRefsRepublished(self: *const Frame) bool {
         return if (self.cold) |c| c.eval_var_refs_republished else false;
-    }
-    pub inline fn globalLexicalSyncEnv(self: *const Frame) ?*Object {
-        return if (self.cold) |c| c.global_lexical_sync_env else null;
-    }
-    pub inline fn globalLexicalSyncSlots(self: *const Frame) []bool {
-        return if (self.cold) |c| c.global_lexical_sync_slots else &.{};
-    }
-    pub inline fn globalLexicalSyncIndices(self: *const Frame) []usize {
-        return if (self.cold) |c| c.global_lexical_sync_indices else &.{};
-    }
-    pub inline fn globalLexicalSyncChecked(self: *const Frame) bool {
-        return if (self.cold) |c| c.global_lexical_sync_checked else false;
     }
     pub inline fn constructorThisValue(self: *const Frame) JSValue {
         return if (self.cold) |c| c.constructor_this_value else JSValue.undefinedValue();

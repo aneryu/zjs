@@ -8902,34 +8902,6 @@ pub const Object = struct {
         return false;
     }
 
-    pub inline fn setOwnDataPropertyAtForLexicalSync(self: *Object, rt: *JSRuntime, index: usize, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (self.hasExoticMethods() or index >= self.shapeProps().len) return false;
-        const prop = self.shape_ref.props[index];
-        const prop_flags = property.Flags.fromBits(prop.flags);
-        if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.kind != .data) return false;
-        const entry = &self.properties[index];
-        const stored = &entry.slot.data;
-        if (!prop_flags.writable and !stored.isUninitialized()) return false;
-        if (atom_id == atom.ids.Private_brand) {
-            const next = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
-            errdefer next.free(rt);
-            const old = stored.*;
-            stored.* = next;
-            destroyPropertySlot(rt, atom_id, prop_flags, .{ .data = old });
-            return true;
-        }
-        if (!stored.requiresRefCount() and !new_value.requiresRefCount()) {
-            stored.* = new_value;
-            return true;
-        }
-        const next = new_value.dup();
-        errdefer next.free(rt);
-        const old = stored.*;
-        stored.* = next;
-        old.free(rt);
-        return true;
-    }
-
     pub inline fn setOwnDataPropertyAtForLexicalSyncOwned(self: *Object, rt: *JSRuntime, index: usize, atom_id: atom.Atom, new_value: JSValue) !bool {
         if (self.hasExoticMethods() or index >= self.shapeProps().len) return false;
         const prop = self.shape_ref.props[index];

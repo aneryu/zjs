@@ -175,7 +175,6 @@ fn compileQjsProgram(
     state.top_level_lexical_as_global_ref = options.mode == .script;
     state.eval_global_var_bindings = (options.eval_global_var_bindings or options.mode == .eval_indirect) and
         !((options.mode == .eval_direct or options.mode == .eval_indirect) and effective_strict);
-    state.function_def.persist_global_lexical = false;
     state.new_target_allowed = options.eval_allows_new_target;
     state.function_def.new_target_allowed = options.eval_allows_new_target;
     state.allow_super = options.eval_allows_super_property;

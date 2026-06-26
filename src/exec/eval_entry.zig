@@ -91,7 +91,22 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         var stack = stack_mod.Stack.init(&rt.memory, ctx.stack_limit);
         defer stack.deinit(rt);
         try stack.reserveAdditional(compiled.function.stack_size);
-        const value = try zjs_vm.runWithOutput(ctx, &stack, &compiled.function, options.output);
+        // `.eval_direct`/`.eval_indirect` run through the EVAL runner contract
+        // (is_eval_code = true, sync_global_lexical_locals = false) — qjs
+        // JS_EVAL_TYPE_DIRECT/INDIRECT — so a top-level let/const/class stays a
+        // pure eval frame-local (no redundant ctx.lexicals property). `.script`
+        // keeps the script runner (JS_EVAL_TYPE_GLOBAL → global_decl cell).
+        const value = switch (options.mode) {
+            .eval_direct, .eval_indirect => v: {
+                // Indirect eval registers its top-level var/function declarations
+                // as configurable global data properties (non-lexical), mirroring
+                // parser.zig:176 (`eval_global_var_bindings = … or mode == .eval_indirect`)
+                // and the in-VM eval() builtin.
+                const eval_global_var_bindings = options.mode == .eval_indirect;
+                break :v try zjs_vm.runEvalWithOutput(ctx, &stack, &compiled.function, options.output, eval_global_var_bindings);
+            },
+            .script, .module => try zjs_vm.runWithOutput(ctx, &stack, &compiled.function, options.output),
+        };
         if (options.timing) |timing| timing.vm_run_ns += elapsedNanosSince(vm_start);
         break :blk value;
     };

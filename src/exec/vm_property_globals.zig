@@ -248,7 +248,6 @@ pub noinline fn getVar(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     opc: u8,
-    sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_local_slots: []core.JSValue,
     eval_var_ref_names: []const core.Atom,
@@ -303,7 +302,7 @@ pub noinline fn getVar(
         }
     }
     if (fastInstalledGlobalDataValueForAtomAtPc(ctx, function, global, frame, site_pc, atom_id, eval_local_names, eval_var_ref_names, eval_with_object)) |value| {
-        return try useFastGlobalDataValue(ctx, output, stack, function, global, frame, catch_target, site_pc, atom_id, value, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object);
+        return try useFastGlobalDataValue(ctx, output, stack, function, global, frame, catch_target, site_pc, atom_id, value, eval_local_names, eval_var_ref_names, eval_with_object);
     }
     if (canUseFastGlobalVarLookup(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
         if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lex_value| {
@@ -317,7 +316,7 @@ pub noinline fn getVar(
             return .done;
         }
         if (globalDataPropertyValueForFastPath(ctx.runtime, global, function, site_pc, atom_id)) |value| {
-            return try useFastGlobalDataValue(ctx, output, stack, function, global, frame, catch_target, site_pc, atom_id, value, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object);
+            return try useFastGlobalDataValue(ctx, output, stack, function, global, frame, catch_target, site_pc, atom_id, value, eval_local_names, eval_var_ref_names, eval_with_object);
         }
     }
     const value = value: {
@@ -486,7 +485,6 @@ fn useFastGlobalDataValue(
     site_pc: usize,
     atom_id: core.Atom,
     value: core.JSValue,
-    sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
@@ -497,7 +495,6 @@ fn useFastGlobalDataValue(
     _ = catch_target;
     _ = site_pc;
     _ = atom_id;
-    _ = sync_global_lexical_locals;
     _ = eval_local_names;
     _ = eval_var_ref_names;
     _ = eval_with_object;

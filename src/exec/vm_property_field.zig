@@ -229,9 +229,7 @@ pub noinline fn field(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     opc: u8,
-    sync_global_lexical_locals: bool,
 ) !Step {
-    _ = sync_global_lexical_locals;
     const site_pc = frame.pc - 1;
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;

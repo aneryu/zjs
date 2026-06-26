@@ -339,33 +339,25 @@ pub fn bindingStoreWritableForFastPath(
 
 pub fn storeBindingOwnedValue(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
     frame: *frame_mod.Frame,
     binding: BindingPut,
     value: core.JSValue,
-    sync_global_lexical_locals: bool,
 ) !void {
     if (binding.is_var_ref) {
         try slot_ops.setSlotValue(ctx, &frame.var_refs[binding.idx], value);
     } else {
         try slot_ops.setSlotValue(ctx, &frame.locals[binding.idx], value);
-        try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, binding.idx, sync_global_lexical_locals);
     }
 }
 
 pub fn storeLocalCompletionBorrowedValue(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
     frame: *frame_mod.Frame,
     completion_put: ?LocalPut,
     value: core.JSValue,
-    sync_global_lexical_locals: bool,
 ) !void {
     if (completion_put) |completion| {
         try slot_ops.setSlotValue(ctx, &frame.locals[completion.idx], value.dup());
-        try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion.idx, sync_global_lexical_locals);
     }
 }
 
@@ -923,12 +915,9 @@ pub fn decodeStringSliceConstLocalStore(
 
 pub fn storeStringSliceConstLocal(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
     frame: *frame_mod.Frame,
     receiver: core.JSValue,
     decoded: StringSliceConstLocalStore,
-    sync_global_lexical_locals: bool,
 ) !void {
     const result = try string_ops.stringSliceValue(ctx.runtime, receiver, decoded.start, decoded.len);
     var result_owned = true;
@@ -936,7 +925,6 @@ pub fn storeStringSliceConstLocal(
 
     try slot_ops.setSlotValue(ctx, &frame.locals[decoded.store.idx], result);
     result_owned = false;
-    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, decoded.store.idx, sync_global_lexical_locals);
     frame.pc = decoded.store.operand_pc + decoded.store.consume;
 }
 
