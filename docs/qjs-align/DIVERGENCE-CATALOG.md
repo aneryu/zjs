@@ -10,6 +10,61 @@ allocation benchmarks 100×).
 Anything not listed as a *structural divergence* is broad LLVM-vs-gcc per-opcode
 tax (~2–2.5×) and is **not** a faithful target.
 
+## 🧱 2026-06-26 bottom-up re-audit (`zjs-bottomup-divergence-audit`, 11 readers + synth) — current HEAD = `eb85a49`
+
+A fresh **bottom-up** audit (re-verify each layer against `quickjs.c` at current HEAD, NOT trusting
+doc checkboxes) after L2/L3/A4 landed. Verdict tally: **DO_NEXT=3, BACKLOG=3, ALREADY_DONE=3, DEEP_DEFER=2, REJECT=0**.
+
+**FOUNDATION IS SOUND — no latent gap.** The value/refcount+GC (F1), property/shape kind-derivation
+(F2), array count/length split (F3) and recursive call-path (C1) auditors all confirm the bottom layer
+is a faithful structural mirror of qjs at HEAD. Specifics verified: `Slot.destroy/dup`
+(property.zig:281-314) is a per-arm match of `free_property` (quickjs.c:6097-6113); `destroyFromHeader`
+(object.zig:1686-1736) matches `free_object` incl. the weakref/remove_cycles guard; the active union
+arm derives EXCLUSIVELY from shape `Flags.kind` (no in-cell tag, `@sizeOf(Slot)==16` asserted);
+`array_length` split is faithful (`denseArrayElement` holes-climb-proto, `ownKeys [0,count)`,
+`appendDenseArrayIndex == add_fast_array_element`, `new Array(n)` born dense-holey). **The bottom layer
+is safe to build on.**
+
+### Genuinely-remaining faithful work (ranked, post-L2/L3/A4)
+
+| # | slice | verdict | ROI/risk | zjs anchor | qjs anchor |
+|---|---|---|---|---|---|
+| 1 | **C2 — derived-class construct: drop eager `this`-instance + prototype lookup** | DO_NEXT | med/med | call_runtime.zig:1554-1612 (eager createConstructorInstance UNCONDITIONAL at 1557/1580/1598, freed+discarded for derived); dispatch twins 534-541/556-564; dead fallbacks vm_call.zig:705, call_runtime.zig:143, object_ops.zig:377 | quickjs.c:20837-20838 (derived: `JS_CallInternal(func,JS_UNDEFINED,new_target)` — NO `js_create_from_ctor`) vs 20842 (base: eager); `js_create_from_ctor` 20783 |
+| 2 | **S2 — spread/rest fast path missing iterator-override guard** ⚠️ **CORRECTNESS BUG → ✅ SHIPPED 2026-06-26** | DONE | med/low | NEW `call_runtime.appendSpreadValuesEnumerate` (vm_literal.zig:323-330 now delegates); reused `arrayIteratorKind`/`isArrayIteratorNextFunction`/`iteratorTargetSlot` (the `fastArrayForOfNext` pattern) | quickjs.c:16814 `js_append_enumerate` (resolve @@iterator + construct iterator; dense copy only when default Array Iterator value-kind + builtin `next` + fast-array + **`len==count`**, else `general_case`) |
+| 3 | **C3 — generator/async resume throwaway slab + per-step `{value,done}`** | DO_NEXT | med/med | zjs_vm.zig:609-643 (started resume STILL allocs fresh slab) + vm_gen_async.zig:157-173 (immediate release+swap = pure round-trip); generic forOfNext builds+discards result obj iterator_ops.zig:592-635,2417-2424 + call_runtime.zig:5315; analog `fastMapSetForOfNext` iterator_ops.zig:706-745 | quickjs.c:17790-17810 (`JS_CALL_FLAG_GENERATOR` early-out: frame already allocated, ZERO per-resume alloc) + 20906 (`async_func_init` allocs frame ONCE) + 16554-16571 (`JS_IteratorNext2` skips intermediate result obj) |
+| 4 | F3-residual — `qjsArraySearchCall` indexOf/includes density gate `count==length` skips dense prefix for holey-fast arrays | BACKLOG | low/low | string_ops.zig:4304-4319 (requires `arrayElements().len==length`); contrast faithful two-phase `indexSearch` builtins/array.zig:821-845 | quickjs.c:42426-42446 / 42476-42496 (scan dense `[n,count)` then generic `[count,len)`, NO count==len gate) |
+| 5 | B1 — compile-time `parent_has_eval` flag (lower per-access parent-eval-shadow runtime guard to a Bytecode flag) | BACKLOG | low/med | vm_property.zig:1067 `frameClosureHasEvalParent` (4-5-load header chase paid by ALL global accesses) + vm_property_globals.zig:120; fast-lane sites zjs_vm.zig:1728,1779; flag → bytecode/function.zig:102 `Flags.reserved:u3`, set in pipeline/finalize.zig:111 | quickjs.c:33158 (`var_object_test` emitted ONLY if `var_object_idx>=0`, COMPILE-TIME) + 36064 (`add_eval_variables` only if `fd->has_eval_call`) |
+| 6 | L1 — string-wrapper exotic `[[OwnPropertyKeys]]` (lazy synthetic index keys vs materialize N char props) | BACKLOG | low/med | object_ops.zig:3101-3104 (materialization loop); read-side gaps objectRestOwnKeys 2151-2161, findPropertyDescriptor 3991-3995; in-repo template `typedArrayOwnKeys` array_ops.zig:5035 | quickjs.c:8757-8769 (`JS_GetOwnPropertyNamesInternal` synthesizes index atoms) + `js_string_get_own_property` 45178 |
+| 7 | C1-residual — recursive-path `var_refs`/arg per-element `.dup` vs qjs O(1) borrow | DEEP_DEFER / REJECT | none/med | vm_call.zig:171 + frame.zig:403; the faithful borrow is **ALREADY LANDED** on the hot inline path inline_calls.zig:403-407,493-498 | quickjs.c:17844/17841 (borrow) — but this is the **COLD** fallback only (generators/async/derived-ctor/cross-realm); the documented non-eliminable ~1.3-1.5× frame floor |
+| 8 | S1 — `OP_get_field` doubled proto-walk (six probes vs qjs single `for(;;)`) | DEEP_DEFER | high/high | vm_property_field.zig:223-357 + object_ops.zig:2858-2880,4012-4028 (by-class-name `getPrototypeMethod` fallback) + property_ic.zig:584-616 | quickjs.c:19108-19160 / 8267-8358 — **root cause is foundational (catalogued C.2)**: builtin proto methods are NOT physical own-props on the receiver chain; NOT a bounded slice |
+| 9 | L2(regex) — `pushState` O(n) heap-snapshot vs `SAVE_CAPTURE` O(1) undo-log | DEEP_DEFER | low/high | libs/regexp/engine.zig:143-210 (full-slice capture+stack snapshot); old opcode set decodeOp 992-1026 (`simple_greedy_quant=29`) | quickjs/libregexp.c:2805-2812 — **zjs ports a pre-2020 libregexp** (`simple_greedy_quant` doesn't exist in reference); undo-log is inseparable from a full ~2300-line re-port |
+
+### ✅ S2 — CONFIRMED correctness bug, FIXED 2026-06-26
+**Was:** `[...arr]` / `f(...arr)` silently **ignored a user-overridden `arr[Symbol.iterator]` or patched
+`%ArrayIteratorPrototype%.next`** — the fast-array branch (vm_literal.zig:327) read `source.getProperty(i)`
+directly, never touching the iterator protocol. Proof:
+`Array.prototype[Symbol.iterator]=function*(){yield 99;yield 98}; print(JSON.stringify([...[1,2,3]]))`
+→ zjs printed `[1,2,3]`, spec/qjs require `[99,98]`. test262 stayed 0/49775 only because its spread tests
+cover custom iterables + error propagation, NOT "monkey-patch the Array iterator then spread a real array"
+(a coverage blind spot). Per §0.4 **correctness is the only hard red line**, fixed first despite C2 being
+more "bottom".
+
+**Fix:** new `call_runtime.appendSpreadValuesEnumerate` mirrors qjs `js_append_enumerate` — always resolve
+`@@iterator` + construct the iterator, then take the dense bulk copy ONLY when the constructed iterator is a
+default Array Iterator (`value` kind) whose `next` is the builtin `js_array_iterator_next` AND its target is a
+hole-free fast array (`length == count`); else step the iterator generically. Reads densely from the
+*iterator's* target (the `fastArrayForOfNext` pattern), so it stays correct even when `@@iterator` was
+repointed to another array's (possibly partially-consumed) iterator. Gate: 12/12 hand cases (incl. all 6
+formerly-wrong), `zig build test` 1227, **test262 `0/49775` (6 known)**, force-GC 1227.
+
+### Stale-doc corrections (supersede where they conflict)
+- **F1/F2 (value-refcount+GC, property/shape kind) ALREADY_DONE & faithful** at HEAD — any checkbox treating L2's 16B untagged slot or its refcount/teardown as open is stale.
+- **F3/L3 (array count/length split) ALREADY_DONE & faithful** — only residual is the narrow #4 density gate (low-ROI BACKLOG), not a hole in L3.
+- **C1 (recursive call path) catalog premise FALSE/STALE**: there is NO per-call ~43-field Bytecode by-value memcpy — `ensureCachedBytecodeView` (function.zig:549-559) caches `*const Bytecode`; the only `nested.*` copy (call_runtime.zig:5108) is gated on `eval_var_ref_names.len>0` (qjs pays it too). The var_refs O(1) borrow is **already landed on the hot inline path** (inline_calls.zig:403-407,493-498, commit 698824e).
+- **L1 headline (s.replace 36.4× via exotic ownKeys) STALE/FALSE as a hot-path claim** — method-call resolution goes get_field2 → getPrimitiveProperty → `getFastStringPrimitiveDataProperty` bitset (string_ops.zig:4601/4621) and returns String.prototype methods WITHOUT ever calling `primitiveObjectForAccess`; s.replace never pays the materialization. The loop is reached only on colder `Object.keys/values/entries(str)` / `getPrototypeOf(str)` / non-standard string GET/SET paths.
+- **S1 root cause = the catalogued C.2 keystone** (PHASE3-leaves-and-levers.md:30-34, method_call_loop 7.06×) — "solve with null-proto-arrays or leave do_not_align"; confirmed still correct, NOT a newly-discovered bounded slice.
+- **regex engine ports a PRE-2020 libregexp** (`grep -c simple_greedy_quant /home/aneryu/quickjs/libregexp.c == 0`) — any doc implying it tracks current libregexp structure is stale; snapshot→undo-log is entangled with a full re-port (DEEP_DEFER).
+
 ## 🧭 Next-direction survey (2026-06-25, `qjs-next-direction-survey`) — ranked roadmap
 
 A second data-driven survey (re-measure + scope/ROI audit of each candidate) ranked the

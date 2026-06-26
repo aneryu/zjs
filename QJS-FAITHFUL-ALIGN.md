@@ -77,13 +77,33 @@ Phase 3  叶子：GC-无关忠实对齐 + 余下赢回退 + global-var 稳定 ce
 
 锚点：`JS_CallInternal` 帧建立、`JSStackFrame`（quickjs.c:410,793）、`JSRefCountHeader`、`gc_obj_list`/环收集器。施工细节见 git 历史（`e8c852b`）。
 
-### Phase 2 — 下游（落在 qjs 地基上）
+### Phase 2 — 下游（落在 qjs 地基上）✅ 已对齐（2026-06-26 bottom-up 审计确认）
 
-- [ ] **调用机制（6-7×）**：`OP_call` 忠实 `JS_CallInternal` 入口；Bytecode view **按指针**而非每调用
-      按值拷 43 字段（审计 rank 1，inline_calls.zig:246）。
-- [ ] **回溯懒构造**（审计 rank 2，inline_calls.zig:665-704）——无 per-call rooting 后自然成立。
-- [ ] **put_field 转移所有权**省 dup/free（审计 rank 9，vm_property_field.zig:351-354）。
-- [ ] 对象-属性 fast path 的 refcount 纪律按新 value 模型对齐。
+> **2026-06-26 `zjs-bottomup-divergence-audit`（11-reader + synth）逐项对照 quickjs.c 核实**：Phase 2 调用机制层在
+> 当前 HEAD（`eb85a49`）已忠实对齐 qjs。下列「未勾选框」实为后续轮次悄悄落地（文档 stale），审计已纠正。详见
+> `docs/qjs-align/DIVERGENCE-CATALOG.md` §🧱 2026-06-26 bottom-up re-audit。
+
+- [x] **调用机制（6-7×）**：`OP_call` 忠实 `JS_CallInternal` 入口；Bytecode view **按指针**（**DONE**：`InlineTarget.view`/`Entry.function`
+      皆 `*const bytecode.Bytecode`；递归慢路径 `nested` 亦取 `ensureCachedBytecodeView` 缓存指针，**无** per-call 43-字段 memcpy——
+      catalog 旧「rank 1 按值拷」前提是 FALSE）。4 KiB Machine memcpy 亦已消除（`Machine.chunks` 懒堆分配，默认空切片）。
+- [x] **回溯懒构造**（**DONE** round-8 `29e93a6`）：删 per-call `ActiveBacktraceFrame`，改 `MachineBacktrace` 单链按需走 Entry 链
+      （faithful `build_backtrace` quickjs.c:7571）。
+- [x] **put_field 转移所有权**省 dup/free（**DONE**：`qjsPutFieldFast` vm_property_field.zig:359 直接将 value 移入 slot
+      `lookup.value.*=value` + free 旧值 + `value_consumed=true`，无 dup/free 抖动）。
+- [x] 对象-属性 fast path 的 refcount 纪律按新 value 模型对齐（**DONE**：F1 审计确认所有写路径 capture-old/write-new/destroy-old-with-OLD-flags
+      锁步,无 double-free/UAF；16B accessor `?*gc.Header` 在 GC trace 中无损往返）。
+- [x] **var_refs O(1) 借用**（**DONE** round-4 `698824e`）：热 inline 路径 `borrow_var_refs`（inline_calls.zig:403-407/493-498，
+      `var_refs_borrowed` flag）+ 零拷贝 arg 借用——faithful `var_refs = p->u.func.var_refs`/`arg_buf = argv`（quickjs.c:17844/17841）。
+      **余**：递归慢路径仍 per-element `.dup`（vm_call.zig:171），但那是冷回退（generators/async/derived-ctor/cross-realm），扩借用碰
+      generator var_refs 挂起生命周期、零热路径收益 → 文档化的不可消除 ~1.3-1.5× 帧地板，REJECT 为目标。
+
+**Phase 2 后的下一前沿**（bottom-up 审计排序，均 faithful/bounded）：
+- [x] **S2** spread/rest 迭代器守卫 ⚠️ **正确性 bug → ✅ DONE 2026-06-26**（§0.4 红线优先;新 `appendSpreadValuesEnumerate` 忠实
+      `js_append_enumerate`:总是解析 `@@iterator`+建迭代器,仅默认 Array Iterator(value)+builtin `next`+无 hole fast array(`len==count`)
+      才 dense 拷贝,否则通用步进;从迭代器 target 读、对覆写后返回他数组迭代器仍正确。门禁 0/49775+1227+force-GC+12/12 手测)。
+- [ ] **C2** derived-ctor 删急切 `this`（call-machinery,call_runtime.zig:1554-1612 对每 derived `new` 急切建实例再丢弃;
+      须处理 super()/arrow-this-before-super TDZ;中等风险）。
+- [ ] **C3** generator resume throwaway slab + per-step `{value,done}`（call-adjacent,zjs_vm.zig:609-643;碰共享 `runWithArgsState`）。
 
 ### Phase 3 — 叶子（GC-无关忠实对齐 + 赢回退 + 大杠杆）
 
