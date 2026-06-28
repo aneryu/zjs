@@ -3947,7 +3947,12 @@ pub fn getFastStringPrimitiveDataProperty(
     if (!receiver.isString()) return null;
     if (!isStandardStringPrototypeMethodAtom(ctx.runtime, atom_id)) return null;
 
-    const proto = constructorPrototypeFromGlobal(ctx.runtime, global, "String") orelse return null;
+    // `constructorPrototypeFromGlobal(.., "String")` interns the atom "String" on
+    // EVERY `s.method()` resolution (the internString hot spot) before walking
+    // `global.String -> .prototype`. "String" is a predefined atom, so resolve it
+    // at comptime and walk with the cached id — no per-call atom allocation.
+    const string_ctor_atom = comptime core.atom.predefinedId("String", .string).?;
+    const proto = object_ops.constructorPrototypeFromGlobalAtom(ctx.runtime, global, string_ctor_atom) orelse return null;
     return ownDataOrAutoInitPropertyValue(proto, atom_id);
 }
 
