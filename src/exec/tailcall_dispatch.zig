@@ -155,6 +155,18 @@ pub const Vm = struct {
         self.stack.values = self.stack_base[0 .. (@intFromPtr(sp) - @intFromPtr(self.stack_base)) / @sizeOf(JSValue)];
     }
 
+    /// Publish ONLY frame.pc (qjs's `sf->cur_pc = pc`, set unconditionally before
+    /// every slow op). A register-resident cold handler that runs user coercion
+    /// (valueOf/toString) must do this BEFORE the helper: a backtrace is captured at
+    /// throw/Error()-construction time inside the user code, so frame.pc has to be
+    /// live THEN — the error-path `publish` runs only while unwinding, too late.
+    /// `advance` = bytes from the opcode to the next op (operand size + 1). Unlike
+    /// `publish` it leaves stack.values alone and is never re-read for dispatch, so
+    /// it is a fire-and-forget store off the hot dependency chain.
+    pub inline fn syncPc(self: *Vm, pc: [*]const u8, advance: usize) void {
+        self.frame.pc = (@intFromPtr(pc) - @intFromPtr(self.code_base)) + advance;
+    }
+
     /// Re-derive sp after a cold helper mutated stack.values (push/pop/grow).
     pub inline fn reloadSp(self: *Vm) [*]JSValue {
         return self.stack.values.ptr + self.stack.values.len;
@@ -699,9 +711,10 @@ pub fn op_compare_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     }
     const lhs = (sp - 2)[0];
     const rhs = (sp - 1)[0];
+    vm.syncPc(pc, 1); // qjs sf->cur_pc — backtrace fidelity through ToPrimitive valueOf (compare ops are 1 byte)
     const result = arith_vm.compareAt(vm.ctx, vm.global, vm.output, pc[0], lhs, rhs) catch |err| {
         // Error only: compareAt freed both operands, so publish the doubly-popped sp
-        // (frame.pc → next op; compare ops are 1 byte) for a consistent catch stack.
+        // (frame.pc → next op) for a consistent catch stack.
         vm.publish(pc, sp - 2);
         const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
         if (!caught) return vm.fail(err);
@@ -793,6 +806,7 @@ pub fn op_update_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
         return coldNext(var_buf, vm);
     }
     const idx: u16 = pc[1];
+    vm.syncPc(pc, 2); // qjs sf->cur_pc — backtrace fidelity through valueOf (see op_add_loc_cold)
     arith_vm.updateLocalAt(vm.ctx, vm.global, vm.output, &var_buf[idx], pc[0]) catch |err| {
         vm.publish(pc + 1, sp);
         const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
@@ -847,10 +861,13 @@ pub fn op_add_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     // (publish→re-read→coldNext) that the backend stalled on is gone. On success we
     // fall straight through to the next op with sp popped by one (the consumed rhs),
     // exactly like the both-int/both-float fast arms above.
+    // qjs `sf->cur_pc = pc` (set before js_add_loc_slow): keep frame.pc live so a
+    // backtrace captured inside an object operand's valueOf/toString reports this op.
+    vm.syncPc(pc, 2);
     arith_vm.addLocalAt(vm.ctx, vm.global, vm.output, &var_buf[idx], rhs) catch |err| {
-        // Error only: now sync frame.pc (one past the operand) and the popped sp so
-        // the catch unwinder sees consistent state. addLocalAt already freed rhs, so
-        // the published length excludes the dead slot — no double free.
+        // Error only: also sync the popped sp so the catch unwinder sees consistent
+        // state. addLocalAt already freed rhs, so the published length excludes the
+        // dead slot — no double free.
         vm.publish(pc + 1, sp - 1);
         const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
         if (!caught) return vm.fail(err);
