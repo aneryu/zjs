@@ -672,6 +672,24 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
+// Hot inline get_length — qjs reads a primitive string's `.length` inline
+// (`OP_get_field` length fast leg: `JS_VALUE_GET_STRING(sp[-1])->len`) instead of
+// routing through the general property machinery. A string operand (flat or rope —
+// `len()` reads the rope's logical length without flattening) pushes its character
+// count directly, replacing the popped string. String WRAPPER objects, arrays,
+// typed arrays, and everything else fall to the cold getLength (full getValueProperty).
+// 1-byte op (operand on the stack).
+pub fn op_get_length(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const value = (sp - 1)[0];
+    if (value.isString()) {
+        const len_val = JSValue.int32(@intCast(value.asStringBody().?.len()));
+        value.free(vm.ctx.runtime);
+        (sp - 1)[0] = len_val;
+        return cont(pc + 1, sp, var_buf, vm);
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
 pub fn op_binary(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const opc = pc[0];
     if (opc != op.pow) {
