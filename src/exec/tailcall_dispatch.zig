@@ -656,6 +656,22 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
+// Hot inline get_array_el — qjs OP_get_array_el's dense fast path: a[i] on a fast
+// array with a non-negative int32 index reads the element directly (dup'd) and pops
+// the [obj, key] pair to [value]. Holey/out-of-range/string-key/typed-array/proxy/
+// negative falls to the cold arrayElement. 1-byte op (operands are on the stack).
+pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const key = (sp - 1)[0];
+    const obj = (sp - 2)[0];
+    if (vm_property_field.fastDenseArrayElementValue(obj, key)) |value| {
+        obj.free(vm.ctx.runtime);
+        key.free(vm.ctx.runtime);
+        (sp - 2)[0] = value; // owned (fastArrayElementDup dups)
+        return cont(pc + 1, sp - 1, var_buf, vm);
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
 pub fn op_binary(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const opc = pc[0];
     if (opc != op.pow) {

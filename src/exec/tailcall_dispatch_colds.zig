@@ -812,6 +812,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.inc_loc] = td.op_update_loc;
     t[op.dec_loc] = td.op_update_loc;
     t[op.get_field] = td.op_get_field; // inline-cache fast path; IC miss → cold h_field
+    t[op.get_array_el] = td.op_get_array_el; // dense fast path; miss → cold h_array_element
     t[op.add_loc] = td.op_add_loc;
     t[op.get_var] = td.op_get_var;
     t[op.get_var_undef] = td.op_get_var;
