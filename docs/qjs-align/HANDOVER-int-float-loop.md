@@ -1,5 +1,44 @@
 # Handover — int+float `s=s+i` loop alignment (2026-06-28)
 
+> ## ⚡ BREAKTHROUGH UPDATE (next session, commit `1322472`) — canonical loop now 0.89× qjs (BEATS it)
+>
+> The "micro EXHAUSTED, only structural left" conclusion below was aimed at the
+> WRONG lever. The cell-walk/dup is a red herring (removing it was neutral-to-slower,
+> as recorded). The **real per-iteration bottleneck was the `frame.pc` MEMORY
+> ROUND-TRIP on every cold op**: `vm.publish(pc,sp)` stored frame.pc, the helper
+> (`addLocal`) RE-READ frame.pc to decode its operand + advanced it, and `coldNext`
+> RE-READ it to re-dispatch — a store→load→store→load chain serialized through
+> memory. qjs keeps pc in a register across `js_add_loc_slow` (`sf->cur_pc` is set
+> once, never re-read on the no-error path).
+>
+> **Fix = register-resident slow handlers**: the helper takes the local SLOT POINTER
+> / operands BY VALUE (no frame.pc decode, no stack.pop); pc/sp stay in argument
+> registers; `publish` happens ONLY on the error path. `addLocal`→`addLocalAt`,
+> `updateLocal`→`updateLocalAt`, `compare`→`compareAt`, with `op_add_loc_cold` /
+> `op_update_loc_cold` / `op_compare_cold` doing `cont(pc+N, sp±k)` on success.
+> **`s=s+i` 528→408ms (1.155×→0.89×), backend-stall 10.5%→4%, instructions 6.14B→5.20B.**
+>
+> Plus faithful float fast paths in the slow helpers (qjs HAS these, verified in
+> source): `updateLocalAt` float64 `d±1`→bare `__JS_NewFloat64` (js_unary_arith_slow
+> `handle_float64`); `compareAt` both-number→direct double compare, no ToPrimitive
+> (js_relational_slow `float64_compare`). **Float-counter `for(x=0.5;x<n;x++)`
+> 1169→544ms (4.07×→1.89×).**
+>
+> **Two traps recorded for reuse**: ① routing op_compare/op_update_loc's miss to a
+> DIRECT tail-call (`@call(.always_tail, op_X_cold, …)`) perturbs the *calling*
+> handler's int32 fast-path codegen (+37 insn/iter on the canonical loop). Route via
+> the existing indirect `cold_table[pc[0]]` instead (point the cold_table entry at
+> the register-resident handler). ② the cold handler is reached at a generator/eval
+> stop boundary (`local_fast_blocked`) → fall back to the publishing path there so
+> `coldNext`'s `maybeStop` still suspends at `stop_before_pc`.
+>
+> Remaining loop gaps (deeper dispatch front, NOT publish): float-counter 1.89×,
+> fib 3.59× (call machinery — separate, see `qjs-call-machinery-deepdive`), string
+> concat 3.76× (allocation). test262 clean (44595 pass / 6 pre-existing regexp).
+>
+> ---
+> *Original handover (the lever it chased was real but secondary) follows:*
+
 Continuation of the dispatch-tax / call-boundary work. This session ground the
 float-accumulator loop down to its faithful floor on the (now-active) tail-call
 dispatcher and found two **global** codegen levers. Micro-optimization of the
