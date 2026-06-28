@@ -47,6 +47,7 @@ const vm_property_field = @import("vm_property_field.zig");
 const property_ic = @import("property_ic.zig");
 const vm_property_private = @import("vm_property_private.zig");
 const string_ops = @import("string_ops.zig");
+const array_ops = @import("array_ops.zig");
 const forof_ops = @import("forof_ops.zig");
 
 const op = bytecode.opcode.op;
@@ -684,6 +685,26 @@ pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
             sp[0] = value; // owned; receiver stays at sp-1 as the call's `this`
             return cont(pc + 5, sp + 1, var_buf, vm);
         }
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
+// Hot inline put_array_el — qjs OP_put_array_el's dense fast path: a[i] = v on a
+// fast array with a non-negative int32 index writes the (dup'd) value into the
+// dense slot (or appends), then pops the [obj, key, value] triple. The value is
+// dup'd into the array (setFastArrayElementDup), so all three operands are freed
+// here exactly as the cold path's defers do. Typed arrays (not is_array), string
+// keys, out-of-range / holey, and exotic receivers fall to the cold h_array_element.
+pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const value = (sp - 1)[0];
+    const key = (sp - 2)[0];
+    const obj = (sp - 3)[0];
+    const rt = vm.ctx.runtime;
+    if (array_ops.putDenseArrayElementFast(rt, obj, key, value) catch |e| return vm.fail(e)) {
+        value.free(rt);
+        key.free(rt);
+        obj.free(rt);
+        return cont(pc + 1, sp - 3, var_buf, vm);
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
