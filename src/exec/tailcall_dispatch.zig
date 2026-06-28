@@ -819,7 +819,19 @@ pub fn op_update_loc(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     // nested closure is reached by inc_loc; only normal-function locals are guaranteed
     // non-captured.)
     const iv = old_v.asInt32() orelse return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    var_buf[idx] = arith_vm.fastInt32Add(iv, if (pc[0] == op.inc_loc) 1 else -1);
+    // qjs OP_inc_loc/OP_dec_loc: branch on the single overflow value (INT32_MAX/MIN),
+    // then a plain int add — NOT the int64-widen + range-check that fastInt32Add (=
+    // qjs's OP_add path) compiles to a branchless scvtf/fcsel. The scvtf computes the
+    // float fallback unconditionally and sits on the loop-carried counter chain; the
+    // predicted-not-taken overflow branch keeps the chain to load→add→store. Overflow
+    // (rare) falls to the cold op, whose updateLocalAt redoes it with the float box.
+    if (pc[0] == op.inc_loc) {
+        if (iv == std.math.maxInt(i32)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        var_buf[idx] = JSValue.int32(iv + 1);
+    } else {
+        if (iv == std.math.minInt(i32)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        var_buf[idx] = JSValue.int32(iv - 1);
+    }
     return cont(pc + 2, sp, var_buf, vm);
 }
 
