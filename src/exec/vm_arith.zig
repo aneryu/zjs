@@ -495,9 +495,14 @@ pub fn updateLocalAt(
     slot: *core.JSValue,
     opcode_id: u8,
 ) !void {
-    const value = slot_ops.slotValueDup(slot.*);
-    defer value.free(ctx.runtime);
-    if (value.asInt32()) |int_value| {
+    // The int32/float64/short-bigint fast paths are non-refcounted and store through
+    // setSlotValue (which frees any old refcounted value), so they read `slot.*`
+    // WITHOUT a dup — qjs js_unary_arith_slow reads sp[-1] directly and JS_DupValue on
+    // a number is a no-op. A var-ref cell (an eval `var x` boxed by a nested closure —
+    // inc_loc is NOT non-captured in eval code) is an object, so it misses all three
+    // and falls to the slow path below, which walks it via slotValueDup.
+    const cur = slot.*;
+    if (cur.asInt32()) |int_value| {
         const updated = switch (opcode_id) {
             op.inc_loc => fastInt32Add(int_value, 1),
             op.dec_loc => fastInt32Sub(int_value, 1),
@@ -509,7 +514,7 @@ pub fn updateLocalAt(
     // Float64 fast path — qjs js_unary_arith_slow's `if (FLOAT64) goto handle_float64`
     // (d ± 1 → bare __JS_NewFloat64, no int32 renormalization). Skips the generic
     // toPrimitiveForNumber + value_ops.unary dispatch on every float-counter `x++`.
-    if (value.asFloat64()) |d| {
+    if (cur.asFloat64()) |d| {
         const updated = switch (opcode_id) {
             op.inc_loc => d + 1,
             op.dec_loc => d - 1,
@@ -518,7 +523,7 @@ pub fn updateLocalAt(
         try slot_ops.setSlotValue(ctx, slot, core.JSValue.float64(updated));
         return;
     }
-    if (value.asShortBigInt()) |bigint_value| {
+    if (cur.asShortBigInt()) |bigint_value| {
         const op_id = switch (opcode_id) {
             op.inc_loc => op.inc,
             op.dec_loc => op.dec,
@@ -529,6 +534,11 @@ pub fn updateLocalAt(
             return;
         }
     }
+    // Object / heap-bigint / var-ref-cell slow path: slotValueDup walks a cell (eval
+    // boxed var) to its value and dups, so user coercion (valueOf) cannot free the
+    // accumulator underneath us (qjs OP_inc_loc's `op1 = JS_DupValue(op1)`).
+    const value = slot_ops.slotValueDup(slot.*);
+    defer value.free(ctx.runtime);
     const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
     defer primitive.free(ctx.runtime);
     if (primitive.isSymbol()) return error.TypeError;
