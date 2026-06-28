@@ -44,6 +44,7 @@ const slot_ops = @import("slot_ops.zig");
 const vm_property_ref = @import("vm_property_ref.zig");
 const vm_property_globals = @import("vm_property_globals.zig");
 const vm_property_field = @import("vm_property_field.zig");
+const property_ic = @import("property_ic.zig");
 const vm_property_private = @import("vm_property_private.zig");
 const forof_ops = @import("forof_ops.zig");
 
@@ -634,6 +635,25 @@ pub fn op_get_arg_short(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm
     if (slot_ops.varRefCellFromValue(v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     sp[0] = v.dup();
     return cont(pc + 1, sp + 1, var_buf, vm);
+}
+
+// Hot inline get_field — qjs OP_get_field's inline-cache fast path. On a monomorphic
+// IC hit (the cached shape still matches the receiver) reads the property's data slot
+// directly and dispatches, skipping the cold field()'s publish→helper→coldNext shell.
+// IC miss / first access / non-object / profiling falls to the cold field, which runs
+// the full lookup AND installs the IC for the next time around. 5-byte op (atom u32).
+pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const receiver = (sp - 1)[0];
+    const atom_id = readInt(u32, pc + 1);
+    const site_pc = @intFromPtr(pc) - @intFromPtr(vm.code_base);
+    if (property_ic.cachedDataPropertyValueForFastPath(vm.function, site_pc, vm.ctx.runtime, receiver, atom_id)) |value| {
+        // IC hit: the value is BORROWED from the object's slot — dup onto the stack
+        // (which owns its entries) and free the receiver, exactly like replaceTopBorrowed.
+        (sp - 1)[0] = if (value.requiresRefCount()) value.dup() else value;
+        receiver.free(vm.ctx.runtime);
+        return cont(pc + 5, sp, var_buf, vm);
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
 pub fn op_binary(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
