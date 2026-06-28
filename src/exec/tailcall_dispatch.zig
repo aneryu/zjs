@@ -785,7 +785,10 @@ pub fn op_update_loc(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx: u16 = pc[1];
     const old_v = var_buf[idx];
-    if (slot_ops.varRefCellFromValue(old_v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // No explicit var-ref cell check: a cell is an object, so `asInt32` below fails on
+    // it and routes to the cold op (which handles cells) — the check is redundant.
+    // (And add_loc/inc_loc are only emitted for non-captured locals, so a cell here is
+    // impossible anyway; the redundancy makes removal safe even if that ever changed.)
     const iv = old_v.asInt32() orelse return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     var_buf[idx] = arith_vm.fastInt32Add(iv, if (pc[0] == op.inc_loc) 1 else -1);
     return cont(pc + 2, sp, var_buf, vm);
@@ -819,7 +822,10 @@ pub fn op_add_loc(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx: u16 = pc[1];
     const old_v = var_buf[idx];
-    if (slot_ops.varRefCellFromValue(old_v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // No explicit var-ref cell check: a cell is an object, so it misses both asInt32
+    // and asFloat64 below and falls to op_add_loc_cold (== cold_table[add_loc], which
+    // handles cells) — the check is redundant. add_loc is only emitted for
+    // non-captured locals anyway, so a cell here is impossible.
     const rhs_v = (sp - 1)[0];
     // qjs OP_add_loc inlines exactly JS_VALUE_IS_BOTH_INT and JS_VALUE_IS_BOTH_FLOAT
     // (and both-string) before falling to js_add_slow. Match the two numeric ones:
