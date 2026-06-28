@@ -656,6 +656,24 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
+// Hot inline put_field — qjs OP_put_field's monomorphic IC: o.x = v writes the
+// value straight into the cached slot when the receiver's shape matches the site's
+// monomorphic IC entry (no allocation, no shape transition). IC miss / new property /
+// setter / exotic receiver fall to the cold h_field, which runs the full put fast
+// path (simple-put + IC install) then the slow setValueProperty. Stack is
+// [obj, value]; on a hit value is consumed by the slot write and obj is freed.
+pub fn op_put_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const value = (sp - 1)[0];
+    const obj = (sp - 2)[0];
+    const atom_id = readInt(u32, pc + 1);
+    const site_pc = @intFromPtr(pc) - @intFromPtr(vm.code_base);
+    if (property_ic.cachedSetObjectDataPropertyForPutFastPath(vm.function, site_pc, vm.ctx.runtime, obj, atom_id, value)) {
+        obj.free(vm.ctx.runtime); // value consumed by the slot write
+        return cont(pc + 5, sp - 2, var_buf, vm);
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
 // Hot inline get_array_el — qjs OP_get_array_el's dense fast path: a[i] on a fast
 // array with a non-negative int32 index reads the element directly (dup'd) and pops
 // the [obj, key] pair to [value]. Holey/out-of-range/string-key/typed-array/proxy/

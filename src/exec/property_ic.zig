@@ -258,6 +258,25 @@ pub fn setObjectDataPropertyForPutFieldFastPath(
     return false;
 }
 
+/// IC-hit-only put for the lean `op_put_field` fast handler (mirror of
+/// `cachedDataPropertyValueForFastPath`): on a monomorphic shape match the value
+/// is written straight into the cached slot (consumed) with no allocation and no
+/// error path. Returns false — deferring to the cold handler's full
+/// `setObjectDataPropertyForPutFieldFastPath` (simple-put + IC install + slow
+/// path) — on any miss, and while opcode profiling is active so the cold handler
+/// still records the op.
+pub inline fn cachedSetObjectDataPropertyForPutFastPath(
+    function: *const bytecode.Bytecode,
+    site_pc: usize,
+    rt: *core.JSRuntime,
+    receiver: core.JSValue,
+    atom_id: core.Atom,
+    value: core.JSValue,
+) bool {
+    if (rt.opcode_profile != null) return false;
+    return setCachedOwnDataPropertyOwned(rt, function, site_pc, receiver, atom_id, value);
+}
+
 fn setCachedOwnDataPropertyOwned(
     rt: *core.JSRuntime,
     function: *const bytecode.Bytecode,
