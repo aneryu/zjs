@@ -339,7 +339,36 @@ fn op_return_undef(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) cal
 
 fn op_call(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     vm.publish(pc, sp);
-    switch (call_vm.call(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, pc[0], &vm.tail_request) catch |e| return vm.fail(e)) {
+    // Decode argc + advance the resume pc (op.call carries a 2-byte operand; the
+    // call0..3 singletons carry none), matching call_vm.call's prologue.
+    const argc: u16 = switch (pc[0]) {
+        op.call => blk: {
+            vm.frame.pc += 2;
+            break :blk readInt(u16, pc + 1);
+        },
+        op.call0 => 0,
+        op.call1 => 1,
+        op.call2 => 2,
+        op.call3 => 3,
+        else => unreachable,
+    };
+    // Inline the common bytecode-to-bytecode resolution here instead of paying
+    // execCall's 10-argument call boundary every iteration: resolveInlineTarget
+    // (an inline fn) reads the callable off the operand region exactly as
+    // execCall's inline leg does and, on a hit, hands the dispatch driver a
+    // pushCall request directly. A miss (host fn / ctor / cross-realm / underflow)
+    // falls to execCall with allow_inline=false so the inline check isn't redone.
+    const total = @as(usize, argc) + 1;
+    if (vm.stack.values.len >= total) {
+        const region_base = vm.stack.values.len - total;
+        const func = vm.stack.values[region_base];
+        if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, JSValue.undefinedValue(), func)) |target| {
+            vm.tail_request = .{ .target = target, .region_base = region_base, .argc = argc };
+            vm.tail_is_reuse = false;
+            return .tail;
+        }
+    }
+    switch (call_runtime.execCall(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, argc, vm.output, vm.global, false, &vm.tail_request) catch |e| return vm.fail(e)) {
         .done, .continue_loop => return coldNext(vb, vm),
         .inline_call => {
             vm.tail_is_reuse = false;
@@ -348,8 +377,28 @@ fn op_call(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c
     }
 }
 fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    vm.publish(pc, sp);
-    switch (call_vm.callMethod(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, true, &vm.tail_request) catch |e| return vm.fail(e)) {
+    vm.publish(pc, sp); // frame.pc now at the 2-byte argc operand
+    const argc = readInt(u16, pc + 1);
+    // Inline the bytecode-method resolution (recv.method() where method is a plain
+    // bytecode function — OOP recursion, chained calls) instead of paying
+    // callMethod's call boundary. Region is [receiver, callable, args...]; the
+    // receiver becomes the callee's `this`. On a HIT advance the resume pc past the
+    // operand and hand the driver a pushCall. On a MISS leave frame.pc AT the
+    // operand so callMethod's own decode (native builtin dispatch, allow_inline
+    // already tried here) reads it correctly.
+    const total = @as(usize, argc) + 2;
+    if (vm.stack.values.len >= total) {
+        const region_base = vm.stack.values.len - total;
+        const receiver = vm.stack.values[region_base];
+        const method = vm.stack.values[region_base + 1];
+        if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, receiver, method)) |target| {
+            vm.frame.pc += 2;
+            vm.tail_request = .{ .target = target, .region_base = region_base, .argc = argc, .layout = .method };
+            vm.tail_is_reuse = false;
+            return .tail;
+        }
+    }
+    switch (call_vm.callMethod(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, false, &vm.tail_request) catch |e| return vm.fail(e)) {
         .done, .continue_loop => return coldNext(vb, vm),
         .inline_call => {
             vm.tail_is_reuse = false;
