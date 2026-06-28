@@ -153,6 +153,69 @@ pub noinline fn compareVm(
     return .done;
 }
 
+/// Register-resident slow compare (qjs OP_lt/OP_le/… → js_relational_slow /
+/// js_eq_slow): takes the two operands BY VALUE and RETURNS the result, never
+/// reading frame.pc or popping the stack — the dispatch handler keeps pc/sp in
+/// registers and stores the result into sp[-2] itself, syncing only on the error
+/// path. Reached only after op_compare's both-int32 fast path missed, so the body
+/// is `compare`'s minus that arm (the float-vs-int / float-vs-float / object /
+/// loose-eq cases). `lhs`/`rhs` are OWNED here (consumed via the defers / the
+/// borrowing coercions, exactly as `compare`'s popped operands were).
+pub fn compareAt(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    output: ?*std.Io.Writer,
+    cmp: u8,
+    lhs: core.JSValue,
+    rhs: core.JSValue,
+) !core.JSValue {
+    defer rhs.free(ctx.runtime);
+    defer lhs.free(ctx.runtime);
+    // Number fast path — qjs js_relational_slow's `float64_compare` (both operands
+    // already numeric ⇒ ToPrimitive is a no-op, so compare the doubles directly).
+    // Covers the float-vs-int `x < n` that misses op_compare's both-int32 arm every
+    // float-counter iteration, skipping toPrimitiveForNumber + value_ops.compare.
+    switch (cmp) {
+        op.lt, op.lte, op.gt, op.gte => {
+            if (value_ops.numberValue(lhs)) |d1| {
+                if (value_ops.numberValue(rhs)) |d2| {
+                    const out = switch (cmp) {
+                        op.lt => d1 < d2,
+                        op.lte => d1 <= d2,
+                        op.gt => d1 > d2,
+                        op.gte => d1 >= d2,
+                        else => unreachable,
+                    };
+                    return core.JSValue.boolean(out);
+                }
+            }
+        },
+        else => {},
+    }
+    if (lhs.asShortBigInt()) |lhs_bigint| {
+        if (rhs.asShortBigInt()) |rhs_bigint| {
+            if (fastCompareShortBigInt(cmp, lhs_bigint, rhs_bigint)) |out| {
+                return core.JSValue.boolean(out);
+            }
+        }
+    }
+    return switch (cmp) {
+        op.eq => core.JSValue.boolean(try looseEqualOp(ctx, output, global, lhs, rhs, 0)),
+        op.neq => core.JSValue.boolean(!try looseEqualOp(ctx, output, global, lhs, rhs, 0)),
+        op.strict_eq => value_ops.strictEqual(lhs, rhs),
+        op.strict_neq => value_ops.strictNotEqual(lhs, rhs),
+        else => blk: {
+            const lhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, lhs);
+            defer lhs_primitive.free(ctx.runtime);
+            if (lhs_primitive.isSymbol()) return error.TypeError;
+            const rhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, rhs);
+            defer rhs_primitive.free(ctx.runtime);
+            if (rhs_primitive.isSymbol()) return error.TypeError;
+            break :blk try value_ops.compare(ctx.runtime, cmp, lhs_primitive, rhs_primitive);
+        },
+    };
+}
+
 /// Inline operand-stack fast path for two int32 operands of an arithmetic /
 /// bitwise binary op. Identical semantics to `binary()`'s int32 branch (same
 /// `fastBinaryInt32` helper, same overflow->float promotion), but operates in
@@ -418,6 +481,66 @@ pub noinline fn updateLocalVm(
     return .done;
 }
 
+/// Register-resident slow inc_loc/dec_loc (qjs OP_inc_loc/OP_dec_loc's non-int
+/// branch), the unary analog of `addLocalAt`: it takes the local SLOT POINTER and
+/// the opcode directly, never reading `frame.pc` or touching the stack, so the
+/// dispatch handler keeps pc/sp in registers and skips the per-iteration frame.pc
+/// memory round-trip. inc_loc/dec_loc are stack-neutral (they rewrite the local in
+/// place), so there is nothing to pop. Body is `updateLocal`'s, re-parameterized on
+/// (slot, opcode_id).
+pub fn updateLocalAt(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    output: ?*std.Io.Writer,
+    slot: *core.JSValue,
+    opcode_id: u8,
+) !void {
+    const value = slot_ops.slotValueDup(slot.*);
+    defer value.free(ctx.runtime);
+    if (value.asInt32()) |int_value| {
+        const updated = switch (opcode_id) {
+            op.inc_loc => fastInt32Add(int_value, 1),
+            op.dec_loc => fastInt32Sub(int_value, 1),
+            else => unreachable,
+        };
+        try slot_ops.setSlotValue(ctx, slot, updated);
+        return;
+    }
+    // Float64 fast path — qjs js_unary_arith_slow's `if (FLOAT64) goto handle_float64`
+    // (d ± 1 → bare __JS_NewFloat64, no int32 renormalization). Skips the generic
+    // toPrimitiveForNumber + value_ops.unary dispatch on every float-counter `x++`.
+    if (value.asFloat64()) |d| {
+        const updated = switch (opcode_id) {
+            op.inc_loc => d + 1,
+            op.dec_loc => d - 1,
+            else => unreachable,
+        };
+        try slot_ops.setSlotValue(ctx, slot, core.JSValue.float64(updated));
+        return;
+    }
+    if (value.asShortBigInt()) |bigint_value| {
+        const op_id = switch (opcode_id) {
+            op.inc_loc => op.inc,
+            op.dec_loc => op.dec,
+            else => unreachable,
+        };
+        if (value_ops.shortBigIntUnary(op_id, bigint_value)) |updated| {
+            try slot_ops.setSlotValue(ctx, slot, updated);
+            return;
+        }
+    }
+    const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
+    defer primitive.free(ctx.runtime);
+    if (primitive.isSymbol()) return error.TypeError;
+    const op_id = switch (opcode_id) {
+        op.inc_loc => op.inc,
+        op.dec_loc => op.dec,
+        else => unreachable,
+    };
+    const updated = try value_ops.unary(ctx.runtime, op_id, primitive);
+    try slot_ops.setSlotValue(ctx, slot, updated);
+}
+
 pub fn addLocal(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
@@ -551,6 +674,100 @@ pub noinline fn addLocalVm(
         return err;
     };
     return .done;
+}
+
+/// Register-resident slow add for OP_add_loc, the faithful analog of qjs's
+/// `js_add_loc_slow(ctx, pv, sp)`: it takes the local SLOT POINTER and the rhs
+/// VALUE directly. Unlike `addLocal` it does NOT read `frame.pc` (the dispatch
+/// handler already holds the operand in a register) and does NOT call
+/// `stack.pop()` (the handler keeps sp register-resident, syncing only on the
+/// error path). This removes the per-iteration `frame.pc` store→reload→store→reload
+/// round-trip — `publish` (write frame.pc/stack.values) → `addLocal` (re-read
+/// frame.pc for the operand) → `coldNext` (re-read frame.pc to re-dispatch) — that
+/// serialized the dispatch critical path through memory; qjs keeps pc in a register
+/// across the js_add_loc_slow call.
+///
+/// `rhs` is OWNED here: the string/number slow paths consume it (qjs
+/// JS_ToPrimitiveFree); the int32/bigint fast paths only ever see non-refcounted
+/// operands, so their early returns leave nothing to free. On every error path rhs
+/// (or the primitive derived from it) is freed, so the caller publishes the popped
+/// sp and the catch unwinder never double-frees the now-dead stack slot. The body
+/// is byte-for-byte `addLocal`'s, only re-parameterized on (slot, rhs).
+pub fn addLocalAt(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    output: ?*std.Io.Writer,
+    slot: *core.JSValue,
+    rhs: core.JSValue,
+) !void {
+    const cell_opt = slot_ops.varRefCellFromValue(slot.*);
+    const lhs_borrowed = if (cell_opt) |cell| cell.varRefValue() else slot.*;
+    if (lhs_borrowed.isString()) {
+        return addLocalStringAt(ctx, output, global, slot, rhs, cell_opt == null);
+    }
+
+    const lhs = slot_ops.slotValueDup(slot.*);
+    if (lhs.asInt32()) |lhs_int| {
+        if (rhs.asInt32()) |rhs_int| {
+            try slot_ops.setSlotValue(ctx, slot, fastInt32Add(lhs_int, rhs_int));
+            return; // both int32 — non-refcounted, nothing to free
+        }
+    }
+    if (lhs.asShortBigInt()) |lhs_bigint| {
+        if (rhs.asShortBigInt()) |rhs_bigint| {
+            if (value_ops.shortBigIntBinary(op.add, lhs_bigint, rhs_bigint)) |updated| {
+                try slot_ops.setSlotValue(ctx, slot, updated);
+                return; // both short big ints — non-refcounted, nothing to free
+            }
+        }
+    }
+
+    const lhs_primitive = coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, lhs) catch |err| {
+        rhs.free(ctx.runtime);
+        return err;
+    };
+    defer lhs_primitive.free(ctx.runtime);
+    const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
+    defer rhs_primitive.free(ctx.runtime);
+
+    if (value_ops.numberValue(lhs_primitive)) |d1| {
+        if (value_ops.numberValue(rhs_primitive)) |d2| {
+            const sum = d1 + d2;
+            if (lhs_primitive.isInt() and rhs_primitive.isInt()) {
+                try slot_ops.setSlotValue(ctx, slot, value_ops.numberToValue(sum));
+            } else {
+                try slot_ops.setSlotValue(ctx, slot, core.JSValue.float64(sum));
+            }
+            return;
+        }
+    }
+    const updated = try value_ops.binary(ctx.runtime, op.add, lhs_primitive, rhs_primitive);
+    try slot_ops.setSlotValue(ctx, slot, updated);
+}
+
+/// `addLocalString`'s slot-pointer analog (see `addLocalAt`).
+noinline fn addLocalStringAt(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    slot: *core.JSValue,
+    rhs: core.JSValue,
+    cell_is_null: bool,
+) !void {
+    const lhs = slot_ops.slotValueDup(slot.*);
+    defer lhs.free(ctx.runtime);
+
+    const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
+    defer rhs_primitive.free(ctx.runtime);
+
+    if (cell_is_null and rhs_primitive.isString()) {
+        if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs_primitive, 2)) {
+            return;
+        }
+    }
+
+    const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs_primitive);
+    try slot_ops.setSlotValue(ctx, slot, updated);
 }
 
 /// Fuses `add; dup? put_var s; (put_locN | drop)?` when the add is a string

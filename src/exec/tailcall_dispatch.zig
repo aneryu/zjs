@@ -678,6 +678,39 @@ pub fn op_compare(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
+/// Dedicated cold handler for OP_lt/OP_le/…/OP_eq's non-(both-int32) operands — the
+/// float-vs-int / float / object / loose-eq cases (qjs js_relational_slow /
+/// js_eq_slow). Installed as the cold_table entry for the compare ops, so op_compare
+/// reaches it through the same indirect `cold_table[pc[0]]` dispatch it always used
+/// (a DIRECT tail-call here would perturb op_compare's int32 fast-path codegen — the
+/// canonical `s=s+i` loop regressed +37 insn/iter when routed directly).
+///
+/// `compareAt` runs register-resident (no publish round-trip) and the handler writes
+/// the result into sp[-2] + pops one, exactly like the int32 fast arm. The win
+/// matters for float-counter loops (`for (var x=0.5; x<n; x++)`), whose `x < n`
+/// misses the int32 arm every iteration. At a generator/eval stop boundary
+/// (local_fast_blocked) it falls back to the publishing path so coldNext's maybeStop
+/// can still suspend at stop_before_pc.
+pub fn op_compare_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) {
+        vm.publish(pc, sp);
+        _ = arith_vm.compareVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, pc[0], vm.output, vm.global) catch |e| return vm.fail(e);
+        return coldNext(var_buf, vm);
+    }
+    const lhs = (sp - 2)[0];
+    const rhs = (sp - 1)[0];
+    const result = arith_vm.compareAt(vm.ctx, vm.global, vm.output, pc[0], lhs, rhs) catch |err| {
+        // Error only: compareAt freed both operands, so publish the doubly-popped sp
+        // (frame.pc → next op; compare ops are 1 byte) for a consistent catch stack.
+        vm.publish(pc, sp - 2);
+        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
+        if (!caught) return vm.fail(err);
+        return coldNext(var_buf, vm);
+    };
+    (sp - 2)[0] = result;
+    return cont(pc + 1, sp - 1, var_buf, vm);
+}
+
 pub fn op_inc_dec(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const opc = pc[0];
     if ((sp - 1)[0].asInt32()) |iv| {
@@ -744,6 +777,30 @@ pub fn op_update_loc(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     var_buf[idx] = arith_vm.fastInt32Add(iv, if (pc[0] == op.inc_loc) 1 else -1);
     return cont(pc + 2, sp, var_buf, vm);
 }
+
+/// Dedicated cold handler for OP_inc_loc/OP_dec_loc's non-int32 operand (float /
+/// BigInt / object counter — the `for (var x=0.5; …; x++)` shape). Installed as the
+/// cold_table entry for inc_loc/dec_loc, so op_update_loc reaches it via the same
+/// indirect `cold_table[pc[0]]` dispatch (a direct tail-call would perturb the int32
+/// fast-path codegen, like op_compare_cold). `updateLocalAt` runs register-resident
+/// (no publish round-trip); inc/dec is stack-neutral so sp is unchanged. At a
+/// generator/eval stop boundary (local_fast_blocked — op_update_loc routes blocked
+/// AND cell here) it uses the publishing path so coldNext's maybeStop still fires.
+pub fn op_update_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) {
+        vm.publish(pc, sp);
+        _ = arith_vm.updateLocalVm(vm.ctx, vm.stack, vm.function, vm.global, vm.frame, vm.catch_target, pc[0], vm.output) catch |e| return vm.fail(e);
+        return coldNext(var_buf, vm);
+    }
+    const idx: u16 = pc[1];
+    arith_vm.updateLocalAt(vm.ctx, vm.global, vm.output, &var_buf[idx], pc[0]) catch |err| {
+        vm.publish(pc + 1, sp);
+        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
+        if (!caught) return vm.fail(err);
+        return coldNext(var_buf, vm);
+    };
+    return cont(pc + 2, sp, var_buf, vm);
+}
 pub fn op_add_loc(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx: u16 = pc[1];
@@ -781,12 +838,25 @@ pub fn op_add_loc(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
 /// stalled on (int+float 29.7% idle cycles, measured). NOT a numeric fast path: it
 /// runs the exact same full `addLocal` (int+float stays with object/BigInt), unhopped.
 pub fn op_add_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    vm.publish(pc, sp);
-    arith_vm.addLocal(vm.ctx, vm.stack, vm.function, vm.global, vm.frame, vm.output) catch |err| {
+    const idx: u16 = pc[1];
+    const rhs = (sp - 1)[0];
+    // qjs OP_add_loc → js_add_loc_slow(ctx, pv, sp): hand the local slot pointer and
+    // the rhs VALUE straight to the slow add, pc/sp staying register-resident. No
+    // `publish` on the hot path — `addLocalAt` neither re-reads frame.pc for the
+    // operand nor pops the stack, so the per-iteration frame.pc memory round-trip
+    // (publish→re-read→coldNext) that the backend stalled on is gone. On success we
+    // fall straight through to the next op with sp popped by one (the consumed rhs),
+    // exactly like the both-int/both-float fast arms above.
+    arith_vm.addLocalAt(vm.ctx, vm.global, vm.output, &var_buf[idx], rhs) catch |err| {
+        // Error only: now sync frame.pc (one past the operand) and the popped sp so
+        // the catch unwinder sees consistent state. addLocalAt already freed rhs, so
+        // the published length excludes the dead slot — no double free.
+        vm.publish(pc + 1, sp - 1);
         const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
         if (!caught) return vm.fail(err);
+        return coldNext(var_buf, vm);
     };
-    return coldNext(var_buf, vm);
+    return cont(pc + 2, sp - 1, var_buf, vm);
 }
 
 // Global var read (2-byte var-ref index). qjs OP_get_var_ref-backed global cell read
