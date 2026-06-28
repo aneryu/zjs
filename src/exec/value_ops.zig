@@ -1047,8 +1047,13 @@ fn appendStringInPlace(rt: *core.JSRuntime, lhs_string: *core.string.String, rhs
 }
 
 pub fn tryAppendStringInPlace(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.JSValue, max_ref_count: usize) !bool {
-    const lhs_header = lhs.refHeader() orelse return false;
-    if (lhs_header.rc > max_ref_count) return false;
+    // Strings/ropes carry a `StringHeader`, NOT the `BlockHeader` that
+    // `refHeader()` returns (it only covers big_int/object/module) — using
+    // refHeader here returned null for every string, silently disabling this
+    // entire in-place append. Use `stringHeader()` so the rc-1/rc-2 unshared
+    // fast path (qjs JS_ConcatStringInPlace) actually fires.
+    const lhs_header = lhs.stringHeader() orelse return false;
+    if (@as(usize, @intCast(lhs_header.rc)) > max_ref_count) return false;
     const lhs_string = stringObject(lhs) orelse return false;
     const rhs_string = stringObject(rhs) orelse return false;
     return try appendStringInPlace(rt, lhs_string, rhs_string);
@@ -1059,7 +1064,9 @@ pub fn tryAppendLatin1StringInPlace(rt: *core.JSRuntime, lhs: core.JSValue, rhs:
 }
 
 pub fn tryAppendLatin1AtomRepeatedInPlace(rt: *core.JSRuntime, lhs: core.JSValue, atom_id: core.Atom, repeat_count: usize, max_ref_count: usize) !bool {
-    const lhs_header = lhs.refHeader() orelse return false;
+    // See tryAppendStringInPlace: a string's refcount lives in `stringHeader()`,
+    // not `refHeader()` (which is null for strings).
+    const lhs_header = lhs.stringHeader() orelse return false;
     if (@as(usize, @intCast(lhs_header.rc)) > max_ref_count) return false;
     const lhs_string = stringObject(lhs) orelse return false;
     if (rt.atoms.kind(atom_id) != .string) return false;
