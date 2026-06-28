@@ -737,6 +737,14 @@ pub fn op_get_length(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
         (sp - 1)[0] = len_val;
         return cont(pc + 1, sp, var_buf, vm);
     }
+    // Plain fast array `.length` — the `for (i=0;i<arr.length;i++)` hot read,
+    // read inline instead of via the cold getLength's getValueProperty.
+    // Exotic/subclassed arrays, typed arrays, and length-getter objects fall cold.
+    if (vm_property_field.fastArrayLengthValue(value)) |len_val| {
+        value.free(vm.ctx.runtime);
+        (sp - 1)[0] = len_val;
+        return cont(pc + 1, sp, var_buf, vm);
+    }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 

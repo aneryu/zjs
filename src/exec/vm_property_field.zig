@@ -335,6 +335,19 @@ pub noinline fn field(
     return .done;
 }
 
+/// `.length` of a plain fast array (qjs OP_get_length / OP_get_array_length leg):
+/// the element count as int32 (float64 above i32) for an own, non-exotic,
+/// non-proxy array. Null for everything else — strings are handled by the
+/// caller's string leg; exotic/subclassed arrays, typed arrays (not is_array),
+/// and objects with a `length` getter fall to the cold getLength.
+pub inline fn fastArrayLengthValue(value: core.JSValue) ?core.JSValue {
+    const object = objectFromValue(value) orelse return null;
+    if (!object.flags.is_array or object.hasExoticMethods() or object.proxyTarget() != null) return null;
+    const len = object.arrayLength();
+    if (len <= @as(u32, @intCast(std.math.maxInt(i32)))) return core.JSValue.int32(@intCast(len));
+    return core.JSValue.float64(@floatFromInt(len));
+}
+
 pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.JSValue {
     if (rt.atoms.mightBePrivate(atom_id)) return null;
     var object = objectFromValue(receiver) orelse return null;
