@@ -22,10 +22,12 @@ pub const Step = enum { done, continue_loop };
 
 /// Step result for opcodes that may request an inline bytecode call to be
 /// pushed by the dispatch loop.
-pub const CallStep = union(enum) {
+pub const CallStep = enum {
     done,
     continue_loop,
-    inline_call: call_runtime.InlineCallRequest,
+    /// The InlineCallRequest is written through the caller's shared `req_out`
+    /// slot, not carried in the result (payload-free → no per-call sret alloca).
+    inline_call,
 };
 
 pub const TailCallMethodResult = union(enum) {
@@ -33,16 +35,19 @@ pub const TailCallMethodResult = union(enum) {
     return_value: core.JSValue,
     /// Eligible bytecode method target for tail-call frame reuse; the
     /// dispatch loop replaces the current inline frame (the receiver becomes
-    /// the reused frame's `this`) instead of recursing.
-    tail_inline: call_runtime.InlineCallRequest,
+    /// the reused frame's `this`) instead of recursing. The InlineCallRequest
+    /// is written through the caller's shared `req_out` slot (payload-free).
+    tail_inline,
 };
 
 pub const TailCallResult = union(enum) {
     handled,
     return_value: core.JSValue,
     /// Eligible bytecode target for tail-call frame reuse; the dispatch
-    /// loop replaces the current inline frame instead of recursing.
-    tail_inline: call_runtime.InlineCallRequest,
+    /// loop replaces the current inline frame instead of recursing. The
+    /// InlineCallRequest is written through the caller's shared `req_out` slot
+    /// (payload-free variant → no per-call sret alloca for the 88-byte request).
+    tail_inline,
 };
 
 pub const CallDepthGuard = struct {
@@ -392,6 +397,7 @@ pub fn call(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     opc: u8,
+    req_out: *call_runtime.InlineCallRequest,
 ) !CallStep {
     const argc = switch (opc) {
         op.call => blk: {
@@ -405,10 +411,10 @@ pub fn call(
         op.call3 => 3,
         else => unreachable,
     };
-    return switch (try call_runtime.execCall(ctx, stack, function, frame, catch_target, argc, output, global, true)) {
+    return switch (try call_runtime.execCall(ctx, stack, function, frame, catch_target, argc, output, global, true, req_out)) {
         .done => .done,
         .continue_loop => .continue_loop,
-        .inline_call => |request| .{ .inline_call = request },
+        .inline_call => .inline_call,
     };
 }
 
@@ -421,13 +427,14 @@ pub noinline fn tailCall(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     allow_inline: bool,
+    req_out: *call_runtime.InlineCallRequest,
 ) !TailCallResult {
     const argc = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
-    switch (try call_runtime.execCall(ctx, stack, function, frame, catch_target, argc, output, global, allow_inline)) {
+    switch (try call_runtime.execCall(ctx, stack, function, frame, catch_target, argc, output, global, allow_inline, req_out)) {
         .done => {},
         .continue_loop => return .handled,
-        .inline_call => |request| return .{ .tail_inline = request },
+        .inline_call => return .tail_inline,
     }
     if (stack.peek()) |value| return .{ .return_value = value };
     return .{ .return_value = core.JSValue.undefinedValue() };
@@ -442,6 +449,7 @@ pub noinline fn callMethod(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     allow_inline: bool,
+    req_out: *call_runtime.InlineCallRequest,
 ) !CallStep {
     const argc = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
@@ -463,7 +471,8 @@ pub noinline fn callMethod(
             const receiver = stack.values[region_base];
             const method = stack.values[region_base + 1];
             if (inline_calls.resolveInlineTarget(ctx, global, receiver, method)) |target| {
-                return .{ .inline_call = .{ .target = target, .region_base = region_base, .argc = argc, .layout = .method } };
+                req_out.* = .{ .target = target, .region_base = region_base, .argc = argc, .layout = .method };
+                return .inline_call;
             }
         }
     }
@@ -531,6 +540,7 @@ pub noinline fn tailCallMethod(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     allow_inline: bool,
+    req_out: *call_runtime.InlineCallRequest,
 ) !TailCallMethodResult {
     const argc = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
@@ -550,7 +560,8 @@ pub noinline fn tailCallMethod(
             const receiver = stack.values[region_base];
             const method = stack.values[region_base + 1];
             if (inline_calls.resolveInlineTarget(ctx, global, receiver, method)) |target| {
-                return .{ .tail_inline = .{ .target = target, .region_base = region_base, .argc = argc, .layout = .method } };
+                req_out.* = .{ .target = target, .region_base = region_base, .argc = argc, .layout = .method };
+                return .tail_inline;
             }
         }
     }

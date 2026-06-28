@@ -430,7 +430,7 @@ pub fn slotValueDup(slot: core.JSValue) core.JSValue {
     return slotValueBorrow(slot).dup();
 }
 
-pub fn slotValueBorrow(slot: core.JSValue) core.JSValue {
+pub fn slotValueBorrow(slot: core.JSValue) callconv(.c) core.JSValue {
     var current = slot;
     var depth: usize = 0;
     while (depth < 16) : (depth += 1) {
@@ -454,11 +454,20 @@ pub fn evalLocalSlotIsEvalVarCell(slot: core.JSValue) bool {
     return cell.varRefIsDeletableSlot().*;
 }
 
-pub fn setSlotValue(ctx: *core.JSContext, slot: *core.JSValue, value: core.JSValue) !void {
+// inline, mirroring QuickJS `static inline set_value`: the common store where
+// neither the outgoing slot nor the incoming value is reference-counted (the hot
+// numeric local-assign case) is a bare move with no call boundary, so a hot
+// handler need not spill its live values across it. The var-ref-cell / refcounted
+// teardown is outlined to keep the inlined footprint to a single branch + store.
+pub inline fn setSlotValue(ctx: *core.JSContext, slot: *core.JSValue, value: core.JSValue) !void {
     if (!slot.requiresRefCount() and !value.requiresRefCount()) {
         slot.* = value;
         return;
     }
+    return setSlotValueRefCounted(ctx, slot, value);
+}
+
+noinline fn setSlotValueRefCounted(ctx: *core.JSContext, slot: *core.JSValue, value: core.JSValue) !void {
     var assigned = value;
     if (varRefCellFromValue(value) != null) {
         assigned = slotValueDup(value);

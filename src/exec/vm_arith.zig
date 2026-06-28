@@ -432,58 +432,108 @@ pub fn addLocal(
     if (idx >= frame.locals.len) return error.InvalidBytecode;
 
     const rhs = try stack.pop();
-    defer rhs.free(ctx.runtime);
+    // rhs ownership transfers onward: the string and number slow paths consume it
+    // via toPrimitiveForAdditionFree (qjs JS_ToPrimitiveFree). The int32/bigint
+    // fast paths only ever see non-refcounted operands, so their early returns
+    // leave nothing to free.
 
     const cell_opt = slot_ops.varRefCellFromValue(frame.locals[idx]);
     const lhs_borrowed = if (cell_opt) |cell| cell.varRefValue() else frame.locals[idx];
     if (lhs_borrowed.isString()) {
-        const lhs = slot_ops.slotValueDup(frame.locals[idx]);
-        defer lhs.free(ctx.runtime);
-
-        const rhs_primitive = try coercion_ops.toPrimitiveForAddition(ctx, output, global, rhs);
-        defer rhs_primitive.free(ctx.runtime);
-
-        // QuickJS OP_add_loc appends into the local's string storage when the
-        // accumulator is unshared. Reference accounting: the local slot plus
-        // our dup hold exactly two references to the accumulator (the retired
-        // global-lexical mirror could once hold a third — that branch is gone).
-        // This keeps `s += part` loops on a flat growable buffer instead of
-        // chaining rope nodes per iteration.
-        if (cell_opt == null and rhs_primitive.isString()) {
-            if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs_primitive, 2)) {
-                return;
-            }
-        }
-
-        const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs_primitive);
-
-        try slot_ops.setSlotValue(ctx, &frame.locals[idx], updated);
-        return;
+        // Outlined: the string-append path carries its own JSValue temporaries
+        // (dup'd accumulator + coerced rhs). Keeping them in a separate frame
+        // stops them from inflating the hot number path's spill set — LLVM does
+        // not coalesce the two branches' spill slots, so an inline string block
+        // makes every float `s = s + i` iteration pay its stack frame.
+        return addLocalString(ctx, output, global, frame, idx, rhs, cell_opt == null);
     }
 
+    // Dup the local so user coercion (Symbol.toPrimitive/valueOf) cannot free it
+    // underneath us. lhs is owned and is CONSUMED by the slow path below.
     const lhs = slot_ops.slotValueDup(frame.locals[idx]);
-    defer lhs.free(ctx.runtime);
     if (lhs.asInt32()) |lhs_int| {
         if (rhs.asInt32()) |rhs_int| {
             const updated = fastInt32Add(lhs_int, rhs_int);
             try slot_ops.setSlotValue(ctx, &frame.locals[idx], updated);
-            return;
+            return; // both int32 — non-refcounted, nothing to free
         }
     }
     if (lhs.asShortBigInt()) |lhs_bigint| {
         if (rhs.asShortBigInt()) |rhs_bigint| {
             if (value_ops.shortBigIntBinary(op.add, lhs_bigint, rhs_bigint)) |updated| {
                 try slot_ops.setSlotValue(ctx, &frame.locals[idx], updated);
-                return;
+                return; // both short big ints — non-refcounted, nothing to free
             }
         }
     }
 
-    const lhs_primitive = try coercion_ops.toPrimitiveForAddition(ctx, output, global, lhs);
+    // Slow path: consume lhs and rhs into primitives with no second dup, mirroring
+    // qjs js_add_slow's JS_ToPrimitiveFree(op1)/JS_ToPrimitiveFree(op2). For the
+    // hot float case both are non-objects, so each call passes the value straight
+    // through — one fewer live JSValue temporary per operand than a borrowing dup.
+    const lhs_primitive = coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, lhs) catch |err| {
+        rhs.free(ctx.runtime);
+        return err;
+    };
     defer lhs_primitive.free(ctx.runtime);
-    const rhs_primitive = try coercion_ops.toPrimitiveForAddition(ctx, output, global, rhs);
+    const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
     defer rhs_primitive.free(ctx.runtime);
+
+    // js_add_slow general path: two JS_TAG_INT operands take the int32 path
+    // (overflow→float); any float operand falls to ToFloat64 + bare __JS_NewFloat64
+    // with NO int32 renormalization. The hot loop is float+int, so `isInt`
+    // short-circuits to the bare box. value_ops.binary is reached only for the cold
+    // (string-via-coercion / BigInt / bool / null) operand combinations.
+    if (value_ops.numberValue(lhs_primitive)) |d1| {
+        if (value_ops.numberValue(rhs_primitive)) |d2| {
+            const sum = d1 + d2;
+            // Store directly in each arm rather than merging into one `updated`
+            // value: LLVM materializes the 16-byte select/phi in a stack temp and
+            // then copies temp→slot, a SIMD round-trip every iteration. Two direct
+            // stores keep the result in registers to the slot.
+            if (lhs_primitive.isInt() and rhs_primitive.isInt()) {
+                try slot_ops.setSlotValue(ctx, &frame.locals[idx], value_ops.numberToValue(sum));
+            } else {
+                try slot_ops.setSlotValue(ctx, &frame.locals[idx], core.JSValue.float64(sum));
+            }
+            return;
+        }
+    }
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs_primitive, rhs_primitive);
+    try slot_ops.setSlotValue(ctx, &frame.locals[idx], updated);
+}
+
+/// String-accumulator branch of `addLocal`, outlined so its JSValue temporaries
+/// live in their own frame and never inflate the hot number path's spill set.
+/// `rhs` is CONSUMED here (toPrimitiveForAdditionFree); the caller transfers
+/// ownership and does not free it.
+noinline fn addLocalString(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    frame: *frame_mod.Frame,
+    idx: u16,
+    rhs: core.JSValue,
+    cell_is_null: bool,
+) !void {
+    const lhs = slot_ops.slotValueDup(frame.locals[idx]);
+    defer lhs.free(ctx.runtime);
+
+    const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
+    defer rhs_primitive.free(ctx.runtime);
+
+    // QuickJS OP_add_loc appends into the local's string storage when the
+    // accumulator is unshared. Reference accounting: the local slot plus our dup
+    // hold exactly two references to the accumulator. This keeps `s += part`
+    // loops on a flat growable buffer instead of chaining rope nodes per
+    // iteration.
+    if (cell_is_null and rhs_primitive.isString()) {
+        if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs_primitive, 2)) {
+            return;
+        }
+    }
+
+    const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs_primitive);
     try slot_ops.setSlotValue(ctx, &frame.locals[idx], updated);
 }
 
@@ -708,15 +758,20 @@ pub fn fastBinaryInt32(binop: u8, lhs: i32, rhs: i32) ?core.JSValue {
 }
 
 pub fn fastInt32Add(lhs: i32, rhs: i32) core.JSValue {
-    const result = @addWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.JSValue.int32(result[0]);
-    return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) + @as(f64, @floatFromInt(rhs)));
+    // qjs-style int64-widen + range check (quickjs.c OP_add int path): avoids
+    // @addWithOverflow's overflow-flag materialize + stack spill in the hot int32
+    // path (the cset/strb [sp] LLVM emits). r is exact in f64 on the float fall-back.
+    const r: i64 = @as(i64, lhs) + rhs;
+    const r32: i32 = @truncate(r);
+    if (r32 == r) return core.JSValue.int32(r32);
+    return value_ops.numberToValue(@as(f64, @floatFromInt(r)));
 }
 
 pub fn fastInt32Sub(lhs: i32, rhs: i32) core.JSValue {
-    const result = @subWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.JSValue.int32(result[0]);
-    return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) - @as(f64, @floatFromInt(rhs)));
+    const r: i64 = @as(i64, lhs) - rhs;
+    const r32: i32 = @truncate(r);
+    if (r32 == r) return core.JSValue.int32(r32);
+    return value_ops.numberToValue(@as(f64, @floatFromInt(r)));
 }
 
 fn fastInt32Mul(lhs: i32, rhs: i32) core.JSValue {

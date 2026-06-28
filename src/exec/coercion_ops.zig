@@ -17,13 +17,39 @@ const callValueOrBytecode = call_runtime.callValueOrBytecode;
 const getValueProperty = object_ops.getValueProperty;
 const isCallableValue = call_runtime.isCallableValue;
 
-pub fn toPrimitiveForAddition(
+/// qjs JS_ToPrimitiveFree: CONSUMES `value` (ownership transfers in). A non-object
+/// operand — the hot int/float add case — passes straight through with no dup and
+/// no free; only objects fall to the outlined Symbol.toPrimitive path, which frees
+/// the input object. The caller hands in an owned value and owns the result out.
+/// This is the faithful primitive; `toPrimitiveForAddition` borrows on top of it.
+pub inline fn toPrimitiveForAdditionFree(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
 ) !core.JSValue {
-    if (!value.isObject()) return value.dup();
+    if (!value.isObject()) return value;
+    return toPrimitiveForAdditionObject(ctx, output, global, value);
+}
+
+/// Borrowing wrapper for callers that hold a borrowed value: dups first so the
+/// consume contract of `toPrimitiveForAdditionFree` leaves their reference intact.
+pub inline fn toPrimitiveForAddition(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    value: core.JSValue,
+) !core.JSValue {
+    return toPrimitiveForAdditionFree(ctx, output, global, value.dup());
+}
+
+fn toPrimitiveForAdditionObject(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    value: core.JSValue,
+) !core.JSValue {
+    defer value.free(ctx.runtime); // consume: JS_ToPrimitiveFree frees the input object
     const symbol_to_primitive = core.atom.predefinedId("Symbol.toPrimitive", .symbol) orelse return toOrdinaryPrimitive(ctx, output, global, value);
     const method = try getValueProperty(ctx, output, global, value, symbol_to_primitive, null, null);
     defer method.free(ctx.runtime);

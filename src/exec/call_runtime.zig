@@ -68,7 +68,10 @@ pub const InlineCallRequest = struct {
     layout: inline_calls.RegionLayout = .plain,
 };
 
-pub const ExecCallResult = union(enum) { done, continue_loop, inline_call: InlineCallRequest };
+/// Payload-free: the `inline_call` request is written through `req_out` (a
+/// caller-owned shared frame slot) instead of being returned by value, so the
+/// 88-byte InlineCallRequest no longer materializes a per-call-site sret alloca.
+pub const ExecCallResult = enum { done, continue_loop, inline_call };
 
 pub fn execCall(
     ctx: *core.JSContext,
@@ -80,6 +83,7 @@ pub fn execCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     allow_inline: bool,
+    req_out: *InlineCallRequest,
 ) !ExecCallResult {
     // Zero-copy call sequence: borrow `func` and `args` directly from the
     // operand stack (which is owned by the caller's frame) instead
@@ -103,7 +107,8 @@ pub fn execCall(
     // host function — qjs has no per-call host-output fast path.
     if (allow_inline) {
         if (inline_calls.resolveInlineTarget(ctx, global, core.JSValue.undefinedValue(), func)) |target| {
-            return .{ .inline_call = .{ .target = target, .region_base = region_base, .argc = argc } };
+            req_out.* = .{ .target = target, .region_base = region_base, .argc = argc };
+            return .inline_call;
         }
     }
 
@@ -209,7 +214,12 @@ pub fn popOwnedStackRegion(rt: *core.JSRuntime, stack: *stack_mod.Stack, region_
     stack.values = stack.values.ptr[0..region_base];
 }
 
-pub fn handleCatchableRuntimeError(
+// noinline: this is the cold exception path shared by every `*Vm` opcode wrapper.
+// Inlining it splices the whole catch machinery (iterator close, error
+// construction, stack unwinding) into each hot handler's frame — inflating the
+// spill set the hot path must set up and tear down every call. Outlining keeps a
+// single `bl` on the cold edge and shrinks every wrapper's frame.
+pub noinline fn handleCatchableRuntimeError(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,

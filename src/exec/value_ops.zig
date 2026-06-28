@@ -858,7 +858,12 @@ fn binaryNumber(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !
         bytecode.opcode.op.pow => jsMathPow(lhs, rhs),
         else => unreachable,
     };
-    return numberToValue(out);
+    // qjs js_add_slow / js_binary_arith_slow: two JS_TAG_INT operands take the
+    // int32 path (normalized result, overflow→float); any float operand goes
+    // ToFloat64 + bare __JS_NewFloat64 with NO int32 renormalization. Mirror that
+    // so a float-involving result is not silently re-tagged int32.
+    if (a.isInt() and b.isInt()) return numberToValue(out);
+    return core.JSValue.float64(out);
 }
 
 fn toInt32(rt: *core.JSRuntime, value: core.JSValue) !i32 {

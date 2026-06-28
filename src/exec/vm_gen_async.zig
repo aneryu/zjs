@@ -265,7 +265,7 @@ pub fn initialYield(
     return .none;
 }
 
-pub fn yieldValue(
+pub noinline fn yieldValue(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
@@ -291,7 +291,7 @@ pub fn yieldValue(
     return .none;
 }
 
-pub fn yieldStar(
+pub noinline fn yieldStar(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -400,7 +400,7 @@ fn yieldStarRaw(
     return .none;
 }
 
-pub fn awaitValue(
+pub noinline fn awaitValue(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
