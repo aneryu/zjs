@@ -785,39 +785,25 @@ inline fn jump8Target(pc: [*]const u8, vm: *Vm) [*]const u8 {
 pub fn op_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     return @call(.always_tail, next, .{ jump8Target(pc, vm), sp, var_buf, vm });
 }
-// The boolean fast path (a comparison result — the hot loop condition) is split from
-// the toBoolean slow path: a non-tail `isTruthy` call in the same function forces a
-// full prologue (80B frame + 5 callee-saved pairs) and spills the popped JSValue to
-// the stack to read its tag (a SIMD→GP round-trip that stalled at ~40% of the op).
-// Booleans need no free (not refcounted) and no call, so this stays prologue-free;
-// non-boolean conditions tail-call the slow shell, keeping its frame off the branch.
+// The boolean fast path (a comparison result — the hot loop condition) inlines; a
+// non-boolean condition routes to cold_table[pc[0]] (the generic branch8 handler).
+// That routing is INDIRECT, which LLVM cannot inline back — so the hot handler stays
+// prologue-free (a direct tail-call to a local slow shell got re-inlined, dragging in
+// its 64B frame + callee-saved spills, which pressured the store buffer and stalled
+// the boolean's store→load forward from op_compare). Booleans need no free / no call.
 pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if ((sp - 1)[0].asBool()) |b| {
         if (!b) return @call(.always_tail, next, .{ jump8Target(pc, vm), sp - 1, var_buf, vm });
         return cont(pc + 2, sp - 1, var_buf, vm);
     }
-    return @call(.always_tail, op_if_false8_slow, .{ pc, sp, var_buf, vm });
-}
-fn op_if_false8_slow(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    const value = (sp - 1)[0];
-    const truthy = value_ops.isTruthy(value);
-    value.free(vm.ctx.runtime);
-    if (!truthy) return @call(.always_tail, next, .{ jump8Target(pc, vm), sp - 1, var_buf, vm });
-    return cont(pc + 2, sp - 1, var_buf, vm);
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 pub fn op_if_true8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if ((sp - 1)[0].asBool()) |b| {
         if (b) return @call(.always_tail, next, .{ jump8Target(pc, vm), sp - 1, var_buf, vm });
         return cont(pc + 2, sp - 1, var_buf, vm);
     }
-    return @call(.always_tail, op_if_true8_slow, .{ pc, sp, var_buf, vm });
-}
-fn op_if_true8_slow(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    const value = (sp - 1)[0];
-    const truthy = value_ops.isTruthy(value);
-    value.free(vm.ctx.runtime);
-    if (truthy) return @call(.always_tail, next, .{ jump8Target(pc, vm), sp - 1, var_buf, vm });
-    return cont(pc + 2, sp - 1, var_buf, vm);
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
 // Fused local-update ops (1-byte local index). qjs OP_inc_loc/OP_add_loc — the
