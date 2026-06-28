@@ -46,6 +46,7 @@ const vm_property_globals = @import("vm_property_globals.zig");
 const vm_property_field = @import("vm_property_field.zig");
 const property_ic = @import("property_ic.zig");
 const vm_property_private = @import("vm_property_private.zig");
+const string_ops = @import("string_ops.zig");
 const forof_ops = @import("forof_ops.zig");
 
 const op = bytecode.opcode.op;
@@ -652,6 +653,27 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         (sp - 1)[0] = if (value.requiresRefCount()) value.dup() else value;
         receiver.free(vm.ctx.runtime);
         return cont(pc + 5, sp, var_buf, vm);
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
+// Hot inline get_field2 for primitive-string method resolution — the receiver of
+// a `"...".method(...)` call (and every template literal, which compiles to
+// `head.concat(...)`). get_field2 keeps the receiver on the stack and pushes the
+// resolved method on top. A standard String.prototype method resolves directly
+// (getFastStringPrimitiveDataProperty returns it dup'd/owned), skipping the cold
+// get_field2's getValueProperty -> getPrimitiveProperty detour. Non-string
+// receivers, non-standard names, and object/IC/prototype-method cases fall to the
+// cold h_field (whose borrowed-vs-owned push distinctions stay in one place).
+pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const receiver = (sp - 1)[0];
+    if (receiver.isString()) {
+        const atom_id = readInt(u32, pc + 1);
+        const resolved = string_ops.getFastStringPrimitiveDataProperty(vm.ctx, vm.global, receiver, atom_id) catch |e| return vm.fail(e);
+        if (resolved) |value| {
+            sp[0] = value; // owned; receiver stays at sp-1 as the call's `this`
+            return cont(pc + 5, sp + 1, var_buf, vm);
+        }
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
