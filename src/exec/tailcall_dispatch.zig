@@ -667,8 +667,18 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
 // cold h_field (whose borrowed-vs-owned push distinctions stay in one place).
 pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
+    const atom_id = readInt(u32, pc + 1);
+    // Object receiver: own-or-prototype data/method via the same self+prototype
+    // walk the cold get_field2 runs first (e.g. arr.push, map.get). The value is
+    // BORROWED from its holder slot, so dup it onto the stack exactly as the cold
+    // path's `pushAssumeCapacity` does; the receiver stays beneath as `this`.
+    if (vm_property_field.qjsGetFieldFast(vm.ctx.runtime, receiver, atom_id)) |value| {
+        sp[0] = if (value.requiresRefCount()) value.dup() else value;
+        return cont(pc + 5, sp + 1, var_buf, vm);
+    }
+    // Primitive string receiver: standard String.prototype method (and every
+    // template literal, compiled to head.concat(...)). Returned value is owned.
     if (receiver.isString()) {
-        const atom_id = readInt(u32, pc + 1);
         const resolved = string_ops.getFastStringPrimitiveDataProperty(vm.ctx, vm.global, receiver, atom_id) catch |e| return vm.fail(e);
         if (resolved) |value| {
             sp[0] = value; // owned; receiver stays at sp-1 as the call's `this`
