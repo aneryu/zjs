@@ -687,6 +687,28 @@ pub fn op_compare(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
             return cont(pc + 1, sp - 1, var_buf, vm);
         }
     }
+    // qjs OP_CMP inlines the float64/int relational compare too (FLOAT64(a)||FLOAT64(b)
+    // → convert both to double, compare) before falling to js_relational_slow. Both
+    // operands are non-refcounted numbers here, so nothing to free. This is what makes
+    // a float-counter `x < n` not pay the cold hop every iteration.
+    switch (opc) {
+        op.lt, op.lte, op.gt, op.gte => {
+            if ((sp - 2)[0].asNumber()) |fa| {
+                if ((sp - 1)[0].asNumber()) |fb| {
+                    const r = switch (opc) {
+                        op.lt => fa < fb,
+                        op.lte => fa <= fb,
+                        op.gt => fa > fb,
+                        op.gte => fa >= fb,
+                        else => unreachable,
+                    };
+                    (sp - 2)[0] = JSValue.boolean(r);
+                    return cont(pc + 1, sp - 1, var_buf, vm);
+                }
+            }
+        },
+        else => {},
+    }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
