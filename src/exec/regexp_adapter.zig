@@ -107,6 +107,7 @@ pub fn appendCanonicalFlagsFromBits(allocator: std.mem.Allocator, buffer: *std.A
         .{ .byte = 'y', .bit = regexp_bytecode.flags.sticky },
     };
     for (order) |entry| {
+        if (entry.byte == 'u' and (bits & regexp_bytecode.flags.unicode_sets) != 0) continue;
         if ((bits & entry.bit) != 0) try buffer.append(allocator, entry.byte);
     }
 }

@@ -21,7 +21,7 @@ const InputData = union(enum) {
         }
     }
 
-    fn asRegexpInput(self: InputData) regexp.engine.Input {
+    fn asRegexpInput(self: InputData) regexp.Input {
         return switch (self) {
             .latin1 => |bytes| .{ .latin1 = bytes },
             .utf16 => |units| .{ .utf16 = units },
@@ -90,14 +90,14 @@ fn runCompilePhase(allocator: std.mem.Allocator, out: *std.Io.Writer, case: Case
     const warmup_iterations = @min(config.warmup, config.compile_iterations);
     var warmup: usize = 0;
     while (warmup < warmup_iterations) : (warmup += 1) {
-        const bytecode = try regexp.engine.compile(allocator, case.pattern, case.flags);
+        const bytecode = try regexp.compile(allocator, case.pattern, case.flags);
         allocator.free(bytecode);
     }
 
     const start = monotonicNanos();
     var i: usize = 0;
     while (i < config.compile_iterations) : (i += 1) {
-        const bytecode = try regexp.engine.compile(allocator, case.pattern, case.flags);
+        const bytecode = try regexp.compile(allocator, case.pattern, case.flags);
         allocator.free(bytecode);
     }
     const elapsed = elapsedNanosSince(start);
@@ -106,13 +106,13 @@ fn runCompilePhase(allocator: std.mem.Allocator, out: *std.Io.Writer, case: Case
 }
 
 fn runExecApiPhase(allocator: std.mem.Allocator, out: *std.Io.Writer, case: Case, config: Config) !void {
-    const bytecode = try regexp.engine.compile(allocator, case.pattern, case.flags);
+    const bytecode = try regexp.compile(allocator, case.pattern, case.flags);
     defer allocator.free(bytecode);
     const input = case.input.asRegexpInput();
 
     var warmup: usize = 0;
     while (warmup < config.warmup) : (warmup += 1) {
-        const status = try regexp.engine.exec(allocator, bytecode, input, 0);
+        const status = try regexp.exec(allocator, bytecode, input, 0);
         _ = status;
     }
 
@@ -120,7 +120,7 @@ fn runExecApiPhase(allocator: std.mem.Allocator, out: *std.Io.Writer, case: Case
     var matches: usize = 0;
     var i: usize = 0;
     while (i < config.exec_iterations) : (i += 1) {
-        const status = try regexp.engine.exec(allocator, bytecode, input, 0);
+        const status = try regexp.exec(allocator, bytecode, input, 0);
         if (status.result == .match) matches += 1;
     }
     const elapsed = elapsedNanosSince(start);
@@ -129,21 +129,21 @@ fn runExecApiPhase(allocator: std.mem.Allocator, out: *std.Io.Writer, case: Case
 }
 
 fn runExecIntoPhase(allocator: std.mem.Allocator, out: *std.Io.Writer, case: Case, config: Config) !void {
-    const bytecode = try regexp.engine.compile(allocator, case.pattern, case.flags);
+    const bytecode = try regexp.compile(allocator, case.pattern, case.flags);
     defer allocator.free(bytecode);
     const input = case.input.asRegexpInput();
 
-    var match: regexp.engine.Match = undefined;
+    var match: regexp.Match = undefined;
     var warmup: usize = 0;
     while (warmup < config.warmup) : (warmup += 1) {
-        _ = try regexp.engine.execIntoMatch(allocator, bytecode, input, 0, &match);
+        _ = try regexp.execIntoMatch(allocator, bytecode, input, 0, &match);
     }
 
     const start = monotonicNanos();
     var matches: usize = 0;
     var i: usize = 0;
     while (i < config.exec_iterations) : (i += 1) {
-        if (try regexp.engine.execIntoMatch(allocator, bytecode, input, 0, &match) == .match) matches += 1;
+        if (try regexp.execIntoMatch(allocator, bytecode, input, 0, &match) == .match) matches += 1;
     }
     const elapsed = elapsedNanosSince(start);
 
@@ -151,11 +151,11 @@ fn runExecIntoPhase(allocator: std.mem.Allocator, out: *std.Io.Writer, case: Cas
 }
 
 fn runExecSlotsPhase(allocator: std.mem.Allocator, out: *std.Io.Writer, case: Case, config: Config, phase_name: []const u8) !void {
-    const bytecode = try regexp.engine.compile(allocator, case.pattern, case.flags);
+    const bytecode = try regexp.compile(allocator, case.pattern, case.flags);
     defer allocator.free(bytecode);
     const input = case.input.asRegexpInput();
-    const alloc_count = regexp.engine.allocCount(bytecode);
-    var inline_capture_slots: [regexp.engine.small_exec_slots]usize = undefined;
+    const alloc_count = regexp.allocCount(bytecode);
+    var inline_capture_slots: [regexp.small_exec_slots]usize = undefined;
     var heap_capture_slots: []usize = &.{};
     defer if (heap_capture_slots.len != 0) allocator.free(heap_capture_slots);
     const capture_slots = if (alloc_count <= inline_capture_slots.len)
@@ -167,14 +167,14 @@ fn runExecSlotsPhase(allocator: std.mem.Allocator, out: *std.Io.Writer, case: Ca
 
     var warmup: usize = 0;
     while (warmup < config.warmup) : (warmup += 1) {
-        _ = try regexp.engine.execCaptureSlotsSliceTrustedWithOptions(allocator, bytecode, input, 0, .{}, capture_slots);
+        _ = try regexp.execCaptureSlotsSliceTrustedWithOptions(allocator, bytecode, input, 0, .{}, capture_slots);
     }
 
     const start = monotonicNanos();
     var matches: usize = 0;
     var i: usize = 0;
     while (i < config.exec_iterations) : (i += 1) {
-        if (try regexp.engine.execCaptureSlotsSliceTrustedWithOptions(allocator, bytecode, input, 0, .{}, capture_slots) == .match) matches += 1;
+        if (try regexp.execCaptureSlotsSliceTrustedWithOptions(allocator, bytecode, input, 0, .{}, capture_slots) == .match) matches += 1;
     }
     const elapsed = elapsedNanosSince(start);
 
@@ -182,20 +182,20 @@ fn runExecSlotsPhase(allocator: std.mem.Allocator, out: *std.Io.Writer, case: Ca
 }
 
 fn runTestPhase(allocator: std.mem.Allocator, out: *std.Io.Writer, case: Case, config: Config) !void {
-    const bytecode = try regexp.engine.compile(allocator, case.pattern, case.flags);
+    const bytecode = try regexp.compile(allocator, case.pattern, case.flags);
     defer allocator.free(bytecode);
     const input = case.input.asRegexpInput();
 
     var warmup: usize = 0;
     while (warmup < config.warmup) : (warmup += 1) {
-        _ = try regexp.engine.testMatch(allocator, bytecode, input, 0);
+        _ = try regexp.testMatch(allocator, bytecode, input, 0);
     }
 
     const start = monotonicNanos();
     var matches: usize = 0;
     var i: usize = 0;
     while (i < config.exec_iterations) : (i += 1) {
-        if (try regexp.engine.testMatch(allocator, bytecode, input, 0)) matches += 1;
+        if (try regexp.testMatch(allocator, bytecode, input, 0)) matches += 1;
     }
     const elapsed = elapsedNanosSince(start);
 

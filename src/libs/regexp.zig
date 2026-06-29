@@ -1230,9 +1230,25 @@ fn lreExecBacktrack(
                         const capture_end = st.capture[@as(usize, capture_index) * 2 + 1];
                         if (capture_start != no_slot_value and capture_end != no_slot_value) {
                             if (opcode == .back_reference) {
-                                if (!st.matchRawForward(safety, cbuf_type, capture_start, capture_end)) break :dispatch_once;
+                                if (comptime cbuf_type == .utf16_unicode) {
+                                    var capture_pos = capture_start;
+                                    while (capture_pos < capture_end) {
+                                        if (st.cptr >= st.cbuf_end) break :dispatch_once;
+                                        const c1 = st.getCharAtBounded(safety, cbuf_type, &capture_pos, capture_end) orelse return error.BytecodeCorrupt;
+                                        const c2 = st.getCharUnchecked(cbuf_type);
+                                        if (c1 != c2) break :dispatch_once;
+                                    }
+                                } else if (!st.matchRawForward(safety, cbuf_type, capture_start, capture_end)) break :dispatch_once;
                             } else if (opcode == .backward_back_reference) {
-                                if (!st.matchRawBackward(safety, cbuf_type, capture_start, capture_end)) break :dispatch_once;
+                                if (comptime cbuf_type == .utf16_unicode) {
+                                    var capture_pos = capture_end;
+                                    while (capture_pos > capture_start) {
+                                        if (st.cptr == 0) break :dispatch_once;
+                                        const c1 = st.getPrevCharAtBounded(safety, cbuf_type, &capture_pos, capture_start) orelse return error.BytecodeCorrupt;
+                                        const c2 = st.getPrevCharAtBounded(safety, cbuf_type, &st.cptr, 0) orelse break :dispatch_once;
+                                        if (c1 != c2) break :dispatch_once;
+                                    }
+                                } else if (!st.matchRawBackward(safety, cbuf_type, capture_start, capture_end)) break :dispatch_once;
                             } else if (opcode == .back_reference_i) {
                                 var capture_pos = capture_start;
                                 while (capture_pos < capture_end) {
@@ -1546,7 +1562,7 @@ fn parseFlags(flag_bytes: []const u8) CompileError!u16 {
                 saw_u = true;
             },
             'v' => {
-                re_flags |= regex_bytecode.flags.unicode | regex_bytecode.flags.unicode_sets;
+                re_flags |= regex_bytecode.flags.unicode_sets;
                 saw_v = true;
             },
             'y' => {
@@ -2552,13 +2568,14 @@ const REParseState = struct {
                 },
                 'u' => {
                     const escape_start = self.buf_ptr;
+                    const braced = self.isBracedUnicodeEscape();
                     const cp = self.parseUnicodeEscape() catch |err| {
                         self.buf_ptr = escape_start;
                         if (self.is_unicode) return err;
                         self.buf_ptr += 2;
                         return .{ .code_point = 'u' };
                     };
-                    return .{ .code_point = cp };
+                    return .{ .code_point = if (braced) cp else try self.combineEscapedSurrogatePair(cp) };
                 },
                 'f', 'n', 'r', 't', 'v' => {
                     self.buf_ptr += 2;
@@ -2582,7 +2599,7 @@ const REParseState = struct {
                 },
             }
         }
-        const cp = try self.readUtf8CodePoint();
+        const cp = try self.readClassCodePoint();
         if (cp > 0xffff and !self.is_unicode) {
             var ranges = CharRange.init(self.allocator);
             errdefer ranges.deinit();
@@ -2964,6 +2981,23 @@ const REParseState = struct {
         const byte = self.buf_start[self.buf_ptr];
         if (byte < 0x80 and isRegexSyntax(byte)) return error.InvalidPattern;
         return self.readUtf8CodePoint();
+    }
+
+    fn readClassCodePoint(self: *REParseState) CompileError!u21 {
+        const first = try self.readUtf8CodePoint();
+        if (!self.is_unicode or !isHiSurrogate(first)) return first;
+
+        const saved = self.buf_ptr;
+        const second = self.readUtf8CodePoint() catch |err| {
+            self.buf_ptr = saved;
+            if (err == error.InvalidPattern) return first;
+            return err;
+        };
+        if (!isLoSurrogate(second)) {
+            self.buf_ptr = saved;
+            return first;
+        }
+        return fromSurrogate(@intCast(first), @intCast(second));
     }
 
     fn readUtf8CodePoint(self: *REParseState) CompileError!u21 {
