@@ -1,4 +1,4 @@
-//! Tail-call dispatch — terminal-state rewrite (TAILCALL-DISPATCH-ONESHOT-BLUEPRINT.md).
+//! Tail-call dispatch — terminal-state rewrite (docs/qjs-align/CALL-MACHINERY-FAITHFUL-FRONTIER.md).
 //!
 //! Every opcode is its own handler `fn(pc, sp, var_buf, vm) callconv(.c) Outcome`;
 //! dispatch is `@call(.always_tail) vm.tbl[pc[0]]` through a 256-entry table.

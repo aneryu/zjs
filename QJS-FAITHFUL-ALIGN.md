@@ -24,7 +24,7 @@
 | 侵入式 `gc_obj_list`（`list_head link` 内嵌） | quickjs.c:284,337 | intrusive `{prev,next}` + `@fieldParentPtr` |
 | frame slab（arg/var/stack/var_refs 紧随 frame） | quickjs.c:793 | 从 `VmStackArena` 切一块连续 slab（zjs 不用 C 栈递归） |
 
-字面不可达且**无需**：C `alloca`（zjs 无 C 栈递归）、computed-goto（dispatch 已用 `switch`+`continue :sw` 对齐反超）。
+字面不可达且**无需**：C `alloca`（zjs 无 C 栈递归）、computed-goto（dispatch 已用 tail-call threaded 对齐：`next` 4 条 ≈ qjs 4-5，表基址驻留无 remat）。
 
 ## 2. 验收门（每一项、反作弊）
 
@@ -47,16 +47,11 @@ Phase 3  叶子：GC-无关忠实对齐 + 余下赢回退 + global-var 稳定 ce
 ### 文档地图（审查入口）
 
 - `QJS-FAITHFUL-ALIGN.md`（本文件）— 原则 + 验收门 + 相结构总图 + 各相状态。
-- `docs/qjs-align/` — **仍活跃的待办规格**（Phase 1 的施工蓝图 KEYSTONE + S1–S5 + Phase 2 规格已随 `e8c852b` 落地并退役，留存于 git 历史）：
-  - `INLINE-CACHE-PLAN.md` — IC：get/put_field 已落地；**S3 = 退役 global_lexical_sync 镜像已 DONE（A4 `45e9f55`，2026-06-26）**（read-IC 子项 MOOT——script 顶层 let/const 读早是 cell deref，stale catalog 的「按名查找」是错的）；S4 poly/mega 非忠实目标（本版 qjs 无 IC）。
-  - `GLOBAL-VARREF-PLAN.md` — ✅ 已落地（见 round-2 handover）。
-  - `PHASE3-leaves-and-levers.md` — 余下叶子 + 大杠杆登记。
-  - **`HANDOVER-perf-round2.md`（2026-06-24 收口，本轮总入口；2026-06-25 追加 method-dispatch slice）** — 5 commit（global var_ref 7×→2.35× · add_loc 融合累加 2.4×→1.3× · 全局绑定即权威 全局==局部 · **method-dispatch cascade hoist `b20d5b4`：`o.m(s)` 4.43×→2.30×、`p.step(s)` 4.85×→2.74×**）+ 方法论纠偏（对照 qjs 实现抹平偏离、perf 是结果）+ 关键事实（qjs 此机 16 字节非 8、NaN-boxing 是伪命题且预存编译失败）+ 剩余两深前沿。分支 `qjs-faithful-perf-round2`（叠 main 9fc72eb）。
-    - **lazy function.prototype（2026-06-25，`18a2610`）**：`createBytecodeFunctionObject` 对每个 normal+has_prototype 函数**急切**建 prototype 对象 + `constructor` 反向引用 → 两个偏离合一：① `.prototype` 永不被观测的函数（回调/IIFE/工厂结果）白白分配；② `func ↔ prototype.constructor` **引用环**使 refcount 永远无法释放该函数，只能等环收集器。每迭代建闭包的循环因此付全套 mark/sweep（`destroyRuntimeCyclesWithValueRoots` ~10%）。qjs 用 lazy autoinit（`JS_AUTOINIT_ID_PROTOTYPE`/`js_instantiate_prototype` quickjs.c:17341）。zjs 已有 autoinit 基建（`Slot.auto_init`，~700 lazy builtin 在用）；加 `function_prototype` AutoInitKind，materializer 从 owner 函数对象推导 realm/constructor（单一共享 interned 描述符，无 per-function 增长）；装在 normal 非 class-ctor 函数上，generator/async-gen/class-ctor 保持急切。永不构造的闭包 → 无 prototype 无环 → refcount 回收。闭包/迭代 5.68×→3.90×，环收集器从 profile 消失；构造函数在 `new` 时照常物化。剩余闭包开销=函数对象创建（length/name 的 defineOwnProperty）——qjs 亦 lazy autoinit（下一切片候选）。**⚠️ 基准陷阱**：`zig build test*`（尤其 `-Dzjs_force_gc=true`）会用不同 build 选项覆写 `zig-out/bin/zjs`；force-GC 二进制每次分配前全量 GC → 分配密集基准读成 100–260×（纯伪象）。**测 perf 前必先 `zig build zjs`**。详见 round-2 handover「Benchmarking hazard」节。
-    - **method-dispatch 发现（2026-06-25）**：method 调用是本轮最大**被低估**缺口（4.4–4.85×，比 fib 更糟且无处不在）。根因=`qjsArrayMethodFastCall`（array_ops.zig:193）对**每个**无 native-id 的 callee（即所有用户 bytecode 方法）跑 ~20 成员线性级联，每成员都以同一 `callableObjectFromValue(func) orelse return null` 开头 → bytecode callee 下整条级联是 ~20 次空转（占简单 method-loop ~30%）。提升该共有前置条件为单次 early-out（可证保行为：恰在每个成员本就返回 null 时返回 null，故 generic `Array.prototype.X.call(arrayLike)` 与同名 user-method shadow 字节级不变）。忠实于 qjs：OP_call_method 一次解析 callee 后按 magic 在 `js_call_c_function` 分发，从不 per-call 扫方法集。剩余 method 缺口=proto get_field IC 税 + call-machinery（帧）税，皆为共有广谱前沿，无 method 专属偏离。调查见 `array-cascade-faithful-gate` workflow（5 agent，证 receiver-gate 不安全：成员实现 generic array-like 语义只需 `receiver.isObject()`）。
-  - `HANDOVER-global-varref.md` — global var_ref 下沉 + 33 回归 4 阶段修复细节。
-  - `DISPATCH-TAX-FINDINGS.md` — 广谱 dispatch 税定性（结构已对齐；残差=跳转表基址未提升 ~26% + LLVM-vs-gcc op-body ~74%，非忠实可抹平）+ add_loc 融合。
-  - `CALL-MACHINERY-QJS.md` / `FRAME-STRUCTURAL-ALIGN.md` — 帧模型偏离剖析（剩余最大单项，多周/高风险，需先出分步门控计划）。
+- `docs/qjs-align/` — 当前态 + qjs 参考 + 落地特性的忠实设计依据（已退役的施工蓝图/分轮 handover 留存于 git 历史）：
+  - **`CALL-MACHINERY-FAITHFUL-FRONTIER.md`** — 调用机制/dispatch **当前结论与前沿**（tail-call 已对齐；单函数重写经 route-2 证实**无必要**——全规模 labeled-switch≈tail-call；剩余=激进塌缩 call 路径 + per-call 瘦身、保留 tail-call；含不可破不变式 + 已证伪勿重试清单 + native-recursion 待验问题）。
+  - `CALL-MACHINERY-QJS.md` — qjs 调用机制实锤参考（quickjs.c 逐行：帧/dispatch/var_refs/backtrace）。当前 zjs 结论见上 `CALL-MACHINERY-FAITHFUL-FRONTIER.md`。
+  - `DIVERGENCE-CATALOG.md` — 偏离登记 + 当前 roadmap（DO_NEXT / BACKLOG / ALREADY，L2/L3/A4 落地后状态）。
+  - `L2-PROPERTY-SLOT-16B.md` / `L3-ARRAY-COUNT-LENGTH-SPLIT.md` — 已落地特性（16B 属性槽 `040f3ba` / array length split `9e81f1c`）的忠实设计 ground-truth。
 
 ---
 
@@ -134,7 +129,7 @@ GC-无关忠实对齐：
   （注：dup proto 指针回退已并入 keystone **S4b**；array count/length 拆分见下「大杠杆」。）
 
 大杠杆（高侵入，flag-gated，test262 0/49775 把关）：
-- [x] **global-var var_ref cell（已落地 2026-06-24）**：全局 `var`/function 声明建 `JS_PROP_VARREF` cell（qjs `js_closure_define_global_var`）、`.global` 闭包变量别名该 cell、OP_get_var/OP_put_var 直接 deref（qjs OP_get_var 二合一）。**global-read 76.6B→31.3B（7.08×→2.45× over 真实 baseline）、global-write 69.4B→23.3B（6.70×→2.98×）、fib 中性零回归**。33 个作用域回归全修（4 阶段，每阶段 test262 0/49775 + 1223 单测 + force-GC）：① `directEvalGlobalVarNeedsRef` 排序对齐 qjs（force_init 让位 binding-match，17059-17071）② threaded get_var/put_var lane 补 generator stop-boundary 守卫 ③ 既有全局属性不再转 var_ref（qjs 17171-17205 detached var_ref）④ fast lane 加 parent-eval-shadow 守卫（qjs var_object_test 33158-33167）。详见 `docs/qjs-align/HANDOVER-global-varref.md`。**余**：编译期 `parent_has_eval` 标志（零运行期开销，eliminate ④ 的 per-access 守卫）是后续忠实精炼；发现一个**预存** TDZ bug（hoisted 函数前向引用顶层 let，clean HEAD 同样失败、test262 不可见）。
+- [x] **global-var var_ref cell（已落地 2026-06-24）**：全局 `var`/function 声明建 `JS_PROP_VARREF` cell（qjs `js_closure_define_global_var`）、`.global` 闭包变量别名该 cell、OP_get_var/OP_put_var 直接 deref（qjs OP_get_var 二合一）。**global-read 76.6B→31.3B（7.08×→2.45× over 真实 baseline）、global-write 69.4B→23.3B（6.70×→2.98×）、fib 中性零回归**。33 个作用域回归全修（4 阶段，每阶段 test262 0/49775 + 1223 单测 + force-GC）：① `directEvalGlobalVarNeedsRef` 排序对齐 qjs（force_init 让位 binding-match，17059-17071）② threaded get_var/put_var lane 补 generator stop-boundary 守卫 ③ 既有全局属性不再转 var_ref（qjs 17171-17205 detached var_ref）④ fast lane 加 parent-eval-shadow 守卫（qjs var_object_test 33158-33167）。**余**：编译期 `parent_has_eval` 标志（零运行期开销，eliminate ④ 的 per-access 守卫）是后续忠实精炼；发现一个**预存** TDZ bug（hoisted 函数前向引用顶层 let，clean HEAD 同样失败、test262 不可见）。
 - [ ] **builtin 方法上 prototype**：每个 builtin 方法物化为各 prototype 的真 own-property（qjs 结构）。
       method_call_loop 7.06×。须解 null-proto 内部数组的方法解析。
 - [x] array `count`/`length` 拆分 → qjs 尾部虚 hole 表示（撤 zjs 的 count==length 融合）。**DONE 2026-06-26 `9e81f1c`（L3）**:加 `array_length: u32` Object 字段(非 qjs prop[0].u.value——与 zjs 既有 count/capacity 字段惯例一致、且与 L2 解耦);`new Array(n)` 现 born-dense holes;**去险关键=zjs 数组层本就 count-aware 写的**(`[count,length)` 分支是「正确的死代码」,拆分激活而非重写它们→可一次性);agent 额外修 4 个潜伏 bug(slice OOB/fill 漏洞/map 丢值/proxy-set trap),门禁抓到第 5 个(indexOf/lastIndexOf/includes dense 扫漏洞→加 `arrayElements().len==length` 守卫 fall through 原型感知循环)。门禁 test262 0 新增+1227+force-GC。蓝图 docs/qjs-align/L3-ARRAY-COUNT-LENGTH-SPLIT.md。

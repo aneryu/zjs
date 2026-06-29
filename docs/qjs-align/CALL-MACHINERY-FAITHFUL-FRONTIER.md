@@ -1,152 +1,132 @@
-# Call-machinery faithful frontier (2026-06-29)
+# Call-machinery faithful frontier — current state & conclusion
 
-One session of disassembly + measurement that drove the "can zjs call-heavy code (fib/funcall)
-**faithfully** match qjs?" question to ground. It **overturned a chain of stale "floor" claims** and
-left a clear, evidence-backed frontier. Method: `taskset -c 8` (X925 big core @3.9 GHz),
-`perf stat -e instructions:u`, differential per-call isolation.
+> **Single source of truth** for where zjs's call/dispatch alignment to QuickJS stands.
+> Updated 2026-06-29 after the route-2 de-risk experiment. This doc consolidates and replaces a
+> cluster of now-historical plan/investigation/handover docs (DISPATCH-TAX-FINDINGS,
+> TAILCALL-DISPATCH-ONESHOT-BLUEPRINT, FRAME-MODEL-ONESHOT-BLUEPRINT, FRAME-RAW-SP-BLUEPRINT,
+> FRAME-STRUCTURAL-ALIGN, COLLAPSE-CALL-MACHINERY-BLUEPRINT, HANDOVER-call-dispatch-align,
+> HANDOVER-frame-incremental, PHASE3-leaves-and-levers) — deleted; their durable conclusions,
+> invariants, and disproven claims are folded in below. qjs-side mechanism reference is kept in
+> `CALL-MACHINERY-QJS.md`.
 
-## TL;DR
+## TL;DR — the current verdict
 
-- **dispatch is already a faithful match** (HEAD is tail-call threaded; `next` = 4 insns ≈ qjs
-  computed-goto 4-5). NOT a floor.
-- **qjs C recursion is NOT free** — `JS_CallInternal` prologue spills 12 callee-saved via `stp×6` +
-  alloca every call (~16 insns). zjs spills to Entry/arena; qjs spills to its stack frame. Neither is free.
-- **The 642-insn/call gap is function decomposition** — qjs runs the whole call in ONE
-  `JS_CallInternal`; zjs splits it across ~15 functions, each paying its own prologue/epilogue +
-  cross-boundary spill. **This is removable (collapse to one function), NOT a Zig language floor.**
-- **No Zig hard floor was found.** fib faithfully matching qjs is *theoretically reachable*; the only
-  faithful path is a deep rewrite collapsing the call path to a qjs-style single recursive function.
-- **IC/fusion beating qjs (e.g. array 1.27×) is "changing tracks", not a faithful match** — the user
-  rejects it as cheating (qjs has neither). See [[qjs-faithful-align-program]] "反超 qjs 是红旗".
+- **Dispatch is a faithful match and is DONE.** HEAD is tail-call threaded (`src/exec/tailcall_dispatch.zig`):
+  `next` = 4 insns ≈ qjs computed-goto's 4-5; table base resident (no `adrp+add` remat); per-handler
+  frame ~80-150 B vs the old monolithic 3504 B. **Do not touch the dispatch mechanism.**
+- **The single-function / labeled-switch rewrite is UNNECESSARY — proven (route-2, §3).** At full
+  224-arm scale a labeled-switch (116 insn/call) and tail-call (112 insn/call) fib are within 4% and
+  both ~0.30× qjs. The dispatch *mechanism* is not the lever. The old POC's 0.32× win is overwhelmingly
+  "the toy skips real per-call work" (refcount dup/free, frame setup, shape/GC), not architecture.
+- **The lever for the remaining fib gap (~2.66× qjs) is aggressive method-A:** collapse the call-path
+  function decomposition and strip the per-call bookkeeping qjs doesn't have — **keeping tail-call
+  dispatch**. Low risk, incremental, gate-able.
+- **Native recursion (the other half of "axis ②") is UNPROVEN and risky.** `Path B` (native recursion
+  + real per-call work) *regressed* to 6.04× on deep fib. Treat it as a separate, later, real-work-modeled
+  experiment — NOT bundled into a "collapse" rewrite.
 
-## Measured per-call (funcall differential = (call-insn − inline-insn) / 5M)
+## 1. What has landed (current state)
 
-| engine | per-call insn | ratio | notes |
-|---|---|---|---|
-| qjs | **287** | 1.00× | single `JS_CallInternal` |
-| C-recursion (Path B) | **707** | 2.46× | but runs the OLD `execCall` slow path — not the ceiling |
-| loop-in-place (HEAD) | **894** | 3.11× | the canonical current dispatcher |
+- **Tail-call threaded dispatch** (the dispatchLoop monolith is gone). Why per-op functions beat one big
+  switch: the monolith's 3504 B frame was the **sum of per-arm JSValue spills that don't coalesce**
+  (proven by comptime-delete bisection — additive); making each opcode a separate function puts its
+  temporaries in its own frame that dies at its return, so runtime stack = **max single handler**, not sum.
+- **The hot simple-inline call path** (`inline_calls.zig`): `setupSimpleInlineEntry` (noinline, regalloc-
+  isolated — load-bearing), `simple_inline_eligible` precomputed on the Bytecode view, `var_refs` borrow
+  (alias closure captures, skip per-call dup/free), single backtrace chain (no parallel per-call node),
+  `op_call`/`op_call_method` inline their bytecode-call resolution (skip `execCall`).
+- **Perf trajectory:** fib ~3.6× → **2.66×** qjs; accumulator loops fused (`add_loc`); method dispatch
+  cascade hoisted. Measure on a fresh `zig build zjs` (stale-binary hazard).
 
-fib total insn: qjs 3.14e9 · loop-in-place 8.37e9 (2.66×) · C-recursion **6.04×** (deep recursion
-regresses — each call a real C stack frame prologue; loop-in-place's Entry chain amortizes better).
-The first-cut (below) moved HEAD loop-in-place fib 2.756→2.661×, funcall 2.418→2.345×.
+## 2. The faithful frontier (what's left, ranked)
 
-## ① dispatch is faithfully aligned (disassembly)
+1. **Aggressive method-A — collapse the call path (low risk, keep tail-call).** Merge the ~9 incidental
+   frame-setup functions (`pushCall→pushFrame→acquireSlot→{Frame.init, FrameSlab.carve, initArenaWindow,
+   initFrameLocals, initArgumentsBorrowedSlots}`) toward a straight-line sequence like qjs's
+   `JS_CallInternal` prologue, and strip per-call bookkeeping qjs lacks (Entry pool, profile guard, eval
+   checks, arena mark on the simple frame). Each step gate-able; expect single-digit-% wins (diminishing).
+2. **Native recursion** — open, unproven, correctness-bearing (see §6). Not recommended without a
+   real-work-modeled de-risk first.
 
-HEAD `next` (`src/exec/tailcall_dispatch.zig`) fast path:
-```asm
-ldrb  w8, [x0]              ; opcode = pc[0]
-ldr   x9, [x3, #88]         ; table base ← resident vm pointer (x3), ONE ldr, no adrp+add
-ldr   x4, [x9, x8, lsl #3]  ; handler = tbl[opcode]
-br    x4
-```
-qjs computed-goto: `ldrb;mov;ldr;br` (4), several sites + `add x0,#0x630` to re-derive base (5).
-**zjs is not worse — cleaner at some sites.** The "107/111 adrp+add remat" in
-[[dispatch-table-base-remat-rootcause]] was the dispatchLoop era, now replaced.
+## 3. route-2 de-risk result (2026-06-29) — single-function rewrite is unnecessary
 
-## ② qjs C recursion is non-zero-cost (disassembly)
+Question: does the 30-line POC's `0.28-0.32× qjs` (single-function labeled-switch + native recursion)
+survive scaling to a full ~200-opcode space, or is it a small-scale artifact? Harness: `/tmp/gen_fib.py`
++ `/tmp/run_sweep.sh` (parameterized fib interpreter, opaque-call padding arms, `taskset -c 8`, fib(30)×3
+= 8,077,611 calls). Reproduced the POC exactly (9 arms = 107.6 = the old 107.5).
 
-`JS_CallInternal` prologue:
-```asm
-stp x29,x30,[sp,#-96]!   ; fp/lr
-stp x19,x20,[sp,#16]     ┐ 6× stp = save 12 callee-saved registers
-... x21..x28 ...         ┘ (+ 6× ldp on return)
-sub sp,sp,#0x1d0         ; fixed 464 B frame
-sub sp,sp,x1             ; alloca
-```
-~16 insns/call just for register spill/restore. **Refutes "C calling convention saves caller for
-free".** qjs `stp`→its own frame; zjs `str`→Entry/arena. Same idea, neither免费.
+| dispatch | arms | insn/call | vs qjs (389) | table base (objdump) |
+|---|---|---|---|---|
+| labeled-switch | 9 (POC) | 107.6 | 0.28× | resident |
+| labeled-switch | 96 | 116.1 | 0.30× | resident (adrp=2) |
+| labeled-switch | **224** | 116.1 | **0.30×** | **resident — 2-insn dispatch** |
+| tail-call | 224 | 111.6 | 0.29× | resident |
+| current zjs (real work) | — | ~1036 | 2.66× | — |
 
-## ③ The gap is function decomposition (perf symbol map)
+**Conclusions:**
+- **Dispatch mechanism doesn't move the needle** (ls 116 ≈ tc 112 at 224 arms) → the single-function
+  rewrite buys nothing the current tail-call doesn't already have. B is dominated.
+- **Corrects `DISPATCH-TAX-FINDINGS`:** that doc claimed "arm count is the determining variable" for
+  table-base eviction (24 arms → 25/25 evicted). Verified false here — the fib interpreter at **224 arms
+  keeps the base resident**. The doc's `disp_many` evicted because it held **8 long-lived pointer carriers**
+  across every arm (saturating callee-saved); a real interpreter loop carries few values, so **arm count
+  alone does not evict** (consistent with the doc's own earlier two-condition root cause: arms-call AND
+  carrier-saturation, both required).
+- **The POC's win is toy-leanness, not architecture.** The toy omits 16 B JSValue refcount dup/free, frame
+  locals/var_refs setup, stack-overflow check, shapes/GC — all of which qjs *also* does (hence qjs = 389,
+  not 115). So a real collapse can't reach 115; its honest target is *qjs's order*, by removing the
+  function-decomposition tax + the bookkeeping qjs lacks.
 
-- qjs funcall: **100% `JS_CallInternal`** (one symbol, one prologue, GCC whole-function regalloc).
-- zjs funcall: **~15 functions** — op_call 18% · runWithArgsState 14% (32-param giant fn + the main
-  dispatch loop, annotate hot = `str [sp,#1544..2072]` ≈2 KB frame) · pushFrame 11% ·
-  setupSimpleInlineEntry 9% · op_return 7% · op_get_arg_short 7% · teardown/cleanup.
-- Each function boundary = its own `stp/ldp` + cross-boundary spill — the tax qjs's single function
-  doesn't pay. **No "C can, Zig can't" primitive was found.** The difference is implementation *shape*,
-  collapsible in principle.
+## 4. Invariants that must NOT be broken (load-bearing — any call-path work preserves these)
 
-## ④ Path B (existing C-recursion dispatcher) — 707 is NOT the ceiling
+- **Ownership lockstep.** `current_function` is **KEPT OWNED** (the "borrow cur_func" facet is rejected —
+  `takeSourceSlot` is a *move*, not a dup, so refcount is already identical to qjs; nothing to remove).
+  The `var_refs` borrow safety is **coupled to `current_function` being owned** — the still-live function
+  object roots the borrowed cells. Flipping one ownership flag without the other → double-free or leak
+  (force-GC + test262 are the oracle).
+- **Frame stays its current ~15-field shape; do NOT slim to 9.** Rejected for real reasons: the teardown
+  cost is the *necessary* value frees (not field proliferation), and most "cold" fields
+  (`storage_*`, `original_args`, eval/sync state) **cross generator/async suspend**, so a `FrameCold`
+  side-struct can't be freed at teardown for a suspended generator. `FrameCold` already exists and is
+  correct as-is.
+- **Suspend / raw-sp bifurcation — preserve all gates.** Hot inline frames borrow a slab window; cold
+  growable frames (top-level / native re-entry / generator / async) keep the full heap-backed `Stack`.
+  Generators transfer buffer ownership into the generator object and *physically cannot* use a borrowed
+  slab window — do not unify the two regimes.
+- **Refcount-only frame liveness.** The cycle collector never walks the frame/Entry chain
+  (`traceRoots`); frame values stay alive by refcount only. Don't add the frame chain to GC roots.
+- **Thread an opcode → read the FULL push/helper refcount + error chain, not just the top function.**
+  This discipline cost 2 bugs historically: missing the `dup`/retain in a threaded `pushAssumeCapacity`
+  (under-ref → premature free), caching a `var_refs` pointer that reallocs mid-frame on closure capture
+  (stale UAF), and threading the `put_array_el` grow path (fallible, can't sync the operand stack).
 
-`src/exec/call_internal.zig` (3040 lines, `dispatchRecursive` + `recurseInlineCall` native-recursion +
-TCO trampoline) lives at git **`eebd7e0~1`**, flag `-Dzjs_recursive_dispatch=true`. Deleted 7 days ago
-for **"WIP / dual-dispatcher maintenance burden", not performance**. Builds on zig 0.16 (worktree
-`/tmp/zjs-pathb`), fib correct (2496120). **But perf shows funcall goes through `execCall` (22%) +
-`callValueOrBytecodeClassModeDispatch` (8%) — the OLD generic resolution slow path** (call_internal.zig:2015
-does execCall THEN recurseInlineCall). HEAD's op_call already inlines `resolveInlineTarget`
-(`tailcall_dispatch.zig:365`, skips execCall). So **707 contains ~30% of resolution overhead HEAD
-already fixed — it overstates the true C-recursion ceiling.** The extreme C-recursion (HEAD-inlined
-op_call + native recursion) was never actually measured.
+## 5. Disproven — do NOT re-attempt
 
-## ⑤ First-cut landed (loop-in-place lean, UNCOMMITTED)
+- **Single-function / labeled-switch dispatch rewrite** — route-2: unnecessary, tail-call is equivalent
+  at scale, and it re-introduces table-remat risk on higher-pressure code.
+- **"Borrow cur_func"** — a non-diff (move, not dup; same refcount as qjs).
+- **Frame slim to 9 fields** — low benefit, high complexity, cold fields cross suspend.
+- **Un-caching cold context vars to free a register for the table base** — disproven by reading the actual
+  reg-alloc: the cold vars are already in stack slots, not callee-saved; only eliminating a *hot* carrier
+  frees a callee-saved register (and that's the raw-sp rewrite, whose fib payoff is a known mirage).
 
-`simple_inline_eligible: bool` precomputed into the Bytecode view:
-- `src/bytecode/function.zig` — field on `Bytecode` struct + computed in `makeBytecodeView`:
-  `func_kind==.normal && !is_class_constructor && !is_derived_class_constructor && !is_arrow_function
-  && !is_strict_mode && !runtime_strict_mode && has_simple_parameter_list && !has_eval_call &&
-  global_vars.len==0`
-- `src/exec/inline_calls.zig:289` `isSimpleInlineFrame` — one byte test short-circuits the ~6
-  scattered `FunctionBytecode` bool loads (the annotate `ldrb [fb,#559/561/563]` cluster that
-  dominated op_call). Call-site conditions (this/args/captures/eval-locals) stay per-call.
+## 6. If native recursion is ever pursued (crossing concerns)
 
-**−35 insn/call, fib 2.756→2.661×, funcall 2.418→2.345×, test262 0/49775 (passed 44601).** This is the
-*faithful* direction (zjs splits qjs's one packed `js_mode` byte into scattered bools; this re-packs an
-eligibility bit). `=false` always falls back to the general path → zero correctness risk.
+Only as a separate experiment, *after* a real-work-modeled de-risk (the toy can't settle it; `Path B`
+regressed to 6.04× with real work + the old slow path). Ground-truth these first:
+- **Suspend.** Generator/async yield must unwind the native stack via a Zig error/sentinel (qjs's
+  `FUNC_RET_YIELD` analog); simple-normal calls recurse, generator/async/class-ctor/eval stay on the
+  current path (already excluded by `resolveInlineTarget`'s `func_kind != .normal`).
+- **Deep recursion / stack overflow.** Native recursion uses the real stack → needs a TCO trampoline for
+  proper tail calls + a `js_check_stack_overflow` equivalent.
+- **Backtrace / exception.** Walk the live `Frame` chain (qjs `current_stack_frame->prev`); Zig `error`
+  propagates naturally up the stack, replacing the explicit Entry-chain unwind.
 
-> The second cut (`resolveInlineTarget`, op_call's other fb-flag reads) needs a separate
-> `fb.inline_admissible` precompute — resolveInlineTarget's admission is *wider* than eligible (allows
-> arrow/strict to inline via the general path) and reads fb *before* `ensureCachedBytecodeView`.
+## Pointers
 
-## ⑥ DECISIVE verification — Zig single-function recursion has NO floor, crushes qjs
-
-A 30-line standalone Zig interpreter (`/tmp/fib_collapse.zig`): 16 B JSValue (tag:i64), in-function
-labeled-switch threaded dispatch (`sw: switch (code[pc]) { … continue :sw code[pc] }`), op_call recursing
-into itself = the qjs `JS_CallInternal` shape. Same fib(30)×3, result correct (2496120):
-
-| interpreter | fib per-call | vs qjs |
-|---|---|---|
-| Zig minimal single-function | **107.5** | **0.28×** |
-| Zig + type checks + stack-overflow check + frame chain | **124.5** | **0.32×** |
-| qjs (full) | 389.2 | 1.00× |
-| zjs loop-in-place (w/ body) | ~1036 | 2.66× |
-
-**Even loaded with qjs's full real per-call overhead** (add/sub/lt tag checks + `js_check_stack_overflow`
-depth guard + frame-chain prev/cur_pc/cur_sp), **Zig single-function recursion is still 124.5/call =
-0.32× qjs — 3× faster.** So:
-
-- **zjs loop-in-place's 1036/call is 100% function decomposition (15 fns vs 1) + implementation bloat,
-  NOT a Zig language / LLVM floor.** Same shape in Zig costs 124.
-- **labeled-switch codegen is excellent in a lean small function** (124/call) — the frame-bloat / table-
-  remat fears were artifacts of the giant `dispatchLoop`, not labeled-switch itself.
-- **The "is there a Zig floor" question is answered: NO.** The extreme single-function-recursion ceiling
-  IS measured now — and it's far below qjs.
-
-## Faithful conclusion + next step
-
-fib faithfully matching qjs is **not just reachable — likely to be exceeded.** No Zig floor; single-function
-collapse is an ~8× lever. The **only faithful path** is the deep rewrite collapsing the call path to a
-qjs-style single recursive function ([[frame-rewrite-one-shot]], multi-week, now backed by the ⑥ evidence).
-
-**Honest bound:** the probe's fib body is simpler than zjs's real path (no 16 B JSValue dup/free, shape
-lookup, GC write barrier). zjs's actual collapse won't hit 124 — but the 0.32× headroom is huge, those real
-costs qjs pays too (it IS 389), and Zig codegen doesn't lose to qjs (probe proves it). So collapsed zjs lands
-at qjs's order or below; matching/beating is very likely. The precise number still needs the real collapse.
-
-**Next:** plan the collapse deep-rewrite blueprint (per [[frame-rewrite-one-shot]]: exhaust ground-truth +
-write to terminal state in one shot, no flag-gated intermediate). NOT IC/fusion (changing tracks, user
-rejected as cheating).
-
-## Overturned stale claims (this session)
-
-| claimed | reality |
-|---|---|
-| "fib residual = frame-build alloca-carve" | function decomposition; alloca-carve is a sliver of pushFrame |
-| "monolithic ⊥ generator/async suspend" | qjs is the counterexample (monolithic + heap state split + `JS_CALL_FLAG_GENERATOR` re-entry) |
-| "Zig+LLVM dispatch floor (labeled-switch remat)" | HEAD is tail-call threaded, 4 insns no remat, aligned to qjs |
-| "no variadic alloca floor" | loop-in-place doesn't use alloca (uses arena carve) |
-| "qjs C recursion saves caller for free" | `stp×6` saves 12 callee-saved every call |
-| "fib unreachable, almost only JIT" | no evidence; gap is removable function decomposition |
-
-See [[verify-before-floor-claims]] — the共同 failure was asserting "floor/unreachable" from
-memory/doc transcription instead of objdump/perf.
+- **qjs mechanism reference:** `CALL-MACHINERY-QJS.md` (verbatim quickjs.c excerpts; the keystone).
+- **Live code:** `src/exec/tailcall_dispatch.zig` (dispatch + driver), `src/exec/inline_calls.zig`
+  (the call path), `src/exec/frame.zig` (frame + carve), `src/exec/vm_call.zig`.
+- **route-2 harness (throwaway):** `/tmp/gen_fib.py`, `/tmp/run_sweep.sh`.
+- **Gates:** `zig build zjs` first (stale-binary hazard), then test262 0/49775 + `zig build test` 1223 +
+  force-GC; perf via targeted benchmarks (NOT the microbench-suite geomean) vs `/home/aneryu/quickjs/qjs`.
