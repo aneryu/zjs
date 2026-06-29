@@ -1,7 +1,7 @@
 const std = @import("std");
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
-const frontend = @import("../frontend/root.zig");
+const parser = @import("../parser.zig");
 const call_mod = @import("call.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
@@ -2630,13 +2630,13 @@ pub fn constructAsyncGeneratorFunctionFromSource(
 }
 
 pub fn parameterSourceContainsAwait(rt: *core.JSRuntime, source: []const u8) !bool {
-    var lexer = frontend.zjs_lexer.Lexer.init(rt.memory.allocator, &rt.atoms, source);
+    var lexer = parser.lexer.Lexer.init(rt.memory.allocator, &rt.atoms, source);
     lexer.is_strict_mode = true;
     while (true) {
         var token = try lexer.next();
         defer lexer.freeToken(&token);
-        if (token.val == frontend.zjs_token.TOK_AWAIT) return true;
-        if (token.val == frontend.zjs_token.TOK_EOF) return false;
+        if (token.val == parser.token.TOK_AWAIT) return true;
+        if (token.val == parser.token.TOK_EOF) return false;
     }
 }
 
@@ -2845,7 +2845,7 @@ pub fn qjsAsyncFunctionRunState(
     if (continuation.generatorExecuting()) return error.TypeError;
     const function_value = continuation.functionBytecodeSlot().* orelse return error.TypeError;
     const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
-    const nested = try bytecode.function.ensureCachedBytecodeView(fb, ctx.runtime);
+    const nested = try bytecode.ensureCachedBytecodeView(fb, ctx.runtime);
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
 

@@ -35,8 +35,8 @@ pub const ExternalHostCallFn = binding_root.ExternalHostCallFn;
 pub const ExternalHostFinalizer = binding_root.ExternalHostFinalizer;
 
 pub const core = @import("core/root.zig");
-pub const frontend = @import("frontend/root.zig");
-pub const bytecode = @import("bytecode/root.zig");
+pub const parser = @import("parser.zig");
+pub const bytecode = @import("bytecode.zig");
 pub const exec = @import("exec/root.zig");
 pub const builtins = @import("builtins/root.zig");
 pub const libs = @import("libs/root.zig");
@@ -50,7 +50,7 @@ test {
     try std.testing.expect(!@hasDecl(public_api.object.Object, "create"));
 
     _ = core;
-    _ = frontend;
+    _ = parser;
     _ = bytecode;
     _ = exec;
     _ = builtins;

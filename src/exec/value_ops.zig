@@ -1,4 +1,4 @@
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const dtoa = @import("../libs/number_format.zig");
 const bignum = @import("../libs/bigint.zig");

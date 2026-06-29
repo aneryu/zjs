@@ -908,7 +908,7 @@ test "runtime root tracer visits EventLoop host roots" {
 }
 
 test "EventLoop roots one-shot function bytecode timer callback after dequeue" {
-    const bytecode = @import("../bytecode/root.zig");
+    const bytecode = @import("../bytecode.zig");
 
     const rt = try zjs.JSRuntime.create(std.testing.allocator);
     const ctx = try zjs.JSContext.create(rt);

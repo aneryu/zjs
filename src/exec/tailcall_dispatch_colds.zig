@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const core = @import("../core/root.zig");
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const td = @import("tailcall_dispatch.zig");
 const HostError = @import("exceptions.zig").HostError;
 

@@ -55,8 +55,8 @@ available only through git history.
 - `src/root.zig`: public engine entrypoint.
 - `src/core/`: values, runtime/context, atoms, strings, objects,
   properties, arrays, GC, and core ownership.
-- `src/frontend/`: lexer, parser, source positions, and frontend parsing.
-- `src/bytecode/`: bytecode, constants, scopes, module metadata,
+- `src/parser.zig`: lexer, parser, source positions, and compile entry.
+- `src/bytecode.zig`: bytecode, constants, scopes, module metadata,
   inline-cache slots, and pipeline passes.
 - `src/exec/`: bytecode execution, calls, eval, exceptions, modules,
   promises, VM opcode shards, and job queue.
@@ -145,9 +145,9 @@ Missing or invalid arguments should print usage and exit non-zero.
 - Core values, runtime/context, atoms, strings, objects, properties, arrays,
   shapes, IC storage, and GC:
   `src/core/`.
-- Lexer, parser, source positions, and TypeScript erasure: `src/frontend/`.
+- Lexer, parser, source positions, and TypeScript erasure: `src/parser.zig`.
 - Bytecode emission, scopes, module metadata, inline-cache slots, and pipeline
-  passes: `src/bytecode/`.
+  passes: `src/bytecode.zig`.
 - Execution semantics, calls, exceptions, eval, modules, promises, job queue,
   and opcode handlers:
   `src/exec/`.

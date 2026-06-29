@@ -12,11 +12,11 @@
 //! (`?*const Bytecode`, `?*Frame`) as opaque pointers because core cannot
 //! name exec/bytecode types. Builtins recover them through
 //! `callerBytecode`/`callerFrame` and use the `Bytecode`/`Frame` aliases in
-//! their own signatures instead of importing `src/bytecode/` directly.
+//! their own signatures instead of importing `src/bytecode.zig` directly.
 
 const std = @import("std");
 const core = @import("../core/root.zig");
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const exceptions = @import("exceptions.zig");
 const frame_mod = @import("frame.zig");
 
@@ -143,7 +143,7 @@ pub fn callerFrame(call: core.host_function.InternalCall) ?*Frame {
 /// True when the instruction the VM caller will execute on return is `drop`,
 /// i.e. the call result is discarded. Builtins use this to take the
 /// result-free mutation fast path (e.g. `Map.prototype.set`/`Set.prototype.add`
-/// in statement position) without importing `src/bytecode/` for the opcode
+/// in statement position) without importing `src/bytecode.zig` for the opcode
 /// constant. Mirrors `vm_call.zig`'s `preparedCallResultIsDropped`.
 pub fn callerResultIsDropped(caller_function: ?*const Bytecode, caller_frame: ?*Frame) bool {
     const function = caller_function orelse return false;

@@ -3,18 +3,18 @@ const zjs = @import("zjs");
 const engine = zjs;
 
 const core = zjs.core;
-const frontend = zjs.frontend;
+const parser = zjs.parser;
 const function_def = zjs.bytecode.function_def;
 const qop = zjs.bytecode.opcode.op;
 const op = zjs.bytecode.opcode.op;
 
-const t = zjs.frontend.zjs_token;
-const QjsLexer = zjs.frontend.zjs_lexer.Lexer;
-const QjsParser = zjs.frontend.zjs_parser.Parser;
-const zjs_parser = zjs.frontend.zjs_parser;
+const t = zjs.parser.token;
+const QjsLexer = zjs.parser.Lexer;
+const ParserNamespace = zjs.parser.Parser;
+const parser_core = zjs.parser.Parser;
 const atom = zjs.core.atom;
 const function_def_mod = zjs.bytecode.function_def;
-const ParseState = engine.frontend.zjs_parser.ParseState;
+const ParseState = engine.parser.Parser.ParseState;
 
 // ================== LEXER TESTS ==================
 
@@ -636,7 +636,7 @@ fn parseExpr(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    try zjs_parser.parseExpr(&state);
+    try parser_core.parseExpr(&state);
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
 }
@@ -650,7 +650,7 @@ fn parseExprWithTopLevelChildren(env: *TestEnv, src: []const u8) !engine.bytecod
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     state.top_level_functions_as_children = true;
-    try zjs_parser.parseExpr(&state);
+    try parser_core.parseExpr(&state);
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.rt);
     return function;
 }
@@ -666,7 +666,7 @@ fn parseExprStrict(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     defer state.deinit(env.rt);
     state.is_strict = true;
     state.function_def.is_strict_mode = true;
-    try zjs_parser.parseExpr(&state);
+    try parser_core.parseExpr(&state);
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
 }
@@ -681,7 +681,7 @@ fn parseStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
 }
@@ -696,7 +696,7 @@ fn parseTSStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     try lex.enableTypeScript();
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
 }
@@ -712,8 +712,8 @@ fn parseTSProgram(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     state.top_level_functions_as_children = true;
-    try zjs_parser.parseDirectives(&state);
-    try zjs_parser.parseProgramStatements(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.parseDirectives(&state);
+    try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.rt);
     return function;
 }
@@ -727,7 +727,7 @@ fn parseStatementWithTopLevelChildren(env: *TestEnv, src: []const u8) !engine.by
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     state.top_level_functions_as_children = true;
-    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.rt);
     return function;
 }
@@ -742,7 +742,7 @@ fn parseModuleStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecod
     lex.is_module = true;
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
 }
@@ -758,7 +758,7 @@ fn parseModuleRefStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Byte
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     state.top_level_lexical_as_module_ref = true;
-    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
 }
@@ -917,7 +917,7 @@ fn parseFunctionBodyStatement(env: *TestEnv, src: []const u8) !engine.bytecode.B
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     state.return_depth = 1;
-    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
 }
@@ -932,7 +932,7 @@ fn returnExprEmittedReturn(env: *TestEnv, src: []const u8) !bool {
     defer state.deinit(env.rt);
     state.return_expr_mode = true;
     state.return_expr_emitted_return = false;
-    try zjs_parser.parseExpr(&state);
+    try parser_core.parseExpr(&state);
     return state.return_expr_emitted_return;
 }
 
@@ -1582,7 +1582,7 @@ test "M3.1 F4: parser emits QuickJS line_num temp and finalize strips it" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     try std.testing.expect(function.code.len >= engine.bytecode.opcode.sizeOfPhase1(op.line_num));
     try std.testing.expectEqual(op.line_num, function.code[0]);
@@ -3208,7 +3208,7 @@ test "F7: private name in uses scope temp before resolver" {
     defer state.deinit(env.rt);
     state.top_level_functions_as_children = true;
 
-    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     var saw_temp = false;
     for (state.function_def.child_list) |child| {
@@ -3613,7 +3613,7 @@ test "F10.1a FunctionDef: parseBlock pushes/pops a scope (balanced)" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     // After parsing: scope_level back to 0, but a new scope was
     // appended (push then pop, the structure is retained for §F10.1
@@ -3634,7 +3634,7 @@ test "F10.1a FunctionDef: nested blocks build parent chain" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     // After parsing: 3 scopes (initial 0 + outer block + inner block).
     try std.testing.expectEqual(@as(usize, 3), state.function_def.scopes.len);
@@ -3661,7 +3661,7 @@ test "F10.1a FunctionDef: let registers as lexical, non-const" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     try std.testing.expectEqual(@as(usize, 1), state.function_def.vars.len);
     const v = state.function_def.vars[0];
@@ -3685,7 +3685,7 @@ test "F10.1a FunctionDef: const registers as lexical + const" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     try std.testing.expectEqual(@as(usize, 1), state.function_def.vars.len);
     try std.testing.expectEqual(true, state.function_def.vars[0].is_lexical);
@@ -3704,7 +3704,7 @@ test "F10.1a FunctionDef: top-level block var registers as global var" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     try std.testing.expectEqual(@as(usize, 0), state.function_def.vars.len);
     try std.testing.expectEqual(@as(usize, 1), state.function_def.global_vars.len);
@@ -3724,7 +3724,7 @@ test "F10.1a FunctionDef: let in nested block attaches to inner scope" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     try std.testing.expectEqual(@as(usize, 2), state.function_def.vars.len);
     // `a` is registered in the outer block scope (1), `b` in the
@@ -3752,8 +3752,8 @@ test "F10.1a FunctionDef: findVar locates by name" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     try std.testing.expectEqual(@as(i32, 0), state.function_def.findVar(x_atom));
     try std.testing.expectEqual(@as(i32, 1), state.function_def.findVar(y_atom));
@@ -3774,7 +3774,7 @@ test "F10.1b Nested function: cur_func stack management" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    try zjs_parser.parseExpr(&state);
+    try parser_core.parseExpr(&state);
 
     // Verify that the cur_func stack is empty after parsing (back to root)
     try std.testing.expectEqual(@as(usize, 0), state.cur_func_stack.len);
@@ -3799,7 +3799,7 @@ test "F10.1c Nested function: bytecode dual-buffering" {
     defer state.deinit(env.rt);
     state.top_level_functions_as_children = true;
 
-    try zjs_parser.parseExpr(&state);
+    try parser_core.parseExpr(&state);
 
     try std.testing.expect(countOpcode(state.function.code, op.fclosure) + countOpcode(state.function.code, op.fclosure8) > 0);
 
@@ -3953,7 +3953,7 @@ test "TS: Inline Object Type Parameter Constraints Are Skipped" {
 }
 
 test "TS: Unsupported Syntax Scan Reports Feature And Position" {
-    const decorator = (try frontend.zjs_lexer.findUnsupportedTypeScriptSyntax(std.testing.allocator,
+    const decorator = (try parser.lexer.findUnsupportedTypeScriptSyntax(std.testing.allocator,
         \\class Before {}
         \\@sealed
         \\class C {}
@@ -3963,7 +3963,7 @@ test "TS: Unsupported Syntax Scan Reports Feature And Position" {
     try std.testing.expect(std.mem.indexOf(u8, decorator.message, "TS decorators") != null);
     try std.testing.expect(std.mem.indexOf(u8, decorator.message, "remove the decorator") != null);
 
-    const import_equals = (try frontend.zjs_lexer.findUnsupportedTypeScriptSyntax(
+    const import_equals = (try parser.lexer.findUnsupportedTypeScriptSyntax(
         std.testing.allocator,
         "import X = require(\"x\");",
     )).?;
@@ -4169,7 +4169,7 @@ test "syntax error deinit balances empty message allocation" {
     var account = core.memory.MemoryAccount.init(std.testing.allocator);
     var atoms = core.atom.AtomTable.init(&account);
 
-    var syntax_error = try frontend.source_pos.SyntaxError.create(&account, &atoms, core.atom.null_atom, .{}, "");
+    var syntax_error = try parser.diagnostics.SyntaxError.create(&account, &atoms, core.atom.null_atom, .{}, "");
     syntax_error.deinit();
     atoms.deinit();
 
@@ -4180,11 +4180,11 @@ test "source positions and syntax errors carry filename line and column" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "let x = (\n1", .{ .mode = .script, .filename = "bad.js" });
+    var parsed = try parser.compile(rt, "let x = (\n1", .{ .mode = .script, .filename = "bad.js" });
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error != null);
-    try std.testing.expectEqual(frontend.parser.ParsePath.syntax_error_guard, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.syntax_error_guard, parsed.parse_path);
     try std.testing.expectEqual(@as(u32, 2), parsed.syntax_error.?.position.line);
     try std.testing.expect(parsed.syntax_error.?.message.len > 0);
     try std.testing.expectEqualStrings("bad.js", rt.atoms.name(parsed.syntax_error.?.filename).?);
@@ -4194,11 +4194,11 @@ test "script parse mode emits bytecode metadata without AST execution" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "var x = 1; x + 2;", .{ .mode = .script, .filename = "script.js" });
+    var parsed = try parser.compile(rt, "var x = 1; x + 2;", .{ .mode = .script, .filename = "script.js" });
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     try std.testing.expect(!parsed.function.flags.is_strict);
     try expectOpcode(parsed.function.code, qop.add);
     try expectOpcode(parsed.function.code, qop.drop);
@@ -4210,14 +4210,14 @@ test "script top-level lexical captured before declaration uses checked var ref"
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt,
+    var parsed = try parser.compile(rt,
         \\function f() { return x + 1; }
         \\let x;
     , .{ .mode = .script, .filename = "global-closure-tdz.js" });
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     // Top-level script `let x` is a single global VarRef cell (.global_decl,
     // top_level_lexical_as_global_ref); the inner `f` forward-captures it as a
     // `.ref` closure var aliasing that cell (was `.local` under the pre-single-cell
@@ -4245,21 +4245,21 @@ test "assignment target scan ignores atom operand bytes" {
         if ((atom_id & 0xff) == engine.bytecode.opcode.op.is_undefined_or_null - 1) break;
     }
 
-    var parsed = try frontend.parser.parse(rt, "var count2 = 2; while (count2 -= 1) { 3; }", .{ .mode = .eval_direct, .filename = "eval" });
+    var parsed = try parser.compile(rt, "var count2 = 2; while (count2 -= 1) { 3; }", .{ .mode = .eval_direct, .filename = "eval" });
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
 }
 
 test "print calls emit global lookup generic call and receiver-preserving property call bytecode" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "print(1 + 2 * 3); console.log(\"ok\");", .{ .mode = .script, .filename = "print.js" });
+    var parsed = try parser.compile(rt, "print(1 + 2 * 3); console.log(\"ok\");", .{ .mode = .script, .filename = "print.js" });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
 
     var get_var_count: usize = 0;
     var get_prop_count: usize = 0;
@@ -4292,10 +4292,10 @@ test "simple variable assignments emit var bytecode" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "let value = 5; value = value + 7; print(value);", .{ .mode = .script, .filename = "vars.js" });
+    var parsed = try parser.compile(rt, "let value = 5; value = value + 7; print(value);", .{ .mode = .script, .filename = "vars.js" });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
 
     var get_var_count: usize = 0;
     for (parsed.function.code) |op_val| {
@@ -4310,10 +4310,10 @@ test "quick parser emits compound assignment and update statements" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "let x = 1; x += 2; x++; print(x);", .{ .mode = .script, .filename = "quick-compound-update.js" });
+    var parsed = try parser.compile(rt, "let x = 1; x += 2; x++; print(x);", .{ .mode = .script, .filename = "quick-compound-update.js" });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
 
     const add_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.add) + countOpcode(parsed.function.code, engine.bytecode.opcode.op.add_loc);
     try std.testing.expect(add_count >= 1);
@@ -4325,10 +4325,10 @@ test "quick parser emits arithmetic compound assignment operators" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "let x = 10; x -= 3; x *= 2; x /= 7; x %= 2; print(x);", .{ .mode = .script, .filename = "quick-compound-arithmetic.js" });
+    var parsed = try parser.compile(rt, "let x = 10; x -= 3; x *= 2; x /= 7; x %= 2; print(x);", .{ .mode = .script, .filename = "quick-compound-arithmetic.js" });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.opcode.op.sub));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.opcode.op.mul));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.opcode.op.div));
@@ -4339,20 +4339,20 @@ test "quick parser does not claim update expression values" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "let x = 1; print(x++);", .{ .mode = .script, .filename = "quick-update-expression-fallback.js" });
+    var parsed = try parser.compile(rt, "let x = 1; print(x++);", .{ .mode = .script, .filename = "quick-update-expression-fallback.js" });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
 }
 
 test "quick parser emits basic array and object literals" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "const arr = [1, 2, 3]; const obj = { a: arr[0], b: 2 }; print(obj.a + obj.b);", .{ .mode = .script, .filename = "quick-literals.js" });
+    var parsed = try parser.compile(rt, "const arr = [1, 2, 3]; const obj = { a: arr[0], b: 2 }; print(obj.a + obj.b);", .{ .mode = .script, .filename = "quick-literals.js" });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
 
     const new_array_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.array_from);
     const new_object_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.object);
@@ -4366,10 +4366,10 @@ test "quick parser emits object property assignment" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "const obj = { x: 1 }; obj.x = obj.x + 2; print(obj.x);", .{ .mode = .script, .filename = "quick-property-assignment.js" });
+    var parsed = try parser.compile(rt, "const obj = { x: 1 }; obj.x = obj.x + 2; print(obj.x);", .{ .mode = .script, .filename = "quick-property-assignment.js" });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
 
     const get_prop_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_field);
     const set_prop_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.put_field);
@@ -4381,10 +4381,10 @@ test "quick parser emits optional property access for object and nullish bases" 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "const obj = { a: { b: 42 } }; print(obj?.a?.b); print(obj?.x?.y); print(undefined?.a);", .{ .mode = .script, .filename = "quick-optional-property.js" });
+    var parsed = try parser.compile(rt, "const obj = { a: { b: 42 } }; print(obj?.a?.b); print(obj?.x?.y); print(undefined?.a);", .{ .mode = .script, .filename = "quick-optional-property.js" });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
 
     const optional_get_prop_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.is_undefined_or_null);
     try std.testing.expectEqual(@as(usize, 5), optional_get_prop_count);
@@ -4394,10 +4394,10 @@ test "quick parser preserves parenthesized postfix bases" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "const obj = { x: 1 }; print((obj).x); print(({ y: obj.x + 2 }).y); print(([3, 4])[1]); print(({ n: null })?.n);", .{ .mode = .script, .filename = "quick-parenthesized-postfix.js" });
+    var parsed = try parser.compile(rt, "const obj = { x: 1 }; print((obj).x); print(({ y: obj.x + 2 }).y); print(([3, 4])[1]); print(({ n: null })?.n);", .{ .mode = .script, .filename = "quick-parenthesized-postfix.js" });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
 
     const get_prop_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_field);
     const optional_get_prop_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.is_undefined_or_null);
@@ -4423,11 +4423,11 @@ test "quick parser keeps conditional member callee branches at one stack slot" {
         \\new (A ?? o.x)();
         \\new (B ? A : o.x)();
     ;
-    var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "conditional-member-callee.js" });
+    var parsed = try parser.compile(rt, source, .{ .mode = .script, .filename = "conditional-member-callee.js" });
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     try std.testing.expectEqual(@as(usize, 0), countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method));
     try std.testing.expect(countCalls(parsed.function.code) >= 5);
     try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_constructor) >= 2);
@@ -4448,11 +4448,11 @@ test "quick parser retrofits forward var captures into nested closures" {
         \\  return getTarget;
         \\}
     ;
-    var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "forward-var-capture.js" });
+    var parsed = try parser.compile(rt, source, .{ .mode = .script, .filename = "forward-var-capture.js" });
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     try expectFunctionClosureRecursive(rt, &parsed.function, "CW", .local);
     try expectFunctionClosureRecursive(rt, &parsed.function, "CW", .ref);
     try expectFunctionClosureRecursive(rt, &parsed.function, "Target", .local);
@@ -4462,11 +4462,11 @@ test "quick parser still promotes unconditional parenthesized member calls" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "var o = { x: function () {} }; (o.x)(); ((o.x))(); ((A ?? o).x)();", .{ .mode = .script, .filename = "parenthesized-member-call.js" });
+    var parsed = try parser.compile(rt, "var o = { x: function () {} }; (o.x)(); ((o.x))(); ((A ?? o).x)();", .{ .mode = .script, .filename = "parenthesized-member-call.js" });
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     try std.testing.expectEqual(@as(usize, 3), countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method));
 }
 
@@ -4474,10 +4474,10 @@ test "quick parser lowers JSON stringify and parse to transitional JSON bytecode
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "const text = JSON.stringify({ a: 1 }); print(JSON.parse(text).a);", .{ .mode = .script, .filename = "quick-json-domain.js" });
+    var parsed = try parser.compile(rt, "const text = JSON.stringify({ a: 1 }); print(JSON.parse(text).a);", .{ .mode = .script, .filename = "quick-json-domain.js" });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     try std.testing.expect(countCalls(parsed.function.code) >= 1);
 }
 
@@ -4485,10 +4485,10 @@ test "quick parser lowers Math calls to transitional Math bytecode" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "print(Math.abs(-5)); print(Math.pow(2, 3)); print(Math.min(1, 2, 3));", .{ .mode = .script, .filename = "quick-math-domain.js" });
+    var parsed = try parser.compile(rt, "print(Math.abs(-5)); print(Math.pow(2, 3)); print(Math.min(1, 2, 3));", .{ .mode = .script, .filename = "quick-math-domain.js" });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     try std.testing.expect(countCalls(parsed.function.code) >= 3);
 }
 
@@ -4496,10 +4496,10 @@ test "quick parser lowers URI calls to transitional URI bytecode" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "console.log(encodeURI(\"a b?x=1&y=2#z\")); print(decodeURIComponent(\"a%20b%3Fx%3D1\"));", .{ .mode = .script, .filename = "quick-uri-domain.js" });
+    var parsed = try parser.compile(rt, "console.log(encodeURI(\"a b?x=1&y=2#z\")); print(decodeURIComponent(\"a%20b%3Fx%3D1\"));", .{ .mode = .script, .filename = "quick-uri-domain.js" });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     try std.testing.expect(countCalls(parsed.function.code) >= 2);
 }
 
@@ -4507,14 +4507,14 @@ test "quick parser lowers Number parse helpers to transitional number bytecode" 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(
+    var parsed = try parser.compile(
         rt,
         "print(parseInt(\"0x10\")); print(parseInt(\"0x10\", 10)); print(parseFloat(\"1.5x\")); print(Number.parseInt(\"42\")); print(Number.parseFloat(\"3.14\")); print(Number.NaN); print(Number.POSITIVE_INFINITY); print(Number.NEGATIVE_INFINITY);",
         .{ .mode = .script, .filename = "quick-number-parse-domain.js" },
     );
     defer parsed.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     try std.testing.expect(countCalls(parsed.function.code) >= 5);
 }
 
@@ -4522,14 +4522,14 @@ test "quick parser lowers supported Date helpers to receiver-preserving property
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(
+    var parsed = try parser.compile(
         rt,
         "print(Date()); print(Date.UTC(2024, 0, 1)); print(Date.parse(\"2024-01-01T00:00:00Z\")); print(Date.now()); const d = new Date(0); print(d.getTime()); print(d.toISOString());",
         .{ .mode = .script, .filename = "quick-date-domain.js" },
     );
     defer parsed.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     try std.testing.expect(countCalls(parsed.function.code) >= 4);
     try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_constructor) >= 1);
     try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method) >= 2);
@@ -4539,14 +4539,14 @@ test "quick parser lowers supported RegExp helpers to receiver-preserving proper
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(
+    var parsed = try parser.compile(
         rt,
         "const r = new RegExp(\"a\", \"g\"); print(r.toString()); print(r.test(\"a\")); print(r.exec(\"a\"));",
         .{ .mode = .script, .filename = "quick-regexp-domain.js" },
     );
     defer parsed.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_constructor) >= 1);
     try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method) >= 3);
 }
@@ -4555,25 +4555,25 @@ test "RegExp property calls keep QuickJS call_method bytecode" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var cached = try frontend.parser.parse(
+    var cached = try parser.compile(
         rt,
         "const r = /a+b/; r.test(\"aaab\");",
         .{ .mode = .script, .filename = "regexp-cached-prepared.js" },
     );
     defer cached.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, cached.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, cached.parse_path);
     try std.testing.expectEqual(@as(usize, 1), countOpcode(cached.function.code, engine.bytecode.opcode.op.get_field2));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(cached.function.code, engine.bytecode.opcode.op.call_method));
 
-    var literal = try frontend.parser.parse(
+    var literal = try parser.compile(
         rt,
         "/a+b/.test(\"aaab\");",
         .{ .mode = .script, .filename = "regexp-literal-fuse.js" },
     );
     defer literal.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, literal.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, literal.parse_path);
     try std.testing.expectEqual(@as(usize, 1), countOpcode(literal.function.code, engine.bytecode.opcode.op.get_field2));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(literal.function.code, engine.bytecode.opcode.op.call_method));
 }
@@ -4582,7 +4582,7 @@ test "function predeclare scan skips slash-equals regexp literals" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(
+    var parsed = try parser.compile(
         rt,
         \\function RegExpBenchmark() {
         \\  var re0 = /^ba/;
@@ -4596,7 +4596,7 @@ test "function predeclare scan skips slash-equals regexp literals" {
     );
     defer parsed.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     try std.testing.expect(parsed.syntax_error == null);
 }
 
@@ -4604,7 +4604,7 @@ test "quick parser lowers supported Promise helpers to receiver-preserving prope
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(
+    var parsed = try parser.compile(
         rt,
         \\const p = new Promise((resolve, reject) => {
         \\    resolve(1);
@@ -4619,7 +4619,7 @@ test "quick parser lowers supported Promise helpers to receiver-preserving prope
     );
     defer parsed.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_constructor) >= 1);
     try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method) >= 4);
 }
@@ -4628,7 +4628,7 @@ test "quick parser lowers supported collection helpers to receiver-preserving pr
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(
+    var parsed = try parser.compile(
         rt,
         \\const map = new Map();
         \\map.set("key", 1);
@@ -4657,7 +4657,7 @@ test "quick parser lowers supported collection helpers to receiver-preserving pr
     );
     defer parsed.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_constructor) >= 4);
     try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method) >= 16);
 }
@@ -4666,7 +4666,7 @@ test "template interpolation emits string concatenation" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "const x = 10; const y = 20; print(`${x} + ${y} = ${x + y}`);", .{ .mode = .script, .filename = "template.js" });
+    var parsed = try parser.compile(rt, "const x = 10; const y = 20; print(`${x} + ${y} = ${x + y}`);", .{ .mode = .script, .filename = "template.js" });
     defer parsed.deinit();
 
     var add_count: usize = 0;
@@ -4680,7 +4680,7 @@ test "simple arrays emit receiver-preserving property calls" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "const arr = [1, 2, 3]; print(arr); print(arr.length); print(arr[0]); print(arr.map(x => x * 2));", .{ .mode = .script, .filename = "array.js" });
+    var parsed = try parser.compile(rt, "const arr = [1, 2, 3]; print(arr); print(arr.length); print(arr[0]); print(arr.map(x => x * 2));", .{ .mode = .script, .filename = "array.js" });
     defer parsed.deinit();
 
     const new_array_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.array_from);
@@ -4698,7 +4698,7 @@ test "simple functions and arrows emit inline helper bytecode" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "function add(a, b) { return a + b; } print(add(2, 3)); const double = x => x * 2; print(double(21)); function fact(n) { return n <= 1 ? 1 : n * fact(n - 1); } print(fact(6));", .{ .mode = .script, .filename = "functions.js" });
+    var parsed = try parser.compile(rt, "function add(a, b) { return a + b; } print(add(2, 3)); const double = x => x * 2; print(double(21)); function fact(n) { return n <= 1 ? 1 : n * fact(n - 1); } print(fact(6));", .{ .mode = .script, .filename = "functions.js" });
     defer parsed.deinit();
 
     var add_count: usize = 0;
@@ -4721,10 +4721,10 @@ test "unsupported spread call reports syntax guard" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "print(...[1]);", .{ .mode = .script, .filename = "fallback.js" });
+    var parsed = try parser.compile(rt, "print(...[1]);", .{ .mode = .script, .filename = "fallback.js" });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
 }
 
 test "test262 frontmatter does not affect quick parser behavior" {
@@ -4738,11 +4738,11 @@ test "test262 frontmatter does not affect quick parser behavior" {
         "  type: Test262Error\n" ++
         "---*/\n" ++
         "assert.sameValue(1 + 1, 2);";
-    var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "metadata.js" });
+    var parsed = try parser.compile(rt, source, .{ .mode = .script, .filename = "metadata.js" });
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_var));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_field));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_field2));
@@ -4786,11 +4786,11 @@ test "test262 prelude frontmatter parses nested private methods after line_num t
         \\  }
         \\}
     ;
-    var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "metadata-private-methods.js" });
+    var parsed = try parser.compile(rt, source, .{ .mode = .script, .filename = "metadata-private-methods.js" });
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     try std.testing.expectEqual(@as(usize, 0), countOpcodeRecursive(&parsed.function, qop.line_num));
     try std.testing.expect(countOpcodeRecursive(&parsed.function, qop.private_in) >= 1);
 }
@@ -4809,7 +4809,7 @@ test "arrow early errors reject non-simple strict and invalid rest parameters" {
     };
 
     for (cases) |source| {
-        var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "arrow-early-error.js" });
+        var parsed = try parser.compile(rt, source, .{ .mode = .script, .filename = "arrow-early-error.js" });
         defer parsed.deinit();
         try std.testing.expect(parsed.syntax_error != null);
         try std.testing.expect(parsed.syntax_error.?.message.len > 0);
@@ -4820,7 +4820,7 @@ test "arrow early error checks do not reject valid nested rest destructuring" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "var f; f = ([...[...x]]) => {};", .{ .mode = .script, .filename = "arrow-valid-rest.js" });
+    var parsed = try parser.compile(rt, "var f; f = ([...[...x]]) => {};", .{ .mode = .script, .filename = "arrow-valid-rest.js" });
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
@@ -4860,7 +4860,7 @@ test "assignment destructuring early errors reject invalid rest forms" {
     };
 
     for (cases) |source| {
-        var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "assignment-early-error.js" });
+        var parsed = try parser.compile(rt, source, .{ .mode = .script, .filename = "assignment-early-error.js" });
         defer parsed.deinit();
         try std.testing.expect(parsed.syntax_error != null);
         try std.testing.expect(parsed.syntax_error.?.message.len > 0);
@@ -4881,7 +4881,7 @@ test "assignment destructuring early errors allow reserved property names" {
     };
 
     for (cases) |case| {
-        var parsed = try frontend.parser.parse(rt, case.source, .{ .mode = .script, .filename = "assignment-valid-property-name.js" });
+        var parsed = try parser.compile(rt, case.source, .{ .mode = .script, .filename = "assignment-valid-property-name.js" });
         defer parsed.deinit();
         try std.testing.expect(parsed.syntax_error == null);
         try expectAtomOperandName(rt, &parsed.function, case.property);
@@ -4901,7 +4901,7 @@ test "assignment early errors reject invalid assignment target types" {
     };
 
     for (cases) |source| {
-        var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "assignment-target-type.js" });
+        var parsed = try parser.compile(rt, source, .{ .mode = .script, .filename = "assignment-target-type.js" });
         defer parsed.deinit();
         try std.testing.expect(parsed.syntax_error != null);
         try std.testing.expect(parsed.syntax_error.?.message.len > 0);
@@ -4918,7 +4918,7 @@ test "async arrow early errors reject await-context parse negatives" {
     };
 
     for (cases) |source| {
-        var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "async-arrow-early-error.js" });
+        var parsed = try parser.compile(rt, source, .{ .mode = .script, .filename = "async-arrow-early-error.js" });
         defer parsed.deinit();
         try std.testing.expect(parsed.syntax_error != null);
         try std.testing.expect(parsed.syntax_error.?.message.len > 0);
@@ -4929,7 +4929,7 @@ test "object computed property names parse async arrow and module await expressi
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var async_arrow = try frontend.parser.parse(rt, "let o = { [async () => {}]: 1 };", .{ .mode = .script, .filename = "computed-async-arrow.js" });
+    var async_arrow = try parser.compile(rt, "let o = { [async () => {}]: 1 };", .{ .mode = .script, .filename = "computed-async-arrow.js" });
     defer async_arrow.deinit();
     try std.testing.expect(async_arrow.syntax_error == null);
     try std.testing.expect(async_arrow.hasFeature(.expression));
@@ -4942,7 +4942,7 @@ test "object computed property names parse async arrow and module await expressi
     try std.testing.expect(countFunctionClosures(async_arrow.function.code) > 0);
     try expectFunctionKindRecursive(&async_arrow.function, .async);
 
-    var module_await = try frontend.parser.parse(rt, "let o = { [await 9]: 9 };", .{ .mode = .module, .filename = "computed-await.js" });
+    var module_await = try parser.compile(rt, "let o = { [await 9]: 9 };", .{ .mode = .module, .filename = "computed-await.js" });
     defer module_await.deinit();
     try std.testing.expect(module_await.syntax_error == null);
     try std.testing.expect(module_await.hasFeature(.expression));
@@ -4969,7 +4969,7 @@ test "class early errors reject class parse negatives" {
         "---*/\n" ++
         "class static {}";
 
-    var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "class-early-error.js" });
+    var parsed = try parser.compile(rt, source, .{ .mode = .script, .filename = "class-early-error.js" });
     defer parsed.deinit();
     try std.testing.expect(parsed.syntax_error != null);
     try std.testing.expect(parsed.syntax_error.?.message.len > 0);
@@ -4979,7 +4979,7 @@ test "module parse mode records import export metadata and strict flag" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(
+    var parsed = try parser.compile(
         rt,
         "import 'side'; import x, * as ns from 'm' with { type: \"json\" }; import { default as def, y, z as renamed, \"str\" as strLocal } from 'n'; export { x as default }; export { x }; export const c = 1; export const { d: dc, e } = {}; export let [arr] = []; export function f(){} export class C{} export async function af(){} export { y as yy } from 'n2'; export * from 's'; export * as ns2 from 's2'; await 0;",
         .{ .mode = .module, .filename = "mod.js" },
@@ -5043,11 +5043,11 @@ test "module parser preserves regex literals across zod-like lookahead scans" {
         \\}
     ;
 
-    var parsed = try frontend.parser.parse(rt, source, .{ .mode = .module, .filename = "zod-regex-lookahead.mjs" });
+    var parsed = try parser.compile(rt, source, .{ .mode = .module, .filename = "zod-regex-lookahead.mjs" });
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
 }
 
 test "parser rescans divide-assign token as regex literal beginning with equals" {
@@ -5074,18 +5074,18 @@ test "parser rescans divide-assign token as regex literal beginning with equals"
         \\globalThis.__eq_regex = [fromReturn, fromSwitch, fromDeclarators];
     ;
 
-    var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "eq-regex-rescan.js" });
+    var parsed = try parser.compile(rt, source, .{ .mode = .script, .filename = "eq-regex-rescan.js" });
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
 }
 
 test "module import local names are compiled as module var refs" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(
+    var parsed = try parser.compile(
         rt,
         "import x, { y as renamed } from 'dep'; import * as ns from 'ns'; function f(){ return renamed; } x; ns;",
         .{ .mode = .module, .filename = "import-refs.js" },
@@ -5118,7 +5118,7 @@ test "module parser rejects duplicate exported names across export forms" {
     };
 
     for (cases) |source| {
-        var parsed = try frontend.parser.parse(rt, source, .{ .mode = .module, .filename = "dup-export.js" });
+        var parsed = try parser.compile(rt, source, .{ .mode = .module, .filename = "dup-export.js" });
         defer parsed.deinit();
         try std.testing.expect(parsed.syntax_error != null);
     }
@@ -5134,7 +5134,7 @@ test "module parser validates local export bindings after full body parse" {
         "import { x } from './dep.js'; export { x };",
     };
     for (valid_cases) |source| {
-        var parsed = try frontend.parser.parse(rt, source, .{ .mode = .module, .filename = "valid-local-export.js" });
+        var parsed = try parser.compile(rt, source, .{ .mode = .module, .filename = "valid-local-export.js" });
         defer parsed.deinit();
         try std.testing.expect(parsed.syntax_error == null);
     }
@@ -5144,7 +5144,7 @@ test "module parser validates local export bindings after full body parse" {
         "export { unresolvable };",
     };
     for (invalid_cases) |source| {
-        var parsed = try frontend.parser.parse(rt, source, .{ .mode = .module, .filename = "invalid-local-export.js" });
+        var parsed = try parser.compile(rt, source, .{ .mode = .module, .filename = "invalid-local-export.js" });
         defer parsed.deinit();
         try std.testing.expect(parsed.syntax_error != null);
     }
@@ -5160,12 +5160,12 @@ test "module parser rejects duplicate import attribute keys per with clause" {
         "export * from './dep.js' with { type: 'json', 'typ\\u0065': '' };",
     };
     for (invalid_cases) |source| {
-        var parsed = try frontend.parser.parse(rt, source, .{ .mode = .module, .filename = "dup-import-attr.js" });
+        var parsed = try parser.compile(rt, source, .{ .mode = .module, .filename = "dup-import-attr.js" });
         defer parsed.deinit();
         try std.testing.expect(parsed.syntax_error != null);
     }
 
-    var parsed = try frontend.parser.parse(
+    var parsed = try parser.compile(
         rt,
         "import a from './a.js' with { type: 'json' }; import b from './b.js' with { type: 'json' };",
         .{ .mode = .module, .filename = "valid-import-attr.js" },
@@ -5178,7 +5178,7 @@ test "module parser accepts empty side-effect import attributes" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "import './dep.js' with {};", .{ .mode = .module, .filename = "side-effect-import-attr.js" });
+    var parsed = try parser.compile(rt, "import './dep.js' with {};", .{ .mode = .module, .filename = "side-effect-import-attr.js" });
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
@@ -5196,12 +5196,12 @@ test "module parser validates string module export names" {
         "export * as \"\\uD83D\" from './dep.js';",
     };
     for (invalid_cases) |source| {
-        var parsed = try frontend.parser.parse(rt, source, .{ .mode = .module, .filename = "invalid-string-export-name.js" });
+        var parsed = try parser.compile(rt, source, .{ .mode = .module, .filename = "invalid-string-export-name.js" });
         defer parsed.deinit();
         try std.testing.expect(parsed.syntax_error != null);
     }
 
-    var parsed = try frontend.parser.parse(rt, "export { \"ok\" as \"also-ok\" } from './dep.js';", .{ .mode = .module, .filename = "valid-string-export-name.js" });
+    var parsed = try parser.compile(rt, "export { \"ok\" as \"also-ok\" } from './dep.js';", .{ .mode = .module, .filename = "valid-string-export-name.js" });
     defer parsed.deinit();
     try std.testing.expect(parsed.syntax_error == null);
 }
@@ -5210,11 +5210,11 @@ test "module parser rejects comma expression as default export expression" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var invalid = try frontend.parser.parse(rt, "export default null, null;", .{ .mode = .module, .filename = "invalid-default-export.js" });
+    var invalid = try parser.compile(rt, "export default null, null;", .{ .mode = .module, .filename = "invalid-default-export.js" });
     defer invalid.deinit();
     try std.testing.expect(invalid.syntax_error != null);
 
-    var valid = try frontend.parser.parse(rt, "export default (null, null);", .{ .mode = .module, .filename = "valid-default-export.js" });
+    var valid = try parser.compile(rt, "export default (null, null);", .{ .mode = .module, .filename = "valid-default-export.js" });
     defer valid.deinit();
     try std.testing.expect(valid.syntax_error == null);
 }
@@ -5223,7 +5223,7 @@ test "module parser accepts keyword module export and import names" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(
+    var parsed = try parser.compile(
         rt,
         "var x; export { x as if, x as import, x as await }; import { if as if_, import as import_, await as await_ } from './dep.js';",
         .{ .mode = .module, .filename = "keyword-module-names.js" },
@@ -5239,7 +5239,7 @@ test "module parser allows duplicate top-level var declarations" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "var test262; var test262; for (var other; false;) {} for (var other; false;) {}", .{ .mode = .module, .filename = "dup-module-var.js" });
+    var parsed = try parser.compile(rt, "var test262; var test262; for (var other; false;) {} for (var other; false;) {}", .{ .mode = .module, .filename = "dup-module-var.js" });
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
@@ -5249,7 +5249,7 @@ test "module parser hoists block var declarations to module var refs" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "if (true) { var proto = {}; proto; }", .{ .mode = .module, .filename = "block-var-module.js" });
+    var parsed = try parser.compile(rt, "if (true) { var proto = {}; proto; }", .{ .mode = .module, .filename = "block-var-module.js" });
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
@@ -5269,19 +5269,19 @@ test "parser accepts dynamic import call expressions" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var module_parsed = try frontend.parser.parse(rt, "try { await import('dep', { with: {} }); } catch (e) {}", .{ .mode = .module, .filename = "dynamic-import.mjs" });
+    var module_parsed = try parser.compile(rt, "try { await import('dep', { with: {} }); } catch (e) {}", .{ .mode = .module, .filename = "dynamic-import.mjs" });
     defer module_parsed.deinit();
     try std.testing.expect(module_parsed.syntax_error == null);
 
-    var script_parsed = try frontend.parser.parse(rt, "import('dep',);", .{ .mode = .script, .filename = "dynamic-import.js" });
+    var script_parsed = try parser.compile(rt, "import('dep',);", .{ .mode = .script, .filename = "dynamic-import.js" });
     defer script_parsed.deinit();
     try std.testing.expect(script_parsed.syntax_error == null);
 
-    var import_meta_arg = try frontend.parser.parse(rt, "import(import.meta);", .{ .mode = .module, .filename = "dynamic-import-meta.mjs" });
+    var import_meta_arg = try parser.compile(rt, "import(import.meta);", .{ .mode = .module, .filename = "dynamic-import-meta.mjs" });
     defer import_meta_arg.deinit();
     try std.testing.expect(import_meta_arg.syntax_error == null);
 
-    var import_in_arg = try frontend.parser.parse(rt, "for (promise = import('dep', 'x' in {}); false;) ;", .{ .mode = .script, .filename = "dynamic-import-in.js" });
+    var import_in_arg = try parser.compile(rt, "for (promise = import('dep', 'x' in {}); false;) ;", .{ .mode = .script, .filename = "dynamic-import-in.js" });
     defer import_in_arg.deinit();
     try std.testing.expect(import_in_arg.syntax_error == null);
 }
@@ -5290,11 +5290,11 @@ test "parser rejects invalid dynamic import call syntax" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var new_import = try frontend.parser.parse(rt, "new import('dep');", .{ .mode = .script, .filename = "bad-dynamic-import.js" });
+    var new_import = try parser.compile(rt, "new import('dep');", .{ .mode = .script, .filename = "bad-dynamic-import.js" });
     defer new_import.deinit();
     try std.testing.expect(new_import.syntax_error != null);
 
-    var escaped_import = try frontend.parser.parse(rt, "im\\u0070ort('dep');", .{ .mode = .script, .filename = "escaped-dynamic-import.js" });
+    var escaped_import = try parser.compile(rt, "im\\u0070ort('dep');", .{ .mode = .script, .filename = "escaped-dynamic-import.js" });
     defer escaped_import.deinit();
     try std.testing.expect(escaped_import.syntax_error != null);
 }
@@ -5303,7 +5303,7 @@ test "module parser accepts default as explicit namespace export name" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "export * as default from './dep.js';", .{ .mode = .module, .filename = "default-star.js" });
+    var parsed = try parser.compile(rt, "export * as default from './dep.js';", .{ .mode = .module, .filename = "default-star.js" });
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
@@ -5314,7 +5314,7 @@ test "eval function class private destructuring spread async generator features 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(
+    var parsed = try parser.compile(
         rt,
         "async function *f(...args) { class C { #x; method(){ return args[0]; } } let {x} = args[0]; yield x; await x; import('m'); }",
         .{ .mode = .eval_direct, .filename = "eval.js" },
@@ -5323,7 +5323,7 @@ test "eval function class private destructuring spread async generator features 
 
     try std.testing.expect(parsed.direct_eval);
     try std.testing.expect(parsed.syntax_error == null);
-    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     try std.testing.expect(parsed.hasFeature(.statement));
     try std.testing.expect(parsed.hasFeature(.expression));
     try std.testing.expect(parsed.hasFeature(.function_));

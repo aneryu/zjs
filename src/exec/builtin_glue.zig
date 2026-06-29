@@ -2,7 +2,7 @@
 //! plus collections (Map/Set), weak refs/FinalizationRegistry, Symbol registry and DataView.
 
 const call_mod = @import("call.zig");
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const collection_vm = @import("array_ops.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;

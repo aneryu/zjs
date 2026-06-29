@@ -6,7 +6,7 @@ not a phase plan.
 Primary owners:
 
 - `src/core/ic.zig`
-- `src/bytecode/function.zig`
+- `src/bytecode.zig`
 - `src/exec/vm_property.zig`
 - `src/exec/property_ic.zig`
 - `src/core/profile.zig`

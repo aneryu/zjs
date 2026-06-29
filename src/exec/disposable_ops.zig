@@ -1,6 +1,6 @@
 const std = @import("std");
 const core = @import("../core/root.zig");
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const frame_mod = @import("frame.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 

@@ -1,7 +1,7 @@
 //! Private-field opcode handlers (get/put/define_private_field).
 
 const std = @import("std");
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");

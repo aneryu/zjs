@@ -140,9 +140,8 @@ zig build perf-benchmark --summary all
 - `src/root.zig`: public engine entrypoint.
 - `src/core/`: values, runtime/context, atoms, strings, objects,
   properties, arrays, GC, and core ownership.
-- `src/frontend/`: lexer, parser, source positions, and frontend
-  parsing.
-- `src/bytecode/`: bytecode, constants, scopes, module metadata,
+- `src/parser.zig`: lexer, parser, source positions, and compile entry.
+- `src/bytecode.zig`: bytecode, constants, scopes, module metadata,
   inline-cache slots, and pipeline passes.
 - `src/exec/`: bytecode execution, calls, eval, exceptions, modules,
   promises, VM opcode shards, and job queue.

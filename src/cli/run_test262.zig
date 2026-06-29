@@ -2,7 +2,7 @@ const std = @import("std");
 const test262_root = @import("zjs");
 const zjs = test262_root.binding_root;
 const runtime_layer = test262_root.runtime;
-const frontend_parser = test262_root.frontend.parser;
+const parser = test262_root.parser;
 const unicode = test262_root.libs.unicode;
 
 extern "c" fn getpid() c_int;
@@ -4029,7 +4029,7 @@ test "test262 typed array iterator staging source parses after installing global
         const ctx = try zjs.JSContext.create(rt);
         defer ctx.destroy();
         _ = try ctx.globalObject();
-        var parsed = try frontend_parser.parse(rt, source, .{
+        var parsed = try parser.compile(rt, source, .{
             .mode = .script,
             .filename = "<eval>",
             .return_completion = true,
@@ -4045,7 +4045,7 @@ test "test262 typed array iterator staging source parses after installing global
         defer ctx.destroy();
         const global = try ctx.globalObject();
         try installTest262Globals(rt, ctx, global);
-        var parsed = try frontend_parser.parse(rt, source, .{
+        var parsed = try parser.compile(rt, source, .{
             .mode = .script,
             .filename = "<eval>",
             .return_completion = true,

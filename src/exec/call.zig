@@ -1,7 +1,7 @@
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
-const bytecode_opcode = @import("../bytecode/opcode.zig");
-const function_bytecode = @import("../bytecode/function.zig");
+const bytecode_opcode = @import("../bytecode.zig").opcode;
+const function_bytecode = @import("../bytecode.zig");
 const closure_mod = @import("closure.zig");
 const construct_mod = @import("construct.zig");
 const frame_mod = @import("frame.zig");
@@ -3357,7 +3357,7 @@ pub fn qjsEvalGlobalScriptSource(
     source: []const u8,
     filename: []const u8,
 ) !core.JSValue {
-    const frontend = @import("../frontend/root.zig");
+    const parser = @import("../parser.zig");
     const stack_mod = @import("stack.zig");
     const zjs_vm = @import("zjs_vm.zig");
 
@@ -3369,7 +3369,7 @@ pub fn qjsEvalGlobalScriptSource(
 
     const EvalResult = @typeInfo(@TypeOf(qjsEvalGlobalScriptSource)).@"fn".return_type.?;
     const result: EvalResult = blk: {
-        var compiled = frontend.parser.parse(ctx.runtime, source, .{ .mode = .script, .filename = filename, .strict = false, .return_completion = true }) catch |err| break :blk err;
+        var compiled = parser.compile(ctx.runtime, source, .{ .mode = .script, .filename = filename, .strict = false, .return_completion = true }) catch |err| break :blk err;
         defer compiled.deinit();
         if (compiled.syntax_error != null) break :blk error.SyntaxError;
         var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);

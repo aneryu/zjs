@@ -9,7 +9,7 @@ const bigint = @import("bigint.zig");
 const object = @import("object.zig");
 const var_ref = @import("var_ref.zig");
 const string = @import("string.zig");
-const function_bytecode_mod = @import("function_bytecode.zig");
+const function_bytecode_mod = @import("../bytecode.zig").function_bytecode;
 const FunctionBytecode = function_bytecode_mod.FunctionBytecode;
 const shape = @import("shape.zig");
 

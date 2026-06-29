@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const globals_mod = core.global_slots;
 const stack_mod = @import("stack.zig");

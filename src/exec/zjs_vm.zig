@@ -1,5 +1,5 @@
 //! QuickJS-aligned VM dispatcher for bytecode produced by
-//! `frontend/zjs_parser.zig`, tracked by the current semantic
+//! `parser.zig`, tracked by the current semantic
 //! alignment plans.
 //!
 //! This is the only VM dispatcher after the parser-rewrite M2 swap.
@@ -10,9 +10,9 @@
 const builtin = @import("builtin");
 const std = @import("std");
 
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
-const frontend = @import("../frontend/root.zig");
+const parser = @import("../parser.zig");
 const call_mod = @import("call.zig");
 const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
@@ -38,7 +38,9 @@ const profile_vm = @import("vm_profile.zig");
 const regexp_vm = @import("vm_regexp.zig");
 const call_runtime = @import("call_runtime.zig");
 const tailcall_dispatch = @import("tailcall_dispatch.zig");
-comptime { _ = tailcall_dispatch; }
+comptime {
+    _ = tailcall_dispatch;
+}
 const array_ops = @import("array_ops.zig");
 const forof_ops = @import("forof_ops.zig");
 const promise_ops = @import("promise_ops.zig");

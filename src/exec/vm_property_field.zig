@@ -1,7 +1,7 @@
 //! Property field and array-element opcode handlers (get/put_field, get/put_array_el, in/instanceof, to_prop_key).
 
 const std = @import("std");
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const frame_mod = @import("frame.zig");

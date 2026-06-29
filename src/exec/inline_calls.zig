@@ -15,7 +15,7 @@
 
 const std = @import("std");
 
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const frame_mod = @import("frame.zig");
@@ -88,7 +88,7 @@ pub inline fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, re
         (function_object.functionArrowNewTarget() orelse core.JSValue.undefinedValue())
     else
         core.JSValue.undefinedValue();
-    const view = bytecode.function.ensureCachedBytecodeView(fb, ctx.runtime) catch return null;
+    const view = bytecode.ensureCachedBytecodeView(fb, ctx.runtime) catch return null;
     return .{
         .function_object = function_object,
         .callable = func,

@@ -28,7 +28,7 @@ const zjs = @import("zjs");
 const core = zjs.core;
 const BindingContext = zjs.binding_root.JSContext;
 const module_graph = zjs.exec.module_graph;
-const frontend_parser = zjs.frontend.parser;
+const parser = zjs.parser;
 
 const corpus_filename = "<oom-corpus>";
 
@@ -236,7 +236,7 @@ fn runParseOnly(allocator: std.mem.Allocator, source: []const u8) !void {
     const rt = try core.JSRuntime.create(allocator);
     var rt_owned = true;
     errdefer if (rt_owned) rt.destroy();
-    var result = try frontend_parser.parse(rt, source, .{
+    var result = try parser.compile(rt, source, .{
         .mode = .script,
         .filename = corpus_filename,
     });

@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const regexp_properties = @import("../libs/unicode.zig").regexp_properties;
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;

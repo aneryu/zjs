@@ -1,6 +1,6 @@
 //! Local, argument, var-ref and global-lexical slot operations shared between the VM and call runtime.
 
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
