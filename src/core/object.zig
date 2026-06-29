@@ -874,6 +874,11 @@ pub const FunctionPayload = struct {
     native_dispatch_name: atom.Atom = atom.null_atom,
     typed_array_element_size: u32 = 0,
     typed_array_kind: u8 = 0,
+    /// Cached "are all closure captures VarRef cells" (0 = not computed, 1 = all
+    /// cells, 2 = some non-cell). Captures are fixed at closure creation, so the
+    /// inline-call simple-frame gate computes this once instead of a cold per-call
+    /// header-load loop over the cells.
+    captures_cell_state: u8 = 0,
     bytecode: ?JSValue = null,
     captures: []JSValue = &.{},
     home_object: ?*Object = null,
@@ -4377,6 +4382,17 @@ pub const Object = struct {
         if (self.functionPayloadConst()) |payload| return payload.captures;
         if (self.generatorPayloadConst()) |payload| return payload.captures;
         return &.{};
+    }
+
+    /// Cached "all captures are VarRef cells" tri-state (FunctionPayload):
+    /// 0 = not computed, 1 = all cells, 2 = some non-cell. Normal-function only
+    /// (the inline simple-frame gate is normal-only).
+    pub fn functionCapturesCellState(self: *Object) u8 {
+        if (self.functionPayload()) |payload| return payload.captures_cell_state;
+        return 0;
+    }
+    pub fn setFunctionCapturesCellState(self: *Object, state: u8) void {
+        if (self.functionPayload()) |payload| payload.captures_cell_state = state;
     }
 
     pub fn functionEvalLocalNamesSlot(self: *Object, rt: *JSRuntime) !*[]atom.Atom {

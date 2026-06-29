@@ -270,9 +270,124 @@ pub const Machine = struct {
         try vm_call.enterInlineCallDepth(self.ctx, global);
         errdefer self.ctx.call_depth -= 1;
         const entry = try self.acquireSlot(global);
-        try setupInlineEntry(self.ctx, global, entry, target, source);
+        if (isSimpleInlineFrame(target, source))
+            try setupSimpleInlineEntry(self.ctx, global, entry, target, source)
+        else
+            try setupInlineEntry(self.ctx, global, entry, target, source);
         self.depth += 1;
         self.switched = true;
+    }
+
+    /// True when the frame takes the straight-line `setupSimpleInlineEntry` path:
+    /// a sloppy, non-arrow plain call (no receiver, undefined `this` → global)
+    /// with simple parameters (no original-args snapshot), no direct-eval bindings
+    /// / eval-call / global-var rebinds, args that can be borrowed in place, and
+    /// all-cell closure captures (borrowable as `var_refs`). Each rejected
+    /// condition is exactly a branch the lean path elides; the general
+    /// `setupInlineEntry` stays the authority for everything else (strict, arrow,
+    /// method receiver, eval, arity pad, non-cell captures).
+    fn isSimpleInlineFrame(target: InlineTarget, source: ArgsSource) bool {
+        const fb = target.fb;
+        if (fb.is_arrow_function) return false;
+        if (fb.is_strict_mode or fb.runtime_strict_mode) return false; // sloppy → this=global, no original snapshot
+        if (!fb.has_simple_parameter_list) return false; // argumentsNeedsOriginalSnapshot
+        const function = target.view;
+        if (function.flags.has_eval_call) return false;
+        if (function.global_vars.len != 0) return false;
+        if (target.function_object.functionEvalLocalNames().len != 0) return false;
+        if (target.function_object.functionEvalLocalRefs().len != 0) return false;
+        switch (source) {
+            .stack_region => |region| if (region.has_receiver) return false,
+            .moved => return false, // tail-call reuse keeps the general path
+        }
+        if (!target.this_value.isUndefined()) return false;
+        if (!canBorrowSourceArgs(function, source)) return false;
+        const captures = target.function_object.functionCapturesSlot().*;
+        if (captures.len > 0 and !allCapturesAreCellsCached(target.function_object, captures)) return false;
+        return true;
+    }
+
+    /// Straight-line frame setup for the `isSimpleInlineFrame` shape — the hot
+    /// fib/closure-call path. It calls the SAME shared primitives as
+    /// `setupInlineEntry` (FrameSlab.carve, Frame.init, initFrameLocals,
+    /// initArgumentsBorrowedSlots) but with every simple-case branch resolved at
+    /// compile time: no eval merge/snapshot, `this = global` (borrowed), no
+    /// original-args snapshot, borrowed args, borrowed all-cell var_refs. Lives in
+    /// its OWN function so its register allocation is not coupled to the 220-line
+    /// general path (whose register pressure spilled the hot fields). Ownership
+    /// flags MUST mirror the general path exactly: current_function .take, this
+    /// .borrow, new_target borrowed, args borrowed (cleanup_source .non_args),
+    /// var_refs borrowed.
+    ///
+    /// `noinline` is LOAD-BEARING: the whole point is to keep this register
+    /// allocation OFF the general `setupInlineEntry`/`pushFrame` chain. If LLVM
+    /// inlines it back into `pushFrame`, the simple path's spills re-couple with
+    /// the general path and the win evaporates (measured: 3.09x→3.26x qjs on fib).
+    noinline fn setupSimpleInlineEntry(ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: InlineTarget, source: ArgsSource) HostError!void {
+        const rt = ctx.runtime;
+        entry.function = target.view;
+        entry.catch_target = null;
+        entry.eval_function_view = null;
+        entry.merged_var_ref_names = &.{};
+        entry.merged_var_refs = &.{};
+        entry.simple_frame = true;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        errdefer entry.profile_guard.deinit();
+
+        const callable_slot = sourceCallableSlot(source);
+
+        entry.arena_mark = rt.vm_stack.mark();
+        errdefer rt.vm_stack.restore(entry.arena_mark);
+
+        entry.frame = frame_mod.Frame.init(entry.function);
+        errdefer entry.frame.deinit(&rt.memory, rt);
+
+        var cleanup_source: SourceCleanupMode = .full;
+        errdefer cleanupSource(rt, source, cleanup_source);
+
+        // Sloppy plain-call receiver coerces to the global object (borrowed). qjs
+        // inline prologue: `this_obj = global_obj` (quickjs.c:17933, sloppy leg).
+        entry.frame.current_function = takeSourceSlot(callable_slot);
+        entry.frame.new_target = target.new_target;
+        entry.frame.this_value = global.value();
+        entry.frame.this_value_owned = false;
+
+        entry.eval_snapshot = .{};
+        const argc = sourceArgCount(source);
+        const frame_arg_count = frame_mod.frameArgCount(entry.function, argc);
+        const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(entry.function, frame_arg_count);
+        const stack_count = @as(usize, entry.function.stack_size) + 1;
+        const slab = frame_mod.FrameSlab.carve(&rt.memory, &rt.vm_stack, 0, 0, entry.function.var_count, stack_count, 0, open_var_ref_count) orelse blk: {
+            const heap_windows = try frame_mod.FrameSlab.allocHeap(&rt.memory, 0, 0, entry.function.var_count, stack_count, 0, open_var_ref_count);
+            entry.frame.installOwnedStorage(heap_windows.storage);
+            break :blk heap_windows;
+        };
+        const frame_windows = frame_mod.FrameStorageWindows{
+            .args = if (slab.args.len != 0) slab.args else null,
+            .original_args = null,
+            .locals = if (slab.locals.len != 0) slab.locals else null,
+            .var_refs = null,
+            .open_var_refs = if (slab.open_var_refs.len != 0) slab.open_var_refs else null,
+        };
+        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.stack_size, slab.stack);
+        errdefer entry.stack.deinit(rt);
+
+        try vm_call.initFrameLocals(ctx, entry.function, &entry.frame, &.{}, &.{}, true, frame_windows);
+        try entry.frame.initArgumentsBorrowedSlots(&rt.memory, sourceArgs(source), true, false, frame_windows);
+        cleanup_source = .non_args;
+        cleanupSource(rt, source, cleanup_source);
+        cleanup_source = .none;
+
+        if (frame_windows.open_var_refs) |open_refs| {
+            entry.frame.installOpenVarRefSlots(open_refs);
+        } else if (open_var_ref_count != 0) {
+            try entry.frame.ensureOpenVarRefSlots(&rt.memory, &rt.vm_stack, true);
+        }
+        const captures = target.function_object.functionCapturesSlot().*;
+        if (captures.len > 0) {
+            entry.frame.var_refs = captures;
+            entry.frame.var_refs_borrowed = true;
+        }
     }
 
     /// Optimized inline-call frame setup, factored out of `pushFrame` so the
@@ -555,6 +670,20 @@ pub const Machine = struct {
             if (core.VarRef.fromValue(cap) == null) return false;
         }
         return true;
+    }
+
+    /// `allVarRefCells` memoized on the function object — captures are fixed at
+    /// closure creation, so the cold header-load loop runs once per closure.
+    fn allCapturesAreCellsCached(function_object: *core.Object, captures: []const core.JSValue) bool {
+        return switch (function_object.functionCapturesCellState()) {
+            1 => true,
+            2 => false,
+            else => blk: {
+                const all = allVarRefCells(captures);
+                function_object.setFunctionCapturesCellState(if (all) 1 else 2);
+                break :blk all;
+            },
+        };
     }
 
     fn canBorrowSourceArgs(function: *const bytecode.Bytecode, source: ArgsSource) bool {
