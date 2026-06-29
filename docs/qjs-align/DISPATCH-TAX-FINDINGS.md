@@ -1,5 +1,17 @@
 # Dispatch-tax investigation — findings + add_loc fusion (2026-06-24)
 
+> **⏫⏫ 2026-06-29 STATUS — tail-call threaded dispatch HAS LANDED; this whole doc is now HISTORICAL.**
+> The `dispatchLoop` monolithic labeled-switch that this document analyzes (4256 B frame, 107/111
+> `adrp+add` table-base remats) **no longer exists on HEAD**. Dispatch is now `runTC` /
+> `src/exec/tailcall_dispatch.zig` — `@call(.always_tail) vm.tbl[pc[0]]` through a 256-entry table.
+> **Disassembly of HEAD `next` fast path = 4 instructions: `ldrb opcode` + `ldr table-base[vm,#88]`
+> (resident vm pointer, ONE ldr, zero adrp+add remat) + `ldr handler` + `br`.** qjs computed-goto =
+> 4-5 instructions (`ldrb;mov;ldr;br`, several sites add `add x0,#0x630` to re-derive the base).
+> **So zjs dispatch is now a FAITHFUL match to qjs (4 ≈ 4-5), no longer a floor or a TODO.** The
+> tail-call "unified solution" this doc and [[dispatch-table-base-remat-rootcause]] argued for is
+> done. The frame-reduction work below (4256→3856 B etc.) was on the now-replaced dispatchLoop and is
+> kept only as history. Current call-machinery frontier: `CALL-MACHINERY-FAITHFUL-FRONTIER.md`.
+
 > **2026-06-27 frame-reduction EXECUTION (goal: shrink dispatchLoop frame to qjs's ~464 B).**
 > Verified incremental progress landed: **4256 B → 3952 B (async noinline) → 3904 B (eval var-ref
 > migration to frame accessors) → 3872 B (eval_local_names/slots depth-conditional) → 3856 B

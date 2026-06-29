@@ -287,13 +287,13 @@ pub const Machine = struct {
     /// `setupInlineEntry` stays the authority for everything else (strict, arrow,
     /// method receiver, eval, arity pad, non-cell captures).
     fn isSimpleInlineFrame(target: InlineTarget, source: ArgsSource) bool {
-        const fb = target.fb;
-        if (fb.is_arrow_function) return false;
-        if (fb.is_strict_mode or fb.runtime_strict_mode) return false; // sloppy → this=global, no original snapshot
-        if (!fb.has_simple_parameter_list) return false; // argumentsNeedsOriginalSnapshot
         const function = target.view;
-        if (function.flags.has_eval_call) return false;
-        if (function.global_vars.len != 0) return false;
+        // fb-derived half (normal, non-arrow, sloppy, simple params, no
+        // eval-call, no global-var rebinds) is precomputed at view build:
+        // one byte test instead of ~6 scattered FunctionBytecode bool loads
+        // (the `ldrb [fb,#…]` cluster that dominated op_call). The remaining
+        // checks below depend on the call site, not the bytecode.
+        if (!function.simple_inline_eligible) return false;
         if (target.function_object.functionEvalLocalNames().len != 0) return false;
         if (target.function_object.functionEvalLocalRefs().len != 0) return false;
         switch (source) {

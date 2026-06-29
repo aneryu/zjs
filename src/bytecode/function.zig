@@ -155,6 +155,16 @@ pub const Bytecode = struct {
     source_loc_slots: []pc2line.SourceLocSlot = &.{},
     source_loc_capacity: usize = 0,
     flags: Flags = .{},
+    /// Precomputed fb-derived half of `isSimpleInlineFrame`: a normal,
+    /// non-arrow, non-constructor, sloppy function with a simple parameter
+    /// list, no direct-eval call and no global-var rebinds — i.e. every
+    /// condition the hot straight-line `setupSimpleInlineEntry` path needs
+    /// that depends ONLY on the bytecode (not the call site). Collapses ~6
+    /// scattered `FunctionBytecode` bool loads on every plain call into a
+    /// single byte test. Call-site conditions (undefined `this`, borrowable
+    /// args, all-cell captures, no eval-local bindings) are still checked per
+    /// call. Computed in `makeBytecodeView`, so it refreshes with the view.
+    simple_inline_eligible: bool = false,
     arg_count: u16 = 0,
     var_count: u16 = 0,
     stack_size: u16 = 0,
@@ -507,6 +517,14 @@ fn makeBytecodeView(fb: *const FunctionBytecode, mem: *memory.MemoryAccount, ato
             .has_eval_call = fb.has_eval_call,
             .backtrace_barrier = fb.backtrace_barrier,
         },
+        // fb-derived inline eligibility (call-site half stays in
+        // `isSimpleInlineFrame`). Stricter than the inline-call admission gate
+        // (`resolveInlineTarget` already guarantees normal/non-ctor here), but
+        // self-contained so it can also short-circuit the resolve path later.
+        .simple_inline_eligible = fb.func_kind == .normal and
+            !fb.is_class_constructor and !fb.is_derived_class_constructor and
+            !fb.is_arrow_function and !fb.is_strict_mode and !fb.runtime_strict_mode and
+            fb.has_simple_parameter_list and !fb.has_eval_call and fb.global_vars.len == 0,
         .arg_count = fb.arg_count,
         .var_count = fb.var_count,
         .stack_size = fb.stack_size,
