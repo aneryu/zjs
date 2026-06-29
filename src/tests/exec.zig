@@ -3,9 +3,9 @@ const zjs = @import("zjs");
 const engine = zjs;
 
 const core = zjs.core;
-const QjsLexer = zjs.frontend.zjs_lexer.Lexer;
-const zjs_parser = zjs.frontend.zjs_parser;
-const ParseState = zjs_parser.ParseState;
+const QjsLexer = zjs.parser.Lexer;
+const parser_core = zjs.parser.Parser;
+const ParseState = parser_core.ParseState;
 const bytecode = zjs.bytecode;
 const function_def = zjs.bytecode.function_def;
 const op = zjs.bytecode.opcode.op;
@@ -583,7 +583,7 @@ pub const vm_helpers = struct {
         var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, src);
         var state = try ParseState.init(&lex, &function);
         defer state.deinit(rt);
-        try zjs_parser.parseExpr(&state);
+        try parser_core.parseExpr(&state);
 
         // Run the FunctionDef-backed finalize pipeline so locals are lowered
         // to get_loc / put_loc instead of falling back to global get_var /
@@ -605,7 +605,7 @@ pub const vm_helpers = struct {
         var state = try ParseState.init(&lex, &function);
         defer state.deinit(rt);
         state.top_level_functions_as_children = true;
-        try zjs_parser.parseExpr(&state);
+        try parser_core.parseExpr(&state);
 
         try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, rt);
 
@@ -638,8 +638,8 @@ pub const vm_helpers = struct {
         defer state.deinit(rt);
 
         try state.enableEvalReturn();
-        while (state.token.val != engine.frontend.zjs_token.TOK_EOF) {
-            try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+        while (state.token.val != engine.parser.token.TOK_EOF) {
+            try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
         }
         try state.finalizeEvalReturn();
 
@@ -662,8 +662,8 @@ pub const vm_helpers = struct {
         state.top_level_functions_as_children = true;
 
         try state.enableEvalReturn();
-        while (state.token.val != engine.frontend.zjs_token.TOK_EOF) {
-            try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+        while (state.token.val != engine.parser.token.TOK_EOF) {
+            try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
         }
         try state.finalizeEvalReturn();
 
@@ -1401,7 +1401,7 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     defer rt.atoms.free(fake_key);
     try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
 
-    var parsed = try engine.frontend.parser.parse(rt, "print(fake(-8));", .{ .mode = .script, .filename = "native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(rt, "print(fake(-8));", .{ .mode = .script, .filename = "native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
     defer stack.deinit(rt);
@@ -2018,7 +2018,7 @@ test "number native builtin records cover static and prototype dispatch" {
     defer rt.atoms.free(fake_proto_key);
     try global.defineOwnProperty(rt, fake_proto_key, core.Descriptor.data(fake_proto, true, false, true));
 
-    var parsed = try engine.frontend.parser.parse(rt, "print(fakeStatic(3.5)); print(fakeProto.call(1.25, 2));", .{ .mode = .script, .filename = "number-native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(rt, "print(fakeStatic(3.5)); print(fakeProto.call(1.25, 2));", .{ .mode = .script, .filename = "number-native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
     defer stack.deinit(rt);
@@ -2069,7 +2069,7 @@ test "string static native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_key);
     try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
 
-    var parsed = try engine.frontend.parser.parse(rt, "print(fakeStringStatic({ valueOf: function(){ return 0x42; } }));", .{ .mode = .script, .filename = "string-static-native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(rt, "print(fakeStringStatic({ valueOf: function(){ return 0x42; } }));", .{ .mode = .script, .filename = "string-static-native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
     defer stack.deinit(rt);
@@ -2126,7 +2126,7 @@ test "string prototype native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_key);
     try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
 
-    var parsed = try engine.frontend.parser.parse(rt, "print(fakeStringIndexOf.call('banana', 'n', { valueOf: function(){ return 3; } }));", .{ .mode = .script, .filename = "string-prototype-native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(rt, "print(fakeStringIndexOf.call('banana', 'n', { valueOf: function(){ return 3; } }));", .{ .mode = .script, .filename = "string-prototype-native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
     defer stack.deinit(rt);
@@ -2176,7 +2176,7 @@ test "date static native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_key);
     try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
 
-    var parsed = try engine.frontend.parser.parse(rt, "print(fakeDateUTC({ valueOf: function(){ return 2024; } }, 0, 1));", .{ .mode = .script, .filename = "date-static-native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(rt, "print(fakeDateUTC({ valueOf: function(){ return 2024; } }, 0, 1));", .{ .mode = .script, .filename = "date-static-native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
     defer stack.deinit(rt);
@@ -2233,7 +2233,7 @@ test "date constructor native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_key);
     try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
 
-    var parsed = try engine.frontend.parser.parse(rt,
+    var parsed = try engine.parser.compile(rt,
         \\const d = new fakeDateConstructor({ valueOf: function(){ return 2; } });
         \\print(d instanceof Date);
         \\print(d.getTime());
@@ -2320,7 +2320,7 @@ test "date prototype native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_key);
     try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
 
-    var parsed = try engine.frontend.parser.parse(rt, "const d = new Date(0); print(fakeDateSetTime.call(d, { valueOf: function(){ return 1704067200000; } })); print(d.getTime());", .{ .mode = .script, .filename = "date-prototype-native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(rt, "const d = new Date(0); print(fakeDateSetTime.call(d, { valueOf: function(){ return 1704067200000; } })); print(d.getTime());", .{ .mode = .script, .filename = "date-prototype-native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
     defer stack.deinit(rt);
@@ -2395,7 +2395,7 @@ test "array static native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_from_key);
     try global.defineOwnProperty(rt, fake_from_key, core.Descriptor.data(fake_from, true, false, true));
 
-    var parsed = try engine.frontend.parser.parse(rt, "print(fakeArrayIsArray([])); print(fakeArrayFrom.call(Array, [7, 8]).join(','));", .{ .mode = .script, .filename = "array-static-native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(rt, "print(fakeArrayIsArray([])); print(fakeArrayFrom.call(Array, [7, 8]).join(','));", .{ .mode = .script, .filename = "array-static-native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
     defer stack.deinit(rt);
@@ -2498,7 +2498,7 @@ test "array prototype native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_values_key);
     try global.defineOwnProperty(rt, fake_values_key, core.Descriptor.data(fake_values, true, false, true));
 
-    var parsed = try engine.frontend.parser.parse(rt, "print(fakeArrayMap.call([1,2], function(v){ return v + 1; }).join(',')); const it = fakeArrayValues.call([9]); print(it.next().value);", .{ .mode = .script, .filename = "array-prototype-native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(rt, "print(fakeArrayMap.call([1,2], function(v){ return v + 1; }).join(',')); const it = fakeArrayValues.call([9]); print(it.next().value);", .{ .mode = .script, .filename = "array-prototype-native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
     defer stack.deinit(rt);
@@ -2623,7 +2623,7 @@ test "collection native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_set_values_key);
     try global.defineOwnProperty(rt, fake_set_values_key, core.Descriptor.data(fake_set_values, true, false, true));
 
-    var parsed = try engine.frontend.parser.parse(rt, "const grouped = fakeMapGroupBy.call(Map, ['aa', 'b'], function(v) { return v.length; }); print(grouped.get(2)[0]); const m = new Map(); fakeMapSet.call(m, 'a', 1); print(m.get('a')); fakeMapForEach.call(m, function(value, key) { print(key + ':' + value); }); const left = new Set(); left.add(1); const right = new Set(); right.add(2); const union = fakeSetUnion.call(left, right); print(Array.from(fakeSetValues.call(union)).join(','));", .{ .mode = .script, .filename = "collection-native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(rt, "const grouped = fakeMapGroupBy.call(Map, ['aa', 'b'], function(v) { return v.length; }); print(grouped.get(2)[0]); const m = new Map(); fakeMapSet.call(m, 'a', 1); print(m.get('a')); fakeMapForEach.call(m, function(value, key) { print(key + ':' + value); }); const left = new Set(); left.add(1); const right = new Set(); right.add(2); const union = fakeSetUnion.call(left, right); print(Array.from(fakeSetValues.call(union)).join(','));", .{ .mode = .script, .filename = "collection-native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
     defer stack.deinit(rt);
@@ -2777,7 +2777,7 @@ test "buffer native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_data_view_byte_length_key);
     try global.defineOwnProperty(rt, fake_data_view_byte_length_key, core.Descriptor.data(fake_data_view_byte_length, true, false, true));
 
-    var parsed = try engine.frontend.parser.parse(rt,
+    var parsed = try engine.parser.compile(rt,
         \\const b = new ArrayBuffer(6);
         \\print(fakeArrayBufferIsView(new DataView(b)));
         \\print(fakeArrayBufferSlice.call(b, 1, 4).byteLength);
@@ -2876,7 +2876,7 @@ test "typed array accessor native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_tag_key);
     try global.defineOwnProperty(rt, fake_tag_key, core.Descriptor.data(fake_tag, true, false, true));
 
-    var parsed = try engine.frontend.parser.parse(rt,
+    var parsed = try engine.parser.compile(rt,
         \\const ta = new Uint8Array([1, 2, 3, 4]);
         \\print(fakeTypedArrayByteLength.call(ta));
         \\print(fakeTypedArrayLength.call(ta));
@@ -2936,7 +2936,7 @@ test "regexp static native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_key);
     try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
 
-    var parsed = try engine.frontend.parser.parse(rt, "print(fakeRegExpEscape('.')); print(fakeRegExpEscape('a+b'));", .{ .mode = .script, .filename = "regexp-static-native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(rt, "print(fakeRegExpEscape('.')); print(fakeRegExpEscape('a+b'));", .{ .mode = .script, .filename = "regexp-static-native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
     defer stack.deinit(rt);
@@ -3052,7 +3052,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_to_string_key);
     try global.defineOwnProperty(rt, fake_to_string_key, core.Descriptor.data(fake_to_string, true, false, true));
 
-    var parsed = try engine.frontend.parser.parse(rt, "const r = /a/; const m = fakeRegExpExec.call(r, 'cat'); print(m[0] + ':' + m.index); print(fakeRegExpTest.call(r, 'cat')); print(fakeRegExpToString.call(r));", .{ .mode = .script, .filename = "regexp-prototype-native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(rt, "const r = /a/; const m = fakeRegExpExec.call(r, 'cat'); print(m[0] + ':' + m.index); print(fakeRegExpTest.call(r, 'cat')); print(fakeRegExpToString.call(r));", .{ .mode = .script, .filename = "regexp-prototype-native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
     defer stack.deinit(rt);
@@ -3187,7 +3187,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_split_key);
     try global.defineOwnProperty(rt, fake_split_key, core.Descriptor.data(fake_split, true, false, true));
 
-    var parsed = try engine.frontend.parser.parse(rt,
+    var parsed = try engine.parser.compile(rt,
         \\const r = /a/;
         \\print(fakeRegExpSearch.call(r, 'cat'));
         \\print(fakeRegExpMatch.call(r, 'cat')[0]);
@@ -3274,7 +3274,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_global_key);
     try global.defineOwnProperty(rt, fake_global_key, core.Descriptor.data(fake_global, true, false, true));
 
-    var parsed = try engine.frontend.parser.parse(rt,
+    var parsed = try engine.parser.compile(rt,
         \\const r = /a\/b/g;
         \\print(fakeRegExpSourceGetter.call(r));
         \\print(fakeRegExpGlobalGetter.call(r));

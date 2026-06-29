@@ -1,6 +1,6 @@
 const std = @import("std");
 const core = @import("../core/root.zig");
-const frontend = @import("../frontend/root.zig");
+const parser = @import("../parser.zig");
 const exec = @import("root.zig");
 
 pub const HostHooks = struct {
@@ -231,7 +231,7 @@ pub fn evalFileModuleGraphWithHostHooks(
         const module_source = try wrapSourceByKind(allocator, loaded_kind, raw_module_source, path, &module_source_allocated);
         defer if (module_source_allocated) allocator.free(module_source);
 
-        var compiled = try frontend.parser.parse(runtime, module_source, .{ .mode = .module, .filename = path });
+        var compiled = try parser.compile(runtime, module_source, .{ .mode = .module, .filename = path });
         if (loaded_owned) allocator.free(raw_module_source);
         defer compiled.deinit();
         if (compiled.syntax_error) |err| {
@@ -333,7 +333,7 @@ fn initializePreloadedModuleFunctionDeclarations(
             break :blk bytes;
         };
         defer if (!is_root) allocator.free(source);
-        var compiled = try frontend.parser.parse(runtime, source, .{ .mode = .module, .filename = path });
+        var compiled = try parser.compile(runtime, source, .{ .mode = .module, .filename = path });
         defer compiled.deinit();
         if (compiled.syntax_error != null) return error.SyntaxError;
         const module_name = try runtime.internAtom(path);
@@ -355,7 +355,7 @@ fn evalPreloadedFileModuleStep(
     var input_continuation = continuation_value;
     errdefer if (input_continuation) |value| value.free(runtime);
 
-    var compiled = try frontend.parser.parse(runtime, source_text, .{ .mode = .module, .filename = filename });
+    var compiled = try parser.compile(runtime, source_text, .{ .mode = .module, .filename = filename });
     defer compiled.deinit();
     if (compiled.syntax_error) |err| {
         const exception_ops = exec.exception_ops;
@@ -844,7 +844,7 @@ fn preloadFileModuleGraphWithHostHooksInner(
     defer runtime.atoms.free(module_name);
     if (skip_existing and runtime.modules.find(module_name) != null) return;
 
-    var parsed = try frontend.parser.parse(runtime, source_text, .{ .mode = .module, .filename = path });
+    var parsed = try parser.compile(runtime, source_text, .{ .mode = .module, .filename = path });
     defer parsed.deinit();
     if (parsed.syntax_error) |err| {
         const exception_ops = exec.exception_ops;

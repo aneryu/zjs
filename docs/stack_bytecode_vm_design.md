@@ -22,9 +22,9 @@ QuickJS-format bytecode，VM loop 逐 opcode dispatch，并把具体 opcode fami
 
 当前 VM 相关入口：
 
-- `src/frontend/zjs_parser.zig`: QuickJS-aligned parser/emitter。
-- `src/bytecode/function.zig`: `Bytecode` runtime carrier。
-- `src/bytecode/pipeline/`: label/variable resolution、stack-size、pc2line 和 finalize passes。
+- `src/parser.zig`: QuickJS-aligned parser/emitter。
+- `src/bytecode.zig`: `Bytecode` runtime carrier。
+- `src/bytecode.zig` `pipeline` namespace: label/variable resolution、stack-size、pc2line 和 finalize passes。
 - `src/exec/zjs_vm.zig`: VM dispatcher。
 - `src/exec/frame.zig`: call frame、eval var-ref snapshot 和 root scope。
 - `src/exec/stack.zig`: operand stack。
@@ -53,7 +53,7 @@ QuickJS-format bytecode，VM loop 逐 opcode dispatch，并把具体 opcode fami
 - stack bytecode interpreter。
 - QuickJS-format opcode execution。
 - `compute_stack_size` style stack-depth validation in
-  `src/bytecode/pipeline/stack_size.zig`。
+  `src/bytecode.zig `pipeline` namespacestack_size.zig`。
 - `pc2line_buf` and `source_loc_slots` for diagnostics/backtrace location。
 - `ValueRootFrame` for explicit host/boundary value-root tracing (VM running
   frames no longer use a per-frame root scope; their operand stack/locals/args/

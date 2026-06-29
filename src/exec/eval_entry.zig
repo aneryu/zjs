@@ -1,8 +1,8 @@
 const std = @import("std");
 
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
-const parser = @import("../frontend/parser.zig");
+const parser = @import("../parser.zig");
 const call = @import("call.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const module_exec = @import("module.zig");
@@ -28,7 +28,7 @@ pub fn evalScriptValue(ctx: *core.JSContext, source_value: core.JSValue, options
 pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context.ContextEvalOptions) !core.JSValue {
     const rt = ctx.runtime;
     const parse_start = monotonicNanos();
-    var compiled = try parser.parse(rt, source_text, .{
+    var compiled = try parser.compile(rt, source_text, .{
         .mode = parserMode(options.mode),
         .filename = options.filename,
         .source_kind = parserSourceKind(options.source_kind),
@@ -232,7 +232,7 @@ fn forceFunctionBytecodeRuntimeStrict(value: core.JSValue) void {
     const header = value.objectHeader() orelse return;
     const function_bytecode: *bytecode.FunctionBytecode = @fieldParentPtr("header", header);
     function_bytecode.runtime_strict_mode = true;
-    bytecode.function.refreshCachedBytecodeView(function_bytecode);
+    bytecode.refreshCachedBytecodeView(function_bytecode);
     for (function_bytecode.cpool) |child| forceFunctionBytecodeRuntimeStrict(child);
 }
 
@@ -276,9 +276,9 @@ fn monotonicNanos() u64 {
 // Eval compile wrappers (moved from the dissolved exec/eval.zig).
 
 pub fn compileDirect(rt: *core.JSRuntime, source: []const u8) !parser.Result {
-    return parser.parse(rt, source, .{ .mode = .eval_direct, .filename = "<eval>" });
+    return parser.compile(rt, source, .{ .mode = .eval_direct, .filename = "<eval>" });
 }
 
 pub fn compileIndirect(rt: *core.JSRuntime, source: []const u8) !parser.Result {
-    return parser.parse(rt, source, .{ .mode = .eval_indirect, .filename = "<eval>" });
+    return parser.compile(rt, source, .{ .mode = .eval_indirect, .filename = "<eval>" });
 }

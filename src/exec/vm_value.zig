@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");

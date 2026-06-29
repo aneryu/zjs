@@ -97,40 +97,39 @@ function violationReason(source, target) {
 
   if (source.startsWith('src/core/')) {
     const disallowed = [
-      'src/bytecode/',
       'src/builtins/',
       'src/cli/',
       'src/exec/',
-      'src/frontend/',
+      'src/parser.zig',
       'src/runtime/',
     ];
-    return targetStarts(target, disallowed) ? 'core must not depend on bytecode, builtins, exec, frontend, runtime, or CLI' : null;
+    return targetStarts(target, disallowed) ? 'core must not depend on parser, builtins, exec, runtime, or CLI' : null;
   }
 
   if (source.startsWith('src/builtins/')) {
     const disallowed = [
-      'src/bytecode/',
+      'src/bytecode.zig',
       'src/cli/',
-      'src/frontend/',
+      'src/parser.zig',
       'src/runtime/',
     ];
-    return targetStarts(target, disallowed) ? 'builtins may import core/libs/exec/builtins only (Phase 6 client model: builtins implement methods on top of exec VM ops); runtime/frontend/bytecode/CLI dependencies must be explicit debt' : null;
+    return targetStarts(target, disallowed) ? 'builtins may import core/libs/exec/builtins only (Phase 6 client model: builtins implement methods on top of exec VM ops); runtime/parser/bytecode/CLI dependencies must be explicit debt' : null;
   }
 
   if (source.startsWith('src/libs/')) {
     const disallowed = [
       'src/binding/',
       'src/builtins/',
-      'src/bytecode/',
+      'src/bytecode.zig',
       'src/cli/',
       'src/exec/',
-      'src/frontend/',
+      'src/parser.zig',
       'src/runtime/',
     ];
     return targetStarts(target, disallowed) ? 'libs may import core/libs only' : null;
   }
 
-  if (source.startsWith('src/frontend/')) {
+  if (source === 'src/parser.zig') {
     const disallowed = [
       'src/binding/',
       'src/builtins/',
@@ -138,18 +137,19 @@ function violationReason(source, target) {
       'src/exec/',
       'src/runtime/',
     ];
-    return targetStarts(target, disallowed) ? 'frontend may import core/libs/frontend/bytecode only (the parser emits bytecode directly); builtins/exec/runtime/binding/CLI dependencies must be explicit debt' : null;
+    return targetStarts(target, disallowed) ? 'parser may import core/libs/bytecode only (the parser emits bytecode directly); builtins/exec/runtime/binding/CLI dependencies must be explicit debt' : null;
   }
 
-  if (source.startsWith('src/bytecode/')) {
+  if (source === 'src/bytecode.zig') {
     const disallowed = [
       'src/binding/',
       'src/builtins/',
       'src/cli/',
       'src/exec/',
+      'src/parser.zig',
       'src/runtime/',
     ];
-    return targetStarts(target, disallowed) ? 'bytecode may import core/libs/frontend/bytecode only' : null;
+    return targetStarts(target, disallowed) ? 'bytecode may import core/libs only' : null;
   }
 
   if (source.startsWith('src/exec/')) {

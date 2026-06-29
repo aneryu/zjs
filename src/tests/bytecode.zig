@@ -382,7 +382,7 @@ test "Bytecode IC allocation skips direct eval and with functions" {
 
     const op = bytecode.opcode.op;
 
-    var cached = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var cached = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer cached.deinit(rt);
     var cached_code = [_]u8{0} ** 4;
     cached_code[0] = op.get_var;
@@ -396,7 +396,7 @@ test "Bytecode IC allocation skips direct eval and with functions" {
     try std.testing.expectEqual(cacheable_ic_slot_count, cached.ic_slots.len);
     try std.testing.expectEqual(build_options.zjs_enable_ic, cached.icSlotForPc(0) != null);
 
-    var direct_eval = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var direct_eval = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer direct_eval.deinit(rt);
     var direct_eval_code = [_]u8{0} ** 9;
     direct_eval_code[0] = op.get_var;
@@ -411,7 +411,7 @@ test "Bytecode IC allocation skips direct eval and with functions" {
     try std.testing.expectEqual(@as(usize, 0), direct_eval.ic_slots.len);
     try std.testing.expectEqual(@as(usize, 0), direct_eval.ic_site_ids.len);
 
-    var with_function = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var with_function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer with_function.deinit(rt);
     var with_code = [_]u8{0} ** 14;
     with_code[0] = op.get_var;
@@ -438,7 +438,7 @@ test "resolve_variables: scope_get_var → get_var" {
     defer rt.atoms.free(name);
     defer rt.atoms.free(x_atom);
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
@@ -478,7 +478,7 @@ test "resolve_variables InvalidBytecode releases retained output atoms" {
     const name = try rt.internAtom("resolveInvalidAtomOwner");
     const first_atom = try rt.internAtom("resolveInvalidFirst");
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
 
     const op = bytecode.opcode.op;
     var input = [_]u8{0} ** 6;
@@ -508,7 +508,7 @@ test "resolve_variables: scope_put_var → put_var" {
     defer rt.atoms.free(name);
     defer rt.atoms.free(y_atom);
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
@@ -551,7 +551,7 @@ test "resolve_variables: global scope_make_ref assignment lowers to put_var" {
     defer rt.atoms.free(global_atom);
     defer rt.atoms.free(local_atom);
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
@@ -600,7 +600,7 @@ test "resolve_variables: strict global scope_make_ref keeps original reference" 
     defer rt.atoms.free(name);
     defer rt.atoms.free(global_atom);
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
@@ -647,7 +647,7 @@ test "resolve_variables: local scope_make_ref assignment keeps reference path" {
     defer rt.atoms.free(local_target);
     defer rt.atoms.free(local_value);
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
@@ -695,7 +695,7 @@ test "resolve_variables: drops enter_scope/leave_scope" {
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     const op = bytecode.opcode.op;
@@ -728,7 +728,7 @@ test "resolve_variables: scope_get_var_undef → get_var_undef" {
     defer rt.atoms.free(name);
     defer rt.atoms.free(z_atom);
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
@@ -767,7 +767,7 @@ test "resolve_labels: drops label opcodes" {
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
@@ -804,7 +804,7 @@ test "resolve_labels: rewrites absolute goto target to relative offset" {
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     const op = bytecode.opcode.op;
@@ -835,7 +835,7 @@ test "resolve_labels: threads jumps through unconditional goto targets" {
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     const op = bytecode.opcode.op;
@@ -867,7 +867,7 @@ test "resolve_labels: folds constant push_i32 conditional tests" {
     const op = bytecode.opcode.op;
 
     {
-        var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
         defer bc.deinit(rt);
 
         // push_i32 1 ; if_false pc=10 ; return_undef
@@ -887,7 +887,7 @@ test "resolve_labels: folds constant push_i32 conditional tests" {
     }
 
     {
-        var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
         defer bc.deinit(rt);
 
         // push_i32 0 ; if_false pc=11 ; drop ; return_undef
@@ -918,7 +918,7 @@ test "resolve_labels: folds push_i32 neg" {
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     const op = bytecode.opcode.op;
@@ -947,7 +947,7 @@ test "resolve_labels: skips dead code after unconditional goto" {
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     const op = bytecode.opcode.op;
@@ -980,7 +980,7 @@ test "F10.2: resolve_labels selects goto8 for near relative target" {
     defer fd.deinit(rt);
     fd.use_short_opcodes = true;
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     const op = bytecode.opcode.op;
@@ -1012,7 +1012,7 @@ test "F10.2: resolve_labels keeps conditional jump wide when target exceeds i8" 
     defer fd.deinit(rt);
     fd.use_short_opcodes = true;
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     const op = bytecode.opcode.op;
@@ -1040,7 +1040,7 @@ test "finalize: runs full pipeline (resolve_variables + resolve_labels)" {
     defer rt.atoms.free(name);
     defer rt.atoms.free(x_atom);
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
@@ -1101,7 +1101,7 @@ test "resolve_variables: scope_get_var → get_loc when var is local" {
     defer rt.atoms.free(name);
     defer rt.atoms.free(x_atom);
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
@@ -1142,7 +1142,7 @@ test "resolve_variables: scope_put_var → put_loc when var is local" {
     defer rt.atoms.free(name);
     defer rt.atoms.free(y_atom);
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
@@ -1186,7 +1186,7 @@ test "resolve_variables: unknown atom falls back to global get_var" {
     defer rt.atoms.free(x_atom);
     defer rt.atoms.free(z_atom);
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
@@ -1231,7 +1231,7 @@ test "resolve_variables: module class binding consumes one input atom before pro
     defer rt.atoms.free(class_atom);
     defer rt.atoms.free(field_atom);
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
@@ -1307,7 +1307,7 @@ test "F10.2: idx<4 selects 1-byte short form (get_loc0..3)" {
     const expected_ops = [_]u8{ op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3 };
     inline for (atoms_arr, expected_ops, 0..) |a, expected, i| {
         _ = i;
-        var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
         defer bc.deinit(rt);
 
         var input = [_]u8{0} ** 8;
@@ -1351,7 +1351,7 @@ test "F10.2: idx∈[4,256) selects 2-byte u8 form (get_loc8)" {
     defer for (saved_atoms) |a| rt.atoms.free(a);
 
     const op = bytecode.opcode.op;
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     const target = saved_atoms[4]; // index 4 → get_loc8
@@ -1383,7 +1383,7 @@ test "F10.2: resolve_labels selects push_i8 for signed 8-bit integer literals" {
     defer fd.deinit(rt);
     fd.use_short_opcodes = true;
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     const op = bytecode.opcode.op;
@@ -1412,7 +1412,7 @@ test "F10.2: resolve_labels selects push_i16 outside signed 8-bit range" {
     defer fd.deinit(rt);
     fd.use_short_opcodes = true;
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     const op = bytecode.opcode.op;
@@ -1441,7 +1441,7 @@ test "F10.2: resolve_labels selects push_const8 for small constant pool index" {
     defer fd.deinit(rt);
     fd.use_short_opcodes = true;
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     const op = bytecode.opcode.op;
@@ -1470,7 +1470,7 @@ test "F10.2: resolve_labels keeps QuickJS get_loc0 get_loc1 shape" {
     defer fd.deinit(rt);
     fd.use_short_opcodes = true;
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     const op = bytecode.opcode.op;
@@ -1497,7 +1497,7 @@ test "F10.2: resolve_labels shortens wide get_loc 0 and get_loc 1 without coales
     defer fd.deinit(rt);
     fd.use_short_opcodes = true;
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     const op = bytecode.opcode.op;
@@ -1530,7 +1530,7 @@ test "F10.2: resolve_labels shortens direct loc arg and var_ref slot ops" {
     defer fd.deinit(rt);
     fd.use_short_opcodes = true;
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     const op = bytecode.opcode.op;
@@ -1605,7 +1605,7 @@ test "M1.1: resolve_variables lowers private-field temp opcodes" {
     };
 
     for (cases) |case| {
-        var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
         defer bc.deinit(rt);
 
         var input = [_]u8{0} ** 8;
@@ -1661,7 +1661,7 @@ test "M1.1: resolve_variables covers every ClosureType classification" {
             .var_name = var_atom,
         });
 
-        var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
         defer bc.deinit(rt);
         var input = [_]u8{0} ** 8;
         input[0] = op.scope_get_var_undef;
@@ -1711,7 +1711,7 @@ test "M1.2: resolve_labels emits FunctionDef special-object prologue" {
     fd.var_object_idx = 7;
     fd.arg_var_object_idx = 8;
 
-    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
     var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
@@ -1747,7 +1747,7 @@ test "resolve_labels: base class constructor prologue does not duplicate class f
         fd.this_var_idx = 0;
         fd.class_fields_init_cpool_idx = 0;
 
-        var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
         defer bc.deinit(rt);
         try bc.setCode(&.{op.return_undef});
 
@@ -1769,7 +1769,7 @@ test "resolve_labels: base class constructor prologue does not duplicate class f
         fd.func_type = .class_constructor;
         fd.this_var_idx = 0;
 
-        var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
         defer bc.deinit(rt);
         try bc.setCode(&.{op.return_undef});
 
@@ -1879,7 +1879,7 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
         try std.testing.expectEqual(@as(usize, 0), fb.ic_site_ids.len);
         try std.testing.expectEqual(@as(usize, 0), fb.ic_sites.len);
     }
-    const bc_view = bytecode.function.asBytecodeView(fb, rt);
+    const bc_view = bytecode.asBytecodeView(fb, rt);
     try std.testing.expectEqual(build_options.zjs_enable_ic, bc_view.icSlotForPc(6) != null);
     try std.testing.expect(bc_view.icSlotForPc(0) == null);
     try std.testing.expectEqual(op.push_atom_value, fb.byte_code[0]);
@@ -1913,7 +1913,7 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
     try std.testing.expect(fb.pc2line_len > 0);
     try std.testing.expectEqualStrings("async function* inner(arg) {}", fb.source.?);
 
-    const view = bytecode.function.asBytecodeView(fb, rt);
+    const view = bytecode.asBytecodeView(fb, rt);
     try std.testing.expectEqualSlices(engine.bytecode.ic.Slot, fb.ic_slots, view.ic_slots);
     try std.testing.expectEqualSlices(usize, fb.ic_site_ids, view.ic_site_ids);
     try std.testing.expect(view.flags.is_strict);
@@ -1970,7 +1970,7 @@ test "createFunctionBytecode: copies global var records from FunctionDef" {
     try std.testing.expect(fb.global_vars[0].is_const);
     try std.testing.expectEqual(@as(i32, 0), fb.global_vars[0].scope_level);
 
-    const view = bytecode.function.asBytecodeView(fb, rt);
+    const view = bytecode.asBytecodeView(fb, rt);
     try std.testing.expectEqualSlices(atom_module.Atom, fb.global_var_names, view.global_var_names);
     try std.testing.expectEqual(@as(usize, 1), view.global_vars.len);
     try std.testing.expectEqual(global_name, view.global_vars[0].var_name);

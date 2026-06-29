@@ -79,6 +79,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseFast,
         .link_libc = true,
+        .omit_frame_pointer = true, // EXPERIMENT: measure per-op prologue (stp/ldp) cost
     });
     internal_fast_mod.addOptions("build_options", engine_options);
     const zjs_cli_mod = b.createModule(.{

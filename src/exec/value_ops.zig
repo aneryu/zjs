@@ -1,4 +1,4 @@
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const dtoa = @import("../libs/number_format.zig");
 const bignum = @import("../libs/bigint.zig");
@@ -858,7 +858,12 @@ fn binaryNumber(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !
         bytecode.opcode.op.pow => jsMathPow(lhs, rhs),
         else => unreachable,
     };
-    return numberToValue(out);
+    // qjs js_add_slow / js_binary_arith_slow: two JS_TAG_INT operands take the
+    // int32 path (normalized result, overflow→float); any float operand goes
+    // ToFloat64 + bare __JS_NewFloat64 with NO int32 renormalization. Mirror that
+    // so a float-involving result is not silently re-tagged int32.
+    if (a.isInt() and b.isInt()) return numberToValue(out);
+    return core.JSValue.float64(out);
 }
 
 fn toInt32(rt: *core.JSRuntime, value: core.JSValue) !i32 {
@@ -1042,8 +1047,13 @@ fn appendStringInPlace(rt: *core.JSRuntime, lhs_string: *core.string.String, rhs
 }
 
 pub fn tryAppendStringInPlace(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.JSValue, max_ref_count: usize) !bool {
-    const lhs_header = lhs.refHeader() orelse return false;
-    if (lhs_header.rc > max_ref_count) return false;
+    // Strings/ropes carry a `StringHeader`, NOT the `BlockHeader` that
+    // `refHeader()` returns (it only covers big_int/object/module) — using
+    // refHeader here returned null for every string, silently disabling this
+    // entire in-place append. Use `stringHeader()` so the rc-1/rc-2 unshared
+    // fast path (qjs JS_ConcatStringInPlace) actually fires.
+    const lhs_header = lhs.stringHeader() orelse return false;
+    if (@as(usize, @intCast(lhs_header.rc)) > max_ref_count) return false;
     const lhs_string = stringObject(lhs) orelse return false;
     const rhs_string = stringObject(rhs) orelse return false;
     return try appendStringInPlace(rt, lhs_string, rhs_string);
@@ -1054,7 +1064,9 @@ pub fn tryAppendLatin1StringInPlace(rt: *core.JSRuntime, lhs: core.JSValue, rhs:
 }
 
 pub fn tryAppendLatin1AtomRepeatedInPlace(rt: *core.JSRuntime, lhs: core.JSValue, atom_id: core.Atom, repeat_count: usize, max_ref_count: usize) !bool {
-    const lhs_header = lhs.refHeader() orelse return false;
+    // See tryAppendStringInPlace: a string's refcount lives in `stringHeader()`,
+    // not `refHeader()` (which is null for strings).
+    const lhs_header = lhs.stringHeader() orelse return false;
     if (@as(usize, @intCast(lhs_header.rc)) > max_ref_count) return false;
     const lhs_string = stringObject(lhs) orelse return false;
     if (rt.atoms.kind(atom_id) != .string) return false;

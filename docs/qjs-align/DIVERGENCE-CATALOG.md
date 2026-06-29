@@ -3,7 +3,7 @@
 Source: a 6-category measurement workflow (`qjs-divergence-sweep`, 28 faithful
 divergences found) + manual verification. Ratios are `zjs_instructions /
 qjs_instructions` on targeted loops, **measured on a clean `zig build zjs`
-binary** (see the benchmarking-hazard note in `HANDOVER-perf-round2.md` — gate
+binary** (see the benchmarking-hazard note in memory `zjs-bench-stale-binary-hazard` — gate
 builds overwrite `zig-out/bin/zjs` with a force-GC binary that inflates
 allocation benchmarks 100×).
 
@@ -33,7 +33,7 @@ is safe to build on.**
 | 2 | **S2 — spread/rest fast path missing iterator-override guard** ⚠️ **CORRECTNESS BUG → ✅ SHIPPED 2026-06-26** | DONE | med/low | NEW `call_runtime.appendSpreadValuesEnumerate` (vm_literal.zig:323-330 now delegates); reused `arrayIteratorKind`/`isArrayIteratorNextFunction`/`iteratorTargetSlot` (the `fastArrayForOfNext` pattern) | quickjs.c:16814 `js_append_enumerate` (resolve @@iterator + construct iterator; dense copy only when default Array Iterator value-kind + builtin `next` + fast-array + **`len==count`**, else `general_case`) |
 | 3 | **C3 — generator throwaway slab (A) + result-object-free for-of step (B)** → ✅ **BOTH SHIPPED 2026-06-26** | A+B DONE | med→**high** / med | A: zjs_vm.zig:617-676 (started resume skips slab+init). B: `fastGeneratorForOfNext` iterator_ops.zig + `qjsSyncGeneratorStep` call_runtime.zig + per-instance-next flag object_ops.zig:2483 | quickjs.c:17790-17810 (`JS_CALL_FLAG_GENERATOR`, slice A) + 16548-16571 (`JS_IteratorNext2` builtin fast path, slice B) |
 | 4 | F3-residual — `qjsArraySearchCall` indexOf/includes density gate skipped dense prefix for holey-fast arrays → ✅ **SHIPPED 2026-06-26** | DONE | low/low | string_ops.zig:4304-4322: full-density gate → dense-PREFIX scan `[cursor, min(count,length))` falling through to the proto-aware generic tail `[count,length)`; L3 holey fast array now fast-scans its dense prefix. Gate: 18 hand cases (holey/dense/fromIndex/NaN/inherited-tail) + 0/49775 + 1227 + force-GC | quickjs.c:42426-42446 / 42476-42496 (dense `[n,count)` then generic `[count,len)`, NO count==len gate) |
-| 5 | B1 — compile-time `parent_has_eval` flag (lower per-access parent-eval-shadow runtime guard to a Bytecode flag) | BACKLOG | low/med | vm_property.zig:1067 `frameClosureHasEvalParent` (4-5-load header chase paid by ALL global accesses) + vm_property_globals.zig:120; fast-lane sites zjs_vm.zig:1728,1779; flag → bytecode/function.zig:102 `Flags.reserved:u3`, set in pipeline/finalize.zig:111 | quickjs.c:33158 (`var_object_test` emitted ONLY if `var_object_idx>=0`, COMPILE-TIME) + 36064 (`add_eval_variables` only if `fd->has_eval_call`) |
+| 5 | B1 — compile-time `parent_has_eval` flag (lower per-access parent-eval-shadow runtime guard to a Bytecode flag) | BACKLOG | low/med | vm_property.zig:1067 `frameClosureHasEvalParent` (4-5-load header chase paid by ALL global accesses) + vm_property_globals.zig:120; fast-lane sites zjs_vm.zig:1728,1779; flag → bytecode.zig `Flags.reserved:u3`, set in bytecode.pipeline.finalize | quickjs.c:33158 (`var_object_test` emitted ONLY if `var_object_idx>=0`, COMPILE-TIME) + 36064 (`add_eval_variables` only if `fd->has_eval_call`) |
 | 6 | L1 — string-wrapper exotic `[[OwnPropertyKeys]]` (lazy synthetic index keys vs materialize N char props) | BACKLOG | low/med | object_ops.zig:3101-3104 (materialization loop); read-side gaps objectRestOwnKeys 2151-2161, findPropertyDescriptor 3991-3995; in-repo template `typedArrayOwnKeys` array_ops.zig:5035 | quickjs.c:8757-8769 (`JS_GetOwnPropertyNamesInternal` synthesizes index atoms) + `js_string_get_own_property` 45178 |
 | 7 | C1-residual — recursive-path `var_refs`/arg per-element `.dup` vs qjs O(1) borrow | DEEP_DEFER / REJECT | none/med | vm_call.zig:171 + frame.zig:403; the faithful borrow is **ALREADY LANDED** on the hot inline path inline_calls.zig:403-407,493-498 | quickjs.c:17844/17841 (borrow) — but this is the **COLD** fallback only (generators/async/derived-ctor/cross-realm); the documented non-eliminable ~1.3-1.5× frame floor |
 | 8 | S1 — `OP_get_field` doubled proto-walk (six probes vs qjs single `for(;;)`) | DEEP_DEFER | high/high | vm_property_field.zig:223-357 + object_ops.zig:2858-2880,4012-4028 (by-class-name `getPrototypeMethod` fallback) + property_ic.zig:584-616 | quickjs.c:19108-19160 / 8267-8358 — **root cause is foundational (catalogued C.2)**: builtin proto methods are NOT physical own-props on the receiver chain; NOT a bounded slice |
@@ -137,7 +137,7 @@ held on shape but the win turned out **much larger** than "skip one object". Imp
 - **F3/L3 (array count/length split) ALREADY_DONE & faithful** — only residual is the narrow #4 density gate (low-ROI BACKLOG), not a hole in L3.
 - **C1 (recursive call path) catalog premise FALSE/STALE**: there is NO per-call ~43-field Bytecode by-value memcpy — `ensureCachedBytecodeView` (function.zig:549-559) caches `*const Bytecode`; the only `nested.*` copy (call_runtime.zig:5108) is gated on `eval_var_ref_names.len>0` (qjs pays it too). The var_refs O(1) borrow is **already landed on the hot inline path** (inline_calls.zig:403-407,493-498, commit 698824e).
 - **L1 headline (s.replace 36.4× via exotic ownKeys) STALE/FALSE as a hot-path claim** — method-call resolution goes get_field2 → getPrimitiveProperty → `getFastStringPrimitiveDataProperty` bitset (string_ops.zig:4601/4621) and returns String.prototype methods WITHOUT ever calling `primitiveObjectForAccess`; s.replace never pays the materialization. The loop is reached only on colder `Object.keys/values/entries(str)` / `getPrototypeOf(str)` / non-standard string GET/SET paths.
-- **S1 root cause = the catalogued C.2 keystone** (PHASE3-leaves-and-levers.md:30-34, method_call_loop 7.06×) — "solve with null-proto-arrays or leave do_not_align"; confirmed still correct, NOT a newly-discovered bounded slice.
+- **S1 root cause = the catalogued C.2 keystone** (CALL-MACHINERY-FAITHFUL-FRONTIER.md, method_call_loop 7.06×) — "solve with null-proto-arrays or leave do_not_align"; confirmed still correct, NOT a newly-discovered bounded slice.
 - **regex engine ports a PRE-2020 libregexp** (`grep -c simple_greedy_quant /home/aneryu/quickjs/libregexp.c == 0`) — any doc implying it tracks current libregexp structure is stale; snapshot→undo-log is entangled with a full re-port (DEEP_DEFER).
 
 ## 🧭 Next-direction survey (2026-06-25, `qjs-next-direction-survey`) — ranked roadmap
@@ -163,14 +163,14 @@ Ranked by `unlock × commonality / (risk × effort)`:
    dense-output cluster. Real MEDIUM risk (hole semantics in a[i]/for-in/Object.keys/length-write/
    JSON; test262 Array holes/sparse/length-write). The single biggest *bounded* structural unlock.
 4. **Frame incremental gates — Slice A + C SHIPPED (round-4)**, Slice D deferred, B low-priority.
-   `docs/qjs-align/HANDOVER-frame-incremental.md`. **Slice A** teardown gate for no-eval frames
+   `docs/qjs-align/CALL-MACHINERY-FAITHFUL-FRONTIER.md`. **Slice A** teardown gate for no-eval frames
    (`5545cef`, fib 26.16B→25.35B, *bigger than the ~437M estimate*). **Slice C** var_refs borrow
    (`698824e`, fib 25.35B→24.88B, gated on `simple_frame && !has_eval_call && global_vars.len==0 &&
    all-cells`; a 5-agent adversarial workflow proved the naive borrow UNSAFE on 4 paths first — see
    round-4 handover). **Slice D deferred** (cur_func is a MOVE not a dup = no refcount win; the
    plain-undefined-`this` fast path already skips coerceCallThis for fib → marginal fib payoff +
    this-coercion risk). The **bulk** (pushFrame 23% + teardown 7% = ~30% of fib) still needs the
-   monolithic frame collapse (`FRAME-STRUCTURAL-ALIGN.md`) — fib is 3.46× after A+C.
+   monolithic frame collapse (`CALL-MACHINERY-FAITHFUL-FRONTIER.md`) — fib is 3.46× after A+C.
 5. **Map/Set per-op (get/set 7.63×, add/has 6.3×)** — NOT a hash-table gap (collection.zig already
    uses open-chained hashing); the cost is the general **call path** to reach the native op, so this
    is coupled to the frame/call-machinery, not a standalone fix.
@@ -187,7 +187,7 @@ verified, then cherry-picked + the integrated union re-gated whole.
 
 | slice | commit | qjs anchor | effect |
 |---|---|---|---|
-| single backtrace chain (delete per-call ActiveBacktraceFrame, walk Machine Entry chain) | `29e93a6` | build_backtrace quickjs.c:7571 | perf-neutral; the one genuine structural piece of the frame-model rewrite (D) — see FRAME-MODEL-ONESHOT-BLUEPRINT.md |
+| single backtrace chain (delete per-call ActiveBacktraceFrame, walk Machine Entry chain) | `29e93a6` | build_backtrace quickjs.c:7571 | perf-neutral; the one genuine structural piece of the frame-model rewrite (D) — see CALL-MACHINERY-FAITHFUL-FRONTIER.md |
 | typed-array inline element READ (all 12 kinds) | `dce71dd` | JS_GetPropertyValue quickjs.c:9029 | Float64 3.68×→2.83×, Uint8 3.59×→2.75× |
 | Array.prototype.slice dense bulk copy | `2886a1f` | js_array_slice fast case quickjs.c:42967 + js_create_array 9601 | **dense slice 6.87×→1.36×** (biggest single win); sparse/Symbol.species fall through to the slow loop |
 | hasOwnProperty existence-only probe (NULL-desc) | `25b30aa` | JS_GetOwnPropertyInternal desc==NULL quickjs.c:8854 | 2.34×→2.13×; preserves TDZ ReferenceError + AUTOINIT no-materialize; Proxy keeps the descriptor/trap path |
@@ -259,7 +259,7 @@ divergence against current HEAD. Key **doc-staleness fixes**:
    (analog to `fastMapSetForOfNext` be06930).
 3. **This qjs build has NO inline cache** (zero `get_ic`/`ic_watchpoint` hits — property reads go through
    `find_own_property` proto-walk every access). So zjs's IC is a **superset** zjs added to claw back the
-   LLVM-vs-gcc dispatch tax; INLINE-CACHE-PLAN's "align to get_ic" (S4 poly/mega) is **not a faithful target**.
+   LLVM-vs-gcc dispatch tax; aligning to a poly/mega IC (S4) is **not a faithful target**.
    The one faithful IC item was **S3 global-lexical** — but **the stale "let g reads still name-lookup" claim was
    WRONG**: script top-level let/const reads were ALREADY a single `.global_decl` var_ref cell deref (da34bc1).
    **A4 (`45e9f55`, 2026-06-26) RETIRED the `global_lexical_sync_*` mirror entirely** — the remaining divergence
@@ -386,7 +386,7 @@ divergence against current HEAD. Key **doc-staleness fixes**:
 - **Frame-model rewrite** (forEach 5.6×, `new ClassC` 3.42×, filter 4.0× — all per-callback /
   per-constructor frame alloc+teardown: `runWithArgsState` + `Frame.deinit` churn). qjs uses a
   single-alloca borrowed frame (JS_CallInternal). The documented multi-week frontier
-  (`CALL-MACHINERY-QJS.md`, `FRAME-STRUCTURAL-ALIGN.md`); also gates fib 3.6×.
+  (`CALL-MACHINERY-QJS.md`, `CALL-MACHINERY-FAITHFUL-FRONTIER.md`); also gates fib 3.6×.
 - **String representation** (per-char `resolveData` indirection underlies indexOf/toUpperCase/
   charCodeAt). A flat-slice-once discipline (or a hot flat cache) would help a whole category.
 - **`s.replace` primitive-string boxing** (36.4×, grows with string length). The sweep agent
@@ -397,7 +397,7 @@ divergence against current HEAD. Key **doc-staleness fixes**:
   string-wrapper objects first (then the loop can go), OR a separate non-enumerating box for
   the method-call path. NOT a quick win.
 - **Broad dispatch tax** (~2–2.5× residual everywhere): jump-table-base not hoisted +
-  LLVM-vs-gcc op-body codegen. Not a structural divergence (`DISPATCH-TAX-FINDINGS.md`).
+  LLVM-vs-gcc op-body codegen. Not a structural divergence (`CALL-MACHINERY-FAITHFUL-FRONTIER.md`).
 
 ## Notes / corrections to the sweep agent's tractability calls
 

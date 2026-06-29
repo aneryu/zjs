@@ -52,7 +52,7 @@ status=0
 
 try_fuse_matches="$(
   awk '
-    /^\+\+\+ b\/src\/(builtins|bytecode|core|exec|frontend|libs|root\.zig)/ { in_engine = 1; next }
+    /^\+\+\+ b\/src\/(builtins|bytecode|core|exec|libs|parser\.zig|root\.zig)/ { in_engine = 1; next }
     /^\+\+\+ b\// { in_engine = 0 }
     in_engine && /^\+[^+]/ && $0 ~ /(^|[^A-Za-z0-9_])tryFuse[A-Za-z0-9_]*/ {
       print FNR ":" $0
@@ -68,7 +68,7 @@ fi
 
 anyerror_matches="$(
   awk '
-    /^\+\+\+ b\/src\/(builtins|bytecode|core|exec|frontend|libs|root\.zig)/ { in_engine = 1; next }
+    /^\+\+\+ b\/src\/(builtins|bytecode|core|exec|libs|parser\.zig|root\.zig)/ { in_engine = 1; next }
     /^\+\+\+ b\// { in_engine = 0 }
     in_engine && /^\+[^+]/ && $0 ~ /(^|[^A-Za-z0-9_])anyerror([^A-Za-z0-9_]|$)/ {
       print FNR ":" $0

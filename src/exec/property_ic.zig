@@ -1,5 +1,5 @@
 const std = @import("std");
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const value_ops = @import("value_ops.zig");
 
@@ -98,6 +98,35 @@ pub inline fn dataPropertyValueForFastPath(
             return lookup.value;
         },
         .missing, .slow => {},
+    }
+    return null;
+}
+
+/// Monomorphic OWN-data-property IC hit — the lean fast path for a hot inline
+/// get_field handler. Only the mono own-property arm is inlined: the poly binary
+/// search and the prototype-chain lookup stay OUT (they would force a multi-hundred-
+/// byte stack frame on the handler, executed every iteration). Anything but a mono
+/// own hit — poly, proto, miss, first access (no IC yet), non-object, or profiling —
+/// returns null and falls to the cold `field`, which runs the full lookup and
+/// installs/updates the IC. Returns the BORROWED slot value (caller dups onto the stack).
+pub inline fn cachedDataPropertyValueForFastPath(
+    function: *const bytecode.Bytecode,
+    site_pc: usize,
+    rt: *core.JSRuntime,
+    receiver: core.JSValue,
+    atom_id: core.Atom,
+) ?core.JSValue {
+    if (rt.opcode_profile != null) return null;
+    const object = objectFromValue(receiver) orelse return null;
+    const slot = icSlot(function, site_pc) orelse return null;
+    if (slot.state != .mono) return null;
+    const entry = slot.entries[0];
+    if (entry.holder_shape_ref == null and
+        entry.shape_ref == object.shape_ref and
+        entry.atom_id == atom_id and
+        entry.version == object.shape_ref.version)
+    {
+        return trustedDataPropertyBorrowedAt(object, entry.slot_index);
     }
     return null;
 }
@@ -227,6 +256,25 @@ pub fn setObjectDataPropertyForPutFieldFastPath(
         return true;
     }
     return false;
+}
+
+/// IC-hit-only put for the lean `op_put_field` fast handler (mirror of
+/// `cachedDataPropertyValueForFastPath`): on a monomorphic shape match the value
+/// is written straight into the cached slot (consumed) with no allocation and no
+/// error path. Returns false — deferring to the cold handler's full
+/// `setObjectDataPropertyForPutFieldFastPath` (simple-put + IC install + slow
+/// path) — on any miss, and while opcode profiling is active so the cold handler
+/// still records the op.
+pub inline fn cachedSetObjectDataPropertyForPutFastPath(
+    function: *const bytecode.Bytecode,
+    site_pc: usize,
+    rt: *core.JSRuntime,
+    receiver: core.JSValue,
+    atom_id: core.Atom,
+    value: core.JSValue,
+) bool {
+    if (rt.opcode_profile != null) return false;
+    return setCachedOwnDataPropertyOwned(rt, function, site_pc, receiver, atom_id, value);
 }
 
 fn setCachedOwnDataPropertyOwned(

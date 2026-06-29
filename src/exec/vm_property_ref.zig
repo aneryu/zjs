@@ -1,7 +1,7 @@
 //! With-statement and reference opcode handlers (make_ref/get_ref_value/put_ref_value/with_*).
 
 const std = @import("std");
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const property_ic = @import("property_ic.zig");

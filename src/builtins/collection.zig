@@ -1997,7 +1997,7 @@ fn stringFromValue(value: core.JSValue) ?*core.string.String {
 // builtins->exec direction is now legal, so they import the exec VM ops
 // (`call_runtime`/`forof_ops`/`coercion_ops`/`value_ops`/`object_ops`/
 // `exception_ops`) directly. The VM caller pair stays type-erased through
-// `builtin_dispatch` (no `src/bytecode/` import). The `.collection` record
+// `builtin_dispatch` (no `src/bytecode.zig` import). The `.collection` record
 // handler (`collectionCall`) and the residual name-based VM dispatch in
 // `call_runtime.zig` both call these directly; the weak-key registry / GC
 // interaction stays in `core` (`Object.weakIdentityFromValue`).

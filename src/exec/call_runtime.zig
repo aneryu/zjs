@@ -1,11 +1,10 @@
 const regexp_properties = @import("../libs/unicode.zig").regexp_properties;
 const std = @import("std");
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const bignum = @import("../libs/bigint.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
-const frontend = @import("../frontend/root.zig");
-const regexp_adapter = @import("../libs/regexp.zig").js_adapter;
+const parser = @import("../parser.zig");
 const unicode_lib = @import("../libs/unicode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_mod = @import("call.zig");
@@ -69,7 +68,10 @@ pub const InlineCallRequest = struct {
     layout: inline_calls.RegionLayout = .plain,
 };
 
-pub const ExecCallResult = union(enum) { done, continue_loop, inline_call: InlineCallRequest };
+/// Payload-free: the `inline_call` request is written through `req_out` (a
+/// caller-owned shared frame slot) instead of being returned by value, so the
+/// 88-byte InlineCallRequest no longer materializes a per-call-site sret alloca.
+pub const ExecCallResult = enum { done, continue_loop, inline_call };
 
 pub fn execCall(
     ctx: *core.JSContext,
@@ -81,6 +83,7 @@ pub fn execCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     allow_inline: bool,
+    req_out: *InlineCallRequest,
 ) !ExecCallResult {
     // Zero-copy call sequence: borrow `func` and `args` directly from the
     // operand stack (which is owned by the caller's frame) instead
@@ -104,7 +107,8 @@ pub fn execCall(
     // host function — qjs has no per-call host-output fast path.
     if (allow_inline) {
         if (inline_calls.resolveInlineTarget(ctx, global, core.JSValue.undefinedValue(), func)) |target| {
-            return .{ .inline_call = .{ .target = target, .region_base = region_base, .argc = argc } };
+            req_out.* = .{ .target = target, .region_base = region_base, .argc = argc };
+            return .inline_call;
         }
     }
 
@@ -210,7 +214,12 @@ pub fn popOwnedStackRegion(rt: *core.JSRuntime, stack: *stack_mod.Stack, region_
     stack.values = stack.values.ptr[0..region_base];
 }
 
-pub fn handleCatchableRuntimeError(
+// noinline: this is the cold exception path shared by every `*Vm` opcode wrapper.
+// Inlining it splices the whole catch machinery (iterator close, error
+// construction, stack unwinding) into each hot handler's frame — inflating the
+// spill set the hot path must set up and tear down every call. Outlining keeps a
+// single `bl` on the cold edge and shrinks every wrapper's frame.
+pub noinline fn handleCatchableRuntimeError(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
@@ -2086,7 +2095,7 @@ pub fn constructDynamicFunctionFromSource(
         .generator => "GeneratorFunction",
         .async_generator => "AsyncGeneratorFunction",
     };
-    var compiled = try frontend.parser.parse(ctx.runtime, source.items, .{ .mode = .eval_direct, .filename = filename, .strict = false });
+    var compiled = try parser.compile(ctx.runtime, source.items, .{ .mode = .eval_direct, .filename = filename, .strict = false });
     defer compiled.deinit();
     if (compiled.syntax_error != null) return exception_ops.throwSyntaxErrorMessage(ctx, function_global, "invalid syntax");
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
@@ -4825,7 +4834,7 @@ pub fn indirectEval(
     const result: EvalResult = blk: {
         const regexp_literal = simpleEvalRegExpLiteral(ctx, eval_global, source.items) catch |err| break :blk err;
         if (regexp_literal) |value| break :blk value;
-        var compiled = frontend.parser.parse(ctx.runtime, source.items, .{ .mode = .eval_indirect, .filename = "<eval>", .strict = false }) catch |err| break :blk err;
+        var compiled = parser.compile(ctx.runtime, source.items, .{ .mode = .eval_indirect, .filename = "<eval>", .strict = false }) catch |err| break :blk err;
         defer compiled.deinit();
         if (compiled.syntax_error != null) break :blk error.SyntaxError;
         if (!compiled.function.flags.is_strict) {
@@ -4861,7 +4870,7 @@ pub fn simpleEvalRegExpLiteral(ctx: *core.JSContext, global: *core.Object, sourc
     const trimmed = std.mem.trim(u8, source, " \t\r\n");
     if (trimmed.len == 0 or trimmed[0] != '/') return null;
     if (trimmed.len >= 2 and (trimmed[1] == '*' or trimmed[1] == '/')) return null;
-    const literal = frontend.zjs_lexer.scanRegExpLiteral(trimmed, 0) catch return null;
+    const literal = parser.lexer.scanRegExpLiteral(trimmed, 0) catch return null;
     if (literal.end_offset != trimmed.len) return null;
     if (containsUtf8LineSeparator(literal.pattern)) return null;
     // Route the scanned pattern/flags through the RegExp construct record (the
@@ -5173,7 +5182,7 @@ pub fn callFunctionBytecodeModeState(
     }
 
     var nested_overlay: bytecode.Bytecode = undefined;
-    var nested = try bytecode.function.ensureCachedBytecodeView(fb, ctx.runtime);
+    var nested = try bytecode.ensureCachedBytecodeView(fb, ctx.runtime);
 
     var combined_var_refs: []const core.JSValue = var_refs;
     var allocated_combined_refs: []core.JSValue = &.{};

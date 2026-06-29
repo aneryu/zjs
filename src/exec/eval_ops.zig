@@ -1,9 +1,9 @@
 //! Direct/indirect eval execution, eval binding capture decisions and eval-local plumbing.
 
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
-const frontend = @import("../frontend/root.zig");
+const parser = @import("../parser.zig");
 const inline_calls = @import("inline_calls.zig");
 const stack_mod = @import("stack.zig");
 const std = @import("std");
@@ -524,7 +524,7 @@ pub fn directEval(
     const eval_class_static_field_this_atom = classStaticThisAtom(ctx.runtime, caller_function, caller_frame);
     const eval_private_bound_names = try directEvalPrivateBoundNames(ctx.runtime, caller_function, caller_frame);
     defer if (eval_private_bound_names.len != 0) ctx.runtime.memory.free(core.Atom, eval_private_bound_names);
-    var compiled = try frontend.parser.parse(ctx.runtime, source.items, .{
+    var compiled = try parser.compile(ctx.runtime, source.items, .{
         .mode = .eval_direct,
         .filename = "<eval>",
         .strict = caller_strict,

@@ -59,8 +59,8 @@ qjs 的结构(quickjs.c):
 
 | 件 | 位置 | 状态 |
 |---|---|---|
-| `ClosureType` enum(含 `.global`/`.global_ref`/`.global_decl`) | `core/function_bytecode.zig:19-29` | ✅ 有,但 `.global` 仅 eval 上下文 set |
-| `ClosureVar` struct | `core/function_bytecode.zig:58-65` | ✅ |
+| `ClosureType` enum(含 `.global`/`.global_ref`/`.global_decl`) | `core/bytecode.function_bytecode:19-29` | ✅ 有,但 `.global` 仅 eval 上下文 set |
+| `ClosureVar` struct | `core/bytecode.function_bytecode:58-65` | ✅ |
 | opcode 决策 get_var vs get_var_ref | `bytecode/pipeline/resolve_variables.zig:156-180,248-315` | `ensureGlobalClosureVar` 只在 eval 建 `.global` |
 | 闭包创建绑 var_ref | `exec/vm_call.zig:152-245 initFrameVarRefs` + `247-257 initialClosureVarRef` | ⚠️ `.global` 路径 `createClosed(uninitialized())` **不 alias 全局属性 cell**(≠ qjs) |
 | VarRef struct(pvalue/ref_count/is_open...) | `core/var_ref.zig:12-25` | ✅ |

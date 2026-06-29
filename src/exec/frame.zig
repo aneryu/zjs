@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const atom = @import("../core/atom.zig");
 const Atom = atom.Atom;
 const core = @import("../core/root.zig");

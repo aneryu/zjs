@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_mod = @import("call.zig");
 const core = @import("../core/root.zig");
@@ -9,7 +9,7 @@ const property_ops = @import("property_ops.zig");
 const array_ops = @import("array_ops.zig");
 const object_ops = @import("object_ops.zig");
 const slot_ops = @import("slot_ops.zig");
-const frontend = @import("../frontend/root.zig");
+const parser = @import("../parser.zig");
 const value_ops = @import("value_ops.zig");
 
 const op = bytecode.opcode.op;
@@ -745,7 +745,7 @@ fn preloadFileModuleGraphInnerMode(
     defer runtime.atoms.free(module_name);
     if (skip_existing and runtime.modules.find(module_name) != null) return;
 
-    var parsed = try frontend.parser.parse(runtime, source_text, .{ .mode = .module, .filename = path });
+    var parsed = try parser.compile(runtime, source_text, .{ .mode = .module, .filename = path });
     defer parsed.deinit();
     if (parsed.syntax_error) |err| {
         if (context) |ctx| {

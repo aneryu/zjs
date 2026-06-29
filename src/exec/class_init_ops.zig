@@ -1,7 +1,7 @@
 //! Class instance element initialization and super/arrow lexical-this helpers.
 
 const builtin_dispatch = @import("builtin_dispatch.zig");
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const construct_mod = @import("construct.zig");
 const core = @import("../core/root.zig");
 const date_vm = @import("date_ops.zig");

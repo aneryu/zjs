@@ -1,6 +1,6 @@
 const core = @import("../core/root.zig");
-const regexp_adapter = @import("../libs/regexp.zig").js_adapter;
-const regexp_validate = @import("../libs/regexp.zig").validate;
+const regexp_adapter = @import("../exec/regexp_adapter.zig");
+const regexp_lib = @import("../libs/regexp.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 const builtin_dispatch = @import("../exec/builtin_dispatch.zig");
@@ -344,11 +344,11 @@ fn regExpStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     return try createStringValue(rt, bytes.items);
 }
 
-fn compilePatternAndFlagsSyntax(rt: *core.JSRuntime, pattern: []const u8, flags: []const u8) !regexp_validate.Compiled {
-    return regexp_validate.compilePatternAndFlags(rt.memory.allocator, pattern, flags);
+fn compilePatternAndFlagsSyntax(rt: *core.JSRuntime, pattern: []const u8, flags: []const u8) !regexp_lib.Compiled {
+    return regexp_lib.compilePatternAndFlags(rt.memory.allocator, pattern, flags);
 }
 
-fn compileSourceAndFlags(rt: *core.JSRuntime, source: core.JSValue, flags: core.JSValue) !regexp_validate.Compiled {
+fn compileSourceAndFlags(rt: *core.JSRuntime, source: core.JSValue, flags: core.JSValue) !regexp_lib.Compiled {
     var flag_bytes = std.ArrayList(u8).empty;
     defer flag_bytes.deinit(rt.memory.allocator);
     try appendValueString(rt, &flag_bytes, flags);
@@ -391,7 +391,7 @@ test "constructCompiled roots source while creating regexp object" {
 
     const source_atom = try rt.atoms.newValueSymbol("gc-regexp-source-symbol");
     const source_value = try rt.symbolValue(source_atom);
-    var compiled = try regexp_validate.compilePatternAndFlags(rt.memory.allocator, "a", "g");
+    var compiled = try regexp_lib.compilePatternAndFlags(rt.memory.allocator, "a", "g");
     defer compiled.deinit(rt.memory.allocator);
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -413,9 +413,9 @@ test "constructCompiled roots source while creating regexp object" {
     try std.testing.expect(rt.atoms.name(source_atom) == null);
 }
 
-/// Pattern/flags early-error validation lives in `libs/regexp/validate.zig`
+/// Pattern/flags early-error validation lives in `libs/regexp.zig`
 /// (QuickJS: `js_compile_regexp` flag parsing plus `lre_compile`).
-pub const compilePatternAndFlags = regexp_validate.compilePatternAndFlags;
+pub const compilePatternAndFlags = regexp_lib.compilePatternAndFlags;
 
 fn isSimpleGlobalClassEscapePattern(pattern: []const u8, flags: []const u8) bool {
     if (flags.len != 1 or flags[0] != 'g') return false;
@@ -890,7 +890,7 @@ fn trimLeadingZeroes(digits: []const u8) []const u8 {
 
 // Relocated to engine core (`core/regexp.zig`) in Phase 6b-3 STEP 2: the
 // character-class membership predicate and its class-range parsing primitives
-// are pure (std + core.unicode + libs/regexp.validate) and are consumed by the
+// are pure (std + core.unicode + libs/regexp.zig) and are consumed by the
 // VM string fast paths without importing builtins. Re-exported here so the
 // RegExp pattern validators below (hasDescendingCharacterClassRange /
 // scanClassForDescendingRange / hasUnicodeClassEscapeRange / invalidUnicodeEscape)

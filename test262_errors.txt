@@ -1,16 +1,1 @@
 # Known test262 failures (accepted, not regressions).
-#
-# RegExp/unicodeSets `\q{...}` string-literal union with emoji sequences.
-# These were introduced by the upstream regexp/unicode refactor
-# `c4f1350 refactor(regexp): remove emoji sequence machinery and streamline
-# RangeSet — interval-based representation, inline helpers, drop string-property
-# tables`, pulled in via `7762d94 Merge remote-tracking branch 'origin/main'`.
-# The regexp/unicode subsystem is being refactored upstream; the remote version
-# is authoritative ("以远程的为准"), so these 6 emoji-sequence string-literal
-# union cases are accepted as known failures rather than reverted.
-test262/test/built-ins/RegExp/unicodeSets/generated/character-class-escape-union-string-literal.js
-test262/test/built-ins/RegExp/unicodeSets/generated/character-class-union-string-literal.js
-test262/test/built-ins/RegExp/unicodeSets/generated/character-property-escape-union-string-literal.js
-test262/test/built-ins/RegExp/unicodeSets/generated/string-literal-union-character-class-escape.js
-test262/test/built-ins/RegExp/unicodeSets/generated/string-literal-union-character-class.js
-test262/test/built-ins/RegExp/unicodeSets/generated/string-literal-union-character-property-escape.js

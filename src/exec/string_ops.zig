@@ -1,12 +1,12 @@
 const std = @import("std");
 
 const regexp_properties = @import("../libs/unicode.zig").regexp_properties;
-const bytecode = @import("../bytecode/root.zig");
+const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const string_id_lookup = core.host_function.builtin_method_id_lookup.string;
-const regexp_adapter = @import("../libs/regexp.zig").js_adapter;
+const regexp_adapter = @import("regexp_adapter.zig");
 const unicode_lib = @import("../libs/unicode.zig");
 const call_mod = @import("call.zig");
 const exception_ops = @import("vm_exception_ops.zig");
@@ -3947,7 +3947,12 @@ pub fn getFastStringPrimitiveDataProperty(
     if (!receiver.isString()) return null;
     if (!isStandardStringPrototypeMethodAtom(ctx.runtime, atom_id)) return null;
 
-    const proto = constructorPrototypeFromGlobal(ctx.runtime, global, "String") orelse return null;
+    // `constructorPrototypeFromGlobal(.., "String")` interns the atom "String" on
+    // EVERY `s.method()` resolution (the internString hot spot) before walking
+    // `global.String -> .prototype`. "String" is a predefined atom, so resolve it
+    // at comptime and walk with the cached id — no per-call atom allocation.
+    const string_ctor_atom = comptime core.atom.predefinedId("String", .string).?;
+    const proto = object_ops.constructorPrototypeFromGlobalAtom(ctx.runtime, global, string_ctor_atom) orelse return null;
     return ownDataOrAutoInitPropertyValue(proto, atom_id);
 }
 

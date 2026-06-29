@@ -138,8 +138,14 @@ pub const JSValue = extern struct {
         bits: u64,
     } else extern struct {
         payload: u64,
-        tag: i32,
-        padding: i32 = 0,
+        // 8-byte tag (matches QuickJS's `int64_t tag` on 64-bit, not a narrow
+        // i32+pad). Critical for codegen: LLVM keeps the 16-byte JSValue in a SIMD
+        // (q) register, so reading the tag means a store-to-load round-trip. A 4-byte
+        // i32 load at offset 8 from the 16-byte store only PARTIALLY overlaps and
+        // stalls (no clean store-forwarding); a full 8-byte load forwards cleanly.
+        // Widening i32+pad → i64 cut the int+float `s=s+i` loop's backend-stall
+        // cycles ~63% (713ms→566ms) with zero test262 change.
+        tag: i64,
     };
 
     repr: Repr,
@@ -272,7 +278,7 @@ pub const JSValue = extern struct {
             if (self.repr.bits <= NanBox.float_max) return Tag.float64;
             return NanBox.tag_by_index[@as(usize, @intCast((self.repr.bits >> NanBox.payload_bits) & 0xF))];
         }
-        return self.repr.tag;
+        return @intCast(self.repr.tag);
     }
 
     pub fn isNumber(self: JSValue) bool {

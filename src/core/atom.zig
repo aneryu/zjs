@@ -866,7 +866,7 @@ pub const AtomTable = struct {
     memory: *memory.MemoryAccount,
     /// Owning runtime, set right after init. Needed to release cached
     /// strings (`DynamicAtom.str`) when an atom dies. Tables created
-    /// without a runtime (frontend-only tests) never cache strings.
+    /// without a runtime (parser-only tests) never cache strings.
     runtime: ?*JSRuntime = null,
     entries: []DynamicAtom = &.{},
     /// Geometric-growth capacity for `entries`. The visible slice length

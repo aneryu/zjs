@@ -47,8 +47,8 @@
    that lives and dies with the eval frame, with **no `global_var_obj` cell and no mirror**
    (qjs has no `global_lexical_sync_*` analogue at all). zjs **already** keeps eval top-level
    lexicals as frame-locals (parser `else if (is_lexical)` → `addScopeVar`,
-   `zjs_parser.zig:9585-9593`, with the cell branch gated `… && !s.is_eval`,
-   `zjs_parser.zig:9562`). So **the storage class is already faithful** — the ONLY
+   `parser.zig:9585-9593`, with the cell branch gated `… && !s.is_eval`,
+   `parser.zig:9562`). So **the storage class is already faithful** — the ONLY
    non-faithful artifact is the redundant `ctx.lexicals` mirror, created and fed solely by
    the misapplied script runner.
 
@@ -70,14 +70,14 @@ and NOT a bare deletion.
 `parser.zig:176-177`: `eval_global_var_bindings` is on for indirect eval + explicit
 global-var-bindings, but **off** for strict direct/indirect eval.
 `eval_entry.zig:204`: `.eval_direct`/`.eval_indirect` → `enableEvalReturn()` →
-`s.is_eval = true` (`zjs_parser.zig:877-879`) and adds the `_ret_` completion slot (this is
+`s.is_eval = true` (`parser.zig:877-879`) and adds the `_ret_` completion slot (this is
 why firing `var_names.len` includes a `_ret_` entry: e.g. `{b, Box, _ret_}` = len 3).
 
 | Mode (zjs) | qjs eval_type | Parser branch | Storage | Self-read op |
 |---|---|---|---|---|
-| `.script`, scope 0 | `JS_EVAL_TYPE_GLOBAL` | `top_level_lexical_as_global_ref && scope0 && !is_eval` (`zjs_parser.zig:9562`) | `.global_decl` cell (NO `addScopeVar`) | `get_var_ref` |
-| `.module`, scope 0 | `JS_EVAL_TYPE_MODULE` | `module_top_level_decl` (`zjs_parser.zig:9546`) | `.module_decl` cell | `get_var_ref` |
-| `.eval_direct` / `.eval_indirect`, scope 0 | `JS_EVAL_TYPE_DIRECT` / `INDIRECT` | `else if (is_lexical)` → `addScopeVar` (`zjs_parser.zig:9585-9593`); `addGlobalVar` SKIPPED (`9588` gate `!s.is_eval`) | **frame local** (TDZ `get_loc_check`) | `get_loc_check` |
+| `.script`, scope 0 | `JS_EVAL_TYPE_GLOBAL` | `top_level_lexical_as_global_ref && scope0 && !is_eval` (`parser.zig:9562`) | `.global_decl` cell (NO `addScopeVar`) | `get_var_ref` |
+| `.module`, scope 0 | `JS_EVAL_TYPE_MODULE` | `module_top_level_decl` (`parser.zig:9546`) | `.module_decl` cell | `get_var_ref` |
+| `.eval_direct` / `.eval_indirect`, scope 0 | `JS_EVAL_TYPE_DIRECT` / `INDIRECT` | `else if (is_lexical)` → `addScopeVar` (`parser.zig:9585-9593`); `addGlobalVar` SKIPPED (`9588` gate `!s.is_eval`) | **frame local** (TDZ `get_loc_check`) | `get_loc_check` |
 | block (scope > 0), any mode | — | `else if (is_lexical)` → `addScopeVar` | frame local | `get_loc_check` |
 
 **Key fact:** eval top-level lexicals are **frame locals with no `global_vars` entry** — the
@@ -210,7 +210,7 @@ path to fire (no sync=true entry over an eval frame-local).
 
 **What STAYS frame-local (the genuinely eval-scoped, discarded cases):** all `.eval_direct` /
 `.eval_indirect` top-level `let`/`const`/`class`. These are correct as frame locals
-(`zjs_parser.zig:9585`); STEP A does not touch the parser. They are discarded with the eval
+(`parser.zig:9585`); STEP A does not touch the parser. They are discarded with the eval
 frame — never promoted to a cell.
 
 **What is already a cell and is NOT touched:** `.script` (`.global_decl`) and `.module`
@@ -256,7 +256,7 @@ Concretely:
   init-global-update-{,non-}configurable.js` concern eval-introduced *var/function* bindings
   becoming **configurable** global data properties — handled by the existing
   `eval_global_var_bindings` data-property path (`addGlobalVar` `is_configurable`,
-  `zjs_parser.zig:779`), which A4 does **not** touch (it is not a lexical, not the mirror).
+  `parser.zig:779`), which A4 does **not** touch (it is not a lexical, not the mirror).
 
 **So the minimal documented deviation is: NONE that A4 introduces.** A4 *removes* a deviation
 (the redundant `ctx.lexicals` mirror) and keeps the faithful frame-local for eval. The only
