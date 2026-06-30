@@ -133,7 +133,7 @@ pub fn functionOwnNativeBuiltinRefForFastPath(
         if (prop_flags.isAccessor()) return null;
         switch (object.propKindAt(index)) {
             .data => {
-                return nativeBuiltinRefFromFunctionValue(object.properties[index].slot.data);
+                return nativeBuiltinRefFromFunctionValue(object.prop_values[index].slot.data);
             },
             .auto_init => {
                 const materialized = object.getProperty(atom_id);
@@ -248,7 +248,7 @@ fn fastImmediatePrototypeDataPropertyLookupForObject(rt: *core.JSRuntime, object
 fn fastOwnOrdinaryDataPropertyLookupForObject(object: *core.Object, atom_id: core.Atom) FastOwnDataLookup {
     const index = object.findProperty(atom_id) orelse return .missing;
     return switch (object.propKindAt(index)) {
-        .data => .{ .value = .{ .index = index, .value = object.properties[index].slot.data } },
+        .data => .{ .value = .{ .index = index, .value = object.prop_values[index].slot.data } },
         .var_ref, .auto_init, .accessor => .slow,
     };
 }
@@ -362,7 +362,7 @@ fn setOwnDataPropertyAtOwned(rt: *core.JSRuntime, object: *core.Object, index: u
 fn fastOwnOrdinaryDataPropertyBorrowedValue(object: *core.Object, atom_id: core.Atom) FastOwnDataResult {
     const index = object.findProperty(atom_id) orelse return .missing;
     return switch (object.propKindAt(index)) {
-        .data => .{ .value = object.properties[index].slot.data },
+        .data => .{ .value = object.prop_values[index].slot.data },
         .var_ref, .auto_init, .accessor => .slow,
     };
 }
@@ -424,7 +424,7 @@ fn globalOwnDataPropertyBorrowedLookup(global: *core.Object, atom_id: core.Atom)
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
         if (prop_flags.isAccessor()) return null;
         if (prop_flags.kind != .data) return null;
-        return .{ .index = index, .value = global.properties[index].slot.data };
+        return .{ .index = index, .value = global.prop_values[index].slot.data };
     }
     return null;
 }
@@ -634,14 +634,14 @@ fn dataSlotAt(object: *core.Object, index: usize, atom_id: core.Atom) ?DataSlot 
     const prop = object.shapeProps()[index];
     const prop_flags = core.property.Flags.fromBits(prop.flags);
     if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.kind != .data) return null;
-    const entry = &object.properties[index];
+    const entry = &object.prop_values[index];
     return .{ .entry = entry, .value = &entry.slot.data };
 }
 
 inline fn trustedDataPropertyBorrowedAt(object: *core.Object, index: usize) ?core.JSValue {
-    if (index >= object.properties.len) return null;
+    if (index >= object.shape_ref.prop_count) return null;
     if (object.propFlagsAt(index).kind != .data) return null;
-    return object.properties[index].slot.data;
+    return object.prop_values[index].slot.data;
 }
 
 test "fast own data property replacement retains private brand atom" {

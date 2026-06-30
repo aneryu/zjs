@@ -5798,7 +5798,7 @@ pub fn qjsFastDensePrimitiveArrayJoin(
     args: []const core.JSValue,
 ) !?core.JSValue {
     if (!object.flags.is_array or object.hasExoticMethods() or object.arrayElementStorageMode() != .dense) return null;
-    if (object.properties.len != 0) return null;
+    if (object.shape_ref.prop_count != 0) return null;
 
     const length: usize = @intCast(object.arrayLength());
     const elements = object.arrayElements();

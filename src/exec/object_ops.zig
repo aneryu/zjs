@@ -1132,7 +1132,7 @@ pub fn qjsRegExpPrototypeMethodIsDefault(rt: *core.JSRuntime, object: *core.Obje
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
         if (prop_flags.isAccessor()) return false;
-        const entry = proto.properties[property_index];
+        const entry = proto.prop_values[property_index];
         return switch (proto.propKindAt(property_index)) {
             .data => qjsRegExpNativeBuiltinMatches(entry.slot.data, expected_id),
             .auto_init => qjsRegExpAutoInitBuiltinMatches(core.property.autoInitAt(rt, entry.slot.auto_init).*, expected_id),
@@ -1157,7 +1157,7 @@ pub fn qjsRegExpPrototypeGetterIsDefault(rt: *core.JSRuntime, object: *core.Obje
     for (proto.shapeProps(), 0..) |prop, property_index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop.atom_id != atom_id) continue;
-        const entry = proto.properties[property_index];
+        const entry = proto.prop_values[property_index];
         return switch (proto.propKindAt(property_index)) {
             .accessor => qjsRegExpNativeBuiltinMatches(entry.slot.accessor.getterValue(), expected_id),
             .auto_init => qjsRegExpAutoInitAccessorBuiltinMatches(core.property.autoInitAt(rt, entry.slot.auto_init).*, expected_id),
@@ -2993,7 +2993,7 @@ pub fn ownDataOrAutoInitPropertyValue(object: *core.Object, atom_id: core.Atom) 
     if (object.hasExoticMethods()) return null;
     if (object.findProperty(atom_id)) |index| {
         return switch (object.propKindAt(index)) {
-            .data => object.properties[index].slot.data.dup(),
+            .data => object.prop_values[index].slot.data.dup(),
             .auto_init => object.getProperty(atom_id),
             .var_ref, .accessor => null,
         };

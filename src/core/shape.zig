@@ -13,7 +13,6 @@ pub const no_property_hash: u32 = 0;
 /// is a 26-bit field, so the sentinel is `maxInt(u26)` rather than `maxInt(u32)`.
 /// Real property indices stay 0-based and are always `< prop_count < maxInt(u26)`.
 pub const no_property_index: u26 = std.math.maxInt(u26);
-pub const no_registry_index: usize = std.math.maxInt(usize);
 
 pub fn propertyCapacityForNeeded(needed: usize) usize {
     if (needed == 0) return 0;
@@ -54,7 +53,6 @@ pub const Shape = struct {
     header: gc.GCObjectHeader = .{},
     is_hashed: bool = false,
     hash: u32 = 0,
-    registry_index: usize = no_registry_index,
     registry_hash_next: ?*Shape = null,
     prop_hash_mask: u32 = no_property_hash,
     prop_count: u32 = 0,
@@ -152,10 +150,14 @@ pub const Registry = struct {
     atoms: *atom.AtomTable,
     gc_registry: *gc.Registry,
     shape_hash_bits: u6 = initial_shape_hash_bits,
+    // qjs only counts *hashed* shapes (quickjs.c:388 `shape_hash_count`); every
+    // shape lives on the GC object list, never a separate registry array.
     shape_hash_count: usize = 0,
     shape_hash_buckets: []?*Shape = &.{},
-    shapes: []*Shape = &.{},
-    shapes_capacity: usize = 0,
+    // Total live shapes (hashed + unhashed). qjs has no such counter — it walks
+    // gc_obj_list when it needs one — but `memoryUsage()` introspection wants an
+    // O(1) read, so we maintain it in `link`/`unlink`.
+    live_shape_count: usize = 0,
 
     pub fn init(runtime: *JSRuntime, account: *memory.MemoryAccount, atoms: *atom.AtomTable, gc_registry: *gc.Registry) Registry {
         return .{ .runtime = runtime, .memory = account, .atoms = atoms, .gc_registry = gc_registry };
@@ -188,19 +190,16 @@ pub const Registry = struct {
     }
 
     pub fn deinit(self: *Registry) void {
-        while (self.shapes.len != 0) {
-            self.destroyShape(self.shapes[self.shapes.len - 1]);
-        }
-
+        // Live shapes are torn down by `gc.Registry.deinit`, which walks the GC
+        // object list — the same way qjs `JS_FreeRuntime` relies on `gc_obj_list`.
+        // Here we only release the shape-hash bucket array, mirroring qjs's
+        // `js_free_rt(rt, rt->shape_hash)`.
         const buckets = self.shape_hash_buckets;
-        const shapes: []*Shape = if (self.shapes_capacity != 0) self.shapes.ptr[0..self.shapes_capacity] else self.shapes[0..0];
         self.shape_hash_buckets = &.{};
         self.shape_hash_bits = initial_shape_hash_bits;
         self.shape_hash_count = 0;
-        self.shapes = &.{};
-        self.shapes_capacity = 0;
+        self.live_shape_count = 0;
         if (buckets.len != 0) self.memory.free(?*Shape, buckets);
-        if (shapes.len != 0) self.memory.free(*Shape, shapes);
     }
 
     pub fn create(self: *Registry, proto: ?*Object) !*Shape {
@@ -442,21 +441,19 @@ pub const Registry = struct {
         self.gc_registry.stats.rc_dec += 1;
         if (shape.header.meta().rc != 0) return;
 
+        // During runtime teardown, shapes are destroyed in a single dedicated
+        // pass by `gc.Registry.deinit` (which walks the GC object list). If we
+        // freed the shape here too, that pass — operating on a snapshot of the
+        // list taken before this release — would double-free it. Mirror the
+        // deinit guard in `gc.releaseAndDestroy`: only decrement, defer the free.
+        if (self.gc_registry.phase == .deinit) return;
+
         self.destroyShape(shape);
     }
 
     pub fn destroyFromHeader(self: *Registry, header: *gc.Header) void {
         const shape: *Shape = @alignCast(@fieldParentPtr("header", header));
         self.destroyShape(shape);
-    }
-
-    pub fn clearReferencesToVisited(self: *Registry, shape: *Shape) void {
-        _ = self;
-        if (shape.proto) |proto| {
-            if (proto.header.meta().flags.cycle_visited and !proto.header.meta().flags.cycle_preserved) {
-                shape.proto = null;
-            }
-        }
     }
 
     fn destroyShape(self: *Registry, shape: *Shape) void {
@@ -614,48 +611,29 @@ pub const Registry = struct {
     }
 
     fn link(self: *Registry, shape: *Shape, hashed: bool) !void {
-        if (hashed) try self.ensureShapeHashCapacity(1);
-        if (self.shapes.len == self.shapes_capacity) {
-            const next_capacity = if (self.shapes_capacity == 0) 4 else self.shapes_capacity * 2;
-            const next = try self.memory.alloc(*Shape, next_capacity);
-            errdefer self.memory.free(*Shape, next);
-            @memcpy(next[0..self.shapes.len], self.shapes);
-            const old_capacity = self.shapes_capacity;
-            const old_shapes: []*Shape = if (old_capacity != 0) self.shapes.ptr[0..old_capacity] else self.shapes[0..0];
-            self.shapes = next[0..self.shapes.len];
-            self.shapes_capacity = next_capacity;
-            if (old_capacity != 0) self.memory.free(*Shape, old_shapes);
-        }
-        const len = self.shapes.len;
-        self.shapes = self.shapes.ptr[0 .. len + 1];
-        self.shapes[len] = shape;
-        shape.registry_index = len;
+        // Shapes are tracked solely through the GC object list (added by the
+        // caller via `gc_registry.addWithSize`), exactly like qjs `add_gc_object`.
+        // The only per-shape bookkeeping here is hash-table insertion.
         if (hashed) {
+            try self.ensureShapeHashCapacity(1);
             shape.is_hashed = true;
             self.insertShapeHash(shape);
             self.shape_hash_count += 1;
         } else {
             shape.is_hashed = false;
         }
+        self.live_shape_count += 1;
     }
 
     fn unlink(self: *Registry, shape: *Shape) void {
-        const i = shape.registry_index;
-        if (i == no_registry_index or i >= self.shapes.len or self.shapes[i] != shape) return;
         if (shape.is_hashed) {
             self.removeShapeHash(shape);
             shape.is_hashed = false;
             std.debug.assert(self.shape_hash_count != 0);
             self.shape_hash_count -= 1;
         }
-        const last_index = self.shapes.len - 1;
-        if (i != last_index) {
-            const moved = self.shapes[last_index];
-            self.shapes[i] = moved;
-            moved.registry_index = i;
-        }
-        self.shapes = self.shapes[0 .. self.shapes.len - 1];
-        shape.registry_index = no_registry_index;
+        std.debug.assert(self.live_shape_count != 0);
+        self.live_shape_count -= 1;
     }
 
     fn ensureShapeHashCapacity(self: *Registry, additional: usize) !void {
@@ -671,13 +649,21 @@ pub const Registry = struct {
         const next = try self.memory.alloc(?*Shape, bucket_count);
         errdefer self.memory.free(?*Shape, next);
         @memset(next, null);
+        // Re-link every hashed shape by walking the OLD buckets, not a separate
+        // shapes array — faithful to qjs `resize_shape_hash` (quickjs.c:5165).
         const old_buckets = self.shape_hash_buckets;
+        for (old_buckets) |bucket| {
+            var current = bucket;
+            while (current) |shape| {
+                const sh_next = shape.registry_hash_next;
+                const idx = hashIndex(shape.hash, next_bits);
+                shape.registry_hash_next = next[idx];
+                next[idx] = shape;
+                current = sh_next;
+            }
+        }
         self.shape_hash_buckets = next;
         self.shape_hash_bits = next_bits;
-        for (self.shapes) |shape| {
-            shape.registry_hash_next = null;
-            if (shape.is_hashed) self.insertShapeHash(shape);
-        }
         self.memory.free(?*Shape, old_buckets);
     }
 

@@ -321,15 +321,14 @@ pub const BlockFlags = packed struct(u8) {
     in_cycle_list: bool = false,
     finalizing: bool = false,
     is_pinned: bool = false,
-    /// Cycle-removal scan state (valid only during destroyRuntimeCyclesWithValueRoots;
+    /// Cycle-removal garbage flag (valid only during destroyRuntimeCyclesWithValueRoots;
     /// unconditionally re-initialized at the start of every cycle-removal round).
-    /// `cycle_visited` = object participates in the current scan (was on the live or
-    /// garbage list when the round started). `cycle_preserved` = object is known live
-    /// (initially live, or resurrected). Free/garbage membership is derived as
-    /// `cycle_visited and !cycle_preserved`.
+    /// `cycle_visited` = object is condemned garbage in the current round (it was still
+    /// `mark`ed after gc_scan, i.e. not resurrected). Resurrection is carried purely by
+    /// the `mark` bit (ScanIncrefVisitor clears `mark` on reachable objects, so they
+    /// never get `cycle_visited` set); there is no separate "preserved" bit.
     cycle_visited: bool = false,
-    cycle_preserved: bool = false,
-    _reserved: u2 = 0,
+    _reserved: u3 = 0,
 };
 
 /// Z-GE v1.0 block header metadata. Phase 1: grouped into a sub-struct so a
@@ -637,6 +636,12 @@ pub const Registry = struct {
     object_worklist: std.ArrayList(*object.Object),
     var_ref_worklist: std.ArrayList(*var_ref.VarRef),
     bytecode_worklist: std.ArrayList(*FunctionBytecode),
+    // Pass-B struct-free deferral for cycle removal (qjs gc_zero_ref_count_list,
+    // quickjs.c:6382/6797): during JS_GC_PHASE_REMOVE_CYCLES an object's
+    // resources are torn down but its struct memory survives until every sibling
+    // in the batch has run, so a sibling finalizer/decref never dereferences a
+    // freed struct. The batch driver drains this list after the resource pass.
+    cycle_deferred_frees: std.ArrayList(*GCObjectHeader),
 
     pub fn init(account: *memory.MemoryAccount, policy: Policy) Registry {
         return .{
@@ -648,16 +653,41 @@ pub const Registry = struct {
             .object_worklist = std.ArrayList(*object.Object).empty,
             .var_ref_worklist = std.ArrayList(*var_ref.VarRef).empty,
             .bytecode_worklist = std.ArrayList(*FunctionBytecode).empty,
+            .cycle_deferred_frees = std.ArrayList(*GCObjectHeader).empty,
+        };
+    }
+
+    /// Reserve capacity so `deferCycleStructFree` cannot fail mid-batch (a failed
+    /// defer would have to choose between an unsafe immediate free or a leak).
+    pub fn reserveCycleDeferred(self: *Registry, capacity: usize) !void {
+        try self.cycle_deferred_frees.ensureTotalCapacity(self.memory.persistent_allocator, capacity);
+    }
+
+    /// Park a resource-stripped GC object's struct for the Pass-B drain. The
+    /// header is already unlinked from the GC object list by the resource pass.
+    pub fn deferCycleStructFree(self: *Registry, header: *GCObjectHeader) void {
+        self.cycle_deferred_frees.append(self.memory.persistent_allocator, header) catch {
+            // Capacity was reserved up-front; reaching here means OOM. Leaking the
+            // struct is the only memory-safe fallback (freeing now risks the very
+            // use-after-free this deferral prevents).
         };
     }
 
     pub fn deinit(self: *Registry, rt: anytype) void {
         self.phase = .deinit;
 
-        // 释放可能存活的所有 Candidate 对象
+        // Phase 1: free every non-shape GC object. Shapes are spliced out of the
+        // GC list into a holding stack (reusing their now-unused `next` link) so
+        // they outlive every object that still owns a shape_ref — destroying a
+        // shape early would have those object destructors release freed memory.
+        // (qjs avoids the ordering hazard via its mark/decref cycle collector;
+        // we keep zjs's explicit teardown but defer shapes to a second pass.)
+        var held_shapes: ?*GCObjectHeader = null;
         while (self.gc_object_tail) |h| {
             if (h.meta().kind == .shape) {
                 self.removeGcObject(h);
+                h.next = held_shapes;
+                held_shapes = h;
                 continue;
             }
             self.removeGcObject(h);
@@ -671,6 +701,16 @@ pub const Registry = struct {
             }
         }
 
+        // Phase 2: now every object is gone, so destroying the held shapes can no
+        // longer dangle a shape_ref. `destroyShape` self-removes from the GC list
+        // (guarded no-op here) and frees property storage + bucket links.
+        while (held_shapes) |h| {
+            const next = h.next;
+            h.next = null;
+            rt.shapes.destroyFromHeader(h);
+            held_shapes = next;
+        }
+
         rt.shapes.deinit();
 
         self.gc_object_head = null;
@@ -681,6 +721,7 @@ pub const Registry = struct {
         self.object_worklist.deinit(self.memory.persistent_allocator);
         self.var_ref_worklist.deinit(self.memory.persistent_allocator);
         self.bytecode_worklist.deinit(self.memory.persistent_allocator);
+        self.cycle_deferred_frees.deinit(self.memory.persistent_allocator);
         if (self.external_tokens_capacity != 0) {
             self.memory.free(ExternalTokenEntry, self.external_tokens.ptr[0..self.external_tokens_capacity]);
         } else if (self.external_tokens.len != 0) {
@@ -1480,6 +1521,25 @@ pub inline fn release(rt: anytype, header: anytype) void {
 
 noinline fn releaseAndDestroy(rt: anytype, header: *Header) void {
     if (rt.gc.phase == .deinit and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .shape)) return;
+    // During cycle removal, a child reaching rc 0 must NOT be freed here: the
+    // dedicated batch loop in `destroyRuntimeCyclesWithValueRoots` frees every
+    // marked-garbage object exactly once. Freeing it here (a cascade) would
+    // double-free it when the batch loop reaches it, and over-release any shape
+    // it shares. Pure no-op = qjs `__JS_FreeValueRT`'s `if (gc_phase !=
+    // JS_GC_PHASE_REMOVE_CYCLES)` gate (quickjs.c:6476): the object stays linked
+    // (and in the garbage snapshot) and is reclaimed by the batch pass. This
+    // makes a reference the mark phase missed harmless (leak at worst) instead of
+    // a use-after-free.
+    //
+    // Kind-set note: qjs gates {OBJECT, FUNCTION_BYTECODE, MODULE} (quickjs.c:6476);
+    // zjs gates {object, var_ref, function_bytecode} and intentionally OMITS shape.
+    // A garbage (dead-cycle) shape is freed exactly once by the `garbage_shapes`
+    // loop in destroyRuntimeCyclesWithValueRoots, and its owners skip releasing it
+    // via the `headerIsCycleGarbage` guard (object.zig destroyFromHeader shape-skip);
+    // a live/shared shape's eager release here can never reach rc 0 during a cycle
+    // round, so shape needs no gate. (zjs has no `.module` GC-kind in flight, so the
+    // MODULE arm of the qjs gate has no zjs analogue.)
+    if (rt.gc.phase == .remove_cycles and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode)) return;
     rt.gc.unlinkObjectWithBytes(header, Registry.heapByteSizeFromHeader(rt, header));
 
     // 10.1 静态 kind switch 派发销毁

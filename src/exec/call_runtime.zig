@@ -2100,8 +2100,31 @@ pub fn constructDynamicFunctionFromSource(
     if (compiled.syntax_error != null) return exception_ops.throwSyntaxErrorMessage(ctx, function_global, "invalid syntax");
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
-    const result = try runWithArgs(ctx, &nested_stack, &compiled.function, function_global.value(), &.{}, &.{}, output, function_global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    // A dynamic-function compilation is a *nested* eval inside a live VM call: the
+    // outer frames hold roots this nested cycle pass cannot see, so running the
+    // full-heap `break_var_ref_cycles_on_exit` collection here marks live outer
+    // values (e.g. an in-flight exception) as garbage and frees them. qjs never
+    // runs GC on eval exit (only at allocation thresholds / explicit JS_RunGC), so
+    // pass `false`; the function expression makes no var_ref cycle of its own and
+    // any cycle in the result is reclaimed by the top-level collection.
+    const result = try runWithArgs(ctx, &nested_stack, &compiled.function, function_global.value(), &.{}, &.{}, output, function_global, false, false, false, &.{}, &.{}, &.{}, &.{});
     errdefer result.free(ctx.runtime);
+    // `runWithArgs` returns the completion value owned, but ALSO leaves an owned
+    // copy on `nested_stack`. When that stack is a `vm_stack` arena window (the
+    // carved-frame fast path), the leftover slot sits ABOVE the arena watermark
+    // restored on frame exit. The `new_target.prototype` read below can run a
+    // proxy `get` trap whose bytecode frame re-carves the same arena and
+    // overwrites that orphaned slot; `nested_stack.deinit` would then free an
+    // alias'd value (e.g. a `Proxy.revocable` `revoke` closure still owned by its
+    // wrapper) — a refcount under-flow that dangles into a later cycle GC. Drain
+    // the stack's owned copy now so the window is empty before any further
+    // bytecode runs; `result` keeps the independently-owned reference.
+    for (nested_stack.values) |*slot| {
+        const stale = slot.*;
+        slot.* = core.JSValue.undefinedValue();
+        stale.free(ctx.runtime);
+    }
+    nested_stack.values = nested_stack.values.ptr[0..0];
     if (object_ops.functionObjectFromValue(result)) |function_object| {
         const prototype = try object_ops.dynamicFunctionNewTargetPrototype(ctx, output, global, new_target, kind, caller_function, caller_frame);
         try function_object.setPrototype(ctx.runtime, prototype);
@@ -3865,7 +3888,7 @@ pub fn initializeGlobalLexicalValue(rt: *core.JSRuntime, env: *core.Object, atom
         if (!atomIdOrNameEql(rt, prop.atom_id, atom_id)) continue;
         switch (env.propKindAt(index)) {
             .data => {
-                const stored = &env.properties[index].slot.data;
+                const stored = &env.prop_values[index].slot.data;
                 if (!stored.isUninitialized()) return false;
                 const next = value.dup();
                 const old_value = stored.*;
@@ -3874,7 +3897,7 @@ pub fn initializeGlobalLexicalValue(rt: *core.JSRuntime, env: *core.Object, atom
                 return true;
             },
             .var_ref => {
-                const cell = env.properties[index].slot.var_ref;
+                const cell = env.prop_values[index].slot.var_ref;
                 if (!cell.varRefValue().isUninitialized()) return false;
                 cell.setVarRefValue(rt, value.dup()) catch return false;
                 return true;

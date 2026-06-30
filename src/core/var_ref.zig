@@ -57,6 +57,18 @@ pub const VarRef = struct {
     pub fn destroyFromHeader(rt: anytype, header: *gc.Header) void {
         const self: *VarRef = @alignCast(@fieldParentPtr("header", header));
         if (!self.is_open) self.value.free(rt);
+        // Cycle removal: keep the struct alive for the Pass-B drain so a sibling
+        // still decref-ing this var_ref does not read freed memory (qjs defers
+        // non-value GC types to gc_zero_ref_count_list, quickjs.c:6790).
+        if (rt.gc.phase == .remove_cycles) {
+            rt.gc.deferCycleStructFree(header);
+            return;
+        }
+        rt.destroyRuntime(VarRef, self);
+    }
+
+    pub fn freeCycleDeferredStruct(rt: anytype, header: *gc.Header) void {
+        const self: *VarRef = @alignCast(@fieldParentPtr("header", header));
         rt.destroyRuntime(VarRef, self);
     }
 

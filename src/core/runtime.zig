@@ -1808,7 +1808,7 @@ pub const JSRuntime = struct {
         }
 
         const object_count = self.gc.liveCount();
-        const shape_count = self.shapes.shapes.len;
+        const shape_count = self.shapes.live_shape_count;
         const module_count = self.modules.modules.len;
         const class_record_count = self.classes.records.len;
         return .{

@@ -2329,27 +2329,30 @@ test "shape refcounts and prototype transitions are tracked" {
     try std.testing.expectEqual(shape_hash_baseline, rt.shapes.shape_hash_count);
 }
 
-test "shape registry release uses stable identity index after swap remove" {
+test "shape registry release maintains hashed and live counts" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+
+    const hashed_baseline = rt.shapes.shape_hash_count;
+    const live_baseline = rt.shapes.live_shape_count;
 
     const first = try rt.shapes.create(null);
     const second = try rt.shapes.create(null);
     const third = try rt.shapes.create(null);
 
-    try std.testing.expectEqual(@as(usize, 0), first.registry_index);
-    try std.testing.expectEqual(@as(usize, 1), second.registry_index);
-    try std.testing.expectEqual(@as(usize, 2), third.registry_index);
+    // Every created shape is both hashed and live (qjs counts hashed shapes only,
+    // and zjs has no separate registry array — both are intrusive GC-list shapes).
+    try std.testing.expectEqual(hashed_baseline + 3, rt.shapes.shape_hash_count);
+    try std.testing.expectEqual(live_baseline + 3, rt.shapes.live_shape_count);
 
     rt.shapes.release(second);
-    try std.testing.expectEqual(@as(usize, 2), rt.shapes.shape_hash_count);
-    try std.testing.expectEqual(@as(usize, core.shape.no_registry_index), second.registry_index);
-    try std.testing.expectEqual(@as(usize, 1), third.registry_index);
-    try std.testing.expectEqual(third, rt.shapes.shapes[1]);
+    try std.testing.expectEqual(hashed_baseline + 2, rt.shapes.shape_hash_count);
+    try std.testing.expectEqual(live_baseline + 2, rt.shapes.live_shape_count);
 
     rt.shapes.release(first);
     rt.shapes.release(third);
-    try std.testing.expectEqual(@as(usize, 0), rt.shapes.shape_hash_count);
+    try std.testing.expectEqual(hashed_baseline, rt.shapes.shape_hash_count);
+    try std.testing.expectEqual(live_baseline, rt.shapes.live_shape_count);
 }
 
 test "shape registry hash grows and reuses object root shapes" {
@@ -2420,7 +2423,7 @@ test "failed new property definition rolls back retained entry" {
     try object.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
     try object.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(3), true, true, true));
 
-    try std.testing.expectEqual(@as(usize, 3), object.properties.len);
+    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 4), object.shape_ref.props().len);
     try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
 
@@ -2430,7 +2433,7 @@ test "failed new property definition rolls back retained entry" {
     rt.setMemoryLimit(null);
 
     try std.testing.expectEqual(retained_refs, retained.header.meta().rc);
-    try std.testing.expectEqual(@as(usize, 3), object.properties.len);
+    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
     try std.testing.expect(!object.hasOwnProperty(d));
 
@@ -2476,7 +2479,7 @@ test "failed auto-init property definition rolls back retained entry" {
     try object.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
     try object.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(3), true, true, true));
 
-    try std.testing.expectEqual(@as(usize, 3), object.properties.len);
+    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 4), object.shape_ref.props().len);
     try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
 
@@ -2487,7 +2490,7 @@ test "failed auto-init property definition rolls back retained entry" {
     );
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(@as(usize, 3), object.properties.len);
+    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
     try std.testing.expect(!object.hasOwnProperty(d));
 
@@ -2526,7 +2529,7 @@ test "failed realm auto-init property definition rolls back borrowed holder regi
     rt.setMemoryLimit(null);
 
     try std.testing.expectEqual(old_holder_count, rt.borrowed_reference_holders.len);
-    try std.testing.expectEqual(@as(usize, 3), object.properties.len);
+    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
     try std.testing.expect(!object.hasOwnProperty(d));
 
@@ -2549,7 +2552,7 @@ test "failed property replacement preserves existing entry" {
     defer rt.atoms.free(key);
 
     try object.defineOwnProperty(rt, key, core.Descriptor.data(old_value.value(), true, true, true));
-    try std.testing.expectEqual(@as(usize, 1), object.properties.len);
+    try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
 
     const old_refs = old_value.header.meta().rc;
@@ -2560,7 +2563,7 @@ test "failed property replacement preserves existing entry" {
 
     try std.testing.expectEqual(old_refs, old_value.header.meta().rc);
     try std.testing.expectEqual(replacement_refs, replacement.header.meta().rc);
-    try std.testing.expectEqual(@as(usize, 1), object.properties.len);
+    try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
 
     const stored = object.getProperty(key);
@@ -2582,20 +2585,20 @@ test "object data property self-assignment keeps stored object alive" {
     stored.value().free(rt);
     try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
 
-    const own_value = holder.properties[0].slot.data;
+    const own_value = holder.prop_values[0].slot.data;
     try std.testing.expect(try holder.setOwnWritableDataProperty(rt, key, own_value));
     try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
-    try std.testing.expectEqual(&stored.header, holder.properties[0].slot.data.refHeader().?);
+    try std.testing.expectEqual(&stored.header, holder.prop_values[0].slot.data.refHeader().?);
 
-    const property_value = holder.properties[0].slot.data;
+    const property_value = holder.prop_values[0].slot.data;
     try holder.setProperty(rt, key, property_value);
     try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
-    try std.testing.expectEqual(&stored.header, holder.properties[0].slot.data.refHeader().?);
+    try std.testing.expectEqual(&stored.header, holder.prop_values[0].slot.data.refHeader().?);
 
-    const simple_value = holder.properties[0].slot.data;
+    const simple_value = holder.prop_values[0].slot.data;
     try std.testing.expect(try holder.setOrDefineOwnDataPropertyForSimpleSet(rt, key, simple_value));
     try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
-    try std.testing.expectEqual(&stored.header, holder.properties[0].slot.data.refHeader().?);
+    try std.testing.expectEqual(&stored.header, holder.prop_values[0].slot.data.refHeader().?);
 }
 
 test "json parse data property self-assignment keeps stored object alive" {
@@ -2612,11 +2615,11 @@ test "json parse data property self-assignment keeps stored object alive" {
     stored.value().free(rt);
     try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
 
-    const current = holder.properties[0].slot.data;
+    const current = holder.prop_values[0].slot.data;
     try holder.defineJsonParseDataProperty(rt, key, current);
 
     try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
-    try std.testing.expectEqual(&stored.header, holder.properties[0].slot.data.refHeader().?);
+    try std.testing.expectEqual(&stored.header, holder.prop_values[0].slot.data.refHeader().?);
 }
 
 test "dense array element self-assignment keeps stored object alive" {
@@ -3366,7 +3369,7 @@ const closed_property_cycle_reclaimed_count: usize = 5;
 
 fn expectNoLiveGc(rt: *core.JSRuntime) !void {
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
-    try std.testing.expectEqual(@as(usize, 0), rt.shapes.shapes.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.shapes.live_shape_count);
 }
 
 fn expectCycleReclaimedIncludingShapes(rt: *core.JSRuntime, expected: usize, actual: usize) !void {
@@ -4145,12 +4148,12 @@ test "destroyed realm global clears borrowed realm pointers and auto init metada
     );
 
     try std.testing.expectEqual(global, holder.functionRealmGlobalPtr().?);
-    try std.testing.expectEqual(@intFromPtr(global), core.property.autoInitAt(rt, holder.properties[0].slot.auto_init).host_function_realm_global);
+    try std.testing.expectEqual(@intFromPtr(global), core.property.autoInitAt(rt, holder.prop_values[0].slot.auto_init).host_function_realm_global);
 
     global.value().free(rt);
 
     try std.testing.expectEqual(@as(?*core.Object, null), holder.functionRealmGlobalPtr());
-    try std.testing.expectEqual(@as(usize, 0), core.property.autoInitAt(rt, holder.properties[0].slot.auto_init).host_function_realm_global);
+    try std.testing.expectEqual(@as(usize, 0), core.property.autoInitAt(rt, holder.prop_values[0].slot.auto_init).host_function_realm_global);
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
 
     const lazy = holder.getProperty(lazy_key);
@@ -4202,7 +4205,7 @@ test "replaced realm auto-init unregisters empty borrowed holder" {
         0,
     );
     try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
-    try std.testing.expectEqual(@intFromPtr(global), core.property.autoInitAt(rt, holder.properties[0].slot.auto_init).host_function_realm_global);
+    try std.testing.expectEqual(@intFromPtr(global), core.property.autoInitAt(rt, holder.prop_values[0].slot.auto_init).host_function_realm_global);
 
     try holder.replaceAutoInitPropertyWithRealmNativeAndCache(
         rt,
@@ -4215,7 +4218,7 @@ test "replaced realm auto-init unregisters empty borrowed holder" {
         0,
     );
 
-    try std.testing.expectEqual(@as(usize, 0), core.property.autoInitAt(rt, holder.properties[0].slot.auto_init).host_function_realm_global);
+    try std.testing.expectEqual(@as(usize, 0), core.property.autoInitAt(rt, holder.prop_values[0].slot.auto_init).host_function_realm_global);
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
 }
 
@@ -4326,13 +4329,13 @@ test "specialized auto-init realm metadata registers borrowed holders" {
         replace_holder,
     };
     for (holders) |holder| {
-        try std.testing.expectEqual(@intFromPtr(global), core.property.autoInitAt(rt, holder.properties[0].slot.auto_init).host_function_realm_global);
+        try std.testing.expectEqual(@intFromPtr(global), core.property.autoInitAt(rt, holder.prop_values[0].slot.auto_init).host_function_realm_global);
     }
 
     global.value().free(rt);
 
     for (holders) |holder| {
-        try std.testing.expectEqual(@as(usize, 0), core.property.autoInitAt(rt, holder.properties[0].slot.auto_init).host_function_realm_global);
+        try std.testing.expectEqual(@as(usize, 0), core.property.autoInitAt(rt, holder.prop_values[0].slot.auto_init).host_function_realm_global);
     }
 }
 

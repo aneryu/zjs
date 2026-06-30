@@ -447,7 +447,7 @@ pub const helpers = struct {
                 thrown.free(eng.runtime);
             }
             if (eng.context.global) |g| {
-                shared_engine_baseline_property_count = g.properties.len;
+                shared_engine_baseline_property_count = g.shape_ref.prop_count;
                 shared_engine_baseline_shape_prop_count = g.shape_ref.prop_count;
                 shared_engine_baseline_shape_hash = g.shape_ref.hash;
                 shared_engine_baseline_shape_deleted_count = g.shape_ref.deleted_prop_count;
@@ -455,8 +455,8 @@ pub const helpers = struct {
                 // Snapshot the baseline property entries (value slots only;
                 // key atoms and flags are snapshotted with the shape props
                 // below).
-                shared_engine_baseline_properties = std.heap.page_allocator.alloc(core.property.Entry, g.properties.len) catch unreachable;
-                for (g.properties, 0..) |entry, idx| {
+                shared_engine_baseline_properties = std.heap.page_allocator.alloc(core.property.Entry, g.shape_ref.prop_count) catch unreachable;
+                for (g.propertyEntries(), 0..) |entry, idx| {
                     // Dup the slot using its kind (read from the shape flags); the
                     // value cell is untagged so dup/destroy need the flags.
                     shared_engine_baseline_properties.?[idx] = .{ .slot = entry.slot.dup(g.propFlagsAt(idx)) };
@@ -534,22 +534,23 @@ pub const helpers = struct {
             // indices below `shared_engine_baseline_property_count` and
             // are kept.
             const baseline = shared_engine_baseline_property_count;
-            if (global.properties.len > baseline) {
-                for (global.properties[baseline..], baseline..) |*entry, idx| {
+            if (global.shape_ref.prop_count > baseline) {
+                for (global.propertyEntries()[baseline..], baseline..) |*entry, idx| {
                     // Untagged value cell: destroy needs the kind (current shape
                     // flags are still valid; restorePropertyLayout runs below).
                     entry.slot.destroy(global.propFlagsAt(idx), eng.runtime);
                     // `deleted` is a flag, not a slot arm: leave a harmless cell.
                     entry.slot = .{ .data = core.JSValue.undefinedValue() };
                 }
-                global.properties = global.properties.ptr[0..baseline];
+                // Count shrink to baseline is handled by restorePropertyLayout
+                // below (the per-object count now lives in shape.prop_count).
             }
 
             // Restore baseline properties below baseline to their original states
             if (shared_engine_baseline_properties) |baselines| {
                 // First, destroy current values below baseline using the CURRENT
                 // shape flags (the layout has not been restored yet).
-                for (global.properties[0..baseline], 0..) |entry, idx| {
+                for (global.propertyEntries()[0..baseline], 0..) |entry, idx| {
                     entry.slot.destroy(global.propFlagsAt(idx), eng.runtime);
                 }
                 // Second, restore baseline values, dupping with the BASELINE
@@ -557,7 +558,7 @@ pub const helpers = struct {
                 const baseline_shape_props = shared_engine_baseline_shape_props.?;
                 for (baselines, 0..) |base, idx| {
                     const base_flags = core.property.Flags.fromBits(baseline_shape_props[idx].flags);
-                    global.properties[idx] = .{ .slot = base.slot.dup(base_flags) };
+                    global.prop_values[idx] = .{ .slot = base.slot.dup(base_flags) };
                 }
             }
 

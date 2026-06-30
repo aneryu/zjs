@@ -293,7 +293,7 @@ pub const Slot = union {
             // must not double-free it here.
             .var_ref => {
                 const cell = self.var_ref;
-                if (rt.gc.phase == .remove_cycles and cell.header.meta().flags.cycle_visited and !cell.header.meta().flags.cycle_preserved) return;
+                if (rt.gc.phase == .remove_cycles and cell.header.meta().flags.cycle_visited) return;
                 cell.valueRef().free(rt);
             },
         }

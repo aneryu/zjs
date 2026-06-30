@@ -1572,6 +1572,17 @@ pub const function_bytecode = struct {
     pub fn destroyFromHeader(rt: anytype, header: *gc.Header) void {
         const self: *FunctionBytecodeImpl = @alignCast(@fieldParentPtr("header", header));
         self.deinit(rt);
+        // Cycle removal: defer the struct-free to the Pass-B drain so a sibling
+        // still referencing this bytecode does not read freed memory.
+        if (rt.gc.phase == .remove_cycles) {
+            rt.gc.deferCycleStructFree(header);
+            return;
+        }
+        rt.memory.free(FunctionBytecodeImpl, self[0..1]);
+    }
+
+    pub fn freeCycleDeferredStruct(rt: anytype, header: *gc.Header) void {
+        const self: *FunctionBytecodeImpl = @alignCast(@fieldParentPtr("header", header));
         rt.memory.free(FunctionBytecodeImpl, self[0..1]);
     }
     pub const FunctionBytecode = FunctionBytecodeImpl;
