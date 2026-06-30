@@ -932,7 +932,7 @@ pub const AtomTable = struct {
         for (self.entries) |*entry| {
             if (entry.str) |cached| {
                 entry.str = null;
-                cached.atom_id = null;
+                cached.atom_id = string.String.no_atom_id;
                 if (isValueSymbolKind(entry.kind)) {
                     cached.header.rc = 1;
                     gc.release(rt, &cached.header);
@@ -1116,7 +1116,7 @@ pub const AtomTable = struct {
     /// non-string atoms, so a symbol's description never converts back
     /// into the symbol atom.
     pub fn cacheString(self: *AtomTable, atom_id: Atom, s: *string.String) void {
-        if (s.atom_id != null) return;
+        if (s.atom_id != string.String.no_atom_id) return;
         if (isTaggedInt(atom_id)) {
             // Tagged ints have no table entry, but the id encodes the
             // value itself and is never recycled: a bare back-pointer is
@@ -1397,7 +1397,7 @@ pub const AtomTable = struct {
         if (entry.str) |cached| {
             entry.str = null;
             std.debug.assert(cached.atom_id == entry.id);
-            cached.atom_id = null;
+            cached.atom_id = string.String.no_atom_id;
             if (destroying_body == null or destroying_body.? != cached) {
                 gc.release(self.runtime.?, &cached.header);
             }

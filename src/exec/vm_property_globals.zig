@@ -157,88 +157,6 @@ fn throwGlobalTdz(
     return err;
 }
 
-inline fn inactiveGlobalOverlayState(
-    ctx: *const core.JSContext,
-    function: *const bytecode.Bytecode,
-    frame: *const frame_mod.Frame,
-    atom_id: core.Atom,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) bool {
-    if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return false;
-    if (!eval_with_object.isUndefined()) return false;
-    if (ctx.lexicals) |env| {
-        if (env.shapeProps().len != 0) return false;
-    }
-    if (!frame.current_function.isUndefined()) return false;
-    if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
-    if (frame.evalLocalNames().len != 0 or frame.evalVarRefNames().len != 0) return false;
-    if (function.var_ref_names.len != 0 and frame.var_refs.len != 0 and frameHasVarRefBinding(function, frame, atom_id)) return false;
-    return true;
-}
-
-inline fn cachedGlobalDataSlotIndex(
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    site_pc: usize,
-    atom_id: core.Atom,
-) ?usize {
-    const slot = function.icSlotForPc(site_pc) orelse return null;
-    if (slot.state == .mono) {
-        const entry = slot.entries[0];
-        if (entry.holder_shape_ref == null and
-            entry.shape_ref == global.shape_ref and
-            entry.atom_id == atom_id and
-            entry.version == global.shape_ref.version)
-        {
-            return entry.slot_index;
-        }
-        return null;
-    }
-    return switch (slot.lookupOwnDataResult(global, atom_id)) {
-        .hit => |index| index,
-        .miss, .invalidated => null,
-    };
-}
-
-inline fn cachedGlobalDataValue(
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    site_pc: usize,
-    atom_id: core.Atom,
-) ?core.JSValue {
-    const index = cachedGlobalDataSlotIndex(function, global, site_pc, atom_id) orelse return null;
-    if (index >= global.properties.len) return null;
-    return global.asDataAt(index);
-}
-
-inline fn pushBorrowedFast(stack: *stack_mod.Stack, value: core.JSValue) !void {
-    if (stack.values.len < stack.capacity) {
-        stack.pushAssumeCapacity(value);
-    } else {
-        try stack.push(value);
-    }
-}
-
-inline fn setCachedGlobalWritableDataAtOwned(
-    rt: *core.JSRuntime,
-    global: *core.Object,
-    atom_id: core.Atom,
-    index: usize,
-    value: core.JSValue,
-) bool {
-    const props = global.shapeProps();
-    if (index >= props.len) return false;
-    const flags = core.property.Flags.fromBits(props[index].flags);
-    if (!flags.writable or flags.deleted or flags.kind != .data) return false;
-    const entry = &global.properties[index];
-    const old_slot = entry.slot;
-    entry.slot = .{ .data = value };
-    core.object.destroyPropertySlot(rt, atom_id, flags, old_slot);
-    return true;
-}
-
 pub noinline fn getVar(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -283,14 +201,7 @@ pub noinline fn getVar(
         }
     }
     const opcode_profile = ctx.runtime.opcode_profile;
-    if (opcode_profile == null) {
-        if (cachedGlobalDataValue(function, global, site_pc, atom_id)) |value| {
-            if (inactiveGlobalOverlayState(ctx, function, frame, atom_id, eval_local_names, eval_var_ref_names, eval_with_object)) {
-                try pushBorrowedFast(stack, value);
-                return .done;
-            }
-        }
-    } else {
+    if (opcode_profile != null) {
         core.profile.recordGlobalLookup();
     }
     if (atom_id == core.atom.ids.undefined_ and canUseFastGlobalUndefinedLookup(function, frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
@@ -812,16 +723,6 @@ pub noinline fn putVar(
     }
     const opcode_profile = ctx.runtime.opcode_profile;
     if (opcode_profile != null) core.profile.recordGlobalLookup();
-    if (opcode_profile == null) {
-        const site_pc = frame.pc - 3;
-        if (cachedGlobalDataSlotIndex(function, global, site_pc, atom_id)) |index| {
-            if (inactiveGlobalOverlayState(ctx, function, frame, atom_id, eval_local_names, eval_var_ref_names, eval_with_object) and
-                setCachedGlobalWritableDataAtOwned(ctx.runtime, global, atom_id, index, value))
-            {
-                return .continue_loop;
-            }
-        }
-    }
     const runtime_strict = function.flags.is_strict or function.flags.runtime_strict;
     if (canUseFastGlobalVarWrite(ctx, function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
         if (call_runtime.setGlobalLexicalValueForFastPathOwned(ctx, atom_id, value) catch |err| {
@@ -1130,7 +1031,7 @@ fn defineGlobalVarDeclaration(
         // let/const (.global_decl var-ref). Falls back to a plain lexical data
         // property for module/eval paths.
         if (!try call_runtime.defineGlobalDeclLexicalCell(ctx, function, frame, atom_id, gv.is_const)) {
-            try call_runtime.defineGlobalLexicalValue(ctx, global, atom_id, core.JSValue.uninitialized(), gv.is_const);
+            try call_runtime.defineGlobalLexicalValue(ctx, atom_id, core.JSValue.uninitialized(), gv.is_const);
         }
     } else if (!global.hasOwnProperty(atom_id)) {
         const desc = core.Descriptor.data(core.JSValue.undefinedValue(), true, true, gv.is_configurable);

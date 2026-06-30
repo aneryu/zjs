@@ -3394,7 +3394,7 @@ fn int64ResultValue(value: i64) zjs.JSValue {
 
 fn test262InternalObjectFromValue(value: zjs.JSValue) ?*zjs.Object {
     const header = value.refHeader() orelse return null;
-    if (header.kind != .object) return null;
+    if (header.meta().kind != .object) return null;
     return @fieldParentPtr("header", header);
 }
 

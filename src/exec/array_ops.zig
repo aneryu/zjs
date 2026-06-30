@@ -454,7 +454,7 @@ pub fn throwRegExpAccessorTypeError(ctx: *core.JSContext, global: *core.Object, 
     return error.JSException;
 }
 
-pub fn createRegExpIndicesArray(rt: *core.JSRuntime, global: *core.Object, input_bytes: []const u8, found: RegExpMatch) !core.JSValue {
+pub fn createRegExpIndicesArray(rt: *core.JSRuntime, global: *core.Object, input_bytes: []const u8, found: *const RegExpMatch) !core.JSValue {
     const out = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
     errdefer core.Object.destroyFromHeader(rt, &out.header);
 

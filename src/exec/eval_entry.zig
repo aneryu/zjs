@@ -230,7 +230,8 @@ fn forceRuntimeStrict(function: *bytecode.Bytecode) void {
 fn forceFunctionBytecodeRuntimeStrict(value: core.JSValue) void {
     if (!value.isFunctionBytecode()) return;
     const header = value.objectHeader() orelse return;
-    const function_bytecode: *bytecode.FunctionBytecode = @fieldParentPtr("header", header);
+    const aligned: *align(16) @TypeOf(header.*) = @alignCast(header);
+    const function_bytecode: *bytecode.FunctionBytecode = @fieldParentPtr("header", aligned);
     function_bytecode.runtime_strict_mode = true;
     bytecode.refreshCachedBytecodeView(function_bytecode);
     for (function_bytecode.cpool) |child| forceFunctionBytecodeRuntimeStrict(child);

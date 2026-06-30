@@ -5574,7 +5574,7 @@ pub const parser_core = struct {
 
             const big = self.function.memory.create(core_bigint.BigInt) catch return Error.OutOfMemory;
             big.* = .{
-                .header = .{ .kind = .big_int },
+                .header = .{},
                 .value = parsed,
             };
             parsed = .{ .allocator = self.function.memory.persistent_allocator };

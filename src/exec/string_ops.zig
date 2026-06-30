@@ -863,6 +863,15 @@ pub fn qjsRegExpAutoInitBuiltinMatches(info: core.property.AutoInit, expected_id
     return native_ref.domain == .regexp and native_ref.id == expected_id;
 }
 
+/// Like `qjsRegExpAutoInitBuiltinMatches` but for a lazily-installed native
+/// accessor (the RegExp.prototype flag getters live as `.native_accessor`
+/// auto-init descriptors whose getter native-builtin id is `native_builtin_id`).
+pub fn qjsRegExpAutoInitAccessorBuiltinMatches(info: core.property.AutoInit, expected_id: u32) bool {
+    if (info.kind != .native_accessor) return false;
+    const native_ref = core.function.decodeNativeBuiltinId(info.native_builtin_id) orelse return false;
+    return native_ref.domain == .regexp and native_ref.id == expected_id;
+}
+
 pub fn qjsRegExpToString(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1329,15 +1338,28 @@ pub fn qjsRegExpSymbolReplaceGeneric(
         try toStringForAnnexB(ctx, output, global, replace_value, caller_function, caller_frame);
     defer if (!functional_replace) replacement_string.free(ctx.runtime);
 
+    // Standard-regexp fast path (QuickJS js_is_standard_regexp -> js_regexp_replace),
+    // probed BEFORE observing the flags getter -- exactly like QuickJS. The guard
+    // is fully side-effect-free (never invokes exec/flags/global/unicode), so a
+    // non-standard regexp falls through to the generic path which observes those
+    // getters in spec order. The fast path drives matching on the compiled
+    // bytecode with a single reused capture buffer and no per-match array object.
+    if (!functional_replace) {
+        if (objectFromValue(rx)) |rx_object| {
+            if (object_ops.regExpIsStandard(ctx.runtime, rx_object)) {
+                if (try qjsRegExpReplaceFast(ctx, output, global, rx, string_value, replacement_string, caller_function, caller_frame)) |res| {
+                    return res;
+                }
+            }
+        }
+    }
+
     const flags_string = try getRegExpFlagsStringForReplace(ctx, output, global, rx, caller_function, caller_frame);
     defer flags_string.free(ctx.runtime);
     const is_global = try qjsStringValueContainsByte(ctx.runtime, flags_string, 'g');
     const full_unicode = try regExpFlagsAreFullUnicode(ctx.runtime, flags_string);
     if (is_global) {
         try setValuePropertyStrict(ctx, output, global, rx, core.atom.ids.lastIndex, core.JSValue.int32(0), caller_function, caller_frame);
-    }
-    if (!functional_replace and !stringValueContainsUnitByte(replacement_string, '$') and try regExpExecPropertyIsDefault(ctx, output, global, rx, caller_function, caller_frame)) {
-        return qjsRegExpSymbolReplaceLiteral(ctx, output, global, rx, string_value, replacement_string, is_global, full_unicode, caller_function, caller_frame);
     }
 
     var matches = std.ArrayList(ReplaceMatch).empty;
@@ -1397,6 +1419,111 @@ pub fn qjsRegExpSymbolReplaceGeneric(
         next_source_position = @min(source_units.items.len, position + matched_len);
     }
     try out.appendSlice(ctx.runtime.memory.allocator, source_units.items[next_source_position..]);
+    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
+}
+
+// Faithful port of QuickJS `js_regexp_replace` (quickjs.c) -- the "simple cases"
+// fast path taken by `js_regexp_Symbol_replace` when the replacement is a plain
+// string (non-functional) and the regexp is standard (default `exec`). Drives
+// matching directly on the compiled bytecode + a single reused capture buffer,
+// substituting `$` patterns straight from the source units. NO per-match JS
+// array object, NO property reads, NO per-match allocation -- this is the whole
+// reason QuickJS is ~18x faster here. Returns null to bail to the generic
+// driver when preconditions fail (non-RegExp receiver, missing bytecode,
+// coercible lastIndex required, or named groups present).
+pub fn qjsRegExpReplaceFast(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    rx: core.JSValue,
+    string_value: core.JSValue,
+    replacement_string: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    const rx_object = objectFromValue(rx) orelse return null;
+    if (rx_object.class_id != core.class.ids.regexp) return null;
+    if (!regexp_fastpath.regExpLastIndexCanSkipCoercion(rx_object)) return null;
+    const cached_bytecode = rx_object.regexpCompiledBytecode();
+    if (cached_bytecode.len == 0) return null;
+    const compiled = regexp_adapter.Compiled{ .bytecode = @constCast(cached_bytecode) };
+    const bits = compiled.flagBits();
+    // QuickJS bails on group names (the generic driver handles `$<name>`).
+    if ((bits & regexp_adapter.flag_bits.named_groups) != 0) return null;
+    // Read flags straight from the compiled bytecode -- like QuickJS's
+    // js_regexp_replace -- instead of observing the (potentially overridden)
+    // flags getter. Safe because the caller already confirmed `exec` is default.
+    const is_global = (bits & regexp_adapter.flag_bits.global) != 0;
+    const is_sticky = (bits & regexp_adapter.flag_bits.sticky) != 0;
+    const full_unicode = (bits & (regexp_adapter.flag_bits.unicode | regexp_adapter.flag_bits.unicode_sets)) != 0;
+    // QuickJS resets lastIndex to 0 up front for global regexps.
+    if (is_global) try setRegExpLastIndexZero(ctx.runtime, rx_object);
+
+    var source = std.ArrayList(u16).empty;
+    defer source.deinit(ctx.runtime.memory.allocator);
+    try appendStringValueUnits(ctx.runtime, &source, string_value);
+    var replacement = std.ArrayList(u16).empty;
+    defer replacement.deinit(ctx.runtime.memory.allocator);
+    try appendStringValueUnits(ctx.runtime, &replacement, replacement_string);
+
+    const alloc_count = compiled.allocCount();
+    const capture_count = compiled.captureCount();
+    var inline_capture_slots: [regexp_adapter.small_exec_slots]usize = undefined;
+    var heap_capture_slots: []usize = &.{};
+    defer if (heap_capture_slots.len != 0) ctx.runtime.memory.allocator.free(heap_capture_slots);
+    const capture = if (alloc_count <= inline_capture_slots.len)
+        inline_capture_slots[0..alloc_count]
+    else capture: {
+        heap_capture_slots = try ctx.runtime.memory.allocator.alloc(usize, alloc_count);
+        break :capture heap_capture_slots;
+    };
+
+    var out = std.ArrayList(u16).empty;
+    defer out.deinit(ctx.runtime.memory.allocator);
+
+    // lastIndex: the caller already reset it to 0 for global regexps. Sticky
+    // (non-global) reads it; otherwise matching starts at 0 (qjs js_regexp_replace).
+    var last_index: usize = 0;
+    if (!is_global and is_sticky) {
+        last_index = regexp_fastpath.regexpLastIndex(ctx.runtime, rx_object);
+    }
+    var next_src: usize = 0;
+    while (true) {
+        if (last_index > source.items.len) {
+            if (is_global or is_sticky) try setRegExpLastIndexZero(ctx.runtime, rx_object);
+            break;
+        }
+        const result = regexp_adapter.execCaptureSlotsOnStringFromIndex(ctx.runtime, compiled, string_value, last_index, capture) catch |err| switch (err) {
+            error.BytecodeCorrupt, error.Timeout => return null,
+            else => return err,
+        };
+        if (result != .match) {
+            if (is_global or is_sticky) try setRegExpLastIndexZero(ctx.runtime, rx_object);
+            break;
+        }
+        const match_start = regexp_adapter.captureSlotValue(capture[0]) orelse 0;
+        const match_end = regexp_adapter.captureSlotValue(capture[1]) orelse match_start;
+        if (next_src < match_start) try out.appendSlice(ctx.runtime.memory.allocator, source.items[next_src..match_start]);
+        if (replacement.items.len != 0) {
+            try appendRegExpSubstitutionFromSlots(ctx.runtime, &out, source.items, match_start, match_end, capture, capture_count, replacement.items);
+        }
+        next_src = match_end;
+        if (!is_global) {
+            if (is_sticky) {
+                const next_value = if (match_end <= @as(usize, @intCast(std.math.maxInt(i32))))
+                    core.JSValue.int32(@intCast(match_end))
+                else
+                    core.JSValue.float64(@floatFromInt(match_end));
+                try regexp_fastpath.setRegExpLastIndexStrict(ctx, output, global, rx, rx_object, next_value, caller_function, caller_frame);
+            }
+            break;
+        }
+        last_index = if (match_end == match_start)
+            advanceStringIndexUnits(source.items, match_end, full_unicode)
+        else
+            match_end;
+    }
+    if (next_src < source.items.len) try out.appendSlice(ctx.runtime.memory.allocator, source.items[next_src..]);
     return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
 }
 
@@ -1757,6 +1884,94 @@ pub fn replacementCaptureUnits(match: ReplaceMatch, replacement: []const u16, in
     return match.captures[capture_index - 1];
 }
 
+// Parse a `$n`/`$nn` capture reference at `replacement[index+1..]` against a
+// match with `capture_count` slots (group 0 included). Mirrors
+// `replacementCaptureUnits` but yields the one-based group number + consumed
+// digit count instead of a materialized JSValue. `null` => not a valid
+// reference (emit a literal `$`).
+const SlotCaptureRef = struct { group: usize, consumed: usize };
+fn parseSlotCaptureRef(replacement: []const u16, index: usize, capture_count: usize) ?SlotCaptureRef {
+    if (capture_count == 0) return null;
+    const max_group = capture_count - 1; // valid groups are 1..max_group
+    if (max_group == 0) return null;
+    const first = replacement[index + 1];
+    if (!isAsciiDigitUnit(first)) return null;
+    if (first == '0') {
+        if (index + 2 >= replacement.len or !isAsciiDigitUnit(replacement[index + 2])) return null;
+        const two: usize = @intCast(replacement[index + 2] - '0');
+        if (two == 0 or two > max_group) return null;
+        return .{ .group = two, .consumed = 2 };
+    }
+    var group: usize = @intCast(first - '0');
+    var consumed: usize = 1;
+    if (index + 2 < replacement.len and isAsciiDigitUnit(replacement[index + 2])) {
+        const two = group * 10 + @as(usize, @intCast(replacement[index + 2] - '0'));
+        if (two >= 1 and two <= max_group) {
+            group = two;
+            consumed = 2;
+        }
+    }
+    if (group == 0 or group > max_group) return null;
+    return .{ .group = group, .consumed = consumed };
+}
+
+// Faithful port of QuickJS `js_string_GetSubstitution` operating directly on the
+// raw capture-slot buffer (no per-match array object). `$&`/`` $` ``/`$'`/`$$`
+// and `$n`/`$nn` are all slices of the source units; an unmatched group expands
+// to empty. Group-name (`$<name>`) substitution is intentionally NOT handled
+// here -- the fast path bails to the generic driver when the pattern has named
+// groups, exactly as QuickJS does.
+fn appendRegExpSubstitutionFromSlots(
+    rt: *core.JSRuntime,
+    out: *std.ArrayList(u16),
+    source: []const u16,
+    match_start: usize,
+    match_end: usize,
+    capture: []const usize,
+    capture_count: usize,
+    replacement: []const u16,
+) !void {
+    const alloc = rt.memory.allocator;
+    var index: usize = 0;
+    while (index < replacement.len) : (index += 1) {
+        const unit = replacement[index];
+        if (unit != '$' or index + 1 >= replacement.len) {
+            try out.append(alloc, unit);
+            continue;
+        }
+        switch (replacement[index + 1]) {
+            '$' => {
+                try out.append(alloc, '$');
+                index += 1;
+            },
+            '&' => {
+                try out.appendSlice(alloc, source[match_start..match_end]);
+                index += 1;
+            },
+            '`' => {
+                try out.appendSlice(alloc, source[0..match_start]);
+                index += 1;
+            },
+            '\'' => {
+                try out.appendSlice(alloc, source[match_end..]);
+                index += 1;
+            },
+            '0'...'9' => {
+                if (parseSlotCaptureRef(replacement, index, capture_count)) |ref| {
+                    index += ref.consumed;
+                    if (regexp_adapter.captureSlotValue(capture[2 * ref.group])) |cstart| {
+                        const cend = regexp_adapter.captureSlotValue(capture[2 * ref.group + 1]) orelse cstart;
+                        try out.appendSlice(alloc, source[cstart..cend]);
+                    }
+                } else {
+                    try out.append(alloc, '$');
+                }
+            },
+            else => try out.append(alloc, '$'),
+        }
+    }
+}
+
 pub fn stringLengthIndex(rt: *core.JSRuntime, string_value: core.JSValue) !usize {
     const string_object = string_value.asStringBody() orelse return 0;
     _ = rt;
@@ -1803,6 +2018,7 @@ pub fn replaceRegExpLegacySlot(rt: *core.JSRuntime, owner: *core.Object, slot: *
 
 pub fn stringAtomId(value: core.JSValue) ?core.Atom {
     const string_value = value.asStringBody() orelse return null;
+    if (string_value.atom_id == core.string.String.no_atom_id) return null;
     return string_value.atom_id;
 }
 
@@ -2617,7 +2833,7 @@ pub fn qjsRegExpMatch(rt: *core.JSRuntime, global: *core.Object, regexp: core.JS
                         found.captures[ci] = .{ .start = 0, .len = 0, .undefined = true, .name = capture.name };
                     }
                 }
-                return try createRegExpMatchArrayFromValue(rt, global, string_value, found, has_indices);
+                return try createRegExpMatchArrayFromValue(rt, global, string_value, &found, has_indices);
             },
             .no_match, .out_of_range, .not_available => return null,
         }
@@ -2963,14 +3179,14 @@ pub fn defineSplitValueElement(rt: *core.JSRuntime, object: *core.Object, index:
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true));
 }
 
-pub fn regExpMatchHasNamedCaptures(found: RegExpMatch) bool {
+pub fn regExpMatchHasNamedCaptures(found: *const RegExpMatch) bool {
     for (found.captures[0..found.capture_count]) |capture| {
         if (capture.name != null) return true;
     }
     return false;
 }
 
-pub fn createRegExpMatchArray(rt: *core.JSRuntime, global: *core.Object, input_bytes: []const u8, found: RegExpMatch, has_indices: bool) !core.JSValue {
+pub fn createRegExpMatchArray(rt: *core.JSRuntime, global: *core.Object, input_bytes: []const u8, found: *const RegExpMatch, has_indices: bool) !core.JSValue {
     const out = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
     errdefer core.Object.destroyFromHeader(rt, &out.header);
     try defineSplitStringElement(rt, out, 0, input_bytes[found.index .. found.index + found.len]);
@@ -3004,7 +3220,30 @@ pub fn createRegExpMatchArray(rt: *core.JSRuntime, global: *core.Object, input_b
     return out.value();
 }
 
-pub fn createRegExpMatchArrayFromValue(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: RegExpMatch, has_indices: bool) !core.JSValue {
+// Build (once per realm) a throwaway template array carrying the
+// index/input/groups named-property shape, and keep it pinned in the realm
+// cache. QuickJS holds an equivalent `regexp_result_shape` permanently
+// (quickjs.c:49297); the permanent reference keeps the shape's transition chain
+// hash-consed so every match array reuses it instead of cloning + rehashing a
+// fresh shape that is then destroyed when the (immediately discarded) array is
+// freed. Pure performance: missing/failing warm-up just falls back to the
+// per-array clone path.
+fn ensureRegExpResultShapeWarm(rt: *core.JSRuntime, global: *core.Object) void {
+    const slot = global.cachedRealmValueSlot(rt, .regexp_match_result_template) catch return;
+    if (slot.* != null) return;
+    const template = core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global)) catch return;
+    template.defineRegExpMatchMetadataPropertiesAssumingNew(rt, 0, core.JSValue.undefinedValue(), core.JSValue.undefinedValue()) catch {
+        core.Object.destroyFromHeader(rt, &template.header);
+        return;
+    };
+    global.setOptionalValueSlot(rt, slot, template.value()) catch {
+        core.Object.destroyFromHeader(rt, &template.header);
+        return;
+    };
+}
+
+pub fn createRegExpMatchArrayFromValue(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: *const RegExpMatch, has_indices: bool) !core.JSValue {
+    ensureRegExpResultShapeWarm(rt, global);
     const out = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
     errdefer core.Object.destroyFromHeader(rt, &out.header);
 
@@ -3035,7 +3274,7 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
     rt: *core.JSRuntime,
     out: *core.Object,
     input_value: core.JSValue,
-    found: RegExpMatch,
+    found: *const RegExpMatch,
     matched: core.JSValue,
 ) !void {
     std.debug.assert(out.flags.is_array);
@@ -3075,7 +3314,7 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
     out.flags.may_have_indexed_properties = true;
 }
 
-pub fn createRegExpMatchArrayNoCapturesFromValue(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: RegExpMatch, input_len: usize, has_indices: bool) !core.JSValue {
+pub fn createRegExpMatchArrayNoCapturesFromValue(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: *const RegExpMatch, input_len: usize, has_indices: bool) !core.JSValue {
     std.debug.assert(found.capture_count == 0);
     const out = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
     errdefer core.Object.destroyFromHeader(rt, &out.header);
@@ -3107,7 +3346,7 @@ pub fn updateRegExpLegacyStaticsForMatchValues(
     rt: *core.JSRuntime,
     global: *core.Object,
     input_value: core.JSValue,
-    found: RegExpMatch,
+    found: *const RegExpMatch,
     matched: core.JSValue,
     legacy_capture_values: *const [9]?core.JSValue,
     last_capture_value: ?core.JSValue,
@@ -3156,7 +3395,7 @@ pub fn updateRegExpLegacyStaticsForMatchValues(
     }
 }
 
-pub fn updateRegExpLegacyStaticsForMatch(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: RegExpMatch) !void {
+pub fn updateRegExpLegacyStaticsForMatch(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: *const RegExpMatch) !void {
     if (try updateRegExpLegacyStaticsLazyForMatch(rt, global, input_value, found)) return;
 
     const matched = try stringSliceValue(rt, input_value, found.index, found.len);
@@ -3185,7 +3424,7 @@ pub fn updateRegExpLegacyStaticsForMatch(rt: *core.JSRuntime, global: *core.Obje
     try updateRegExpLegacyStaticsForMatchValues(rt, global, input_value, found, matched, &legacy_capture_values, last_capture_value);
 }
 
-pub fn updateRegExpLegacyStaticsLazyForMatch(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: RegExpMatch) !bool {
+pub fn updateRegExpLegacyStaticsLazyForMatch(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: *const RegExpMatch) !bool {
     var encoded_captures: [9]?core.JSValue = @splat(null);
     var encoded_last_paren: ?core.JSValue = null;
 
@@ -3263,7 +3502,7 @@ pub fn combinedSurrogateCodePoint(high: u16, low: u16) u21 {
     return unicode_lib.codePointFromSurrogatePair(high, low);
 }
 
-pub fn createRegExpMatchArrayFromStringValue(rt: *core.JSRuntime, input_value: core.JSValue, found: RegExpMatch) !core.JSValue {
+pub fn createRegExpMatchArrayFromStringValue(rt: *core.JSRuntime, input_value: core.JSValue, found: *const RegExpMatch) !core.JSValue {
     const out = try core.Object.createArray(rt, null);
     errdefer core.Object.destroyFromHeader(rt, &out.header);
     try defineSplitValueElement(rt, out, 0, input_value);
@@ -3945,7 +4184,19 @@ pub fn getFastStringPrimitiveDataProperty(
     atom_id: core.Atom,
 ) !?core.JSValue {
     if (!receiver.isString()) return null;
-    if (!isStandardStringPrototypeMethodAtom(ctx.runtime, atom_id)) return null;
+    // Resolve any String.prototype own method straight off the prototype without
+    // materializing a boxed String wrapper. Restricting to predefined, non-index
+    // atoms (excluding `length`, which is the primitive's own length, not
+    // `String.prototype.length`) keeps `s[i]`/`s.length`/dynamic-name accesses on
+    // their existing paths. This must cover NOT ONLY the `prototypeMethodId`
+    // method-table methods (charCodeAt, split, match, …) but also the
+    // String.prototype methods installed as plain functions (concat, replace,
+    // replaceAll, the AnnexB html helpers). Before this, `"x".replace(...)`
+    // missed the bitset gate and fell into `primitiveObjectForAccess`, which
+    // builds a String wrapper with one own property per character of the
+    // receiver -- O(n) per call, ~13x slower than QuickJS on string `.replace`.
+    if (core.atom.isTaggedInt(atom_id) or atom_id == 0 or atom_id > core.atom.predefined_count) return null;
+    if (atom_id == core.atom.ids.length) return null;
 
     // `constructorPrototypeFromGlobal(.., "String")` interns the atom "String" on
     // EVERY `s.method()` resolution (the internString hot spot) before walking

@@ -776,7 +776,8 @@ fn expectAtomName(env: *TestEnv, atom_id: engine.core.Atom, expected: []const u8
 fn functionBytecodeFromValue(value: engine.core.JSValue) ?*const engine.bytecode.FunctionBytecode {
     if (!value.isFunctionBytecode()) return null;
     const header = value.objectHeader() orelse return null;
-    return @fieldParentPtr("header", header);
+    const aligned: *align(16) @TypeOf(header.*) = @alignCast(header);
+    return @fieldParentPtr("header", aligned);
 }
 
 fn expectFunctionConstant(function: *const engine.bytecode.Bytecode, index: usize) !*const engine.bytecode.FunctionBytecode {

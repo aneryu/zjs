@@ -463,7 +463,7 @@ pub const helpers = struct {
                 }
 
                 shared_engine_baseline_shape_props = std.heap.page_allocator.alloc(core.shape.Property, g.shape_ref.prop_count) catch unreachable;
-                for (g.shape_ref.props[0..g.shape_ref.prop_count], 0..) |prop, idx| {
+                for (g.shape_ref.props()[0..g.shape_ref.prop_count], 0..) |prop, idx| {
                     shared_engine_baseline_shape_props.?[idx] = prop;
                     shared_engine_baseline_shape_props.?[idx].hash_next = core.shape.no_property_index;
                     if (prop.atom_id != core.atom.null_atom) {
@@ -728,11 +728,11 @@ test "frame setLocal handles self-assignment without dropping object" {
     try frame.setLocal(&rt.memory, rt, 0, object.value());
     object.value().free(rt);
 
-    try std.testing.expectEqual(@as(i32, 1), object.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), object.header.meta().rc);
     const current = frame.locals[0];
     try frame.setLocal(&rt.memory, rt, 0, current);
 
-    try std.testing.expectEqual(@as(i32, 1), object.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), object.header.meta().rc);
     try std.testing.expectEqual(&object.header, frame.locals[0].refHeader().?);
 }
 

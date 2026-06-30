@@ -11,7 +11,6 @@ pub const string = @import("string.zig");
 pub const bigint = @import("bigint.zig");
 pub const class = @import("class.zig");
 pub const shape = @import("shape.zig");
-pub const ic = @import("ic.zig");
 pub const global_slots = @import("global_slots.zig");
 pub const function = @import("function.zig");
 pub const function_bytecode = @import("../bytecode.zig").function_bytecode;

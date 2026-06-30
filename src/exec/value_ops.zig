@@ -736,7 +736,7 @@ fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !
         }
     }
 
-    if (op == bytecode.opcode.op.add and a.isBigInt() and a.refHeader() != null and a.refHeader().?.rc == 1) {
+    if (op == bytecode.opcode.op.add and a.isBigInt() and a.refHeader() != null and a.refHeader().?.meta().rc == 1) {
         const header = a.refHeader().?;
         const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
         const rhs = try bigIntFromValueBorrowed(rt, b);
@@ -938,7 +938,7 @@ fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value
 
         if (position == .suffix) {
             if (string_value.stringHeader()) |header| {
-                if (header.rc == 1 and string.atom_id == null) {
+                if (header.rc == 1 and string.atom_id == core.string.String.no_atom_id) {
                     if (try string.appendLatin1InPlace(rt, digits)) {
                         return string_value.dup();
                     }

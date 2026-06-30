@@ -696,10 +696,11 @@ pub fn op_get_arg_short(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm
 pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
     const atom_id = readInt(u32, pc + 1);
-    const site_pc = @intFromPtr(pc) - @intFromPtr(vm.code_base);
-    if (property_ic.cachedDataPropertyValueForFastPath(vm.function, site_pc, vm.ctx.runtime, receiver, atom_id)) |value| {
-        // IC hit: the value is BORROWED from the object's slot — dup onto the stack
-        // (which owns its entries) and free the receiver, exactly like replaceTopBorrowed.
+    // qjs OP_get_field does an inline find_own_property on each access (no cache).
+    // Walk self+prototype for a plain data property; on a hit the value is BORROWED
+    // from the holder slot, so dup onto the stack (which owns its entries) and free
+    // the receiver. Exotic/private/non-object/prototype-fallback falls to cold field().
+    if (vm_property_field.qjsGetFieldFast(vm.ctx.runtime, receiver, atom_id)) |value| {
         (sp - 1)[0] = if (value.requiresRefCount()) value.dup() else value;
         receiver.free(vm.ctx.runtime);
         return cont(pc + 5, sp, var_buf, vm);
@@ -768,8 +769,10 @@ pub fn op_put_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     const value = (sp - 1)[0];
     const obj = (sp - 2)[0];
     const atom_id = readInt(u32, pc + 1);
-    const site_pc = @intFromPtr(pc) - @intFromPtr(vm.code_base);
-    if (property_ic.cachedSetObjectDataPropertyForPutFastPath(vm.function, site_pc, vm.ctx.runtime, obj, atom_id, value)) {
+    // qjs OP_put_field inline: find_own_property on the receiver, write the slot
+    // (consuming `value`) and free the old value. Shape-changing adds, exotic, and
+    // non-object receivers fall to cold field().
+    if (vm_property_field.qjsPutFieldFast(vm.ctx.runtime, obj, atom_id, value)) {
         obj.free(vm.ctx.runtime); // value consumed by the slot write
         return cont(pc + 5, sp - 2, var_buf, vm);
     }

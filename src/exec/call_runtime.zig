@@ -3781,12 +3781,11 @@ pub fn globalLexicalValueForGlobal(ctx: *core.JSContext, global: *core.Object, a
     return env.getProperty(atom_id);
 }
 
-pub fn defineGlobalLexicalValue(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom, value: core.JSValue, is_const: bool) !void {
+pub fn defineGlobalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom, value: core.JSValue, is_const: bool) !void {
     const env = try globalLexicalEnv(ctx);
     if (!env.hasOwnProperty(atom_id)) {
         const rt = ctx.runtime;
         try env.defineOwnPropertyAssumingNew(rt, atom_id, core.Descriptor.data(value, !is_const, false, false));
-        global.shape_ref.version +%= 1;
     }
 }
 
@@ -6778,7 +6777,8 @@ pub fn currentFrameFunctionIsStrict(frame: *frame_mod.Frame) bool {
 
 pub fn functionBytecodeFromValue(value: core.JSValue) ?*const bytecode.FunctionBytecode {
     const header = value.objectHeader() orelse return null;
-    return @fieldParentPtr("header", header);
+    const aligned: *align(16) @TypeOf(header.*) = @alignCast(header);
+    return @fieldParentPtr("header", aligned);
 }
 
 pub fn isFunctionLikeClass(class_id: core.class.ClassId) bool {

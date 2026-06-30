@@ -49,7 +49,7 @@ test "heap BigInt value uses reserved QuickJS tag" {
     defer value.free(rt);
 
     try std.testing.expect(value.isBigInt());
-    try std.testing.expectEqual(core.gc.RefKind.big_int, value.refHeader().?.kind);
+    try std.testing.expectEqual(core.gc.RefKind.big_int, value.refHeader().?.meta().kind);
 }
 
 test "runtime and context init-deinit are leak free" {
@@ -2290,14 +2290,14 @@ test "shapes retain property atoms and compare transitions" {
     try std.testing.expect(first.is_hashed);
     try std.testing.expectEqual(@as(usize, 1), first.prop_count);
     try std.testing.expect(first.sameTransition(second.*));
-    try std.testing.expect(rt.atoms.name(first.props[0].atom_id) != null);
+    try std.testing.expect(rt.atoms.name(first.props()[0].atom_id) != null);
     try std.testing.expectEqual(
         core.shape.hashIndex(first.hash, core.shape.initial_shape_hash_bits),
         core.shape.hashIndex(first.hash, rt.shapes.shape_hash_bits),
     );
 
     rt.shapes.release(first);
-    try std.testing.expect(rt.atoms.name(second.props[0].atom_id) != null);
+    try std.testing.expect(rt.atoms.name(second.props()[0].atom_id) != null);
     rt.shapes.release(second);
     try std.testing.expectEqual(@as(usize, 0), rt.shapes.shape_hash_count);
 }
@@ -2394,9 +2394,7 @@ test "ordinary object additions reuse transition shapes" {
     try second.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(4), true, true, true));
 
     try std.testing.expectEqual(first.shape_ref, second.shape_ref);
-    try std.testing.expect(first.shape_ref.parent != null);
     try std.testing.expectEqual(@as(usize, 2), first.shape_ref.prop_count);
-    try std.testing.expectEqual(b, first.shape_ref.transition_atom);
     try std.testing.expectEqual(@as(?i32, 1), first.getProperty(a).asInt32());
     try std.testing.expectEqual(@as(?i32, 4), second.getProperty(b).asInt32());
 }
@@ -2423,15 +2421,15 @@ test "failed new property definition rolls back retained entry" {
     try object.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(3), true, true, true));
 
     try std.testing.expectEqual(@as(usize, 3), object.properties.len);
-    try std.testing.expectEqual(@as(usize, 4), object.shape_ref.props.len);
+    try std.testing.expectEqual(@as(usize, 4), object.shape_ref.props().len);
     try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
 
-    const retained_refs = retained.header.rc;
+    const retained_refs = retained.header.meta().rc;
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     try std.testing.expectError(error.OutOfMemory, object.defineOwnProperty(rt, d, core.Descriptor.data(retained.value(), true, true, true)));
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(retained_refs, retained.header.rc);
+    try std.testing.expectEqual(retained_refs, retained.header.meta().rc);
     try std.testing.expectEqual(@as(usize, 3), object.properties.len);
     try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
     try std.testing.expect(!object.hasOwnProperty(d));
@@ -2453,7 +2451,7 @@ test "context lexicals property alias releases context strong reference" {
     const env_key = try rt.internAtom("env");
     defer rt.atoms.free(env_key);
     try global.defineOwnProperty(rt, env_key, core.Descriptor.data(env.value(), true, true, true));
-    try std.testing.expectEqual(@as(i32, 2), env.header.rc);
+    try std.testing.expectEqual(@as(i32, 2), env.header.meta().rc);
 
     ctx.destroy();
     try expectNoLiveGc(rt);
@@ -2479,7 +2477,7 @@ test "failed auto-init property definition rolls back retained entry" {
     try object.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(3), true, true, true));
 
     try std.testing.expectEqual(@as(usize, 3), object.properties.len);
-    try std.testing.expectEqual(@as(usize, 4), object.shape_ref.props.len);
+    try std.testing.expectEqual(@as(usize, 4), object.shape_ref.props().len);
     try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
@@ -2554,14 +2552,14 @@ test "failed property replacement preserves existing entry" {
     try std.testing.expectEqual(@as(usize, 1), object.properties.len);
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
 
-    const old_refs = old_value.header.rc;
-    const replacement_refs = replacement.header.rc;
+    const old_refs = old_value.header.meta().rc;
+    const replacement_refs = replacement.header.meta().rc;
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     try std.testing.expectError(error.OutOfMemory, object.defineOwnProperty(rt, key, core.Descriptor.data(replacement.value(), true, true, true)));
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(old_refs, old_value.header.rc);
-    try std.testing.expectEqual(replacement_refs, replacement.header.rc);
+    try std.testing.expectEqual(old_refs, old_value.header.meta().rc);
+    try std.testing.expectEqual(replacement_refs, replacement.header.meta().rc);
     try std.testing.expectEqual(@as(usize, 1), object.properties.len);
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
 
@@ -2582,21 +2580,21 @@ test "object data property self-assignment keeps stored object alive" {
 
     try holder.defineOwnProperty(rt, key, core.Descriptor.data(stored.value(), true, true, true));
     stored.value().free(rt);
-    try std.testing.expectEqual(@as(i32, 1), stored.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
 
     const own_value = holder.properties[0].slot.data;
     try std.testing.expect(try holder.setOwnWritableDataProperty(rt, key, own_value));
-    try std.testing.expectEqual(@as(i32, 1), stored.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
     try std.testing.expectEqual(&stored.header, holder.properties[0].slot.data.refHeader().?);
 
     const property_value = holder.properties[0].slot.data;
     try holder.setProperty(rt, key, property_value);
-    try std.testing.expectEqual(@as(i32, 1), stored.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
     try std.testing.expectEqual(&stored.header, holder.properties[0].slot.data.refHeader().?);
 
     const simple_value = holder.properties[0].slot.data;
     try std.testing.expect(try holder.setOrDefineOwnDataPropertyForSimpleSet(rt, key, simple_value));
-    try std.testing.expectEqual(@as(i32, 1), stored.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
     try std.testing.expectEqual(&stored.header, holder.properties[0].slot.data.refHeader().?);
 }
 
@@ -2612,12 +2610,12 @@ test "json parse data property self-assignment keeps stored object alive" {
 
     try holder.defineJsonParseDataProperty(rt, key, stored.value());
     stored.value().free(rt);
-    try std.testing.expectEqual(@as(i32, 1), stored.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
 
     const current = holder.properties[0].slot.data;
     try holder.defineJsonParseDataProperty(rt, key, current);
 
-    try std.testing.expectEqual(@as(i32, 1), stored.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
     try std.testing.expectEqual(&stored.header, holder.properties[0].slot.data.refHeader().?);
 }
 
@@ -2632,12 +2630,12 @@ test "dense array element self-assignment keeps stored object alive" {
 
     try std.testing.expect(try array.appendDenseArrayIndex(rt, 0, index, stored.value()));
     stored.value().free(rt);
-    try std.testing.expectEqual(@as(i32, 1), stored.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
 
     const current = array.arrayElements()[0];
     try array.setProperty(rt, index, current);
 
-    try std.testing.expectEqual(@as(i32, 1), stored.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
     try std.testing.expectEqual(&stored.header, array.arrayElements()[0].refHeader().?);
 }
 
@@ -2687,14 +2685,14 @@ test "failed prototype replacement preserves prototype and refcounts" {
     try std.testing.expectEqual(shared_shape, second.shape_ref);
     try std.testing.expect(first.getPrototype() == null);
 
-    const proto_refs = proto.header.rc;
+    const proto_refs = proto.header.meta().rc;
     const shape_refs = shared_shape.refCount();
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     try std.testing.expectError(error.OutOfMemory, first.setPrototype(rt, proto));
     rt.setMemoryLimit(null);
 
     try std.testing.expect(first.getPrototype() == null);
-    try std.testing.expectEqual(proto_refs, proto.header.rc);
+    try std.testing.expectEqual(proto_refs, proto.header.meta().rc);
     try std.testing.expectEqual(shared_shape, first.shape_ref);
     try std.testing.expectEqual(shared_shape, second.shape_ref);
     try std.testing.expectEqual(shape_refs, shared_shape.refCount());
@@ -2755,63 +2753,6 @@ test "shape transition cache releases chained shapes" {
     try std.testing.expectEqual(@as(usize, 0), rt.shapes.shape_hash_count);
 }
 
-test "inline cache slot guards shape identity and version" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const obj = try core.Object.create(rt, core.class.ids.object, null);
-    defer obj.value().free(rt);
-
-    const key = try rt.internAtom("ic_key");
-    defer rt.atoms.free(key);
-
-    try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
-
-    var slot = engine.bytecode.ic.Slot{};
-    defer slot.deinit(&rt.shapes);
-
-    try std.testing.expectEqual(engine.bytecode.ic.InstallResult.installed_mono, slot.installOwnData(&rt.shapes, obj, key, 0));
-    try std.testing.expectEqual(@as(?usize, 0), slot.lookupOwnData(obj, key));
-
-    try std.testing.expect(obj.deleteProperty(rt, key));
-    try std.testing.expectEqual(@as(?usize, null), slot.lookupOwnData(obj, key));
-
-    try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
-    try std.testing.expectEqual(engine.bytecode.ic.InstallResult.promoted_poly, slot.installOwnData(&rt.shapes, obj, key, 1));
-    try std.testing.expectEqual(@as(?usize, 1), slot.lookupOwnData(obj, key));
-}
-
-test "inline cache slot guards immediate prototype holder shape and version" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const proto = try core.Object.create(rt, core.class.ids.object, null);
-    defer proto.value().free(rt);
-
-    const obj = try core.Object.create(rt, core.class.ids.object, proto);
-    defer obj.value().free(rt);
-
-    const key = try rt.internAtom("proto_ic_key");
-    defer rt.atoms.free(key);
-
-    try proto.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(7), true, true, true));
-
-    var slot = engine.bytecode.ic.Slot{};
-    defer slot.deinit(&rt.shapes);
-
-    try std.testing.expectEqual(engine.bytecode.ic.InstallResult.installed_mono, slot.installProtoData(&rt.shapes, obj, proto, key, 0));
-    switch (slot.lookupProtoDataResult(obj, key)) {
-        .hit => |hit| {
-            try std.testing.expect(hit.holder == proto);
-            try std.testing.expectEqual(@as(usize, 0), hit.slot_index);
-        },
-        .miss, .invalidated => return error.ExpectedProtoIcHit,
-    }
-
-    try std.testing.expect(proto.deleteProperty(rt, key));
-    try std.testing.expectEqual(engine.bytecode.ic.ProtoLookupResult.invalidated, slot.lookupProtoDataResult(obj, key));
-}
-
 test "large object property lookup uses shape hash across delete and re-add" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -2829,7 +2770,6 @@ test "large object property lookup uses shape hash across delete and re-add" {
     }
 
     try std.testing.expect(obj.shape_ref.hasPropertyHash());
-    try std.testing.expect(obj.shape_ref.version > 0);
 
     const target = try rt.internAtom("prop_96");
     defer rt.atoms.free(target);
@@ -2837,9 +2777,7 @@ test "large object property lookup uses shape hash across delete and re-add" {
     defer before.free(rt);
     try std.testing.expectEqual(@as(?i32, 96), before.asInt32());
 
-    const version_before_delete = obj.shape_ref.version;
     try std.testing.expect(obj.deleteProperty(rt, target));
-    try std.testing.expect(obj.shape_ref.version > version_before_delete);
     try std.testing.expect(!obj.hasOwnProperty(target));
 
     try obj.defineOwnProperty(rt, target, core.Descriptor.data(core.JSValue.int32(777), true, true, true));
@@ -3325,10 +3263,10 @@ test "gc heap accounting verifier catches missing allocation entries" {
     defer obj.value().free(rt);
     try rt.gc.verifyHeapAccounting(rt);
 
-    const old_size_class = obj.header.size_class;
-    obj.header.size_class = 0;
+    const old_size_class = obj.header.meta().size_class;
+    obj.header.meta().size_class = 0;
     try std.testing.expectError(error.MissingHeapAllocation, rt.gc.verifyHeapAccounting(rt));
-    obj.header.size_class = old_size_class;
+    obj.header.meta().size_class = old_size_class;
     try rt.gc.verifyHeapAccounting(rt);
 }
 
@@ -3415,7 +3353,7 @@ test "gc object release does not allocate after refcount reaches zero" {
     rt.setMemoryLimit(null);
 
     try std.testing.expect(did_release);
-    try std.testing.expectEqual(@as(i32, 0), obj.header.rc);
+    try std.testing.expectEqual(@as(i32, 0), obj.header.meta().rc);
     try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
 
     // Clean up manually since we released/unlinked it
@@ -3602,16 +3540,16 @@ test "native pin retains direct object and counts nested pins" {
 
     try std.testing.expect(object.header.pinned());
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().pinned_cell_count);
-    try std.testing.expectEqual(@as(i32, 3), object.header.rc);
+    try std.testing.expectEqual(@as(i32, 3), object.header.meta().rc);
 
     value.free(rt);
-    try std.testing.expectEqual(@as(i32, 2), object.header.rc);
+    try std.testing.expectEqual(@as(i32, 2), object.header.meta().rc);
     try std.testing.expectEqual(@as(usize, live_empty_object_gc_count), rt.gc.liveCount());
 
     first_pin.release();
     try std.testing.expect(object.header.pinned());
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().pinned_cell_count);
-    try std.testing.expectEqual(@as(i32, 1), object.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), object.header.meta().rc);
 
     second_pin.release();
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().pinned_cell_count);
@@ -4173,9 +4111,9 @@ test "realm cached prototypes are strong cycle-collected references" {
     try function_proto.defineOwnProperty(rt, global_key, core.Descriptor.data(global.value(), true, true, true));
     try promise_proto.defineOwnProperty(rt, global_key, core.Descriptor.data(global.value(), true, true, true));
 
-    try std.testing.expectEqual(@as(i32, 3), global.header.rc);
-    try std.testing.expectEqual(@as(i32, 2), function_proto.header.rc);
-    try std.testing.expectEqual(@as(i32, 2), promise_proto.header.rc);
+    try std.testing.expectEqual(@as(i32, 3), global.header.meta().rc);
+    try std.testing.expectEqual(@as(i32, 2), function_proto.header.meta().rc);
+    try std.testing.expectEqual(@as(i32, 2), promise_proto.header.meta().rc);
 
     global.value().free(rt);
     function_proto.value().free(rt);
@@ -4446,7 +4384,7 @@ test "dead weak collection key entry is swept when target is destroyed" {
     key.value().free(rt);
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
-    try std.testing.expectEqual(@as(i32, 1), value.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), value.header.meta().rc);
 
     value.value().free(rt);
 
@@ -4470,7 +4408,7 @@ test "dead weak collection key entry is swept without freeing live value" {
 
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
-    try std.testing.expectEqual(@as(i32, 1), value.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), value.header.meta().rc);
 }
 
 test "live weak collection key preserves stored value" {
@@ -4903,7 +4841,7 @@ test "finalization registry dead target releases held value when target is destr
     target.value().free(rt);
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
-    try std.testing.expectEqual(@as(i32, 1), held.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), held.header.meta().rc);
 
     held.value().free(rt);
 
@@ -5053,7 +4991,7 @@ test "runtime cycle removal preserves externally rooted outgoing objects" {
     left.value().free(rt);
     right.value().free(rt);
     try std.testing.expectEqual(@as(usize, 5), rt.runObjectCycleRemoval());
-    try std.testing.expectEqual(@as(i32, 1), external.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), external.header.meta().rc);
     external.value().free(rt);
     try expectNoLiveGc(rt);
 }

@@ -622,6 +622,7 @@ pub const RealmValueSlot = enum(u8) {
     std_file_prototype,
     regexp_constructor,
     callsite_prototype,
+    regexp_match_result_template,
     count,
 };
 
@@ -1091,6 +1092,13 @@ fn exoticMethodsForClassId(class_id: class.ClassId) ?*const ExoticMethods {
 pub const BindingExistence = enum { absent, present, uninitialized };
 
 pub const Object = struct {
+    pub const gc_kind_tag: u8 = @intFromEnum(gc.GcKind.object);
+    comptime {
+        // GC prefix model: BlockHeader.meta() reads objectPtr-8, so header MUST
+        // be at offset 0. Zig reorders non-extern fields; if this fails, force
+        // header first with `align(16)` (see FunctionBytecode).
+        std.debug.assert(@offsetOf(@This(), "header") == 0);
+    }
     header: gc.GCObjectHeader,
     class_payload: class.Payload = null,
     shape_ref: *shape.Shape,
@@ -1108,7 +1116,7 @@ pub const Object = struct {
     class_id: class.ClassId,
     flags: ObjectFlags = .{},
     class_payload_kind: class.PayloadKind = .none,
-    weakref_count: usize = 0,
+    weakref_count: u32 = 0,
 
     pub fn expect(val: JSValue) !*Object {
         const header = val.refHeader() orelse return error.TypeError;
@@ -1312,7 +1320,7 @@ pub const Object = struct {
         markObjectAsPrototype(rt, prototype);
         const has_exotic_methods = classHasExoticMethods(rt, class_id, class_record);
         self.* = .{
-            .header = .{ .kind = .object },
+            .header = .{},
             .class_id = class_id,
             .class_payload = class_payload,
             .class_payload_kind = class_payload_kind,
@@ -1629,7 +1637,7 @@ pub const Object = struct {
         if (!self.finalizeInlineClassPayload(rt)) self.enqueueClassPayloadFinalizer(rt);
         const old_properties = self.properties;
         const old_property_capacity = self.propertyStorageCapacity();
-        const old_shape_props = self.shape_ref.props[0..@min(self.shape_ref.prop_count, old_properties.len)];
+        const old_shape_props = self.shape_ref.props()[0..@min(self.shape_ref.prop_count, old_properties.len)];
         self.properties = &.{};
         self.flags.has_property_storage = false;
         for (old_properties, 0..) |entry, index| {
@@ -1664,8 +1672,8 @@ pub const Object = struct {
             rt.shapes.release(object_shape);
         }
         if (rt.gc.phase != .deinit and self.weakref_count != 0) {
-            self.header.rc = 0;
-            self.header.flags.mark = false;
+            self.header.meta().rc = 0;
+            self.header.meta().flags.mark = false;
             return;
         }
         _ = rt.takeWeakObjectIdentity(self);
@@ -1673,9 +1681,9 @@ pub const Object = struct {
     }
 
     pub fn destroyDeadWeakHusk(rt: *JSRuntime, self: *Object) void {
-        std.debug.assert(self.header.rc == 0);
+        std.debug.assert(self.header.meta().rc == 0);
         std.debug.assert(self.weakref_count == 0);
-        std.debug.assert(!self.header.flags.mark);
+        std.debug.assert(!self.header.meta().flags.mark);
         const inline_layout = inlineClassPayloadLayout(rt.classes.record(self.class_id));
         _ = rt.takeWeakObjectIdentity(self);
         freeObjectAllocation(rt, self, inline_layout);
@@ -1763,7 +1771,7 @@ pub const Object = struct {
         var index: usize = 0;
         while (index < rt.borrowed_reference_holders.len) {
             const current = rt.borrowed_reference_holders[index];
-            if (current.header.rc == 0) {
+            if (current.header.meta().rc == 0) {
                 rt.unregisterBorrowedReferenceHolder(current);
                 continue;
             }
@@ -1799,7 +1807,7 @@ pub const Object = struct {
         var read_index: usize = 0;
         while (read_index < rt.borrowed_reference_holders.len) : (read_index += 1) {
             const current = rt.borrowed_reference_holders[read_index];
-            if (current.header.rc != 0) {
+            if (current.header.meta().rc != 0) {
                 if (write_index != read_index) rt.borrowed_reference_holders[write_index] = current;
                 write_index += 1;
                 continue;
@@ -1888,7 +1896,7 @@ pub const Object = struct {
         {
             var gc_iter = rt.gc.objectIterator();
             while (gc_iter.next()) |h| {
-                if (h.kind != .object or h.flags.mark) continue;
+                if (h.meta().kind != .object or h.meta().flags.mark) continue;
                 const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                 const payload = obj.collectionPayloadConst() orelse continue;
                 if (payload.weak_entries.len == 0) continue;
@@ -1902,7 +1910,7 @@ pub const Object = struct {
         }
 
         for (weak_holders.items) |obj| {
-            if (obj.header.rc == 0) continue;
+            if (obj.header.meta().rc == 0) continue;
             obj.sweepCycleGarbageWeakCollectionEntriesForHolder(rt, internal_bytecodes);
         }
     }
@@ -5281,7 +5289,7 @@ pub const Object = struct {
     }
 
     fn traceChildren(rt: *JSRuntime, header: *gc.Header, visitor: anytype) void {
-        switch (header.kind) {
+        switch (header.meta().kind) {
             .object => {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", header));
                 obj.traceChildEdgesNoFail(rt, visitor);
@@ -5304,7 +5312,7 @@ pub const Object = struct {
     }
 
     inline fn headerHasTraceableChildren(header: *const gc.Header) bool {
-        return header.kind == .object or header.kind == .function_bytecode or header.kind == .var_ref or header.kind == .shape;
+        return header.metaConst().kind == .object or header.metaConst().kind == .function_bytecode or header.metaConst().kind == .var_ref or header.metaConst().kind == .shape;
     }
 
     const DecrefVisitor = struct {
@@ -5343,8 +5351,8 @@ pub const Object = struct {
 
         fn visitHeader(self: DecrefVisitor, h: *gc.Header) void {
             _ = self;
-            if (h.rc == 0) return;
-            h.rc -= 1;
+            if (h.meta().rc == 0) return;
+            h.meta().rc -= 1;
         }
     };
 
@@ -5383,9 +5391,9 @@ pub const Object = struct {
         }
 
         fn visitHeader(self: ScanIncrefVisitor, h: *gc.Header) void {
-            h.rc += 1;
-            if (headerHasTraceableChildren(h) and h.flags.mark) {
-                h.flags.mark = false;
+            h.meta().rc += 1;
+            if (headerHasTraceableChildren(h) and h.meta().flags.mark) {
+                h.meta().flags.mark = false;
                 traceChildren(self.rt, h, self);
             }
         }
@@ -5427,7 +5435,7 @@ pub const Object = struct {
 
         fn visitHeader(self: ScanRestoreVisitor, h: *gc.Header) void {
             _ = self;
-            h.rc += 1;
+            h.meta().rc += 1;
         }
     };
 
@@ -5439,7 +5447,7 @@ pub const Object = struct {
         {
             var gc_iter = rt.gc.objectIterator();
             while (gc_iter.next()) |h| {
-                if (h.kind != .object) continue;
+                if (h.meta().kind != .object) continue;
                 const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                 if (!obj.hasWeakPayloadReferences()) continue;
                 gc.retain(&obj.header);
@@ -5452,7 +5460,7 @@ pub const Object = struct {
         }
 
         for (weak_holders.items) |obj| {
-            if (obj.header.rc == 0) continue;
+            if (obj.header.meta().rc == 0) continue;
             try obj.sweepDeadWeakPayloadReferences(rt);
         }
     }
@@ -5576,9 +5584,9 @@ pub const Object = struct {
         defer {
             var gc_iter = rt.gc.objectIterator();
             while (gc_iter.next()) |h| {
-                h.flags.mark = false;
-                h.flags.cycle_visited = false;
-                h.flags.cycle_preserved = false;
+                h.meta().flags.mark = false;
+                h.meta().flags.cycle_visited = false;
+                h.meta().flags.cycle_preserved = false;
             }
         }
 
@@ -5586,7 +5594,7 @@ pub const Object = struct {
         {
             var gc_iter = rt.gc.objectIterator();
             while (gc_iter.next()) |h| {
-                h.flags.mark = true;
+                h.meta().flags.mark = true;
             }
 
             gc_iter = rt.gc.objectIterator();
@@ -5599,8 +5607,8 @@ pub const Object = struct {
         {
             var gc_iter = rt.gc.objectIterator();
             while (gc_iter.next()) |h| {
-                if (h.rc > 0 and h.flags.mark) {
-                    h.flags.mark = false;
+                if (h.meta().rc > 0 and h.meta().flags.mark) {
+                    h.meta().flags.mark = false;
                     traceChildren(rt, h, ScanIncrefVisitor{ .rt = rt });
                 }
             }
@@ -5612,7 +5620,7 @@ pub const Object = struct {
         {
             var gc_iter = rt.gc.objectIterator();
             while (gc_iter.next()) |h| {
-                if (h.flags.mark) garbage_headers.appendAssumeCapacity(h);
+                if (h.meta().flags.mark) garbage_headers.appendAssumeCapacity(h);
             }
         }
 
@@ -5628,13 +5636,13 @@ pub const Object = struct {
         {
             var gc_iter = rt.gc.objectIterator();
             while (gc_iter.next()) |h| {
-                h.flags.cycle_visited = false;
-                h.flags.cycle_preserved = false;
+                h.meta().flags.cycle_visited = false;
+                h.meta().flags.cycle_preserved = false;
             }
             for (garbage_headers.items) |h| {
-                if (h.flags.mark) h.flags.cycle_visited = true;
-                if (h.kind == .function_bytecode) {
-                    if (!h.flags.mark) continue;
+                if (h.meta().flags.mark) h.meta().flags.cycle_visited = true;
+                if (h.meta().kind == .function_bytecode) {
+                    if (!h.meta().flags.mark) continue;
                     const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                     try free_internal_bytecodes.put(@intFromPtr(fb), {});
                 }
@@ -5646,7 +5654,7 @@ pub const Object = struct {
         var garbage_count: usize = 0;
         {
             for (garbage_headers.items) |h| {
-                if ((h.kind == .object or h.kind == .var_ref or h.kind == .shape) and h.flags.mark) garbage_count += 1;
+                if ((h.meta().kind == .object or h.meta().kind == .var_ref or h.meta().kind == .shape) and h.meta().flags.mark) garbage_count += 1;
             }
         }
 
@@ -5656,16 +5664,16 @@ pub const Object = struct {
 
         if (garbage_count == 0) {
             for (garbage_headers.items) |h| {
-                if (h.kind == .function_bytecode) {
-                    if (!h.flags.mark) continue;
+                if (h.meta().kind == .function_bytecode) {
+                    if (!h.meta().flags.mark) continue;
                     const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                     clearFunctionBytecodeReferencesToVisited(rt, fb, &free_internal_bytecodes);
                 }
             }
 
             for (garbage_headers.items) |h| {
-                if (h.kind == .function_bytecode) {
-                    if (!h.flags.mark) continue;
+                if (h.meta().kind == .function_bytecode) {
+                    if (!h.meta().flags.mark) continue;
                     rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
                     function_bytecode_mod.destroyFromHeader(rt, h);
                 }
@@ -5674,17 +5682,17 @@ pub const Object = struct {
         }
 
         for (garbage_headers.items) |h| {
-            if (!h.flags.mark) continue;
-            if (h.kind == .object) {
+            if (!h.meta().flags.mark) continue;
+            if (h.meta().kind == .object) {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                 try obj.clearReferencesToVisited(rt, &free_internal_bytecodes);
-            } else if (h.kind == .var_ref) {
+            } else if (h.meta().kind == .var_ref) {
                 const ref: *var_ref_mod.VarRef = @alignCast(@fieldParentPtr("header", h));
                 clearValueReferenceToVisited(rt, ref.varRefValueSlot(), &free_internal_bytecodes);
-            } else if (h.kind == .function_bytecode) {
+            } else if (h.meta().kind == .function_bytecode) {
                 const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                 clearFunctionBytecodeReferencesToVisited(rt, fb, &free_internal_bytecodes);
-            } else if (h.kind == .shape) {
+            } else if (h.meta().kind == .shape) {
                 const shape_ref: *shape.Shape = @alignCast(@fieldParentPtr("header", h));
                 rt.shapes.clearReferencesToVisited(shape_ref);
             }
@@ -5696,19 +5704,19 @@ pub const Object = struct {
         try garbage_shapes.ensureTotalCapacity(rt.memory.persistent_allocator, garbage_count);
         defer garbage_shapes.deinit(rt.memory.persistent_allocator);
         for (garbage_headers.items) |h| {
-            if (!h.flags.mark or h.kind != .shape) continue;
+            if (!h.meta().flags.mark or h.meta().kind != .shape) continue;
             const shape_ref: *shape.Shape = @alignCast(@fieldParentPtr("header", h));
             garbage_shapes.appendAssumeCapacity(shape_ref);
         }
 
         for (garbage_headers.items) |h| {
-            if (!h.flags.mark) continue;
-            if (h.kind == .object) {
+            if (!h.meta().flags.mark) continue;
+            if (h.meta().kind == .object) {
                 destroyFromHeader(rt, h);
-            } else if (h.kind == .var_ref) {
+            } else if (h.meta().kind == .var_ref) {
                 rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
                 var_ref_mod.VarRef.destroyFromHeader(rt, h);
-            } else if (h.kind == .function_bytecode) {
+            } else if (h.meta().kind == .function_bytecode) {
                 rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
                 function_bytecode_mod.destroyFromHeader(rt, h);
             }
@@ -5716,8 +5724,8 @@ pub const Object = struct {
 
         for (garbage_shapes.items) |shape_ref| {
             const h = &shape_ref.header;
-            if (!h.flags.mark) continue;
-            if (h.flags.finalizing) continue;
+            if (!h.meta().flags.mark) continue;
+            if (h.meta().flags.finalizing) continue;
             if (h.prev == null and h.next == null and rt.gc.gc_object_head != h and rt.gc.gc_object_tail != h) continue;
             rt.shapes.destroyFromHeader(h);
         }
@@ -5756,7 +5764,7 @@ pub const Object = struct {
             while (iterator.next()) |address| {
                 const function_bytecode: *const FunctionBytecode = @ptrFromInt(address.*);
                 const internal_refs = countFunctionBytecodeRefsFromFunctionBytecodes(function_bytecode, candidates);
-                const ref_count = function_bytecode.header.rc;
+                const ref_count = function_bytecode.header.metaConst().rc;
                 if (ref_count == internal_refs or (ref_count != 0 and ref_count - 1 == internal_refs)) continue;
 
                 _ = candidates.remove(address.*);
@@ -5812,7 +5820,7 @@ pub const Object = struct {
 
     fn objectFromValue(stored: JSValue) ?*Object {
         const stored_header = stored.refHeader() orelse return null;
-        if (stored_header.kind != .object) return null;
+        if (stored_header.meta().kind != .object) return null;
         return @fieldParentPtr("header", stored_header);
     }
 
@@ -5851,7 +5859,7 @@ pub const Object = struct {
     }
 
     fn collectReachableObjects(rt: *JSRuntime, visited: *ObjectVisitSet, current: *Object) ObjectGraphError!void {
-        if (current.header.rc == 0) return;
+        if (current.header.meta().rc == 0) return;
         const visit = try visited.getOrPut(@intFromPtr(current));
         if (visit.found_existing) return;
         try current.collectDirectChildObjects(rt, visited);
@@ -6004,8 +6012,12 @@ pub const Object = struct {
         // visit them from there. Visitors only read symbol atoms (set
         // insertion / no-op), so revisiting a shared shape from several
         // objects is safe.
-        for (self.shape_ref.props[0..self.shape_ref.prop_count]) |*prop| {
-            try Helper.callVisitSymbol(visitor, &prop.atom_id);
+        for (self.shape_ref.props()[0..self.shape_ref.prop_count]) |*prop| {
+            // `atom_id` is a packed-struct field (bit offset 32); visitors only
+            // read symbol atoms (set insertion / no-op, never mutate a shared
+            // shape's key), so pass a byte-aligned local copy.
+            var key_atom = prop.atom_id;
+            try Helper.callVisitSymbol(visitor, &key_atom);
         }
         // Only entries with a matching shape property record carry a derivable
         // kind. A property mid-`appendPreparedPropertyEntry` can have an entry
@@ -6296,7 +6308,7 @@ pub const Object = struct {
 
     fn objectFromWeakCandidate(stored: JSValue) ?*Object {
         const header = stored.refHeader() orelse return null;
-        if (header.kind != .object) return null;
+        if (header.meta().kind != .object) return null;
         return @alignCast(@fieldParentPtr("header", header));
     }
 
@@ -6390,11 +6402,11 @@ pub const Object = struct {
     /// True when `child` is condemned garbage in the current cycle-removal round
     /// (it was scanned and was not preserved/resurrected).
     inline fn objectIsCycleGarbage(child: *const Object) bool {
-        return child.header.flags.cycle_visited and !child.header.flags.cycle_preserved;
+        return child.header.metaConst().flags.cycle_visited and !child.header.metaConst().flags.cycle_preserved;
     }
 
     inline fn headerIsCycleGarbage(header: *const gc.Header) bool {
-        return header.flags.cycle_visited and !header.flags.cycle_preserved;
+        return header.metaConst().flags.cycle_visited and !header.metaConst().flags.cycle_preserved;
     }
 
     fn clearReferencesToVisited(
@@ -6493,8 +6505,9 @@ pub const Object = struct {
 
     fn functionBytecodeFromValue(stored: JSValue) ?*FunctionBytecode {
         const header = stored.objectHeader() orelse return null;
-        if (header.kind != .function_bytecode) return null;
-        return @fieldParentPtr("header", header);
+        if (header.meta().kind != .function_bytecode) return null;
+        const aligned: *align(16) @TypeOf(header.*) = @alignCast(header);
+        return @fieldParentPtr("header", aligned);
     }
 
     fn collectInternalFunctionBytecodes(
@@ -6550,7 +6563,7 @@ pub const Object = struct {
                 const internal_refs =
                     (try countFunctionBytecodeRefsFromVisitedObjects(rt, function_bytecode, visited)) +
                     countFunctionBytecodeRefsFromFunctionBytecodes(function_bytecode, internal_bytecodes);
-                if (internal_refs == function_bytecode.header.rc) continue;
+                if (internal_refs == function_bytecode.header.meta().rc) continue;
 
                 _ = internal_bytecodes.remove(address.*);
                 removed = true;
@@ -6561,7 +6574,7 @@ pub const Object = struct {
     }
 
     fn functionBytecodeFromGcHeader(header: *gc.GCObjectHeader) ?*const FunctionBytecode {
-        if (header.kind != .function_bytecode) return null;
+        if (header.meta().kind != .function_bytecode) return null;
         return @alignCast(@fieldParentPtr("header", header));
     }
 
@@ -7691,7 +7704,7 @@ pub const Object = struct {
 
     pub fn getOwnDataPropertyValueAt(self: *const Object, index: usize, atom_id: atom.Atom) ?JSValue {
         if (self.hasExoticMethods() or index >= self.shapeProps().len) return null;
-        const prop = self.shape_ref.props[index];
+        const prop = self.shape_ref.props()[index];
         const prop_flags = property.Flags.fromBits(prop.flags);
         if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.kind != .data) return null;
         return self.properties[index].slot.data.dup();
@@ -8812,7 +8825,7 @@ pub const Object = struct {
 
     pub inline fn setOwnDataPropertyAtForLexicalSyncOwned(self: *Object, rt: *JSRuntime, index: usize, atom_id: atom.Atom, new_value: JSValue) !bool {
         if (self.hasExoticMethods() or index >= self.shapeProps().len) return false;
-        const prop = self.shape_ref.props[index];
+        const prop = self.shape_ref.props()[index];
         const prop_flags = property.Flags.fromBits(prop.flags);
         if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.kind != .data) return false;
         const entry = &self.properties[index];
@@ -9340,7 +9353,7 @@ pub const Object = struct {
     }
 
     fn shapeNeedsMutationCopy(self: Object) bool {
-        return self.shape_ref.refCount() != 1 or self.shape_ref.is_transition_cacheable or self.shape_ref.parent != null;
+        return self.shape_ref.refCount() != 1;
     }
 
     fn ensureUniqueShapeForMutation(self: *Object, rt: *JSRuntime) !void {
@@ -9386,7 +9399,7 @@ pub const Object = struct {
     }
 
     fn propertyStorageCapacity(self: *const Object) usize {
-        return if (self.flags.has_property_storage) self.shape_ref.props.len else 0;
+        return if (self.flags.has_property_storage) self.shape_ref.props().len else 0;
     }
 
     fn replaceProperty(self: *Object, rt: *JSRuntime, index: usize, desc: descriptor.Descriptor) !void {
@@ -9425,12 +9438,12 @@ pub const Object = struct {
     /// metadata (atom + flags) lives in the shape; `self.properties`
     /// holds only the value slots, indexed 1:1 with the shape props.
     pub inline fn propAtomAt(self: *const Object, index: usize) atom.Atom {
-        return self.shape_ref.props[index].atom_id;
+        return self.shape_ref.props()[index].atom_id;
     }
 
     /// Flags for the own property stored at `index` (see `propAtomAt`).
     pub inline fn propFlagsAt(self: *const Object, index: usize) property.Flags {
-        return property.Flags.fromBits(self.shape_ref.props[index].flags);
+        return property.Flags.fromBits(self.shape_ref.props()[index].flags);
     }
 
     // --- Typed property-slot API (L2 chokepoint) --------------------------
@@ -9525,13 +9538,13 @@ pub const Object = struct {
     /// Clamped to the entry count so a partially appended property
     /// (entry pushed, shape not yet transitioned) is never exposed.
     pub inline fn shapeProps(self: *const Object) []const shape.Property {
-        return self.shape_ref.props[0..@min(self.shape_ref.prop_count, self.properties.len)];
+        return self.shape_ref.props()[0..@min(self.shape_ref.prop_count, self.properties.len)];
     }
 
     fn findPropertyProbeTrusted(self: *const Object, atom_id: atom.Atom) ?PropertyProbe {
         const prop_count = self.shape_ref.prop_count;
         std.debug.assert(prop_count <= self.properties.len);
-        const props = self.shape_ref.props.ptr;
+        const props = self.shape_ref.props().ptr;
         std.debug.assert(self.shape_ref.hasPropertyHash());
         var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
         while (shape_index != shape.no_property_index) {
@@ -9552,6 +9565,33 @@ pub const Object = struct {
         return .{ .value = .{ .index = lookup.index, .flags = flags, .value = self.properties[lookup.index].slot.data } };
     }
 
+    pub const OwnDataValueResult = union(enum) {
+        value: JSValue,
+        missing,
+        slow,
+    };
+
+    /// Lean own-data-property lookup for the hot get_field path: returns just the
+    /// BORROWED slot value (16B) instead of materializing the {index, flags, value}
+    /// probe struct, so the decoded flags/index stay in registers rather than
+    /// spilling to the stack. Mirrors qjs find_own_property + the data-kind guard;
+    /// folds the chain walk, deleted skip, and kind check into one pass.
+    pub inline fn findOwnDataValueFast(self: *const Object, atom_id: atom.Atom) OwnDataValueResult {
+        const props = self.shape_ref.props().ptr;
+        var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
+        while (shape_index != shape.no_property_index) {
+            const index: usize = @intCast(shape_index);
+            const prop = props[index];
+            shape_index = prop.hash_next;
+            const flags = property.Flags.fromBits(prop.flags);
+            if (prop.atom_id == atom_id and !flags.deleted) {
+                if (flags.kind != .data) return .slow;
+                return .{ .value = self.properties[index].slot.data };
+            }
+        }
+        return .missing;
+    }
+
     pub fn findWritableOwnDataPropertyFast(self: *Object, atom_id: atom.Atom) ?WritableOwnDataPropertyFastLookup {
         const lookup = self.findPropertyProbeTrusted(atom_id) orelse return null;
         const flags = property.Flags.fromBits(lookup.prop.flags);
@@ -9568,7 +9608,7 @@ pub const Object = struct {
         while (shape_index != shape.no_property_index and steps < self.shape_ref.prop_count) : (steps += 1) {
             const index: usize = @intCast(shape_index);
             if (index >= self.shape_ref.prop_count) break;
-            shape_index = self.shape_ref.props[index].hash_next;
+            shape_index = self.shape_ref.props()[index].hash_next;
             if (index >= props.len) continue;
             const prop = props[index];
             if (prop.atom_id == atom_id and !property.Flags.fromBits(prop.flags).deleted) return index;

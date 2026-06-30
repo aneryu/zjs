@@ -1,5 +1,4 @@
 const std = @import("std");
-const build_options = @import("build_options");
 const zjs = @import("zjs");
 const engine = zjs;
 
@@ -369,64 +368,6 @@ test "FunctionDef: LabelSlot and JumpSlot" {
 
     try std.testing.expectEqual(@as(i32, 1), fd.jump_count);
     try std.testing.expectEqual(@as(i32, 100), fd.jump_slots[0].op);
-}
-
-test "Bytecode IC allocation skips direct eval and with functions" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const name = try rt.internAtom("ic_bypass");
-    const x_atom = try rt.internAtom("x");
-    defer rt.atoms.free(name);
-    defer rt.atoms.free(x_atom);
-
-    const op = bytecode.opcode.op;
-
-    var cached = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer cached.deinit(rt);
-    var cached_code = [_]u8{0} ** 4;
-    cached_code[0] = op.get_var;
-    std.mem.writeInt(u16, cached_code[1..3], 0, .little);
-    cached_code[3] = op.return_undef;
-    cached.var_ref_names = try rt.memory.alloc(core.Atom, 1);
-    cached.var_ref_names[0] = rt.atoms.dup(x_atom);
-    try cached.setCode(&cached_code);
-    try cached.allocateIcSlots();
-    const cacheable_ic_slot_count: usize = if (build_options.zjs_enable_ic) 1 else 0;
-    try std.testing.expectEqual(cacheable_ic_slot_count, cached.ic_slots.len);
-    try std.testing.expectEqual(build_options.zjs_enable_ic, cached.icSlotForPc(0) != null);
-
-    var direct_eval = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer direct_eval.deinit(rt);
-    var direct_eval_code = [_]u8{0} ** 9;
-    direct_eval_code[0] = op.get_var;
-    std.mem.writeInt(u16, direct_eval_code[1..3], 0, .little);
-    direct_eval_code[3] = op.eval;
-    std.mem.writeInt(u32, direct_eval_code[4..8], 0, .little);
-    direct_eval_code[8] = op.return_undef;
-    direct_eval.var_ref_names = try rt.memory.alloc(core.Atom, 1);
-    direct_eval.var_ref_names[0] = rt.atoms.dup(x_atom);
-    try direct_eval.setCode(&direct_eval_code);
-    try direct_eval.allocateIcSlots();
-    try std.testing.expectEqual(@as(usize, 0), direct_eval.ic_slots.len);
-    try std.testing.expectEqual(@as(usize, 0), direct_eval.ic_site_ids.len);
-
-    var with_function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer with_function.deinit(rt);
-    var with_code = [_]u8{0} ** 14;
-    with_code[0] = op.get_var;
-    std.mem.writeInt(u16, with_code[1..3], 0, .little);
-    with_code[3] = op.with_get_var;
-    std.mem.writeInt(u32, with_code[4..8], x_atom, .little);
-    std.mem.writeInt(u32, with_code[8..12], 0, .little);
-    with_code[12] = 1;
-    with_code[13] = op.return_undef;
-    with_function.var_ref_names = try rt.memory.alloc(core.Atom, 1);
-    with_function.var_ref_names[0] = rt.atoms.dup(x_atom);
-    try with_function.setCode(&with_code);
-    try with_function.allocateIcSlots();
-    try std.testing.expectEqual(@as(usize, 0), with_function.ic_slots.len);
-    try std.testing.expectEqual(@as(usize, 0), with_function.ic_site_ids.len);
 }
 
 test "resolve_variables: scope_get_var → get_var" {
@@ -1864,24 +1805,6 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
     try std.testing.expectEqual(function_def.FunctionKind.async_generator, fb.func_kind);
     try std.testing.expectEqual(@as(usize, 11), fb.byte_code.len);
     try std.testing.expectEqual(@as(i32, 11), fb.byte_code_len);
-    const cacheable_ic_slot_count: usize = if (build_options.zjs_enable_ic) 1 else 0;
-    try std.testing.expectEqual(cacheable_ic_slot_count, fb.ic_slots.len);
-    if (build_options.zjs_enable_ic) {
-        if (fb.ic_site_ids.len != 0) {
-            try std.testing.expectEqual(fb.byte_code.len, fb.ic_site_ids.len);
-            try std.testing.expectEqual(@as(usize, 0), fb.ic_site_ids[6]);
-        } else {
-            try std.testing.expectEqual(@as(usize, 1), fb.ic_sites.len);
-            try std.testing.expectEqual(@as(usize, 6), fb.ic_sites[0].pc);
-            try std.testing.expectEqual(@as(usize, 0), fb.ic_sites[0].slot_index);
-        }
-    } else {
-        try std.testing.expectEqual(@as(usize, 0), fb.ic_site_ids.len);
-        try std.testing.expectEqual(@as(usize, 0), fb.ic_sites.len);
-    }
-    const bc_view = bytecode.asBytecodeView(fb, rt);
-    try std.testing.expectEqual(build_options.zjs_enable_ic, bc_view.icSlotForPc(6) != null);
-    try std.testing.expect(bc_view.icSlotForPc(0) == null);
     try std.testing.expectEqual(op.push_atom_value, fb.byte_code[0]);
     try std.testing.expectEqual(op.drop, fb.byte_code[5]);
     try std.testing.expectEqual(op.get_var, fb.byte_code[6]);
@@ -1914,8 +1837,6 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
     try std.testing.expectEqualStrings("async function* inner(arg) {}", fb.source.?);
 
     const view = bytecode.asBytecodeView(fb, rt);
-    try std.testing.expectEqualSlices(engine.bytecode.ic.Slot, fb.ic_slots, view.ic_slots);
-    try std.testing.expectEqualSlices(usize, fb.ic_site_ids, view.ic_site_ids);
     try std.testing.expect(view.flags.is_strict);
     try std.testing.expect(view.flags.is_async);
     try std.testing.expect(view.flags.is_generator);
@@ -2008,7 +1929,7 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
 
     const heap_bytes = fb.heapByteSize();
     try std.testing.expect(heap_bytes >= large_threshold);
-    try std.testing.expectEqual(@as(u16, @intCast(@min(heap_bytes, std.math.maxInt(u16)))), fb.header.size_class);
+    try std.testing.expectEqual(@as(u16, @intCast(@min(heap_bytes, std.math.maxInt(u16)))), fb.header.meta().size_class);
 
     const stats = rt.gcStats();
     try std.testing.expectEqual(@as(usize, 1), stats.large_alloc_count);

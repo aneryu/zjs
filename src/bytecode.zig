@@ -1175,7 +1175,6 @@ pub const function_bytecode = struct {
 
     const atom = @import("core/atom.zig");
     const gc = @import("core/gc.zig");
-    const ic_mod = @import("core/ic.zig");
     const memory = @import("core/memory.zig");
     const runtime = @import("core/runtime.zig");
     const shape = @import("core/shape.zig");
@@ -1275,11 +1274,15 @@ pub const function_bytecode = struct {
     /// into a single `block` allocation; the slice fields then point inside
     /// that block (see `BlockBuilder`). Fixtures that populate the fields with
     /// individual allocations leave `block` empty, and `deinit` falls back to
-    /// the legacy per-slice frees. The IC tables (`ic_slots` / `ic_site_ids` /
-    /// `ic_sites`) always stay independent allocations because they are
-    /// runtime-mutable and independently released via `deinitIcSlots`.
+    /// the legacy per-slice frees.
     pub const FunctionBytecodeImpl = struct {
-        header: gc.GCObjectHeader,
+        pub const gc_kind_tag: u8 = @intFromEnum(gc.GcKind.function_bytecode);
+        comptime {
+            // align(16) forces this many-pointer-field struct to keep header at
+            // offset 0 (Zig would otherwise reorder it deep into the struct).
+            std.debug.assert(@offsetOf(@This(), "header") == 0);
+        }
+        header: gc.GCObjectHeader align(16),
         memory: *memory.MemoryAccount,
         atoms: *atom.AtomTable,
 
@@ -1339,9 +1342,6 @@ pub const function_bytecode = struct {
         var_ref_count: u16 = 0,
         closure_var_count: u16 = 0,
         cpool_count: i32 = 0,
-        ic_slots: []ic_mod.Slot = &.{},
-        ic_site_ids: []usize = &.{},
-        ic_sites: []ic_mod.Site = &.{},
         call_sites: []CallSite = &.{},
 
         /// Cached execution view used by the VM call machinery. QuickJS keeps a
@@ -1371,9 +1371,7 @@ pub const function_bytecode = struct {
 
         pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable, name: atom.Atom) FunctionBytecodeImpl {
             return .{
-                .header = .{
-                    .kind = .function_bytecode,
-                },
+                .header = .{},
                 .memory = account,
                 .atoms = atoms,
                 .func_name = atoms.dup(name),
@@ -1465,7 +1463,6 @@ pub const function_bytecode = struct {
                 if (owned) self.memory.free(u8, @constCast(src));
             }
             self.source_len = 0;
-            self.deinitIcSlots(&rt.shapes);
 
             self.class_fields_init = null;
             self.cpool = &.{};
@@ -1477,9 +1474,6 @@ pub const function_bytecode = struct {
 
         pub fn heapByteSize(self: *const FunctionBytecodeImpl) usize {
             var bytes: usize = @sizeOf(FunctionBytecodeImpl);
-            bytes = addSliceBytes(bytes, ic_mod.Slot, self.ic_slots.len);
-            bytes = addSliceBytes(bytes, usize, self.ic_site_ids.len);
-            bytes = addSliceBytes(bytes, ic_mod.Site, self.ic_sites.len);
             bytes = addSaturating(bytes, self.execution_view_heap_size);
             if (self.block.len != 0) return addSaturating(bytes, self.block.len);
             bytes = addSliceBytes(bytes, u8, self.byte_code.len);
@@ -1507,26 +1501,6 @@ pub const function_bytecode = struct {
             return bytes;
         }
 
-        pub fn deinitIcSlots(self: *FunctionBytecodeImpl, registry: ?*shape.Registry) void {
-            const ic_slots = self.ic_slots;
-            self.ic_slots = &.{};
-            if (ic_slots.len != 0 and @intFromPtr(ic_slots.ptr) != 0) {
-                if (registry) |shape_registry| {
-                    for (ic_slots) |*slot| slot.deinit(shape_registry);
-                }
-                self.memory.free(ic_mod.Slot, ic_slots);
-            }
-            const ic_site_ids = self.ic_site_ids;
-            self.ic_site_ids = &.{};
-            if (ic_site_ids.len != 0 and @intFromPtr(ic_site_ids.ptr) != 0) {
-                self.memory.free(usize, ic_site_ids);
-            }
-            const ic_sites = self.ic_sites;
-            self.ic_sites = &.{};
-            if (ic_sites.len != 0 and @intFromPtr(ic_sites.ptr) != 0) {
-                self.memory.free(ic_mod.Site, ic_sites);
-            }
-        }
     };
 
     /// Alignment of the consolidated `FunctionBytecodeImpl.block` allocation. Must
@@ -6115,7 +6089,6 @@ pub const pipeline_finalize = struct {
         fb.var_ref_count = @intCast(fd.var_ref_count);
         fb.closure_var_count = @intCast(fd.closure_var_count);
         fb.stack_size = lowered.stack_size;
-        try bytecode_function.allocateFunctionBytecodeIcSlots(fb);
 
         // Copy source location
         fb.atoms.replace(&fb.filename, fd.filename);
@@ -6277,7 +6250,6 @@ pub const pipeline_finalize = struct {
 
         // Phase 3c: compute_stack_size over resolved QuickJS-format bytecode.
         function.stack_size = try computeStackSizeForCurrentBytecode(function.code);
-        try function.allocateIcSlots();
 
         // Defensive fall-off-end backstop for the register-resident dispatch (which
         // dropped the per-op bounds check): parser output always ends in a cold
@@ -6886,8 +6858,9 @@ pub const pipeline_finalize = struct {
 
     fn functionBytecodeFromValueMutable(value: JSValue) ?*fb_mod.FunctionBytecode {
         const header = value.objectHeader() orelse return null;
-        if (header.kind != .function_bytecode) return null;
-        return @fieldParentPtr("header", header);
+        if (header.meta().kind != .function_bytecode) return null;
+        const aligned: *align(16) @TypeOf(header.*) = @alignCast(header);
+        return @fieldParentPtr("header", aligned);
     }
 
     fn syncFunctionDefCpool(function: *bytecode_function.Bytecode, fd: *const function_def_mod.FunctionDef) !void {
@@ -6906,7 +6879,6 @@ const function_mod = struct {
     const function_bytecode_mod = function_bytecode;
     const memory = @import("core/memory.zig");
     const JSValue = @import("core/value.zig").JSValue;
-    const ic_mod = @import("core/ic.zig");
     const pc2line = pipeline_pc2line;
     const runtime = @import("core/runtime.zig");
 
@@ -7028,8 +7000,6 @@ const function_mod = struct {
         argc: u16,
     };
 
-    const IcSite = ic_mod.Site;
-
     pub const BytecodeImpl = struct {
         memory: *memory.MemoryAccount,
         atoms: *atom.AtomTable,
@@ -7085,9 +7055,6 @@ const function_mod = struct {
         constants: constant.Pool,
         module_record: ?module.Record = null,
         debug_table: ?debug.Table = null,
-        ic_slots: []ic_mod.Slot = &.{},
-        ic_site_ids: []usize = &.{},
-        ic_sites: []IcSite = &.{},
         direct_call_sites: []DirectCallSite = &.{},
         direct_call_sites_capacity: usize = 0,
         call_sites: []function_bytecode_mod.CallSite = &.{},
@@ -7137,57 +7104,9 @@ const function_mod = struct {
             self.debug_table = null;
             if (module_record) |*record| record.deinit();
             if (debug_table) |*table| table.deinit();
-            self.deinitIcSlots(rt);
             self.deinitDirectCallSites();
             self.deinitCallSites();
             if (owns_pc2line_buf and pc2line_buf.len != 0) self.memory.free(u8, pc2line_buf);
-        }
-
-        pub fn allocateIcSlots(self: *BytecodeImpl) !void {
-            self.deinitIcSlots(null);
-            if (!build_options.zjs_enable_ic) return;
-            if (self.code.len == 0) return;
-            if (bytecodeSkipsPropertyIc(self.code)) return;
-            const site_count = countIcSitesInCode(self.code);
-            if (site_count == 0) return;
-            const use_dense_sites = shouldUseDenseIcSiteIds(self.code.len, site_count);
-            var site_ids: []usize = &.{};
-            if (use_dense_sites) site_ids = try allocateIcSiteIds(self.memory, self.code);
-            errdefer if (site_ids.len != 0) self.memory.free(usize, site_ids);
-            var sites: []IcSite = &.{};
-            if (!use_dense_sites) sites = try allocateIcSites(self.memory, self.code, site_count);
-            errdefer if (sites.len != 0) self.memory.free(IcSite, sites);
-            const slots = try self.memory.alloc(ic_mod.Slot, site_count);
-            errdefer self.memory.free(ic_mod.Slot, slots);
-            @memset(slots, .{});
-            self.ic_site_ids = site_ids;
-            self.ic_sites = sites;
-            self.ic_slots = slots;
-        }
-
-        fn deinitIcSlots(self: *BytecodeImpl, rt: ?*runtime.JSRuntime) void {
-            const ic_slots = self.ic_slots;
-            self.ic_slots = &.{};
-            if (ic_slots.len != 0 and @intFromPtr(ic_slots.ptr) != 0) {
-                if (rt) |runtime_ptr| {
-                    for (ic_slots) |*slot| slot.deinit(&runtime_ptr.shapes);
-                }
-                self.memory.free(ic_mod.Slot, ic_slots);
-            }
-            const ic_site_ids = self.ic_site_ids;
-            self.ic_site_ids = &.{};
-            if (ic_site_ids.len != 0 and @intFromPtr(ic_site_ids.ptr) != 0) {
-                self.memory.free(usize, ic_site_ids);
-            }
-            const ic_sites = self.ic_sites;
-            self.ic_sites = &.{};
-            if (ic_sites.len != 0 and @intFromPtr(ic_sites.ptr) != 0) {
-                self.memory.free(IcSite, ic_sites);
-            }
-        }
-
-        pub fn icSlotForPc(self: *const BytecodeImpl, site_pc: usize) ?*ic_mod.Slot {
-            return lookupIcSlotForPc(self.ic_slots, self.ic_site_ids, self.ic_sites, site_pc);
         }
 
         pub fn setCode(self: *BytecodeImpl, bytes: []const u8) !void {
@@ -7421,9 +7340,6 @@ const function_mod = struct {
             .global_var_names = fb.global_var_names,
             .global_vars = fb.global_vars,
             .private_bound_names = fb.private_bound_names,
-            .ic_slots = fb.ic_slots,
-            .ic_site_ids = fb.ic_site_ids,
-            .ic_sites = fb.ic_sites,
             .call_sites = fb.call_sites,
             .constants = .{ .memory = mem, .atoms = atoms, .values = fb.cpool },
         };
@@ -7464,149 +7380,9 @@ const function_mod = struct {
         mem.destroy(BytecodeImpl, view);
     }
 
-    pub fn allocateFunctionBytecodeIcSlots(fb: *FunctionBytecode) !void {
-        fb.deinitIcSlots(null);
-        if (!build_options.zjs_enable_ic) return;
-        if (fb.byte_code.len == 0) return;
-        if (bytecodeSkipsPropertyIc(fb.byte_code)) return;
-        const site_count = countIcSitesInCode(fb.byte_code);
-        if (site_count == 0) return;
-        const use_dense_sites = shouldUseDenseIcSiteIds(fb.byte_code.len, site_count);
-        var site_ids: []usize = &.{};
-        if (use_dense_sites) site_ids = try allocateIcSiteIds(fb.memory, fb.byte_code);
-        errdefer if (site_ids.len != 0) fb.memory.free(usize, site_ids);
-        var sites: []IcSite = &.{};
-        if (!use_dense_sites) sites = try allocateIcSites(fb.memory, fb.byte_code, site_count);
-        errdefer if (sites.len != 0) fb.memory.free(IcSite, sites);
-        const slots = try fb.memory.alloc(ic_mod.Slot, site_count);
-        errdefer fb.memory.free(ic_mod.Slot, slots);
-        @memset(slots, .{});
-        fb.ic_site_ids = site_ids;
-        fb.ic_sites = sites;
-        fb.ic_slots = slots;
-    }
-
-    pub fn functionBytecodeIcSlotForPc(fb: *const FunctionBytecode, site_pc: usize) ?*ic_mod.Slot {
-        return lookupIcSlotForPc(fb.ic_slots, fb.ic_site_ids, fb.ic_sites, site_pc);
-    }
-
-    fn lookupIcSlotForPc(ic_slots: []const ic_mod.Slot, ic_site_ids: []const usize, ic_sites: []const IcSite, site_pc: usize) ?*ic_mod.Slot {
-        if (ic_site_ids.len != 0) {
-            if (site_pc >= ic_site_ids.len) return null;
-            const site_id = ic_site_ids[site_pc];
-            if (site_id == std.math.maxInt(usize) or site_id >= ic_slots.len) return null;
-            return @constCast(&ic_slots[site_id]);
-        }
-        const site = findIcSite(ic_sites, site_pc) orelse return null;
-        if (site.slot_index >= ic_slots.len) return null;
-        return @constCast(&ic_slots[site.slot_index]);
-    }
-
-    fn opcodeHasOwnDataIc(op_id: u8) bool {
-        return op_id == opcode.op.get_var or
-            op_id == opcode.op.get_var_undef or
-            op_id == opcode.op.put_var or
-            op_id == opcode.op.get_field or
-            op_id == opcode.op.get_field2 or
-            op_id == opcode.op.put_field;
-    }
-
     fn bytesMayContainEvalCall(bytes: []const u8) bool {
         return std.mem.indexOfScalar(u8, bytes, opcode.op.eval) != null or
             std.mem.indexOfScalar(u8, bytes, opcode.op.apply_eval) != null;
-    }
-
-    fn bytecodeSkipsPropertyIc(code: []const u8) bool {
-        var pc: usize = 0;
-        while (pc < code.len) {
-            const op_id = code[pc];
-            const size = opcode.sizeOf(op_id);
-            if (size == 0 or pc + size > code.len) return true;
-            switch (op_id) {
-                opcode.op.eval,
-                opcode.op.apply_eval,
-                opcode.op.with_get_var,
-                opcode.op.with_put_var,
-                opcode.op.with_delete_var,
-                opcode.op.with_make_ref,
-                opcode.op.with_get_ref,
-                => return true,
-                else => {},
-            }
-            pc += size;
-        }
-        return false;
-    }
-
-    fn countIcSitesInCode(code: []const u8) usize {
-        var count: usize = 0;
-        var pc: usize = 0;
-        while (pc < code.len) {
-            const op_id = code[pc];
-            const size = opcode.sizeOf(op_id);
-            if (size == 0 or pc + size > code.len) return 0;
-            if (opcodeHasOwnDataIc(op_id)) count += 1;
-            pc += size;
-        }
-        return count;
-    }
-
-    fn shouldUseDenseIcSiteIds(code_len: usize, site_count: usize) bool {
-        return code_len > 128 or site_count > 8;
-    }
-
-    fn allocateIcSiteIds(mem: *memory.MemoryAccount, code: []const u8) ![]usize {
-        const site_ids = try mem.alloc(usize, code.len);
-        errdefer mem.free(usize, site_ids);
-        @memset(site_ids, std.math.maxInt(usize));
-        var next_site_id: usize = 0;
-        var pc: usize = 0;
-        while (pc < code.len) {
-            const op_id = code[pc];
-            const size = opcode.sizeOf(op_id);
-            if (size == 0 or pc + size > code.len) return error.InvalidBytecode;
-            if (opcodeHasOwnDataIc(op_id)) {
-                site_ids[pc] = next_site_id;
-                next_site_id += 1;
-            }
-            pc += size;
-        }
-        return site_ids;
-    }
-
-    fn allocateIcSites(mem: *memory.MemoryAccount, code: []const u8, site_count: usize) ![]IcSite {
-        const sites = try mem.alloc(IcSite, site_count);
-        errdefer mem.free(IcSite, sites);
-        var next_site_id: usize = 0;
-        var pc: usize = 0;
-        while (pc < code.len) {
-            const op_id = code[pc];
-            const size = opcode.sizeOf(op_id);
-            if (size == 0 or pc + size > code.len) return error.InvalidBytecode;
-            if (opcodeHasOwnDataIc(op_id)) {
-                sites[next_site_id] = .{ .pc = pc, .slot_index = next_site_id };
-                next_site_id += 1;
-            }
-            pc += size;
-        }
-        std.debug.assert(next_site_id == site_count);
-        return sites;
-    }
-
-    fn findIcSite(sites: []const IcSite, site_pc: usize) ?IcSite {
-        var low: usize = 0;
-        var high: usize = sites.len;
-        while (low < high) {
-            const mid = low + (high - low) / 2;
-            const site = sites[mid];
-            if (site.pc == site_pc) return site;
-            if (site.pc < site_pc) {
-                low = mid + 1;
-            } else {
-                high = mid;
-            }
-        }
-        return null;
     }
 
     pub const destroyFunctionBytecode = function_bytecode_mod.destroyFunctionBytecode;
@@ -7794,7 +7570,6 @@ pub const dump = struct {
     }
 };
 
-pub const ic = @import("core/ic.zig");
 pub const pipeline = struct {
     pub const resolve_variables = pipeline_resolve_variables;
     pub const resolve_labels = pipeline_resolve_labels;
@@ -7812,5 +7587,3 @@ pub const cachedBytecodeView = function_mod.cachedBytecodeView;
 pub const installCachedBytecodeView = function_mod.installCachedBytecodeView;
 pub const ensureCachedBytecodeView = function_mod.ensureCachedBytecodeView;
 pub const refreshCachedBytecodeView = function_mod.refreshCachedBytecodeView;
-pub const allocateFunctionBytecodeIcSlots = function_mod.allocateFunctionBytecodeIcSlots;
-pub const functionBytecodeIcSlotForPc = function_mod.functionBytecodeIcSlotForPc;

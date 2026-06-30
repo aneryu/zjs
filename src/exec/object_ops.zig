@@ -114,6 +114,7 @@ const qjsIteratorClose = call_runtime.qjsIteratorClose;
 const qjsObjectEntryArrayValue = array_ops.qjsObjectEntryArrayValue;
 const qjsReflectConstructGenericCallable = call_runtime.qjsReflectConstructGenericCallable;
 const qjsRegExpAutoInitBuiltinMatches = string_ops.qjsRegExpAutoInitBuiltinMatches;
+const qjsRegExpAutoInitAccessorBuiltinMatches = string_ops.qjsRegExpAutoInitAccessorBuiltinMatches;
 const qjsRegExpNativeBuiltinMatches = string_ops.qjsRegExpNativeBuiltinMatches;
 const readUtf16CodePoint = string_ops.readUtf16CodePoint;
 const regExpConstructorFromGlobal = regexp_fastpath.regExpConstructorFromGlobal;
@@ -150,6 +151,15 @@ const valueTruthy = coercion_ops.valueTruthy;
 const varRefCellFromValue = slot_ops.varRefCellFromValue;
 
 pub fn objectPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
+    // Use the realm-cached `%Object.prototype%` (O(1) array index, like QuickJS's
+    // `class_proto[JS_CLASS_OBJECT]`) instead of resolving `global.Object.prototype`
+    // by two property-hash lookups on EVERY object allocation. `arrayPrototypeFromGlobal`
+    // already takes this fast path; `{}` literals went through the slow path and it
+    // showed up as ~7.7% of empty-object allocation. `Object.prototype` is
+    // non-writable/non-configurable so the cached value never goes stale.
+    if (global.cachedRealmValue(.object_prototype)) |stored| {
+        return property_ops.expectObject(stored) catch null;
+    }
     return constructorPrototypeFromGlobalAtom(rt, global, core.atom.ids.Object);
 }
 
@@ -1132,6 +1142,55 @@ pub fn qjsRegExpPrototypeMethodIsDefault(rt: *core.JSRuntime, object: *core.Obje
     return false;
 }
 
+/// Side-effect-free check that a RegExp flag getter (`flags`/`global`/`unicode`/
+/// `sticky`) resolves to the default native accessor -- the accessor analog of
+/// `qjsRegExpPrototypeMethodIsDefault`, used to gate the standard-regexp fast
+/// paths exactly like QuickJS `check_regexp_getter`. Crucially this NEVER
+/// invokes the getter, so probing it has no observable effect (the failing
+/// `Symbol.replace/get-*-err` tests require the generic path to observe an
+/// overridden getter in spec order instead).
+pub fn qjsRegExpPrototypeGetterIsDefault(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, expected_id: u32) bool {
+    if (object.class_id != core.class.ids.regexp) return false;
+    if (object.hasOwnProperty(atom_id)) return false;
+    const proto = object.getPrototype() orelse return false;
+    if (proto.hasExoticMethods()) return false;
+    for (proto.shapeProps(), 0..) |prop, property_index| {
+        const prop_flags = core.property.Flags.fromBits(prop.flags);
+        if (prop_flags.deleted or prop.atom_id != atom_id) continue;
+        const entry = proto.properties[property_index];
+        return switch (proto.propKindAt(property_index)) {
+            .accessor => qjsRegExpNativeBuiltinMatches(entry.slot.accessor.getterValue(), expected_id),
+            .auto_init => qjsRegExpAutoInitAccessorBuiltinMatches(core.property.autoInitAt(rt, entry.slot.auto_init).*, expected_id),
+            .data, .var_ref => false,
+        };
+    }
+    return false;
+}
+
+/// Side-effect-free `js_is_standard_regexp` (quickjs.c): the receiver is a
+/// genuine RegExp whose `lastIndex` is a plain number and whose `exec` method
+/// and `flags`/`global`/`unicode` getters are all the pristine built-ins. Only
+/// then may a fast path read flags straight from the compiled bytecode and skip
+/// the observable property reads the spec otherwise mandates.
+pub fn regExpIsStandard(rt: *core.JSRuntime, object: *core.Object) bool {
+    if (object.class_id != core.class.ids.regexp) return false;
+    // QuickJS `js_is_standard_regexp` requires `JS_IsNumber(lastIndex)`: a
+    // non-number lastIndex (string "1", {}, ...) must take the generic path so
+    // ToLength coercion is observed (sticky/global use lastIndex directly).
+    if (object.regexpLastIndex()) |last_index| {
+        if (!last_index.isNumber()) return false;
+    } else return false;
+    const exec_atom = core.atom.predefinedId("exec", .string) orelse return false;
+    if (!qjsRegExpPrototypeMethodIsDefault(rt, object, exec_atom, @intFromEnum(method_ids.regexp.PrototypeMethod.exec))) return false;
+    const flags_atom = core.atom.predefinedId("flags", .string) orelse return false;
+    if (!qjsRegExpPrototypeGetterIsDefault(rt, object, flags_atom, @intFromEnum(method_ids.regexp.AccessorMethod.flags))) return false;
+    const global_atom = core.atom.predefinedId("global", .string) orelse return false;
+    if (!qjsRegExpPrototypeGetterIsDefault(rt, object, global_atom, @intFromEnum(method_ids.regexp.AccessorMethod.global))) return false;
+    const unicode_atom = core.atom.predefinedId("unicode", .string) orelse return false;
+    if (!qjsRegExpPrototypeGetterIsDefault(rt, object, unicode_atom, @intFromEnum(method_ids.regexp.AccessorMethod.unicode))) return false;
+    return true;
+}
+
 pub fn regExpExecPropertyIsDefault(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1320,7 +1379,7 @@ pub fn defineFreshNonIndexDataProperty(rt: *core.JSRuntime, object: *core.Object
     try object.defineOwnNonIndexPropertyAssumingNew(rt, atom_id, core.Descriptor.data(value, writable, enumerable, configurable));
 }
 
-pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Object, out: *core.Object, found: RegExpMatch) !void {
+pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Object, out: *core.Object, found: *const RegExpMatch) !void {
     var has_named = false;
     for (found.captures[0..found.capture_count]) |capture| {
         if (capture.name != null) {
@@ -1361,7 +1420,7 @@ pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Obje
     try defineFreshNonIndexDataProperty(rt, out, groups_atom, groups_value, true, true, true);
 }
 
-pub fn defineRegExpGroupsProperty(rt: *core.JSRuntime, out: *core.Object, input_bytes: []const u8, found: RegExpMatch) !void {
+pub fn defineRegExpGroupsProperty(rt: *core.JSRuntime, out: *core.Object, input_bytes: []const u8, found: *const RegExpMatch) !void {
     var has_named = false;
     for (found.captures[0..found.capture_count]) |capture| {
         if (capture.name != null) {
@@ -1405,7 +1464,7 @@ pub fn defineRegExpGroupsProperty(rt: *core.JSRuntime, out: *core.Object, input_
     try defineFreshNonIndexDataProperty(rt, out, groups_atom, groups_value, true, true, true);
 }
 
-pub fn defineRegExpGroupsPropertyFromValue(rt: *core.JSRuntime, out: *core.Object, input_value: core.JSValue, found: RegExpMatch) !void {
+pub fn defineRegExpGroupsPropertyFromValue(rt: *core.JSRuntime, out: *core.Object, input_value: core.JSValue, found: *const RegExpMatch) !void {
     var has_named = false;
     for (found.captures[0..found.capture_count]) |capture| {
         if (capture.name != null) {
@@ -2604,7 +2663,7 @@ pub fn functionObjectFromValue(value: core.JSValue) ?*core.Object {
 pub fn objectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
-    if (header.kind != .object) return null;
+    if (header.meta().kind != .object) return null;
     return @fieldParentPtr("header", header);
 }
 

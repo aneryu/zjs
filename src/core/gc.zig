@@ -332,30 +332,62 @@ pub const BlockFlags = packed struct(u8) {
     _reserved: u2 = 0,
 };
 
-/// Z-GE v1.0 block header with qjs-style intrusive GC list links.
-pub const BlockHeader = extern struct {
+/// Z-GE v1.0 block header metadata. Phase 1: grouped into a sub-struct so a
+/// later phase can relocate it to an allocator prefix. Layout/size unchanged.
+/// qjs-style block-prefix metadata. Mirrors `JSMallocBlockHeader`
+/// (quickjs.c:270): refcount + gc type + GC mark/cycle bits + heap-byte size
+/// live in an 8-byte prefix that the allocator places immediately BEFORE the
+/// object (at `objectPtr - 8`), so the in-object `BlockHeader` is just the
+/// intrusive GC list links (= qjs `JSGCObjectHeader`, 16 bytes).
+pub const Metadata = extern struct {
     size_class: u16 align(8) = 0,
-    kind: GcKind,
+    kind: GcKind = .object,
     flags: BlockFlags = .{},
     rc: i32 = 1,
+};
+
+/// Size of the metadata prefix that precedes every GC object (objectPtr - 8).
+pub const metadata_prefix_size: usize = @sizeOf(Metadata);
+
+comptime {
+    // The allocator initializes the prefix by raw byte writes (memory.zig has no
+    // gc import); these offsets must hold: kind at byte 2, rc (i32) at byte 4.
+    std.debug.assert(@offsetOf(Metadata, "kind") == 2);
+    std.debug.assert(@offsetOf(Metadata, "rc") == 4);
+}
+
+/// In-object GC header = intrusive list links only (qjs `JSGCObjectHeader`,
+/// 16 bytes). The refcount / kind / flags / heap-size live in the `Metadata`
+/// prefix 8 bytes before this header; reach them via `meta()`.
+pub const BlockHeader = extern struct {
     prev: ?*BlockHeader = null,
     next: ?*BlockHeader = null,
 
     comptime {
-        std.debug.assert(@sizeOf(BlockHeader) == 24);
+        std.debug.assert(@sizeOf(BlockHeader) == 16);
+        std.debug.assert(@sizeOf(Metadata) == 8);
+    }
+
+    pub inline fn meta(self: *BlockHeader) *Metadata {
+        return @ptrFromInt(@intFromPtr(self) - metadata_prefix_size);
+    }
+
+    pub inline fn metaConst(self: *const BlockHeader) *const Metadata {
+        return @ptrFromInt(@intFromPtr(self) - metadata_prefix_size);
     }
 
     pub inline fn retain(self: *BlockHeader) void {
-        std.debug.assert(self.rc > 0);
-        self.rc += 1;
+        const m = self.meta();
+        std.debug.assert(m.rc > 0);
+        m.rc += 1;
     }
 
     pub fn pinned(self: *const BlockHeader) bool {
-        return self.flags.is_pinned;
+        return self.metaConst().flags.is_pinned;
     }
 
     pub fn setPinned(self: *BlockHeader, value: bool) void {
-        self.flags.is_pinned = value;
+        self.meta().flags.is_pinned = value;
     }
 };
 
@@ -624,17 +656,17 @@ pub const Registry = struct {
 
         // 释放可能存活的所有 Candidate 对象
         while (self.gc_object_tail) |h| {
-            if (h.kind == .shape) {
+            if (h.meta().kind == .shape) {
                 self.removeGcObject(h);
                 continue;
             }
             self.removeGcObject(h);
             self.recordHeapFreeWithBytes(h, heapByteSizeFromHeader(rt, h));
-            h.flags.finalizing = true;
-            if (h.kind == .object) {
+            h.meta().flags.finalizing = true;
+            if (h.meta().kind == .object) {
                 object.Object.destroyFromHeader(rt, h);
                 rt.drainDeferredClassPayloadFinalizers();
-            } else if (h.kind == .function_bytecode) {
+            } else if (h.meta().kind == .function_bytecode) {
                 function_bytecode_mod.destroyFromHeader(rt, h);
             }
         }
@@ -984,18 +1016,18 @@ pub const Registry = struct {
         const is_large = self.isLargeAllocation(bytes);
         const tracked = isCycleCandidate(h);
 
-        h.rc = 1;
-        h.flags = .{};
+        h.meta().rc = 1;
+        h.meta().flags = .{};
         h.prev = null;
         h.next = null;
-        h.size_class = encodeHeapBytes(bytes);
+        h.meta().size_class = encodeHeapBytes(bytes);
         self.recordHeapAlloc(is_large, bytes);
 
         if (tracked) self.appendGcObject(h);
     }
 
     fn defaultHeapBytes(h: *const GCObjectHeader) usize {
-        return switch (h.kind) {
+        return switch (h.metaConst().kind) {
             .object => @sizeOf(object.Object),
             .function_bytecode => @sizeOf(FunctionBytecode),
             .var_ref => @sizeOf(var_ref.VarRef),
@@ -1009,14 +1041,14 @@ pub const Registry = struct {
     }
 
     fn storedHeapBytes(h: *const GCObjectHeader) ?usize {
-        if (h.size_class == 0) return 0;
-        if (h.size_class == large_heap_size_class) return null;
-        return h.size_class;
+        if (h.metaConst().size_class == 0) return 0;
+        if (h.metaConst().size_class == large_heap_size_class) return null;
+        return h.metaConst().size_class;
     }
 
     pub fn heapByteSizeFromHeader(rt: anytype, h: *const GCObjectHeader) usize {
         if (storedHeapBytes(h)) |bytes| return bytes;
-        return switch (h.kind) {
+        return switch (h.metaConst().kind) {
             .object => blk: {
                 const obj: *const object.Object = @alignCast(@fieldParentPtr("header", h));
                 break :blk obj.allocationSize(rt);
@@ -1036,7 +1068,7 @@ pub const Registry = struct {
     }
 
     fn isCycleCandidate(h: *const GCObjectHeader) bool {
-        return h.kind == .object or h.kind == .function_bytecode or h.kind == .var_ref or h.kind == .shape;
+        return h.metaConst().kind == .object or h.metaConst().kind == .function_bytecode or h.metaConst().kind == .var_ref or h.metaConst().kind == .shape;
     }
 
     fn recordHeapAlloc(self: *Registry, is_large: bool, bytes: usize) void {
@@ -1059,11 +1091,11 @@ pub const Registry = struct {
     }
 
     fn recordHeapFreeWithBytes(self: *Registry, header: *GCObjectHeader, bytes: usize) void {
-        if (header.size_class == 0 or bytes == 0) return;
+        if (header.meta().size_class == 0 or bytes == 0) return;
         const is_large = self.isLargeAllocation(bytes);
         self.subtractLiveHeapBytes(is_large, bytes);
         self.recordSpaceFree(is_large, bytes);
-        header.size_class = 0;
+        header.meta().size_class = 0;
     }
 
     pub fn pinHeader(self: *Registry, header: *GCObjectHeader) !void {
@@ -1178,11 +1210,11 @@ pub const Registry = struct {
     }
 
     pub fn releaseObject(self: *Registry, h: *GCObjectHeader) bool {
-        std.debug.assert(h.rc > 0);
-        h.rc -= 1;
+        std.debug.assert(h.meta().rc > 0);
+        h.meta().rc -= 1;
         self.stats.rc_dec += 1;
 
-        if (h.rc == 0) {
+        if (h.meta().rc == 0) {
             self.unlinkObject(h);
             return true;
         }
@@ -1311,8 +1343,8 @@ pub const Registry = struct {
         var count: usize = 0;
         while (current) |h| {
             if (!isCycleCandidate(h)) return error.CorruptGcList;
-            if (h.rc < 0) return error.NegativeRefCount;
-            if (h.flags.mark and self.phase == .none) return error.MarkBitLeftSet;
+            if (h.meta().rc < 0) return error.NegativeRefCount;
+            if (h.meta().flags.mark and self.phase == .none) return error.MarkBitLeftSet;
 
             if (h.prev != previous) return error.CorruptGcList;
 
@@ -1416,7 +1448,7 @@ pub inline fn checkedHeaderFromPayload(rt: anytype, ptr: *anyopaque) *BlockHeade
     _ = rt;
     const h = headerFromPayload(ptr);
     if (builtin.mode == .Debug) {
-        std.debug.assert(h.rc >= 0);
+        std.debug.assert(h.meta().rc >= 0);
     }
     return h;
 }
@@ -1439,19 +1471,19 @@ pub inline fn release(rt: anytype, header: anytype) void {
         string.String.releaseFromHeader(rt, header);
         return;
     }
-    std.debug.assert(header.rc > 0);
-    header.rc -= 1;
+    std.debug.assert(header.meta().rc > 0);
+    header.meta().rc -= 1;
     rt.gc.stats.rc_dec += 1;
 
-    if (header.rc == 0) releaseAndDestroy(rt, header);
+    if (header.meta().rc == 0) releaseAndDestroy(rt, header);
 }
 
 noinline fn releaseAndDestroy(rt: anytype, header: *Header) void {
-    if (rt.gc.phase == .deinit and (header.kind == .object or header.kind == .var_ref or header.kind == .shape)) return;
+    if (rt.gc.phase == .deinit and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .shape)) return;
     rt.gc.unlinkObjectWithBytes(header, Registry.heapByteSizeFromHeader(rt, header));
 
     // 10.1 静态 kind switch 派发销毁
-    switch (header.kind) {
+    switch (header.meta().kind) {
         .string => unreachable,
         .object => object.Object.destroyFromHeader(rt, header),
         .big_int => bigint.BigInt.destroyFromHeader(rt, header),

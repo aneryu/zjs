@@ -8,7 +8,11 @@ pub const initial_prop_size = 4;
 pub const initial_hash_size = 4;
 pub const initial_shape_hash_bits: u6 = 6;
 pub const no_property_hash: u32 = 0;
-pub const no_property_index: u32 = std.math.maxInt(u32);
+/// End-of-chain / not-found sentinel for the property hash list. Mirrors qjs's
+/// 8-byte JSShapeProperty packing (quickjs.c:968 `hash_next:26`): the chain index
+/// is a 26-bit field, so the sentinel is `maxInt(u26)` rather than `maxInt(u32)`.
+/// Real property indices stay 0-based and are always `< prop_count < maxInt(u26)`.
+pub const no_property_index: u26 = std.math.maxInt(u26);
 pub const no_registry_index: usize = std.math.maxInt(usize);
 
 pub fn propertyCapacityForNeeded(needed: usize) usize {
@@ -18,8 +22,14 @@ pub fn propertyCapacityForNeeded(needed: usize) usize {
     return capacity;
 }
 
-pub const Property = struct {
-    hash_next: u32 = no_property_index,
+/// 8-byte property record, bit-for-bit faithful to qjs `JSShapeProperty`
+/// (quickjs.c:968-972): `hash_next:26` and `flags:6` share one 32-bit word,
+/// followed by the 32-bit atom. `packed struct(u64)` keeps `hash_next`/`flags`/
+/// `atom_id` as direct field accesses (no nested `.hf.` rename) while collapsing
+/// the prior 12-byte layout to 8. `atom_id` lands at bit offset 32 (byte 4) so a
+/// byte-aligned `*u32` is recoverable for GC symbol visiting via a local copy.
+pub const Property = packed struct(u64) {
+    hash_next: u26 = no_property_index,
     flags: u6 = 0,
     atom_id: atom.Atom = atom.null_atom,
 };
@@ -37,49 +47,65 @@ const PropertyStorage = struct {
 };
 
 pub const Shape = struct {
-    header: gc.GCObjectHeader = .{ .kind = .shape },
+    pub const gc_kind_tag: u8 = @intFromEnum(gc.GcKind.shape);
+    comptime {
+        std.debug.assert(@offsetOf(@This(), "header") == 0);
+    }
+    header: gc.GCObjectHeader = .{},
     is_hashed: bool = false,
-    is_transition_cacheable: bool = false,
-    parent: ?*Shape = null,
-    transition_atom: atom.Atom = atom.null_atom,
-    transition_flags: u6 = 0,
-    version: u32 = 0,
     hash: u32 = 0,
     registry_index: usize = no_registry_index,
     registry_hash_next: ?*Shape = null,
-    registry_hash_prev: ?*?*Shape = null,
     prop_hash_mask: u32 = no_property_hash,
-    prop_count: usize = 0,
-    deleted_prop_count: usize = 0,
+    prop_count: u32 = 0,
+    deleted_prop_count: u32 = 0,
     proto: ?*Object = null,
     property_storage: []u8 = &.{},
-    hash_buckets: []u32 = &.{},
-    props: []Property = &.{},
+
+    inline fn bucketCount(self: *const Shape) usize {
+        return if (self.prop_hash_mask == no_property_hash) 0 else @as(usize, self.prop_hash_mask) + 1;
+    }
+
+    pub inline fn hashBuckets(self: *const Shape) []u32 {
+        const n = self.bucketCount();
+        if (n == 0) return &.{};
+        const ptr: [*]u32 = @ptrCast(@alignCast(self.property_storage.ptr));
+        return ptr[0..n];
+    }
+
+    pub inline fn props(self: *const Shape) []Property {
+        if (self.property_storage.len == 0) return &.{};
+        const bucket_bytes = @sizeOf(u32) * self.bucketCount();
+        const offset = std.mem.alignForward(usize, bucket_bytes, @alignOf(Property));
+        const cap = (self.property_storage.len - offset) / @sizeOf(Property);
+        const ptr: [*]Property = @ptrCast(@alignCast(self.property_storage.ptr + offset));
+        return ptr[0..cap];
+    }
 
     pub fn retain(self: *Shape) void {
         gc.retain(&self.header);
     }
 
     pub fn refCount(self: *const Shape) usize {
-        return @intCast(self.header.rc);
+        return @intCast(self.header.metaConst().rc);
     }
 
     pub fn sameTransition(self: Shape, other: Shape) bool {
         if (self.proto != other.proto or self.prop_count != other.prop_count) return false;
-        for (self.props[0..self.prop_count], other.props[0..other.prop_count]) |a, b| {
+        for (self.props()[0..self.prop_count], other.props()[0..other.prop_count]) |a, b| {
             if (a.atom_id != b.atom_id or a.flags != b.flags) return false;
         }
         return true;
     }
 
     pub fn hasPropertyHash(self: Shape) bool {
-        return self.prop_hash_mask != no_property_hash and self.hash_buckets.len != 0;
+        return self.prop_hash_mask != no_property_hash;
     }
 
     pub fn firstPropertyIndex(self: Shape, atom_id: atom.Atom) u32 {
         if (!self.hasPropertyHash()) return no_property_index;
         const bucket = propertyBucketIndex(self.hash, atom_id, self.prop_hash_mask);
-        return self.hash_buckets[bucket];
+        return self.hashBuckets()[bucket];
     }
 
     pub inline fn traceChildEdgesFallible(self: *Shape, rt: *JSRuntime, visitor: anytype) !void {
@@ -113,7 +139,6 @@ pub const Shape = struct {
         };
 
         try Helper.callVisitObject(visitor, &self.proto);
-        if (self.parent) |parent| try Helper.callVisitShape(visitor, parent);
     }
 
     pub inline fn traceChildEdgesNoFail(self: *Shape, rt: *JSRuntime, visitor: anytype) void {
@@ -179,42 +204,39 @@ pub const Registry = struct {
     }
 
     pub fn create(self: *Registry, proto: ?*Object) !*Shape {
-        return self.createShape(proto, false);
+        return self.createShape(proto);
     }
 
     pub fn createObjectRoot(self: *Registry, proto: ?*Object) !*Shape {
         var current = self.firstShapeWithHash(initialHash(proto));
         while (current) |shape| : (current = shape.registry_hash_next) {
-            if (!shape.is_transition_cacheable) continue;
-            if (shape.parent != null or shape.prop_count != 0 or shape.proto != proto) continue;
+            if (shape.prop_count != 0 or shape.proto != proto) continue;
             shape.retain();
             return shape;
         }
-        return self.createShape(proto, true);
+        return self.createShape(proto);
     }
 
     pub fn createObjectRootWithPropertyCapacity(self: *Registry, proto: ?*Object, property_capacity: usize) !*Shape {
         if (property_capacity == 0) return self.createObjectRoot(proto);
-        return self.createShapeWithPropertyCapacity(proto, false, property_capacity);
+        return self.createShapeWithPropertyCapacity(proto, property_capacity);
     }
 
-    fn createShape(self: *Registry, proto: ?*Object, is_transition_cacheable: bool) !*Shape {
+    fn createShape(self: *Registry, proto: ?*Object) !*Shape {
         const shape = try self.memory.create(Shape);
         errdefer self.memory.destroy(Shape, shape);
+        shape.header.meta().* = .{ .kind = .shape };
         const storage = try self.allocPropertyStorage(initial_prop_size, initial_hash_size);
         errdefer self.freePropertyStorage(storage.bytes);
         shape.* = .{
-            .header = .{ .kind = .shape },
-            .is_transition_cacheable = is_transition_cacheable,
+            .header = .{},
             .proto = proto,
             .property_storage = storage.bytes,
-            .hash_buckets = storage.hash_buckets,
-            .props = storage.props,
             .prop_hash_mask = @intCast(initial_hash_size - 1),
             .hash = initialHash(proto),
         };
-        @memset(shape.hash_buckets, no_property_index);
-        @memset(shape.props, .{});
+        @memset(shape.hashBuckets(), no_property_index);
+        @memset(shape.props(), .{});
         try self.link(shape, true);
         errdefer self.unlink(shape);
         try self.gc_registry.addWithSize(&shape.header, @sizeOf(Shape));
@@ -225,28 +247,25 @@ pub const Registry = struct {
     fn createShapeWithPropertyCapacity(
         self: *Registry,
         proto: ?*Object,
-        is_transition_cacheable: bool,
         property_capacity: usize,
     ) !*Shape {
         std.debug.assert(property_capacity != 0);
         const shape = try self.memory.create(Shape);
         errdefer self.memory.destroy(Shape, shape);
+        shape.header.meta().* = .{ .kind = .shape };
         const bucket_count: usize = @max(initial_hash_size, nextPowerOfTwo(property_capacity + 1));
         const storage = try self.allocPropertyStorage(property_capacity, bucket_count);
         errdefer self.freePropertyStorage(storage.bytes);
         shape.* = .{
-            .header = .{ .kind = .shape },
-            .is_transition_cacheable = is_transition_cacheable,
+            .header = .{},
             .proto = proto,
             .property_storage = storage.bytes,
-            .hash_buckets = storage.hash_buckets,
-            .props = storage.props,
             .prop_hash_mask = if (bucket_count == 0) no_property_hash else @as(u32, @intCast(bucket_count - 1)),
             .hash = initialHash(proto),
         };
-        @memset(shape.props, .{});
-        if (shape.hash_buckets.len != 0) {
-            @memset(shape.hash_buckets, no_property_index);
+        @memset(shape.props(), .{});
+        if (shape.hashBuckets().len != 0) {
+            @memset(shape.hashBuckets(), no_property_index);
         }
         try self.link(shape, true);
         errdefer self.unlink(shape);
@@ -260,54 +279,55 @@ pub const Registry = struct {
             shape.retain();
             return shape;
         }
-
-        const transition_atom = self.atoms.dup(atom_id);
-        errdefer self.atoms.free(transition_atom);
-        const child = try self.cloneShape(parent, parent.proto, true, propertyCapacityForNeeded(parent.prop_count + 1), true);
+        const child = try self.cloneShape(parent, parent.proto, propertyCapacityForNeeded(parent.prop_count + 1), true);
         errdefer self.release(child);
-        child.parent = parent;
-        parent.retain();
-        child.transition_atom = transition_atom;
-        child.transition_flags = flags;
         try self.appendProperty(child, atom_id, flags);
         const old_hash = child.hash;
         child.hash = transitionHash(parent.hash, atom_id, flags);
         self.rehashShape(child, old_hash);
-        child.version = parent.version +% 1;
-        child.is_transition_cacheable = true;
         return child;
     }
 
     fn findHashedShapeProperty(self: *Registry, parent: *Shape, atom_id: atom.Atom, flags: u6) ?*Shape {
         if (!parent.is_hashed) return null;
         const expected_hash = transitionHash(parent.hash, atom_id, flags);
+        const n = parent.prop_count;
+        const parent_props = parent.props();
         var current = self.firstShapeWithHash(expected_hash);
         while (current) |candidate| : (current = candidate.registry_hash_next) {
             if (candidate.hash != expected_hash) continue;
-            if (candidate.parent != parent) continue;
-            if (candidate.transition_atom != atom_id or candidate.transition_flags != flags) continue;
+            if (candidate.proto != parent.proto) continue;
+            if (candidate.prop_count != n + 1) continue;
+            const cand_props = candidate.props();
+            var matched = true;
+            for (0..n) |i| {
+                if (cand_props[i].atom_id != parent_props[i].atom_id or cand_props[i].flags != parent_props[i].flags) {
+                    matched = false;
+                    break;
+                }
+            }
+            if (!matched) continue;
+            if (cand_props[n].atom_id != atom_id or cand_props[n].flags != flags) continue;
             return candidate;
         }
         return null;
     }
 
     pub fn cloneForMutation(self: *Registry, source: *Shape) !*Shape {
-        const clone = try self.cloneShape(source, source.proto, false, source.props.len, false);
-        clone.version = source.version +% 1;
+        const clone = try self.cloneShape(source, source.proto, source.props().len, false);
         return clone;
     }
 
     pub fn prepareUpdate(self: *Registry, shape_ptr: **Shape) !void {
         const current = shape_ptr.*;
-        if (current.is_hashed and current.header.rc == 1 and !current.is_transition_cacheable and current.parent == null) {
+        if (current.is_hashed and current.header.meta().rc == 1) {
             self.removeShapeHash(current);
             current.is_hashed = false;
             std.debug.assert(self.shape_hash_count != 0);
             self.shape_hash_count -= 1;
             return;
         }
-        if (current.header.rc == 1 and !current.is_transition_cacheable and current.parent == null) return;
-
+        if (current.header.meta().rc == 1) return;
         const clone = try self.cloneForMutation(current);
         shape_ptr.* = clone;
         self.release(current);
@@ -320,11 +340,10 @@ pub const Registry = struct {
         shape.proto = proto;
         const old_hash = shape.hash;
         shape.hash = initialHash(proto);
-        for (shape.props[0..shape.prop_count]) |prop| {
+        for (shape.props()[0..shape.prop_count]) |prop| {
             shape.hash = transitionHash(shape.hash, prop.atom_id, prop.flags);
         }
         self.rehashShape(shape, old_hash);
-        shape.version +%= 1;
         return old_proto;
     }
 
@@ -333,27 +352,24 @@ pub const Registry = struct {
         const old_hash = shape.hash;
         shape.hash = transitionHash(shape.hash, atom_id, flags);
         self.rehashShape(shape, old_hash);
-        shape.version +%= 1;
     }
 
     pub fn markPropertyDeleted(self: *Registry, shape: *Shape, index: usize, flags: u6) void {
         _ = self;
         std.debug.assert(index < shape.prop_count);
-        shape.props[index].flags = flags;
+        shape.props()[index].flags = flags;
         shape.deleted_prop_count += 1;
-        shape.version +%= 1;
     }
 
     pub fn updatePropertyFlags(self: *Registry, shape: *Shape, index: usize, flags: u6) void {
         _ = self;
         std.debug.assert(index < shape.prop_count);
-        if (shape.props[index].flags == flags) return;
-        shape.props[index].flags = flags;
-        shape.version +%= 1;
+        if (shape.props()[index].flags == flags) return;
+        shape.props()[index].flags = flags;
     }
 
     pub fn restorePropertyLayout(self: *Registry, shape: *Shape, baseline_props: []const Property, baseline_hash: u32, baseline_deleted_count: usize) !void {
-        var target_capacity = if (shape.props.len == 0) initial_prop_size else shape.props.len;
+        var target_capacity = if (shape.props().len == 0) initial_prop_size else shape.props().len;
         while (target_capacity < baseline_props.len) : (target_capacity *= 2) {}
         const bucket_count: usize = @max(initial_hash_size, nextPowerOfTwo(baseline_props.len + baseline_deleted_count + 1));
         const storage = try self.allocPropertyStorage(target_capacity, bucket_count);
@@ -368,15 +384,13 @@ pub const Registry = struct {
             };
         }
 
-        const old_props = shape.props;
+        const old_props = shape.props();
         const old_prop_count = shape.prop_count;
         const old_storage = shape.property_storage;
         shape.property_storage = storage.bytes;
-        shape.props = storage.props;
-        shape.hash_buckets = storage.hash_buckets;
         shape.prop_hash_mask = if (bucket_count == 0) no_property_hash else @as(u32, @intCast(bucket_count - 1));
-        shape.prop_count = baseline_props.len;
-        shape.deleted_prop_count = baseline_deleted_count;
+        shape.prop_count = @intCast(baseline_props.len);
+        shape.deleted_prop_count = @intCast(baseline_deleted_count);
 
         const old_hash = shape.hash;
         shape.hash = baseline_hash;
@@ -388,32 +402,24 @@ pub const Registry = struct {
         self.freePropertyStorage(old_storage);
 
         if (shape.hasPropertyHash()) {
-            for (shape.props[0..shape.prop_count], 0..) |*prop, index| {
+            for (shape.props()[0..shape.prop_count], 0..) |*prop, index| {
                 prop.hash_next = no_property_index;
                 self.linkPropertyHash(shape, index);
             }
         }
-        shape.version +%= 1;
-    }
-
-    pub fn bumpVersion(self: *Registry, shape: *Shape) void {
-        _ = self;
-        shape.version +%= 1;
     }
 
     pub fn reserveProperties(self: *Registry, shape: *Shape, needed: usize) !void {
-        if (needed <= shape.props.len) return;
-        var next_capacity = shape.props.len;
+        if (needed <= shape.props().len) return;
+        var next_capacity = shape.props().len;
         while (next_capacity < needed) : (next_capacity *= 2) {}
-        const storage = try self.allocPropertyStorage(next_capacity, shape.hash_buckets.len);
+        const storage = try self.allocPropertyStorage(next_capacity, shape.hashBuckets().len);
         errdefer self.freePropertyStorage(storage.bytes);
         @memset(storage.props, .{});
-        @memcpy(storage.props[0..shape.props.len], shape.props);
-        if (shape.hash_buckets.len != 0) @memcpy(storage.hash_buckets, shape.hash_buckets);
+        @memcpy(storage.props[0..shape.props().len], shape.props());
+        if (shape.hashBuckets().len != 0) @memcpy(storage.hash_buckets, shape.hashBuckets());
         const old_storage = shape.property_storage;
         shape.property_storage = storage.bytes;
-        shape.hash_buckets = storage.hash_buckets;
-        shape.props = storage.props;
         self.freePropertyStorage(old_storage);
     }
 
@@ -425,16 +431,16 @@ pub const Registry = struct {
 
     pub fn hasReservedOwnPropertyCapacity(self: *Registry, shape: *const Shape, needed: usize) bool {
         _ = self;
-        if (needed > shape.props.len) return false;
+        if (needed > shape.props().len) return false;
         const minimum = needed + shape.deleted_prop_count;
         return shape.hasPropertyHash() and minimum <= shape.prop_hash_mask + 1;
     }
 
     pub fn release(self: *Registry, shape: *Shape) void {
-        std.debug.assert(shape.header.rc > 0);
-        shape.header.rc -= 1;
+        std.debug.assert(shape.header.meta().rc > 0);
+        shape.header.meta().rc -= 1;
         self.gc_registry.stats.rc_dec += 1;
-        if (shape.header.rc != 0) return;
+        if (shape.header.meta().rc != 0) return;
 
         self.destroyShape(shape);
     }
@@ -447,13 +453,8 @@ pub const Registry = struct {
     pub fn clearReferencesToVisited(self: *Registry, shape: *Shape) void {
         _ = self;
         if (shape.proto) |proto| {
-            if (proto.header.flags.cycle_visited and !proto.header.flags.cycle_preserved) {
+            if (proto.header.meta().flags.cycle_visited and !proto.header.meta().flags.cycle_preserved) {
                 shape.proto = null;
-            }
-        }
-        if (shape.parent) |parent| {
-            if (parent.header.flags.cycle_visited and !parent.header.flags.cycle_preserved) {
-                shape.parent = null;
             }
         }
     }
@@ -461,28 +462,19 @@ pub const Registry = struct {
     fn destroyShape(self: *Registry, shape: *Shape) void {
         self.gc_registry.unlinkObjectWithBytes(&shape.header, @sizeOf(Shape));
         self.unlink(shape);
-        if (shape.parent) |parent| {
-            if (self.gc_registry.phase != .deinit) self.release(parent);
-        }
         const old_proto = shape.proto;
-        const transition_atom = shape.transition_atom;
-        const props = shape.props;
+        const shape_props = shape.props();
         const prop_count = shape.prop_count;
         const property_storage = shape.property_storage;
         shape.proto = null;
-        shape.parent = null;
-        shape.transition_atom = atom.null_atom;
         shape.property_storage = &.{};
-        shape.props = &.{};
         shape.prop_count = 0;
         shape.deleted_prop_count = 0;
-        shape.hash_buckets = &.{};
         shape.prop_hash_mask = no_property_hash;
         if (old_proto) |proto| {
             if (self.gc_registry.phase != .deinit) proto.value().free(self.runtime);
         }
-        if (transition_atom != atom.null_atom) self.atoms.free(transition_atom);
-        for (props[0..prop_count]) |prop| {
+        for (shape_props[0..prop_count]) |prop| {
             if (prop.atom_id != atom.null_atom) self.atoms.free(prop.atom_id);
         }
         self.freePropertyStorage(property_storage);
@@ -493,44 +485,40 @@ pub const Registry = struct {
         self: *Registry,
         source: *Shape,
         proto: ?*Object,
-        is_transition_cacheable: bool,
         needed: usize,
         hashed: bool,
     ) !*Shape {
         const capacity = @max(initial_prop_size, needed);
         const shape = try self.memory.create(Shape);
         errdefer self.memory.destroy(Shape, shape);
-        const bucket_count: usize = if (source.hash_buckets.len != 0)
-            source.hash_buckets.len
+        shape.header.meta().* = .{ .kind = .shape };
+        const bucket_count: usize = if (source.hashBuckets().len != 0)
+            source.hashBuckets().len
         else
             @max(initial_hash_size, nextPowerOfTwo(source.prop_count + source.deleted_prop_count + 1));
         const storage = try self.allocPropertyStorage(capacity, bucket_count);
         errdefer self.freePropertyStorage(storage.bytes);
         shape.* = .{
-            .header = .{ .kind = .shape },
-            .is_transition_cacheable = is_transition_cacheable,
-            .version = source.version,
+            .header = .{},
             .hash = source.hash,
             .prop_count = source.prop_count,
             .deleted_prop_count = source.deleted_prop_count,
             .proto = proto,
             .property_storage = storage.bytes,
-            .hash_buckets = storage.hash_buckets,
-            .props = storage.props,
             .prop_hash_mask = if (bucket_count == 0) no_property_hash else @as(u32, @intCast(bucket_count - 1)),
         };
-        @memset(shape.props, .{});
-        if (shape.hash_buckets.len != 0) @memset(shape.hash_buckets, no_property_index);
-        for (source.props[0..source.prop_count], 0..) |prop, index| {
-            shape.props[index] = .{
+        @memset(shape.props(), .{});
+        if (shape.hashBuckets().len != 0) @memset(shape.hashBuckets(), no_property_index);
+        for (source.props()[0..source.prop_count], 0..) |prop, index| {
+            shape.props()[index] = .{
                 .hash_next = no_property_index,
                 .flags = prop.flags,
                 .atom_id = if (prop.atom_id == atom.null_atom) atom.null_atom else self.atoms.dup(prop.atom_id),
             };
         }
-        errdefer self.freePropertyAtoms(shape.props[0..shape.prop_count]);
+        errdefer self.freePropertyAtoms(shape.props()[0..shape.prop_count]);
         if (shape.hasPropertyHash()) {
-            for (shape.props[0..shape.prop_count], 0..) |*prop, index| {
+            for (shape.props()[0..shape.prop_count], 0..) |*prop, index| {
                 prop.hash_next = no_property_index;
                 self.linkPropertyHash(shape, index);
             }
@@ -547,22 +535,18 @@ pub const Registry = struct {
         var retained_atom_owned = true;
         errdefer if (retained_atom_owned) self.atoms.free(retained_atom);
         const old_storage = shape.property_storage;
-        const old_hash_buckets = shape.hash_buckets;
-        const old_props = shape.props;
         var grew_props = false;
-        if (shape.prop_count == shape.props.len) {
-            const storage = try self.allocPropertyStorage(shape.props.len * 2, shape.hash_buckets.len);
+        if (shape.prop_count == shape.props().len) {
+            const storage = try self.allocPropertyStorage(shape.props().len * 2, shape.hashBuckets().len);
             @memset(storage.props, .{});
-            @memcpy(storage.props[0..shape.props.len], shape.props);
-            if (shape.hash_buckets.len != 0) @memcpy(storage.hash_buckets, shape.hash_buckets);
+            @memcpy(storage.props[0..shape.props().len], shape.props());
+            if (shape.hashBuckets().len != 0) @memcpy(storage.hash_buckets, shape.hashBuckets());
             shape.property_storage = storage.bytes;
-            shape.hash_buckets = storage.hash_buckets;
-            shape.props = storage.props;
             grew_props = true;
         }
 
         const index = shape.prop_count;
-        shape.props[index] = .{
+        shape.props()[index] = .{
             .hash_next = no_property_index,
             .flags = flags,
             .atom_id = retained_atom,
@@ -572,14 +556,12 @@ pub const Registry = struct {
         var appended = true;
         errdefer if (appended) {
             shape.prop_count -= 1;
-            const appended_atom = shape.props[index].atom_id;
-            shape.props[index] = .{};
+            const appended_atom = shape.props()[index].atom_id;
+            shape.props()[index] = .{};
             if (appended_atom != atom.null_atom) self.atoms.free(appended_atom);
             if (grew_props) {
                 const new_storage = shape.property_storage;
                 shape.property_storage = old_storage;
-                shape.hash_buckets = old_hash_buckets;
-                shape.props = old_props;
                 self.freePropertyStorage(new_storage);
             }
         };
@@ -598,7 +580,7 @@ pub const Registry = struct {
     fn ensurePropertyHash(self: *Registry, shape: *Shape) !bool {
         const minimum = shape.prop_count + shape.deleted_prop_count;
         if (shape.hasPropertyHash() and minimum <= shape.prop_hash_mask + 1) return false;
-        var bucket_count: usize = if (shape.hasPropertyHash()) shape.hash_buckets.len * 2 else initial_hash_size;
+        var bucket_count: usize = if (shape.hasPropertyHash()) shape.hashBuckets().len * 2 else initial_hash_size;
         while (bucket_count <= minimum) : (bucket_count *= 2) {}
         try self.rebuildPropertyHash(shape, bucket_count);
         return true;
@@ -606,32 +588,29 @@ pub const Registry = struct {
 
     fn rebuildPropertyHash(self: *Registry, shape: *Shape, bucket_count: usize) !void {
         std.debug.assert(std.math.isPowerOfTwo(bucket_count));
-        const storage = try self.allocPropertyStorage(shape.props.len, bucket_count);
+        const storage = try self.allocPropertyStorage(shape.props().len, bucket_count);
         errdefer self.freePropertyStorage(storage.bytes);
         @memset(storage.props, .{});
-        @memcpy(storage.props[0..shape.props.len], shape.props);
+        @memcpy(storage.props[0..shape.props().len], shape.props());
         @memset(storage.hash_buckets, no_property_index);
         const old_storage = shape.property_storage;
         shape.property_storage = storage.bytes;
-        shape.hash_buckets = storage.hash_buckets;
-        shape.props = storage.props;
         shape.prop_hash_mask = @intCast(bucket_count - 1);
         self.freePropertyStorage(old_storage);
-        for (shape.props[0..shape.prop_count], 0..) |*prop, index| {
+        for (shape.props()[0..shape.prop_count], 0..) |*prop, index| {
             prop.hash_next = no_property_index;
             self.linkPropertyHash(shape, index);
         }
-        shape.version +%= 1;
     }
 
     fn linkPropertyHash(self: *Registry, shape: *Shape, index: usize) void {
         _ = self;
         std.debug.assert(shape.hasPropertyHash());
         std.debug.assert(index < shape.prop_count);
-        const prop = &shape.props[index];
+        const prop = &shape.props()[index];
         const bucket = propertyBucketIndex(shape.hash, prop.atom_id, shape.prop_hash_mask);
-        prop.hash_next = shape.hash_buckets[bucket];
-        shape.hash_buckets[bucket] = @intCast(index);
+        prop.hash_next = @intCast(shape.hashBuckets()[bucket]);
+        shape.hashBuckets()[bucket] = @intCast(index);
     }
 
     fn link(self: *Registry, shape: *Shape, hashed: bool) !void {
@@ -697,7 +676,6 @@ pub const Registry = struct {
         self.shape_hash_bits = next_bits;
         for (self.shapes) |shape| {
             shape.registry_hash_next = null;
-            shape.registry_hash_prev = null;
             if (shape.is_hashed) self.insertShapeHash(shape);
         }
         self.memory.free(?*Shape, old_buckets);
@@ -713,19 +691,14 @@ pub const Registry = struct {
         const bucket = hashIndex(shape.hash, self.shape_hash_bits);
         const bucket_link = &self.shape_hash_buckets[bucket];
         shape.registry_hash_next = bucket_link.*;
-        if (shape.registry_hash_next) |next| next.registry_hash_prev = &shape.registry_hash_next;
-        shape.registry_hash_prev = bucket_link;
         bucket_link.* = shape;
     }
 
     fn removeShapeHash(self: *Registry, shape: *Shape) void {
-        if (shape.registry_hash_prev) |prev| {
-            prev.* = shape.registry_hash_next;
-            if (shape.registry_hash_next) |next| next.registry_hash_prev = prev;
-            shape.registry_hash_next = null;
-            shape.registry_hash_prev = null;
-            return;
-        }
+        // qjs shape_hash is singly-linked (quickjs.c:984 `shape_hash_next`);
+        // js_shape_hash_unlink re-walks the bucket rather than keeping a back
+        // pointer. Re-walk the current-hash bucket, falling back to a full scan
+        // if the shape was filed under a stale hash.
         if (!self.removeShapeHashFromBucket(shape, shape.hash)) self.removeShapeHashEverywhere(shape);
     }
 
@@ -745,9 +718,7 @@ pub const Registry = struct {
             while (cursor.*) |candidate| {
                 if (candidate == shape) {
                     cursor.* = candidate.registry_hash_next;
-                    if (candidate.registry_hash_next) |next| next.registry_hash_prev = cursor;
                     candidate.registry_hash_next = null;
-                    candidate.registry_hash_prev = null;
                     break;
                 }
                 cursor = &candidate.registry_hash_next;
@@ -762,9 +733,7 @@ pub const Registry = struct {
         while (cursor.*) |candidate| {
             if (candidate == shape) {
                 cursor.* = candidate.registry_hash_next;
-                if (candidate.registry_hash_next) |next| next.registry_hash_prev = cursor;
                 candidate.registry_hash_next = null;
-                candidate.registry_hash_prev = null;
                 return true;
             }
             cursor = &candidate.registry_hash_next;

@@ -228,58 +228,6 @@ inline fn dispatchFastBinaryInt32(binop: u8, lhs: i32, rhs: i32) ?core.JSValue {
     };
 }
 
-inline fn dispatchFieldOwnDataIcValue(
-    function: *const bytecode.Bytecode,
-    site_pc: usize,
-    receiver: core.JSValue,
-    atom_id: core.Atom,
-) ?core.JSValue {
-    const object = class_vm.objectFromValue(receiver) orelse return null;
-    const slot = function.icSlotForPc(site_pc) orelse return null;
-    if (slot.state != .mono) return null;
-    const entry = slot.entries[0];
-    if (entry.holder_shape_ref != null or
-        entry.shape_ref != object.shape_ref or
-        entry.atom_id != atom_id or
-        entry.version != object.shape_ref.version)
-    {
-        return null;
-    }
-    if (entry.slot_index >= object.properties.len) return null;
-    return object.asDataAt(entry.slot_index);
-}
-
-inline fn dispatchFieldOwnDataIcStoreOwned(
-    rt: *core.JSRuntime,
-    function: *const bytecode.Bytecode,
-    site_pc: usize,
-    receiver: core.JSValue,
-    atom_id: core.Atom,
-    value: core.JSValue,
-) bool {
-    const object = class_vm.objectFromValue(receiver) orelse return false;
-    if (object.needsSlowPropertyAccess() or object.hasExoticMethods()) return false;
-    const slot = function.icSlotForPc(site_pc) orelse return false;
-    if (slot.state != .mono) return false;
-    const entry = slot.entries[0];
-    if (entry.holder_shape_ref != null or
-        entry.shape_ref != object.shape_ref or
-        entry.atom_id != atom_id or
-        entry.version != object.shape_ref.version)
-    {
-        return false;
-    }
-    if (entry.slot_index >= object.shapeProps().len) return false;
-    const prop = object.shapeProps()[entry.slot_index];
-    const prop_flags = core.property.Flags.fromBits(prop.flags);
-    if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.kind != .data or !prop_flags.writable) return false;
-    const property_entry = &object.properties[entry.slot_index];
-    const old_slot = property_entry.slot;
-    property_entry.slot = .{ .data = value };
-    core.object.destroyPropertySlot(rt, atom_id, prop_flags, old_slot);
-    return true;
-}
-
 inline fn dispatchFastUpdateInt32(opcode_id: u8, value: i32) core.JSValue {
     return switch (opcode_id) {
         op.post_inc, op.inc_loc => dispatchFastInt32Add(value, 1),
@@ -1846,26 +1794,6 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
 
             // ---- Object properties ----
             op.get_field, op.get_field2 => {
-                if (comptime thread_dispatch) get_field_ic_fast: {
-                    if (reg_sp == stack.values.ptr) break :get_field_ic_fast;
-                    const operand_pc = (@intFromPtr(reg_ip) - @intFromPtr(function.code.ptr));
-                    if (operand_pc == 0) break :get_field_ic_fast;
-                    const site_pc = operand_pc - 1;
-                    const atom_id = std.mem.readInt(u32, reg_ip[0..4], .little);
-                    const receiver = (reg_sp - 1)[0];
-                    const value = dispatchFieldOwnDataIcValue(function, site_pc, receiver, atom_id) orelse break :get_field_ic_fast;
-                    reg_ip += 4;
-                    if (opc == op.get_field) {
-                        (reg_sp - 1)[0] = value.dup();
-                        receiver.free(ctx.runtime);
-                    } else {
-                        reg_sp[0] = value.dup();
-                        reg_sp += 1;
-                    }
-                    opc = reg_ip[0];
-                    reg_ip += 1;
-                    continue :sw opc;
-                }
                 syncDown(function, frame, stack, reg_ip, reg_sp);
                 switch (try vm_property_field.field(ctx, output, global, stack, function, frame, catch_target, opc)) {
                     .done => {},
@@ -1873,22 +1801,6 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 }
             },
             op.put_field => {
-                if (comptime thread_dispatch) put_field_ic_fast: {
-                    if (@intFromPtr(reg_sp) - @intFromPtr(stack.values.ptr) < 2 * @sizeOf(core.JSValue)) break :put_field_ic_fast;
-                    const operand_pc = (@intFromPtr(reg_ip) - @intFromPtr(function.code.ptr));
-                    if (operand_pc == 0) break :put_field_ic_fast;
-                    const site_pc = operand_pc - 1;
-                    const atom_id = std.mem.readInt(u32, reg_ip[0..4], .little);
-                    const receiver = (reg_sp - 2)[0];
-                    const value = (reg_sp - 1)[0];
-                    if (!dispatchFieldOwnDataIcStoreOwned(ctx.runtime, function, site_pc, receiver, atom_id, value)) break :put_field_ic_fast;
-                    reg_ip += 4;
-                    reg_sp -= 2;
-                    receiver.free(ctx.runtime);
-                    opc = reg_ip[0];
-                    reg_ip += 1;
-                    continue :sw opc;
-                }
                 syncDown(function, frame, stack, reg_ip, reg_sp);
                 switch (try vm_property_field.field(ctx, output, global, stack, function, frame, catch_target, opc)) {
                     .done => {},

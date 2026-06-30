@@ -1372,7 +1372,7 @@ pub const JSRuntime = struct {
     pub fn retainWeakIdentity(self: *JSRuntime, identity: usize) void {
         if ((identity & 1) == 0) {
             const object = self.objectFromWeakIdentity(identity) orelse return;
-            std.debug.assert(object.header.rc > 0);
+            std.debug.assert(object.header.meta().rc > 0);
             object.weakref_count += 1;
             return;
         }
@@ -1386,7 +1386,7 @@ pub const JSRuntime = struct {
             const object = self.objectFromWeakIdentity(identity) orelse return;
             std.debug.assert(object.weakref_count > 0);
             object.weakref_count -= 1;
-            if (object.weakref_count == 0 and object.header.rc == 0 and !object.header.flags.mark) {
+            if (object.weakref_count == 0 and object.header.meta().rc == 0 and !object.header.meta().flags.mark) {
                 Object.destroyDeadWeakHusk(self, object);
             }
             return;
@@ -1429,7 +1429,7 @@ pub const JSRuntime = struct {
     pub fn liveObjectFromWeakIdentity(self: *const JSRuntime, identity: usize) ?*Object {
         if ((identity & 1) != 0) return null;
         const object = self.objectFromWeakIdentity(identity) orelse return null;
-        if (object.header.rc == 0) return null;
+        if (object.header.meta().rc == 0) return null;
         return object;
     }
 
@@ -1912,7 +1912,7 @@ pub const JSRuntime = struct {
         }
         var gc_iter = self.gc.objectIterator();
         while (gc_iter.next()) |header| {
-            if (header.kind == .object) {
+            if (header.meta().kind == .object) {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", header));
                 count +|= obj.weakCollectionEntries().len;
                 count +|= obj.finalizationRegistryCells().len;
@@ -2456,9 +2456,9 @@ pub const JSRuntime = struct {
             self.current_deferred_weak_value_free_identity = skip_identity;
             defer self.current_deferred_weak_value_free_identity = previous_skip_identity;
             if (item.value.refCountHeader()) |header| {
-                if (header.rc == 0) {
+                if (header.meta().rc == 0) {
                     const already_consumed_prequeued_object =
-                        header.kind == .object and
+                        header.meta().kind == .object and
                         skip_identity != null and
                         skip_identity.? == (@intFromPtr(header) & ~@as(usize, 1));
                     std.debug.assert(already_consumed_prequeued_object);
@@ -2692,8 +2692,8 @@ pub const JSRuntime = struct {
 
 fn objectFromLastRefValue(value: JSValue) ?*Object {
     const header = value.refHeader() orelse return null;
-    if (header.kind != .object) return null;
-    if (header.rc != 1) return null;
+    if (header.meta().kind != .object) return null;
+    if (header.meta().rc != 1) return null;
     return @alignCast(@fieldParentPtr("header", header));
 }
 

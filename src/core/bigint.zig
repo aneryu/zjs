@@ -4,6 +4,10 @@ const JSRuntime = @import("runtime.zig").JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 
 pub const BigInt = struct {
+    pub const gc_kind_tag: u8 = @intFromEnum(gc.GcKind.big_int);
+    comptime {
+        @import("std").debug.assert(@offsetOf(@This(), "header") == 0);
+    }
     header: gc.Header,
     value: libs.bigint.BigInt,
 
@@ -22,7 +26,7 @@ pub const BigInt = struct {
     pub fn createFromOwned(rt: *JSRuntime, value: libs.bigint.BigInt) !*BigInt {
         const self = try rt.memory.create(BigInt);
         self.* = .{
-            .header = .{ .kind = .big_int },
+            .header = .{},
             .value = value,
         };
         return self;

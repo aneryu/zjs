@@ -13,8 +13,8 @@ pub const Data = union(enum) {
     utf16: []u16,
     slice: struct {
         parent: *String,
-        start: usize,
-        len: usize,
+        start: u32,
+        len: u32,
     },
     rope: *Rope,
 
@@ -97,13 +97,15 @@ pub fn isAsciiBytes(bytes: []const u8) bool {
 }
 
 pub const String = struct {
+    pub const no_atom_id: u32 = std.math.maxInt(u32);
+
     header: gc.StringHeader,
     data: Data,
     layout: Layout,
-    capacity: usize,
+    capacity: u32,
     hash: u32,
     hash_ready: bool = false,
-    atom_id: ?u32 = null,
+    atom_id: u32 = no_atom_id,
     /// Set once a string becomes a rope child. Rope nodes snapshot their
     /// children's content, so in-place appends must be refused from then on.
     rope_child: bool = false,
@@ -181,7 +183,7 @@ pub const String = struct {
             .header = .{},
             .data = .{ .utf16 = units },
             .layout = .separate,
-            .capacity = capacity,
+            .capacity = @intCast(capacity),
             .hash = 0,
         };
         return self;
@@ -242,7 +244,7 @@ pub const String = struct {
     /// Rope-backed strings are flattened by the content read.
     pub fn internAtom(self: *String, rt: *JSRuntime) !u32 {
         _ = self.contentHash();
-        if (self.atom_id) |cached| return rt.atoms.dup(cached);
+        if (self.atom_id != no_atom_id) return rt.atoms.dup(self.atom_id);
         var utf8 = std.ArrayList(u8).empty;
         defer utf8.deinit(rt.memory.allocator);
         const atom_id = switch (self.resolveData()) {
@@ -391,7 +393,7 @@ pub const String = struct {
     /// `append*InPlace` family (reference-count accounting at the call site).
     /// On allocation failure the rope is left untouched.
     pub fn appendRopeTail(self: *String, rt: *JSRuntime, suffix: ResolvedData) !bool {
-        if (self.atom_id != null or self.rope_child) return false;
+        if (self.atom_id != no_atom_id or self.rope_child) return false;
         if (self.data != .rope) return false;
         const node = self.data.rope;
         std.debug.assert(node.rt == rt);
@@ -493,10 +495,8 @@ pub const String = struct {
     }
 
     pub fn compare(self: String, other: String) i32 {
-        if (self.atom_id) |self_atom| {
-            if (other.atom_id) |other_atom| {
-                if (self_atom == other_atom) return 0;
-            }
+        if (self.atom_id != no_atom_id and other.atom_id != no_atom_id) {
+            if (self.atom_id == other.atom_id) return 0;
         }
         return compareResolved(self.resolveData(), other.resolveData());
     }
@@ -577,17 +577,17 @@ pub const String = struct {
         self.header = .{};
         self.hash = 0;
         self.hash_ready = false;
-        self.atom_id = null;
+        self.atom_id = no_atom_id;
         self.rope_child = false;
         self.layout = .slice;
         self.capacity = 0;
-        self.data = .{ .slice = .{ .parent = parent, .start = start, .len = slice_len } };
+        self.data = .{ .slice = .{ .parent = parent, .start = @intCast(start), .len = @intCast(slice_len) } };
         parent.retain();
         return self;
     }
 
     pub fn appendLatin1InPlace(self: *String, rt: *JSRuntime, suffix: []const u8) !bool {
-        if (self.atom_id != null or self.rope_child) return false;
+        if (self.atom_id != no_atom_id or self.rope_child) return false;
         if (suffix.len == 0) return true;
         const bytes = switch (self.data) {
             .latin1 => |bytes| bytes,
@@ -617,14 +617,14 @@ pub const String = struct {
         writeLatin1Terminator(expanded);
         const old_bytes = finalLatin1Allocation(bytes, self.capacity);
         self.data = .{ .latin1 = expanded };
-        self.capacity = next_capacity;
+        self.capacity = @intCast(next_capacity);
         if (self.hash_ready) self.hash = hashLatin1(suffix, self.hash);
         rt.memory.free(u8, old_bytes);
         return true;
     }
 
     pub fn appendUtf16InPlace(self: *String, rt: *JSRuntime, suffix: []const u16) !bool {
-        if (self.atom_id != null or self.rope_child) return false;
+        if (self.atom_id != no_atom_id or self.rope_child) return false;
         if (suffix.len == 0) return true;
         const units = switch (self.data) {
             .latin1, .slice, .rope => return false,
@@ -648,14 +648,14 @@ pub const String = struct {
         @memcpy(expanded[old_len..new_len], suffix);
         const old_units = units.ptr[0..self.capacity];
         self.data = .{ .utf16 = expanded[0..new_len] };
-        self.capacity = next_capacity;
+        self.capacity = @intCast(next_capacity);
         if (self.hash_ready) self.hash = hashUtf16(suffix, self.hash);
         rt.memory.free(u16, old_units);
         return true;
     }
 
     pub fn appendLatin1ToUtf16InPlace(self: *String, rt: *JSRuntime, suffix: []const u8) !bool {
-        if (self.atom_id != null or self.rope_child) return false;
+        if (self.atom_id != no_atom_id or self.rope_child) return false;
         if (suffix.len == 0) return true;
         const units = switch (self.data) {
             .latin1, .slice, .rope => return false,
@@ -679,14 +679,14 @@ pub const String = struct {
         for (suffix, old_len..) |byte, index| expanded[index] = byte;
         const old_units = units.ptr[0..self.capacity];
         self.data = .{ .utf16 = expanded[0..new_len] };
-        self.capacity = next_capacity;
+        self.capacity = @intCast(next_capacity);
         if (self.hash_ready) self.hash = hashLatin1(suffix, self.hash);
         rt.memory.free(u16, old_units);
         return true;
     }
 
     pub fn appendUtf16WidenInPlace(self: *String, rt: *JSRuntime, suffix: []const u16) !bool {
-        if (self.atom_id != null or self.rope_child) return false;
+        if (self.atom_id != no_atom_id or self.rope_child) return false;
         if (suffix.len == 0) return true;
         const bytes = switch (self.data) {
             .latin1 => |bytes| bytes,
@@ -702,14 +702,14 @@ pub const String = struct {
         @memcpy(expanded[old_len..new_len], suffix);
         const old_bytes = finalLatin1Allocation(bytes, self.capacity);
         self.data = .{ .utf16 = expanded[0..new_len] };
-        self.capacity = next_capacity;
+        self.capacity = @intCast(next_capacity);
         if (self.hash_ready) self.hash = hashUtf16(suffix, self.hash);
         rt.memory.free(u8, old_bytes);
         return true;
     }
 
     pub fn appendLatin1RepeatedInPlace(self: *String, rt: *JSRuntime, suffix: []const u8, repeat_count: usize) !bool {
-        if (self.atom_id != null or self.rope_child) return false;
+        if (self.atom_id != no_atom_id or self.rope_child) return false;
         if (repeat_count == 0 or suffix.len == 0) return true;
         const bytes = switch (self.data) {
             .latin1 => |bytes| bytes,
@@ -726,7 +726,7 @@ pub const String = struct {
 
         var expanded: []u8 = undefined;
         var old_bytes: []u8 = &.{};
-        var next_capacity = self.capacity;
+        var next_capacity: usize = self.capacity;
         if (new_len <= self.capacity) {
             expanded = bytes.ptr[0..new_len];
         } else {
@@ -755,7 +755,7 @@ pub const String = struct {
         }
         writeLatin1Terminator(expanded);
         self.data = .{ .latin1 = expanded[0..new_len] };
-        self.capacity = next_capacity;
+        self.capacity = @intCast(next_capacity);
         if (self.hash_ready) {
             var remaining = repeat_count;
             while (remaining != 0) : (remaining -= 1) {
@@ -772,7 +772,8 @@ pub const String = struct {
         // A string bound to a live dynamic atom cannot be destroyed (the
         // atom table holds a reference), so reaching here with a dynamic
         // id would mean the table failed to clear the back-pointer.
-        if (self.atom_id) |atom_id| {
+        if (self.atom_id != no_atom_id) {
+            const atom_id = self.atom_id;
             if (!atom_mod.isConst(atom_id) and !atom_mod.isTaggedInt(atom_id)) {
                 if (rt.atoms.onSymbolBodyZeroRef(rt, atom_id, self)) return;
             } else {
@@ -784,7 +785,7 @@ pub const String = struct {
 
     pub fn destroyWeakSymbolBody(rt: *JSRuntime, self: *String) void {
         std.debug.assert(self.header.rc == 0);
-        self.atom_id = null;
+        self.atom_id = no_atom_id;
         destroyUninitialized(rt, self);
     }
 
@@ -800,10 +801,10 @@ pub const String = struct {
         self.header = .{};
         self.hash = 0;
         self.hash_ready = false;
-        self.atom_id = null;
+        self.atom_id = no_atom_id;
         self.rope_child = false;
         self.layout = .compact;
-        self.capacity = capacity;
+        self.capacity = @intCast(capacity);
         switch (tag) {
             .latin1 => {
                 const payload = bytes[inline_layout.payload_offset..];
@@ -1108,8 +1109,8 @@ fn drainRopeDestroyChain(rt: *JSRuntime, pending: *?*String) void {
         pending.* = node.chain_next;
         // `atom_id` is a weak back-pointer; nothing to release here. A
         // wrapper bound to a live dynamic atom cannot reach rc 0.
-        if (wrapper.atom_id) |atom_id| {
-            std.debug.assert(atom_mod.isConst(atom_id) or atom_mod.isTaggedInt(atom_id));
+        if (wrapper.atom_id != String.no_atom_id) {
+            std.debug.assert(atom_mod.isConst(wrapper.atom_id) or atom_mod.isTaggedInt(wrapper.atom_id));
         }
         switch (node.flat) {
             .none => {
@@ -1134,7 +1135,7 @@ fn drainRopeDestroyChain(rt: *JSRuntime, pending: *?*String) void {
 }
 
 fn destroyRopeWrapper(rt: *JSRuntime, self: *String) void {
-    self.atom_id = null; // weak back-pointer, already validated by destroyFromHeader
+    self.atom_id = String.no_atom_id; // weak back-pointer, already validated by destroyFromHeader
     self.data.rope.chain_next = null;
     var pending: ?*String = self;
     drainRopeDestroyChain(rt, &pending);

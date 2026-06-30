@@ -400,7 +400,9 @@ pub const JSValue = extern struct {
     }
 
     pub fn asSymbolAtom(self: JSValue) ?u32 {
-        return if (self.asSymbolBody()) |body| body.atom_id else null;
+        const body = self.asSymbolBody() orelse return null;
+        if (body.atom_id == string_mod.String.no_atom_id) return null;
+        return body.atom_id;
     }
 
     pub fn asSymbolBody(self: JSValue) ?*string_mod.String {

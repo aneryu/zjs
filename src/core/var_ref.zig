@@ -10,10 +10,10 @@ const gc = @import("gc.zig");
 const JSValue = @import("value.zig").JSValue;
 
 pub const VarRef = struct {
-    header: gc.Header = .{ .kind = .var_ref },
+    pub const gc_kind_tag: u8 = @intFromEnum(gc.GcKind.var_ref);
+    header: gc.Header = .{},
     value: JSValue = JSValue.undefinedValue(),
     pvalue: *JSValue = undefined,
-    next_open: ?*VarRef = null,
     is_const: bool = false,
     // QuickJS JSVarRef.is_lexical (quickjs.c:453) — only meaningful for
     // top-level global lexical bindings; gates TDZ-throw on read.
@@ -31,9 +31,10 @@ pub const VarRef = struct {
         const self = try rt.createRuntime(VarRef);
         errdefer rt.destroyRuntime(VarRef, self);
         self.* = .{
-            .header = .{ .kind = .var_ref },
+            .header = .{},
             .value = initial_value,
         };
+        self.header.meta().* = .{ .kind = .var_ref };
         self.pvalue = &self.value;
         try rt.gc.addWithSize(&self.header, @sizeOf(VarRef));
         return self;
@@ -43,11 +44,12 @@ pub const VarRef = struct {
         const self = try rt.createRuntime(VarRef);
         errdefer rt.destroyRuntime(VarRef, self);
         self.* = .{
-            .header = .{ .kind = .var_ref },
+            .header = .{},
             .value = JSValue.undefinedValue(),
             .pvalue = slot,
             .is_open = true,
         };
+        self.header.meta().* = .{ .kind = .var_ref };
         try rt.gc.addWithSize(&self.header, @sizeOf(VarRef));
         return self;
     }
@@ -64,7 +66,7 @@ pub const VarRef = struct {
 
     pub fn fromValue(value: JSValue) ?*VarRef {
         const header = value.refHeader() orelse return null;
-        if (header.kind != .var_ref) return null;
+        if (header.meta().kind != .var_ref) return null;
         return @alignCast(@fieldParentPtr("header", header));
     }
 
@@ -73,7 +75,6 @@ pub const VarRef = struct {
         const closed_value = self.pvalue.*.dup();
         self.value = closed_value;
         self.pvalue = &self.value;
-        self.next_open = null;
         self.is_open = false;
         _ = rt;
     }

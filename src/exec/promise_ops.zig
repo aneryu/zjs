@@ -1259,12 +1259,12 @@ test "qjsPromiseSettleValue handles result self-assignment" {
 
     try promise.setPromiseResult(rt, result.value().dup());
     result.value().free(rt);
-    try std.testing.expectEqual(@as(i32, 1), result.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), result.header.meta().rc);
 
     const current = promise.promiseResult().?;
     try qjsPromiseSettleValue(ctx, global, promise, current, false);
 
-    try std.testing.expectEqual(@as(i32, 1), result.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), result.header.meta().rc);
     try std.testing.expectEqual(&result.header, promise.promiseResult().?.refHeader().?);
 }
 

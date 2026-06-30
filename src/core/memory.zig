@@ -315,14 +315,27 @@ pub const MemoryAccount = struct {
     fn allocInternal(self: *MemoryAccount, comptime T: type, count: usize, comptime trigger_gc: bool) ![]T {
         if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
         if (count == 0) return &.{};
-        const bytes = std.math.mul(usize, @sizeOf(T), count) catch return error.OutOfMemory;
+        // GC objects (header at offset 0) carry an 8-byte metadata prefix before
+        // the object. They are only ever allocated singly (`alloc(T, 1)`), e.g.
+        // FunctionBytecode; arrays of pointers/values are NOT GC objects.
+        const is_gc = comptime isGcObject(T);
+        if (comptime is_gc) std.debug.assert(count == 1);
+        const prefix = comptime if (is_gc) gcPrefixSize(T) else 0;
+        const payload_bytes = std.math.mul(usize, @sizeOf(T), count) catch return error.OutOfMemory;
+        const bytes = prefix + payload_bytes;
         try self.checkAllocation(bytes);
         if (comptime trigger_gc) {
             self.triggerGCBeforeAllocation(bytes);
         }
         const next_allocated_bytes = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;
-        const raw = try self.rawAlloc(bytes, std.mem.Alignment.of(T));
-        const ptr: [*]T = @ptrCast(@alignCast(raw));
+        const alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T);
+        const raw = try self.rawAlloc(bytes, alignment);
+        const obj_addr = @intFromPtr(raw) + prefix;
+        if (comptime is_gc) initGcPrefix(T, @ptrFromInt(obj_addr - gc_prefix_size));
+        const ptr: [*]T = if (comptime is_gc)
+            @ptrFromInt(obj_addr)
+        else
+            @ptrCast(@alignCast(raw));
         const slice = ptr[0..count];
         self.allocated_bytes = next_allocated_bytes;
         if (comptime diagnostic_accounting_enabled) {
@@ -338,14 +351,19 @@ pub const MemoryAccount = struct {
     pub fn free(self: *MemoryAccount, comptime T: type, slice: []T) void {
         if (slice.len == 0) return;
         if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(slice.ptr));
-        const bytes = std.math.mul(usize, @sizeOf(T), slice.len) catch return;
+        const is_gc = comptime isGcObject(T);
+        const prefix = comptime if (is_gc) gcPrefixSize(T) else 0;
+        const payload_bytes = std.math.mul(usize, @sizeOf(T), slice.len) catch return;
+        const bytes = prefix + payload_bytes;
         self.allocated_bytes -= bytes;
         if (comptime diagnostic_accounting_enabled) {
             self.allocation_count -= 1;
             self.free_calls += 1;
         }
-        const bytes_ptr: [*]u8 = @ptrCast(slice.ptr);
-        self.rawFree(bytes_ptr[0..bytes], std.mem.Alignment.of(T));
+        const base: usize = @intFromPtr(slice.ptr) - prefix;
+        const bytes_ptr: [*]u8 = @ptrFromInt(base);
+        const alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T);
+        self.rawFree(bytes_ptr[0..bytes], alignment);
     }
 
     /// Attempts to resize an existing allocation through the backing allocator's
@@ -437,36 +455,89 @@ pub const MemoryAccount = struct {
         return self.createInternal(T, false);
     }
 
+    /// Size of the metadata prefix the allocator places before every GC object.
+    /// MUST equal `@sizeOf(gc.Metadata)` (asserted there). Hardcoded to avoid a
+    /// circular import (gc.zig imports memory.zig).
+    const gc_prefix_size: usize = 8;
+
+    /// A GC object is any struct whose first field (`header`, offset 0) is the
+    /// 16-byte intrusive-list `BlockHeader` (`prev`/`next`). Such objects carry
+    /// their refcount/kind/flags in an 8-byte prefix at `objectPtr - 8`; plain
+    /// allocations (and the 4-byte `StringHeader`, which has no prev/next) do not.
+    inline fn isGcObject(comptime T: type) bool {
+        if (@typeInfo(T) != .@"struct") return false;
+        if (!@hasDecl(T, "gc_kind_tag")) return false;
+        if (!@hasField(T, "header")) return false;
+        if (@offsetOf(T, "header") != 0) return false;
+        const H = @FieldType(T, "header");
+        return @typeInfo(H) == .@"struct" and @hasField(H, "prev") and @hasField(H, "next") and @sizeOf(H) == 16;
+    }
+
+    /// Total leading bytes reserved before a GC object so that (a) the 8-byte
+    /// `Metadata` lands at `objectPtr - 8` (where `BlockHeader.meta()` looks) and
+    /// (b) the object stays `@alignOf(T)`-aligned. For align<=8 types this is 8;
+    /// for over-aligned types (e.g. FunctionBytecode forces align 16 to keep its
+    /// `header` field at offset 0) it rounds up to the alignment.
+    inline fn gcPrefixSize(comptime T: type) usize {
+        return comptime std.mem.alignForward(usize, gc_prefix_size, @alignOf(T));
+    }
+
+    inline fn gcAlignment(comptime T: type) std.mem.Alignment {
+        return comptime if (@alignOf(T) > gc_prefix_size) std.mem.Alignment.of(T) else std.mem.Alignment.fromByteUnits(gc_prefix_size);
+    }
+
+    /// Initialize the 8-byte GC metadata at `meta` (= objectPtr - 8) to
+    /// {size_class:0, kind:T.gc_kind_tag, flags:0, rc:1}. Written as raw bytes
+    /// (memory.zig has no gc import); the kind@2 / rc@4 offsets are asserted in gc.zig.
+    inline fn initGcPrefix(comptime T: type, meta: [*]u8) void {
+        @memset(meta[0..gc_prefix_size], 0);
+        meta[2] = T.gc_kind_tag;
+        meta[4] = 1;
+    }
+
     fn createInternal(self: *MemoryAccount, comptime T: type, comptime trigger_gc: bool) !*T {
         if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
-        const bytes = @sizeOf(T);
+        const is_gc = comptime isGcObject(T);
+        const prefix = comptime if (is_gc) gcPrefixSize(T) else 0;
+        const bytes = prefix + @sizeOf(T);
         try self.checkAllocation(bytes);
         if (comptime trigger_gc) {
             self.triggerGCBeforeAllocation(bytes);
         }
         const next_allocated_bytes = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;
-        const raw = try self.rawAlloc(bytes, std.mem.Alignment.of(T));
-        const ptr: *T = @ptrCast(@alignCast(raw));
+        const alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T);
+        const raw = try self.rawAlloc(bytes, alignment);
+        const obj_addr = @intFromPtr(raw) + prefix;
+        if (comptime is_gc) initGcPrefix(T, @ptrFromInt(obj_addr - gc_prefix_size));
+        const ptr: *T = if (comptime is_gc)
+            @ptrFromInt(obj_addr)
+        else
+            @ptrCast(@alignCast(raw));
         self.allocated_bytes = next_allocated_bytes;
         if (comptime diagnostic_accounting_enabled) {
             self.allocation_count += 1;
             self.create_calls += 1;
             self.updatePeak();
             if (self.profile_alloc_count) |counter| counter.* +|= 1;
-            self.traceAlloc(@sizeOf(T), 1, @intFromPtr(ptr));
+            self.traceAlloc(bytes, 1, @intFromPtr(ptr));
         }
         return ptr;
     }
 
     pub fn destroy(self: *MemoryAccount, comptime T: type, ptr: *T) void {
         if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(ptr));
-        self.allocated_bytes -= @sizeOf(T);
+        const is_gc = comptime isGcObject(T);
+        const prefix = comptime if (is_gc) gcPrefixSize(T) else 0;
+        const bytes = prefix + @sizeOf(T);
+        self.allocated_bytes -= bytes;
         if (comptime diagnostic_accounting_enabled) {
             self.allocation_count -= 1;
             self.destroy_calls += 1;
         }
-        const bytes_ptr: [*]u8 = @ptrCast(ptr);
-        self.rawFree(bytes_ptr[0..@sizeOf(T)], std.mem.Alignment.of(T));
+        const base: usize = @intFromPtr(ptr) - prefix;
+        const bytes_ptr: [*]u8 = @ptrFromInt(base);
+        const alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T);
+        self.rawFree(bytes_ptr[0..bytes], alignment);
     }
 
     pub fn hasOutstandingAllocations(self: MemoryAccount) bool {
