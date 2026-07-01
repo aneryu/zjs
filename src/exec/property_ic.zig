@@ -410,8 +410,8 @@ pub fn ordinaryDataPropertyIsUndefinedForFastPath(rt: *core.JSRuntime, value: co
 }
 
 fn declaredGlobalVarDataBorrowedLookup(global: *core.Object, function: *const bytecode.Bytecode, atom_id: core.Atom) ?BorrowedGlobalDataLookup {
-    for (function.global_var_names) |name| {
-        if (name != atom_id) continue;
+    for (function.global_vars) |gv| {
+        if (gv.var_name != atom_id) continue;
         return globalOwnDataPropertyBorrowedLookup(global, atom_id);
     }
     return null;
@@ -686,33 +686,33 @@ test "global own data slot helpers preserve lookup and write ownership" {
     const initial = try core.string.String.createAscii(rt, "initial");
     try global.defineOwnProperty(rt, key, core.Descriptor.data(initial.value(), true, true, true));
     initial.value().free(rt);
-    try std.testing.expectEqual(@as(i32, 1), initial.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), initial.header().rc);
 
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer function.deinit(rt);
-    function.global_var_names = try rt.memory.alloc(core.Atom, 1);
-    function.global_var_names[0] = rt.atoms.dup(key);
+    function.global_vars = try rt.memory.alloc(bytecode.function_def.GlobalVar, 1);
+    function.global_vars[0] = .{ .cpool_idx = -1, .scope_level = 0, .var_name = rt.atoms.dup(key) };
 
     const lookup = globalOwnDataPropertyBorrowedLookup(global, key).?;
     try std.testing.expectEqual(@as(usize, 0), lookup.index);
-    try std.testing.expectEqual(&initial.header, lookup.value.stringHeader().?);
-    try std.testing.expectEqual(&initial.header, globalOwnDataPropertyValue(global, key).?.stringHeader().?);
+    try std.testing.expectEqual(initial.header(), lookup.value.stringHeader().?);
+    try std.testing.expectEqual(initial.header(), globalOwnDataPropertyValue(global, key).?.stringHeader().?);
     try std.testing.expect(globalOwnDataPropertyValue(global, other_key) == null);
-    try std.testing.expectEqual(&initial.header, globalOwnWritableDataPropertyLookup(global, key).?.value.stringHeader().?);
+    try std.testing.expectEqual(initial.header(), globalOwnWritableDataPropertyLookup(global, key).?.value.stringHeader().?);
     const writable_lookup = globalWritableDataPropertyLookupAt(global, lookup.index, key).?;
     try std.testing.expectEqual(lookup.index, writable_lookup.index);
-    try std.testing.expectEqual(&initial.header, writable_lookup.value.stringHeader().?);
+    try std.testing.expectEqual(initial.header(), writable_lookup.value.stringHeader().?);
     try std.testing.expectEqual(@as(?usize, lookup.index), globalWritableDataStoreIndexForFastPath(rt, null, global, &function, 0, key));
     const store_lookup = globalWritableDataStoreLookupForFastPath(rt, null, global, &function, 0, key).?;
     try std.testing.expectEqual(lookup.index, store_lookup.index);
-    try std.testing.expectEqual(&initial.header, store_lookup.value.stringHeader().?);
-    try std.testing.expectEqual(&initial.header, globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
-    try std.testing.expectEqual(&initial.header, declaredGlobalVarDataBorrowedLookup(global, &function, key).?.value.stringHeader().?);
+    try std.testing.expectEqual(initial.header(), store_lookup.value.stringHeader().?);
+    try std.testing.expectEqual(initial.header(), globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
+    try std.testing.expectEqual(initial.header(), declaredGlobalVarDataBorrowedLookup(global, &function, key).?.value.stringHeader().?);
     try std.testing.expect(declaredGlobalVarDataBorrowedLookup(global, &function, other_key) == null);
-    try std.testing.expectEqual(&initial.header, globalDataPropertyLookupForFastPath(rt, global, &function, 0, key).?.value.stringHeader().?);
-    try std.testing.expectEqual(&initial.header, globalDataPropertyValueForFastPath(rt, global, &function, 0, key).?.stringHeader().?);
-    try std.testing.expectEqual(&initial.header, globalDataPropertyLookupForFastPathNoProfile(rt, global, &function, 0, key).?.value.stringHeader().?);
-    try std.testing.expectEqual(&initial.header, globalDataPropertyValueForFastPathNoProfile(rt, global, &function, 0, key).?.stringHeader().?);
+    try std.testing.expectEqual(initial.header(), globalDataPropertyLookupForFastPath(rt, global, &function, 0, key).?.value.stringHeader().?);
+    try std.testing.expectEqual(initial.header(), globalDataPropertyValueForFastPath(rt, global, &function, 0, key).?.stringHeader().?);
+    try std.testing.expectEqual(initial.header(), globalDataPropertyLookupForFastPathNoProfile(rt, global, &function, 0, key).?.value.stringHeader().?);
+    try std.testing.expectEqual(initial.header(), globalDataPropertyValueForFastPathNoProfile(rt, global, &function, 0, key).?.stringHeader().?);
     try std.testing.expect(globalDataPropertyLookupForFastPath(rt, global, &function, 0, other_key) == null);
     try std.testing.expect(globalDataPropertyValueForFastPath(rt, global, &function, 0, other_key) == null);
 
@@ -727,7 +727,7 @@ test "global own data slot helpers preserve lookup and write ownership" {
     const shadowed_store = setGlobalWritableDataStoreForFastPathOwned(rt, lexicals, global, &function, 0, key, shadowed_owned.value());
     if (shadowed_store) shadowed_transferred = true;
     try std.testing.expect(!shadowed_store);
-    try std.testing.expectEqual(@as(i32, 1), shadowed_owned.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), shadowed_owned.header().rc);
     shadowed_owned.value().free(rt);
     shadowed_transferred = true;
 
@@ -737,18 +737,18 @@ test "global own data slot helpers preserve lookup and write ownership" {
         try std.testing.expect(setGlobalDataPropertyLookup(rt, global, lookup, key, value.value()));
         break :copied value;
     };
-    try std.testing.expectEqual(@as(i32, 2), copied.header.rc);
+    try std.testing.expectEqual(@as(i32, 2), copied.header().rc);
     copied.value().free(rt);
-    try std.testing.expectEqual(@as(i32, 1), copied.header.rc);
-    try std.testing.expectEqual(&copied.header, globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
+    try std.testing.expectEqual(@as(i32, 1), copied.header().rc);
+    try std.testing.expectEqual(copied.header(), globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
 
     const owned = try core.string.String.createAscii(rt, "owned");
     var owned_transferred = false;
     errdefer if (!owned_transferred) owned.value().free(rt);
     try std.testing.expect(setGlobalOwnWritableDataPropertyAtOwned(rt, global, lookup.index, key, owned.value()));
     owned_transferred = true;
-    try std.testing.expectEqual(@as(i32, 1), owned.header.rc);
-    try std.testing.expectEqual(&owned.header, globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
+    try std.testing.expectEqual(@as(i32, 1), owned.header().rc);
+    try std.testing.expectEqual(owned.header(), globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
 
     const lookup_owned = try core.string.String.createAscii(rt, "lookup-owned");
     var lookup_transferred = false;
@@ -756,16 +756,16 @@ test "global own data slot helpers preserve lookup and write ownership" {
     const writable_store = globalWritableDataStoreLookupForFastPath(rt, null, global, &function, 0, key).?;
     try std.testing.expect(setGlobalWritableDataStoreLookupOwned(rt, global, writable_store, key, lookup_owned.value()));
     lookup_transferred = true;
-    try std.testing.expectEqual(@as(i32, 1), lookup_owned.header.rc);
-    try std.testing.expectEqual(&lookup_owned.header, globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
+    try std.testing.expectEqual(@as(i32, 1), lookup_owned.header().rc);
+    try std.testing.expectEqual(lookup_owned.header(), globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
 
     const fast_path_owned = try core.string.String.createAscii(rt, "fast-path-owned");
     var fast_path_transferred = false;
     errdefer if (!fast_path_transferred) fast_path_owned.value().free(rt);
     try std.testing.expect(setGlobalWritableDataStoreForFastPathOwned(rt, null, global, &function, 0, key, fast_path_owned.value()));
     fast_path_transferred = true;
-    try std.testing.expectEqual(@as(i32, 1), fast_path_owned.header.rc);
-    try std.testing.expectEqual(&fast_path_owned.header, globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
+    try std.testing.expectEqual(@as(i32, 1), fast_path_owned.header().rc);
+    try std.testing.expectEqual(fast_path_owned.header(), globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
 }
 
 test "global own data slot helpers reject readonly and accessor writes" {

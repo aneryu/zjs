@@ -134,7 +134,7 @@ pub noinline fn makeSlotRef(
     const ref_value = switch (opc) {
         op.make_loc_ref => blk: {
             if (idx >= frame.locals.len) return error.InvalidBytecode;
-            const is_lexical = idx < function.var_is_lexical.len and function.var_is_lexical[idx];
+            const is_lexical = idx < function.vardefs.len and function.vardefs[idx].is_lexical;
             break :blk try slot_ops.ensureLocalVarRefCell(ctx, frame, idx, is_lexical);
         },
         op.make_arg_ref => blk: {

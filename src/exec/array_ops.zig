@@ -4225,12 +4225,12 @@ pub fn typedArrayConstructorObject(value: core.JSValue) ?*core.Object {
 
 pub fn isConstructorForArrayOf(rt: *core.JSRuntime, value: core.JSValue) !bool {
     if (functionBytecodeFromValue(value)) |fb| {
-        return !fb.is_arrow_function and fb.has_prototype and fb.func_kind != .generator and fb.func_kind != .async_generator;
+        return !fb.flags.is_arrow_function and fb.flags.has_prototype and fb.flags.func_kind != .generator and fb.flags.func_kind != .async_generator;
     }
     if (functionObjectFromValue(value)) |function_object| {
         const function_value = function_object.functionBytecodeSlot().* orelse return false;
         const fb = functionBytecodeFromValue(function_value) orelse return false;
-        return !fb.is_arrow_function and fb.has_prototype and fb.func_kind != .generator and fb.func_kind != .async_generator;
+        return !fb.flags.is_arrow_function and fb.flags.has_prototype and fb.flags.func_kind != .generator and fb.flags.func_kind != .async_generator;
     }
     const object = callableObjectFromValue(value) orelse return false;
     if (object.class_id == core.class.ids.bound_function) {
@@ -5573,7 +5573,11 @@ test "createArrayFromArgs roots direct function bytecode args while creating arr
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        fb.cpool = __cp.ptr;
+        fb.cpool_count = @intCast(__cp.len);
+    }
     const symbol_atom = try rt.atoms.newValueSymbol("gc-create-array-from-args-bytecode-symbol");
     fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;

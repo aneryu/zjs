@@ -1247,16 +1247,37 @@ pub const function_bytecode = struct {
         var_name: atom.Atom,
     };
 
-    pub const CallSiteKind = enum(u8) {
-        prop_atom,
+    /// Side allocation holding the class-field metadata that only class
+    /// constructors/methods populate (empty for ~every ordinary function).
+    /// Collapsing the three `{ptr,len}` pairs that used to live inline on
+    /// `JSFunctionBytecode` into one nullable pointer keeps the common
+    /// (non-class) function a null pointer and mirrors qjs storing class-field
+    /// info out-of-line. Allocated/freed as one block owned by the FB.
+    pub const ClassMeta = struct {
+        class_instance_fields: []atom.Atom = &.{},
+        private_bound_names: []atom.Atom = &.{},
+        class_private_names: []atom.Atom = &.{},
     };
 
-    pub const CallSite = struct {
-        kind: CallSiteKind = .prop_atom,
-        atom_id: atom.Atom,
-        prepare_pc: u32,
-        call_pc: u32,
-        ic_slot_index: usize = std.math.maxInt(usize),
+    /// Out-of-line box for the FunctionBytecode cold cluster: the source/debug
+    /// fields (`line_num`/`col_num`/`source_len`/`pc2line_len` + the
+    /// `pc2line_buf`/`source_ptr` bare pointers) plus the argument-name array
+    /// (`arg_names`/`arg_names_len`). qjs keeps the debug fields inline in a
+    /// `debug` sub-struct and folds args into `vardefs`; zjs instead boxes this
+    /// whole cold cluster behind a single `?*DebugInfo` on the FB, shaving the
+    /// eight inline fields down to one 8B pointer. Allocated by the finalize
+    /// path (always, one small allocation per FB), freed in `deinit`. FBs with
+    /// no debug info and no args (the rare fixture) carry a null and the
+    /// accessors fall back to empty defaults.
+    pub const DebugInfo = struct {
+        line_num: i32 = 0,
+        col_num: i32 = 0,
+        source_len: i32 = 0,
+        pc2line_len: i32 = 0,
+        arg_names_len: u32 = 0,
+        pc2line_buf: [*]u8 = @ptrFromInt(@alignOf(u8)),
+        source_ptr: ?[*]const u8 = null,
+        arg_names: [*]atom.Atom = @ptrFromInt(@alignOf(atom.Atom)),
     };
 
     /// Mirrors `JSFunctionBytecode` (`quickjs.c:768-804`).
@@ -1277,227 +1298,493 @@ pub const function_bytecode = struct {
     /// the legacy per-slice frees.
     pub const FunctionBytecodeImpl = struct {
         pub const gc_kind_tag: u8 = @intFromEnum(gc.GcKind.function_bytecode);
+
+        /// Packed bitfield mirroring the `js_mode` + bit flags QuickJS keeps on
+        /// `JSFunctionBytecode` (quickjs.c:770-782). Consolidating the former 15
+        /// standalone `bool` fields + `func_kind` into one packed struct mirrors
+        /// qjs's packed layout; read/written as `fb.flags.<name>`.
+        pub const Flags = packed struct {
+            is_strict_mode: bool = false,
+            runtime_strict_mode: bool = false,
+            has_prototype: bool = false,
+            has_simple_parameter_list: bool = true,
+            is_class_constructor: bool = false,
+            is_derived_class_constructor: bool = false,
+            need_home_object: bool = false,
+            func_kind: FunctionKind = .normal,
+            is_arrow_function: bool = false,
+            new_target_allowed: bool = false,
+            super_call_allowed: bool = false,
+            super_allowed: bool = false,
+            arguments_allowed: bool = false,
+            backtrace_barrier: bool = false,
+            is_indirect_eval: bool = false,
+            has_eval_call: bool = false,
+            /// True when the read-only slices point into the single consolidated
+            /// `block` allocation (the `createFunctionBytecode` path); false for
+            /// the fixture path where each slice owns its own allocation. Replaces
+            /// the former `block_len == 0` marker so the FB carries only the block
+            /// pointer, not its length (the length is recomputed at free time).
+            from_block: bool = false,
+        };
+
         comptime {
             // align(16) forces this many-pointer-field struct to keep header at
             // offset 0 (Zig would otherwise reorder it deep into the struct).
             std.debug.assert(@offsetOf(@This(), "header") == 0);
         }
         header: gc.GCObjectHeader align(16),
-        memory: *memory.MemoryAccount,
-        atoms: *atom.AtomTable,
 
-        /// Consolidated storage for the read-only slices below. Empty when the
-        /// fields were populated with individual allocations (fixture path).
-        block: []u8 = &.{},
+        /// Consolidated storage for the read-only slices below. When
+        /// `flags.from_block` is set, the bare-pointer slices all point into this
+        /// single block (the `createFunctionBytecode` path); otherwise the fields
+        /// were populated with individual allocations (fixture path) and each
+        /// slice owns its own storage. Stored as a bare `[*]u8` self-pointer with
+        /// no length — the block's total size is recomputed from the slice
+        /// lengths at free time (`computeBlockSize`), mirroring QuickJS's single
+        /// `js_malloc(function_size)` allocation held by self-pointer.
+        block_ptr: [*]u8 = noSlice(u8),
 
-        // Flags (mirrors JSFunctionBytecode packed fields, same order as quickjs.c:770-782)
-        is_strict_mode: bool = false,
-        runtime_strict_mode: bool = false,
-        has_prototype: bool = false,
-        has_simple_parameter_list: bool = true,
-        is_class_constructor: bool = false,
-        is_derived_class_constructor: bool = false,
-        need_home_object: bool = false,
-        func_kind: FunctionKind = .normal,
-        is_arrow_function: bool = false,
-        new_target_allowed: bool = false,
-        super_call_allowed: bool = false,
-        super_allowed: bool = false,
-        arguments_allowed: bool = false,
-        backtrace_barrier: bool = false,
-        is_indirect_eval: bool = false,
-        has_eval_call: bool = false,
+        // Flags (mirrors JSFunctionBytecode packed fields, same order as
+        // quickjs.c:770-782). Packed into `Flags` to drop per-field padding.
+        flags: Flags = .{},
 
         // Bytecode (quickjs.c:783-784)
-        byte_code: []u8 = &.{},
+        //
+        // The read-only finalized slices below are stored as bare `[*]T`
+        // pointers plus explicit length fields, mirroring QuickJS's
+        // `JSFunctionBytecode` (self-pointer + separate count). This halves the
+        // per-field footprint (16B slice -> 8B pointer). Parallel arrays that
+        // provably share a length share ONE length field:
+        //   - vardefs => vars_len
+        //   - var_ref_names/closure_var => var_refs_len
+        //   - global_vars => global_vars_len
+        // byte_code uses byte_code_len, cpool uses cpool_count, pc2line_buf uses
+        // pc2line_len. Access the slice via the accessor methods (byteCode(), …).
+        byte_code: [*]u8 = noSlice(u8),
         byte_code_len: i32 = 0,
-        generator_body_pc: usize = 0,
-        atom_operands: []atom.Atom = &.{},
-        arg_names: []atom.Atom = &.{},
-        var_names: []atom.Atom = &.{},
-        var_is_lexical: []bool = &.{},
-        var_is_const: []bool = &.{},
-        // Lexical scope level per local slot (parallels var_is_lexical). Distinguishes
-        // a top-level (scope_level == 0) lexical from a block-level shadower.
-        var_scope_level: []i32 = &.{},
-        var_ref_names: []atom.Atom = &.{},
-        var_ref_is_lexical: []bool = &.{},
-        var_ref_is_const: []bool = &.{},
-        var_ref_is_global_decl: []bool = &.{},
-        global_var_names: []atom.Atom = &.{},
-        global_vars: []GlobalVar = &.{},
+        // The former `atom_operands: [*]atom.Atom` + `atom_operands_len` pair
+        // was a pure refcount-retention array: the VM never decoded through it
+        // (atoms are read inline from `byte_code`). Retention now walks the
+        // finalized bytecode directly (`dupBytecodeAtoms`/`freeBytecodeAtoms`),
+        // dropping the 12B here and matching qjs, which holds atom refs inline.
+        //
+        // The argument-name array (`arg_names`/`arg_names_len`) was moved into
+        // the out-of-line `DebugInfo` box (a cold-only array used for
+        // direct-eval scope resolution and backtrace binding lookups), shaving
+        // 12B off the inline struct. Access it via `argNames()`.
+        // Local-variable metadata. Faithful to qjs `JSFunctionBytecode.vardefs`
+        // (packed `JSVarDef[]`). The former parallel arrays
+        // (var_names/var_is_lexical/var_is_const/var_scope_level) were redundant
+        // copies of `vardefs[i].{var_name,is_lexical,is_const,scope_level}` and
+        // were removed; every reader now derives from `vardefs[i]`.
+        vars_len: u32 = 0,
+        var_refs_len: u32 = 0,
+        // `global_var_names` was a redundant name mirror of
+        // `global_vars[i].var_name` (both sized by `global_vars_len`); it was
+        // removed and every reader now derives the name from `globalVars()`.
+        global_vars: [*]GlobalVar = noSlice(GlobalVar),
+        global_vars_len: u32 = 0,
 
         // Metadata (quickjs.c:785-792)
         func_name: atom.Atom,
-        vardefs: []VarDef = &.{},
-        closure_var: []ClosureVar = &.{},
-        class_instance_fields: []atom.Atom = &.{},
-        private_bound_names: []atom.Atom = &.{},
-        class_private_names: []atom.Atom = &.{},
-        class_fields_init: ?JSValue = null,
+        vardefs: [*]VarDef = noSlice(VarDef),
+        closure_var: [*]ClosureVar = noSlice(ClosureVar),
+        // Class-field metadata (instance fields, private bound names, private
+        // names) is stored out-of-line behind a single nullable pointer; only
+        // class constructors/methods allocate it, so ordinary functions carry
+        // just an 8B null. See `ClassMeta`.
+        class_meta: ?*ClassMeta = null,
+        /// Out-of-line box for the class-field-initializer function value. Set
+        /// only for class constructors with field initializers; ordinary FBs
+        /// carry an 8B null. A `?JSValue` (24B, no niche) here would waste 16B on
+        /// every FB, so the value is boxed behind a single nullable pointer.
+        class_fields_init: ?*JSValue = null,
         arg_count: u16 = 0,
         var_count: u16 = 0,
         defined_arg_count: u16 = 0,
         stack_size: u16 = 0,
-        var_ref_count: u16 = 0,
-        closure_var_count: u16 = 0,
         cpool_count: i32 = 0,
-        call_sites: []CallSite = &.{},
 
-        /// Cached execution view used by the VM call machinery. QuickJS keeps a
-        /// direct `JSFunctionBytecode *` on function objects and dispatches from
-        /// that pointer; zjs still exposes the older `bytecode.Bytecode` execution
-        /// API, so finalized bytecode stores one borrowed view and the VM passes a
-        /// pointer to it instead of rebuilding the view per call.
-        execution_view: ?*anyopaque = null,
-        execution_view_owned: bool = false,
-        execution_view_heap_size: usize = 0,
-        execution_view_destroy: ?*const fn (*memory.MemoryAccount, *anyopaque) void = null,
+        // QuickJS dispatches the VM directly from the `JSFunctionBytecode *`; zjs
+        // still runs the older `bytecode.Bytecode` execution API, so the VM call
+        // machinery rebuilds a lightweight `Bytecode` view on demand per call
+        // (`makeBytecodeView`) rather than caching one here. No cache fields.
 
         // Note: QuickJS has 'realm' field (JSContext *) here; Zig version
         // tracks this differently via the runtime context.
 
         // Constant pool (contains child Function objects) (quickjs.c:796)
-        cpool: []JSValue = &.{},
+        cpool: [*]JSValue = noSlice(JSValue),
 
         // Source location (quickjs.c:797-803)
         filename: atom.Atom,
-        line_num: i32 = 0,
-        col_num: i32 = 0,
-        source_len: i32 = 0,
-        pc2line_len: i32 = 0,
-        pc2line_buf: []u8 = &.{},
-        source: ?[]const u8 = null,
+        /// Boxed source/debug cluster (line/col/source/pc2line). `null` means no
+        /// debug info was captured; the accessors below (`lineNum()`, `colNum()`,
+        /// `sourceText()`, `pc2lineBuf()`, …) return defaults in that case. The
+        /// finalize path allocates it when there is anything to store; `deinit`
+        /// frees it. See `DebugInfo`.
+        debug: ?*DebugInfo = null,
 
+        /// Default bare-pointer value for empty read-only slices. A `[*]T` cannot
+        /// be `&.{}`; use a dangling-but-aligned pointer (never dereferenced while
+        /// the paired length is 0).
+        inline fn noSlice(comptime T: type) [*]T {
+            return @as([*]T, @ptrFromInt(@alignOf(T)));
+        }
+
+        // Slice accessors materialize a `[]T` from the bare pointer + length pair.
+        // The VM/readers use these instead of touching the raw fields.
+        pub inline fn byteCode(self: *const FunctionBytecodeImpl) []u8 {
+            return self.byte_code[0..@intCast(self.byte_code_len)];
+        }
+        /// PC of the generator body marker, or 0 if none. Mirrors qjs, which
+        /// locates the body marker by scanning the bytecode rather than caching
+        /// a field (the former `generator_body_pc: usize`). The marker is the
+        /// `push_false; drop; push_true; drop` sequence emitted at the boundary
+        /// between the parameter-init prologue and the generator body; the pc
+        /// returned points just past it. Only generator/async-generator FBs
+        /// contain the marker, so this returns 0 for ordinary functions.
+        pub fn generatorBodyPc(self: *const FunctionBytecodeImpl) usize {
+            const code = self.byteCode();
+            const op = opcode.op;
+            var i: usize = 0;
+            while (i + 4 <= code.len) : (i += 1) {
+                if (code[i] == op.push_false and
+                    code[i + 1] == op.drop and
+                    code[i + 2] == op.push_true and
+                    code[i + 3] == op.drop)
+                {
+                    return i + 4;
+                }
+            }
+            return 0;
+        }
+        pub inline fn argNames(self: *const FunctionBytecodeImpl) []atom.Atom {
+            const dbg = self.debug orelse return &.{};
+            return dbg.arg_names[0..dbg.arg_names_len];
+        }
+        pub inline fn varDefs(self: *const FunctionBytecodeImpl) []VarDef {
+            return self.vardefs[0..self.vars_len];
+        }
+        pub inline fn closureVar(self: *const FunctionBytecodeImpl) []ClosureVar {
+            return self.closure_var[0..self.var_refs_len];
+        }
+        pub inline fn globalVars(self: *const FunctionBytecodeImpl) []GlobalVar {
+            return self.global_vars[0..self.global_vars_len];
+        }
+        pub inline fn classInstanceFields(self: *const FunctionBytecodeImpl) []atom.Atom {
+            const meta = self.class_meta orelse return &.{};
+            return meta.class_instance_fields;
+        }
+        pub inline fn privateBoundNames(self: *const FunctionBytecodeImpl) []atom.Atom {
+            const meta = self.class_meta orelse return &.{};
+            return meta.private_bound_names;
+        }
+        pub inline fn classPrivateNames(self: *const FunctionBytecodeImpl) []atom.Atom {
+            const meta = self.class_meta orelse return &.{};
+            return meta.class_private_names;
+        }
+        pub inline fn cpoolSlice(self: *const FunctionBytecodeImpl) []JSValue {
+            return self.cpool[0..@intCast(self.cpool_count)];
+        }
+        pub inline fn pc2lineBuf(self: *const FunctionBytecodeImpl) []u8 {
+            const dbg = self.debug orelse return &.{};
+            return dbg.pc2line_buf[0..@intCast(dbg.pc2line_len)];
+        }
+        /// Length of the pc2line buffer, or 0 when no debug info was captured.
+        pub inline fn pc2lineLen(self: *const FunctionBytecodeImpl) i32 {
+            const dbg = self.debug orelse return 0;
+            return dbg.pc2line_len;
+        }
+        /// Starting source line, or 0 when no debug info was captured.
+        pub inline fn lineNum(self: *const FunctionBytecodeImpl) i32 {
+            const dbg = self.debug orelse return 0;
+            return dbg.line_num;
+        }
+        /// Starting source column, or 0 when no debug info was captured.
+        pub inline fn colNum(self: *const FunctionBytecodeImpl) i32 {
+            const dbg = self.debug orelse return 0;
+            return dbg.col_num;
+        }
+        /// Original source text, or `null` if none was captured. Materializes the
+        /// `[]const u8` from the boxed `source_ptr` + `source_len` pair.
+        pub inline fn sourceText(self: *const FunctionBytecodeImpl) ?[]const u8 {
+            const dbg = self.debug orelse return null;
+            const ptr = dbg.source_ptr orelse return null;
+            return ptr[0..@intCast(dbg.source_len)];
+        }
+
+        /// `account` is accepted for call-site symmetry with the other GC-object
+        /// initializers; the FunctionBytecode no longer stores the allocator or
+        /// atom table (qjs keeps only a `realm` pointer). deinit/view builders get
+        /// the runtime threaded in instead.
         pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable, name: atom.Atom) FunctionBytecodeImpl {
+            _ = account;
             return .{
                 .header = .{},
-                .memory = account,
-                .atoms = atoms,
                 .func_name = atoms.dup(name),
                 .filename = atoms.dup(name),
             };
         }
 
-        pub fn deinit(self: *FunctionBytecodeImpl, rt: anytype) void {
-            // When `block` owns the storage the per-slice frees are skipped;
-            // only the per-element atom/value references are released and the
-            // block is freed once at the end.
-            const owned = self.block.len == 0;
-
-            const execution_view = self.execution_view;
-            const execution_view_owned = self.execution_view_owned;
-            const execution_view_destroy = self.execution_view_destroy;
-            self.execution_view = null;
-            self.execution_view_owned = false;
-            self.execution_view_heap_size = 0;
-            self.execution_view_destroy = null;
-            if (execution_view_owned) {
-                if (execution_view_destroy) |destroy| {
-                    if (execution_view) |ptr| destroy(self.memory, ptr);
+        /// Walk final-form bytecode `byte_code` opcode-by-opcode, dup'ing the
+        /// inline atom of every atom-operand opcode. This is the retention
+        /// scheme that replaces the former standalone `atom_operands` array:
+        /// the finalized bytecode owns one atom ref per atom-operand opcode.
+        /// Called once at finalize (`createFunctionBytecode`) after the code is
+        /// copied into the block. Must be paired 1:1 with `freeBytecodeAtoms`.
+        ///
+        /// In every atom operand format (`atom`, `atom_u8`, `atom_u16`,
+        /// `atom_label_u8`, `atom_label_u16`) the 4-byte atom is the first
+        /// operand at `pc + 1`; `hasAtomOperandFmt` selects those formats.
+        pub fn dupBytecodeAtoms(byte_code: []const u8, atoms: *atom.AtomTable) void {
+            var pc: usize = 0;
+            while (pc < byte_code.len) {
+                const op_id = byte_code[pc];
+                const size: usize = opcode.sizeOf(op_id);
+                if (size == 0) break; // unknown id: bail rather than loop
+                if (pc + size <= byte_code.len and hasAtomOperandFmt(op_id)) {
+                    const atom_id = std.mem.readInt(u32, byte_code[pc + 1 ..][0..4], .little);
+                    _ = atoms.dup(atom_id);
                 }
+                pc += size;
             }
+        }
+
+        /// Mirror of `dupBytecodeAtoms`: walk the finalized bytecode and free
+        /// one atom ref per atom-operand opcode. Called from `deinit` in place
+        /// of walking the removed `atom_operands` array. Frees exactly as many
+        /// atoms as `dupBytecodeAtoms` dup'd (same walk over the same bytes).
+        pub fn freeBytecodeAtoms(byte_code: []const u8, atoms: *atom.AtomTable) void {
+            var pc: usize = 0;
+            while (pc < byte_code.len) {
+                const op_id = byte_code[pc];
+                const size: usize = opcode.sizeOf(op_id);
+                if (size == 0) break;
+                if (pc + size <= byte_code.len and hasAtomOperandFmt(op_id)) {
+                    const atom_id = std.mem.readInt(u32, byte_code[pc + 1 ..][0..4], .little);
+                    atoms.free(atom_id);
+                }
+                pc += size;
+            }
+        }
+
+        /// True when the final-form opcode carries an atom operand (its atom is
+        /// always the 4-byte field at `pc + 1`). Mirrors the pipeline's
+        /// `hasAtomOperand` but lives here so the retention walk is self-contained.
+        inline fn hasAtomOperandFmt(op_id: u8) bool {
+            const fmt = opcode.formatOf(op_id);
+            return fmt == .atom or fmt == .atom_u8 or fmt == .atom_u16 or
+                fmt == .atom_label_u8 or fmt == .atom_label_u16;
+        }
+
+        /// Iterator over the atom operands embedded in final-form bytecode.
+        /// Replaces reads of the removed `atom_operands` array for runtime
+        /// consumers (direct-eval scope scans). Yields each atom-operand
+        /// opcode's inline 4-byte atom in bytecode order — the same sequence the
+        /// former array held. Does not touch refcounts.
+        pub const BytecodeAtomIterator = struct {
+            byte_code: []const u8,
+            pc: usize = 0,
+
+            pub fn next(self: *BytecodeAtomIterator) ?atom.Atom {
+                while (self.pc < self.byte_code.len) {
+                    const op_id = self.byte_code[self.pc];
+                    const size: usize = opcode.sizeOf(op_id);
+                    if (size == 0) return null; // unknown id: stop
+                    const has_atom = self.pc + size <= self.byte_code.len and hasAtomOperandFmt(op_id);
+                    const atom_id: ?atom.Atom = if (has_atom)
+                        std.mem.readInt(u32, self.byte_code[self.pc + 1 ..][0..4], .little)
+                    else
+                        null;
+                    self.pc += size;
+                    if (atom_id) |a| return a;
+                }
+                return null;
+            }
+        };
+
+        /// Convenience constructor for `BytecodeAtomIterator` over this FB.
+        pub fn atomOperandIterator(self: *const FunctionBytecodeImpl) BytecodeAtomIterator {
+            return .{ .byte_code = self.byteCode() };
+        }
+
+        /// Recompute the total size of the consolidated `block` allocation from
+        /// the slice lengths. MUST mirror the `BlockBuilder` reservation order in
+        /// `createFunctionBytecode` exactly (same segments, same order, same
+        /// `+1` bytecode sentinel), so `deinit` can free the block without
+        /// storing its length. Only valid when `flags.from_block` is set.
+        fn computeBlockSize(self: *const FunctionBytecodeImpl) usize {
+            const arg_names_len: usize = if (self.debug) |dbg| dbg.arg_names_len else 0;
+            var layout = BlockBuilder{};
+            _ = layout.reserve(JSValue, @intCast(self.cpool_count));
+            _ = layout.reserve(VarDef, self.vars_len);
+            _ = layout.reserve(ClosureVar, self.var_refs_len);
+            _ = layout.reserve(atom.Atom, arg_names_len);
+            _ = layout.reserve(GlobalVar, self.global_vars_len);
+            _ = layout.reserve(u8, @as(usize, @intCast(self.byte_code_len)) + 1);
+            if (self.debug) |dbg| {
+                _ = layout.reserve(u8, @intCast(dbg.pc2line_len));
+                _ = layout.reserve(u8, @intCast(dbg.source_len));
+            }
+            return layout.size;
+        }
+
+        pub fn deinit(self: *FunctionBytecodeImpl, rt: anytype) void {
+            const mem = &rt.memory;
+            const atoms = &rt.atoms;
+            // When the slices point into the consolidated `block`, the per-slice
+            // frees are skipped; only the per-element atom/value references are
+            // released and the block is freed once at the end. `owned` (the
+            // fixture path) means every slice owns its own allocation. The block's
+            // total size is recomputed here from the slice lengths BEFORE any
+            // length field is zeroed by the frees below.
+            const from_block = self.flags.from_block;
+            const owned = !from_block;
+            const block_size: usize = if (from_block) self.computeBlockSize() else 0;
 
             const func_name = self.func_name;
             const filename = self.filename;
             self.func_name = atom.null_atom;
             self.filename = atom.null_atom;
-            self.atoms.free(func_name);
-            self.atoms.free(filename);
+            atoms.free(func_name);
+            atoms.free(filename);
 
-            const byte_code = self.byte_code;
-            self.byte_code = &.{};
+            const byte_code = self.byteCode();
+            self.byte_code = noSlice(u8);
             self.byte_code_len = 0;
-            if (owned and byte_code.len != 0) self.memory.free(u8, byte_code);
-            releaseAtomSlice(self.atoms, self.memory, &self.atom_operands, owned);
-            releaseAtomSlice(self.atoms, self.memory, &self.arg_names, owned);
-            releaseAtomSlice(self.atoms, self.memory, &self.var_names, owned);
-            releaseSlice(bool, self.memory, &self.var_is_lexical, owned);
-            releaseSlice(bool, self.memory, &self.var_is_const, owned);
-            releaseSlice(i32, self.memory, &self.var_scope_level, owned);
-            releaseAtomSlice(self.atoms, self.memory, &self.var_ref_names, owned);
-            releaseSlice(bool, self.memory, &self.var_ref_is_lexical, owned);
-            releaseSlice(bool, self.memory, &self.var_ref_is_const, owned);
-            releaseSlice(bool, self.memory, &self.var_ref_is_global_decl, owned);
-            releaseAtomSlice(self.atoms, self.memory, &self.global_var_names, owned);
+            // The finalized bytecode owns one atom ref per atom-operand opcode
+            // (dup'd at finalize); release them by re-walking the code before
+            // its backing buffer is freed. Replaces the removed `atom_operands`
+            // retention array (qjs holds the atom refs inline in the bytecode
+            // too, freeing them in `free_function_bytecode`'s opcode walk).
+            freeBytecodeAtoms(byte_code, atoms);
+            if (owned and byte_code.len != 0) mem.free(u8, byte_code);
+            // Argument names live in the out-of-line `DebugInfo` box; release
+            // their atom refs (and, on the fixture path, the slice storage). The
+            // box's own bare fields are cleared/freed in the `self.debug` block
+            // near the end of deinit.
+            if (self.debug) |dbg| {
+                const arg_names = dbg.arg_names[0..dbg.arg_names_len];
+                for (arg_names) |atom_id| atoms.free(atom_id);
+                if (owned and arg_names.len != 0) mem.free(atom.Atom, arg_names);
+                dbg.arg_names = FunctionBytecodeImpl.noSlice(atom.Atom);
+                dbg.arg_names_len = 0;
+            }
 
-            const global_vars = self.global_vars;
-            self.global_vars = &.{};
-            for (global_vars) |*gv| self.atoms.free(gv.var_name);
-            if (owned and global_vars.len != 0) self.memory.free(GlobalVar, global_vars);
+            // vardefs owns `vars_len`. Each `vardefs[i]` carries the var name plus
+            // is_lexical/is_const/scope_level metadata (the former parallel arrays).
+            {
+                const vardefs = self.varDefs();
+                for (vardefs) |*v| atoms.free(v.var_name);
+                if (owned and vardefs.len != 0) mem.free(VarDef, vardefs);
+                self.vardefs = noSlice(VarDef);
 
-            const vardefs = self.vardefs;
-            self.vardefs = &.{};
-            for (vardefs) |*v| self.atoms.free(v.var_name);
-            if (owned and vardefs.len != 0) self.memory.free(VarDef, vardefs);
+                self.vars_len = 0;
+            }
 
-            const closure_var = self.closure_var;
-            self.closure_var = &.{};
-            for (closure_var) |*cv| self.atoms.free(cv.var_name);
-            if (owned and closure_var.len != 0) self.memory.free(ClosureVar, closure_var);
+            // closure_var sized by `var_refs_len`. The former separate
+            // `var_ref_names` name array was a redundant mirror of
+            // `closure_var[i].var_name` (both sized by `var_refs_len`) and was
+            // removed; every reader now derives the var-ref name from
+            // `closure_var[i].var_name` (see `Bytecode.varRefName`).
+            {
+                const closure_var = self.closureVar();
+                for (closure_var) |*cv| atoms.free(cv.var_name);
+                if (owned and closure_var.len != 0) mem.free(ClosureVar, closure_var);
+                self.closure_var = noSlice(ClosureVar);
 
-            releaseAtomSlice(self.atoms, self.memory, &self.class_instance_fields, owned);
-            releaseAtomSlice(self.atoms, self.memory, &self.private_bound_names, owned);
-            releaseAtomSlice(self.atoms, self.memory, &self.class_private_names, owned);
+                self.var_refs_len = 0;
+            }
+
+            // global_vars sized by `global_vars_len`. The former
+            // `global_var_names` name mirror was removed; names live inside
+            // `global_vars[i].var_name`.
+            {
+                const global_vars = self.globalVars();
+                for (global_vars) |*gv| atoms.free(gv.var_name);
+                if (owned and global_vars.len != 0) mem.free(GlobalVar, global_vars);
+                self.global_vars = noSlice(GlobalVar);
+
+                self.global_vars_len = 0;
+            }
+
+            // Class-field metadata is always a side allocation owned by the FB
+            // (never inside `block`), so it is freed here regardless of `owned`.
+            if (self.class_meta) |meta| {
+                self.class_meta = null;
+                for (meta.class_instance_fields) |atom_id| atoms.free(atom_id);
+                if (meta.class_instance_fields.len != 0) mem.free(atom.Atom, meta.class_instance_fields);
+                for (meta.private_bound_names) |atom_id| atoms.free(atom_id);
+                if (meta.private_bound_names.len != 0) mem.free(atom.Atom, meta.private_bound_names);
+                for (meta.class_private_names) |atom_id| atoms.free(atom_id);
+                if (meta.class_private_names.len != 0) mem.free(atom.Atom, meta.class_private_names);
+                mem.free(ClassMeta, meta[0..1]);
+            }
             const class_fields_init = self.class_fields_init;
             self.class_fields_init = null;
-            if (class_fields_init) |stored| stored.free(rt);
+            if (class_fields_init) |boxed| {
+                boxed.*.free(rt);
+                mem.destroy(JSValue, boxed);
+            }
 
-            const cpool = self.cpool;
-            self.cpool = &.{};
+            const cpool = self.cpoolSlice();
+            self.cpool = noSlice(JSValue);
+            self.cpool_count = 0;
             for (cpool) |*slot| {
                 const value = slot.*;
                 slot.* = JSValue.undefinedValue();
                 value.free(rt);
             }
-            if (owned and cpool.len != 0) self.memory.free(JSValue, cpool);
+            if (owned and cpool.len != 0) mem.free(JSValue, cpool);
 
-            const pc2line_buf = self.pc2line_buf;
-            self.pc2line_buf = &.{};
-            self.pc2line_len = 0;
-            if (owned and pc2line_buf.len != 0) self.memory.free(u8, pc2line_buf);
-
-            releaseCallSites(self.atoms, self.memory, &self.call_sites, owned);
-            if (self.source) |src| {
-                self.source = null;
-                if (owned) self.memory.free(u8, @constCast(src));
+            // The source/debug cluster is boxed out-of-line. The `pc2line_buf`
+            // and `source_ptr` inside it point into the FB `block` when owned,
+            // so those slices are only freed on the fixture (non-block) path;
+            // the `DebugInfo` box itself is always a side allocation freed here.
+            if (self.debug) |dbg| {
+                self.debug = null;
+                const pc2line_buf = dbg.pc2line_buf[0..@intCast(dbg.pc2line_len)];
+                if (owned and pc2line_buf.len != 0) mem.free(u8, pc2line_buf);
+                if (dbg.source_ptr) |src_ptr| {
+                    const src = src_ptr[0..@intCast(dbg.source_len)];
+                    if (owned and src.len != 0) mem.free(u8, @constCast(src));
+                }
+                mem.free(DebugInfo, dbg[0..1]);
             }
-            self.source_len = 0;
 
-            self.class_fields_init = null;
-            self.cpool = &.{};
-
-            const block = self.block;
-            self.block = &.{};
-            if (block.len != 0) self.memory.freeAlignedBytes(block, block_alignment);
+            const block_ptr = self.block_ptr;
+            self.block_ptr = noSlice(u8);
+            self.flags.from_block = false;
+            if (from_block and block_size != 0) mem.freeAlignedBytes(block_ptr[0..block_size], block_alignment);
         }
 
         pub fn heapByteSize(self: *const FunctionBytecodeImpl) usize {
             var bytes: usize = @sizeOf(FunctionBytecodeImpl);
-            bytes = addSaturating(bytes, self.execution_view_heap_size);
-            if (self.block.len != 0) return addSaturating(bytes, self.block.len);
-            bytes = addSliceBytes(bytes, u8, self.byte_code.len);
-            bytes = addSliceBytes(bytes, atom.Atom, self.atom_operands.len);
-            bytes = addSliceBytes(bytes, atom.Atom, self.arg_names.len);
-            bytes = addSliceBytes(bytes, atom.Atom, self.var_names.len);
-            bytes = addSliceBytes(bytes, bool, self.var_is_lexical.len);
-            bytes = addSliceBytes(bytes, bool, self.var_is_const.len);
-            bytes = addSliceBytes(bytes, i32, self.var_scope_level.len);
-            bytes = addSliceBytes(bytes, atom.Atom, self.var_ref_names.len);
-            bytes = addSliceBytes(bytes, bool, self.var_ref_is_lexical.len);
-            bytes = addSliceBytes(bytes, bool, self.var_ref_is_const.len);
-            bytes = addSliceBytes(bytes, bool, self.var_ref_is_global_decl.len);
-            bytes = addSliceBytes(bytes, atom.Atom, self.global_var_names.len);
-            bytes = addSliceBytes(bytes, GlobalVar, self.global_vars.len);
-            bytes = addSliceBytes(bytes, VarDef, self.vardefs.len);
-            bytes = addSliceBytes(bytes, ClosureVar, self.closure_var.len);
-            bytes = addSliceBytes(bytes, atom.Atom, self.class_instance_fields.len);
-            bytes = addSliceBytes(bytes, atom.Atom, self.private_bound_names.len);
-            bytes = addSliceBytes(bytes, atom.Atom, self.class_private_names.len);
-            bytes = addSliceBytes(bytes, JSValue, self.cpool.len);
-            bytes = addSliceBytes(bytes, u8, self.pc2line_buf.len);
-            bytes = addSliceBytes(bytes, CallSite, self.call_sites.len);
-            if (self.source) |source| bytes = addSaturating(bytes, source.len);
+            // The `DebugInfo` box is always a side allocation (never inside the
+            // FB `block`), so its 8B struct is accounted regardless of `block`.
+            // Its `pc2line_buf`/`source` byte contents, however, live inside the
+            // `block` when owned — those are only added on the fixture path.
+            if (self.debug) |_| bytes = addSaturating(bytes, @sizeOf(DebugInfo));
+            if (self.flags.from_block) return addSaturating(bytes, self.computeBlockSize());
+            bytes = addSliceBytes(bytes, u8, @intCast(self.byte_code_len));
+            if (self.debug) |dbg| bytes = addSliceBytes(bytes, atom.Atom, dbg.arg_names_len);
+            bytes = addSliceBytes(bytes, atom.Atom, self.var_refs_len);
+            bytes = addSliceBytes(bytes, GlobalVar, self.global_vars_len);
+            bytes = addSliceBytes(bytes, VarDef, self.vars_len);
+            bytes = addSliceBytes(bytes, ClosureVar, self.var_refs_len);
+            if (self.class_meta) |meta| {
+                bytes = addSaturating(bytes, @sizeOf(ClassMeta));
+                bytes = addSliceBytes(bytes, atom.Atom, meta.class_instance_fields.len);
+                bytes = addSliceBytes(bytes, atom.Atom, meta.private_bound_names.len);
+                bytes = addSliceBytes(bytes, atom.Atom, meta.class_private_names.len);
+            }
+            bytes = addSliceBytes(bytes, JSValue, @intCast(self.cpool_count));
+            if (self.debug) |dbg| {
+                bytes = addSliceBytes(bytes, u8, @intCast(dbg.pc2line_len));
+                if (dbg.source_ptr) |_| bytes = addSaturating(bytes, @intCast(dbg.source_len));
+            }
             return bytes;
         }
 
@@ -1507,7 +1794,6 @@ pub const function_bytecode = struct {
     /// cover the widest element type packed into the block.
     pub const block_alignment: std.mem.Alignment = .fromByteUnits(@max(
         @alignOf(JSValue),
-        @alignOf(CallSite),
         @alignOf(VarDef),
         @alignOf(ClosureVar),
         @alignOf(atom.Atom),
@@ -1535,24 +1821,41 @@ pub const function_bytecode = struct {
         return ptr[0..len];
     }
 
-    fn releaseAtomSlice(atoms: *atom.AtomTable, mem: *memory.MemoryAccount, slot: *[]atom.Atom, owned: bool) void {
-        const items = slot.*;
-        slot.* = &.{};
-        for (items) |atom_id| atoms.free(atom_id);
-        if (owned and items.len != 0) mem.free(atom.Atom, items);
+    /// Dup a source atom slice into a freshly-allocated owned slice (empty
+    /// source yields `&.{}` with no allocation). Used to build `ClassMeta`.
+    fn dupAtomSlice(
+        mem: *memory.MemoryAccount,
+        atoms: *atom.AtomTable,
+        src: []const atom.Atom,
+    ) !([]atom.Atom) {
+        if (src.len == 0) return &.{};
+        const out = try mem.alloc(atom.Atom, src.len);
+        for (src, out) |atom_id, *dst| dst.* = atoms.dup(atom_id);
+        return out;
     }
 
-    fn releaseCallSites(atoms: *atom.AtomTable, mem: *memory.MemoryAccount, slot: *[]CallSite, owned: bool) void {
-        const items = slot.*;
-        slot.* = &.{};
-        for (items) |site| atoms.free(site.atom_id);
-        if (owned and items.len != 0) mem.free(CallSite, items);
-    }
-
-    fn releaseSlice(comptime T: type, mem: *memory.MemoryAccount, slot: *[]T, owned: bool) void {
-        const items = slot.*;
-        slot.* = &.{};
-        if (owned and items.len != 0) mem.free(T, items);
+    /// Allocate and populate the out-of-line `ClassMeta` for a class
+    /// constructor/method. On error every partial allocation is released.
+    pub fn buildClassMeta(
+        mem: *memory.MemoryAccount,
+        atoms: *atom.AtomTable,
+        instance_fields: []const atom.Atom,
+        private_bound_names: []const atom.Atom,
+        class_private_names: []const atom.Atom,
+    ) !*ClassMeta {
+        const meta = try mem.alloc(ClassMeta, 1);
+        errdefer mem.free(ClassMeta, meta);
+        meta[0] = .{};
+        errdefer {
+            for (meta[0].class_instance_fields) |atom_id| atoms.free(atom_id);
+            if (meta[0].class_instance_fields.len != 0) mem.free(atom.Atom, meta[0].class_instance_fields);
+            for (meta[0].private_bound_names) |atom_id| atoms.free(atom_id);
+            if (meta[0].private_bound_names.len != 0) mem.free(atom.Atom, meta[0].private_bound_names);
+        }
+        meta[0].class_instance_fields = try dupAtomSlice(mem, atoms, instance_fields);
+        meta[0].private_bound_names = try dupAtomSlice(mem, atoms, private_bound_names);
+        meta[0].class_private_names = try dupAtomSlice(mem, atoms, class_private_names);
+        return &meta[0];
     }
 
     fn addSliceBytes(total: usize, comptime T: type, len: usize) usize {
@@ -5933,62 +6236,69 @@ pub const pipeline_finalize = struct {
         };
 
         // Copy flags and metadata
-        fb.is_strict_mode = fd.is_strict_mode;
-        fb.has_prototype = fd.has_prototype;
-        fb.has_simple_parameter_list = fd.has_simple_parameter_list;
-        fb.is_class_constructor = fd.func_type == .class_constructor or fd.func_type == .derived_class_constructor;
-        fb.is_derived_class_constructor = fd.is_derived_class_constructor;
-        fb.need_home_object = fd.need_home_object;
-        fb.func_kind = fd.func_kind;
-        fb.is_arrow_function = fd.func_type == .arrow;
-        fb.new_target_allowed = fd.new_target_allowed;
-        fb.super_call_allowed = fd.super_call_allowed;
-        fb.super_allowed = fd.super_allowed;
-        fb.arguments_allowed = fd.arguments_allowed;
-        fb.backtrace_barrier = fd.backtrace_barrier;
-        fb.is_indirect_eval = fd.is_indirect_eval;
-        fb.has_eval_call = bytecodeHasEvalCall(lowered.code);
+        fb.flags.is_strict_mode = fd.is_strict_mode;
+        fb.flags.has_prototype = fd.has_prototype;
+        fb.flags.has_simple_parameter_list = fd.has_simple_parameter_list;
+        fb.flags.is_class_constructor = fd.func_type == .class_constructor or fd.func_type == .derived_class_constructor;
+        fb.flags.is_derived_class_constructor = fd.is_derived_class_constructor;
+        fb.flags.need_home_object = fd.need_home_object;
+        fb.flags.func_kind = fd.func_kind;
+        fb.flags.is_arrow_function = fd.func_type == .arrow;
+        fb.flags.new_target_allowed = fd.new_target_allowed;
+        fb.flags.super_call_allowed = fd.super_call_allowed;
+        fb.flags.super_allowed = fd.super_allowed;
+        fb.flags.arguments_allowed = fd.arguments_allowed;
+        fb.flags.backtrace_barrier = fd.backtrace_barrier;
+        fb.flags.is_indirect_eval = fd.is_indirect_eval;
+        fb.flags.has_eval_call = bytecodeHasEvalCall(lowered.code);
 
         // Pack all read-only artifact slices into a single block allocation.
         // Segments are reserved largest-alignment-first to minimize padding;
-        // the slice fields below point into `fb.block` and `deinit` releases
+        // the slice fields below point into `fb.block_ptr` and `deinit` releases
         // the whole block at once.
         const source_len: usize = if (fd.source_text) |source| source.len else 0;
         var layout = fb_mod.BlockBuilder{};
-        const execution_view_off = layout.reserve(bytecode_function.Bytecode, 1);
         const cpool_off = layout.reserve(JSValue, fd.cpool.len);
-        const call_sites_off = layout.reserve(fb_mod.CallSite, lowered.call_sites.len);
         const vardefs_off = layout.reserve(function_def_mod.VarDef, fd.vars.len);
         const closure_var_off = layout.reserve(function_def_mod.ClosureVar, fd.closure_var.len);
-        const atom_operands_off = layout.reserve(atom.Atom, lowered.atom_operands.len);
         const arg_names_off = layout.reserve(atom.Atom, fd.args.len);
-        const var_names_off = layout.reserve(atom.Atom, fd.vars.len);
-        const var_ref_names_off = layout.reserve(atom.Atom, fd.closure_var.len);
-        const global_var_names_off = layout.reserve(atom.Atom, fd.global_vars.len);
         const global_vars_off = layout.reserve(function_def_mod.GlobalVar, fd.global_vars.len);
-        const class_instance_fields_off = layout.reserve(atom.Atom, fd.class_instance_fields.len);
-        const private_bound_names_off = layout.reserve(atom.Atom, fd.private_bound_names.len);
-        const class_private_names_off = layout.reserve(atom.Atom, fd.class_private_names.len);
+        // Class-field metadata is stored out-of-line (side `ClassMeta`), not in
+        // this block; class constructors are rare so the extra small allocations
+        // are cheap and keep the common function's `class_meta` a null pointer.
         // Reserve one extra trailing byte for an `op.return` sentinel (see below):
         // it lets the register-resident dispatch drop the per-op fall-off-end bounds
         // check, matching qjs (whose parser terminates every function with a return).
         const byte_code_off = layout.reserve(u8, lowered.code.len + 1);
         const pc2line_off = layout.reserve(u8, lowered.pc2line_buf.len);
         const source_off = layout.reserve(u8, source_len);
-        const var_is_lexical_off = layout.reserve(bool, fd.vars.len);
-        const var_is_const_off = layout.reserve(bool, fd.vars.len);
-        const var_scope_level_off = layout.reserve(i32, fd.vars.len);
-        const var_ref_is_lexical_off = layout.reserve(bool, fd.closure_var.len);
-        const var_ref_is_const_off = layout.reserve(bool, fd.closure_var.len);
-        const var_ref_is_global_decl_off = layout.reserve(bool, fd.closure_var.len);
-        fb.block = try fd.memory.allocAlignedBytes(layout.size, fb_mod.block_alignment);
-        const block = fb.block;
+        // Allocate the out-of-line cold-cluster box first so both the
+        // argument-name array and the source/debug fields can be stored into it.
+        // Allocating it before the block keeps the error path clean: if the box
+        // alloc fails, `fb.debug` stays null and nothing is owned; if the block
+        // alloc fails afterwards, `from_block` is still unset so `deinit` won't
+        // try to free a block that was never allocated.
+        const dbg = try fd.memory.alloc(fb_mod.DebugInfo, 1);
+        dbg[0] = .{};
+        fb.debug = &dbg[0];
+
+        const block = try fd.memory.allocAlignedBytes(layout.size, fb_mod.block_alignment);
+        fb.block_ptr = block.ptr;
+        fb.flags.from_block = true;
 
         // Copy lowered bytecode.
         if (lowered.code.len > 0) {
-            fb.byte_code = fb_mod.blockSlice(block, u8, byte_code_off, lowered.code.len);
-            @memcpy(fb.byte_code, lowered.code);
+            const byte_code = fb_mod.blockSlice(block, u8, byte_code_off, lowered.code.len);
+            @memcpy(byte_code, lowered.code);
+            fb.byte_code = byte_code.ptr;
             fb.byte_code_len = @intCast(lowered.code.len);
+            // Retain one atom ref per atom-operand opcode in the copied
+            // bytecode. `lowered` drops its own refs on deinit, so these dups
+            // become the FB's sole owners; `deinit` releases them via the same
+            // walk (`freeBytecodeAtoms`). This replaces the removed
+            // `atom_operands` retention array (dup count is identical: the
+            // pipeline maintains one `atom_operands` entry per atom-format op).
+            fb_mod.FunctionBytecode.dupBytecodeAtoms(byte_code, fd.atoms);
             // Trailing `op.return` sentinel just past the visible code slice. Eval
             // completion and `goto`-to-end patterns leave code that "falls off" the
             // end without a terminating return; on fall-off the dispatch reads this
@@ -5996,125 +6306,75 @@ pub const pipeline_finalize = struct {
             // old per-op bounds-checked fall-off path produced. Functions that do
             // end in a real return hit it first and never observe the sentinel.
             fb_mod.blockSlice(block, u8, byte_code_off, lowered.code.len + 1)[lowered.code.len] = opcode.op.@"return";
-            if (fd.func_kind == .generator or fd.func_kind == .async_generator) {
-                fb.generator_body_pc = findGeneratorBodyMarker(lowered.code) orelse 0;
-            }
-        }
-        if (lowered.atom_operands.len > 0) {
-            const atom_operands = fb_mod.blockSlice(block, atom.Atom, atom_operands_off, lowered.atom_operands.len);
-            for (lowered.atom_operands, atom_operands) |atom_id, *out| out.* = fd.atoms.dup(atom_id);
-            fb.atom_operands = atom_operands;
-        }
-        if (lowered.call_sites.len > 0) {
-            const call_sites = fb_mod.blockSlice(block, fb_mod.CallSite, call_sites_off, lowered.call_sites.len);
-            for (lowered.call_sites, call_sites) |site, *out| {
-                out.* = site;
-                out.atom_id = fd.atoms.dup(site.atom_id);
-            }
-            fb.call_sites = call_sites;
+            // The generator body marker PC is derived on demand by scanning the
+            // finalized bytecode (`FunctionBytecode.generatorBodyPc`), mirroring
+            // qjs — no cached field.
         }
         if (fd.args.len > 0) {
             const arg_names = fb_mod.blockSlice(block, atom.Atom, arg_names_off, fd.args.len);
             for (fd.args, arg_names) |arg, *out| out.* = fd.atoms.dup(arg.var_name);
-            fb.arg_names = arg_names;
+            dbg[0].arg_names = arg_names.ptr;
+            dbg[0].arg_names_len = @intCast(arg_names.len);
         }
 
-        // Copy vardefs plus the var-name metadata views.
+        // Copy vardefs (sized by fd.vars.len, recorded once in `vars_len`). Each
+        // VarDef carries var_name/is_lexical/is_const/scope_level — the former
+        // parallel arrays are now read straight from `vardefs[i]`.
         if (fd.vars.len > 0) {
-            const var_names = fb_mod.blockSlice(block, atom.Atom, var_names_off, fd.vars.len);
-            const var_is_lexical = fb_mod.blockSlice(block, bool, var_is_lexical_off, fd.vars.len);
-            const var_is_const = fb_mod.blockSlice(block, bool, var_is_const_off, fd.vars.len);
-            const var_scope_level = fb_mod.blockSlice(block, i32, var_scope_level_off, fd.vars.len);
-            for (fd.vars, var_names, var_is_lexical, var_is_const, var_scope_level) |v, *name, *is_lexical, *is_const, *scope_level| {
-                name.* = fd.atoms.dup(v.var_name);
-                is_lexical.* = v.is_lexical;
-                is_const.* = v.is_const;
-                scope_level.* = v.scope_level;
-            }
-            fb.var_names = var_names;
-            fb.var_is_lexical = var_is_lexical;
-            fb.var_is_const = var_is_const;
-            fb.var_scope_level = var_scope_level;
-
             const vardefs = fb_mod.blockSlice(block, function_def_mod.VarDef, vardefs_off, fd.vars.len);
             @memcpy(vardefs, fd.vars);
             for (vardefs) |*v| v.var_name = fd.atoms.dup(v.var_name);
-            fb.vardefs = vardefs;
+            fb.vardefs = vardefs.ptr;
+            fb.vars_len = @intCast(fd.vars.len);
         }
 
-        // Copy closure_var plus the var-ref metadata views.
+        // Copy closure_var (sized by fd.closure_var.len, recorded once in
+        // `var_refs_len`). The former parallel `var_ref_names` atom array was a
+        // redundant mirror of `closure_var[i].var_name` and was removed; every
+        // reader now derives the var-ref name from `closure_var[i].var_name`
+        // (see `Bytecode.varRefName`). Likewise the former parallel
+        // is_lexical/is_const/is_global_decl `[]bool` arrays are derived from
+        // `closure_var[idx]` on access.
         if (fd.closure_var.len > 0) {
-            const var_ref_names = fb_mod.blockSlice(block, atom.Atom, var_ref_names_off, fd.closure_var.len);
-            const var_ref_is_lexical = fb_mod.blockSlice(block, bool, var_ref_is_lexical_off, fd.closure_var.len);
-            const var_ref_is_const = fb_mod.blockSlice(block, bool, var_ref_is_const_off, fd.closure_var.len);
-            const var_ref_is_global_decl = fb_mod.blockSlice(block, bool, var_ref_is_global_decl_off, fd.closure_var.len);
-            for (fd.closure_var, var_ref_names, var_ref_is_lexical, var_ref_is_const, var_ref_is_global_decl) |cv, *name, *is_lexical, *is_const, *is_global_decl| {
-                name.* = fd.atoms.dup(cv.var_name);
-                is_lexical.* = cv.is_lexical;
-                is_const.* = cv.is_const;
-                is_global_decl.* = cv.closure_type == .global_decl;
-            }
-            fb.var_ref_names = var_ref_names;
-            fb.var_ref_is_lexical = var_ref_is_lexical;
-            fb.var_ref_is_const = var_ref_is_const;
-            fb.var_ref_is_global_decl = var_ref_is_global_decl;
-
             const closure_var = fb_mod.blockSlice(block, function_def_mod.ClosureVar, closure_var_off, fd.closure_var.len);
             @memcpy(closure_var, fd.closure_var);
             for (closure_var) |*cv| cv.var_name = fd.atoms.dup(cv.var_name);
-            fb.closure_var = closure_var;
+            fb.closure_var = closure_var.ptr;
+            fb.var_refs_len = @intCast(fd.closure_var.len);
         }
 
         if (fd.global_vars.len > 0) {
-            const global_var_names = fb_mod.blockSlice(block, atom.Atom, global_var_names_off, fd.global_vars.len);
-            for (fd.global_vars, global_var_names) |gv, *out| out.* = fd.atoms.dup(gv.var_name);
-            fb.global_var_names = global_var_names;
-
             const global_vars = fb_mod.blockSlice(block, function_def_mod.GlobalVar, global_vars_off, fd.global_vars.len);
             for (fd.global_vars, global_vars) |gv, *out| {
                 out.* = gv;
                 out.var_name = fd.atoms.dup(gv.var_name);
             }
-            fb.global_vars = global_vars;
-        }
-        if (fd.class_instance_fields.len > 0) {
-            const fields = fb_mod.blockSlice(block, atom.Atom, class_instance_fields_off, fd.class_instance_fields.len);
-            for (fd.class_instance_fields, fields) |atom_id, *out| out.* = fd.atoms.dup(atom_id);
-            fb.class_instance_fields = fields;
-        }
-        if (fd.private_bound_names.len > 0) {
-            const names = fb_mod.blockSlice(block, atom.Atom, private_bound_names_off, fd.private_bound_names.len);
-            for (fd.private_bound_names, names) |atom_id, *out| out.* = fd.atoms.dup(atom_id);
-            fb.private_bound_names = names;
-        }
-        if (fd.class_private_names.len > 0) {
-            const names = fb_mod.blockSlice(block, atom.Atom, class_private_names_off, fd.class_private_names.len);
-            for (fd.class_private_names, names) |atom_id, *out| out.* = fd.atoms.dup(atom_id);
-            fb.class_private_names = names;
+            fb.global_vars = global_vars.ptr;
+            fb.global_vars_len = @intCast(fd.global_vars.len);
         }
 
         // Copy metadata counts
         fb.arg_count = @intCast(fd.arg_count);
         fb.var_count = @intCast(fd.var_count);
         fb.defined_arg_count = @intCast(fd.defined_arg_count);
-        fb.var_ref_count = @intCast(fd.var_ref_count);
-        fb.closure_var_count = @intCast(fd.closure_var_count);
         fb.stack_size = lowered.stack_size;
 
-        // Copy source location
-        fb.atoms.replace(&fb.filename, fd.filename);
-        fb.line_num = fd.line_num;
-        fb.col_num = fd.col_num;
+        // Copy source location into the boxed cold cluster (`dbg`, allocated up
+        // front above alongside the argument names).
+        fd.atoms.replace(&fb.filename, fd.filename);
+        dbg[0].line_num = fd.line_num;
+        dbg[0].col_num = fd.col_num;
         if (lowered.pc2line_buf.len != 0) {
-            fb.pc2line_buf = fb_mod.blockSlice(block, u8, pc2line_off, lowered.pc2line_buf.len);
-            @memcpy(fb.pc2line_buf, lowered.pc2line_buf);
-            fb.pc2line_len = @intCast(lowered.pc2line_buf.len);
+            const pc2line_buf = fb_mod.blockSlice(block, u8, pc2line_off, lowered.pc2line_buf.len);
+            @memcpy(pc2line_buf, lowered.pc2line_buf);
+            dbg[0].pc2line_buf = pc2line_buf.ptr;
+            dbg[0].pc2line_len = @intCast(lowered.pc2line_buf.len);
         }
         if (fd.source_text) |source| {
             const owned = fb_mod.blockSlice(block, u8, source_off, source.len);
             @memcpy(owned, source);
-            fb.source = owned;
-            fb.source_len = @intCast(source.len);
+            dbg[0].source_ptr = owned.ptr;
+            dbg[0].source_len = @intCast(source.len);
         }
 
         // Copy constants.
@@ -6122,9 +6382,22 @@ pub const pipeline_finalize = struct {
             const cpool = fb_mod.blockSlice(block, JSValue, cpool_off, fd.cpool.len);
             fb.cpool_count = @intCast(fd.cpool.len);
             for (fd.cpool, cpool) |value, *out| out.* = value.dup();
-            fb.cpool = cpool;
+            fb.cpool = cpool.ptr;
         }
-        bytecode_function.installCachedBytecodeView(fb, &fb_mod.blockSlice(block, bytecode_function.Bytecode, execution_view_off, 1)[0]);
+
+        // Class-field metadata (side allocation) is built last, so it is the only
+        // `try` after the block's slices/lengths are fully populated. If it fails,
+        // `deinit`'s `computeBlockSize` and per-element free loops both see a
+        // consistent, fully-populated FB (the block is freed at its exact size).
+        if (fd.class_instance_fields.len > 0 or fd.private_bound_names.len > 0 or fd.class_private_names.len > 0) {
+            fb.class_meta = try fb_mod.buildClassMeta(
+                fd.memory,
+                fd.atoms,
+                fd.class_instance_fields,
+                fd.private_bound_names,
+                fd.class_private_names,
+            );
+        }
 
         if (std.c.getenv("ZJS_DISASM") != null) {
             const dump_mod = bytecode_dump;
@@ -6140,21 +6413,6 @@ pub const pipeline_finalize = struct {
 
         committed = true;
         return slice;
-    }
-
-    fn findGeneratorBodyMarker(code: []const u8) ?usize {
-        const op = opcode.op;
-        var i: usize = 0;
-        while (i + 4 <= code.len) : (i += 1) {
-            if (code[i] == op.push_false and
-                code[i + 1] == op.drop and
-                code[i + 2] == op.push_true and
-                code[i + 3] == op.drop)
-            {
-                return i + 4;
-            }
-        }
-        return null;
     }
 
     /// Run all pipeline phases on a compile/execution `Bytecode`.
@@ -6661,66 +6919,26 @@ pub const pipeline_finalize = struct {
     }
 
     fn syncBytecodeVarNames(function: *bytecode_function.Bytecode, fd: *const function_def_mod.FunctionDef) !void {
-        if (function.var_names.len != 0) {
-            const var_names = function.var_names;
-            function.var_names = &.{};
-            for (var_names) |atom_id| function.atoms.free(atom_id);
-            function.memory.free(atom.Atom, var_names);
-        }
-        if (function.var_is_lexical.len != 0) {
-            const var_is_lexical = function.var_is_lexical;
-            function.var_is_lexical = &.{};
-            function.memory.free(bool, var_is_lexical);
-        }
-        if (function.var_is_const.len != 0) {
-            const var_is_const = function.var_is_const;
-            function.var_is_const = &.{};
-            function.memory.free(bool, var_is_const);
-        }
-        if (function.var_scope_level.len != 0) {
-            const var_scope_level = function.var_scope_level;
-            function.var_scope_level = &.{};
-            function.memory.free(i32, var_scope_level);
+        if (function.vardefs.len != 0) {
+            const vardefs = function.vardefs;
+            function.vardefs = &.{};
+            for (vardefs) |*v| function.atoms.free(v.var_name);
+            function.memory.free(function_def_mod.VarDef, vardefs);
         }
         if (fd.vars.len == 0) return;
 
-        const metadata = try copyVarNameMetadata(function.memory, function.atoms, fd.vars);
-        function.var_names = metadata.names;
-        function.var_is_lexical = metadata.is_lexical;
-        function.var_is_const = metadata.is_const;
-        function.var_scope_level = metadata.scope_level;
-    }
-
-    const VarNameMetadata = struct {
-        names: []atom.Atom,
-        is_lexical: []bool,
-        is_const: []bool,
-        scope_level: []i32,
-    };
-
-    fn copyVarNameMetadata(memory: anytype, atoms: *atom.AtomTable, vars: []const function_def_mod.VarDef) !VarNameMetadata {
-        const names = try memory.alloc(atom.Atom, vars.len);
+        const vardefs = try function.memory.alloc(function_def_mod.VarDef, fd.vars.len);
         var initialized: usize = 0;
         errdefer {
-            for (names[0..initialized]) |atom_id| atoms.free(atom_id);
-            memory.free(atom.Atom, names);
+            for (vardefs[0..initialized]) |*v| function.atoms.free(v.var_name);
+            function.memory.free(function_def_mod.VarDef, vardefs);
         }
-        const is_lexical = try memory.alloc(bool, vars.len);
-        errdefer memory.free(bool, is_lexical);
-        const is_const = try memory.alloc(bool, vars.len);
-        errdefer memory.free(bool, is_const);
-        const scope_level = try memory.alloc(i32, vars.len);
-        errdefer memory.free(i32, scope_level);
-
-        for (vars, 0..) |v, idx| {
-            names[idx] = atoms.dup(v.var_name);
-            is_lexical[idx] = v.is_lexical;
-            is_const[idx] = v.is_const;
-            scope_level[idx] = v.scope_level;
+        for (fd.vars, 0..) |v, idx| {
+            vardefs[idx] = v;
+            vardefs[idx].var_name = function.atoms.dup(v.var_name);
             initialized += 1;
         }
-
-        return .{ .names = names, .is_lexical = is_lexical, .is_const = is_const, .scope_level = scope_level };
+        function.vardefs = vardefs;
     }
 
     fn syncBytecodeVarRefNames(function: *bytecode_function.Bytecode, fd: *const function_def_mod.FunctionDef) !void {
@@ -6729,21 +6947,6 @@ pub const pipeline_finalize = struct {
             function.var_ref_names = &.{};
             for (var_ref_names) |atom_id| function.atoms.free(atom_id);
             function.memory.free(atom.Atom, var_ref_names);
-        }
-        if (function.var_ref_is_lexical.len != 0) {
-            const var_ref_is_lexical = function.var_ref_is_lexical;
-            function.var_ref_is_lexical = &.{};
-            function.memory.free(bool, var_ref_is_lexical);
-        }
-        if (function.var_ref_is_const.len != 0) {
-            const var_ref_is_const = function.var_ref_is_const;
-            function.var_ref_is_const = &.{};
-            function.memory.free(bool, var_ref_is_const);
-        }
-        if (function.var_ref_is_global_decl.len != 0) {
-            const var_ref_is_global_decl = function.var_ref_is_global_decl;
-            function.var_ref_is_global_decl = &.{};
-            function.memory.free(bool, var_ref_is_global_decl);
         }
         if (function.closure_var.len != 0) {
             const closure_var = function.closure_var;
@@ -6754,44 +6957,26 @@ pub const pipeline_finalize = struct {
         if (fd.closure_var.len == 0) return;
         const names = try function.memory.alloc(atom.Atom, fd.closure_var.len);
         errdefer function.memory.free(atom.Atom, names);
-        const is_lexical = try function.memory.alloc(bool, fd.closure_var.len);
-        errdefer function.memory.free(bool, is_lexical);
-        const is_const = try function.memory.alloc(bool, fd.closure_var.len);
-        const is_global_decl = try function.memory.alloc(bool, fd.closure_var.len);
         const closure_var = try function.memory.alloc(function_def_mod.ClosureVar, fd.closure_var.len);
         var initialized: usize = 0;
         var initialized_closure: usize = 0;
         errdefer {
             for (names[0..initialized]) |atom_id| function.atoms.free(atom_id);
-            function.memory.free(bool, is_const);
-            function.memory.free(bool, is_global_decl);
             for (closure_var[0..initialized_closure]) |*cv| function.atoms.free(cv.var_name);
             function.memory.free(function_def_mod.ClosureVar, closure_var);
         }
         for (fd.closure_var, 0..) |cv, idx| {
             names[idx] = fd.atoms.dup(cv.var_name);
-            is_lexical[idx] = cv.is_lexical;
-            is_const[idx] = cv.is_const;
-            is_global_decl[idx] = cv.closure_type == .global_decl;
             closure_var[idx] = cv;
             closure_var[idx].var_name = fd.atoms.dup(cv.var_name);
             initialized += 1;
             initialized_closure += 1;
         }
         function.var_ref_names = names;
-        function.var_ref_is_lexical = is_lexical;
-        function.var_ref_is_const = is_const;
-        function.var_ref_is_global_decl = is_global_decl;
         function.closure_var = closure_var;
     }
 
     fn syncBytecodeGlobalVarNames(function: *bytecode_function.Bytecode, fd: *const function_def_mod.FunctionDef) !void {
-        if (function.global_var_names.len != 0) {
-            const global_var_names = function.global_var_names;
-            function.global_var_names = &.{};
-            for (global_var_names) |atom_id| function.atoms.free(atom_id);
-            function.memory.free(atom.Atom, global_var_names);
-        }
         if (function.global_vars.len != 0) {
             const global_vars = function.global_vars;
             function.global_vars = &.{};
@@ -6799,13 +6984,6 @@ pub const pipeline_finalize = struct {
             function.memory.free(function_def_mod.GlobalVar, global_vars);
         }
         if (fd.global_vars.len == 0) return;
-        function.global_var_names = try function.memory.alloc(atom.Atom, fd.global_vars.len);
-        var initialized_names: usize = 0;
-        errdefer {
-            for (function.global_var_names[0..initialized_names]) |atom_id| function.atoms.free(atom_id);
-            function.memory.free(atom.Atom, function.global_var_names);
-            function.global_var_names = &.{};
-        }
         function.global_vars = try function.memory.alloc(function_def_mod.GlobalVar, fd.global_vars.len);
         var initialized_vars: usize = 0;
         errdefer {
@@ -6814,8 +6992,6 @@ pub const pipeline_finalize = struct {
             function.global_vars = &.{};
         }
         for (fd.global_vars, 0..) |gv, idx| {
-            function.global_var_names[idx] = fd.atoms.dup(gv.var_name);
-            initialized_names += 1;
             function.global_vars[idx] = gv;
             function.global_vars[idx].var_name = fd.atoms.dup(gv.var_name);
             initialized_vars += 1;
@@ -6848,10 +7024,14 @@ pub const pipeline_finalize = struct {
             const ctor_value = fd.cpool[@intCast(child.parent_cpool_idx)];
             const init_value = fd.cpool[@intCast(child.class_fields_init_cpool_idx)];
             const ctor_fb = functionBytecodeFromValueMutable(ctor_value) orelse return error.InvalidBytecode;
-            const next_value = init_value.dup();
-            const old_value = ctor_fb.class_fields_init;
-            ctor_fb.class_fields_init = next_value;
-            if (old_value) |stored| stored.free(rt);
+            const boxed = try rt.memory.create(JSValue);
+            boxed.* = init_value.dup();
+            const old_boxed = ctor_fb.class_fields_init;
+            ctor_fb.class_fields_init = boxed;
+            if (old_boxed) |stored| {
+                stored.*.free(rt);
+                rt.memory.destroy(JSValue, stored);
+            }
         }
     }
 
@@ -6940,6 +7120,13 @@ const function_mod = struct {
         slot.* = &.{};
         for (items) |atom_id| atoms.free(atom_id);
         if (items.len != 0) mem.free(atom.Atom, items);
+    }
+
+    fn freeOwnedVarDefSlice(atoms: *atom.AtomTable, mem: *memory.MemoryAccount, slot: *[]function_bytecode_mod.VarDef) void {
+        const items = slot.*;
+        slot.* = &.{};
+        for (items) |*v| atoms.free(v.var_name);
+        if (items.len != 0) mem.free(function_bytecode_mod.VarDef, items);
     }
 
     fn freeOwnedClosureVarSlice(atoms: *atom.AtomTable, mem: *memory.MemoryAccount, slot: *[]function_bytecode_mod.ClosureVar) void {
@@ -7043,24 +7230,20 @@ const function_mod = struct {
         atom_operands: []atom.Atom = &.{},
         atom_operands_capacity: usize = 0,
         arg_names: []atom.Atom = &.{},
-        var_names: []atom.Atom = &.{},
-        var_is_lexical: []bool = &.{},
-        var_is_const: []bool = &.{},
-        // Lexical scope level (`JSVarDef.scope_level`) per local slot. Top-level
-        // (scope_level == 0) lexicals participate in the global-lexical sync; a
-        // block-level shadower (scope_level > 0) that happens to share a name with
-        // a top-level `let`/`const` must NOT. Mirrors qjs, where a block `let` is a
-        // pure frame local (`add_scope_var`) with no tie to the global_decl cell.
-        var_scope_level: []i32 = &.{},
+        // Local-variable metadata, faithful to qjs `JSFunctionBytecode.vardefs`.
+        // Each `vardefs[i]` carries var_name plus is_lexical/is_const/scope_level
+        // (the former parallel arrays). `scope_level` (`JSVarDef.scope_level`):
+        // top-level (scope_level == 0) lexicals participate in the global-lexical
+        // sync; a block-level shadower (scope_level > 0) that happens to share a
+        // name with a top-level `let`/`const` must NOT (qjs: a block `let` is a
+        // pure frame local with no tie to the global_decl cell).
+        vardefs: []function_bytecode_mod.VarDef = &.{},
         var_ref_names: []atom.Atom = &.{},
-        var_ref_is_lexical: []bool = &.{},
-        var_ref_is_const: []bool = &.{},
-        // True for each var-ref that is a top-level script lexical (closure_type
-        // == .global_decl, qjs JS_CLOSURE_GLOBAL_DECL). Distinguishes top-level
-        // let/const from hoisted function-decl closure vars at instantiation.
-        var_ref_is_global_decl: []bool = &.{},
+        // Lexical / const / top-level-global-decl (closure_type == .global_decl,
+        // qjs JS_CLOSURE_GLOBAL_DECL) status per var-ref is derived on access
+        // from `closure_var[idx]` via varRefIs{Lexical,Const,GlobalDecl}At; the
+        // former parallel `[]bool` arrays were redundant copies of closure_var.
         closure_var: []function_bytecode_mod.ClosureVar = &.{},
-        global_var_names: []atom.Atom = &.{},
         global_vars: []function_bytecode_mod.GlobalVar = &.{},
         private_bound_names: []atom.Atom = &.{},
         constants: constant.Pool,
@@ -7068,8 +7251,6 @@ const function_mod = struct {
         debug_table: ?debug.Table = null,
         direct_call_sites: []DirectCallSite = &.{},
         direct_call_sites_capacity: usize = 0,
-        call_sites: []function_bytecode_mod.CallSite = &.{},
-        call_sites_capacity: usize = 0,
 
         pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable, name: atom.Atom) BytecodeImpl {
             return .{
@@ -7090,16 +7271,9 @@ const function_mod = struct {
             self.atoms.free(filename);
             freeGrowableAtomSlice(self.atoms, self.memory, &self.atom_operands, &self.atom_operands_capacity);
             freeOwnedAtomSlice(self.atoms, self.memory, &self.arg_names);
-            freeOwnedAtomSlice(self.atoms, self.memory, &self.var_names);
-            freeOwnedSlice(bool, self.memory, &self.var_is_lexical);
-            freeOwnedSlice(bool, self.memory, &self.var_is_const);
-            freeOwnedSlice(i32, self.memory, &self.var_scope_level);
+            freeOwnedVarDefSlice(self.atoms, self.memory, &self.vardefs);
             freeOwnedAtomSlice(self.atoms, self.memory, &self.var_ref_names);
-            freeOwnedSlice(bool, self.memory, &self.var_ref_is_lexical);
-            freeOwnedSlice(bool, self.memory, &self.var_ref_is_const);
-            freeOwnedSlice(bool, self.memory, &self.var_ref_is_global_decl);
             freeOwnedClosureVarSlice(self.atoms, self.memory, &self.closure_var);
-            freeOwnedAtomSlice(self.atoms, self.memory, &self.global_var_names);
             freeOwnedGlobalVarSlice(self.atoms, self.memory, &self.global_vars);
             freeOwnedAtomSlice(self.atoms, self.memory, &self.private_bound_names);
             freeGrowableSlice(u8, self.memory, &self.code, &self.code_capacity);
@@ -7116,8 +7290,42 @@ const function_mod = struct {
             if (module_record) |*record| record.deinit();
             if (debug_table) |*table| table.deinit();
             self.deinitDirectCallSites();
-            self.deinitCallSites();
             if (owns_pc2line_buf and pc2line_buf.len != 0) self.memory.free(u8, pc2line_buf);
+        }
+
+        // Var-ref lexical/const/global-decl metadata is derived on access from
+        // `closure_var[idx]` rather than stored in parallel `[]bool` arrays,
+        // mirroring qjs (which keeps only `JSClosureVar`). For indices past
+        // `closure_var.len` (eval-synthesised var-refs that have no backing
+        // closure var) these default to `false`, matching the historical
+        // bounds-guarded reads of the removed parallel arrays.
+        pub inline fn varRefIsLexicalAt(self: *const BytecodeImpl, idx: usize) bool {
+            if (idx >= self.closure_var.len) return false;
+            return self.closure_var[idx].is_lexical;
+        }
+        pub inline fn varRefIsConstAt(self: *const BytecodeImpl, idx: usize) bool {
+            if (idx >= self.closure_var.len) return false;
+            return self.closure_var[idx].is_const;
+        }
+        pub inline fn varRefIsGlobalDeclAt(self: *const BytecodeImpl, idx: usize) bool {
+            if (idx >= self.closure_var.len) return false;
+            return self.closure_var[idx].closure_type == .global_decl;
+        }
+
+        // Var-ref names. The finalized FunctionBytecode no longer stores a
+        // separate `var_ref_names` atom array (it was a redundant mirror of
+        // `closure_var[i].var_name`); normal views leave `var_ref_names` empty
+        // and derive names from `closure_var`. Direct-eval overlays install a
+        // MERGED `var_ref_names` array (closure names ++ eval-synthesised names)
+        // that also covers indices past `closure_var.len`; those accessors then
+        // read the merged array. Callers that iterated `var_ref_names[i]` now go
+        // through `varRefNamesLen()`/`varRefName(i)`.
+        pub inline fn varRefNamesLen(self: *const BytecodeImpl) usize {
+            return if (self.var_ref_names.len != 0) self.var_ref_names.len else self.closure_var.len;
+        }
+        pub inline fn varRefName(self: *const BytecodeImpl, idx: usize) atom.Atom {
+            if (self.var_ref_names.len != 0) return self.var_ref_names[idx];
+            return self.closure_var[idx].var_name;
         }
 
         pub fn setCode(self: *BytecodeImpl, bytes: []const u8) !void {
@@ -7259,14 +7467,6 @@ const function_mod = struct {
             tail[0].atom_id = self.atoms.dup(site.atom_id);
         }
 
-        pub fn appendCallSite(self: *BytecodeImpl, site: function_bytecode_mod.CallSite) !u16 {
-            if (self.call_sites.len >= std.math.maxInt(u16)) return error.BytecodeOverflow;
-            const tail = try growSliceBy(function_bytecode_mod.CallSite, self.memory, &self.call_sites, &self.call_sites_capacity, 1);
-            tail[0] = site;
-            tail[0].atom_id = self.atoms.dup(site.atom_id);
-            return @intCast(self.call_sites.len - 1);
-        }
-
         pub fn deinitDirectCallSites(self: *BytecodeImpl) void {
             const items = self.direct_call_sites;
             const capacity = self.direct_call_sites_capacity;
@@ -7274,15 +7474,6 @@ const function_mod = struct {
             self.direct_call_sites_capacity = 0;
             for (items) |site| self.atoms.free(site.atom_id);
             if (capacity != 0) self.memory.free(DirectCallSite, items.ptr[0..capacity]);
-        }
-
-        pub fn deinitCallSites(self: *BytecodeImpl) void {
-            const items = self.call_sites;
-            const capacity = self.call_sites_capacity;
-            self.call_sites = &.{};
-            self.call_sites_capacity = 0;
-            for (items) |site| self.atoms.free(site.atom_id);
-            if (capacity != 0) self.memory.free(function_bytecode_mod.CallSite, items.ptr[0..capacity]);
         }
 
         pub fn ensureModule(self: *BytecodeImpl) *module.Record {
@@ -7302,93 +7493,59 @@ const function_mod = struct {
     /// It intentionally omits compile-only fields such as scopes, modules, and
     /// debug tables; those remain on the compile-time `BytecodeImpl` representation.
     pub fn asBytecodeView(fb: *const FunctionBytecode, rt: *runtime.JSRuntime) BytecodeImpl {
-        return makeBytecodeView(fb, &rt.memory, &rt.atoms);
+        return @This().makeBytecodeView(fb, &rt.memory, &rt.atoms);
     }
 
-    fn makeBytecodeView(fb: *const FunctionBytecode, mem: *memory.MemoryAccount, atoms: *atom.AtomTable) BytecodeImpl {
+    pub fn makeBytecodeView(fb: *const FunctionBytecode, mem: *memory.MemoryAccount, atoms: *atom.AtomTable) BytecodeImpl {
         return .{
             .memory = mem,
             .atoms = atoms,
             .name = fb.func_name,
             .filename = fb.filename,
-            .line_num = fb.line_num,
-            .col_num = fb.col_num,
-            .pc2line_buf = fb.pc2line_buf,
+            .line_num = fb.lineNum(),
+            .col_num = fb.colNum(),
+            .pc2line_buf = fb.pc2lineBuf(),
             .owns_pc2line_buf = false,
-            .pc2line_start_line = fb.line_num,
-            .pc2line_start_col = fb.col_num,
+            .pc2line_start_line = fb.lineNum(),
+            .pc2line_start_col = fb.colNum(),
             .flags = .{
-                .has_prototype = fb.has_prototype,
-                .has_simple_parameter_list = fb.has_simple_parameter_list,
-                .is_derived_class_constructor = fb.is_derived_class_constructor,
-                .is_async = fb.func_kind == .async or fb.func_kind == .async_generator,
-                .is_generator = fb.func_kind == .generator or fb.func_kind == .async_generator,
-                .is_strict = fb.is_strict_mode,
-                .runtime_strict = fb.runtime_strict_mode,
-                .is_indirect_eval = fb.is_indirect_eval,
-                .has_eval_call = fb.has_eval_call,
-                .backtrace_barrier = fb.backtrace_barrier,
+                .has_prototype = fb.flags.has_prototype,
+                .has_simple_parameter_list = fb.flags.has_simple_parameter_list,
+                .is_derived_class_constructor = fb.flags.is_derived_class_constructor,
+                .is_async = fb.flags.func_kind == .async or fb.flags.func_kind == .async_generator,
+                .is_generator = fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator,
+                .is_strict = fb.flags.is_strict_mode,
+                .runtime_strict = fb.flags.runtime_strict_mode,
+                .is_indirect_eval = fb.flags.is_indirect_eval,
+                .has_eval_call = fb.flags.has_eval_call,
+                .backtrace_barrier = fb.flags.backtrace_barrier,
             },
-            .simple_inline_eligible = fb.func_kind == .normal and
-                !fb.is_class_constructor and !fb.is_derived_class_constructor and
-                !fb.is_arrow_function and !fb.is_strict_mode and !fb.runtime_strict_mode and
-                fb.has_simple_parameter_list and !fb.has_eval_call and fb.global_vars.len == 0,
+            .simple_inline_eligible = fb.flags.func_kind == .normal and
+                !fb.flags.is_class_constructor and !fb.flags.is_derived_class_constructor and
+                !fb.flags.is_arrow_function and !fb.flags.is_strict_mode and !fb.flags.runtime_strict_mode and
+                fb.flags.has_simple_parameter_list and !fb.flags.has_eval_call and fb.global_vars_len == 0,
             .arg_count = fb.arg_count,
             .var_count = fb.var_count,
             .stack_size = fb.stack_size,
-            .code = fb.byte_code,
-            .atom_operands = fb.atom_operands,
-            .arg_names = fb.arg_names,
-            .var_names = fb.var_names,
-            .var_is_lexical = fb.var_is_lexical,
-            .var_is_const = fb.var_is_const,
-            .var_scope_level = fb.var_scope_level,
-            .var_ref_names = fb.var_ref_names,
-            .var_ref_is_lexical = fb.var_ref_is_lexical,
-            .var_ref_is_const = fb.var_ref_is_const,
-            .var_ref_is_global_decl = fb.var_ref_is_global_decl,
-            .closure_var = fb.closure_var,
-            .global_var_names = fb.global_var_names,
-            .global_vars = fb.global_vars,
-            .private_bound_names = fb.private_bound_names,
-            .call_sites = fb.call_sites,
-            .constants = .{ .memory = mem, .atoms = atoms, .values = fb.cpool },
+            .code = fb.byteCode(),
+            // `atom_operands` intentionally left as the default empty slice: the
+            // FB no longer keeps a standalone atom-operand array (retention moved
+            // inline into the bytecode). Runtime readers that need the referenced
+            // atoms walk `code` directly (see `atomOperandIterator`).
+            .arg_names = fb.argNames(),
+            .vardefs = fb.varDefs(),
+            // Normal (non-eval) calls carry no separate var-ref name array; the
+            // names are derived from `closure_var[i].var_name` via the
+            // `varRefName`/`varRefNamesLen` accessors. Direct-eval overlays
+            // (mergeEvalBindings / the indirect-eval overlay in call_runtime)
+            // set `var_ref_names` to a merged array covering closure + eval
+            // synthesized refs; those accessors then read the merged array.
+            .var_ref_names = &.{},
+            .closure_var = fb.closureVar(),
+            .global_vars = fb.globalVars(),
+            .private_bound_names = fb.privateBoundNames(),
+            .constants = .{ .memory = mem, .atoms = atoms, .values = fb.cpoolSlice() },
         };
-    }
-
-    pub fn cachedBytecodeView(fb: *const FunctionBytecode) ?*const BytecodeImpl {
-        const ptr = fb.execution_view orelse return null;
-        return @ptrCast(@alignCast(ptr));
-    }
-
-    pub fn installCachedBytecodeView(fb: *FunctionBytecode, view: *BytecodeImpl) void {
-        view.* = makeBytecodeView(fb, fb.memory, fb.atoms);
-        fb.execution_view = view;
-        fb.execution_view_owned = false;
-        fb.execution_view_heap_size = 0;
-        fb.execution_view_destroy = null;
-    }
-
-    pub fn ensureCachedBytecodeView(fb: *const FunctionBytecode, rt: *runtime.JSRuntime) !*const BytecodeImpl {
-        if (@This().cachedBytecodeView(fb)) |view| return view;
-        const mutable_fb: *FunctionBytecode = @constCast(fb);
-        const view = try rt.memory.create(BytecodeImpl);
-        view.* = makeBytecodeView(fb, &rt.memory, &rt.atoms);
-        mutable_fb.execution_view = view;
-        mutable_fb.execution_view_owned = true;
-        mutable_fb.execution_view_heap_size = @sizeOf(BytecodeImpl);
-        mutable_fb.execution_view_destroy = destroyCachedBytecodeView;
-        return view;
-    }
-
-    pub fn refreshCachedBytecodeView(fb: *FunctionBytecode) void {
-        const view = @This().cachedBytecodeView(fb) orelse return;
-        @constCast(view).* = makeBytecodeView(fb, fb.memory, fb.atoms);
-    }
-
-    fn destroyCachedBytecodeView(mem: *memory.MemoryAccount, ptr: *anyopaque) void {
-        const view: *BytecodeImpl = @ptrCast(@alignCast(ptr));
-        mem.destroy(BytecodeImpl, view);
     }
 
     fn bytesMayContainEvalCall(bytes: []const u8) bool {
@@ -7432,12 +7589,10 @@ pub const dump = struct {
         try writer.print("var_count   : {d}\n", .{bc.var_count});
         try writer.print("stack_size  : {d}\n", .{bc.stack_size});
         try writer.print("code_len    : {d}\n", .{bc.code.len});
-        try writer.print("atoms       : {d}\n", .{bc.atom_operands.len});
         try writer.print("constants   : {d}\n", .{bc.constants.values.len});
         try writer.print("--- instructions ---\n", .{});
 
         var pc: usize = 0;
-        var atom_idx: usize = 0;
         while (pc < bc.code.len) {
             const op_id = bc.code[pc];
             const reported_size = opcode.sizeOf(op_id);
@@ -7456,7 +7611,7 @@ pub const dump = struct {
             }
 
             const fmt = opcode.formatOf(op_id);
-            try printOperands(writer, bc, fmt, bc.code[pc..end], &atom_idx);
+            try printOperands(writer, bc, fmt, bc.code[pc..end]);
 
             if (opts.show_raw_bytes) {
                 try writer.print("    ; raw=", .{});
@@ -7476,7 +7631,6 @@ pub const dump = struct {
         bc: *const function_mod.Bytecode,
         fmt: opcode.Format,
         body: []const u8,
-        atom_idx: *usize,
     ) !void {
         switch (fmt) {
             .none, .none_int, .none_loc, .none_arg, .none_var_ref => {},
@@ -7524,28 +7678,28 @@ pub const dump = struct {
                 }
             },
             .atom => {
-                try writeAtomOperand(writer, bc, atom_idx);
+                try writeAtomOperand(writer, bc, body);
             },
             .atom_u8 => {
-                try writeAtomOperand(writer, bc, atom_idx);
+                try writeAtomOperand(writer, bc, body);
                 if (body.len >= 6) try writer.print(", {d}", .{body[5]});
             },
             .atom_u16 => {
-                try writeAtomOperand(writer, bc, atom_idx);
+                try writeAtomOperand(writer, bc, body);
                 if (body.len >= 7) {
                     const v = std.mem.readInt(u16, body[5..][0..2], .little);
                     try writer.print(", {d}", .{v});
                 }
             },
             .atom_label_u8 => {
-                try writeAtomOperand(writer, bc, atom_idx);
+                try writeAtomOperand(writer, bc, body);
                 if (body.len >= 10) {
                     const lbl = std.mem.readInt(u32, body[5..][0..4], .little);
                     try writer.print(", L{d}, {d}", .{ lbl, body[9] });
                 }
             },
             .atom_label_u16 => {
-                try writeAtomOperand(writer, bc, atom_idx);
+                try writeAtomOperand(writer, bc, body);
                 if (body.len >= 11) {
                     const lbl = std.mem.readInt(u32, body[5..][0..4], .little);
                     const v = std.mem.readInt(u16, body[9..][0..2], .little);
@@ -7565,14 +7719,16 @@ pub const dump = struct {
     fn writeAtomOperand(
         writer: *std.Io.Writer,
         bc: *const function_mod.Bytecode,
-        atom_idx: *usize,
+        body: []const u8,
     ) !void {
-        if (atom_idx.* >= bc.atom_operands.len) {
+        // The atom is the 4-byte operand at `body[1..5]` in every atom format;
+        // read it inline rather than from a side array (the finalized FB no
+        // longer keeps one).
+        if (body.len < 5) {
             try writer.print(" <atom?>", .{});
             return;
         }
-        const a = bc.atom_operands[atom_idx.*];
-        atom_idx.* += 1;
+        const a = std.mem.readInt(u32, body[1..][0..4], .little);
         if (bc.atoms.name(a)) |s| {
             try writer.print(" \"{s}\"", .{s});
         } else {
@@ -7594,7 +7750,4 @@ pub const Bytecode = function_mod.Bytecode;
 pub const FunctionBytecode = function_bytecode.FunctionBytecode;
 pub const FunctionDef = function_def.FunctionDef;
 pub const asBytecodeView = function_mod.asBytecodeView;
-pub const cachedBytecodeView = function_mod.cachedBytecodeView;
-pub const installCachedBytecodeView = function_mod.installCachedBytecodeView;
-pub const ensureCachedBytecodeView = function_mod.ensureCachedBytecodeView;
-pub const refreshCachedBytecodeView = function_mod.refreshCachedBytecodeView;
+pub const makeBytecodeView = function_mod.makeBytecodeView;

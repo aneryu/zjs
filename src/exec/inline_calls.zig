@@ -43,7 +43,14 @@ pub const InlineTarget = struct {
     /// The callable closure value (becomes `frame.current_function`).
     callable: core.JSValue,
     fb: *const bytecode.FunctionBytecode,
-    view: *const bytecode.Bytecode,
+    /// The execution view (a `bytecode.Bytecode`) built on demand from `fb`.
+    /// Carried BY VALUE so it travels with the InlineTarget through the
+    /// InlineCallRequest / tail_request into `pushFrame`, which copies it into
+    /// the entry-owned `view_storage`. qjs dispatches straight from
+    /// `JSFunctionBytecode*`; zjs still runs the older `bytecode.Bytecode` API,
+    /// so it rebuilds this lightweight view per call instead of caching one on
+    /// the FunctionBytecode.
+    view: bytecode.Bytecode,
     /// Raw receiver before [[Call]] `this` boxing: an arrow target's lexical
     /// `this` (arrows ignore any provided receiver), otherwise the call
     /// receiver — `undefined` for plain calls, the property base for method
@@ -76,19 +83,20 @@ pub inline fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, re
     const function_object = object_ops.functionObjectFromValue(func) orelse return null;
     const function_value = function_object.functionBytecodeSlot().* orelse return null;
     const fb = call_runtime.functionBytecodeFromValue(function_value) orelse return null;
-    if (fb.func_kind != .normal) return null;
-    if (fb.is_class_constructor or fb.is_derived_class_constructor) return null;
+    if (fb.flags.func_kind != .normal) return null;
+    if (fb.flags.is_class_constructor or fb.flags.is_derived_class_constructor) return null;
     const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
     if (function_global != global) return null;
-    const this_value = if (fb.is_arrow_function)
+    const this_value = if (fb.flags.is_arrow_function)
         (function_object.functionLexicalThis() orelse core.JSValue.undefinedValue())
     else
         receiver;
-    const new_target = if (fb.is_arrow_function)
+    const new_target = if (fb.flags.is_arrow_function)
         (function_object.functionArrowNewTarget() orelse core.JSValue.undefinedValue())
     else
         core.JSValue.undefinedValue();
-    const view = bytecode.ensureCachedBytecodeView(fb, ctx.runtime) catch return null;
+    const rt = ctx.runtime;
+    const view = bytecode.makeBytecodeView(fb, &rt.memory, &rt.atoms);
     return .{
         .function_object = function_object,
         .callable = func,
@@ -104,9 +112,15 @@ pub inline fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, re
 /// the dispatch loop and backtrace pc borrows while the
 /// level is alive.
 pub const Entry = struct {
+    /// Entry-owned backing store for the execution view built from the target's
+    /// FunctionBytecode. `function` points here for a plain call (the Entry slots
+    /// are pointer-stable chunked storage, so `&view_storage` stays valid for the
+    /// whole call). qjs dispatches straight from `JSFunctionBytecode*`; zjs runs
+    /// the older `bytecode.Bytecode` API and rebuilds this view per call.
+    view_storage: bytecode.Bytecode,
     function: *const bytecode.Bytecode,
     /// Eval-only side view used when direct-eval bindings extend
-    /// `function.var_ref_names`. Common calls borrow `target.view` directly.
+    /// `function.var_ref_names`. Common calls point `function` at `view_storage`.
     eval_function_view: ?*bytecode.Bytecode,
     frame: frame_mod.Frame,
     eval_snapshot: frame_mod.EvalVarRefSnapshot,
@@ -270,10 +284,10 @@ pub const Machine = struct {
         try vm_call.enterInlineCallDepth(self.ctx, global);
         errdefer self.ctx.call_depth -= 1;
         const entry = try self.acquireSlot(global);
-        if (isSimpleInlineFrame(target, source))
-            try setupSimpleInlineEntry(self.ctx, global, entry, target, source)
+        if (isSimpleInlineFrame(&target, source))
+            try setupSimpleInlineEntry(self.ctx, global, entry, &target, source)
         else
-            try setupInlineEntry(self.ctx, global, entry, target, source);
+            try setupInlineEntry(self.ctx, global, entry, &target, source);
         self.depth += 1;
         self.switched = true;
     }
@@ -286,8 +300,8 @@ pub const Machine = struct {
     /// condition is exactly a branch the lean path elides; the general
     /// `setupInlineEntry` stays the authority for everything else (strict, arrow,
     /// method receiver, eval, arity pad, non-cell captures).
-    fn isSimpleInlineFrame(target: InlineTarget, source: ArgsSource) bool {
-        const function = target.view;
+    fn isSimpleInlineFrame(target: *const InlineTarget, source: ArgsSource) bool {
+        const function = &target.view;
         // fb-derived half (normal, non-arrow, sloppy, simple params, no
         // eval-call, no global-var rebinds) is precomputed at view build:
         // one byte test instead of ~6 scattered FunctionBytecode bool loads
@@ -323,9 +337,10 @@ pub const Machine = struct {
     /// allocation OFF the general `setupInlineEntry`/`pushFrame` chain. If LLVM
     /// inlines it back into `pushFrame`, the simple path's spills re-couple with
     /// the general path and the win evaporates (measured: 3.09x→3.26x qjs on fib).
-    noinline fn setupSimpleInlineEntry(ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: InlineTarget, source: ArgsSource) HostError!void {
+    noinline fn setupSimpleInlineEntry(ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
         const rt = ctx.runtime;
-        entry.function = target.view;
+        entry.view_storage = target.view;
+        entry.function = &entry.view_storage;
         entry.catch_target = null;
         entry.eval_function_view = null;
         entry.merged_var_ref_names = &.{};
@@ -397,9 +412,10 @@ pub const Machine = struct {
     /// The caller owns depth accounting (enterInlineCallDepth / enterCallDepth)
     /// and any push/pop bookkeeping; on error every partially-initialized
     /// resource is released via the errdefers below.
-    pub fn setupInlineEntry(ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: InlineTarget, source: ArgsSource) HostError!void {
+    pub fn setupInlineEntry(ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
         const rt = ctx.runtime;
-        entry.function = target.view;
+        entry.view_storage = target.view;
+        entry.function = &entry.view_storage;
         entry.catch_target = null;
         entry.eval_function_view = null;
         entry.merged_var_ref_names = &.{};
@@ -420,7 +436,7 @@ pub const Machine = struct {
         var frame_var_refs: []const core.JSValue = target.function_object.functionCapturesSlot().*;
         if (eval_names.len > 0 and eval_refs.len > 0) {
             const eval_view = try rt.memory.create(bytecode.Bytecode);
-            eval_view.* = target.view.*;
+            eval_view.* = target.view;
             entry.eval_function_view = eval_view;
             entry.function = eval_view;
             try mergeEvalBindings(rt, entry, frame_var_refs, eval_names, eval_refs);
@@ -440,16 +456,16 @@ pub const Machine = struct {
         // method, and primitive receivers stay on the shared coercion path.
         var boxed_this: ?core.JSValue = null;
         defer if (boxed_this) |value| value.free(rt);
-        const fb_strict = target.fb.is_strict_mode or target.fb.runtime_strict_mode;
+        const fb_strict = target.fb.flags.is_strict_mode or target.fb.flags.runtime_strict_mode;
         const receiver_slot = sourceReceiverSlot(source);
-        const plain_undefined_this = !target.fb.is_arrow_function and receiver_slot == null and target.this_value.isUndefined();
+        const plain_undefined_this = !target.fb.flags.is_arrow_function and receiver_slot == null and target.this_value.isUndefined();
         const effective_this = if (plain_undefined_this)
             if (fb_strict) core.JSValue.undefinedValue() else global.value()
         else
             try call_runtime.coerceCallThis(ctx, global, fb_strict, target.this_value, &boxed_this);
 
         var take_receiver_as_this = false;
-        if (boxed_this == null and !target.fb.is_arrow_function) {
+        if (boxed_this == null and !target.fb.flags.is_arrow_function) {
             if (receiver_slot) |slot| {
                 if (effective_this.same(slot.*)) {
                     take_receiver_as_this = true;
@@ -745,11 +761,12 @@ pub const Machine = struct {
         eval_refs: []const core.JSValue,
     ) HostError!void {
         const add_len = @min(eval_names.len, eval_refs.len);
-        const old_names = entry.function.var_ref_names;
-        const names = try rt.memory.alloc(core.Atom, old_names.len + add_len);
+        const old_len = entry.function.varRefNamesLen();
+        const names = try rt.memory.alloc(core.Atom, old_len + add_len);
         errdefer rt.memory.free(core.Atom, names);
-        @memcpy(names[0..old_names.len], old_names);
-        @memcpy(names[old_names.len..], eval_names[0..add_len]);
+        var i: usize = 0;
+        while (i < old_len) : (i += 1) names[i] = entry.function.varRefName(i);
+        @memcpy(names[old_len..], eval_names[0..add_len]);
         const refs = try rt.memory.alloc(core.JSValue, captures.len + add_len);
         @memcpy(refs[0..captures.len], captures);
         @memcpy(refs[captures.len..], eval_refs[0..add_len]);

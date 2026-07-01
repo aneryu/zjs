@@ -343,11 +343,11 @@ pub fn createBytecodeFunctionObject(
     const fb = functionBytecodeFromValue(rooted_value) orelse return error.InvalidBytecode;
     const object = try core.Object.create(ctx.runtime, core.class.ids.bytecode_function, null);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
-    const function_prototype = if (fb.func_kind == .async_generator)
+    const function_prototype = if (fb.flags.func_kind == .async_generator)
         try asyncGeneratorFunctionPrototypeFromGlobal(ctx.runtime, global)
-    else if (fb.func_kind == .generator)
+    else if (fb.flags.func_kind == .generator)
         try generatorFunctionPrototypeFromGlobal(ctx.runtime, global)
-    else if (fb.func_kind == .async)
+    else if (fb.flags.func_kind == .async)
         try asyncFunctionPrototypeFromGlobal(ctx.runtime, global)
     else
         functionPrototypeFromGlobal(ctx.runtime, global);
@@ -368,12 +368,13 @@ pub fn createBytecodeFunctionObject(
         defer import_meta.free(ctx.runtime);
         try object.setOptionalValueSlot(ctx.runtime, try object.functionImportMetaSlot(ctx.runtime), import_meta.dup());
     }
-    try installLexicalPrivateNameRemap(ctx.runtime, object, frame, fb.private_bound_names);
-    if (fb.class_fields_init) |init_bytecode| {
+    try installLexicalPrivateNameRemap(ctx.runtime, object, frame, fb.privateBoundNames());
+    if (fb.class_fields_init) |init_bytecode_box| {
+        const init_bytecode = init_bytecode_box.*;
         const init_value = try createBytecodeFunctionObject(ctx, frame, caller_function, global, init_bytecode, core.atom.ids.empty_string, opc, false, eval_local_names, eval_local_slots, capture_eval_var_ref_names, eval_var_refs, &.{});
         try object.setOptionalValueSlot(ctx.runtime, try object.functionClassFieldsInitSlot(ctx.runtime), init_value);
     }
-    if (fb.is_arrow_function) {
+    if (fb.flags.is_arrow_function) {
         const lexical_this_slot = derivedConstructorThisLocalSlot(frame) orelse &frame.this_value;
         const lexical_this_value = if (frame.function.flags.is_derived_class_constructor or varRefCellFromValue(lexical_this_slot.*) != null)
             try ensureVarRefCell(ctx, lexical_this_slot)
@@ -400,7 +401,7 @@ pub fn createBytecodeFunctionObject(
     }
     const effective_name = if (fb.func_name != core.atom.ids.empty_string and ctx.runtime.atoms.kind(fb.func_name) != null)
         fb.func_name
-    else if (fb.is_class_constructor)
+    else if (fb.flags.is_class_constructor)
         name_atom
     else
         fb.func_name;
@@ -410,8 +411,8 @@ pub fn createBytecodeFunctionObject(
         defer name_value.free(ctx.runtime);
         try object.defineOwnProperty(ctx.runtime, core.atom.ids.name, core.Descriptor.data(name_value, false, false, true));
     }
-    if (fb.closure_var.len > 0) {
-        const captures = try ctx.runtime.memory.alloc(core.JSValue, fb.closure_var.len);
+    if (fb.closureVar().len > 0) {
+        const captures = try ctx.runtime.memory.alloc(core.JSValue, fb.closureVar().len);
         var captures_transferred = false;
         errdefer if (!captures_transferred) ctx.runtime.memory.free(core.JSValue, captures);
         var rooted_captures: []core.JSValue = captures[0..0];
@@ -426,7 +427,7 @@ pub fn createBytecodeFunctionObject(
             }
             rooted_captures = &.{};
         };
-        for (fb.closure_var, 0..) |cv, idx| {
+        for (fb.closureVar(), 0..) |cv, idx| {
             captures[idx] = switch (cv.closure_type) {
                 .local => blk: {
                     if (cv.var_idx >= frame.locals.len) return error.InvalidBytecode;
@@ -463,8 +464,8 @@ pub fn createBytecodeFunctionObject(
             };
             if (varRefCellFromValue(captures[idx])) |cell| {
                 const captured_const = cv.is_const or switch (cv.closure_type) {
-                    .local => cv.var_idx < caller_function.var_is_const.len and caller_function.var_is_const[cv.var_idx],
-                    .ref, .global_ref, .module_decl, .module_import => cv.var_idx < caller_function.var_ref_is_const.len and caller_function.var_ref_is_const[cv.var_idx],
+                    .local => cv.var_idx < caller_function.vardefs.len and caller_function.vardefs[cv.var_idx].is_const,
+                    .ref, .global_ref, .module_decl, .module_import => caller_function.varRefIsConstAt(cv.var_idx),
                     else => false,
                 };
                 cell.varRefIsConstSlot().* = cell.varRefIsConstSlot().* or captured_const or cv.var_kind == .function_name;
@@ -485,9 +486,9 @@ pub fn createBytecodeFunctionObject(
     const captures_direct_eval_scope = function_has_direct_eval or captures_eval_var_scope;
     const captures_eval_frame_scope = captures_direct_eval_scope;
     if (eval_local_names.len > 0 or capture_eval_var_ref_names.len > 0 or
-        (captures_eval_frame_scope and caller_function.var_names.len > 0) or
+        (captures_eval_frame_scope and caller_function.vardefs.len > 0) or
         (captures_eval_frame_scope and caller_function.arg_names.len > 0) or
-        (captures_direct_eval_scope and caller_function.var_ref_names.len > 0))
+        (captures_direct_eval_scope and caller_function.varRefNamesLen() > 0))
     {
         var used_count: usize = 0;
         for (eval_local_names, 0..) |atom_id, idx| {
@@ -502,9 +503,9 @@ pub fn createBytecodeFunctionObject(
             if (captures_direct_eval_scope or captures_eval_var_scope or functionBytecodeUsesAtom(ctx.runtime, fb, atom_id)) used_count += 1;
         }
         if (captures_eval_frame_scope) {
-            const local_count = @min(caller_function.var_names.len, frame.locals.len);
+            const local_count = @min(caller_function.vardefs.len, frame.locals.len);
             for (frame.locals[0..local_count], 0..) |slot, idx| {
-                if (idx < caller_function.var_is_lexical.len and caller_function.var_is_lexical[idx]) continue;
+                if (idx < caller_function.vardefs.len and caller_function.vardefs[idx].is_lexical) continue;
                 if (slot_ops.varRefSlotIsUninitialized(slot)) continue;
                 if (shouldSkipDirectEvalLocalCapture(fb, slot, skip_direct_eval_capture_values)) continue;
                 used_count += 1;
@@ -517,7 +518,7 @@ pub fn createBytecodeFunctionObject(
                 used_count += 1;
             }
             if (captures_direct_eval_scope) {
-                const ref_count = @min(caller_function.var_ref_names.len, frame.var_refs.len);
+                const ref_count = @min(caller_function.varRefNamesLen(), frame.var_refs.len);
                 for (0..ref_count) |idx| {
                     if (closureVarIsNonLexicalGlobalSentinel(caller_function, idx)) continue;
                     used_count += 1;
@@ -574,12 +575,12 @@ pub fn createBytecodeFunctionObject(
                 rooted_refs = refs[0..initialized];
             }
             if (captures_eval_frame_scope) {
-                const local_count = @min(caller_function.var_names.len, frame.locals.len);
-                for (caller_function.var_names[0..local_count], 0..) |atom_id, idx| {
-                    if (idx < caller_function.var_is_lexical.len and caller_function.var_is_lexical[idx]) continue;
+                const local_count = @min(caller_function.vardefs.len, frame.locals.len);
+                for (caller_function.vardefs[0..local_count], 0..) |vd, idx| {
+                    if (vd.is_lexical) continue;
                     if (slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) continue;
                     if (shouldSkipDirectEvalLocalCapture(fb, frame.locals[idx], skip_direct_eval_capture_values)) continue;
-                    names[initialized] = ctx.runtime.atoms.dup(atom_id);
+                    names[initialized] = ctx.runtime.atoms.dup(vd.var_name);
                     initialized_names += 1;
                     refs[initialized] = try ensureFrameVarRefCell(ctx, frame, &frame.locals[idx]);
                     initialized += 1;
@@ -598,8 +599,10 @@ pub fn createBytecodeFunctionObject(
                 }
             }
             if (captures_direct_eval_scope) {
-                const ref_count = @min(caller_function.var_ref_names.len, frame.var_refs.len);
-                for (caller_function.var_ref_names[0..ref_count], 0..) |atom_id, idx| {
+                const ref_count = @min(caller_function.varRefNamesLen(), frame.var_refs.len);
+                var idx: usize = 0;
+                while (idx < ref_count) : (idx += 1) {
+                    const atom_id = caller_function.varRefName(idx);
                     if (closureVarIsNonLexicalGlobalSentinel(caller_function, idx)) continue;
                     names[initialized] = ctx.runtime.atoms.dup(atom_id);
                     initialized_names += 1;
@@ -613,8 +616,8 @@ pub fn createBytecodeFunctionObject(
             (try object.functionEvalLocalRefsSlot(ctx.runtime)).* = refs;
         }
     }
-    if (create_prototype and fb.has_prototype) {
-        if (fb.func_kind == .normal and !fb.is_class_constructor) {
+    if (create_prototype and fb.flags.has_prototype) {
+        if (fb.flags.func_kind == .normal and !fb.flags.is_class_constructor) {
             // qjs-faithful lazy `prototype` (JS_AUTOINIT_ID_PROTOTYPE): install a
             // placeholder; the prototype object + its `constructor` back-ref are
             // materialized only when `.prototype` is first observed or the
@@ -627,16 +630,16 @@ pub fn createBytecodeFunctionObject(
             // constructor and are observed by the runtime immediately).
             try object.defineFunctionPrototypeAutoInit(ctx.runtime, core.property.Flags.data(true, false, false));
         } else {
-            const generator_prototype = if (fb.func_kind == .async_generator)
+            const generator_prototype = if (fb.flags.func_kind == .async_generator)
                 try asyncGeneratorPrototypeFromGlobal(ctx.runtime, global)
-            else if (fb.func_kind == .generator)
+            else if (fb.flags.func_kind == .generator)
                 try generatorPrototypeFromGlobal(ctx.runtime, global)
             else
                 objectPrototypeFromGlobal(ctx.runtime, global);
             const prototype = try core.Object.create(ctx.runtime, core.class.ids.object, generator_prototype);
             var prototype_raw_owned = true;
             errdefer if (prototype_raw_owned) core.Object.destroyFromHeader(ctx.runtime, &prototype.header);
-            if (fb.func_kind != .generator and fb.func_kind != .async_generator) {
+            if (fb.flags.func_kind != .generator and fb.flags.func_kind != .async_generator) {
                 try prototype.defineOwnProperty(ctx.runtime, core.atom.ids.constructor, core.Descriptor.data(object.value(), true, false, true));
             }
             const prototype_value = prototype.value();
@@ -650,8 +653,8 @@ pub fn createBytecodeFunctionObject(
 
 pub fn functionBytecodeUsesArgumentsSpecialObject(fb: *const bytecode.FunctionBytecode) bool {
     var index: usize = 0;
-    while (index + 1 < fb.byte_code.len) : (index += 1) {
-        if (fb.byte_code[index] == op.special_object and (fb.byte_code[index + 1] == 0 or fb.byte_code[index + 1] == 1)) return true;
+    while (index + 1 < fb.byteCode().len) : (index += 1) {
+        if (fb.byteCode()[index] == op.special_object and (fb.byteCode()[index + 1] == 0 or fb.byteCode()[index + 1] == 1)) return true;
     }
     return false;
 }
@@ -1119,7 +1122,7 @@ pub fn currentArrowFunctionObject(frame: *frame_mod.Frame) ?*core.Object {
     const current_object = objectFromValue(frame.current_function) orelse return null;
     const function_value = current_object.functionBytecodeSlot().* orelse return null;
     const fb = functionBytecodeFromValue(function_value) orelse return null;
-    if (!fb.is_arrow_function) return null;
+    if (!fb.flags.is_arrow_function) return null;
     return current_object;
 }
 
@@ -2241,11 +2244,11 @@ pub fn directEvalWithObject(
 ) core.JSValue {
     const function = caller_function orelse return core.JSValue.undefinedValue();
     const frame = caller_frame orelse return core.JSValue.undefinedValue();
-    const count = @min(function.var_names.len, frame.locals.len);
+    const count = @min(function.vardefs.len, frame.locals.len);
     var idx = count;
     while (idx > 0) {
         idx -= 1;
-        const name = rt.atoms.name(function.var_names[idx]) orelse continue;
+        const name = rt.atoms.name(function.vardefs[idx].var_name) orelse continue;
         if (!std.mem.startsWith(u8, name, "__active_with_obj_")) continue;
         const value = slotValueDup(frame.locals[idx]);
         if (objectFromValue(value) != null) return value;
@@ -2268,11 +2271,11 @@ pub fn directEvalCallerAllowsSuperProperty(caller_frame: ?*frame_mod.Frame, eval
     if (eval_in_class_field_initializer) return true;
     const outer_frame = caller_frame orelse return false;
     if (outer_frame.current_function.isUndefined()) return false;
-    if (functionBytecodeFromValue(outer_frame.current_function)) |fb| return fb.super_allowed;
+    if (functionBytecodeFromValue(outer_frame.current_function)) |fb| return fb.flags.super_allowed;
     if (objectFromValue(outer_frame.current_function)) |function_object| {
         const stored = function_object.functionBytecodeSlot().* orelse return false;
         const fb = functionBytecodeFromValue(stored) orelse return false;
-        return fb.super_allowed;
+        return fb.flags.super_allowed;
     }
     return false;
 }
@@ -2335,7 +2338,7 @@ pub fn createGeneratorObject(
         try object.setFunctionRealmGlobalPtr(ctx.runtime, objectRealmGlobal(function_object) orelse global);
     } else |_| {}
     try object.setFunctionRealmGlobalPtrIfNull(ctx.runtime, global);
-    const fb_runtime_strict = fb.is_strict_mode or fb.runtime_strict_mode;
+    const fb_runtime_strict = fb.flags.is_strict_mode or fb.flags.runtime_strict_mode;
     const effective_this = if (!fb_runtime_strict) blk: {
         if (rooted_this.isUndefined() or rooted_this.isNull()) break :blk global.value();
         if (!rooted_this.isObject()) {
@@ -2434,7 +2437,7 @@ pub fn createGeneratorObject(
         (try object.functionEvalLocalRefsSlot(ctx.runtime)).* = refs;
     }
 
-    if (fb.generator_body_pc != 0) {
+    if (fb.generatorBodyPc() != 0) {
         const init_result = try runGeneratorParameterInit(ctx, fb, object, current_function_value, effective_this, args, object.functionCapturesSlot().*, output, global);
         init_result.free(ctx.runtime);
     }
@@ -2898,7 +2901,7 @@ pub fn functionCallerArgumentsProperty(
     }
     if (object.functionBytecode()) |fb_value| {
         const fb = functionBytecodeFromValue(fb_value) orelse return core.JSValue.undefinedValue();
-        if (fb.is_strict_mode or fb.runtime_strict_mode or fb.is_arrow_function or fb.func_kind == .generator or fb.func_kind == .async_generator) return error.TypeError;
+        if (fb.flags.is_strict_mode or fb.flags.runtime_strict_mode or fb.flags.is_arrow_function or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) return error.TypeError;
         return core.JSValue.undefinedValue();
     }
     return error.TypeError;
@@ -3325,8 +3328,8 @@ pub fn setWithOwnDescriptor(
 pub fn bytecodeFunctionObjectTag(object: *core.Object) []const u8 {
     const function_value = object.functionBytecodeSlot().* orelse return "Function";
     const function_bytecode = functionBytecodeFromValue(function_value) orelse return "Function";
-    if (function_bytecode.func_kind == .async or function_bytecode.func_kind == .async_generator) return "AsyncFunction";
-    if (function_bytecode.func_kind == .generator) return "GeneratorFunction";
+    if (function_bytecode.flags.func_kind == .async or function_bytecode.flags.func_kind == .async_generator) return "AsyncFunction";
+    if (function_bytecode.flags.func_kind == .generator) return "GeneratorFunction";
     return "Function";
 }
 
@@ -3700,10 +3703,13 @@ test "descriptorObjectFromDescriptor roots direct function bytecode value while 
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        fb.cpool = __cp.ptr;
+        fb.cpool_count = @intCast(__cp.len);
+    }
     const symbol_atom = try rt.atoms.newValueSymbol("gc-descriptor-object-value-bytecode-symbol");
     fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
 
     var desc_value = core.JSValue.functionBytecode(&fb.header);
     var desc_value_alive = true;
@@ -4383,8 +4389,8 @@ pub noinline fn setHomeObject(
         var is_arrow_function = false;
         if (func_object.functionBytecodeSlot().*) |function_bytecode_value| {
             if (functionBytecodeFromValue(function_bytecode_value)) |fb| {
-                can_set_home_object = !fb.is_class_constructor;
-                is_arrow_function = fb.is_arrow_function;
+                can_set_home_object = !fb.flags.is_class_constructor;
+                is_arrow_function = fb.flags.is_arrow_function;
             }
         }
         if (can_set_home_object) {
@@ -4621,10 +4627,10 @@ pub noinline fn defineClass(
     try proto.defineOwnProperty(ctx.runtime, core.atom.ids.constructor, core.Descriptor.data(ctor_object.value(), true, false, true));
     try ctor_object.defineOwnProperty(ctx.runtime, core.atom.ids.prototype, core.Descriptor.data(proto_value, false, false, false));
     if (functionBytecodeFromValue(ctor_source)) |ctor_fb| {
-        if (ctor_fb.private_bound_names.len != 0 or ctor_fb.class_private_names.len != 0) {
+        if (ctor_fb.privateBoundNames().len != 0 or ctor_fb.classPrivateNames().len != 0) {
             call_runtime.clearPrivateNameRemap(ctx.runtime, proto);
-            try installLexicalPrivateNameRemap(ctx.runtime, proto, frame, ctor_fb.private_bound_names);
-            try call_runtime.installFreshPrivateNameRemap(ctx.runtime, proto, ctor_fb.class_private_names);
+            try installLexicalPrivateNameRemap(ctx.runtime, proto, frame, ctor_fb.privateBoundNames());
+            try call_runtime.installFreshPrivateNameRemap(ctx.runtime, proto, ctor_fb.classPrivateNames());
             try call_runtime.copyPrivateNameRemap(ctx.runtime, ctor_object, proto);
         }
     }
@@ -4745,7 +4751,7 @@ fn defineObjectMethodValue(
         try function_object.setFunctionHomeObject(rt, object);
         if (function_object.functionBytecodeSlot().*) |function_bytecode_value| {
             if (functionBytecodeFromValue(function_bytecode_value)) |fb| {
-                try installLexicalPrivateNameRemap(rt, object, caller_frame, fb.private_bound_names);
+                try installLexicalPrivateNameRemap(rt, object, caller_frame, fb.privateBoundNames());
             }
         }
         const prefix: ?[]const u8 = switch (flags & 3) {

@@ -890,30 +890,30 @@ pub const JSRuntime = struct {
         self.clearPendingFinalizationJobs();
         const recent_two_unit_string = self.recent_two_unit_string;
         self.recent_two_unit_string = null;
-        if (recent_two_unit_string) |cached| JSValue.string(&cached.string.header).free(self);
+        if (recent_two_unit_string) |cached| JSValue.string(cached.string.header()).free(self);
         for (&self.recent_atom_strings) |*slot| {
             const cached = slot.*;
             slot.* = null;
-            if (cached) |stored| JSValue.string(&stored.string.header).free(self);
+            if (cached) |stored| JSValue.string(stored.string.header()).free(self);
         }
         self.recent_atom_string_next = 0;
         const empty_string = self.empty_string;
         self.empty_string = null;
-        if (empty_string) |cached| JSValue.string(&cached.header).free(self);
+        if (empty_string) |cached| JSValue.string(cached.header()).free(self);
         for (&self.single_byte_strings) |*slot| {
             const cached = slot.*;
             slot.* = null;
-            if (cached) |stored| JSValue.string(&stored.header).free(self);
+            if (cached) |stored| JSValue.string(stored.header()).free(self);
         }
         for (&self.percent_hex_strings) |*slot| {
             const cached = slot.*;
             slot.* = null;
-            if (cached) |stored| JSValue.string(&stored.header).free(self);
+            if (cached) |stored| JSValue.string(stored.header()).free(self);
         }
         for (&self.small_int_strings) |*slot| {
             const cached = slot.*;
             slot.* = null;
-            if (cached) |stored| JSValue.string(&stored.header).free(self);
+            if (cached) |stored| JSValue.string(stored.header()).free(self);
         }
         for (&self.internal_destructuring_helpers) |*slot| {
             const cached = slot.*;
@@ -2039,7 +2039,7 @@ pub const JSRuntime = struct {
             .second = second,
             .string = created,
         };
-        if (old) |stored| JSValue.string(&stored.string.header).free(self);
+        if (old) |stored| JSValue.string(stored.string.header()).free(self);
         return created;
     }
 
@@ -2063,7 +2063,7 @@ pub const JSRuntime = struct {
             .string = created,
         };
         self.recent_atom_string_next = (slot_index + 1) % self.recent_atom_strings.len;
-        if (old) |stored| JSValue.string(&stored.string.header).free(self);
+        if (old) |stored| JSValue.string(stored.string.header()).free(self);
         return created;
     }
 

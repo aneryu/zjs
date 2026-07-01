@@ -408,7 +408,7 @@ pub const JSValue = extern struct {
     pub fn asSymbolBody(self: JSValue) ?*string_mod.String {
         if (!self.hasTag(Tag.symbol)) return null;
         const header = self.stringHeader() orelse return null;
-        return @alignCast(@fieldParentPtr("header", header));
+        return string_mod.String.fromHeader(header);
     }
 
     pub fn asShortBigInt(self: JSValue) ?i64 {
@@ -471,10 +471,42 @@ pub const JSValue = extern struct {
         return String.fromValue(self);
     }
 
+    /// Value→String boundary (qjs `js_linearize_string_rope` call site): a
+    /// `.string_rope` value is MATERIALIZED into a flat string and the borrowed
+    /// flat `*String` is returned, so every downstream reader sees a flat
+    /// string. `.string`/`.symbol` values return their body directly.
     pub fn asStringBody(self: JSValue) ?*string_mod.String {
-        if (!self.isString()) return null;
+        switch (self.tagOf()) {
+            Tag.string, Tag.symbol => {
+                const header = self.stringHeader() orelse return null;
+                return string_mod.String.fromHeader(header);
+            },
+            Tag.string_rope => {
+                const node = self.ropeBody() orelse return null;
+                return node.flattenInfallible();
+            },
+            else => return null,
+        }
+    }
+
+    /// Raw string body WITHOUT flattening: returns the `*String` for
+    /// `.string`/`.symbol` and null for a rope (which is not a `*String`).
+    /// Used by the rope-internal walkers that already discriminate on tag.
+    pub fn asStringBodyRaw(self: JSValue) ?*string_mod.String {
+        switch (self.tagOf()) {
+            Tag.string, Tag.symbol => {
+                const header = self.stringHeader() orelse return null;
+                return string_mod.String.fromHeader(header);
+            },
+            else => return null,
+        }
+    }
+
+    /// The `StringRope` behind a `.string_rope` value (null otherwise).
+    pub fn ropeBody(self: JSValue) ?*string_mod.StringRope {
+        if (!self.hasTag(Tag.string_rope)) return null;
         const header = self.stringHeader() orelse return null;
-        return @alignCast(@fieldParentPtr("header", header));
+        return string_mod.StringRope.fromHeader(header);
     }
 
     pub fn asBytes(self: JSValue, ctx: anytype) Bytes.Error!Bytes {
@@ -547,10 +579,9 @@ pub const JSValue = extern struct {
             // contiguous tail [deinit_skip_min, refcount_max].
             if (rt.gc.phase == .deinit and p >= NanBox.deinit_skip_min) return;
             if (rt.opcode_profile) |prof| prof.recordValueFree();
-            if (p == NanBox.prefixOf(Tag.symbol) or
-                p == NanBox.prefixOf(Tag.string) or
-                p == NanBox.prefixOf(Tag.string_rope))
-            {
+            if (p == NanBox.prefixOf(Tag.string_rope)) {
+                releaseRopeValue(rt, self);
+            } else if (p == NanBox.prefixOf(Tag.symbol) or p == NanBox.prefixOf(Tag.string)) {
                 gc.release(rt, ptrFromPayload(gc.StringHeader, self.payloadOf()).?);
             } else {
                 gc.release(rt, ptrFromPayload(gc.Header, self.payloadOf()).?);
@@ -566,13 +597,30 @@ pub const JSValue = extern struct {
         }
         if (rt.opcode_profile) |prof| prof.recordValueFree();
         switch (self.tagOf()) {
-            Tag.symbol, Tag.string, Tag.string_rope => {
+            Tag.string_rope => {
+                releaseRopeValue(rt, self);
+                return;
+            },
+            Tag.symbol, Tag.string => {
                 if (self.stringHeader()) |header| gc.release(rt, header);
                 return;
             },
             else => {},
         }
         if (self.refCountHeader()) |header| gc.release(rt, header);
+    }
+
+    /// Refcount release for a `.string_rope` value: decrement the rope's
+    /// refcount and, at 0, iteratively destroy the rope object (never through
+    /// the flat-`String` `releaseFromHeader` path, whose `@fieldParentPtr` cast
+    /// assumes a `*String` layout).
+    fn releaseRopeValue(rt: anytype, self: JSValue) void {
+        const node = self.ropeBody() orelse return;
+        const hdr = node.header();
+        std.debug.assert(hdr.rc > 0);
+        hdr.rc -= 1;
+        rt.gc.stats.rc_dec += 1;
+        if (hdr.rc == 0) string_mod.destroyRope(rt, node);
     }
 
     pub fn same(self: JSValue, other: JSValue) bool {
@@ -658,7 +706,7 @@ fn compareStringValues(a: JSValue, b: JSValue) ?i32 {
     if (!a.isString() or !b.isString()) return null;
     const a_string = a.asStringBody() orelse return null;
     const b_string = b.asStringBody() orelse return null;
-    return a_string.compare(b_string.*);
+    return a_string.compare(b_string);
 }
 
 fn compareBigIntValues(a: JSValue, b: JSValue) ?std.math.Order {

@@ -1287,7 +1287,11 @@ test "createPromiseCombinatorState roots direct function bytecode resolve while 
     fb.* = function_bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        fb.cpool = __cp.ptr;
+        fb.cpool_count = @intCast(__cp.len);
+    }
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-combinator-state-resolve-bytecode-symbol");
     fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
@@ -2741,7 +2745,7 @@ fn functionBytecodeToStringValue(
     bytecode: *const function_bytecode.FunctionBytecode,
     object: ?*core.Object,
 ) !core.JSValue {
-    if (bytecode.source) |source| return value_ops.createStringValue(rt, source);
+    if (bytecode.sourceText()) |source| return value_ops.createStringValue(rt, source);
     if (object) |function_object| {
         if (function_object.functionSource()) |source| return source.dup();
         return nativeFunctionSourceValue(rt, function_object);

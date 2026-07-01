@@ -925,10 +925,14 @@ test "EventLoop roots one-shot function bytecode timer callback after dequeue" {
     const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    fb.func_kind = .generator;
+    fb.flags.func_kind = .generator;
     try rt.gc.add(&fb.header);
 
-    fb.cpool = try rt.memory.alloc(zjs.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(zjs.JSValue, 1);
+        fb.cpool = __cp.ptr;
+        fb.cpool_count = @intCast(__cp.len);
+    }
     const symbol_atom = try rt.atoms.newValueSymbol("gc-timer-bytecode-symbol");
     fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;

@@ -1440,10 +1440,14 @@ test "qjsPromiseThenableJob roots direct function bytecode then callback while c
     const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    fb.func_kind = .generator;
+    fb.flags.func_kind = .generator;
     try rt.gc.add(&fb.header);
 
-    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        fb.cpool = __cp.ptr;
+        fb.cpool_count = @intCast(__cp.len);
+    }
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-thenable-job-bytecode-symbol");
     fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
@@ -1963,7 +1967,11 @@ test "qjsPromiseCombinatorState roots direct function bytecode resolve while cre
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        fb.cpool = __cp.ptr;
+        fb.cpool_count = @intCast(__cp.len);
+    }
     const symbol_atom = try rt.atoms.newValueSymbol("gc-qjs-promise-combinator-state-resolve-bytecode-symbol");
     fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
@@ -2775,7 +2783,11 @@ test "atomicsWaitAsyncResult roots direct function bytecode value while creating
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        fb.cpool = __cp.ptr;
+        fb.cpool_count = @intCast(__cp.len);
+    }
     const symbol_atom = try rt.atoms.newValueSymbol("gc-atomics-wait-async-result-bytecode-symbol");
     fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
@@ -2845,7 +2857,8 @@ pub fn qjsAsyncFunctionRunState(
     if (continuation.generatorExecuting()) return error.TypeError;
     const function_value = continuation.functionBytecodeSlot().* orelse return error.TypeError;
     const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
-    const nested = try bytecode.ensureCachedBytecodeView(fb, ctx.runtime);
+    var nested_view = bytecode.makeBytecodeView(fb, &ctx.runtime.memory, &ctx.runtime.atoms);
+    const nested = &nested_view;
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
 
@@ -2855,7 +2868,7 @@ pub fn qjsAsyncFunctionRunState(
 
     const async_global = objectRealmGlobal(continuation) orelse global;
     const current_function_value = continuation.generatorCurrentFunction() orelse continuation.value();
-    const fb_runtime_strict = fb.is_strict_mode or fb.runtime_strict_mode;
+    const fb_runtime_strict = fb.flags.is_strict_mode or fb.flags.runtime_strict_mode;
     return runWithArgsState(ctx, &nested_stack, nested, continuation.generatorThis() orelse core.JSValue.undefinedValue(), continuation.generatorArgs(), continuation.functionCapturesSlot().*, output, async_global, false, fb_runtime_strict, false, &.{}, &.{}, continuation.functionEvalLocalNames(), continuation.functionEvalLocalRefs(), &.{}, &.{}, &.{}, &.{}, continuation, resume_value, null, current_function_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), true);
 }
 
@@ -3677,10 +3690,14 @@ test "settlePendingPromiseReaction roots callback and arg after clearing promise
     const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    fb.func_kind = .generator;
+    fb.flags.func_kind = .generator;
     try rt.gc.add(&fb.header);
 
-    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        fb.cpool = __cp.ptr;
+        fb.cpool_count = @intCast(__cp.len);
+    }
     const callback_symbol = try rt.atoms.newValueSymbol("gc-promise-reaction-callback-symbol");
     fb.cpool[0] = try rt.symbolValue(callback_symbol);
     fb.cpool_count = 1;

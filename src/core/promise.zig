@@ -77,7 +77,11 @@ test "fulfilledWithPrototype roots direct function bytecode result while constru
     fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        fb.cpool = __cp.ptr;
+        fb.cpool_count = @intCast(__cp.len);
+    }
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-fulfilled-bytecode-symbol");
     fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
@@ -638,7 +642,11 @@ test "settlementRecord roots direct function bytecode item while creating record
     fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        fb.cpool = __cp.ptr;
+        fb.cpool_count = @intCast(__cp.len);
+    }
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-settlement-bytecode-symbol");
     fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;

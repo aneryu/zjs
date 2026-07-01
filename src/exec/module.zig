@@ -180,24 +180,26 @@ pub fn buildModuleVarRefs(
     module_name: core.Atom,
     function: *const bytecode.Bytecode,
 ) ![]core.JSValue {
-    if (function.var_ref_names.len == 0) return &.{};
+    if (function.varRefNamesLen() == 0) return &.{};
     const record = ctx.runtime.modules.find(module_name) orelse return error.ModuleNotFound;
     if (function.closure_var.len == 0) {
-        for (function.var_ref_names, 0..) |name, idx| {
+        var idx: usize = 0;
+        while (idx < function.varRefNamesLen()) : (idx += 1) {
+            const name = function.varRefName(idx);
             if (moduleHasResolvedImport(record, name)) continue;
             const cell = try moduleLocalCell(ctx, record, name, moduleVarRefIsLexical(function, idx), moduleVarRefIsConst(function, idx));
             cell.free(ctx.runtime);
         }
     } else {
         for (function.closure_var, 0..) |cv, idx| {
-            if (idx >= function.var_ref_names.len) return error.InvalidBytecode;
+            if (idx >= function.varRefNamesLen()) return error.InvalidBytecode;
             if (cv.closure_type != .module_decl) continue;
-            const name = function.var_ref_names[idx];
+            const name = function.varRefName(idx);
             const cell = try moduleLocalCell(ctx, record, name, cv.is_lexical, cv.is_const);
             cell.free(ctx.runtime);
         }
     }
-    const refs = try ctx.runtime.memory.alloc(core.JSValue, function.var_ref_names.len);
+    const refs = try ctx.runtime.memory.alloc(core.JSValue, function.varRefNamesLen());
     errdefer ctx.runtime.memory.free(core.JSValue, refs);
     var rooted_refs: []core.JSValue = refs[0..0];
     var refs_root = ValueSliceRoot{};
@@ -212,7 +214,9 @@ pub fn buildModuleVarRefs(
         rooted_refs = &.{};
     }
 
-    for (function.var_ref_names, 0..) |name, idx| {
+    var idx: usize = 0;
+    while (idx < function.varRefNamesLen()) : (idx += 1) {
+        const name = function.varRefName(idx);
         refs[idx] = if (idx < function.closure_var.len) switch (function.closure_var[idx].closure_type) {
             .module_import => try moduleImportCell(ctx, record, name),
             .module_decl => try moduleLocalCell(ctx, record, name, moduleVarRefIsLexical(function, idx), moduleVarRefIsConst(function, idx)),
@@ -236,13 +240,11 @@ fn createGlobalModuleVarRef(ctx: *core.JSContext, cv: bytecode.function_def.Clos
 }
 
 fn moduleVarRefIsLexical(function: *const bytecode.Bytecode, index: usize) bool {
-    if (index >= function.var_ref_is_lexical.len) return false;
-    return function.var_ref_is_lexical[index];
+    return function.varRefIsLexicalAt(index);
 }
 
 fn moduleVarRefIsConst(function: *const bytecode.Bytecode, index: usize) bool {
-    if (index >= function.var_ref_is_const.len) return false;
-    return function.var_ref_is_const[index];
+    return function.varRefIsConstAt(index);
 }
 
 pub fn freeModuleVarRefs(runtime: *core.JSRuntime, refs: []core.JSValue) void {

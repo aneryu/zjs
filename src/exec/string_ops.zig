@@ -736,8 +736,7 @@ pub fn qjsStringFromCodePointDenseArray(rt: *core.JSRuntime, array: *core.Object
         if (length == 0) return (try core.string.String.createAscii(rt, "")).value();
         const max_units = try std.math.mul(usize, length, 2);
         const units = try rt.memory.alloc(u16, max_units);
-        var consumed_units = false;
-        defer if (!consumed_units) rt.memory.free(u16, units);
+        defer rt.memory.free(u16, units);
 
         var unit_count: usize = 0;
         var index: usize = 0;
@@ -755,8 +754,10 @@ pub fn qjsStringFromCodePointDenseArray(rt: *core.JSRuntime, array: *core.Object
                 unit_count += 2;
             }
         }
-        const string = try core.string.String.createUtf16Owned(rt, units[0..unit_count], max_units);
-        consumed_units = true;
+        // `units` is copied into a fresh inline string (QuickJS `JSString`
+        // characters are always inline); the `defer` below frees the scratch
+        // buffer since it is not adopted.
+        const string = try core.string.String.createUtf16(rt, units[0..unit_count]);
         return string.value();
     }
 
@@ -2881,7 +2882,7 @@ pub fn qjsRegExpMatch(rt: *core.JSRuntime, global: *core.Object, regexp: core.JS
     return out.value();
 }
 
-pub fn advanceStringIndexStringValue(string_value: core.string.String, index: usize, unicode: bool) usize {
+pub fn advanceStringIndexStringValue(string_value: *const core.string.String, index: usize, unicode: bool) usize {
     if (!unicode or index + 1 >= string_value.len()) return index + 1;
     const first = string_value.codeUnitAt(index);
     const second = string_value.codeUnitAt(index + 1);
@@ -2908,19 +2909,19 @@ pub fn findStringUnitMatch(value: core.JSValue, unit: u16, start: usize) ?usize 
     return null;
 }
 
-pub fn isStringLineStartPosition(string_value: core.string.String, pos: usize, multiline: bool) bool {
+pub fn isStringLineStartPosition(string_value: *const core.string.String, pos: usize, multiline: bool) bool {
     if (pos == 0) return true;
     if (!multiline or pos > string_value.len()) return false;
     return isLineTerminatorUnit(string_value.codeUnitAt(pos - 1));
 }
 
-pub fn isStringLineEndPosition(string_value: core.string.String, pos: usize, multiline: bool) bool {
+pub fn isStringLineEndPosition(string_value: *const core.string.String, pos: usize, multiline: bool) bool {
     if (pos == string_value.len()) return true;
     if (!multiline or pos > string_value.len()) return false;
     return isLineTerminatorUnit(string_value.codeUnitAt(pos));
 }
 
-pub fn stringCodePointAt(string_value: core.string.String, pos: usize) ?struct { value: u21, len: usize } {
+pub fn stringCodePointAt(string_value: *const core.string.String, pos: usize) ?struct { value: u21, len: usize } {
     if (pos >= string_value.len()) return null;
     const first = string_value.codeUnitAt(pos);
     if (isHighSurrogateUnit(first) and pos + 1 < string_value.len()) {
@@ -4057,8 +4058,10 @@ pub const KeywordMatch = struct {
 };
 
 pub fn replaceFrameVarRefBinding(rt: *core.JSRuntime, frame: *frame_mod.Frame, atom_id: core.Atom, value: core.JSValue) void {
-    const count = @min(frame.function.var_ref_names.len, frame.var_refs.len);
-    for (frame.function.var_ref_names[0..count], 0..) |name, idx| {
+    const count = @min(frame.function.varRefNamesLen(), frame.var_refs.len);
+    var idx: usize = 0;
+    while (idx < count) : (idx += 1) {
+        const name = frame.function.varRefName(idx);
         if (!atomIdOrNameEql(rt, name, atom_id)) continue;
         const next = value.dup();
         const old_value = frame.var_refs[idx];

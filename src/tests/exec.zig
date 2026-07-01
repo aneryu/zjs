@@ -564,7 +564,7 @@ pub const helpers = struct {
 
             if (shared_engine_baseline_shape_props) |baseline_shape_props| {
                 eng.runtime.shapes.restorePropertyLayout(
-                    global.shape_ref,
+                    &global.shape_ref,
                     baseline_shape_props[0..shared_engine_baseline_shape_prop_count],
                     shared_engine_baseline_shape_hash,
                     shared_engine_baseline_shape_deleted_count,
@@ -753,8 +753,8 @@ test "VM roots frame this symbol before derived constructor var-ref allocation" 
     function.flags.is_derived_class_constructor = true;
     function.var_count = 1;
     function.stack_size = 1;
-    function.var_names = try rt.memory.alloc(core.Atom, 1);
-    function.var_names[0] = rt.atoms.dup(this_name);
+    function.vardefs = try rt.memory.alloc(function_def.VarDef, 1);
+    function.vardefs[0] = .{ .var_name = rt.atoms.dup(this_name), .scope_level = 0 };
     try function.setCode(&.{ op.get_loc0, op.drop, op.return_undef });
 
     const this_symbol = try rt.atoms.newValueSymbol("gc-vm-frame-this-before-roots");

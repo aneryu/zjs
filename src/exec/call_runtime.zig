@@ -533,18 +533,18 @@ fn callValueOrBytecodeClassModeDispatch(
 ) HostError!core.JSValue {
     if (func.isFunctionBytecode()) {
         const fb = functionBytecodeFromValue(func) orelse return error.TypeError;
-        if (allow_class_constructor_call and !fb.is_class_constructor) {
-            if (fb.is_arrow_function or !fb.has_prototype or fb.func_kind == .generator or fb.func_kind == .async_generator) return error.TypeError;
+        if (allow_class_constructor_call and !fb.flags.is_class_constructor) {
+            if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) return error.TypeError;
             const result = try callFunctionBytecodeConstruct(ctx, func, func, this_value, args, &.{}, output, global, &.{}, &.{}, class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
             if (result.isObject()) return result;
             result.free(ctx.runtime);
             return this_value.dup();
         }
-        if (fb.is_class_constructor) {
+        if (fb.flags.is_class_constructor) {
             if (!allow_class_constructor_call) return error.TypeError;
-            const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else this_value;
-            const constructor_this = if (fb.is_derived_class_constructor) this_value else core.JSValue.undefinedValue();
-            if (!fb.is_derived_class_constructor) {
+            const initial_this = if (fb.flags.is_derived_class_constructor) core.JSValue.uninitialized() else this_value;
+            const constructor_this = if (fb.flags.is_derived_class_constructor) this_value else core.JSValue.undefinedValue();
+            if (!fb.flags.is_derived_class_constructor) {
                 try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, this_value, fb, caller_function, caller_frame);
             }
             return callFunctionBytecodeModeState(ctx, func, func, initial_this, args, &.{}, output, global, &.{}, &.{}, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
@@ -554,26 +554,26 @@ fn callValueOrBytecodeClassModeDispatch(
     if (object_ops.functionObjectFromValue(func)) |function_object| {
         const function_value = function_object.functionBytecodeSlot().* orelse return error.TypeError;
         const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
-        if (allow_class_constructor_call and !fb.is_class_constructor) {
-            if (fb.is_arrow_function or !fb.has_prototype or fb.func_kind == .generator or fb.func_kind == .async_generator) return error.TypeError;
+        if (allow_class_constructor_call and !fb.flags.is_class_constructor) {
+            if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) return error.TypeError;
             const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
             const result = try callFunctionBytecodeConstruct(ctx, function_value, func, this_value, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNames(), function_object.functionEvalLocalRefs(), class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
             if (result.isObject()) return result;
             result.free(ctx.runtime);
             return this_value.dup();
         }
-        if (fb.is_class_constructor) {
+        if (fb.flags.is_class_constructor) {
             if (!allow_class_constructor_call) return throwFunctionRealmTypeErrorMessage(ctx, global, function_object, "class constructors must be invoked with 'new'");
-            const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else this_value;
-            const constructor_this = if (fb.is_derived_class_constructor) this_value else core.JSValue.undefinedValue();
+            const initial_this = if (fb.flags.is_derived_class_constructor) core.JSValue.uninitialized() else this_value;
+            const constructor_this = if (fb.flags.is_derived_class_constructor) this_value else core.JSValue.undefinedValue();
             const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-            if (!fb.is_derived_class_constructor) {
+            if (!fb.flags.is_derived_class_constructor) {
                 try class_init_ops.initializeClassInstanceElements(ctx, output, function_global, func, this_value, fb, caller_function, caller_frame);
             }
             return callFunctionBytecodeModeState(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNames(), function_object.functionEvalLocalRefs(), true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
         }
         const effective_this = function_object.functionLexicalThis() orelse this_value;
-        const effective_new_target = if (fb.is_arrow_function) blk: {
+        const effective_new_target = if (fb.flags.is_arrow_function) blk: {
             if (function_object.functionArrowNewTarget()) |new_target| break :blk new_target;
             break :blk core.JSValue.undefinedValue();
         } else core.JSValue.undefinedValue();
@@ -1021,9 +1021,12 @@ test "callValueOrBytecodeClassMode roots inline args before bytecode frame alloc
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
-    fb.byte_code = try rt.memory.alloc(u8, 1);
-    fb.byte_code[0] = op.return_undef;
-    fb.byte_code_len = 1;
+    {
+        const code = try rt.memory.alloc(u8, 1);
+        code[0] = op.return_undef;
+        fb.byte_code = code.ptr;
+        fb.byte_code_len = 1;
+    }
     fb.var_count = 1;
 
     var func_value = core.JSValue.functionBytecode(&fb.header);
@@ -1562,13 +1565,13 @@ pub fn constructValueOrBytecodeWithNewTarget(
     }
     if (func.isFunctionBytecode()) {
         const fb = functionBytecodeFromValue(func) orelse return error.TypeError;
-        if (fb.is_arrow_function or !fb.has_prototype or fb.func_kind == .generator or fb.func_kind == .async_generator) return error.TypeError;
+        if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) return error.TypeError;
         // qjs JS_CallConstructorInternal (quickjs.c:20837): a DERIVED class ctor
         // allocates NO instance and does NO prototype lookup — `this` stays
         // uninitialized (TDZ) until super() builds the object via new.target and
         // binds it. Only base/ordinary ctors get the eager js_create_from_ctor
         // instance (quickjs.c:20842).
-        if (fb.is_derived_class_constructor) {
+        if (fb.flags.is_derived_class_constructor) {
             return try callFunctionBytecodeConstruct(ctx, func, func, core.JSValue.uninitialized(), args, &.{}, output, global, &.{}, &.{}, new_target, core.JSValue.undefinedValue());
         }
         const instance = try createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
@@ -1585,14 +1588,14 @@ pub fn constructValueOrBytecodeWithNewTarget(
     if (object_ops.functionObjectFromValue(func)) |function_object| {
         const function_value = function_object.functionBytecodeSlot().* orelse return error.TypeError;
         const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
-        if (fb.is_class_constructor) {
+        if (fb.flags.is_class_constructor) {
             // Special handling for class constructors (published via top-level script/module binding or direct define_class).
             // This is the VM alignment fix for the "not a constructor" bug in top-level class decl in plain .js scripts
             // (the functionObjectFromValue path was not recognizing is_class_constructor and taking the ordinary path,
             // which rejected class ctors or used wrong initial_this for derived/fields init).
             const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
             // Derived class ctor: no eager instance / prototype lookup (qjs quickjs.c:20837); see above.
-            if (fb.is_derived_class_constructor) {
+            if (fb.flags.is_derived_class_constructor) {
                 return try callFunctionBytecodeConstruct(ctx, function_value, func, core.JSValue.uninitialized(), args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNames(), function_object.functionEvalLocalRefs(), new_target, core.JSValue.undefinedValue());
             }
             const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
@@ -1606,16 +1609,16 @@ pub fn constructValueOrBytecodeWithNewTarget(
             result.free(ctx.runtime);
             return instance;
         }
-        if (fb.is_arrow_function or !fb.has_prototype or fb.func_kind == .generator or fb.func_kind == .async_generator) return error.TypeError;
+        if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) return error.TypeError;
         if (try constructSimpleFieldConstructor(ctx, func, function_object, fb, args, new_target)) |constructed| return constructed;
         const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
         errdefer instance.free(ctx.runtime);
-        if (!fb.is_derived_class_constructor) {
+        if (!fb.flags.is_derived_class_constructor) {
             try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, instance, fb, caller_function, caller_frame);
         }
         const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-        const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
-        const constructor_this = if (fb.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
+        const initial_this = if (fb.flags.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
+        const constructor_this = if (fb.flags.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
         const result = try callFunctionBytecodeConstruct(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNames(), function_object.functionEvalLocalRefs(), new_target, constructor_this);
         if (result.isObject()) {
             instance.free(ctx.runtime);
@@ -1696,10 +1699,14 @@ test "qjsConstructFinalizationRegistryWithPrototype roots function bytecode clea
     const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    fb.func_kind = .generator;
+    fb.flags.func_kind = .generator;
     try rt.gc.add(&fb.header);
 
-    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        fb.cpool = __cp.ptr;
+        fb.cpool_count = @intCast(__cp.len);
+    }
     const symbol_atom = try rt.atoms.newValueSymbol("gc-finalization-cleanup-bytecode-symbol");
     fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
@@ -1874,17 +1881,17 @@ fn constructSimpleFieldConstructor(
 }
 
 fn simpleFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleFieldConstructorPattern {
-    if (fb.is_class_constructor or fb.is_derived_class_constructor) return null;
-    if (fb.is_arrow_function or fb.func_kind != .normal or !fb.has_prototype) return null;
-    if (fb.var_count > 1 or fb.var_ref_count != 0 or fb.cpool_count != 0) return null;
-    if (fb.class_instance_fields.len != 0 or fb.class_private_names.len != 0 or fb.private_bound_names.len != 0) return null;
-    if (fb.super_call_allowed or fb.super_allowed or fb.arguments_allowed or fb.is_indirect_eval) return null;
+    if (fb.flags.is_class_constructor or fb.flags.is_derived_class_constructor) return null;
+    if (fb.flags.is_arrow_function or fb.flags.func_kind != .normal or !fb.flags.has_prototype) return null;
+    if (fb.var_count > 1 or fb.var_refs_len != 0 or fb.cpool_count != 0) return null;
+    if (fb.classInstanceFields().len != 0 or fb.classPrivateNames().len != 0 or fb.privateBoundNames().len != 0) return null;
+    if (fb.flags.super_call_allowed or fb.flags.super_allowed or fb.flags.arguments_allowed or fb.flags.is_indirect_eval) return null;
 
     return simpleLocalThisFieldConstructorPattern(fb) orelse simpleStackThisFieldConstructorPattern(fb);
 }
 
 fn simpleLocalThisFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleFieldConstructorPattern {
-    const code = fb.byte_code;
+    const code = fb.byteCode();
     var pc: usize = 0;
     var pattern = SimpleFieldConstructorPattern{};
     if (pc >= code.len or code[pc] != op.push_this) return null;
@@ -1904,7 +1911,7 @@ fn simpleLocalThisFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) 
 }
 
 fn simpleStackThisFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleFieldConstructorPattern {
-    const code = fb.byte_code;
+    const code = fb.byteCode();
     var pc: usize = 0;
     var pattern = SimpleFieldConstructorPattern{};
     if (pc >= code.len or code[pc] != op.push_this) return null;
@@ -2227,8 +2234,8 @@ pub fn collectCallerEvalRefs(
     names_out: *[]core.Atom,
     refs_out: *[]core.JSValue,
 ) !void {
-    const var_ref_count = @min(caller.var_ref_names.len, frame.var_refs.len);
-    const local_count = @min(caller.var_names.len, frame.locals.len);
+    const var_ref_count = @min(caller.varRefNamesLen(), frame.var_refs.len);
+    const local_count = @min(caller.vardefs.len, frame.locals.len);
     const total = var_ref_count + local_count;
     if (total == 0) return;
 
@@ -2249,14 +2256,18 @@ pub fn collectCallerEvalRefs(
         ctx.runtime.memory.free(core.JSValue, refs);
     }
 
-    for (caller.var_ref_names[0..var_ref_count], 0..) |atom_id, idx| {
-        names[initialized] = atom_id;
-        refs[initialized] = frame.var_refs[idx].dup();
-        initialized += 1;
-        rooted_refs = refs[0..initialized];
+    {
+        var idx: usize = 0;
+        while (idx < var_ref_count) : (idx += 1) {
+            const atom_id = caller.varRefName(idx);
+            names[initialized] = atom_id;
+            refs[initialized] = frame.var_refs[idx].dup();
+            initialized += 1;
+            rooted_refs = refs[0..initialized];
+        }
     }
-    for (caller.var_names[0..local_count], 0..) |atom_id, idx| {
-        names[initialized] = atom_id;
+    for (caller.vardefs[0..local_count], 0..) |vd, idx| {
+        names[initialized] = vd.var_name;
         refs[initialized] = try slot_ops.ensureFrameVarRefCell(ctx, frame, &frame.locals[idx]);
         initialized += 1;
         rooted_refs = refs[0..initialized];
@@ -3765,7 +3776,9 @@ pub fn defineGlobalDeclVarCell(
     const cell_value = (try ensureGlobalObjectVarRefCell(ctx, global, atom_id, configurable)) orelse return false;
     defer cell_value.free(ctx.runtime);
     var rebound = false;
-    for (function.var_ref_names, 0..) |name, idx| {
+    var idx: usize = 0;
+    while (idx < function.varRefNamesLen()) : (idx += 1) {
+        const name = function.varRefName(idx);
         if (!atomIdOrNameEql(ctx.runtime, name, atom_id)) continue;
         if (!closureVarIsNonLexicalGlobalSentinel(function, idx)) continue;
         if (idx >= frame.var_refs.len) {
@@ -3826,9 +3839,11 @@ pub fn defineGlobalDeclLexicalCell(
     atom_id: core.Atom,
     is_const: bool,
 ) !bool {
-    for (function.var_ref_names, 0..) |name, idx| {
+    var idx: usize = 0;
+    while (idx < function.varRefNamesLen()) : (idx += 1) {
+        const name = function.varRefName(idx);
         if (name != atom_id) continue;
-        if (idx >= function.var_ref_is_global_decl.len or !function.var_ref_is_global_decl[idx]) return false;
+        if (!function.varRefIsGlobalDeclAt(idx)) return false;
         const cell_value = try ensureGlobalLexicalCell(ctx, atom_id, is_const);
         if (idx >= frame.var_refs.len) {
             try frame_mod.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
@@ -3979,11 +3994,11 @@ pub fn classStaticThisAtom(
 ) ?core.Atom {
     const function = caller_function orelse return null;
     const frame = caller_frame orelse return null;
-    const count = @min(function.var_names.len, frame.locals.len);
+    const count = @min(function.vardefs.len, frame.locals.len);
     var idx = count;
     while (idx > 0) {
         idx -= 1;
-        const atom_id = function.var_names[idx];
+        const atom_id = function.vardefs[idx].var_name;
         const name = rt.atoms.name(atom_id) orelse continue;
         if (!std.mem.startsWith(u8, name, "__class_static_this_")) continue;
         if (slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) continue;
@@ -3998,9 +4013,9 @@ pub fn classStaticThisValue(
     atom_id: core.Atom,
 ) ?core.JSValue {
     const function = caller_function orelse return null;
-    const count = @min(function.var_names.len, caller_frame.locals.len);
-    for (function.var_names[0..count], 0..) |name, idx| {
-        if (name != atom_id) continue;
+    const count = @min(function.vardefs.len, caller_frame.locals.len);
+    for (function.vardefs[0..count], 0..) |vd, idx| {
+        if (vd.var_name != atom_id) continue;
         const value = caller_frame.locals[idx];
         if (slot_ops.varRefSlotIsUninitialized(value)) continue;
         return value;
@@ -4350,7 +4365,7 @@ pub fn createDirectEvalVisibleLocalBindings(
     eval_global_var_bindings: bool,
 ) !DirectEvalVisibleLocalBindings {
     const arg_count = @min(caller_function.arg_names.len, caller_frame.args.len);
-    const local_count = if (eval_in_parameter_initializer) 0 else @min(caller_function.var_names.len, caller_frame.locals.len);
+    const local_count = if (eval_in_parameter_initializer) 0 else @min(caller_function.vardefs.len, caller_frame.locals.len);
     const include_implicit_arguments =
         eval_ops.directEvalShouldExposeImplicitArguments(caller_frame) and
         !functionHasArgOrLocal(caller_function, core.atom.ids.arguments, arg_count, local_count);
@@ -4377,7 +4392,7 @@ pub fn createDirectEvalVisibleLocalBindings(
     var local_index = local_count;
     while (local_index > 0) {
         local_index -= 1;
-        const atom_id = caller_function.var_names[local_index];
+        const atom_id = caller_function.vardefs[local_index].var_name;
         if (atom_id == core.atom.null_atom) continue;
         if (eval_ops.directEvalVisibleBindingExists(ctx.runtime, names[0..initialized], atom_id)) continue;
         // A top-level (scope 0) `let`/`const` is promoted into the global
@@ -4389,21 +4404,21 @@ pub fn createDirectEvalVisibleLocalBindings(
         // is a genuine shadowing binding and must be exposed, inner-first,
         // mirroring qjs `add_eval_variables` capturing `fd->scopes[scope_level]`
         // lexicals ahead of the scope-0 globals (quickjs.c:33700-33733).
-        const local_scope_level = if (local_index < caller_function.var_scope_level.len)
-            caller_function.var_scope_level[local_index]
+        const local_scope_level = if (local_index < caller_function.vardefs.len)
+            caller_function.vardefs[local_index].scope_level
         else
             0;
         if (eval_global_var_bindings and
             local_scope_level == 0 and
             globalLexicalHas(ctx, atom_id) and
-            eval_ops.directEvalVisibleLocalNameCount(ctx.runtime, caller_function.var_names[0..local_count], atom_id) == 1)
+            eval_ops.directEvalVisibleLocalNameCount(ctx.runtime, caller_function.vardefs[0..local_count], atom_id) == 1)
         {
             continue;
         }
         names[initialized] = ctx.runtime.atoms.dup(atom_id);
         initialized_names += 1;
         slots[initialized] = try slot_ops.ensureFrameVarRefCell(ctx, caller_frame, &caller_frame.locals[local_index]);
-        if (local_index < caller_function.var_is_const.len and caller_function.var_is_const[local_index]) {
+        if (local_index < caller_function.vardefs.len and caller_function.vardefs[local_index].is_const) {
             if (slot_ops.varRefCellFromValue(slots[initialized])) |cell| {
                 cell.varRefIsConstSlot().* = true;
             }
@@ -4452,11 +4467,11 @@ pub fn createDirectEvalVisibleLocalBindings(
 }
 
 pub fn frameCurrentFunctionIsArrow(caller_frame: *frame_mod.Frame) bool {
-    if (functionBytecodeFromValue(caller_frame.current_function)) |fb| return fb.is_arrow_function;
+    if (functionBytecodeFromValue(caller_frame.current_function)) |fb| return fb.flags.is_arrow_function;
     if (object_ops.objectFromValue(caller_frame.current_function)) |function_object| {
         const stored = function_object.functionBytecodeSlot().* orelse return false;
         const fb = functionBytecodeFromValue(stored) orelse return false;
-        return fb.is_arrow_function;
+        return fb.flags.is_arrow_function;
     }
     return false;
 }
@@ -4465,11 +4480,11 @@ pub fn directEvalCallerAllowsNewTarget(caller_frame: ?*frame_mod.Frame, eval_in_
     if (eval_in_class_field_initializer) return true;
     const outer_frame = caller_frame orelse return false;
     if (outer_frame.current_function.isUndefined()) return false;
-    if (functionBytecodeFromValue(outer_frame.current_function)) |fb| return fb.new_target_allowed;
+    if (functionBytecodeFromValue(outer_frame.current_function)) |fb| return fb.flags.new_target_allowed;
     if (object_ops.objectFromValue(outer_frame.current_function)) |function_object| {
         const stored = function_object.functionBytecodeSlot().* orelse return false;
         const fb = functionBytecodeFromValue(stored) orelse return false;
-        return fb.new_target_allowed;
+        return fb.flags.new_target_allowed;
     }
     return false;
 }
@@ -4483,8 +4498,8 @@ pub fn functionHasArgOrLocal(
     for (function.arg_names[0..arg_count]) |name| {
         if (name == atom_id) return true;
     }
-    for (function.var_names[0..local_count]) |name| {
-        if (name == atom_id) return true;
+    for (function.vardefs[0..local_count]) |vd| {
+        if (vd.var_name == atom_id) return true;
     }
     return false;
 }
@@ -4497,10 +4512,10 @@ pub fn callerArgIndex(rt: *core.JSRuntime, function: *const bytecode.Bytecode, a
 }
 
 pub fn callerLocalIndex(rt: *core.JSRuntime, function: *const bytecode.Bytecode, atom_id: core.Atom) ?usize {
-    const count = @min(function.var_names.len, function.var_is_lexical.len);
-    for (function.var_names[0..count], 0..) |name, idx| {
-        if (!atomIdOrNameEql(rt, name, atom_id)) continue;
-        if (function.var_is_lexical[idx]) continue;
+    const count = function.vardefs.len;
+    for (function.vardefs[0..count], 0..) |vd, idx| {
+        if (!atomIdOrNameEql(rt, vd.var_name, atom_id)) continue;
+        if (vd.is_lexical) continue;
         return idx;
     }
     return null;
@@ -4519,13 +4534,14 @@ pub fn directEvalVarDeclarationNames(
     defer if (simple_var_name != core.atom.null_atom) rt.atoms.free(simple_var_name);
     const count = blk: {
         var n: usize = 0;
-        const local_count = @min(function.var_names.len, function.var_is_lexical.len);
-        for (function.var_names[0..local_count], 0..) |atom_id, idx| {
+        const local_count = function.vardefs.len;
+        for (function.vardefs[0..local_count]) |vd| {
+            const atom_id = vd.var_name;
             if (atom_id == core.atom.null_atom) continue;
             if (atom_id == eval_ret_atom) continue;
             if (directEvalVarNameIsNonLeadingFunctionCallerArg(rt, source, caller_function, atom_id)) continue;
             if (directEvalSourceHasLexicalDeclarationName(rt, source, atom_id)) continue;
-            const is_lexical = function.var_is_lexical[idx];
+            const is_lexical = vd.is_lexical;
             if (!is_lexical and eval_global_var_bindings and !directEvalVarDeclarationShouldCreateRef(rt, global, atom_id)) continue;
             if (!is_lexical) n += 1;
         }
@@ -4554,13 +4570,14 @@ pub fn directEvalVarDeclarationNames(
     const names = try rt.memory.alloc(core.Atom, count);
     errdefer rt.memory.free(core.Atom, names);
     var out_idx: usize = 0;
-    const local_count = @min(function.var_names.len, function.var_is_lexical.len);
-    for (function.var_names[0..local_count], 0..) |atom_id, idx| {
+    const local_count = function.vardefs.len;
+    for (function.vardefs[0..local_count]) |vd| {
+        const atom_id = vd.var_name;
         if (atom_id == core.atom.null_atom) continue;
         if (atom_id == eval_ret_atom) continue;
         if (directEvalVarNameIsNonLeadingFunctionCallerArg(rt, source, caller_function, atom_id)) continue;
         if (directEvalSourceHasLexicalDeclarationName(rt, source, atom_id)) continue;
-        if (function.var_is_lexical[idx]) continue;
+        if (vd.is_lexical) continue;
         if (eval_global_var_bindings and !directEvalVarDeclarationShouldCreateRef(rt, global, atom_id)) continue;
         names[out_idx] = rt.atoms.dup(atom_id);
         out_idx += 1;
@@ -4710,9 +4727,9 @@ pub fn looksLikeIdentifierKeyword(source: []const u8, keyword_index: usize, keyw
 }
 
 pub fn functionHasNonLexicalLocal(rt: *core.JSRuntime, function: *const bytecode.Bytecode, atom_id: core.Atom) bool {
-    const local_count = @min(function.var_names.len, function.var_is_lexical.len);
-    for (function.var_names[0..local_count], 0..) |name, idx| {
-        if (atomIdOrNameEql(rt, name, atom_id) and !function.var_is_lexical[idx]) return true;
+    const local_count = function.vardefs.len;
+    for (function.vardefs[0..local_count]) |vd| {
+        if (atomIdOrNameEql(rt, vd.var_name, atom_id) and !vd.is_lexical) return true;
     }
     return false;
 }
@@ -4732,11 +4749,11 @@ pub fn directEvalGlobalVarLocalAtom(
     slot: core.JSValue,
 ) ?core.Atom {
     if (!value_ops.atomNameEql(rt, function.name, "<eval>")) return null;
-    if (idx >= function.var_names.len) return null;
-    if (idx < function.var_is_lexical.len and function.var_is_lexical[idx]) return null;
+    if (idx >= function.vardefs.len) return null;
+    if (function.vardefs[idx].is_lexical) return null;
     if (!slot_ops.evalLocalSlotIsEvalVarCell(slot)) return null;
 
-    const atom_id = function.var_names[idx];
+    const atom_id = function.vardefs[idx].var_name;
     for (function.global_vars) |gv| {
         if (gv.is_lexical) continue;
         if (atomIdOrNameEql(rt, gv.var_name, atom_id)) return atom_id;
@@ -4986,10 +5003,10 @@ pub fn callerFunctionHasArg(rt: *core.JSRuntime, function: *const bytecode.Bytec
 }
 
 pub fn callerFunctionHasLexicalLocal(rt: *core.JSRuntime, function: *const bytecode.Bytecode, name: []const u8) bool {
-    const local_count = @min(function.var_names.len, function.var_is_lexical.len);
-    for (function.var_names[0..local_count], 0..) |atom_id, idx| {
-        if (!function.var_is_lexical[idx]) continue;
-        const local_name = rt.atoms.name(atom_id) orelse continue;
+    const local_count = function.vardefs.len;
+    for (function.vardefs[0..local_count]) |vd| {
+        if (!vd.is_lexical) continue;
+        const local_name = rt.atoms.name(vd.var_name) orelse continue;
         if (std.mem.eql(u8, local_name, name)) return true;
     }
     return false;
@@ -5002,12 +5019,14 @@ pub fn callerFunctionHasBinding(
     name: []const u8,
 ) bool {
     const function = caller_function orelse return false;
-    const local_count = @min(function.var_names.len, frame.locals.len);
-    for (function.var_names[0..local_count]) |atom_id| {
-        if (value_ops.atomNameEql(rt, atom_id, name)) return true;
+    const local_count = @min(function.vardefs.len, frame.locals.len);
+    for (function.vardefs[0..local_count]) |vd| {
+        if (value_ops.atomNameEql(rt, vd.var_name, name)) return true;
     }
-    const ref_count = @min(function.var_ref_names.len, frame.var_refs.len);
-    for (function.var_ref_names[0..ref_count]) |atom_id| {
+    const ref_count = @min(function.varRefNamesLen(), frame.var_refs.len);
+    var ref_idx: usize = 0;
+    while (ref_idx < ref_count) : (ref_idx += 1) {
+        const atom_id = function.varRefName(ref_idx);
         if (value_ops.atomNameEql(rt, atom_id, name)) return true;
     }
     return false;
@@ -5019,12 +5038,14 @@ pub fn functionHasFrameBinding(
     frame: *frame_mod.Frame,
     atom_id: core.Atom,
 ) bool {
-    const local_count = @min(function.var_names.len, frame.locals.len);
-    for (function.var_names[0..local_count]) |binding| {
-        if (binding == atom_id or atomNamesEqual(rt, binding, atom_id)) return true;
+    const local_count = @min(function.vardefs.len, frame.locals.len);
+    for (function.vardefs[0..local_count]) |vd| {
+        if (vd.var_name == atom_id or atomNamesEqual(rt, vd.var_name, atom_id)) return true;
     }
-    const ref_count = @min(function.var_ref_names.len, frame.var_refs.len);
-    for (function.var_ref_names[0..ref_count], 0..) |binding, idx| {
+    const ref_count = @min(function.varRefNamesLen(), frame.var_refs.len);
+    var idx: usize = 0;
+    while (idx < ref_count) : (idx += 1) {
+        const binding = function.varRefName(idx);
         if (slot_ops.varRefSlotIsUninitialized(frame.var_refs[idx]) and closureVarIsNonLexicalGlobalSentinel(function, idx)) continue;
         if (binding == atom_id or atomNamesEqual(rt, binding, atom_id)) return true;
     }
@@ -5199,12 +5220,13 @@ pub fn callFunctionBytecodeModeState(
     constructor_this_value: core.JSValue,
 ) HostError!core.JSValue {
     const fb = functionBytecodeFromValue(func) orelse return error.TypeError;
-    if (defer_generators and (fb.func_kind == .generator or fb.func_kind == .async_generator)) {
-        return object_ops.createGeneratorObject(ctx, func, current_function_value, this_value, args, var_refs, output, global, eval_var_ref_names, eval_var_refs, fb.func_kind == .async_generator);
+    if (defer_generators and (fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator)) {
+        return object_ops.createGeneratorObject(ctx, func, current_function_value, this_value, args, var_refs, output, global, eval_var_ref_names, eval_var_refs, fb.flags.func_kind == .async_generator);
     }
 
     var nested_overlay: bytecode.Bytecode = undefined;
-    var nested = try bytecode.ensureCachedBytecodeView(fb, ctx.runtime);
+    var nested_base = bytecode.makeBytecodeView(fb, &ctx.runtime.memory, &ctx.runtime.atoms);
+    var nested: *const bytecode.Bytecode = &nested_base;
 
     var combined_var_refs: []const core.JSValue = var_refs;
     var allocated_combined_refs: []core.JSValue = &.{};
@@ -5215,7 +5237,7 @@ pub fn callFunctionBytecodeModeState(
         if (allocated_var_ref_names.len != 0) ctx.runtime.memory.free(core.Atom, allocated_var_ref_names);
     }
     if (eval_var_ref_names.len > 0 and eval_var_refs.len > 0) {
-        const old_name_len = nested.var_ref_names.len;
+        const old_name_len = nested.varRefNamesLen();
         const add_len = @min(eval_var_ref_names.len, eval_var_refs.len);
         const names = try ctx.runtime.memory.alloc(core.Atom, old_name_len + add_len);
         var names_transferred = false;
@@ -5224,9 +5246,12 @@ pub fn callFunctionBytecodeModeState(
         errdefer if (!names_transferred) {
             for (names[0..initialized_names]) |atom_id| ctx.runtime.atoms.free(atom_id);
         };
-        for (nested.var_ref_names, 0..) |atom_id, idx| {
-            names[idx] = ctx.runtime.atoms.dup(atom_id);
-            initialized_names += 1;
+        {
+            var idx: usize = 0;
+            while (idx < old_name_len) : (idx += 1) {
+                names[idx] = ctx.runtime.atoms.dup(nested.varRefName(idx));
+                initialized_names += 1;
+            }
         }
         for (eval_var_ref_names[0..add_len], 0..) |atom_id, idx| names[old_name_len + idx] = ctx.runtime.atoms.dup(atom_id);
         initialized_names += add_len;
@@ -5251,12 +5276,12 @@ pub fn callFunctionBytecodeModeState(
 
     var boxed_this: ?core.JSValue = null;
     defer if (boxed_this) |value| value.free(ctx.runtime);
-    const fb_runtime_strict = fb.is_strict_mode or fb.runtime_strict_mode;
+    const fb_runtime_strict = fb.flags.is_strict_mode or fb.flags.runtime_strict_mode;
     const effective_this = try coerceCallThis(ctx, global, fb_runtime_strict, this_value, &boxed_this);
-    if (fb.func_kind == .async and generator_state == null) {
+    if (fb.flags.func_kind == .async and generator_state == null) {
         return promise_ops.qjsAsyncFunctionStart(ctx, func, current_function_value, effective_this, args, combined_var_refs, output, global, eval_var_ref_names, eval_var_refs);
     }
-    const stop_on_yield = fb.func_kind == .generator or fb.func_kind == .async_generator;
+    const stop_on_yield = fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator;
 
     // Mirror QuickJS JS_CallInternal: non-suspending bytecode frames carve
     // their operand stack from the contiguous per-runtime VM stack arena
@@ -5264,7 +5289,7 @@ pub fn callFunctionBytecodeModeState(
     // heap buffers in and out of the stack, so those keep heap mode.
     const arena_mark = ctx.runtime.vm_stack.mark();
     defer ctx.runtime.vm_stack.restore(arena_mark);
-    const arena_eligible = fb.func_kind == .normal and generator_state == null;
+    const arena_eligible = fb.flags.func_kind == .normal and generator_state == null;
     const operand_window: ?[]core.JSValue = if (arena_eligible)
         ctx.runtime.vm_stack.carve(&ctx.runtime.memory, @as(usize, fb.stack_size) + 1)
     else
@@ -5276,12 +5301,12 @@ pub fn callFunctionBytecodeModeState(
     defer nested_stack.deinit(ctx.runtime);
     const dispatch_result = runWithArgsState(ctx, &nested_stack, nested, effective_this, args, combined_var_refs, output, global, false, fb_runtime_strict, stop_on_yield, &.{}, &.{}, eval_var_ref_names, eval_var_refs, &.{}, &.{}, &.{}, &.{}, generator_state, resume_value, stop_before_pc, current_function_value, new_target_value, constructor_this_value, false, false, core.JSValue.undefinedValue(), false);
     const result = dispatch_result catch |err| {
-        if (fb.func_kind == .async_generator) {
+        if (fb.flags.func_kind == .async_generator) {
             return exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, global));
         }
         return err;
     };
-    if (fb.func_kind == .async_generator) {
+    if (fb.flags.func_kind == .async_generator) {
         defer result.free(ctx.runtime);
         return core.promise.fulfilledWithPrototype(ctx.runtime, result, promise_ops.promisePrototypeFromGlobal(ctx.runtime, global));
     }
@@ -5302,66 +5327,57 @@ pub fn runGeneratorParameterInit(
     var nested = bytecode.Bytecode.init(&ctx.runtime.memory, &ctx.runtime.atoms, fb.func_name);
     defer nested.deinit(ctx.runtime);
     nested.atoms.replace(&nested.filename, fb.filename);
-    nested.line_num = fb.line_num;
-    nested.col_num = fb.col_num;
+    nested.line_num = fb.lineNum();
+    nested.col_num = fb.colNum();
     nested.arg_count = fb.arg_count;
     nested.var_count = fb.var_count;
     nested.stack_size = fb.stack_size;
-    nested.flags.is_strict = fb.is_strict_mode;
-    nested.flags.runtime_strict = fb.runtime_strict_mode;
-    nested.flags.has_simple_parameter_list = fb.has_simple_parameter_list;
-    try nested.setCode(fb.byte_code);
-    for (fb.atom_operands) |atom_id| {
+    nested.flags.is_strict = fb.flags.is_strict_mode;
+    nested.flags.runtime_strict = fb.flags.runtime_strict_mode;
+    nested.flags.has_simple_parameter_list = fb.flags.has_simple_parameter_list;
+    try nested.setCode(fb.byteCode());
+    // Rebuild the nested view's atom-operand retention array by walking the
+    // FB's inline atoms (the FB no longer keeps a standalone array).
+    var atom_it = fb.atomOperandIterator();
+    while (atom_it.next()) |atom_id| {
         try nested.retainAtomOperand(atom_id);
     }
-    if (fb.arg_names.len > 0) {
-        nested.arg_names = try ctx.runtime.memory.alloc(core.Atom, fb.arg_names.len);
-        for (fb.arg_names, 0..) |atom_id, idx| {
+    if (fb.argNames().len > 0) {
+        nested.arg_names = try ctx.runtime.memory.alloc(core.Atom, fb.argNames().len);
+        for (fb.argNames(), 0..) |atom_id, idx| {
             nested.arg_names[idx] = ctx.runtime.atoms.dup(atom_id);
         }
     }
-    if (fb.var_names.len > 0) {
-        nested.var_names = try ctx.runtime.memory.alloc(core.Atom, fb.var_names.len);
-        for (fb.var_names, 0..) |atom_id, idx| {
-            nested.var_names[idx] = ctx.runtime.atoms.dup(atom_id);
+    if (fb.varDefs().len > 0) {
+        nested.vardefs = try ctx.runtime.memory.alloc(bytecode.function_def.VarDef, fb.varDefs().len);
+        for (fb.varDefs(), 0..) |v, idx| {
+            nested.vardefs[idx] = v;
+            nested.vardefs[idx].var_name = ctx.runtime.atoms.dup(v.var_name);
         }
     }
-    if (fb.var_is_lexical.len > 0) {
-        nested.var_is_lexical = try ctx.runtime.memory.alloc(bool, fb.var_is_lexical.len);
-        @memcpy(nested.var_is_lexical, fb.var_is_lexical);
-    }
-    if (fb.var_is_const.len > 0) {
-        nested.var_is_const = try ctx.runtime.memory.alloc(bool, fb.var_is_const.len);
-        @memcpy(nested.var_is_const, fb.var_is_const);
-    }
-    if (fb.var_ref_names.len > 0) {
-        nested.var_ref_names = try ctx.runtime.memory.alloc(core.Atom, fb.var_ref_names.len);
-        for (fb.var_ref_names, 0..) |atom_id, idx| {
-            nested.var_ref_names[idx] = ctx.runtime.atoms.dup(atom_id);
+    if (fb.closureVar().len > 0) {
+        // The FB no longer keeps a standalone var-ref name array; the var-ref
+        // names are `closure_var[i].var_name`. Mirror them here so the nested
+        // compile-time Bytecode's var_ref_names matches the view accessors.
+        nested.var_ref_names = try ctx.runtime.memory.alloc(core.Atom, fb.closureVar().len);
+        for (fb.closureVar(), 0..) |cv, idx| {
+            nested.var_ref_names[idx] = ctx.runtime.atoms.dup(cv.var_name);
         }
     }
-    if (fb.var_ref_is_lexical.len > 0) {
-        nested.var_ref_is_lexical = try ctx.runtime.memory.alloc(bool, fb.var_ref_is_lexical.len);
-        @memcpy(nested.var_ref_is_lexical, fb.var_ref_is_lexical);
-    }
-    if (fb.var_ref_is_const.len > 0) {
-        nested.var_ref_is_const = try ctx.runtime.memory.alloc(bool, fb.var_ref_is_const.len);
-        @memcpy(nested.var_ref_is_const, fb.var_ref_is_const);
-    }
-    if (fb.closure_var.len > 0) {
-        nested.closure_var = try ctx.runtime.memory.alloc(bytecode.function_def.ClosureVar, fb.closure_var.len);
-        for (fb.closure_var, 0..) |cv, idx| {
+    if (fb.closureVar().len > 0) {
+        nested.closure_var = try ctx.runtime.memory.alloc(bytecode.function_def.ClosureVar, fb.closureVar().len);
+        for (fb.closureVar(), 0..) |cv, idx| {
             nested.closure_var[idx] = cv;
             nested.closure_var[idx].var_name = ctx.runtime.atoms.dup(cv.var_name);
         }
     }
-    for (fb.cpool) |value| {
+    for (fb.cpoolSlice()) |value| {
         _ = try nested.addConstant(value);
     }
 
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
-    return runWithArgsState(ctx, &nested_stack, &nested, this_value, args, var_refs, output, global, false, true, false, &.{}, &.{}, object.functionEvalLocalNames(), object.functionEvalLocalRefs(), &.{}, &.{}, &.{}, &.{}, object, null, fb.generator_body_pc, current_function_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), false);
+    return runWithArgsState(ctx, &nested_stack, &nested, this_value, args, var_refs, output, global, false, true, false, &.{}, &.{}, object.functionEvalLocalNames(), object.functionEvalLocalRefs(), &.{}, &.{}, &.{}, &.{}, object, null, fb.generatorBodyPc(), current_function_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), false);
 }
 
 pub fn qjsGeneratorNext(
@@ -5975,11 +5991,11 @@ pub fn generatorCatchResumeResultValue(result: core.JSValue) core.JSValue {
 }
 
 pub fn generatorPcAfterYieldStar(fb: *const bytecode.FunctionBytecode, pc: usize) ?usize {
-    if (pc >= fb.byte_code.len) return null;
-    const op_id = fb.byte_code[pc];
+    if (pc >= fb.byteCode().len) return null;
+    const op_id = fb.byteCode()[pc];
     if (op_id != op.yield_star and op_id != op.async_yield_star) return null;
     const size = bytecode.opcode.sizeOf(op_id);
-    if (size == 0 or pc + size > fb.byte_code.len) return null;
+    if (size == 0 or pc + size > fb.byteCode().len) return null;
     return pc + size;
 }
 
@@ -5991,14 +6007,14 @@ pub const GeneratorReturnFinallyRange = struct {
 pub fn findGeneratorReturnFinallyTarget(fb: *const bytecode.FunctionBytecode, start_pc: u32) ?GeneratorReturnFinallyRange {
     var pc: usize = 0;
     var found: ?GeneratorReturnFinallyRange = null;
-    while (pc < start_pc and pc < fb.byte_code.len) {
-        const op_id = fb.byte_code[pc];
+    while (pc < start_pc and pc < fb.byteCode().len) {
+        const op_id = fb.byteCode()[pc];
         if (op_id == op.@"catch") {
-            if (pc + 5 > fb.byte_code.len) return found;
+            if (pc + 5 > fb.byteCode().len) return found;
             const operand_pc = pc + 1;
-            const diff = readInt(i32, fb.byte_code[operand_pc..][0..4]);
+            const diff = readInt(i32, fb.byteCode()[operand_pc..][0..4]);
             const target = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
-            if (target > start_pc and target <= fb.byte_code.len) {
+            if (target > start_pc and target <= fb.byteCode().len) {
                 if (findGeneratorReturnFinallyTargetFromCatch(fb, @intCast(target))) |candidate| {
                     if (found == null or candidate.stop > found.?.stop) {
                         found = candidate;
@@ -6018,7 +6034,7 @@ pub fn findGeneratorReturnFinallyTargetFromCatch(fb: *const bytecode.FunctionByt
     if (rethrow_pc <= catch_target) return null;
     if (findForwardGotoTargetInRange(fb, catch_target, rethrow_pc)) |normal_finally_target| {
         if (normal_finally_target > rethrow_pc) {
-            return .{ .start = normal_finally_target, .stop = fb.byte_code.len };
+            return .{ .start = normal_finally_target, .stop = fb.byteCode().len };
         }
     }
     return .{ .start = catch_target, .stop = rethrow_pc };
@@ -6027,10 +6043,10 @@ pub fn findGeneratorReturnFinallyTargetFromCatch(fb: *const bytecode.FunctionByt
 pub fn findForwardGotoTargetInRange(fb: *const bytecode.FunctionBytecode, start_pc: usize, end_pc: usize) ?usize {
     var pc = start_pc;
     var found: ?usize = null;
-    while (pc < end_pc and pc < fb.byte_code.len) {
-        const op_id = fb.byte_code[pc];
+    while (pc < end_pc and pc < fb.byteCode().len) {
+        const op_id = fb.byteCode()[pc];
         if (forwardGotoTarget(fb, pc)) |target| {
-            if (target > pc and target <= fb.byte_code.len) found = @intCast(target);
+            if (target > pc and target <= fb.byteCode().len) found = @intCast(target);
         }
         const size = bytecode.opcode.sizeOf(op_id);
         if (size == 0) return found;
@@ -6042,14 +6058,14 @@ pub fn findForwardGotoTargetInRange(fb: *const bytecode.FunctionBytecode, start_
 pub fn findEnclosingCatchTarget(fb: *const bytecode.FunctionBytecode, start_pc: u32) ?usize {
     var pc: usize = 0;
     var found: ?usize = null;
-    while (pc < start_pc and pc < fb.byte_code.len) {
-        const op_id = fb.byte_code[pc];
+    while (pc < start_pc and pc < fb.byteCode().len) {
+        const op_id = fb.byteCode()[pc];
         if (op_id == op.@"catch") {
-            if (pc + 5 > fb.byte_code.len) return found;
+            if (pc + 5 > fb.byteCode().len) return found;
             const operand_pc = pc + 1;
-            const diff = readInt(i32, fb.byte_code[operand_pc..][0..4]);
+            const diff = readInt(i32, fb.byteCode()[operand_pc..][0..4]);
             const target = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
-            if (target > start_pc and target <= fb.byte_code.len) found = @intCast(target);
+            if (target > start_pc and target <= fb.byteCode().len) found = @intCast(target);
         }
         const size = bytecode.opcode.sizeOf(op_id);
         if (size == 0) return null;
@@ -6060,8 +6076,8 @@ pub fn findEnclosingCatchTarget(fb: *const bytecode.FunctionBytecode, start_pc: 
 
 pub fn findThrowFrom(fb: *const bytecode.FunctionBytecode, start_pc: usize) ?usize {
     var pc = start_pc;
-    while (pc < fb.byte_code.len) {
-        const op_id = fb.byte_code[pc];
+    while (pc < fb.byteCode().len) {
+        const op_id = fb.byteCode()[pc];
         if (op_id == op.throw) return pc;
         const size = bytecode.opcode.sizeOf(op_id);
         if (size == 0) return null;
@@ -6071,28 +6087,28 @@ pub fn findThrowFrom(fb: *const bytecode.FunctionBytecode, start_pc: usize) ?usi
 }
 
 pub fn forwardGotoTarget(fb: *const bytecode.FunctionBytecode, pc: usize) ?u32 {
-    const op_id = fb.byte_code[pc];
+    const op_id = fb.byteCode()[pc];
     return switch (op_id) {
         op.goto8 => blk: {
-            if (pc + 1 >= fb.byte_code.len) break :blk null;
+            if (pc + 1 >= fb.byteCode().len) break :blk null;
             const operand_pc = pc + 1;
-            const diff: i8 = @bitCast(fb.byte_code[operand_pc]);
+            const diff: i8 = @bitCast(fb.byteCode()[operand_pc]);
             const target = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
-            break :blk if (target > @as(i64, @intCast(pc)) and target <= @as(i64, @intCast(fb.byte_code.len))) @as(u32, @intCast(target)) else null;
+            break :blk if (target > @as(i64, @intCast(pc)) and target <= @as(i64, @intCast(fb.byteCode().len))) @as(u32, @intCast(target)) else null;
         },
         op.goto16 => blk: {
-            if (pc + 3 > fb.byte_code.len) break :blk null;
+            if (pc + 3 > fb.byteCode().len) break :blk null;
             const operand_pc = pc + 1;
-            const diff = readInt(i16, fb.byte_code[operand_pc..][0..2]);
+            const diff = readInt(i16, fb.byteCode()[operand_pc..][0..2]);
             const target = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
-            break :blk if (target > @as(i64, @intCast(pc)) and target <= @as(i64, @intCast(fb.byte_code.len))) @as(u32, @intCast(target)) else null;
+            break :blk if (target > @as(i64, @intCast(pc)) and target <= @as(i64, @intCast(fb.byteCode().len))) @as(u32, @intCast(target)) else null;
         },
         op.goto => blk: {
-            if (pc + 5 > fb.byte_code.len) break :blk null;
+            if (pc + 5 > fb.byteCode().len) break :blk null;
             const operand_pc = pc + 1;
-            const diff = readInt(i32, fb.byte_code[operand_pc..][0..4]);
+            const diff = readInt(i32, fb.byteCode()[operand_pc..][0..4]);
             const target = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
-            break :blk if (target > @as(i64, @intCast(pc)) and target <= @as(i64, @intCast(fb.byte_code.len))) @as(u32, @intCast(target)) else null;
+            break :blk if (target > @as(i64, @intCast(pc)) and target <= @as(i64, @intCast(fb.byteCode().len))) @as(u32, @intCast(target)) else null;
         },
         else => null,
     };
@@ -6521,10 +6537,14 @@ test "wrapIteratorFromIterator roots direct function bytecode next method while 
     const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    fb.func_kind = .generator;
+    fb.flags.func_kind = .generator;
     try rt.gc.add(&fb.header);
 
-    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        fb.cpool = __cp.ptr;
+        fb.cpool_count = @intCast(__cp.len);
+    }
     const symbol_atom = try rt.atoms.newValueSymbol("gc-wrap-iterator-next-bytecode-symbol");
     fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
@@ -6720,7 +6740,11 @@ test "createIteratorResult roots direct function bytecode value while creating r
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        fb.cpool = __cp.ptr;
+        fb.cpool_count = @intCast(__cp.len);
+    }
     const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-result-bytecode-symbol");
     fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
@@ -6794,7 +6818,7 @@ pub fn currentFrameFunctionIsStrict(frame: *frame_mod.Frame) bool {
         if (function_object.functionBytecodeSlot().*) |stored| functionBytecodeFromValue(stored) else null
     else
         null;
-    if (fb) |function_bytecode| return function_bytecode.is_strict_mode or function_bytecode.runtime_strict_mode;
+    if (fb) |function_bytecode| return function_bytecode.flags.is_strict_mode or function_bytecode.flags.runtime_strict_mode;
     return false;
 }
 
@@ -6814,12 +6838,12 @@ pub fn isFunctionLikeClass(class_id: core.class.ClassId) bool {
 pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) error{OutOfMemory}!bool {
     if (value.isFunctionBytecode()) {
         const fb = functionBytecodeFromValue(value) orelse return false;
-        return !fb.is_arrow_function and fb.has_prototype and fb.func_kind != .generator and fb.func_kind != .async_generator;
+        return !fb.flags.is_arrow_function and fb.flags.has_prototype and fb.flags.func_kind != .generator and fb.flags.func_kind != .async_generator;
     }
     if (object_ops.functionObjectFromValue(value)) |function_object| {
         const function_value = function_object.functionBytecodeSlot().* orelse return false;
         const fb = functionBytecodeFromValue(function_value) orelse return false;
-        return !fb.is_arrow_function and fb.has_prototype and fb.func_kind != .generator and fb.func_kind != .async_generator;
+        return !fb.flags.is_arrow_function and fb.flags.has_prototype and fb.flags.func_kind != .generator and fb.flags.func_kind != .async_generator;
     }
     if (object_ops.callableObjectFromValue(value)) |function_object| {
         if (function_object.class_id == core.class.ids.bound_function) {
@@ -7164,17 +7188,17 @@ pub fn qjsReflectConstructGenericCallable(
 
     if (resolved.target.isFunctionBytecode()) {
         const fb = functionBytecodeFromValue(resolved.target) orelse return error.TypeError;
-        if (fb.is_arrow_function or !fb.has_prototype or fb.func_kind == .generator or fb.func_kind == .async_generator) {
+        if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) {
             return error.TypeError;
         }
         const instance_object = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
         const instance = instance_object.value();
         errdefer instance.free(ctx.runtime);
-        if (!fb.is_derived_class_constructor) {
+        if (!fb.flags.is_derived_class_constructor) {
             try class_init_ops.initializeClassInstanceElements(ctx, output, global, resolved.target, instance, fb, caller_function, caller_frame);
         }
-        const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
-        const constructor_this = if (fb.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
+        const initial_this = if (fb.flags.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
+        const constructor_this = if (fb.flags.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
         const result = try callFunctionBytecodeConstruct(ctx, resolved.target, resolved.target, initial_this, resolved_args, &.{}, output, global, &.{}, &.{}, resolved.new_target, constructor_this);
         if (result.isObject()) {
             instance.free(ctx.runtime);
@@ -7187,18 +7211,18 @@ pub fn qjsReflectConstructGenericCallable(
     if (object_ops.functionObjectFromValue(resolved.target)) |function_object| {
         const function_value = function_object.functionBytecodeSlot().* orelse return error.TypeError;
         const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
-        if (fb.is_arrow_function or !fb.has_prototype or fb.func_kind == .generator or fb.func_kind == .async_generator) {
+        if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) {
             return error.TypeError;
         }
         const instance_object = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
         const instance = instance_object.value();
         errdefer instance.free(ctx.runtime);
-        if (!fb.is_derived_class_constructor) {
+        if (!fb.flags.is_derived_class_constructor) {
             try class_init_ops.initializeClassInstanceElements(ctx, output, global, resolved.target, instance, fb, caller_function, caller_frame);
         }
         const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-        const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
-        const constructor_this = if (fb.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
+        const initial_this = if (fb.flags.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
+        const constructor_this = if (fb.flags.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
         const result = try callFunctionBytecodeConstruct(ctx, function_value, resolved.target, initial_this, resolved_args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNames(), function_object.functionEvalLocalRefs(), resolved.new_target, constructor_this);
         if (result.isObject()) {
             instance.free(ctx.runtime);
@@ -7674,8 +7698,10 @@ pub fn isBlockedByUnscopables(
 
 pub fn lookupFrameVarRef(ctx: *core.JSContext, global: *core.Object, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, atom_id: core.Atom) ?core.JSValue {
     const rt = ctx.runtime;
-    const count = @min(function.var_ref_names.len, frame.var_refs.len);
-    for (function.var_ref_names[0..count], 0..) |name, idx| {
+    const count = @min(function.varRefNamesLen(), frame.var_refs.len);
+    var idx: usize = 0;
+    while (idx < count) : (idx += 1) {
+        const name = function.varRefName(idx);
         if (!atomIdOrNameEql(rt, name, atom_id)) continue;
         if (closureVarIsNonLexicalGlobalSentinel(function, idx)) {
             if (globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| return lexical_value;
@@ -7699,9 +7725,9 @@ pub fn closureVarIsNonLexicalGlobalSentinel(function: *const bytecode.Bytecode, 
 }
 
 pub fn lookupFrameLocalValue(rt: *core.JSRuntime, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, atom_id: core.Atom) ?core.JSValue {
-    const count = @min(function.var_names.len, frame.locals.len);
-    for (function.var_names[0..count], 0..) |name, idx| {
-        if (!atomIdOrNameEql(rt, name, atom_id)) continue;
+    const count = @min(function.vardefs.len, frame.locals.len);
+    for (function.vardefs[0..count], 0..) |vd, idx| {
+        if (!atomIdOrNameEql(rt, vd.var_name, atom_id)) continue;
         return slot_ops.slotValueDup(frame.locals[idx]);
     }
     return null;
@@ -7799,9 +7825,9 @@ pub fn deleteDirectEvalGlobalVarLocalBinding(
     frame: *frame_mod.Frame,
     atom_id: core.Atom,
 ) ?bool {
-    const count = @min(function.var_names.len, frame.locals.len);
-    for (function.var_names[0..count], 0..) |name, idx| {
-        if (!atomIdOrNameEql(rt, name, atom_id)) continue;
+    const count = @min(function.vardefs.len, frame.locals.len);
+    for (function.vardefs[0..count], 0..) |vd, idx| {
+        if (!atomIdOrNameEql(rt, vd.var_name, atom_id)) continue;
         _ = directEvalGlobalVarLocalAtom(rt, function, idx, frame.locals[idx]) orelse return null;
         const deleted = if (global.hasProperty(atom_id)) global.deleteProperty(rt, atom_id) else true;
         if (deleted) _ = deleteVarRefSlot(rt, frame.locals[idx]);
@@ -7816,10 +7842,10 @@ pub fn deleteFrameLocalBinding(
     frame: *frame_mod.Frame,
     atom_id: core.Atom,
 ) ?bool {
-    const count = @min(@min(function.var_names.len, function.var_is_lexical.len), frame.locals.len);
-    for (function.var_names[0..count], 0..) |name, idx| {
-        if (!atomIdOrNameEql(rt, name, atom_id)) continue;
-        if (function.var_is_lexical[idx]) return false;
+    const count = @min(function.vardefs.len, frame.locals.len);
+    for (function.vardefs[0..count], 0..) |vd, idx| {
+        if (!atomIdOrNameEql(rt, vd.var_name, atom_id)) continue;
+        if (vd.is_lexical) return false;
         return deleteVarRefSlot(rt, frame.locals[idx]);
     }
     return null;
@@ -7877,10 +7903,10 @@ pub fn initializeEvalFrameLocals(
     names: []const core.Atom,
     slots: []const core.JSValue,
 ) void {
-    const count = @min(function.var_names.len, frame.locals.len);
-    for (function.var_names[0..count], 0..) |atom_id, idx| {
-        if (idx < function.var_is_lexical.len and function.var_is_lexical[idx]) continue;
-        const value = lookupNamedRawSlotValue(ctx.runtime, names, slots, atom_id) orelse continue;
+    const count = @min(function.vardefs.len, frame.locals.len);
+    for (function.vardefs[0..count], 0..) |vd, idx| {
+        if (vd.is_lexical) continue;
+        const value = lookupNamedRawSlotValue(ctx.runtime, names, slots, vd.var_name) orelse continue;
         const old_value = frame.locals[idx];
         frame.locals[idx] = value;
         old_value.free(ctx.runtime);
@@ -7910,10 +7936,10 @@ pub fn setFrameLocalValue(
     atom_id: core.Atom,
     value: core.JSValue,
 ) !bool {
-    const count = @min(function.var_names.len, frame.locals.len);
-    for (function.var_names[0..count], 0..) |name, idx| {
-        if (name != atom_id) continue;
-        if (idx < function.var_is_lexical.len and function.var_is_lexical[idx]) continue;
+    const count = @min(function.vardefs.len, frame.locals.len);
+    for (function.vardefs[0..count], 0..) |vd, idx| {
+        if (vd.var_name != atom_id) continue;
+        if (vd.is_lexical) continue;
         try slot_ops.setSlotValue(ctx, &frame.locals[idx], value);
         return true;
     }
@@ -7927,7 +7953,9 @@ pub fn setFrameVarRefValue(
     atom_id: core.Atom,
     value: core.JSValue,
 ) !bool {
-    for (function.var_ref_names, 0..) |name, idx| {
+    var idx: usize = 0;
+    while (idx < function.varRefNamesLen()) : (idx += 1) {
+        const name = function.varRefName(idx);
         if (name != atom_id) continue;
         if (idx >= frame.var_refs.len) try frame_mod.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
         if (closureVarIsNonLexicalGlobalSentinel(function, idx) and slot_ops.varRefSlotIsUninitialized(frame.var_refs[idx])) {

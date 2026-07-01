@@ -178,8 +178,8 @@ inline fn localFastPathNeedsGeneratorStopBoundary(stop_before_pc: ?usize) bool {
 
 inline fn isDerivedConstructorThisLocal(function: *const bytecode.Bytecode, idx: u16) bool {
     return function.flags.is_derived_class_constructor and
-        idx < function.var_names.len and
-        function.var_names[idx] == 8;
+        idx < function.vardefs.len and
+        function.vardefs[idx].var_name == 8;
 }
 
 inline fn dispatchFastInt32Add(lhs: i32, rhs: i32) core.JSValue {
@@ -1253,7 +1253,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     const old_v = reg_var_buf[idx];
                     if (slot_ops.varRefCellFromValue(old_v) != null) break :put_loc_check_fast;
                     if (old_v.isUninitialized()) break :put_loc_check_fast;
-                    if (idx < function.var_is_const.len and function.var_is_const[idx]) break :put_loc_check_fast;
+                    if (idx < function.vardefs.len and function.vardefs[idx].is_const) break :put_loc_check_fast;
                     const value = (reg_sp - 1)[0];
                     if (slot_ops.varRefCellFromValue(value) != null) break :put_loc_check_fast;
 

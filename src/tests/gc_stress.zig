@@ -226,7 +226,11 @@ test "gc stress function bytecode constant pool object cycles are reclaimed" {
         const fb = &fb_slice[0];
         fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
         try rt.gc.add(&fb.header);
-        fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+        {
+            const __cp = try rt.memory.alloc(core.JSValue, 1);
+            fb.cpool = __cp.ptr;
+            fb.cpool_count = @intCast(__cp.len);
+        }
         fb.cpool[0] = captured_obj.value().dup();
         fb.cpool_count = 1;
 

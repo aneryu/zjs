@@ -47,7 +47,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         _ = ctx.throwValue(error_val);
         return error.SyntaxError;
     }
-    if (options.runtime_strict and options.mode == .script) forceRuntimeStrict(&compiled.function);
+    if (options.runtime_strict and options.mode == .script) forceRuntimeStrict(rt, &compiled.function);
 
     var module_name: core.Atom = core.atom.null_atom;
     var has_module_record = false;
@@ -132,13 +132,10 @@ fn canReturnUndefinedWithoutVm(function: *const bytecode.Bytecode) bool {
     if (function.code.len != 1 or function.code[0] != bytecode.opcode.op.return_undef) return false;
     return function.var_count == 0 and
         function.arg_count == 0 and
-        function.var_names.len == 0 and
-        function.var_is_lexical.len == 0 and
-        function.var_is_const.len == 0 and
-        function.var_ref_names.len == 0 and
-        function.var_ref_is_lexical.len == 0 and
-        function.var_ref_is_const.len == 0 and
-        function.global_var_names.len == 0 and
+        function.vardefs.len == 0 and
+        function.varRefNamesLen() == 0 and
+        function.closure_var.len == 0 and
+        function.global_vars.len == 0 and
         function.private_bound_names.len == 0 and
         function.constants.values.len == 0;
 }
@@ -222,19 +219,20 @@ fn parserSourceKind(kind: core.context.EvalSourceKind) parser.SourceKind {
     };
 }
 
-fn forceRuntimeStrict(function: *bytecode.Bytecode) void {
+fn forceRuntimeStrict(rt: *core.JSRuntime, function: *bytecode.Bytecode) void {
     function.flags.runtime_strict = true;
-    for (function.constants.values) |value| forceFunctionBytecodeRuntimeStrict(value);
+    for (function.constants.values) |value| forceFunctionBytecodeRuntimeStrict(rt, value);
 }
 
-fn forceFunctionBytecodeRuntimeStrict(value: core.JSValue) void {
+fn forceFunctionBytecodeRuntimeStrict(rt: *core.JSRuntime, value: core.JSValue) void {
     if (!value.isFunctionBytecode()) return;
     const header = value.objectHeader() orelse return;
     const aligned: *align(16) @TypeOf(header.*) = @alignCast(header);
     const function_bytecode: *bytecode.FunctionBytecode = @fieldParentPtr("header", aligned);
-    function_bytecode.runtime_strict_mode = true;
-    bytecode.refreshCachedBytecodeView(function_bytecode);
-    for (function_bytecode.cpool) |child| forceFunctionBytecodeRuntimeStrict(child);
+    function_bytecode.flags.runtime_strict_mode = true;
+    // No cached execution view to refresh: the VM rebuilds the `Bytecode` view
+    // per call (`makeBytecodeView`), so the updated flag is read fresh next call.
+    for (function_bytecode.cpoolSlice()) |child| forceFunctionBytecodeRuntimeStrict(rt, child);
 }
 
 fn isWhitespaceSeparatedNumericScript(source_text: []const u8) bool {

@@ -1035,7 +1035,7 @@ fn unicodeCaseReceiver(rt: *core.JSRuntime, receiver: core.JSValue, to_lower: bo
 
         // The final-sigma test (Σ→ς) is the only branch that needs neighbour
         // context; it is rare (lowercase Σ only) so it keeps the string_value walk.
-        const mapping = if (to_lower and span.value == 0x03a3 and isFinalSigma(string_value.*, span.start, span.end))
+        const mapping = if (to_lower and span.value == 0x03a3 and isFinalSigma(string_value, span.start, span.end))
             singleCaseMapping(0x03c2)
         else
             unicode.caseConvert(span.value, to_lower);
@@ -1094,7 +1094,7 @@ const CodePointSpan = struct {
     end: usize,
 };
 
-fn codePointAtStringIndex(string_value: core.string.String, index: usize) CodePointSpan {
+fn codePointAtStringIndex(string_value: *const core.string.String, index: usize) CodePointSpan {
     const first = string_value.codeUnitAt(index);
     const next_index = index + 1;
     if (isHighSurrogateUnit(first) and next_index < string_value.len()) {
@@ -1106,7 +1106,7 @@ fn codePointAtStringIndex(string_value: core.string.String, index: usize) CodePo
     return .{ .value = @intCast(first), .start = index, .end = next_index };
 }
 
-fn codePointBeforeStringIndex(string_value: core.string.String, end: usize) ?CodePointSpan {
+fn codePointBeforeStringIndex(string_value: *const core.string.String, end: usize) ?CodePointSpan {
     if (end == 0) return null;
     const last_index = end - 1;
     const last = string_value.codeUnitAt(last_index);
@@ -1124,7 +1124,7 @@ fn appendUtf16CodePoint(rt: *core.JSRuntime, units: *std.ArrayList(u16), cp: u21
     return unicode.appendUtf16CodePoint(rt.memory.allocator, units, cp);
 }
 
-fn isFinalSigma(string_value: core.string.String, sigma_start: usize, after_sigma: usize) bool {
+fn isFinalSigma(string_value: *const core.string.String, sigma_start: usize, after_sigma: usize) bool {
     var before_index = sigma_start;
     while (true) {
         const previous = codePointBeforeStringIndex(string_value, before_index) orelse return false;
@@ -1645,7 +1645,11 @@ test "string iteratorResult roots direct function bytecode value while creating 
     fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        fb.cpool = __cp.ptr;
+        fb.cpool_count = @intCast(__cp.len);
+    }
     const symbol_atom = try rt.atoms.newValueSymbol("gc-string-iterator-result-bytecode-symbol");
     fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;

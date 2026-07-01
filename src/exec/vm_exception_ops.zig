@@ -142,7 +142,7 @@ pub fn throwTdzReference(ctx: *core.JSContext) error{ReferenceError} {
         throwReferenceErrorSentinel(ctx);
         return error.ReferenceError;
     };
-    defer core.JSValue.string(&name_str.header).free(rt);
+    defer core.JSValue.string(name_str.header()).free(rt);
 
     const name_atom = rt.internAtom("ReferenceError") catch {
         throwReferenceErrorSentinel(ctx);
@@ -150,7 +150,7 @@ pub fn throwTdzReference(ctx: *core.JSContext) error{ReferenceError} {
     };
     defer rt.atoms.free(name_atom);
 
-    const name_value = core.JSValue.string(&name_str.header);
+    const name_value = core.JSValue.string(name_str.header());
     error_obj.defineOwnProperty(rt, name_atom, core.Descriptor.data(name_value, true, false, true)) catch {
         throwReferenceErrorSentinel(ctx);
         return error.ReferenceError;
@@ -160,7 +160,7 @@ pub fn throwTdzReference(ctx: *core.JSContext) error{ReferenceError} {
         throwReferenceErrorSentinel(ctx);
         return error.ReferenceError;
     };
-    defer core.JSValue.string(&message_str.header).free(rt);
+    defer core.JSValue.string(message_str.header()).free(rt);
 
     const message_atom = rt.internAtom("message") catch {
         throwReferenceErrorSentinel(ctx);
@@ -168,7 +168,7 @@ pub fn throwTdzReference(ctx: *core.JSContext) error{ReferenceError} {
     };
     defer rt.atoms.free(message_atom);
 
-    const message_value = core.JSValue.string(&message_str.header);
+    const message_value = core.JSValue.string(message_str.header());
     error_obj.defineOwnProperty(rt, message_atom, core.Descriptor.data(message_value, true, false, true)) catch {
         throwReferenceErrorSentinel(ctx);
         return error.ReferenceError;

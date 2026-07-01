@@ -390,6 +390,13 @@ pub const BlockHeader = extern struct {
     }
 };
 
+/// Standalone refcount word for flat strings and string ropes. It is NOT
+/// embedded in the `String`/`StringRope` structs (which stay at their exact qjs
+/// sizes): each string/rope allocation reserves this 4-byte prefix immediately
+/// ahead of the struct (`objectPtr - string_rc_prefix_size`), mirroring qjs's
+/// `JSRefCountHeader` prefix. The struct reaches it through `String.header()` /
+/// `StringRope.header()`, and a `Tag.string`/`Tag.string_rope`/`Tag.symbol`
+/// JSValue's pointer payload IS this prefix.
 pub const StringHeader = extern struct {
     rc: i32 = 1,
 
@@ -402,6 +409,10 @@ pub const StringHeader = extern struct {
         self.rc += 1;
     }
 };
+
+/// Byte size of the refcount prefix reserved ahead of every flat `String` and
+/// `StringRope` allocation. Equal to `@sizeOf(StringHeader)` (4).
+pub const string_rc_prefix_size: usize = @sizeOf(StringHeader);
 
 pub const Header = BlockHeader;
 pub const GCObjectHeader = Header;
@@ -1072,7 +1083,12 @@ pub const Registry = struct {
             .object => @sizeOf(object.Object),
             .function_bytecode => @sizeOf(FunctionBytecode),
             .var_ref => @sizeOf(var_ref.VarRef),
-            .shape => @sizeOf(shape.Shape),
+            // A shape's heap footprint includes its inline FAM (hash table +
+            // prop[]); recompute from the live capacity fields (qjs get_shape_size).
+            .shape => blk: {
+                const sh: *const shape.Shape = @alignCast(@fieldParentPtr("header", h));
+                break :blk sh.allocationSize();
+            },
             .string, .big_int => 0,
         };
     }
@@ -1099,7 +1115,10 @@ pub const Registry = struct {
                 break :blk fb.heapByteSize();
             },
             .var_ref => @sizeOf(var_ref.VarRef),
-            .shape => @sizeOf(shape.Shape),
+            .shape => blk: {
+                const sh: *const shape.Shape = @alignCast(@fieldParentPtr("header", h));
+                break :blk sh.allocationSize();
+            },
             .string, .big_int => 0,
         };
     }

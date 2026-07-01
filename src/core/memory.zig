@@ -540,6 +540,68 @@ pub const MemoryAccount = struct {
         self.rawFree(bytes_ptr[0..bytes], alignment);
     }
 
+    /// Variable-size GC allocation: the `T` struct immediately followed by
+    /// `fam_bytes` of inline flexible-array-member storage, in ONE allocation,
+    /// with the 8-byte `Metadata` prefix at `objectPtr - 8` (identical model to
+    /// `createInternal`). Mirrors qjs's single `get_shape_size()` allocation for
+    /// JSShape (struct fields + inline hash table + prop[]). The caller is
+    /// responsible for the FAM's internal alignment (must be <= `gcAlignment(T)`,
+    /// which is >= 8); since the struct size is a multiple of `@alignOf(T)`, the
+    /// FAM region starts `@alignOf(T)`-aligned right after the struct.
+    pub inline fn createWithFam(self: *MemoryAccount, comptime T: type, fam_bytes: usize) !*T {
+        return self.createWithFamInternal(T, fam_bytes, true);
+    }
+
+    pub inline fn createWithFamNoTrigger(self: *MemoryAccount, comptime T: type, fam_bytes: usize) !*T {
+        return self.createWithFamInternal(T, fam_bytes, false);
+    }
+
+    fn createWithFamInternal(self: *MemoryAccount, comptime T: type, fam_bytes: usize, comptime trigger_gc: bool) !*T {
+        comptime std.debug.assert(isGcObject(T));
+        if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
+        const prefix = comptime gcPrefixSize(T);
+        const payload_bytes = std.math.add(usize, @sizeOf(T), fam_bytes) catch return error.OutOfMemory;
+        const bytes = std.math.add(usize, prefix, payload_bytes) catch return error.OutOfMemory;
+        try self.checkAllocation(bytes);
+        if (comptime trigger_gc) {
+            self.triggerGCBeforeAllocation(bytes);
+        }
+        const next_allocated_bytes = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;
+        const alignment = comptime gcAlignment(T);
+        const raw = try self.rawAlloc(bytes, alignment);
+        const obj_addr = @intFromPtr(raw) + prefix;
+        initGcPrefix(T, @ptrFromInt(obj_addr - gc_prefix_size));
+        const ptr: *T = @ptrFromInt(obj_addr);
+        self.allocated_bytes = next_allocated_bytes;
+        if (comptime diagnostic_accounting_enabled) {
+            self.allocation_count += 1;
+            self.create_calls += 1;
+            self.updatePeak();
+            if (self.profile_alloc_count) |counter| counter.* +|= 1;
+            self.traceAlloc(1, bytes, @intFromPtr(ptr));
+        }
+        return ptr;
+    }
+
+    /// Frees a `createWithFam` allocation. `fam_bytes` MUST equal the value
+    /// passed to `createWithFam` (the caller derives it from the live object's
+    /// capacity fields before clearing them).
+    pub fn destroyWithFam(self: *MemoryAccount, comptime T: type, ptr: *T, fam_bytes: usize) void {
+        comptime std.debug.assert(isGcObject(T));
+        if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(ptr));
+        const prefix = comptime gcPrefixSize(T);
+        const bytes = prefix + @sizeOf(T) + fam_bytes;
+        self.allocated_bytes -= bytes;
+        if (comptime diagnostic_accounting_enabled) {
+            self.allocation_count -= 1;
+            self.destroy_calls += 1;
+        }
+        const base: usize = @intFromPtr(ptr) - prefix;
+        const bytes_ptr: [*]u8 = @ptrFromInt(base);
+        const alignment = comptime gcAlignment(T);
+        self.rawFree(bytes_ptr[0..bytes], alignment);
+    }
+
     pub fn hasOutstandingAllocations(self: MemoryAccount) bool {
         if (comptime diagnostic_accounting_enabled) {
             return self.allocated_bytes != 0 or self.allocation_count != 0;

@@ -896,33 +896,24 @@ const StringIntPosition = enum {
 };
 
 fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value: i32, position: StringIntPosition) !?core.JSValue {
-    const string = stringObject(string_value) orelse return null;
-    if (string.len() == 0) {
-        return try toStringValue(rt, core.JSValue.int32(int_value));
-    }
-
-    // Rope-backed strings must not be flattened by borrowLatin1; append the
-    // formatted digits into the rope's tail when the wrapper is exclusively
-    // held, otherwise chain them through another rope node.
-    if (string.isRope()) {
+    // Rope-backed values must NOT be flattened here: extend the rope's tail
+    // when it is exclusively held, otherwise chain through another rope node.
+    // Detect the rope at the VALUE/tag level before `stringObject` would
+    // flatten it.
+    if (string_value.ropeBody()) |node| {
+        if (node.len == 0) return try toStringValue(rt, core.JSValue.int32(int_value));
         if (position == .suffix) {
-            if (string_value.stringHeader()) |header| {
-                if (header.rc == 1) {
-                    var digits_buf: [16]u8 = undefined;
-                    const digits = dtoa.formatInt32(&digits_buf, int_value);
-                    if (try string.appendRopeTail(rt, .{ .latin1 = digits })) {
-                        return string_value.dup();
-                    }
+            if (node.header().rc == 1 and node.flat == null) {
+                var digits_buf: [16]u8 = undefined;
+                const digits = dtoa.formatInt32(&digits_buf, int_value);
+                if (try core.string.appendRopeTail(node, rt, .{ .latin1 = digits })) {
+                    return string_value.dup();
                 }
             }
         }
         const digits_value = try toStringValue(rt, core.JSValue.int32(int_value));
-        const digits_string = stringObject(digits_value) orelse {
-            digits_value.free(rt);
-            return null;
-        };
-        const left = if (position == .prefix) digits_string else string;
-        const right = if (position == .prefix) string else digits_string;
+        const left = if (position == .prefix) digits_value else string_value;
+        const right = if (position == .prefix) string_value else digits_value;
         const out = core.string.String.createRope(rt, left, right) catch |err| {
             digits_value.free(rt);
             return err;
@@ -931,20 +922,15 @@ fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value
         return out.value();
     }
 
+    const string = stringObject(string_value) orelse return null;
+    if (string.len() == 0) {
+        return try toStringValue(rt, core.JSValue.int32(int_value));
+    }
+
     const string_bytes = string.borrowLatin1() orelse return null;
     if (int_value >= 0 and int_value < 256) {
         const cached = try rt.smallIntString(@intCast(int_value));
         const digits = cached.borrowLatin1() orelse return null;
-
-        if (position == .suffix) {
-            if (string_value.stringHeader()) |header| {
-                if (header.rc == 1 and string.atom_id == core.string.String.no_atom_id) {
-                    if (try string.appendLatin1InPlace(rt, digits)) {
-                        return string_value.dup();
-                    }
-                }
-            }
-        }
 
         const out = switch (position) {
             .prefix => try core.string.String.createLatin1Concat(rt, digits, string_bytes),
@@ -964,35 +950,41 @@ fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value
 }
 
 fn stringAddStrings(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValue {
-    const a_string = stringObject(a) orelse return error.TypeError;
-    const b_string = stringObject(b) orelse return error.TypeError;
-    const a_len = a_string.len();
-    const b_len = b_string.len();
+    const a_len = core.string.stringValueLen(a);
+    const b_len = core.string.stringValueLen(b);
     if (a_len == 0) return b.dup();
     if (b_len == 0) return a.dup();
+
+    const a_is_rope = a.ropeBody() != null;
+    const b_is_rope = b.ropeBody() != null;
+
     // rc==1: the caller holds the only reference, so the lhs is consumed by
-    // this add and may be extended in place (flat capacity append, or rope
-    // tail append when the lhs is an unmaterialized rope). A rope rhs keeps
-    // the deferred rope-of-rope linking below instead of being copied.
-    if (!b_string.isRope()) {
-        if (a.stringHeader()) |header| {
-            if (header.rc == 1 and try appendStringInPlace(rt, a_string, b_string)) {
+    // this add and may be extended in place (rope tail append when the lhs is
+    // an unmaterialized rope). A rope rhs keeps the deferred rope-of-rope
+    // linking below instead of being copied.
+    if (!b_is_rope) {
+        if (a.ropeBody()) |node| {
+            if (node.header().rc == 1 and try appendRopeTailValue(rt, node, b)) {
                 return a.dup();
             }
         }
     }
     // If either operand already is a rope, concatenating eagerly would flatten
     // it; chain another rope node instead (ropes are always >= rope_min_len).
-    if (a_string.isRope() or b_string.isRope()) {
-        const out = try core.string.String.createRope(rt, a_string, b_string);
+    if (a_is_rope or b_is_rope) {
+        const out = try core.string.String.createRope(rt, a, b);
         return out.value();
     }
     // Long concatenations defer the copy through a rope node (QuickJS
     // JSStringRope analogue); content materializes lazily on first read.
     if (a_len + b_len >= core.string.String.rope_min_len) {
-        const out = try core.string.String.createRope(rt, a_string, b_string);
+        const out = try core.string.String.createRope(rt, a, b);
         return out.value();
     }
+
+    // Both operands are flat from here.
+    const a_string = stringObject(a) orelse return error.TypeError;
+    const b_string = stringObject(b) orelse return error.TypeError;
     // Fast path: both operands are latin1. We allocate the result string
     // directly and memcpy in place, skipping the ArrayList intermediate
     // and the latin1→utf16 fallback when both sides fit in 8 bits.
@@ -1019,44 +1011,29 @@ fn stringAddStrings(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core
     // Mixed widths fall back to the slower ArrayList path.
     var units = try std.ArrayList(u16).initCapacity(rt.memory.allocator, a_len + b_len);
     defer units.deinit(rt.memory.allocator);
-    try appendStringUtf16Units(rt, &units, a_string.*);
-    try appendStringUtf16Units(rt, &units, b_string.*);
+    try appendStringUtf16Units(rt, &units, a_string);
+    try appendStringUtf16Units(rt, &units, b_string);
     return (try core.string.String.createUtf16(rt, units.items)).value();
 }
 
-fn appendStringInPlace(rt: *core.JSRuntime, lhs_string: *core.string.String, rhs_string: *core.string.String) !bool {
-    // Rope lhs: never resolve it here (resolveData() would flatten it
-    // eagerly). An unmaterialized rope grows through its private tail
-    // buffer instead of chaining one node per append; a rope rhs keeps the
-    // rope-of-rope linking so its own deferred content stays lazy.
-    if (lhs_string.isRope()) {
-        if (rhs_string.isRope()) return false;
-        return lhs_string.appendRopeTail(rt, rhs_string.resolveData());
-    }
-    try rhs_string.ensureFlat(rt);
-    return switch (rhs_string.resolveData()) {
-        .latin1 => |rhs_bytes| switch (lhs_string.resolveData()) {
-            .latin1 => try lhs_string.appendLatin1InPlace(rt, rhs_bytes),
-            .utf16 => try lhs_string.appendLatin1ToUtf16InPlace(rt, rhs_bytes),
-        },
-        .utf16 => |rhs_units| switch (lhs_string.resolveData()) {
-            .latin1 => try lhs_string.appendUtf16WidenInPlace(rt, rhs_units),
-            .utf16 => try lhs_string.appendUtf16InPlace(rt, rhs_units),
-        },
-    };
+/// Extends an exclusively-held unmaterialized rope's tail with `rhs`'s flat
+/// content. `rhs` must NOT be a rope (the caller guards that so the rhs's own
+/// deferred content stays lazy through rope-of-rope linking instead).
+fn appendRopeTailValue(rt: *core.JSRuntime, node: *core.string.StringRope, rhs: core.JSValue) !bool {
+    if (rhs.ropeBody() != null) return false;
+    if (node.flat != null) return false;
+    const rhs_string = stringObject(rhs) orelse return false;
+    return core.string.appendRopeTail(node, rt, rhs_string.resolveData());
 }
 
 pub fn tryAppendStringInPlace(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.JSValue, max_ref_count: usize) !bool {
-    // Strings/ropes carry a `StringHeader`, NOT the `BlockHeader` that
-    // `refHeader()` returns (it only covers big_int/object/module) — using
-    // refHeader here returned null for every string, silently disabling this
-    // entire in-place append. Use `stringHeader()` so the rc-1/rc-2 unshared
-    // fast path (qjs JS_ConcatStringInPlace) actually fires.
-    const lhs_header = lhs.stringHeader() orelse return false;
-    if (@as(usize, @intCast(lhs_header.rc)) > max_ref_count) return false;
-    const lhs_string = stringObject(lhs) orelse return false;
-    const rhs_string = stringObject(rhs) orelse return false;
-    return try appendStringInPlace(rt, lhs_string, rhs_string);
+    // Only an exclusively-held unmaterialized rope lhs can be extended in
+    // place (via its private tail buffer). Flat strings store their characters
+    // inline in a fixed-size allocation (qjs `JSString` FAM), so there is no
+    // spare capacity — the caller copies into a fresh string instead.
+    const node = lhs.ropeBody() orelse return false;
+    if (@as(usize, @intCast(node.header().rc)) > max_ref_count) return false;
+    return appendRopeTailValue(rt, node, rhs);
 }
 
 pub fn tryAppendLatin1StringInPlace(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.JSValue, max_ref_count: usize) !bool {
@@ -1064,17 +1041,16 @@ pub fn tryAppendLatin1StringInPlace(rt: *core.JSRuntime, lhs: core.JSValue, rhs:
 }
 
 pub fn tryAppendLatin1AtomRepeatedInPlace(rt: *core.JSRuntime, lhs: core.JSValue, atom_id: core.Atom, repeat_count: usize, max_ref_count: usize) !bool {
-    // See tryAppendStringInPlace: a string's refcount lives in `stringHeader()`,
-    // not `refHeader()` (which is null for strings).
-    const lhs_header = lhs.stringHeader() orelse return false;
-    if (@as(usize, @intCast(lhs_header.rc)) > max_ref_count) return false;
-    const lhs_string = stringObject(lhs) orelse return false;
-    if (rt.atoms.kind(atom_id) != .string) return false;
-    const suffix = rt.atoms.name(atom_id) orelse return false;
-    for (suffix) |byte| {
-        if (byte > 0x7f) return false;
-    }
-    return try lhs_string.appendLatin1RepeatedInPlace(rt, suffix, repeat_count);
+    // Flat strings store their characters inline in a fixed-size allocation
+    // (QuickJS `JSString` FAM), so there is no spare capacity to extend into
+    // in place. Callers fall back to `latin1AtomRepeatedConcatValue`, which
+    // copies into a fresh string.
+    _ = rt;
+    _ = lhs;
+    _ = atom_id;
+    _ = repeat_count;
+    _ = max_ref_count;
+    return false;
 }
 
 pub fn latin1AtomRepeatedConcatValue(rt: *core.JSRuntime, lhs: core.JSValue, atom_id: core.Atom, repeat_count: usize) !?core.JSValue {
@@ -1116,14 +1092,14 @@ fn stringObject(value: core.JSValue) ?*core.string.String {
     return value.asStringBody();
 }
 
-fn appendStringLatin1Units(rt: *core.JSRuntime, out: *std.ArrayList(u8), string: core.string.String) !void {
+fn appendStringLatin1Units(rt: *core.JSRuntime, out: *std.ArrayList(u8), string: *const core.string.String) !void {
     switch (string.resolveData()) {
         .latin1 => |bytes| try out.appendSlice(rt.memory.allocator, bytes),
         .utf16 => |units| try appendUtf16AsUtf8(rt, out, units),
     }
 }
 
-fn stringLatin1IsAscii(string: core.string.String) bool {
+fn stringLatin1IsAscii(string: *const core.string.String) bool {
     switch (string.resolveData()) {
         .latin1 => |bytes| {
             for (bytes) |byte| {
@@ -1135,7 +1111,7 @@ fn stringLatin1IsAscii(string: core.string.String) bool {
     }
 }
 
-fn appendStringUtf16Units(rt: *core.JSRuntime, out: *std.ArrayList(u16), string: core.string.String) !void {
+fn appendStringUtf16Units(rt: *core.JSRuntime, out: *std.ArrayList(u16), string: *const core.string.String) !void {
     switch (string.resolveData()) {
         .latin1 => |bytes| {
             for (bytes) |byte| try out.append(rt.memory.allocator, byte);
@@ -1268,7 +1244,7 @@ fn parseIntString(bytes: []const u8) ?i32 {
 fn compareStringValues(a: core.JSValue, b: core.JSValue) ?i32 {
     const a_string = a.asStringBody() orelse return null;
     const b_string = b.asStringBody() orelse return null;
-    return a_string.compare(b_string.*);
+    return a_string.compare(b_string);
 }
 
 fn jsMathPow(lhs: f64, rhs: f64) f64 {

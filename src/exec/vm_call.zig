@@ -108,9 +108,9 @@ pub fn enterCallProfile(rt: *core.JSRuntime) CallProfileGuard {
 
 pub fn linkDerivedConstructorThisLocal(ctx: *core.JSContext, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
     if (!function.flags.is_derived_class_constructor) return;
-    const count = @min(function.var_names.len, frame.locals.len);
-    for (function.var_names[0..count], 0..) |atom_id, idx| {
-        if (!value_ops.atomNameEql(ctx.runtime, atom_id, "this")) continue;
+    const count = @min(function.vardefs.len, frame.locals.len);
+    for (function.vardefs[0..count], 0..) |vd, idx| {
+        if (!value_ops.atomNameEql(ctx.runtime, vd.var_name, "this")) continue;
         const this_cell = try slot_ops.ensureVarRefCell(ctx, &frame.this_value);
         const old_value = frame.locals[idx];
         frame.locals[idx] = this_cell;
@@ -200,21 +200,23 @@ pub inline fn initFrameVarRefs(
         return;
     }
 
-    if (function.var_ref_names.len == 0) return;
+    if (function.varRefNamesLen() == 0) return;
     const owned_refs = if (windows.var_refs) |values| blk: {
-        std.debug.assert(values.len == function.var_ref_names.len);
+        std.debug.assert(values.len == function.varRefNamesLen());
         break :blk values;
     } else blk: {
         if (use_inline_storage) {
-            if (ctx.runtime.vm_stack.carve(&ctx.runtime.memory, function.var_ref_names.len)) |window| break :blk window;
+            if (ctx.runtime.vm_stack.carve(&ctx.runtime.memory, function.varRefNamesLen())) |window| break :blk window;
         }
-        break :blk try frame.allocOwnedStorage(&ctx.runtime.memory, function.var_ref_names.len);
+        break :blk try frame.allocOwnedStorage(&ctx.runtime.memory, function.varRefNamesLen());
     };
     var initialized: usize = 0;
     errdefer {
         for (owned_refs[0..initialized]) |*val| val.free(ctx.runtime);
     }
-    for (function.var_ref_names, 0..) |var_name, idx| {
+    var idx: usize = 0;
+    while (idx < function.varRefNamesLen()) : (idx += 1) {
+        const var_name = function.varRefName(idx);
         // Top-level script let/const: share the cell that already lives in the
         // ctx.lexicals VARREF slot (qjs frame.var_refs[idx] aliases the global
         // lexical cell, js_closure_define_global_var). Falls back to building a
@@ -222,7 +224,7 @@ pub inline fn initFrameVarRefs(
         // In the var_ref_names path (top-level script frame only; module/closure
         // frames take the var_refs-passed path above), a lexical var-ref is a
         // .global_decl top-level let/const (the top frame has no .ref captures).
-        const is_global_decl = idx < function.var_ref_is_global_decl.len and function.var_ref_is_global_decl[idx];
+        const is_global_decl = function.varRefIsGlobalDeclAt(idx);
         if (is_global_decl) {
             // qjs check-before-create: the redeclaration gate (check_define_var,
             // mirrors JS_CheckDefineGlobalVar PASS1) must run BEFORE the
@@ -232,7 +234,7 @@ pub inline fn initFrameVarRefs(
             // creates/shares the real ctx.lexicals VARREF cell after the check
             // passes and rebinds frame.var_refs[idx] to alias it (qjs
             // js_closure_define_global_var PASS2).
-            const is_const = idx < function.var_ref_is_const.len and function.var_ref_is_const[idx];
+            const is_const = function.varRefIsConstAt(idx);
             const cell = try core.VarRef.createClosed(ctx.runtime, core.JSValue.uninitialized());
             cell.varRefIsConstSlot().* = is_const;
             cell.is_lexical = true;

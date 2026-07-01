@@ -818,7 +818,7 @@ pub const DynamicAtom = struct {
 
     pub fn strongRefCount(self: DynamicAtom) usize {
         if (isValueSymbolKind(self.kind)) {
-            if (self.str) |body| return @intCast(body.header.rc);
+            if (self.str) |body| return @intCast(body.header().rc);
         }
         return self.ref_count;
     }
@@ -926,7 +926,7 @@ pub const AtomTable = struct {
                 slot.* = null;
                 // Predefined ids are never recycled, so the weak
                 // back-pointer can stay valid on the string.
-                gc.release(rt, &cached.header);
+                gc.release(rt, cached.header());
             }
         }
         for (self.entries) |*entry| {
@@ -934,10 +934,10 @@ pub const AtomTable = struct {
                 entry.str = null;
                 cached.atom_id = string.String.no_atom_id;
                 if (isValueSymbolKind(entry.kind)) {
-                    cached.header.rc = 1;
-                    gc.release(rt, &cached.header);
+                    cached.header().rc = 1;
+                    gc.release(rt, cached.header());
                 } else {
-                    gc.release(rt, &cached.header);
+                    gc.release(rt, cached.header());
                 }
             }
         }
@@ -1021,7 +1021,7 @@ pub const AtomTable = struct {
         const entry = &self.entries[idx];
         if (isValueSymbolKind(entry.kind)) {
             if (entry.str) |body| {
-                gc.release(self.runtime.?, &body.header);
+                gc.release(self.runtime.?, body.header());
                 return;
             }
         }
@@ -1134,38 +1134,40 @@ pub const AtomTable = struct {
             const slot = &self.predefined_str[atom_id - 1];
             if (slot.* == null) {
                 slot.* = s;
-                gc.retain(&s.header);
+                gc.retain(s.header());
             }
             return;
         }
         const entry = self.findDynamic(atom_id) orelse return;
         if (!entry.isLive() or entry.kind != .string or entry.str != null) return;
         entry.str = s;
-        gc.retain(&s.header);
+        gc.retain(s.header());
         s.atom_id = atom_id;
     }
 
     pub fn symbolValue(self: *AtomTable, rt: *JSRuntime, atom_id: Atom) !JSValue {
         const body = try self.ensureSymbolBody(rt, atom_id);
-        if (body.header.rc == 0) {
-            body.header.rc = 1;
+        const hdr = body.header();
+        if (hdr.rc == 0) {
+            hdr.rc = 1;
         } else {
-            gc.retain(&body.header);
+            gc.retain(hdr);
         }
-        return JSValue.symbol(&body.header);
+        return JSValue.symbol(hdr);
     }
 
     pub fn takeSymbolValue(self: *AtomTable, rt: *JSRuntime, atom_id: Atom) !JSValue {
         const body = try self.ensureSymbolBody(rt, atom_id);
-        if (body.header.rc == 0) body.header.rc = 1;
-        return JSValue.symbol(&body.header);
+        const hdr = body.header();
+        if (hdr.rc == 0) hdr.rc = 1;
+        return JSValue.symbol(hdr);
     }
 
     pub fn symbolValueIfLive(self: *AtomTable, rt: *JSRuntime, atom_id: Atom) !JSValue {
         const body = self.symbolBodyIfLive(atom_id) orelse return JSValue.undefinedValue();
         _ = rt;
-        gc.retain(&body.header);
-        return JSValue.symbol(&body.header);
+        gc.retain(body.header());
+        return JSValue.symbol(body.header());
     }
 
     pub fn retainSymbolWeakRef(self: *AtomTable, atom_id: Atom) void {
@@ -1186,7 +1188,7 @@ pub const AtomTable = struct {
         entry.weakref_count -= 1;
         if (entry.weakref_count == 0 and entry.strongRefCount() == 0) {
             if (entry.str) |body| {
-                if (body.header.rc == 0) {
+                if (body.header().rc == 0) {
                     self.finalizeDeadEntry(@intCast(idx), body);
                     string.String.destroyWeakSymbolBody(rt, body);
                 }
@@ -1226,7 +1228,7 @@ pub const AtomTable = struct {
         const entry = self.findDynamicConst(atom_id) orelse return null;
         if (!isValueSymbolKind(entry.kind)) return null;
         const body = entry.str orelse return null;
-        if (body.header.rc == 0) return null;
+        if (body.header().rc == 0) return null;
         return body;
     }
 
@@ -1264,7 +1266,7 @@ pub const AtomTable = struct {
             transferred_refs -= 2;
         }
         body.atom_id = atom_id;
-        body.header.rc = @intCast(transferred_refs);
+        body.header().rc = @intCast(transferred_refs);
         entry.ref_count = 0;
         entry.str = body;
         return body;
@@ -1399,7 +1401,7 @@ pub const AtomTable = struct {
             std.debug.assert(cached.atom_id == entry.id);
             cached.atom_id = string.String.no_atom_id;
             if (destroying_body == null or destroying_body.? != cached) {
-                gc.release(self.runtime.?, &cached.header);
+                gc.release(self.runtime.?, cached.header());
             }
         }
         const bytes = entry.bytes;
@@ -1420,8 +1422,8 @@ pub const AtomTable = struct {
         _ = self;
         std.debug.assert(isValueSymbolKind(entry.kind));
         if (entry.str) |body| {
-            std.debug.assert(body.header.rc > 0);
-            gc.retain(&body.header);
+            std.debug.assert(body.header().rc > 0);
+            gc.retain(body.header());
             return;
         }
         entry.ref_count += 1;

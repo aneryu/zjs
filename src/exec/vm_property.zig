@@ -211,9 +211,9 @@ pub fn localPutNextPc(put: LocalPut) usize {
 pub fn localCompletionPutWritableForFastPath(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, put: LocalPut) bool {
     if (put.idx >= frame.locals.len) return false;
     if (put.checked) return false;
-    if (put.idx < function.var_is_lexical.len and function.var_is_lexical[put.idx]) return false;
+    if (put.idx < function.vardefs.len and function.vardefs[put.idx].is_lexical) return false;
     if (varRefCellFromValue(frame.locals[put.idx]) != null) return false;
-    if (put.idx < function.var_is_const.len and function.var_is_const[put.idx]) return false;
+    if (put.idx < function.vardefs.len and function.vardefs[put.idx].is_const) return false;
     return true;
 }
 
@@ -325,14 +325,14 @@ pub fn bindingStoreWritableForFastPath(
             return !stored.isUninitialized();
         }
         if (slot.isUninitialized()) return false;
-        if (binding.idx < function.var_ref_is_const.len and function.var_ref_is_const[binding.idx]) return false;
-        if (binding.opc == op.put_var_ref_check and binding.idx < function.var_ref_names.len and call_runtime.globalLexicalHasForGlobal(ctx, global, function.var_ref_names[binding.idx])) return false;
+        if (function.varRefIsConstAt(binding.idx)) return false;
+        if (binding.opc == op.put_var_ref_check and binding.idx < function.varRefNamesLen() and call_runtime.globalLexicalHasForGlobal(ctx, global, function.varRefName(binding.idx))) return false;
         return true;
     }
     if (binding.idx >= frame.locals.len) return false;
     if (binding.checked) {
         if (slot_ops.varRefSlotIsUninitialized(frame.locals[binding.idx])) return false;
-        if (binding.idx < function.var_is_const.len and function.var_is_const[binding.idx]) return false;
+        if (binding.idx < function.vardefs.len and function.vardefs[binding.idx].is_const) return false;
     }
     return true;
 }
@@ -366,9 +366,9 @@ fn varRefGlobalLexicalWritable(
     function: *const bytecode.Bytecode,
     var_ref_idx: u16,
 ) bool {
-    if (var_ref_idx >= function.var_ref_names.len) return false;
+    if (var_ref_idx >= function.varRefNamesLen()) return false;
     const env = call_runtime.existingGlobalLexicalEnv(ctx) orelse return false;
-    const desc = env.getOwnProperty(ctx.runtime, function.var_ref_names[var_ref_idx]) orelse return false;
+    const desc = env.getOwnProperty(ctx.runtime, function.varRefName(var_ref_idx)) orelse return false;
     return desc.kind == .data and (desc.writable orelse false);
 }
 
@@ -432,8 +432,8 @@ pub fn decodeBindingPut(code: []const u8, pc: usize) ?BindingPut {
 
 pub fn globalVarAtom(function: *const bytecode.Bytecode, idx: u16) ?core.Atom {
     if (idx < function.closure_var.len) return function.closure_var[idx].var_name;
-    if (idx >= function.var_ref_names.len) return null;
-    return function.var_ref_names[idx];
+    if (idx >= function.varRefNamesLen()) return null;
+    return function.varRefName(idx);
 }
 
 pub fn decodeGlobalPut(function: *const bytecode.Bytecode, pc: usize) ?GlobalBindingPut {
@@ -503,8 +503,8 @@ pub fn varRefStoreWritableForFastPath(
     }
     if (slot.isUninitialized()) return false;
     if (store.opc == op.put_var_ref_check) {
-        if (store.idx < function.var_ref_names.len and call_runtime.globalLexicalHasForGlobal(ctx, global, function.var_ref_names[store.idx])) return false;
-        if (store.idx < function.var_ref_is_const.len and function.var_ref_is_const[store.idx]) return false;
+        if (store.idx < function.varRefNamesLen() and call_runtime.globalLexicalHasForGlobal(ctx, global, function.varRefName(store.idx))) return false;
+        if (function.varRefIsConstAt(store.idx)) return false;
     }
     return true;
 }
@@ -895,7 +895,7 @@ pub fn decodeStringSliceConstLocalStore(
     const store = decodeLocalPut(code, call_pc + 3) orelse return null;
     if (store.idx >= frame.locals.len) return null;
     if (slot_ops.varRefSlotIsUninitialized(frame.locals[store.idx])) return null;
-    if (store.idx < function.var_is_const.len and function.var_is_const[store.idx]) return null;
+    if (store.idx < function.vardefs.len and function.vardefs[store.idx].is_const) return null;
 
     const input_len = string_value.len();
     const input_len_i64 = std.math.cast(i64, input_len) orelse return null;
@@ -1038,7 +1038,7 @@ pub fn functionFrameBindingShadowsGlobal(rt: *core.JSRuntime, function: *const b
 }
 
 fn functionHasDynamicScopeBindings(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame) bool {
-    if (function.var_ref_names.len != 0 or frame.var_refs.len != 0) return true;
+    if (function.varRefNamesLen() != 0 or frame.var_refs.len != 0) return true;
     const function_object = objectFromValue(frame.current_function) orelse return false;
     if (function_object.functionCapturesSlot().*.len != 0) return true;
     if (function_object.functionEvalLocalNames().len != 0) return true;
@@ -1051,9 +1051,9 @@ fn functionLocalOrArgBindingShadowsGlobal(rt: *core.JSRuntime, function: *const 
     for (function.arg_names[0..arg_count]) |name| {
         if (call_runtime.atomIdOrNameEql(rt, name, atom_id)) return true;
     }
-    const local_count = @min(function.var_names.len, frame.locals.len);
-    for (function.var_names[0..local_count]) |name| {
-        if (call_runtime.atomIdOrNameEql(rt, name, atom_id)) return true;
+    const local_count = @min(function.vardefs.len, frame.locals.len);
+    for (function.vardefs[0..local_count]) |vd| {
+        if (call_runtime.atomIdOrNameEql(rt, vd.var_name, atom_id)) return true;
     }
     return false;
 }
@@ -1109,8 +1109,10 @@ pub fn canFuseGlobalDataWrite(
 }
 
 pub fn frameHasVarRefBinding(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
-    const count = @min(frame.var_refs.len, function.var_ref_names.len);
-    for (function.var_ref_names[0..count]) |name| {
+    const count = @min(frame.var_refs.len, function.varRefNamesLen());
+    var idx: usize = 0;
+    while (idx < count) : (idx += 1) {
+        const name = function.varRefName(idx);
         if (name == atom_id) return true;
     }
     return false;

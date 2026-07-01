@@ -786,8 +786,8 @@ fn expectFunctionConstant(function: *const engine.bytecode.Bytecode, index: usiz
 }
 
 fn countOpcodeInFunctionBytecode(fb: *const engine.bytecode.FunctionBytecode, opcode: u8) usize {
-    var count = countOpcode(fb.byte_code, opcode);
-    for (fb.cpool) |value| {
+    var count = countOpcode(fb.byteCode(), opcode);
+    for (fb.cpoolSlice()) |value| {
         if (functionBytecodeFromValue(value)) |child| {
             count += countOpcodeInFunctionBytecode(child, opcode);
         }
@@ -1540,8 +1540,8 @@ test "M3.1 F4: for-await close keeps body statement source location" {
     const child = try expectFunctionConstant(&fn_bc, 0);
     var iterator_close_pc: ?usize = null;
     var pc: usize = 0;
-    while (pc < child.byte_code.len) {
-        const op_id = child.byte_code[pc];
+    while (pc < child.byteCode().len) {
+        const op_id = child.byteCode()[pc];
         if (op_id == op.iterator_close) {
             iterator_close_pc = pc;
             break;
@@ -1553,15 +1553,15 @@ test "M3.1 F4: for-await close keeps body statement source location" {
     const close_pc = iterator_close_pc orelse return error.TestExpectedEqual;
 
     const decoded = try engine.bytecode.pipeline.pc2line.decode(std.testing.allocator, .{
-        .bytes = child.pc2line_buf,
-        .line_num = child.line_num,
-        .col_num = child.col_num,
+        .bytes = child.pc2lineBuf(),
+        .line_num = child.lineNum(),
+        .col_num = child.colNum(),
         .memory = &env.rt.memory,
     });
     defer std.testing.allocator.free(decoded);
 
-    var line_num = child.line_num;
-    var col_num = child.col_num;
+    var line_num = child.lineNum();
+    var col_num = child.colNum();
     for (decoded) |slot| {
         if (slot.pc > close_pc) break;
         line_num = slot.line_num;
@@ -2771,11 +2771,11 @@ test "F6: simple function declaration" {
 
     const child = try expectFunctionConstant(&fn_bc, 0);
     try expectAtomName(&env, child.func_name, "foo");
-    try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.func_kind);
-    try std.testing.expect(child.has_prototype);
-    try std.testing.expect(!child.is_arrow_function);
-    try std.testing.expectEqual(@as(usize, 0), child.arg_names.len);
-    try expectOpcode(child.byte_code, op.return_undef);
+    try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.flags.func_kind);
+    try std.testing.expect(child.flags.has_prototype);
+    try std.testing.expect(!child.flags.is_arrow_function);
+    try std.testing.expectEqual(@as(usize, 0), child.argNames().len);
+    try expectOpcode(child.byteCode(), op.return_undef);
 }
 
 test "F6: line_num before explicit return does not add implicit return" {
@@ -2790,8 +2790,8 @@ test "F6: line_num before explicit return does not add implicit return" {
     defer fn_bc.deinit(env.rt);
 
     const child = try expectFunctionConstant(&fn_bc, 0);
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(child.byte_code, op.@"return"));
-    try std.testing.expectEqual(@as(usize, 0), countOpcode(child.byte_code, op.return_undef));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(child.byteCode(), op.@"return"));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(child.byteCode(), op.return_undef));
 }
 
 test "F6: function declaration with parameters" {
@@ -2802,11 +2802,11 @@ test "F6: function declaration with parameters" {
 
     const child = try expectFunctionConstant(&fn_bc, 0);
     try expectAtomName(&env, child.func_name, "foo");
-    try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.func_kind);
-    try std.testing.expectEqual(@as(usize, 2), child.arg_names.len);
-    try expectAtomName(&env, child.arg_names[0], "x");
-    try expectAtomName(&env, child.arg_names[1], "y");
-    try expectOpcode(child.byte_code, op.return_undef);
+    try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.flags.func_kind);
+    try std.testing.expectEqual(@as(usize, 2), child.argNames().len);
+    try expectAtomName(&env, child.argNames()[0], "x");
+    try expectAtomName(&env, child.argNames()[1], "y");
+    try expectOpcode(child.byteCode(), op.return_undef);
 }
 
 test "F6: var redeclaration of parameter keeps closure bound to arg" {
@@ -2827,11 +2827,11 @@ test "F6: function declaration with rest parameter" {
 
     const child = try expectFunctionConstant(&fn_bc, 0);
     try expectAtomName(&env, child.func_name, "foo");
-    try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.func_kind);
-    try std.testing.expectEqual(@as(usize, 1), child.arg_names.len);
-    try expectAtomName(&env, child.arg_names[0], "args");
-    try expectOpcode(child.byte_code, op.rest);
-    try expectOpcode(child.byte_code, op.return_undef);
+    try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.flags.func_kind);
+    try std.testing.expectEqual(@as(usize, 1), child.argNames().len);
+    try expectAtomName(&env, child.argNames()[0], "args");
+    try expectOpcode(child.byteCode(), op.rest);
+    try expectOpcode(child.byteCode(), op.return_undef);
 }
 
 test "F6: arrow function with block body" {
@@ -2841,11 +2841,11 @@ test "F6: arrow function with block body" {
     defer fn_bc.deinit(env.rt);
 
     const child = try expectFunctionConstant(&fn_bc, 0);
-    try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.func_kind);
-    try std.testing.expect(child.is_arrow_function);
-    try std.testing.expect(!child.has_prototype);
-    try std.testing.expectEqual(@as(usize, 0), child.arg_names.len);
-    try expectOpcode(child.byte_code, op.return_undef);
+    try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.flags.func_kind);
+    try std.testing.expect(child.flags.is_arrow_function);
+    try std.testing.expect(!child.flags.has_prototype);
+    try std.testing.expectEqual(@as(usize, 0), child.argNames().len);
+    try expectOpcode(child.byteCode(), op.return_undef);
 }
 
 test "F6: arrow function with expression body" {
@@ -2855,12 +2855,12 @@ test "F6: arrow function with expression body" {
     defer fn_bc.deinit(env.rt);
 
     const child = try expectFunctionConstant(&fn_bc, 0);
-    try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.func_kind);
-    try std.testing.expect(child.is_arrow_function);
-    try std.testing.expect(!child.has_prototype);
-    try std.testing.expectEqual(@as(usize, 0), child.arg_names.len);
-    try expectOpcode(child.byte_code, op.push_i8);
-    try expectOpcode(child.byte_code, op.@"return");
+    try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.flags.func_kind);
+    try std.testing.expect(child.flags.is_arrow_function);
+    try std.testing.expect(!child.flags.has_prototype);
+    try std.testing.expectEqual(@as(usize, 0), child.argNames().len);
+    try expectOpcode(child.byteCode(), op.push_i8);
+    try expectOpcode(child.byteCode(), op.@"return");
 }
 
 test "F6: arrow function with single parameter" {
@@ -2870,12 +2870,12 @@ test "F6: arrow function with single parameter" {
     defer fn_bc.deinit(env.rt);
 
     const child = try expectFunctionConstant(&fn_bc, 0);
-    try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.func_kind);
-    try std.testing.expect(child.is_arrow_function);
-    try std.testing.expectEqual(@as(usize, 1), child.arg_names.len);
-    try expectAtomName(&env, child.arg_names[0], "x");
-    try expectOpcode(child.byte_code, op.get_arg0);
-    try expectOpcode(child.byte_code, op.@"return");
+    try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.flags.func_kind);
+    try std.testing.expect(child.flags.is_arrow_function);
+    try std.testing.expectEqual(@as(usize, 1), child.argNames().len);
+    try expectAtomName(&env, child.argNames()[0], "x");
+    try expectOpcode(child.byteCode(), op.get_arg0);
+    try expectOpcode(child.byteCode(), op.@"return");
 }
 
 test "F6: arrow function with multiple parameters" {
@@ -2885,15 +2885,15 @@ test "F6: arrow function with multiple parameters" {
     defer fn_bc.deinit(env.rt);
 
     const child = try expectFunctionConstant(&fn_bc, 0);
-    try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.func_kind);
-    try std.testing.expect(child.is_arrow_function);
-    try std.testing.expectEqual(@as(usize, 2), child.arg_names.len);
-    try expectAtomName(&env, child.arg_names[0], "x");
-    try expectAtomName(&env, child.arg_names[1], "y");
-    try expectOpcode(child.byte_code, op.get_arg0);
-    try expectOpcode(child.byte_code, op.get_arg1);
-    try expectOpcode(child.byte_code, op.add);
-    try expectOpcode(child.byte_code, op.@"return");
+    try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.flags.func_kind);
+    try std.testing.expect(child.flags.is_arrow_function);
+    try std.testing.expectEqual(@as(usize, 2), child.argNames().len);
+    try expectAtomName(&env, child.argNames()[0], "x");
+    try expectAtomName(&env, child.argNames()[1], "y");
+    try expectOpcode(child.byteCode(), op.get_arg0);
+    try expectOpcode(child.byteCode(), op.get_arg1);
+    try expectOpcode(child.byteCode(), op.add);
+    try expectOpcode(child.byteCode(), op.@"return");
 }
 
 test "F6: arrow function with rest parameter" {
@@ -2903,12 +2903,12 @@ test "F6: arrow function with rest parameter" {
     defer fn_bc.deinit(env.rt);
 
     const child = try expectFunctionConstant(&fn_bc, 0);
-    try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.func_kind);
-    try std.testing.expect(child.is_arrow_function);
-    try std.testing.expectEqual(@as(usize, 1), child.arg_names.len);
-    try expectAtomName(&env, child.arg_names[0], "args");
-    try expectOpcode(child.byte_code, op.rest);
-    try expectOpcode(child.byte_code, op.@"return");
+    try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.flags.func_kind);
+    try std.testing.expect(child.flags.is_arrow_function);
+    try std.testing.expectEqual(@as(usize, 1), child.argNames().len);
+    try expectAtomName(&env, child.argNames()[0], "args");
+    try expectOpcode(child.byteCode(), op.rest);
+    try expectOpcode(child.byteCode(), op.@"return");
 }
 
 test "F6: function with object destructuring parameter" {
@@ -2921,8 +2921,8 @@ test "F6: function with object destructuring parameter" {
     try expectAtomName(&env, child.func_name, "foo");
     try std.testing.expectEqual(@as(u16, 1), child.arg_count);
     try std.testing.expectEqual(@as(u16, 2), child.var_count);
-    try expectOpcode(child.byte_code, op.get_field);
-    try expectOpcode(child.byte_code, op.return_undef);
+    try expectOpcode(child.byteCode(), op.get_field);
+    try expectOpcode(child.byteCode(), op.return_undef);
 }
 
 test "F6: function with array destructuring parameter" {
@@ -2935,8 +2935,8 @@ test "F6: function with array destructuring parameter" {
     try expectAtomName(&env, child.func_name, "foo");
     try std.testing.expectEqual(@as(u16, 1), child.arg_count);
     try std.testing.expectEqual(@as(u16, 2), child.var_count);
-    try expectOpcode(child.byte_code, op.special_object);
-    try expectOpcode(child.byte_code, op.return_undef);
+    try expectOpcode(child.byteCode(), op.special_object);
+    try expectOpcode(child.byteCode(), op.return_undef);
 }
 
 test "F6: arrow function with object destructuring parameter" {
@@ -2946,11 +2946,11 @@ test "F6: arrow function with object destructuring parameter" {
     defer fn_bc.deinit(env.rt);
 
     const child = try expectFunctionConstant(&fn_bc, 0);
-    try std.testing.expect(child.is_arrow_function);
+    try std.testing.expect(child.flags.is_arrow_function);
     try std.testing.expectEqual(@as(u16, 1), child.arg_count);
     try std.testing.expectEqual(@as(u16, 2), child.var_count);
-    try expectOpcode(child.byte_code, op.get_field);
-    try expectOpcode(child.byte_code, op.@"return");
+    try expectOpcode(child.byteCode(), op.get_field);
+    try expectOpcode(child.byteCode(), op.@"return");
 }
 
 test "F6: arrow function with array destructuring parameter" {
@@ -2960,11 +2960,11 @@ test "F6: arrow function with array destructuring parameter" {
     defer fn_bc.deinit(env.rt);
 
     const child = try expectFunctionConstant(&fn_bc, 0);
-    try std.testing.expect(child.is_arrow_function);
+    try std.testing.expect(child.flags.is_arrow_function);
     try std.testing.expectEqual(@as(u16, 1), child.arg_count);
     try std.testing.expectEqual(@as(u16, 2), child.var_count);
-    try expectOpcode(child.byte_code, op.special_object);
-    try expectOpcode(child.byte_code, op.@"return");
+    try expectOpcode(child.byteCode(), op.special_object);
+    try expectOpcode(child.byteCode(), op.@"return");
 }
 
 // ---- F7 Class parsing tests ----
@@ -2976,12 +2976,12 @@ test "F7: class with constructor" {
     defer fn_bc.deinit(env.rt);
 
     const ctor = try expectFunctionConstant(&fn_bc, 0);
-    try std.testing.expect(ctor.is_class_constructor);
-    try std.testing.expect(!ctor.is_derived_class_constructor);
-    try std.testing.expectEqual(@as(usize, 1), ctor.arg_names.len);
-    try expectAtomName(&env, ctor.arg_names[0], "x");
+    try std.testing.expect(ctor.flags.is_class_constructor);
+    try std.testing.expect(!ctor.flags.is_derived_class_constructor);
+    try std.testing.expectEqual(@as(usize, 1), ctor.argNames().len);
+    try expectAtomName(&env, ctor.argNames()[0], "x");
     try expectOpcode(fn_bc.code, op.define_class);
-    try expectOpcode(ctor.byte_code, op.put_field);
+    try expectOpcode(ctor.byteCode(), op.put_field);
 }
 
 test "F7: class with getter" {
@@ -2991,12 +2991,12 @@ test "F7: class with getter" {
     defer fn_bc.deinit(env.rt);
 
     const getter = try expectFunctionConstant(&fn_bc, 0);
-    try std.testing.expectEqual(function_def_mod.FunctionKind.normal, getter.func_kind);
-    try std.testing.expectEqual(@as(usize, 0), getter.arg_names.len);
+    try std.testing.expectEqual(function_def_mod.FunctionKind.normal, getter.flags.func_kind);
+    try std.testing.expectEqual(@as(usize, 0), getter.argNames().len);
     try expectOpcode(fn_bc.code, op.define_class);
     try expectOpcode(fn_bc.code, op.define_method);
-    try expectOpcode(getter.byte_code, op.get_field);
-    try expectOpcode(getter.byte_code, op.@"return");
+    try expectOpcode(getter.byteCode(), op.get_field);
+    try expectOpcode(getter.byteCode(), op.@"return");
 }
 
 test "F7: class with setter" {
@@ -3006,12 +3006,12 @@ test "F7: class with setter" {
     defer fn_bc.deinit(env.rt);
 
     const setter = try expectFunctionConstant(&fn_bc, 0);
-    try std.testing.expectEqual(function_def_mod.FunctionKind.normal, setter.func_kind);
-    try std.testing.expectEqual(@as(usize, 1), setter.arg_names.len);
-    try expectAtomName(&env, setter.arg_names[0], "value");
+    try std.testing.expectEqual(function_def_mod.FunctionKind.normal, setter.flags.func_kind);
+    try std.testing.expectEqual(@as(usize, 1), setter.argNames().len);
+    try expectAtomName(&env, setter.argNames()[0], "value");
     try expectOpcode(fn_bc.code, op.define_class);
     try expectOpcode(fn_bc.code, op.define_method);
-    try expectOpcode(setter.byte_code, op.put_field);
+    try expectOpcode(setter.byteCode(), op.put_field);
 }
 
 test "F7: class field ASI before generator method" {
@@ -3077,12 +3077,12 @@ test "F7: super() constructor call" {
     defer fn_bc.deinit(env.rt);
 
     const ctor = try expectFunctionConstant(&fn_bc, 0);
-    try std.testing.expect(ctor.is_class_constructor);
-    try std.testing.expect(ctor.is_derived_class_constructor);
+    try std.testing.expect(ctor.flags.is_class_constructor);
+    try std.testing.expect(ctor.flags.is_derived_class_constructor);
     try expectOpcode(fn_bc.code, op.define_class);
     try expectOpcode(fn_bc.code, op.get_var);
-    try expectOpcode(ctor.byte_code, op.get_super);
-    try expectOpcode(ctor.byte_code, op.call_method);
+    try expectOpcode(ctor.byteCode(), op.get_super);
+    try expectOpcode(ctor.byteCode(), op.call_method);
 }
 
 test "F7: derived constructor this read lowers to get_loc_checkthis" {
@@ -3092,10 +3092,10 @@ test "F7: derived constructor this read lowers to get_loc_checkthis" {
     defer fn_bc.deinit(env.rt);
 
     const ctor = try expectFunctionConstant(&fn_bc, 0);
-    try std.testing.expect(ctor.is_derived_class_constructor);
-    try expectOpcode(ctor.byte_code, op.get_loc_checkthis);
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(ctor.byte_code, op.@"return"));
-    try std.testing.expectEqual(@as(usize, 0), countOpcode(ctor.byte_code, op.return_undef));
+    try std.testing.expect(ctor.flags.is_derived_class_constructor);
+    try expectOpcode(ctor.byteCode(), op.get_loc_checkthis);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(ctor.byteCode(), op.@"return"));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(ctor.byteCode(), op.return_undef));
 }
 
 test "F7: super() rejected in base constructor" {
@@ -3113,9 +3113,9 @@ test "F9: yield expression" {
 
     const child = try expectFunctionConstant(&fn_bc, 0);
     try expectAtomName(&env, child.func_name, "g");
-    try std.testing.expectEqual(function_def_mod.FunctionKind.generator, child.func_kind);
-    try expectOpcode(child.byte_code, op.yield);
-    try expectOpcode(child.byte_code, op.return_async);
+    try std.testing.expectEqual(function_def_mod.FunctionKind.generator, child.flags.func_kind);
+    try expectOpcode(child.byteCode(), op.yield);
+    try expectOpcode(child.byteCode(), op.return_async);
 }
 
 test "F9: yield* expression" {
@@ -3126,11 +3126,11 @@ test "F9: yield* expression" {
 
     const child = try expectFunctionConstant(&fn_bc, 0);
     try expectAtomName(&env, child.func_name, "g");
-    try std.testing.expectEqual(function_def_mod.FunctionKind.generator, child.func_kind);
-    try expectOpcode(child.byte_code, op.for_of_start);
-    try expectOpcode(child.byte_code, op.iterator_next);
-    try expectOpcode(child.byte_code, op.yield_star);
-    try expectOpcode(child.byte_code, op.return_async);
+    try std.testing.expectEqual(function_def_mod.FunctionKind.generator, child.flags.func_kind);
+    try expectOpcode(child.byteCode(), op.for_of_start);
+    try expectOpcode(child.byteCode(), op.iterator_next);
+    try expectOpcode(child.byteCode(), op.yield_star);
+    try expectOpcode(child.byteCode(), op.return_async);
 }
 
 test "F8: export default statement" {
@@ -3454,9 +3454,9 @@ test "F9: async function expression" {
     defer fn_bc.deinit(env.rt);
 
     const child = try expectFunctionConstant(&fn_bc, 0);
-    try std.testing.expectEqual(function_def_mod.FunctionKind.async, child.func_kind);
-    try std.testing.expect(!child.has_prototype);
-    try expectOpcode(child.byte_code, op.return_async);
+    try std.testing.expectEqual(function_def_mod.FunctionKind.async, child.flags.func_kind);
+    try std.testing.expect(!child.flags.has_prototype);
+    try expectOpcode(child.byteCode(), op.return_async);
 }
 
 test "F9: async arrow function" {
@@ -3466,10 +3466,10 @@ test "F9: async arrow function" {
     defer fn_bc.deinit(env.rt);
 
     const child = try expectFunctionConstant(&fn_bc, 0);
-    try std.testing.expectEqual(function_def_mod.FunctionKind.async, child.func_kind);
-    try std.testing.expect(child.is_arrow_function);
-    try std.testing.expect(!child.has_prototype);
-    try expectOpcode(child.byte_code, op.return_async);
+    try std.testing.expectEqual(function_def_mod.FunctionKind.async, child.flags.func_kind);
+    try std.testing.expect(child.flags.is_arrow_function);
+    try std.testing.expect(!child.flags.has_prototype);
+    try expectOpcode(child.byteCode(), op.return_async);
 }
 
 test "F9: async function declaration" {
@@ -3480,8 +3480,8 @@ test "F9: async function declaration" {
 
     const child = try expectFunctionConstant(&fn_bc, 0);
     try expectAtomName(&env, child.func_name, "f");
-    try std.testing.expectEqual(function_def_mod.FunctionKind.async, child.func_kind);
-    try expectOpcode(child.byte_code, op.return_async);
+    try std.testing.expectEqual(function_def_mod.FunctionKind.async, child.flags.func_kind);
+    try expectOpcode(child.byteCode(), op.return_async);
 }
 
 test "F9: async function declaration with parameters" {
@@ -3491,10 +3491,10 @@ test "F9: async function declaration with parameters" {
     defer fn_bc.deinit(env.rt);
 
     const child = try expectFunctionConstant(&fn_bc, 0);
-    try std.testing.expectEqual(function_def_mod.FunctionKind.async, child.func_kind);
-    try std.testing.expectEqual(@as(usize, 2), child.arg_names.len);
-    try expectAtomName(&env, child.arg_names[0], "x");
-    try expectAtomName(&env, child.arg_names[1], "y");
+    try std.testing.expectEqual(function_def_mod.FunctionKind.async, child.flags.func_kind);
+    try std.testing.expectEqual(@as(usize, 2), child.argNames().len);
+    try expectAtomName(&env, child.argNames()[0], "x");
+    try expectAtomName(&env, child.argNames()[1], "y");
 }
 
 test "F9: async function declaration with body" {
@@ -3504,9 +3504,9 @@ test "F9: async function declaration with body" {
     defer fn_bc.deinit(env.rt);
 
     const child = try expectFunctionConstant(&fn_bc, 0);
-    try std.testing.expectEqual(function_def_mod.FunctionKind.async, child.func_kind);
-    try expectOpcode(child.byte_code, op.push_i8);
-    try expectOpcode(child.byte_code, op.return_async);
+    try std.testing.expectEqual(function_def_mod.FunctionKind.async, child.flags.func_kind);
+    try expectOpcode(child.byteCode(), op.push_i8);
+    try expectOpcode(child.byteCode(), op.return_async);
 }
 
 test "F9: yield outside generator error" {
@@ -3530,9 +3530,9 @@ test "F9: await inside async function no error" {
     defer fn_bc.deinit(env.rt);
 
     const child = try expectFunctionConstant(&fn_bc, 0);
-    try std.testing.expectEqual(function_def_mod.FunctionKind.async, child.func_kind);
-    try expectOpcode(child.byte_code, op.await);
-    try expectOpcode(child.byte_code, op.return_async);
+    try std.testing.expectEqual(function_def_mod.FunctionKind.async, child.flags.func_kind);
+    try expectOpcode(child.byteCode(), op.await);
+    try expectOpcode(child.byteCode(), op.return_async);
 }
 
 // ---- Object literal enhancements ----
@@ -4085,8 +4085,8 @@ fn countFunctionClosures(code: []const u8) usize {
 }
 
 fn functionBytecodeHasKind(fb: *const engine.bytecode.FunctionBytecode, kind: function_def.FunctionKind) bool {
-    if (fb.func_kind == kind) return true;
-    for (fb.cpool) |value| {
+    if (fb.flags.func_kind == kind) return true;
+    for (fb.cpoolSlice()) |value| {
         if (functionBytecodeFromValue(value)) |child| {
             if (functionBytecodeHasKind(child, kind)) return true;
         }
@@ -4100,10 +4100,10 @@ fn functionBytecodeHasClosure(
     name: []const u8,
     closure_type: function_def.ClosureType,
 ) bool {
-    for (fb.closure_var) |cv| {
+    for (fb.closureVar()) |cv| {
         if (cv.closure_type == closure_type and std.mem.eql(u8, rt.atoms.name(cv.var_name) orelse "", name)) return true;
     }
-    for (fb.cpool) |value| {
+    for (fb.cpoolSlice()) |value| {
         if (functionBytecodeFromValue(value)) |child| {
             if (functionBytecodeHasClosure(rt, child, name, closure_type)) return true;
         }
@@ -4827,10 +4827,10 @@ test "arrow early error checks do not reject valid nested rest destructuring" {
     try std.testing.expect(parsed.syntax_error == null);
     try std.testing.expect(countFunctionClosures(parsed.function.code) > 0);
     const arrow = try expectFunctionConstant(&parsed.function, 0);
-    try std.testing.expect(arrow.is_arrow_function);
-    try std.testing.expectEqual(function_def.FunctionKind.normal, arrow.func_kind);
-    try expectOpcode(arrow.byte_code, qop.special_object);
-    try expectOpcode(arrow.byte_code, qop.return_undef);
+    try std.testing.expect(arrow.flags.is_arrow_function);
+    try std.testing.expectEqual(function_def.FunctionKind.normal, arrow.flags.func_kind);
+    try expectOpcode(arrow.byteCode(), qop.special_object);
+    try expectOpcode(arrow.byteCode(), qop.return_undef);
 }
 
 test "assignment destructuring early errors reject invalid rest forms" {
