@@ -98,6 +98,8 @@ const re_header_register_count = 3;
 const re_header_bytecode_len = 4;
 const int32_max: u32 = 0x7fffffff;
 const group_name_trailer_len = 2;
+const class8_bitmap_len = 16;
+const class8_char_count = class8_bitmap_len * 8;
 
 const lre_ctype_space: u8 = 1 << 0;
 const lre_ctype_digit: u8 = 1 << 1;
@@ -177,6 +179,11 @@ const REOPCodeEnum = enum(u8) {
     set_char_pos,
     check_advance,
     prev,
+    class8,
+    not_class8,
+    scan_until_char8,
+    loop_class8_g,
+    loop_not_class8_g,
 };
 
 const CbufType = enum {
@@ -886,6 +893,66 @@ const ExecState = struct {
         self.cptr = prev;
     }
 
+    inline fn scanUntilChar8(self: *ExecState, comptime cbuf_type: CbufType, needle: u8) bool {
+        if (self.cptr >= self.cbuf_end) return false;
+        var pos = self.cptr + 1;
+        if (comptime cbuf_type == .latin1) {
+            const haystack = self.cbuf_latin1[pos..self.cbuf_end];
+            if (std.mem.indexOfScalar(u8, haystack, needle)) |offset| {
+                self.cptr = pos + offset;
+                return true;
+            }
+            return false;
+        }
+
+        const units = self.cbuf_utf16;
+        while (pos < self.cbuf_end) : (pos += 1) {
+            if (units[pos] == needle) {
+                self.cptr = pos;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    inline fn scanGreedyClass8(
+        self: *ExecState,
+        comptime safety: ExecSafety,
+        comptime cbuf_type: CbufType,
+        bitmap: [*]const u8,
+        inverted: bool,
+        min: u8,
+        continuation_pc: [*]const u8,
+    ) !bool {
+        var count: usize = 0;
+        var last_candidate: ?usize = if (min == 0) self.cptr else null;
+        while (self.cptr < self.cbuf_end) {
+            const before = self.cptr;
+            const c = self.getCharUnchecked(cbuf_type);
+            const matched = class8CodePointMatches(bitmap, c);
+            if (if (inverted) matched else !matched) {
+                self.cptr = before;
+                break;
+            }
+            count += 1;
+            if (count >= min) {
+                const after = self.cptr;
+                if (last_candidate) |candidate| {
+                    self.cptr = candidate;
+                    try self.pushExecState(safety, continuation_pc, .split);
+                    self.cptr = after;
+                }
+                last_candidate = after;
+            }
+            try self.s.pollTimeout();
+        }
+        if (last_candidate) |candidate| {
+            self.cptr = candidate;
+            return true;
+        }
+        return false;
+    }
+
     inline fn matchRawForward(self: *ExecState, comptime safety: ExecSafety, comptime cbuf_type: CbufType, start: usize, end: usize) bool {
         if (comptime safety == .checked) {
             if (end < start) return false;
@@ -1079,6 +1146,36 @@ fn lreExecBacktrack(
                     if (st.cptr >= st.cbuf_end) break :dispatch_once;
                     const c = st.getCharUnchecked(cbuf_type);
                     if (lreIsSpace(c)) break :dispatch_once;
+                    continue :main;
+                },
+                .class8, .not_class8 => {
+                    try st.ensurePc(safety, st.pc, class8_bitmap_len);
+                    const bitmap = st.pc;
+                    st.pc += class8_bitmap_len;
+                    if (st.cptr >= st.cbuf_end) break :dispatch_once;
+                    const c = st.getCharUnchecked(cbuf_type);
+                    const matched = class8CodePointMatches(bitmap, c);
+                    if (opcode == .class8) {
+                        if (!matched) break :dispatch_once;
+                    } else {
+                        if (matched) break :dispatch_once;
+                    }
+                    continue :main;
+                },
+                .scan_until_char8 => {
+                    const needle = try st.getU8(safety);
+                    const offset = try st.getI32(safety);
+                    if (!st.scanUntilChar8(cbuf_type, needle)) break :dispatch_once;
+                    st.pc = try st.pcWithOffset(safety, offset);
+                    continue :main;
+                },
+                .loop_class8_g, .loop_not_class8_g => {
+                    const min = try st.getU8(safety);
+                    if (min > 1) return error.BytecodeCorrupt;
+                    try st.ensurePc(safety, st.pc, class8_bitmap_len);
+                    const bitmap = st.pc;
+                    st.pc += class8_bitmap_len;
+                    if (!try st.scanGreedyClass8(safety, cbuf_type, bitmap, opcode == .loop_not_class8_g, min, st.pc)) break :dispatch_once;
                     continue :main;
                 },
                 .save_start, .save_end => {
@@ -1420,7 +1517,7 @@ fn checkedAllocCount(header: REBytecodeHeader) !usize {
 }
 
 inline fn decodeOp(byte: u8) ?REOPCodeEnum {
-    if (byte > @intFromEnum(REOPCodeEnum.prev)) return null;
+    if (byte > @intFromEnum(REOPCodeEnum.loop_not_class8_g)) return null;
     return @enumFromInt(byte);
 }
 
@@ -1532,6 +1629,7 @@ pub fn compile(allocator: std.mem.Allocator, pattern: []const u8, flags_str: []c
     if (s.buf_ptr != pattern.len) return error.InvalidPattern;
     try s.reEmitOpU8(.save_end, 0);
     try s.reEmitOp(.match);
+    s.patchSearchLiteralPrefix();
     try s.patchHeader();
 
     return try s.byte_code.toOwnedSlice(allocator);
@@ -1716,6 +1814,28 @@ const REParseState = struct {
         self.byte_code.items[2] = self.capture_count;
         self.byte_code.items[3] = stack_size;
         std.mem.writeInt(u32, self.byte_code.items[4..8], @intCast(bytecode_len), .little);
+    }
+
+    fn patchSearchLiteralPrefix(self: *REParseState) void {
+        if ((self.re_flags & regex_bytecode.flags.sticky) != 0) return;
+        const prelude = header_len;
+        const pattern_start = prelude + 11;
+        const first_atom = pattern_start + 2;
+        const code = self.byte_code.items;
+        if (code.len < first_atom + 3) return;
+        if (code[prelude] != opByte(.split_goto_first)) return;
+        if (std.mem.readInt(u32, code[prelude + 1 ..][0..4], .little) != 6) return;
+        if (code[prelude + 5] != opByte(.any)) return;
+        if (code[prelude + 6] != opByte(.goto_)) return;
+        if (@as(i32, @bitCast(std.mem.readInt(u32, code[prelude + 7 ..][0..4], .little))) != -11) return;
+        if (code[pattern_start] != opByte(.save_start) or code[pattern_start + 1] != 0) return;
+        if (code[first_atom] != opByte(.char)) return;
+
+        const needle_u16 = std.mem.readInt(u16, code[first_atom + 1 ..][0..2], .little);
+        if (needle_u16 > 0xff) return;
+        code[prelude + 5] = opByte(.scan_until_char8);
+        code[prelude + 6] = @intCast(needle_u16);
+        std.mem.writeInt(u32, code[prelude + 7 ..][0..4], @bitCast(@as(i32, -11)), .little);
     }
 
     fn reParseDisjunction(self: *REParseState, terminator: ?u8, is_backward_dir: bool) CompileError!void {
@@ -2669,7 +2789,21 @@ const REParseState = struct {
                 quant_atom_start += 3;
             }
         }
+        if (greedy and max == int32_max and (min == 0 or min == 1) and !analysis.need_check_advance) {
+            if (try self.tryFoldGreedyClass8Loop(quant_atom_start, @intCast(min))) return;
+        }
         try self.wrapGenericQuantifier(quant_atom_start, min, max, greedy, analysis.need_check_advance);
+    }
+
+    fn tryFoldGreedyClass8Loop(self: *REParseState, atom_start: usize, min: u8) !bool {
+        if (atom_start >= self.byte_code.items.len) return false;
+        const op = decodeOp(self.byte_code.items[atom_start]) orelse return false;
+        if (op != .class8 and op != .not_class8) return false;
+        if (self.byte_code.items.len - atom_start != 1 + class8_bitmap_len) return false;
+        try self.insertBytes(atom_start + 1, 1);
+        self.byte_code.items[atom_start] = opByte(if (op == .class8) .loop_class8_g else .loop_not_class8_g);
+        self.byte_code.items[atom_start + 1] = min;
+        return true;
     }
 
     fn wrapGenericQuantifier(self: *REParseState, atom_start: usize, min: u32, max: u32, greedy: bool, need_check_advance: bool) CompileError!void {
@@ -3079,6 +3213,16 @@ const REParseState = struct {
             try self.reEmitOpU32(.char32, 0xffffffff);
             return;
         }
+        if (!self.ignore_case) {
+            if (buildClass8IncludedBitmap(ranges)) |bitmap| {
+                try self.reEmitClass8(.class8, &bitmap);
+                return;
+            }
+            if (buildClass8ExcludedBitmap(ranges)) |bitmap| {
+                try self.reEmitClass8(.not_class8, &bitmap);
+                return;
+            }
+        }
         var high = ranges.lastHi();
         if (high == unicode.char_range_sentinel) {
             high = ranges.points.items[ranges.points.items.len - 2];
@@ -3104,6 +3248,11 @@ const REParseState = struct {
                 try self.appendU16(@intCast(inclusive_hi));
             }
         }
+    }
+
+    fn reEmitClass8(self: *REParseState, op: REOPCodeEnum, bitmap: *const [class8_bitmap_len]u8) !void {
+        try self.reEmitOp(op);
+        try self.byte_code.appendSlice(self.allocator, bitmap[0..]);
     }
 
     fn backReferenceOp(self: *const REParseState, is_backward_dir: bool) REOPCodeEnum {
@@ -3227,6 +3376,52 @@ const REClassAtom = union(enum) {
 
 const CharRange = unicode.CharRange;
 
+fn buildClass8IncludedBitmap(ranges: *const CharRange) ?[class8_bitmap_len]u8 {
+    var bitmap: [class8_bitmap_len]u8 = @splat(0);
+    var range_index: usize = 0;
+    while (range_index < ranges.rangeCount()) : (range_index += 1) {
+        const range = ranges.rangeAt(range_index);
+        if (range.hi > class8_char_count) return null;
+        var c = range.lo;
+        while (c < range.hi) : (c += 1) {
+            setClass8BitmapBit(&bitmap, @intCast(c));
+        }
+    }
+    return bitmap;
+}
+
+fn buildClass8ExcludedBitmap(ranges: *const CharRange) ?[class8_bitmap_len]u8 {
+    if (!rangesContainTailFrom(ranges, class8_char_count)) return null;
+    var bitmap: [class8_bitmap_len]u8 = @splat(0);
+    var c: u32 = 0;
+    while (c < class8_char_count) : (c += 1) {
+        if (!rangesContainCodePoint(ranges, c)) {
+            setClass8BitmapBit(&bitmap, @intCast(c));
+        }
+    }
+    return bitmap;
+}
+
+fn rangesContainTailFrom(ranges: *const CharRange, start: u32) bool {
+    var range_index: usize = 0;
+    while (range_index < ranges.rangeCount()) : (range_index += 1) {
+        const range = ranges.rangeAt(range_index);
+        if (range.hi <= start) continue;
+        return range.lo <= start and range.hi == unicode.char_range_sentinel;
+    }
+    return false;
+}
+
+fn rangesContainCodePoint(ranges: *const CharRange, cp: u32) bool {
+    var range_index: usize = 0;
+    while (range_index < ranges.rangeCount()) : (range_index += 1) {
+        const range = ranges.rangeAt(range_index);
+        if (cp < range.lo) return false;
+        if (cp < range.hi) return true;
+    }
+    return false;
+}
+
 fn addAtomToCharRange(ranges: *CharRange, atom: REClassAtom, ignore_case: bool, is_unicode: bool) CompileError!void {
     switch (atom) {
         .code_point => |cp| {
@@ -3315,8 +3510,12 @@ fn reNeedCheckAdvAndCaptureInit(code: []const u8) CompileError!AtomAnalysis {
                 len += @as(usize, count) * 8;
                 need_check_advance = false;
             },
-            .char, .char_i, .char32, .char32_i, .dot, .any, .space, .not_space => {
+            .char, .char_i, .char32, .char32_i, .dot, .any, .space, .not_space, .class8, .not_class8 => {
                 need_check_advance = false;
+            },
+            .loop_class8_g, .loop_not_class8_g => {
+                if (pos + 2 > code.len) return error.InvalidPattern;
+                if (code[pos + 1] != 0) need_check_advance = false;
             },
             .line_start, .line_start_m, .line_end, .line_end_m, .set_i32, .set_char_pos, .word_boundary, .word_boundary_i, .not_word_boundary, .not_word_boundary_i, .prev => {},
             .save_start, .save_end, .save_reset => {},
@@ -3391,6 +3590,9 @@ fn opFixedSize(op: REOPCodeEnum) ?usize {
         .char, .char_i => 3,
         .char32, .char32_i => 5,
         .dot, .any, .space, .not_space, .line_start, .line_start_m, .line_end, .line_end_m, .match, .lookahead_match, .negative_lookahead_match, .word_boundary, .word_boundary_i, .not_word_boundary, .not_word_boundary_i, .prev => 1,
+        .class8, .not_class8 => 1 + class8_bitmap_len,
+        .scan_until_char8 => 6,
+        .loop_class8_g, .loop_not_class8_g => 2 + class8_bitmap_len,
         .goto_, .split_goto_first, .split_next_first, .lookahead, .negative_lookahead => 5,
         .loop, .set_i32 => 6,
         .set_char_pos, .check_advance => 2,
@@ -3613,6 +3815,23 @@ inline fn fromHex(byte: u8) ?u21 {
     if (byte >= 'A' and byte <= 'F') return byte - 'A' + 10;
     if (byte >= 'a' and byte <= 'f') return byte - 'a' + 10;
     return null;
+}
+
+inline fn class8Mask(byte: u8) u8 {
+    return @as(u8, 1) << @as(u3, @intCast(byte & 7));
+}
+
+inline fn class8BitmapContains(bitmap: [*]const u8, byte: u8) bool {
+    return (bitmap[byte >> 3] & class8Mask(byte)) != 0;
+}
+
+inline fn class8CodePointMatches(bitmap: [*]const u8, code_point: u21) bool {
+    if (code_point >= class8_char_count) return false;
+    return class8BitmapContains(bitmap, @intCast(code_point));
+}
+
+inline fn setClass8BitmapBit(bitmap: *[class8_bitmap_len]u8, byte: u8) void {
+    bitmap[byte >> 3] |= class8Mask(byte);
 }
 
 const DecodedWtf8 = struct {
