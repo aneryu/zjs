@@ -1,3 +1,5 @@
+//=== Public API & types ====================================================
+
 const std = @import("std");
 const unicode = @import("unicode.zig");
 const regexp_properties = @import("unicode/regexp_properties.zig");
@@ -31,6 +33,7 @@ pub const Match = struct {
     start: usize,
     end: usize,
     capture_count: usize,
+    // Only captures[0..capture_count] are initialized and valid.
     captures: [max_captures]Capture = undefined,
 };
 
@@ -43,6 +46,7 @@ pub const ExecResult = enum {
 
 pub const ExecStatus = struct {
     result: ExecResult,
+    // Valid only when result == .match.
     match: Match = undefined,
 };
 
@@ -50,6 +54,7 @@ pub const Input = union(enum) {
     latin1: []const u8,
     utf16: []const u16,
 
+    // Module-private: callers outside this file choose their own input handling.
     fn len(self: Input) usize {
         return switch (self) {
             .latin1 => |bytes| bytes.len,
@@ -92,46 +97,7 @@ const CaptureSlotBuffer = struct {
     }
 };
 
-const header_len = 8;
-const re_header_capture_count = 2;
-const re_header_register_count = 3;
-const re_header_bytecode_len = 4;
-const int32_max: u32 = 0x7fffffff;
-const group_name_trailer_len = 2;
-const class8_bitmap_len = 16;
-const class8_char_count = class8_bitmap_len * 8;
-
-const lre_ctype_space: u8 = 1 << 0;
-const lre_ctype_digit: u8 = 1 << 1;
-const lre_ctype_upper: u8 = 1 << 2;
-const lre_ctype_lower: u8 = 1 << 3;
-const lre_ctype_under: u8 = 1 << 4;
-
-const lre_ctype_bits = buildLRECtypeBits();
-const lre_canonicalize_non_unicode_latin1 = buildLRECanonicalizeLatin1(false);
-const lre_canonicalize_unicode_latin1 = buildLRECanonicalizeLatin1(true);
-
-fn buildLRECtypeBits() [256]u8 {
-    var table: [256]u8 = @splat(0);
-    for (0..table.len) |i| {
-        const byte: u8 = @intCast(i);
-        if ((byte >= 0x09 and byte <= 0x0d) or byte == 0x20 or byte == 0xa0) table[i] |= lre_ctype_space;
-        if (byte >= '0' and byte <= '9') table[i] |= lre_ctype_digit;
-        if (byte >= 'A' and byte <= 'Z') table[i] |= lre_ctype_upper;
-        if (byte >= 'a' and byte <= 'z') table[i] |= lre_ctype_lower;
-        if (byte == '_') table[i] |= lre_ctype_under;
-    }
-    return table;
-}
-
-fn buildLRECanonicalizeLatin1(comptime is_unicode: bool) [256]u21 {
-    @setEvalBranchQuota(20000);
-    var table: [256]u21 = undefined;
-    for (0..table.len) |i| {
-        table[i] = unicode.regexpCanonicalize(@intCast(i), is_unicode);
-    }
-    return table;
-}
+//=== Opcode enum ==========================================================
 
 const REOPCodeEnum = enum(u8) {
     invalid,
@@ -185,6 +151,19 @@ const REOPCodeEnum = enum(u8) {
     loop_class8_g,
     loop_not_class8_g,
 };
+
+//=== Bytecode layout & shared tables ======================================
+
+const header_len = 8;
+const re_header_capture_count = 2;
+const re_header_register_count = 3;
+const re_header_bytecode_len = 4;
+const int32_max: u32 = 0x7fffffff;
+const group_name_trailer_len = 2;
+const class8_bitmap_len = 16;
+const class8_char_count = class8_bitmap_len * 8;
+
+//=== Execution enums & context ===========================================
 
 const CbufType = enum {
     latin1,
@@ -260,6 +239,61 @@ const REExecContext = struct {
     }
 };
 
+// Shared classification and canonicalization tables.
+
+const lre_ctype_space: u8 = 1 << 0;
+const lre_ctype_digit: u8 = 1 << 1;
+const lre_ctype_upper: u8 = 1 << 2;
+const lre_ctype_lower: u8 = 1 << 3;
+const lre_ctype_under: u8 = 1 << 4;
+
+const lre_ctype_bits = buildLRECtypeBits();
+const lre_canonicalize_non_unicode_latin1 = buildLRECanonicalizeLatin1(false);
+const lre_canonicalize_unicode_latin1 = buildLRECanonicalizeLatin1(true);
+
+fn buildLRECtypeBits() [256]u8 {
+    var table: [256]u8 = @splat(0);
+    for (0..table.len) |i| {
+        const byte: u8 = @intCast(i);
+        if ((byte >= 0x09 and byte <= 0x0d) or byte == 0x20 or byte == 0xa0) table[i] |= lre_ctype_space;
+        if (byte >= '0' and byte <= '9') table[i] |= lre_ctype_digit;
+        if (byte >= 'A' and byte <= 'Z') table[i] |= lre_ctype_upper;
+        if (byte >= 'a' and byte <= 'z') table[i] |= lre_ctype_lower;
+        if (byte == '_') table[i] |= lre_ctype_under;
+    }
+    return table;
+}
+
+fn buildLRECanonicalizeLatin1(comptime is_unicode: bool) [256]u21 {
+    @setEvalBranchQuota(20000);
+    var table: [256]u21 = undefined;
+    for (0..table.len) |i| {
+        table[i] = unicode.regexpCanonicalize(@intCast(i), is_unicode);
+    }
+    return table;
+}
+
+inline fn lreCanonicalize(code_point: u21, is_unicode: bool) u21 {
+    if (code_point < 128) {
+        if (is_unicode) {
+            if (code_point >= 'A' and code_point <= 'Z') return code_point - 'A' + 'a';
+        } else {
+            if (code_point >= 'a' and code_point <= 'z') return code_point - 'a' + 'A';
+        }
+        return code_point;
+    }
+    if (code_point < 256) {
+        const byte: u8 = @intCast(code_point);
+        return if (is_unicode)
+            lre_canonicalize_unicode_latin1[byte]
+        else
+            lre_canonicalize_non_unicode_latin1[byte];
+    }
+    return unicode.regexpCanonicalize(code_point, is_unicode);
+}
+
+//=== Header / slot helpers ===============================================
+
 fn normalizeStartIndex(input: Input, cbuf_type: CbufType, start_index: usize) usize {
     if (cbuf_type != .utf16_unicode) return start_index;
     return switch (input) {
@@ -282,18 +316,30 @@ pub fn captureSlotValue(value: usize) ?usize {
     return slotOptional(value);
 }
 
-pub fn captureCount(bytecode: []const u8) usize {
+fn captureCountFromBytecode(bytecode: []const u8) usize {
     if (bytecode.len <= re_header_capture_count) return 0;
     return bytecode[re_header_capture_count];
 }
 
-pub fn registerCount(bytecode: []const u8) usize {
+pub fn captureCount(bytecode: []const u8) usize {
+    return captureCountFromBytecode(bytecode);
+}
+
+fn registerCountFromBytecode(bytecode: []const u8) usize {
     if (bytecode.len <= re_header_register_count) return 0;
     return bytecode[re_header_register_count];
 }
 
+pub fn registerCount(bytecode: []const u8) usize {
+    return registerCountFromBytecode(bytecode);
+}
+
+fn allocCountFromBytecode(bytecode: []const u8) usize {
+    return captureCountFromBytecode(bytecode) * 2 + registerCountFromBytecode(bytecode);
+}
+
 pub fn allocCount(bytecode: []const u8) usize {
-    return captureCount(bytecode) * 2 + registerCount(bytecode);
+    return allocCountFromBytecode(bytecode);
 }
 
 pub fn getFlags(bytecode: []const u8) u16 {
@@ -301,7 +347,7 @@ pub fn getFlags(bytecode: []const u8) u16 {
     return std.mem.readInt(u16, bytecode[0..2], .little);
 }
 
-pub fn groupName(bytecode: []const u8, one_based_capture_index: usize) ?[]const u8 {
+fn groupNameFromBytecode(bytecode: []const u8, one_based_capture_index: usize) ?[]const u8 {
     if (one_based_capture_index == 0 or (getFlags(bytecode) & flags.named_groups) == 0) return null;
     const header = parseHeader(bytecode) catch return null;
     if (one_based_capture_index >= header.capture_count) return null;
@@ -319,6 +365,12 @@ pub fn groupName(bytecode: []const u8, one_based_capture_index: usize) ?[]const 
     return null;
 }
 
+pub fn groupName(bytecode: []const u8, one_based_capture_index: usize) ?[]const u8 {
+    return groupNameFromBytecode(bytecode, one_based_capture_index);
+}
+
+//=== Compiled wrapper & exec entry points ================================
+
 pub const Compiled = struct {
     bytecode: []u8,
 
@@ -328,28 +380,28 @@ pub const Compiled = struct {
     }
 
     pub fn captureCount(self: Compiled) usize {
-        return regex_bytecode.captureCount(self.bytecode);
+        return captureCountFromBytecode(self.bytecode);
     }
 
     pub fn registerCount(self: Compiled) usize {
-        return regex_bytecode.registerCount(self.bytecode);
+        return registerCountFromBytecode(self.bytecode);
     }
 
     pub fn allocCount(self: Compiled) usize {
-        return regex_bytecode.allocCount(self.bytecode);
+        return allocCountFromBytecode(self.bytecode);
     }
 
     pub fn groupName(self: Compiled, one_based_capture_index: usize) ?[]const u8 {
-        return regex_bytecode.groupName(self.bytecode, one_based_capture_index);
+        return groupNameFromBytecode(self.bytecode, one_based_capture_index);
     }
 
     pub fn flagBits(self: Compiled) u16 {
-        return regex_bytecode.getFlags(self.bytecode);
+        return getFlags(self.bytecode);
     }
 };
 
 pub fn compilePatternAndFlags(allocator: std.mem.Allocator, pattern: []const u8, flags_str: []const u8) !Compiled {
-    return .{ .bytecode = try regex_bytecode.compile(allocator, pattern, flags_str) };
+    return .{ .bytecode = try compile(allocator, pattern, flags_str) };
 }
 
 pub fn isSupportedUnicodePropertyExpression(name: []const u8) bool {
@@ -399,7 +451,9 @@ pub fn execIntoMatchWithOptions(
     return .match;
 }
 
-/// Fast path for bytecode produced by this compiler or by an equivalent validator.
+/// Fast path for bytecode produced by this compiler or by an equivalent
+/// validator. Trusted execution still validates the bytecode header and capture
+/// storage size, but skips per-opcode corruption checks inside the VM loop.
 pub fn execIntoMatchTrustedWithOptions(
     allocator: std.mem.Allocator,
     bytecode: []const u8,
@@ -462,7 +516,8 @@ pub fn execCaptureSlotsSliceWithOptions(
     return execCaptureSlotsParsed(.checked, allocator, bytecode, input, start_index, options, header, capture);
 }
 
-/// Fast path for bytecode produced by this compiler or by an equivalent validator.
+/// Trusted capture-slot execution for compiler-produced bytecode.
+/// See `execIntoMatchTrustedWithOptions` for the safety contract.
 pub fn execCaptureSlotsSliceTrustedWithOptions(
     allocator: std.mem.Allocator,
     bytecode: []const u8,
@@ -549,7 +604,8 @@ pub fn testMatchWithOptions(allocator: std.mem.Allocator, bytecode: []const u8, 
     return (try execCaptureSlotsParsed(.checked, allocator, bytecode, input, start_index, options, header, capture_buf.slots)) == .match;
 }
 
-/// Fast path for bytecode produced by this compiler or by an equivalent validator.
+/// Trusted test-only execution for compiler-produced bytecode.
+/// See `execIntoMatchTrustedWithOptions` for the safety contract.
 pub fn testMatchTrustedWithOptions(allocator: std.mem.Allocator, bytecode: []const u8, input: Input, start_index: usize, options: ExecOptions) !bool {
     const header = try parseHeader(bytecode);
     var capture_buf = CaptureSlotBuffer{};
@@ -557,6 +613,8 @@ pub fn testMatchTrustedWithOptions(allocator: std.mem.Allocator, bytecode: []con
     defer capture_buf.deinit(allocator);
     return (try execCaptureSlotsParsed(.trusted, allocator, bytecode, input, start_index, options, header, capture_buf.slots)) == .match;
 }
+
+//=== Execution state & backtrack interpreter ==============================
 
 inline fn decodeExecState(comptime safety: ExecSafety, meta: usize) !REExecStateEnum {
     const type_value = meta & bp_type_mask;
@@ -894,6 +952,8 @@ const ExecState = struct {
     }
 
     inline fn scanUntilChar8(self: *ExecState, comptime cbuf_type: CbufType, needle: u8) bool {
+        // The search prelude has already consumed the current unit; resume from
+        // the following position and leave cptr on the matched needle.
         if (self.cptr >= self.cbuf_end) return false;
         var pos = self.cptr + 1;
         if (comptime cbuf_type == .latin1) {
@@ -1479,6 +1539,8 @@ fn lreExecBacktrack(
     }
 }
 
+//=== Exec output & header parse ===========================================
+
 fn writeMatch(bytecode: []const u8, total_capture_count: usize, captures: [*]const usize, result: *Match) void {
     const start = slotOptional(captures[0]) orelse 0;
     const end = slotOptional(captures[1]) orelse start;
@@ -1513,31 +1575,13 @@ fn parseHeader(bytecode: []const u8) !REBytecodeHeader {
 fn checkedAllocCount(header: REBytecodeHeader) !usize {
     if (header.capture_count == 0 or header.capture_count > max_captures) return error.BytecodeCorrupt;
     if (header.register_count > register_count_max) return error.BytecodeCorrupt;
-    return header.capture_count * 2 + header.register_count;
+    const capture_slots = std.math.mul(usize, header.capture_count, 2) catch return error.BytecodeCorrupt;
+    return std.math.add(usize, capture_slots, header.register_count) catch return error.BytecodeCorrupt;
 }
 
 inline fn decodeOp(byte: u8) ?REOPCodeEnum {
     if (byte > @intFromEnum(REOPCodeEnum.loop_not_class8_g)) return null;
     return @enumFromInt(byte);
-}
-
-inline fn lreCanonicalize(code_point: u21, is_unicode: bool) u21 {
-    if (code_point < 128) {
-        if (is_unicode) {
-            if (code_point >= 'A' and code_point <= 'Z') return code_point - 'A' + 'a';
-        } else {
-            if (code_point >= 'a' and code_point <= 'z') return code_point - 'a' + 'A';
-        }
-        return code_point;
-    }
-    if (code_point < 256) {
-        const byte: u8 = @intCast(code_point);
-        return if (is_unicode)
-            lre_canonicalize_unicode_latin1[byte]
-        else
-            lre_canonicalize_non_unicode_latin1[byte];
-    }
-    return unicode.regexpCanonicalize(code_point, is_unicode);
 }
 
 inline fn isLineTerminator(code_point: u21) bool {
@@ -1572,7 +1616,7 @@ fn writeHeader(buf: []u8, flag_bits: u16, captures: u8, stack_size: u8, code_len
     std.mem.writeInt(u32, buf[re_header_bytecode_len..header_len], code_len, .little);
 }
 
-const regex_bytecode = @This();
+//=== Compiler =============================================================
 
 pub const CompileError = std.mem.Allocator.Error || error{
     InvalidPattern,
@@ -1600,6 +1644,142 @@ const ModifierGroup = struct {
     }
 };
 
+fn parseModifierGroup(pattern: []const u8, start: usize) CompileError!?ModifierGroup {
+    if (!startsWithAt(pattern, start, "(?")) return null;
+    var pos = start + 2;
+    if (pos >= pattern.len) return null;
+    const first = pattern[pos];
+    if (first != '-' and !isRegExpModifierFlag(first)) return null;
+
+    var add: [3]bool = .{ false, false, false };
+    var remove: [3]bool = .{ false, false, false };
+    var saw_modifier = false;
+    while (pos < pattern.len and isRegExpModifierFlag(pattern[pos])) : (pos += 1) {
+        const slot = modifierFlagSlot(pattern[pos]);
+        if (add[slot]) return error.InvalidPattern;
+        add[slot] = true;
+        saw_modifier = true;
+    }
+    if (pos < pattern.len and pattern[pos] == '-') {
+        pos += 1;
+        while (pos < pattern.len and isRegExpModifierFlag(pattern[pos])) : (pos += 1) {
+            const slot = modifierFlagSlot(pattern[pos]);
+            if (remove[slot]) return error.InvalidPattern;
+            remove[slot] = true;
+            saw_modifier = true;
+        }
+    }
+    if (!saw_modifier) return error.InvalidPattern;
+    if (pos >= pattern.len or pattern[pos] != ':') return error.InvalidPattern;
+    for (0..add.len) |slot| {
+        if (add[slot] and remove[slot]) return error.InvalidPattern;
+    }
+    return .{ .body_start = pos + 1, .add = add, .remove = remove };
+}
+
+fn startsWithAt(haystack: []const u8, index: usize, needle: []const u8) bool {
+    return index <= haystack.len and haystack.len - index >= needle.len and std.mem.eql(u8, haystack[index..][0..needle.len], needle);
+}
+
+fn isRegExpModifierFlag(byte: u8) bool {
+    return byte == 'i' or byte == 'm' or byte == 's';
+}
+
+fn modifierFlagSlot(byte: u8) usize {
+    return switch (byte) {
+        'i' => 0,
+        'm' => 1,
+        's' => 2,
+        else => unreachable,
+    };
+}
+
+const CharRange = unicode.CharRange;
+
+const REClassAtom = union(enum) {
+    code_point: u21,
+    ranges: CharRange,
+};
+
+/// A v-mode class set: code points plus multi-code-point strings
+/// (from `\q{...}`). Single-code-point string alternatives fold into
+/// `ranges`; `strings` stays deduplicated and allocator-owned.
+const REStringList = struct {
+    ranges: CharRange,
+    strings: std.ArrayList([]u21) = .empty,
+
+    fn init(allocator: std.mem.Allocator) REStringList {
+        return .{ .ranges = CharRange.init(allocator) };
+    }
+
+    fn deinit(self: *REStringList) void {
+        for (self.strings.items) |s| self.ranges.allocator.free(s);
+        self.strings.deinit(self.ranges.allocator);
+        self.ranges.deinit();
+    }
+
+    fn containsString(self: *const REStringList, needle: []const u21) bool {
+        for (self.strings.items) |s| {
+            if (std.mem.eql(u21, s, needle)) return true;
+        }
+        return false;
+    }
+
+    /// Takes ownership of `s` (frees it when already present).
+    fn addOwnedString(self: *REStringList, s: []u21) !void {
+        if (self.containsString(s)) {
+            self.ranges.allocator.free(s);
+            return;
+        }
+        try self.strings.append(self.ranges.allocator, s);
+    }
+
+    fn unionWith(self: *REStringList, other: *const REStringList) !void {
+        try self.ranges.addSet(&other.ranges);
+        for (other.strings.items) |s| {
+            if (self.containsString(s)) continue;
+            const copy = try self.ranges.allocator.dupe(u21, s);
+            errdefer self.ranges.allocator.free(copy);
+            try self.strings.append(self.ranges.allocator, copy);
+        }
+    }
+
+    fn intersectWith(self: *REStringList, other: *REStringList) !void {
+        try self.ranges.intersectWith(&other.ranges);
+        var write: usize = 0;
+        for (self.strings.items) |s| {
+            if (other.containsString(s)) {
+                self.strings.items[write] = s;
+                write += 1;
+            } else {
+                self.ranges.allocator.free(s);
+            }
+        }
+        self.strings.shrinkRetainingCapacity(write);
+    }
+
+    fn subtract(self: *REStringList, other: *REStringList) !void {
+        try self.ranges.subWith(&other.ranges);
+        var write: usize = 0;
+        for (self.strings.items) |s| {
+            if (!other.containsString(s)) {
+                self.strings.items[write] = s;
+                write += 1;
+            } else {
+                self.ranges.allocator.free(s);
+            }
+        }
+        self.strings.shrinkRetainingCapacity(write);
+    }
+};
+
+const REStringListOperandResult = struct { set: REStringList, was_range: bool };
+
+const REStringListBuildContext = struct {
+    s: *REParseState,
+    set: *REStringList,
+};
+
 pub fn compile(allocator: std.mem.Allocator, pattern: []const u8, flags_str: []const u8) CompileError![]u8 {
     const re_flags = try parseFlags(flags_str);
 
@@ -1609,17 +1789,17 @@ pub fn compile(allocator: std.mem.Allocator, pattern: []const u8, flags_str: []c
         .buf_start = pattern,
         .buf_end = pattern.len,
         .re_flags = re_flags,
-        .is_unicode = (re_flags & (regex_bytecode.flags.unicode | regex_bytecode.flags.unicode_sets)) != 0,
-        .unicode_sets = (re_flags & regex_bytecode.flags.unicode_sets) != 0,
-        .ignore_case = (re_flags & regex_bytecode.flags.ignore_case) != 0,
-        .multi_line = (re_flags & regex_bytecode.flags.multiline) != 0,
-        .dotall = (re_flags & regex_bytecode.flags.dot_all) != 0,
+        .is_unicode = (re_flags & (flags.unicode | flags.unicode_sets)) != 0,
+        .unicode_sets = (re_flags & flags.unicode_sets) != 0,
+        .ignore_case = (re_flags & flags.ignore_case) != 0,
+        .multi_line = (re_flags & flags.multiline) != 0,
+        .dotall = (re_flags & flags.dot_all) != 0,
     };
     errdefer s.byte_code.deinit(allocator);
     defer s.group_names.deinit(allocator);
 
     try s.emitHeader();
-    if ((re_flags & regex_bytecode.flags.sticky) == 0) {
+    if ((re_flags & flags.sticky) == 0) {
         try s.reEmitOpI32(.split_goto_first, 6);
         try s.reEmitOp(.any);
         try s.reEmitOpI32(.goto_, -11);
@@ -1644,27 +1824,27 @@ fn parseFlags(flag_bytes: []const u8) CompileError!u16 {
         if (seen[flag]) return error.InvalidPattern;
         seen[flag] = true;
         switch (flag) {
-            'd' => re_flags |= regex_bytecode.flags.indices,
-            'g' => re_flags |= regex_bytecode.flags.global,
+            'd' => re_flags |= flags.indices,
+            'g' => re_flags |= flags.global,
             'i' => {
-                re_flags |= regex_bytecode.flags.ignore_case;
+                re_flags |= flags.ignore_case;
             },
             'm' => {
-                re_flags |= regex_bytecode.flags.multiline;
+                re_flags |= flags.multiline;
             },
             's' => {
-                re_flags |= regex_bytecode.flags.dot_all;
+                re_flags |= flags.dot_all;
             },
             'u' => {
-                re_flags |= regex_bytecode.flags.unicode;
+                re_flags |= flags.unicode;
                 saw_u = true;
             },
             'v' => {
-                re_flags |= regex_bytecode.flags.unicode_sets;
+                re_flags |= flags.unicode_sets;
                 saw_v = true;
             },
             'y' => {
-                re_flags |= regex_bytecode.flags.sticky;
+                re_flags |= flags.sticky;
             },
             else => return error.InvalidPattern,
         }
@@ -1672,6 +1852,120 @@ fn parseFlags(flag_bytes: []const u8) CompileError!u16 {
     if (saw_u and saw_v) return error.InvalidPattern;
     return re_flags;
 }
+
+fn parseGroupNameAt(pattern: []const u8, index: *usize) CompileError![]const u8 {
+    const start = index.*;
+    if (start >= pattern.len) return error.InvalidPattern;
+    var position: usize = 0;
+    while (index.* < pattern.len and pattern[index.*] != '>') : (position += 1) {
+        const cp = try readGroupNameCodePoint(pattern, index);
+        if (position == 0) {
+            if (!isRegExpGroupNameStart(cp)) return error.InvalidPattern;
+        } else if (!isRegExpGroupNameContinue(cp)) {
+            return error.InvalidPattern;
+        }
+    }
+    if (index.* == start or index.* >= pattern.len or pattern[index.*] != '>') return error.InvalidPattern;
+    const name = pattern[start..index.*];
+    index.* += 1;
+    return name;
+}
+
+fn groupNamesEqual(lhs: []const u8, rhs: []const u8) bool {
+    var lhs_index: usize = 0;
+    var rhs_index: usize = 0;
+    while (lhs_index < lhs.len and rhs_index < rhs.len) {
+        const lhs_cp = readGroupNameCodePoint(lhs, &lhs_index) catch return false;
+        const rhs_cp = readGroupNameCodePoint(rhs, &rhs_index) catch return false;
+        if (lhs_cp != rhs_cp) return false;
+    }
+    return lhs_index == lhs.len and rhs_index == rhs.len;
+}
+
+fn readGroupNameCodePoint(pattern: []const u8, index: *usize) CompileError!u21 {
+    if (index.* >= pattern.len) return error.InvalidPattern;
+    if (pattern[index.*] == '\\') {
+        const first = try readUnicodeEscapeCodePoint(pattern, index);
+        if (isHiSurrogate(first)) {
+            const saved = index.*;
+            if (readUnicodeEscapeCodePoint(pattern, index)) |second| {
+                if (isLoSurrogate(second)) return fromSurrogate(@intCast(first), @intCast(second));
+            } else |_| {}
+            index.* = saved;
+        }
+        if (first > max_code_point) return error.InvalidPattern;
+        return first;
+    }
+    const byte = pattern[index.*];
+    const width = std.unicode.utf8ByteSequenceLength(byte) catch return error.InvalidPattern;
+    if (index.* + width > pattern.len) return error.InvalidPattern;
+    const cp = std.unicode.utf8Decode(pattern[index.* .. index.* + width]) catch return error.InvalidPattern;
+    if (cp > max_code_point) return error.InvalidPattern;
+    index.* += width;
+    return @intCast(cp);
+}
+
+fn readUnicodeEscapeCodePoint(pattern: []const u8, index: *usize) CompileError!u21 {
+    if (index.* + 2 > pattern.len or pattern[index.*] != '\\' or pattern[index.* + 1] != 'u') return error.InvalidPattern;
+    var pos = index.* + 2;
+    if (pos < pattern.len and pattern[pos] == '{') {
+        pos += 1;
+        var value: u21 = 0;
+        var saw_digit = false;
+        while (pos < pattern.len and pattern[pos] != '}') : (pos += 1) {
+            const digit = fromHex(pattern[pos]) orelse return error.InvalidPattern;
+            if (value > max_code_point / 16) return error.InvalidPattern;
+            value = value * 16 + digit;
+            if (value > max_code_point) return error.InvalidPattern;
+            saw_digit = true;
+        }
+        if (!saw_digit or pos >= pattern.len or pattern[pos] != '}') return error.InvalidPattern;
+        index.* = pos + 1;
+        return value;
+    }
+    if (pos + 4 > pattern.len) return error.InvalidPattern;
+    var value: u21 = 0;
+    var count: usize = 0;
+    while (count < 4) : (count += 1) {
+        value = value * 16 + (fromHex(pattern[pos + count]) orelse return error.InvalidPattern);
+    }
+    index.* = pos + 4;
+    return value;
+}
+
+fn isRegExpGroupNameStart(cp: u21) bool {
+    if (cp == '$' or cp == '_') return true;
+    if (unicode.isAsciiAlphaCodePoint(cp)) return true;
+    if (isInvalidRegExpGroupNameStart(cp)) return false;
+    return cp > 0x7f;
+}
+
+fn isRegExpGroupNameContinue(cp: u21) bool {
+    if (isInvalidRegExpGroupNameContinue(cp)) return false;
+    if (cp == 0x104a4) return true;
+    if (isRegExpGroupNameStart(cp)) return true;
+    if (unicode.isAsciiDigitCodePoint(cp)) return true;
+    if (cp == 0x1d7da) return true;
+    return false;
+}
+
+fn isInvalidRegExpGroupNameStart(cp: u21) bool {
+    if (unicode.isSurrogateCodePoint(cp)) return true;
+    return switch (cp) {
+        0x275e, 0x2764, 0x104a4, 0x1d7da, 0x1f08b, 0x1f415, 0x1f712, 0x1f98a, 0x10ffff => true,
+        else => false,
+    };
+}
+
+fn isInvalidRegExpGroupNameContinue(cp: u21) bool {
+    if (unicode.isSurrogateCodePoint(cp)) return true;
+    return switch (cp) {
+        0x275e, 0x2764, 0x1f08b, 0x1f415, 0x1f712, 0x1f98a, 0x10ffff => true,
+        else => false,
+    };
+}
+
+//=== Parser state =========================================================
 
 const REParseState = struct {
     allocator: std.mem.Allocator,
@@ -1691,6 +1985,8 @@ const REParseState = struct {
     has_named_captures: i32 = -1,
     @"opaque": ?*anyopaque = null,
     group_names: std.ArrayList(u8) = .empty,
+
+    //--- group name storage ---
 
     const CaptureParseResult = struct {
         count: u16,
@@ -1800,6 +2096,8 @@ const REParseState = struct {
         return self.has_named_captures != 0;
     }
 
+    //--- header emit / patch ---
+
     fn emitHeader(self: *REParseState) !void {
         try self.byte_code.appendNTimes(self.allocator, 0, header_len);
     }
@@ -1809,7 +2107,7 @@ const REParseState = struct {
         const stack_size = try reComputeRegisterCount(self.byte_code.items[header_len..]);
         const has_named_groups = self.group_names.items.len > @as(usize, self.capture_count - 1) * group_name_trailer_len;
         if (has_named_groups) try self.byte_code.appendSlice(self.allocator, self.group_names.items);
-        const flag_bits = self.re_flags | if (has_named_groups) regex_bytecode.flags.named_groups else 0;
+        const flag_bits = self.re_flags | if (has_named_groups) flags.named_groups else 0;
         std.mem.writeInt(u16, self.byte_code.items[0..2], flag_bits, .little);
         self.byte_code.items[2] = self.capture_count;
         self.byte_code.items[3] = stack_size;
@@ -1817,7 +2115,7 @@ const REParseState = struct {
     }
 
     fn patchSearchLiteralPrefix(self: *REParseState) void {
-        if ((self.re_flags & regex_bytecode.flags.sticky) != 0) return;
+        if ((self.re_flags & flags.sticky) != 0) return;
         const prelude = header_len;
         const pattern_start = prelude + 11;
         const first_atom = pattern_start + 2;
@@ -1837,6 +2135,8 @@ const REParseState = struct {
         code[prelude + 6] = @intCast(needle_u16);
         std.mem.writeInt(u32, code[prelude + 7 ..][0..4], @bitCast(@as(i32, -11)), .little);
     }
+
+    //--- top-level parse dispatch ---
 
     fn reParseDisjunction(self: *REParseState, terminator: ?u8, is_backward_dir: bool) CompileError!void {
         const start = self.byte_code.items.len;
@@ -1995,6 +2295,8 @@ const REParseState = struct {
         try self.reEmitOpU8(if (is_backward_dir) .save_start else .save_end, capture_index);
         return .{ .start = start, .quantifiable = true, .capture_count_before = capture_index };
     }
+
+    //--- escape parsing ---
 
     fn parseEscape(self: *REParseState, start: usize, is_backward_dir: bool) CompileError!Atom {
         std.debug.assert(self.buf_start[self.buf_ptr] == '\\');
@@ -2215,6 +2517,8 @@ const REParseState = struct {
         }
     }
 
+    //--- char class parsing ---
+
     fn reParseCharClass(self: *REParseState, start: usize, is_backward_dir: bool) CompileError!Atom {
         self.buf_ptr += 1;
         if (self.unicode_sets) {
@@ -2253,78 +2557,6 @@ const REParseState = struct {
         return self.buf_ptr + needle.len <= self.buf_start.len and
             std.mem.eql(u8, self.buf_start[self.buf_ptr..][0..needle.len], needle);
     }
-
-    /// A v-mode class set: code points plus multi-code-point strings
-    /// (from `\q{...}`). Single-code-point string alternatives fold into
-    /// `ranges`; `strings` stays deduplicated and allocator-owned.
-    const REStringList = struct {
-        ranges: CharRange,
-        strings: std.ArrayList([]u21) = .empty,
-
-        fn init(allocator: std.mem.Allocator) REStringList {
-            return .{ .ranges = CharRange.init(allocator) };
-        }
-
-        fn deinit(self: *REStringList) void {
-            for (self.strings.items) |s| self.ranges.allocator.free(s);
-            self.strings.deinit(self.ranges.allocator);
-            self.ranges.deinit();
-        }
-
-        fn containsString(self: *const REStringList, needle: []const u21) bool {
-            for (self.strings.items) |s| {
-                if (std.mem.eql(u21, s, needle)) return true;
-            }
-            return false;
-        }
-
-        /// Takes ownership of `s` (frees it when already present).
-        fn addOwnedString(self: *REStringList, s: []u21) !void {
-            if (self.containsString(s)) {
-                self.ranges.allocator.free(s);
-                return;
-            }
-            try self.strings.append(self.ranges.allocator, s);
-        }
-
-        fn unionWith(self: *REStringList, other: *const REStringList) !void {
-            try self.ranges.addSet(&other.ranges);
-            for (other.strings.items) |s| {
-                if (self.containsString(s)) continue;
-                const copy = try self.ranges.allocator.dupe(u21, s);
-                errdefer self.ranges.allocator.free(copy);
-                try self.strings.append(self.ranges.allocator, copy);
-            }
-        }
-
-        fn intersectWith(self: *REStringList, other: *REStringList) !void {
-            try self.ranges.intersectWith(&other.ranges);
-            var write: usize = 0;
-            for (self.strings.items) |s| {
-                if (other.containsString(s)) {
-                    self.strings.items[write] = s;
-                    write += 1;
-                } else {
-                    self.ranges.allocator.free(s);
-                }
-            }
-            self.strings.shrinkRetainingCapacity(write);
-        }
-
-        fn subtract(self: *REStringList, other: *REStringList) !void {
-            try self.ranges.subWith(&other.ranges);
-            var write: usize = 0;
-            for (self.strings.items) |s| {
-                if (!other.containsString(s)) {
-                    self.strings.items[write] = s;
-                    write += 1;
-                } else {
-                    self.ranges.allocator.free(s);
-                }
-            }
-            self.strings.shrinkRetainingCapacity(write);
-        }
-    };
 
     /// v-mode ClassSetExpression body. Entered just past the opening `[`
     /// (top-level or nested); consumes through the matching `]`. The
@@ -2401,8 +2633,6 @@ const REParseState = struct {
         }
         return result;
     }
-
-    const REStringListOperandResult = struct { set: REStringList, was_range: bool };
 
     /// One ClassSetOperand (or, when `allow_range`, a ClassSetRange) of a
     /// v-mode class set expression. The caller owns the returned set.
@@ -2729,6 +2959,8 @@ const REParseState = struct {
         return .{ .code_point = cp };
     }
 
+    //--- quantifier ---
+
     fn parseQuantifier(self: *REParseState, atom: Atom) CompileError!void {
         if (self.buf_ptr >= self.buf_start.len) return;
         var min: u32 = 1;
@@ -2883,6 +3115,8 @@ const REParseState = struct {
         }
     }
 
+    //--- numeric escape ---
+
     fn parseDecimalEscape(self: *REParseState) CompileError!u32 {
         std.debug.assert(self.buf_start[self.buf_ptr] == '\\');
         self.buf_ptr += 1;
@@ -2947,6 +3181,8 @@ const REParseState = struct {
         return cp;
     }
 
+    //--- group name & unicode property escape ---
+
     fn parseGroupName(self: *REParseState) CompileError![]const u8 {
         return parseGroupNameAt(self.buf_start, &self.buf_ptr);
     }
@@ -2970,11 +3206,6 @@ const REParseState = struct {
         self.buf_ptr = end + 1;
         return set;
     }
-
-    const REStringListBuildContext = struct {
-        s: *REParseState,
-        set: *REStringList,
-    };
 
     fn buildStringPropertyStringList(self: *REParseState, property_name: []const u8) CompileError!?REStringList {
         var set = REStringList.init(self.allocator);
@@ -3045,6 +3276,8 @@ const REParseState = struct {
         try addUnicodeProperty(&ranges, name);
         return ranges;
     }
+
+    //--- code point readers ---
 
     fn parseDigits(self: *REParseState, allow_overflow: bool) CompileError!u32 {
         var value: u64 = 0;
@@ -3134,6 +3367,23 @@ const REParseState = struct {
         return fromSurrogate(@intCast(first), @intCast(second));
     }
 
+    const DecodedWtf8 = struct {
+        code_point: u21,
+        len: usize,
+    };
+
+    fn decodeWtf8Surrogate(bytes: []const u8, index: usize) ?DecodedWtf8 {
+        if (index + 3 > bytes.len or bytes[index] != 0xed) return null;
+        const second = bytes[index + 1];
+        const third = bytes[index + 2];
+        if (second < 0xa0 or second > 0xbf) return null;
+        if (third < 0x80 or third > 0xbf) return null;
+        const code_point: u21 =
+            (@as(u21, bytes[index] & 0x0f) << 12) |
+            (@as(u21, second & 0x3f) << 6) |
+            @as(u21, third & 0x3f);
+        return .{ .code_point = code_point, .len = 3 };
+    }
     fn readUtf8CodePoint(self: *REParseState) CompileError!u21 {
         if (self.buf_ptr >= self.buf_start.len) return error.InvalidPattern;
         const byte = self.buf_start[self.buf_ptr];
@@ -3163,6 +3413,8 @@ const REParseState = struct {
         }
         return pos < self.buf_start.len and self.buf_start[pos] == '}';
     }
+
+    //--- bytecode emit ---
 
     fn reEmitChar(self: *REParseState, cp: u21) !void {
         if (cp <= 0xffff) {
@@ -3369,12 +3621,24 @@ const REParseState = struct {
     }
 };
 
-const REClassAtom = union(enum) {
-    code_point: u21,
-    ranges: CharRange,
-};
+//=== Char-class / CharRange helpers =======================================
 
-const CharRange = unicode.CharRange;
+inline fn class8Mask(byte: u8) u8 {
+    return @as(u8, 1) << @as(u3, @intCast(byte & 7));
+}
+
+inline fn class8BitmapContains(bitmap: [*]const u8, byte: u8) bool {
+    return (bitmap[byte >> 3] & class8Mask(byte)) != 0;
+}
+
+inline fn class8CodePointMatches(bitmap: [*]const u8, code_point: u21) bool {
+    if (code_point >= class8_char_count) return false;
+    return class8BitmapContains(bitmap, @intCast(code_point));
+}
+
+inline fn setClass8BitmapBit(bitmap: *[class8_bitmap_len]u8, byte: u8) void {
+    bitmap[byte >> 3] |= class8Mask(byte);
+}
 
 fn buildClass8IncludedBitmap(ranges: *const CharRange) ?[class8_bitmap_len]u8 {
     var bitmap: [class8_bitmap_len]u8 = @splat(0);
@@ -3484,6 +3748,8 @@ fn addUnicodeProperty(ranges: *CharRange, name: []const u8) CompileError!void {
     defer property_points.deinit();
     try ranges.addSet(&property_points);
 }
+
+//=== Post-parse analysis & opcode helpers =================================
 
 const AtomAnalysis = struct {
     need_check_advance: bool,
@@ -3614,6 +3880,8 @@ fn canonicalizeLiteral(cp: u21, ignore_case: bool, is_unicode: bool) u21 {
     return lreCanonicalize(cp, is_unicode);
 }
 
+//=== Syntax & name helpers ================================================
+
 fn opByte(op: REOPCodeEnum) u8 {
     return @intFromEnum(op);
 }
@@ -3629,56 +3897,6 @@ fn isSyntaxEscape(byte: u8) bool {
     return switch (byte) {
         '^', '$', '\\', '.', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|' => true,
         else => false,
-    };
-}
-
-fn parseModifierGroup(pattern: []const u8, start: usize) CompileError!?ModifierGroup {
-    if (!startsWithAt(pattern, start, "(?")) return null;
-    var pos = start + 2;
-    if (pos >= pattern.len) return null;
-    const first = pattern[pos];
-    if (first != '-' and !isRegExpModifierFlag(first)) return null;
-
-    var add: [3]bool = .{ false, false, false };
-    var remove: [3]bool = .{ false, false, false };
-    var saw_modifier = false;
-    while (pos < pattern.len and isRegExpModifierFlag(pattern[pos])) : (pos += 1) {
-        const slot = modifierFlagSlot(pattern[pos]);
-        if (add[slot]) return error.InvalidPattern;
-        add[slot] = true;
-        saw_modifier = true;
-    }
-    if (pos < pattern.len and pattern[pos] == '-') {
-        pos += 1;
-        while (pos < pattern.len and isRegExpModifierFlag(pattern[pos])) : (pos += 1) {
-            const slot = modifierFlagSlot(pattern[pos]);
-            if (remove[slot]) return error.InvalidPattern;
-            remove[slot] = true;
-            saw_modifier = true;
-        }
-    }
-    if (!saw_modifier) return error.InvalidPattern;
-    if (pos >= pattern.len or pattern[pos] != ':') return error.InvalidPattern;
-    for (0..add.len) |slot| {
-        if (add[slot] and remove[slot]) return error.InvalidPattern;
-    }
-    return .{ .body_start = pos + 1, .add = add, .remove = remove };
-}
-
-fn startsWithAt(haystack: []const u8, index: usize, needle: []const u8) bool {
-    return index <= haystack.len and haystack.len - index >= needle.len and std.mem.eql(u8, haystack[index..][0..needle.len], needle);
-}
-
-fn isRegExpModifierFlag(byte: u8) bool {
-    return byte == 'i' or byte == 'm' or byte == 's';
-}
-
-fn modifierFlagSlot(byte: u8) usize {
-    return switch (byte) {
-        'i' => 0,
-        'm' => 1,
-        's' => 2,
-        else => unreachable,
     };
 }
 
@@ -3698,158 +3916,13 @@ fn isUnicodeSetsReservedDoublePunctuator(first: u8, second: u8) bool {
     };
 }
 
-fn parseGroupNameAt(pattern: []const u8, index: *usize) CompileError![]const u8 {
-    const start = index.*;
-    if (start >= pattern.len) return error.InvalidPattern;
-    var position: usize = 0;
-    while (index.* < pattern.len and pattern[index.*] != '>') : (position += 1) {
-        const cp = try readGroupNameCodePoint(pattern, index);
-        if (position == 0) {
-            if (!isRegExpGroupNameStart(cp)) return error.InvalidPattern;
-        } else if (!isRegExpGroupNameContinue(cp)) {
-            return error.InvalidPattern;
-        }
-    }
-    if (index.* == start or index.* >= pattern.len or pattern[index.*] != '>') return error.InvalidPattern;
-    const name = pattern[start..index.*];
-    index.* += 1;
-    return name;
-}
-
-fn groupNamesEqual(lhs: []const u8, rhs: []const u8) bool {
-    var lhs_index: usize = 0;
-    var rhs_index: usize = 0;
-    while (lhs_index < lhs.len and rhs_index < rhs.len) {
-        const lhs_cp = readGroupNameCodePoint(lhs, &lhs_index) catch return false;
-        const rhs_cp = readGroupNameCodePoint(rhs, &rhs_index) catch return false;
-        if (lhs_cp != rhs_cp) return false;
-    }
-    return lhs_index == lhs.len and rhs_index == rhs.len;
-}
-
-fn readGroupNameCodePoint(pattern: []const u8, index: *usize) CompileError!u21 {
-    if (index.* >= pattern.len) return error.InvalidPattern;
-    if (pattern[index.*] == '\\') {
-        const first = try readUnicodeEscapeCodePoint(pattern, index);
-        if (isHiSurrogate(first)) {
-            const saved = index.*;
-            if (readUnicodeEscapeCodePoint(pattern, index)) |second| {
-                if (isLoSurrogate(second)) return fromSurrogate(@intCast(first), @intCast(second));
-            } else |_| {}
-            index.* = saved;
-        }
-        if (first > max_code_point) return error.InvalidPattern;
-        return first;
-    }
-    const byte = pattern[index.*];
-    const width = std.unicode.utf8ByteSequenceLength(byte) catch return error.InvalidPattern;
-    if (index.* + width > pattern.len) return error.InvalidPattern;
-    const cp = std.unicode.utf8Decode(pattern[index.* .. index.* + width]) catch return error.InvalidPattern;
-    if (cp > max_code_point) return error.InvalidPattern;
-    index.* += width;
-    return @intCast(cp);
-}
-
-fn readUnicodeEscapeCodePoint(pattern: []const u8, index: *usize) CompileError!u21 {
-    if (index.* + 2 > pattern.len or pattern[index.*] != '\\' or pattern[index.* + 1] != 'u') return error.InvalidPattern;
-    var pos = index.* + 2;
-    if (pos < pattern.len and pattern[pos] == '{') {
-        pos += 1;
-        var value: u21 = 0;
-        var saw_digit = false;
-        while (pos < pattern.len and pattern[pos] != '}') : (pos += 1) {
-            const digit = fromHex(pattern[pos]) orelse return error.InvalidPattern;
-            if (value > max_code_point / 16) return error.InvalidPattern;
-            value = value * 16 + digit;
-            if (value > max_code_point) return error.InvalidPattern;
-            saw_digit = true;
-        }
-        if (!saw_digit or pos >= pattern.len or pattern[pos] != '}') return error.InvalidPattern;
-        index.* = pos + 1;
-        return value;
-    }
-    if (pos + 4 > pattern.len) return error.InvalidPattern;
-    var value: u21 = 0;
-    var count: usize = 0;
-    while (count < 4) : (count += 1) {
-        value = value * 16 + (fromHex(pattern[pos + count]) orelse return error.InvalidPattern);
-    }
-    index.* = pos + 4;
-    return value;
-}
-
-fn isRegExpGroupNameStart(cp: u21) bool {
-    if (cp == '$' or cp == '_') return true;
-    if (unicode.isAsciiAlphaCodePoint(cp)) return true;
-    if (isInvalidRegExpGroupNameStart(cp)) return false;
-    return cp > 0x7f;
-}
-
-fn isRegExpGroupNameContinue(cp: u21) bool {
-    if (isInvalidRegExpGroupNameContinue(cp)) return false;
-    if (cp == 0x104a4) return true;
-    if (isRegExpGroupNameStart(cp)) return true;
-    if (unicode.isAsciiDigitCodePoint(cp)) return true;
-    if (cp == 0x1d7da) return true;
-    return false;
-}
-
-fn isInvalidRegExpGroupNameStart(cp: u21) bool {
-    if (unicode.isSurrogateCodePoint(cp)) return true;
-    return switch (cp) {
-        0x275e, 0x2764, 0x104a4, 0x1d7da, 0x1f08b, 0x1f415, 0x1f712, 0x1f98a, 0x10ffff => true,
-        else => false,
-    };
-}
-
-fn isInvalidRegExpGroupNameContinue(cp: u21) bool {
-    if (unicode.isSurrogateCodePoint(cp)) return true;
-    return switch (cp) {
-        0x275e, 0x2764, 0x1f08b, 0x1f415, 0x1f712, 0x1f98a, 0x10ffff => true,
-        else => false,
-    };
-}
+//=== Encoding & classification helpers ====================================
 
 inline fn fromHex(byte: u8) ?u21 {
     if (byte >= '0' and byte <= '9') return byte - '0';
     if (byte >= 'A' and byte <= 'F') return byte - 'A' + 10;
     if (byte >= 'a' and byte <= 'f') return byte - 'a' + 10;
     return null;
-}
-
-inline fn class8Mask(byte: u8) u8 {
-    return @as(u8, 1) << @as(u3, @intCast(byte & 7));
-}
-
-inline fn class8BitmapContains(bitmap: [*]const u8, byte: u8) bool {
-    return (bitmap[byte >> 3] & class8Mask(byte)) != 0;
-}
-
-inline fn class8CodePointMatches(bitmap: [*]const u8, code_point: u21) bool {
-    if (code_point >= class8_char_count) return false;
-    return class8BitmapContains(bitmap, @intCast(code_point));
-}
-
-inline fn setClass8BitmapBit(bitmap: *[class8_bitmap_len]u8, byte: u8) void {
-    bitmap[byte >> 3] |= class8Mask(byte);
-}
-
-const DecodedWtf8 = struct {
-    code_point: u21,
-    len: usize,
-};
-
-fn decodeWtf8Surrogate(bytes: []const u8, index: usize) ?DecodedWtf8 {
-    if (index + 3 > bytes.len or bytes[index] != 0xed) return null;
-    const second = bytes[index + 1];
-    const third = bytes[index + 2];
-    if (second < 0xa0 or second > 0xbf) return null;
-    if (third < 0x80 or third > 0xbf) return null;
-    const code_point: u21 =
-        (@as(u21, bytes[index] & 0x0f) << 12) |
-        (@as(u21, second & 0x3f) << 6) |
-        @as(u21, third & 0x3f);
-    return .{ .code_point = code_point, .len = 3 };
 }
 
 inline fn isDigit(byte: u8) bool {
