@@ -412,7 +412,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    args = parser.compile_args()
+    args = parser.parse_args()
 
     text = args.source.read_text(encoding="utf-8")
     cases = extract_cases(text)

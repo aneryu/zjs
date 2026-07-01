@@ -1544,19 +1544,34 @@ fn lreExecBacktrack(
 fn writeMatch(bytecode: []const u8, total_capture_count: usize, captures: [*]const usize, result: *Match) void {
     const start = slotOptional(captures[0]) orelse 0;
     const end = slotOptional(captures[1]) orelse start;
+    const capture_count = total_capture_count - 1;
     result.* = .{
         .start = start,
         .end = end,
-        .capture_count = total_capture_count - 1,
+        .capture_count = capture_count,
     };
+
     var i: usize = 0;
-    while (i < result.capture_count) : (i += 1) {
+    while (i < capture_count) : (i += 1) {
         const capture_index = i + 1;
         result.captures[i] = .{
             .start = slotOptional(captures[2 * capture_index]),
             .end = slotOptional(captures[2 * capture_index + 1]),
-            .name = groupName(bytecode, capture_index),
+            .name = null,
         };
+    }
+
+    if ((getFlags(bytecode) & flags.named_groups) == 0) return;
+    const header = parseHeader(bytecode) catch return;
+    var pos = header_len + header.bytecode_len;
+    var capture_index: usize = 1;
+    while (capture_index < header.capture_count and pos <= bytecode.len) : (capture_index += 1) {
+        const end_pos = std.mem.indexOfScalarPos(u8, bytecode, pos, 0) orelse return;
+        if (end_pos + 1 >= bytecode.len) return;
+        if (end_pos != pos and capture_index - 1 < capture_count) {
+            result.captures[capture_index - 1].name = bytecode[pos..end_pos];
+        }
+        pos = end_pos + group_name_trailer_len;
     }
 }
 
@@ -1986,6 +2001,10 @@ const REParseState = struct {
     @"opaque": ?*anyopaque = null,
     group_names: std.ArrayList(u8) = .empty,
 
+    fn atomResult(self: *const REParseState, start: usize, quantifiable: bool) Atom {
+        return .{ .start = start, .quantifiable = quantifiable, .capture_count_before = self.capture_count };
+    }
+
     //--- group name storage ---
 
     const CaptureParseResult = struct {
@@ -2193,9 +2212,7 @@ const REParseState = struct {
             },
             '.' => {
                 self.buf_ptr += 1;
-                if (is_backward_dir) try self.reEmitOp(.prev);
-                try self.reEmitOp(if (self.dotall) .any else .dot);
-                if (is_backward_dir) try self.reEmitOp(.prev);
+                try self.emitDirectional(if (self.dotall) .any else .dot, is_backward_dir);
                 return .{ .start = start, .quantifiable = true, .capture_count_before = capture_count_before };
             },
             '*', '+', '?' => return error.InvalidPattern,
@@ -2220,7 +2237,7 @@ const REParseState = struct {
                     const quant_start = try self.emitNonUnicodeSurrogatePairTerms(cp, is_backward_dir);
                     return .{ .start = quant_start, .quantifiable = true, .capture_count_before = capture_count_before };
                 }
-                try self.emitCharacterAtom(canonicalizeLiteral(cp, self.ignore_case, self.is_unicode), is_backward_dir);
+                try self.emitCanonicalChar(cp, is_backward_dir);
                 return .{ .start = start, .quantifiable = true, .capture_count_before = capture_count_before };
             },
         }
@@ -2312,24 +2329,20 @@ const REParseState = struct {
                 else
                     .not_word_boundary;
                 try self.reEmitOp(op);
-                return .{ .start = start, .quantifiable = false, .capture_count_before = self.capture_count };
+                return self.atomResult(start, false);
             },
             's', 'S' => {
                 self.buf_ptr += 2;
-                if (is_backward_dir) try self.reEmitOp(.prev);
-                try self.reEmitOp(if (escaped == 's') .space else .not_space);
-                if (is_backward_dir) try self.reEmitOp(.prev);
-                return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                try self.emitDirectional(if (escaped == 's') .space else .not_space, is_backward_dir);
+                return self.atomResult(start, true);
             },
             'd', 'D', 'w', 'W' => {
                 self.buf_ptr += 2;
                 var ranges = CharRange.init(self.allocator);
                 defer ranges.deinit();
                 try addClassEscape(&ranges, escaped);
-                if (is_backward_dir) try self.reEmitOp(.prev);
-                try self.reEmitRange(&ranges);
-                if (is_backward_dir) try self.reEmitOp(.prev);
-                return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                try self.emitDirectionalRange(&ranges, is_backward_dir);
+                return self.atomResult(start, true);
             },
             '1'...'9' => {
                 const escape_start = self.buf_ptr;
@@ -2338,18 +2351,18 @@ const REParseState = struct {
                     if (self.is_unicode) return error.InvalidPattern;
                     self.buf_ptr = escape_start + 1;
                     const cp = try self.parseLegacyDecimalEscape();
-                    try self.emitCharacterAtom(canonicalizeLiteral(cp, self.ignore_case, self.is_unicode), is_backward_dir);
-                    return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                    try self.emitCanonicalChar(cp, is_backward_dir);
+                    return self.atomResult(start, true);
                 }
                 try self.emitBackReference(is_backward_dir, &.{@intCast(capture_index)});
-                return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                return self.atomResult(start, true);
             },
             '0' => {
                 self.buf_ptr += 2;
                 if (self.buf_ptr < self.buf_start.len and isDigit(self.buf_start[self.buf_ptr]) and self.is_unicode) return error.InvalidPattern;
                 const cp = try self.parseLegacyOctalAfterZero();
-                try self.emitCharacterAtom(canonicalizeLiteral(cp, self.ignore_case, self.is_unicode), is_backward_dir);
-                return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                try self.emitCanonicalChar(cp, is_backward_dir);
+                return self.atomResult(start, true);
             },
             'x' => {
                 const escape_start = self.buf_ptr;
@@ -2357,11 +2370,11 @@ const REParseState = struct {
                     self.buf_ptr = escape_start;
                     if (self.is_unicode) return err;
                     self.buf_ptr += 2;
-                    try self.emitCharacterAtom(canonicalizeLiteral('x', self.ignore_case, self.is_unicode), is_backward_dir);
-                    return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                    try self.emitCanonicalChar('x', is_backward_dir);
+                    return self.atomResult(start, true);
                 };
-                try self.emitCharacterAtom(canonicalizeLiteral(cp, self.ignore_case, self.is_unicode), is_backward_dir);
-                return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                try self.emitCanonicalChar(cp, is_backward_dir);
+                return self.atomResult(start, true);
             },
             'u' => {
                 const escape_start = self.buf_ptr;
@@ -2370,49 +2383,29 @@ const REParseState = struct {
                     self.buf_ptr = escape_start;
                     if (self.is_unicode) return err;
                     self.buf_ptr += 2;
-                    try self.emitCharacterAtom(canonicalizeLiteral('u', self.ignore_case, self.is_unicode), is_backward_dir);
-                    return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                    try self.emitCanonicalChar('u', is_backward_dir);
+                    return self.atomResult(start, true);
                 };
                 const combined = if (braced) cp else try self.combineEscapedSurrogatePair(cp);
-                try self.emitCharacterAtom(canonicalizeLiteral(combined, self.ignore_case, self.is_unicode), is_backward_dir);
-                return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                try self.emitCanonicalChar(combined, is_backward_dir);
+                return self.atomResult(start, true);
             },
             'c' => {
                 if (self.buf_ptr + 2 >= self.buf_start.len) {
                     if (self.is_unicode) return error.InvalidPattern;
-                    self.buf_ptr += 2;
-                    try self.emitCharacterAtom('\\', is_backward_dir);
-                    try self.emitCharacterAtom('c', is_backward_dir);
-                    if (self.buf_ptr < self.buf_start.len) {
-                        const cp = try self.readUtf8CodePoint();
-                        if (cp > 0xffff) {
-                            try self.emitNonUnicodeSurrogatePairAtom(cp, is_backward_dir);
-                        } else {
-                            try self.emitCharacterAtom(canonicalizeLiteral(cp, self.ignore_case, self.is_unicode), is_backward_dir);
-                        }
-                    }
-                    return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                    try self.emitInvalidControlEscape(is_backward_dir);
+                    return self.atomResult(start, true);
                 }
                 const cp_byte = self.buf_start[self.buf_ptr + 2];
                 if (!((cp_byte >= 'a' and cp_byte <= 'z') or (cp_byte >= 'A' and cp_byte <= 'Z'))) {
                     if (self.is_unicode) return error.InvalidPattern;
-                    self.buf_ptr += 2;
-                    try self.emitCharacterAtom('\\', is_backward_dir);
-                    try self.emitCharacterAtom('c', is_backward_dir);
-                    if (self.buf_ptr < self.buf_start.len) {
-                        const cp = try self.readUtf8CodePoint();
-                        if (cp > 0xffff) {
-                            try self.emitNonUnicodeSurrogatePairAtom(cp, is_backward_dir);
-                        } else {
-                            try self.emitCharacterAtom(canonicalizeLiteral(cp, self.ignore_case, self.is_unicode), is_backward_dir);
-                        }
-                    }
-                    return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                    try self.emitInvalidControlEscape(is_backward_dir);
+                    return self.atomResult(start, true);
                 }
                 const cp: u21 = cp_byte & 0x1f;
                 self.buf_ptr += 3;
-                try self.emitCharacterAtom(canonicalizeLiteral(cp, self.ignore_case, self.is_unicode), is_backward_dir);
-                return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                try self.emitCanonicalChar(cp, is_backward_dir);
+                return self.atomResult(start, true);
             },
             'f', 'n', 'r', 't', 'v' => {
                 self.buf_ptr += 2;
@@ -2424,21 +2417,21 @@ const REParseState = struct {
                     'v' => 0x0b,
                     else => unreachable,
                 };
-                try self.emitCharacterAtom(canonicalizeLiteral(cp, self.ignore_case, self.is_unicode), is_backward_dir);
-                return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                try self.emitCanonicalChar(cp, is_backward_dir);
+                return self.atomResult(start, true);
             },
             'p', 'P' => {
                 if (!self.is_unicode) {
                     self.buf_ptr += 2;
-                    try self.emitCharacterAtom(canonicalizeLiteral(escaped, self.ignore_case, self.is_unicode), is_backward_dir);
-                    return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                    try self.emitCanonicalChar(escaped, is_backward_dir);
+                    return self.atomResult(start, true);
                 }
                 if (self.unicode_sets) {
                     if (try self.parseStringPropertyEscape()) |string_set| {
                         var set = string_set;
                         defer set.deinit();
                         try self.reEmitStringList(&set, is_backward_dir);
-                        return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                        return self.atomResult(start, true);
                     }
                 }
                 const inverted = escaped == 'P';
@@ -2451,25 +2444,23 @@ const REParseState = struct {
                 if (self.ignore_case and !self.unicode_sets) {
                     try ranges.regexpCanonicalize(self.is_unicode);
                 }
-                if (is_backward_dir) try self.reEmitOp(.prev);
-                try self.reEmitRange(&ranges);
-                if (is_backward_dir) try self.reEmitOp(.prev);
-                return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                try self.emitDirectionalRange(&ranges, is_backward_dir);
+                return self.atomResult(start, true);
             },
             'k' => {
                 const escape_start = self.buf_ptr;
                 if (self.buf_ptr + 2 >= self.buf_start.len or self.buf_start[self.buf_ptr + 2] != '<') {
                     if (self.is_unicode or try self.reHasNamedCaptures()) return error.InvalidPattern;
                     self.buf_ptr += 2;
-                    try self.emitCharacterAtom(canonicalizeLiteral('k', self.ignore_case, self.is_unicode), is_backward_dir);
-                    return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                    try self.emitCanonicalChar('k', is_backward_dir);
+                    return self.atomResult(start, true);
                 }
                 self.buf_ptr += 3;
                 const name = self.parseGroupName() catch |err| {
                     if (self.is_unicode or try self.reHasNamedCaptures()) return err;
                     self.buf_ptr = escape_start + 2;
-                    try self.emitCharacterAtom(canonicalizeLiteral('k', self.ignore_case, self.is_unicode), is_backward_dir);
-                    return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                    try self.emitCanonicalChar('k', is_backward_dir);
+                    return self.atomResult(start, true);
                 };
                 var is_forward = false;
                 var capture_count = try self.findGroupName(name, false);
@@ -2479,8 +2470,8 @@ const REParseState = struct {
                     if (capture_count == 0) {
                         if (self.is_unicode or try self.reHasNamedCaptures()) return error.InvalidPattern;
                         self.buf_ptr = escape_start + 2;
-                        try self.emitCharacterAtom(canonicalizeLiteral('k', self.ignore_case, self.is_unicode), is_backward_dir);
-                        return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                        try self.emitCanonicalChar('k', is_backward_dir);
+                        return self.atomResult(start, true);
                     }
                     is_forward = true;
                 }
@@ -2490,7 +2481,7 @@ const REParseState = struct {
                 } else {
                     _ = try self.findGroupName(name, true);
                 }
-                return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                return self.atomResult(start, true);
             },
             else => {
                 if (escaped >= 0x80) {
@@ -2501,18 +2492,18 @@ const REParseState = struct {
                         const quant_start = try self.emitNonUnicodeSurrogatePairTerms(cp, is_backward_dir);
                         return .{ .start = quant_start, .quantifiable = true, .capture_count_before = self.capture_count };
                     }
-                    try self.emitCharacterAtom(canonicalizeLiteral(cp, self.ignore_case, self.is_unicode), is_backward_dir);
-                    return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                    try self.emitCanonicalChar(cp, is_backward_dir);
+                    return self.atomResult(start, true);
                 }
                 if (isSyntaxEscape(escaped) or escaped == '/') {
                     self.buf_ptr += 2;
-                    try self.emitCharacterAtom(canonicalizeLiteral(escaped, self.ignore_case, self.is_unicode), is_backward_dir);
-                    return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                    try self.emitCanonicalChar(escaped, is_backward_dir);
+                    return self.atomResult(start, true);
                 }
                 if (self.is_unicode) return error.InvalidPattern;
                 self.buf_ptr += 2;
-                try self.emitCharacterAtom(canonicalizeLiteral(escaped, self.ignore_case, self.is_unicode), is_backward_dir);
-                return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                try self.emitCanonicalChar(escaped, is_backward_dir);
+                return self.atomResult(start, true);
             },
         }
     }
@@ -2525,7 +2516,7 @@ const REParseState = struct {
             var set = try self.reParseNestedClass();
             defer set.deinit();
             try self.reEmitStringList(&set, is_backward_dir);
-            return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+            return self.atomResult(start, true);
         }
         var ranges = CharRange.init(self.allocator);
         defer ranges.deinit();
@@ -2540,10 +2531,8 @@ const REParseState = struct {
                 self.buf_ptr += 1;
                 ranges.normalize();
                 if (invert) try ranges.invert();
-                if (is_backward_dir) try self.reEmitOp(.prev);
-                try self.reEmitRange(&ranges);
-                if (is_backward_dir) try self.reEmitOp(.prev);
-                return .{ .start = start, .quantifiable = true, .capture_count_before = self.capture_count };
+                try self.emitDirectionalRange(&ranges, is_backward_dir);
+                return self.atomResult(start, true);
             }
 
             var atom_ranges = try self.reParseClassAtomOrRange(body_start);
@@ -3430,6 +3419,22 @@ const REParseState = struct {
         if (is_backward_dir) try self.reEmitOp(.prev);
     }
 
+    fn emitCanonicalChar(self: *REParseState, cp: u21, is_backward_dir: bool) !void {
+        try self.emitCharacterAtom(canonicalizeLiteral(cp, self.ignore_case, self.is_unicode), is_backward_dir);
+    }
+
+    fn emitDirectional(self: *REParseState, op: REOPCodeEnum, is_backward_dir: bool) !void {
+        if (is_backward_dir) try self.reEmitOp(.prev);
+        try self.reEmitOp(op);
+        if (is_backward_dir) try self.reEmitOp(.prev);
+    }
+
+    fn emitDirectionalRange(self: *REParseState, ranges: *CharRange, is_backward_dir: bool) !void {
+        if (is_backward_dir) try self.reEmitOp(.prev);
+        try self.reEmitRange(ranges);
+        if (is_backward_dir) try self.reEmitOp(.prev);
+    }
+
     fn emitNonUnicodeSurrogatePairAtom(self: *REParseState, cp: u21, is_backward_dir: bool) !void {
         const pair = unicode.surrogatePairFromCodePoint(cp);
         const high: u21 = pair.high;
@@ -3440,6 +3445,26 @@ const REParseState = struct {
         } else {
             try self.emitCharacterAtom(high, false);
             try self.emitCharacterAtom(low, false);
+        }
+    }
+
+    fn emitNonUnicodeCodePointAtom(self: *REParseState, cp: u21, is_backward_dir: bool) !void {
+        std.debug.assert(!self.is_unicode);
+        if (cp > 0xffff) {
+            try self.emitNonUnicodeSurrogatePairAtom(cp, is_backward_dir);
+        } else {
+            try self.emitCanonicalChar(cp, is_backward_dir);
+        }
+    }
+
+    fn emitInvalidControlEscape(self: *REParseState, is_backward_dir: bool) CompileError!void {
+        std.debug.assert(!self.is_unicode);
+        self.buf_ptr += 2;
+        try self.emitCharacterAtom('\\', is_backward_dir);
+        try self.emitCharacterAtom('c', is_backward_dir);
+        if (self.buf_ptr < self.buf_start.len) {
+            const cp = try self.readUtf8CodePoint();
+            try self.emitNonUnicodeCodePointAtom(cp, is_backward_dir);
         }
     }
 
