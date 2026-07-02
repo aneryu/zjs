@@ -8691,12 +8691,16 @@ pub const parser_core = struct {
             switch (shape) {
                 .direct => |argc| try s.emitOpU16At(opcode.op.call_constructor, argc, callee_line, callee_col),
                 .applied => {
-                    // `new X(...args)`. Stack on entry to apply: [func, array].
-                    // QuickJS rewrites with perm3 to feed apply a dummy `this`
-                    // (`quickjs.c:26693-26697`); for the plain `new` path we
-                    // synthesize that `this` slot here.
-                    try s.emitOp(opcode.op.undefined);
-                    try s.emitOp(opcode.op.swap);
+                    // `new X(...args)`. Stack here: [func, func(dup =
+                    // new.target), array]. QuickJS FUNC_CALL_NEW emits
+                    // `perm3 ; apply 1` (`quickjs.c:27359-27364`,
+                    // "obj func array -> func obj array") so apply consumes
+                    // the dup'd callee as the new.target slot. The previous
+                    // `undefined ; swap` synthesized an extra `this` slot and
+                    // left the dup'd callee on the stack, permanently
+                    // off-balancing the verifier depth (StackMismatch at any
+                    // merge point: try/catch bookkeeping, loop back-edges).
+                    try s.emitOp(opcode.op.perm3);
                     try s.emitOpU16At(opcode.op.apply, 1, callee_line, callee_col); // 1 = is_new
                 },
             }
