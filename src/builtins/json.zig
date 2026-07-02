@@ -67,6 +67,13 @@ fn jsonIsRawJsonCall(host_call: InternalCall) HostError!core.JSValue {
 
 fn jsonRawJsonCall(host_call: InternalCall) HostError!core.JSValue {
     const value = if (host_call.args.len >= 1) host_call.args[0] else core.JSValue.undefinedValue();
+    if (host_call.global) |raw_global| {
+        if (!value.isString()) {
+            const coerced = try string_ops.toStringForAnnexB(host_call.ctx, host_call.output, raw_global, value, builtin_dispatch.callerBytecode(host_call), builtin_dispatch.callerFrame(host_call));
+            defer coerced.free(host_call.ctx.runtime);
+            return rawJSON(host_call.ctx.runtime, coerced);
+        }
+    }
     return rawJSON(host_call.ctx.runtime, value) catch |err| switch (err) {
         error.SyntaxError, error.TypeError => err,
         else => err,
@@ -153,9 +160,346 @@ pub fn parse(rt: *core.JSRuntime, global: ?*core.Object, value: core.JSValue) !c
 
     if (try parseSimpleJsonValue(rt, global, bytes.items)) |parsed| return parsed;
 
-    var parsed = std.json.parseFromSlice(std.json.Value, rt.memory.allocator, bytes.items, .{ .duplicate_field_behavior = .use_last }) catch return error.SyntaxError;
-    defer parsed.deinit();
-    return try valueFromStdJson(rt, global, parsed.value);
+    if (rooted_value.asStringBody()) |body| {
+        try body.ensureFlat(rt);
+        return switch (body.resolveData()) {
+            .latin1 => |latin1| jsonParseFull(u8, rt, global, latin1),
+            .utf16 => |units| jsonParseFull(u16, rt, global, units),
+        };
+    }
+    return jsonParseFullFromBytes(rt, global, bytes.items);
+}
+
+/// Coerced (non-string) inputs: decode the UTF-8 bytes into a real string and
+/// parse its code units through the same faithful walk.
+fn jsonParseFullFromBytes(rt: *core.JSRuntime, global: ?*core.Object, bytes: []const u8) !core.JSValue {
+    const text = try core.string.String.createUtf8(rt, bytes);
+    defer text.value().free(rt);
+    try text.ensureFlat(rt);
+    return switch (text.resolveData()) {
+        .latin1 => |latin1| jsonParseFull(u8, rt, global, latin1),
+        .utf16 => |units| jsonParseFull(u16, rt, global, units),
+    };
+}
+
+/// Faithful port of the qjs JSON parser (js_json_parse -> json_next_token /
+/// json_parse_value, quickjs.c:23440): recursive descent over the source
+/// string's CODE UNITS (WTF-16 — lone surrogates in string literals are legal
+/// JSON and round-trip, unlike the retired std.json backend), JSON whitespace
+/// only, strict number grammar, last-duplicate-key-wins, own "__proto__"
+/// property (no prototype mutation). Depth is bounded by the native stack
+/// guard (json_next_token js_check_stack_overflow, quickjs.c:23483).
+fn jsonParseFull(comptime T: type, rt: *core.JSRuntime, global: ?*core.Object, units: []const T) !core.JSValue {
+    var parser = JsonUnitParser(T){ .rt = rt, .global = global, .units = units };
+    parser.skipWhitespace();
+    const value = try parser.parseValue();
+    errdefer value.free(rt);
+    parser.skipWhitespace();
+    if (parser.index != parser.units.len) return error.SyntaxError;
+    return value;
+}
+
+const JsonParseError = std.mem.Allocator.Error || error{
+    SyntaxError,
+    TypeError,
+    IncompatibleDescriptor,
+    InvalidAtom,
+    InvalidLength,
+    NotExtensible,
+    ReadOnly,
+    StringTooLong,
+};
+
+fn JsonUnitParser(comptime T: type) type {
+    return struct {
+        rt: *core.JSRuntime,
+        global: ?*core.Object,
+        units: []const T,
+        index: usize = 0,
+
+        const Self = @This();
+
+        fn peek(self: *const Self) ?T {
+            if (self.index >= self.units.len) return null;
+            return self.units[self.index];
+        }
+
+        fn skipWhitespace(self: *Self) void {
+            while (self.index < self.units.len) : (self.index += 1) {
+                switch (self.units[self.index]) {
+                    ' ', '\t', '\n', '\r' => {},
+                    else => return,
+                }
+            }
+        }
+
+        fn expectLiteral(self: *Self, comptime text: []const u8) !void {
+            if (self.index + text.len > self.units.len) return error.SyntaxError;
+            inline for (text, 0..) |byte, offset| {
+                if (self.units[self.index + offset] != byte) return error.SyntaxError;
+            }
+            self.index += text.len;
+        }
+
+        fn parseValue(self: *Self) JsonParseError!core.JSValue {
+            if (self.rt.checkNativeStackOverflow(0)) return error.SyntaxError;
+            self.skipWhitespace();
+            const unit = self.peek() orelse return error.SyntaxError;
+            return switch (unit) {
+                '{' => self.parseObject(),
+                '[' => self.parseArray(),
+                '"' => self.parseString(),
+                't' => blk: {
+                    try self.expectLiteral("true");
+                    break :blk core.JSValue.boolean(true);
+                },
+                'f' => blk: {
+                    try self.expectLiteral("false");
+                    break :blk core.JSValue.boolean(false);
+                },
+                'n' => blk: {
+                    try self.expectLiteral("null");
+                    break :blk core.JSValue.nullValue();
+                },
+                '-', '0'...'9' => self.parseNumber(),
+                else => error.SyntaxError,
+            };
+        }
+
+        fn parseObject(self: *Self) JsonParseError!core.JSValue {
+            self.index += 1; // '{'
+            const object = try core.Object.create(self.rt, core.class.ids.object, objectPrototypeFromGlobal(self.rt, self.global));
+            var object_value = object.value();
+            var root_values = [_]core.runtime.ValueRootValue{.{ .value = &object_value }};
+            const root_frame = core.runtime.ValueRootFrame{ .previous = self.rt.active_value_roots, .values = &root_values };
+            self.rt.active_value_roots = &root_frame;
+            defer self.rt.active_value_roots = root_frame.previous;
+            errdefer {
+                const failed = object_value;
+                object_value = core.JSValue.undefinedValue();
+                failed.free(self.rt);
+            }
+            self.skipWhitespace();
+            if (self.peek() == @as(T, '}')) {
+                self.index += 1;
+                return object_value;
+            }
+            while (true) {
+                self.skipWhitespace();
+                if (self.peek() != @as(T, '"')) return error.SyntaxError;
+                const key_atom = try self.parseKeyAtom();
+                defer self.rt.atoms.free(key_atom);
+                self.skipWhitespace();
+                if (self.peek() != @as(T, ':')) return error.SyntaxError;
+                self.index += 1;
+                const child = try self.parseValue();
+                defer child.free(self.rt);
+                try object.defineOwnProperty(self.rt, key_atom, core.Descriptor.data(child, true, true, true));
+                self.skipWhitespace();
+                const next = self.peek() orelse return error.SyntaxError;
+                if (next == '}') {
+                    self.index += 1;
+                    return object_value;
+                }
+                if (next != ',') return error.SyntaxError;
+                self.index += 1;
+            }
+        }
+
+        fn parseArray(self: *Self) JsonParseError!core.JSValue {
+            self.index += 1; // '['
+            const object = try core.Object.createArray(self.rt, arrayPrototypeFromGlobal(self.rt, self.global));
+            var object_value = object.value();
+            var root_values = [_]core.runtime.ValueRootValue{.{ .value = &object_value }};
+            const root_frame = core.runtime.ValueRootFrame{ .previous = self.rt.active_value_roots, .values = &root_values };
+            self.rt.active_value_roots = &root_frame;
+            defer self.rt.active_value_roots = root_frame.previous;
+            errdefer {
+                const failed = object_value;
+                object_value = core.JSValue.undefinedValue();
+                failed.free(self.rt);
+            }
+            self.skipWhitespace();
+            if (self.peek() == @as(T, ']')) {
+                self.index += 1;
+                return object_value;
+            }
+            var index: u32 = 0;
+            while (true) {
+                const child = try self.parseValue();
+                defer child.free(self.rt);
+                if (!try object.appendDenseArrayLiteralIndex(self.rt, index, child)) {
+                    try object.defineOwnProperty(self.rt, core.atom.atomFromUInt32(index), core.Descriptor.data(child, true, true, true));
+                }
+                index += 1;
+                self.skipWhitespace();
+                const next = self.peek() orelse return error.SyntaxError;
+                if (next == ']') {
+                    self.index += 1;
+                    return object_value;
+                }
+                if (next != ',') return error.SyntaxError;
+                self.index += 1;
+            }
+        }
+
+        fn parseKeyAtom(self: *Self) !core.Atom {
+            var key_units = std.ArrayList(u16).empty;
+            defer key_units.deinit(self.rt.memory.allocator);
+            try self.parseStringUnits(&key_units);
+            var key_bytes = std.ArrayList(u8).empty;
+            defer key_bytes.deinit(self.rt.memory.allocator);
+            try appendWtf8FromUnits(self.rt, &key_bytes, key_units.items);
+            return self.rt.internAtom(key_bytes.items);
+        }
+
+        fn parseString(self: *Self) !core.JSValue {
+            var out = std.ArrayList(u16).empty;
+            defer out.deinit(self.rt.memory.allocator);
+            try self.parseStringUnits(&out);
+            return (try core.string.String.createUtf16(self.rt, out.items)).value();
+        }
+
+        /// qjs js_parse_string JSON mode: raw code units pass through (including
+        /// lone surrogates), \uXXXX escapes decode to bare units.
+        fn parseStringUnits(self: *Self, out: *std.ArrayList(u16)) !void {
+            self.index += 1; // opening quote
+            while (true) {
+                if (self.index >= self.units.len) return error.SyntaxError;
+                const unit = self.units[self.index];
+                self.index += 1;
+                if (unit == '"') return;
+                if (unit == '\\') {
+                    if (self.index >= self.units.len) return error.SyntaxError;
+                    const escape = self.units[self.index];
+                    self.index += 1;
+                    switch (escape) {
+                        '"' => try out.append(self.rt.memory.allocator, '"'),
+                        '\\' => try out.append(self.rt.memory.allocator, '\\'),
+                        '/' => try out.append(self.rt.memory.allocator, '/'),
+                        'b' => try out.append(self.rt.memory.allocator, 0x08),
+                        'f' => try out.append(self.rt.memory.allocator, 0x0c),
+                        'n' => try out.append(self.rt.memory.allocator, 0x0a),
+                        'r' => try out.append(self.rt.memory.allocator, 0x0d),
+                        't' => try out.append(self.rt.memory.allocator, 0x09),
+                        'u' => {
+                            if (self.index + 4 > self.units.len) return error.SyntaxError;
+                            var code: u16 = 0;
+                            inline for (0..4) |_| {
+                                const digit = jsonHexDigit(self.units[self.index]) orelse return error.SyntaxError;
+                                code = (code << 4) | digit;
+                                self.index += 1;
+                            }
+                            try out.append(self.rt.memory.allocator, code);
+                        },
+                        else => return error.SyntaxError,
+                    }
+                    continue;
+                }
+                if (unit < 0x20) return error.SyntaxError;
+                if (T == u8) {
+                    try out.append(self.rt.memory.allocator, unit);
+                } else {
+                    try out.append(self.rt.memory.allocator, unit);
+                }
+            }
+        }
+
+        fn parseNumber(self: *Self) !core.JSValue {
+            const start = self.index;
+            var ascii = std.ArrayList(u8).empty;
+            defer ascii.deinit(self.rt.memory.allocator);
+            var had_fraction = false;
+            if (self.peek() == @as(T, '-')) self.index += 1;
+            // integer part: 0 | [1-9][0-9]*
+            const first = self.peek() orelse return error.SyntaxError;
+            if (first == '0') {
+                self.index += 1;
+            } else if (first >= '1' and first <= '9') {
+                while (self.peek()) |unit| {
+                    if (unit < '0' or unit > '9') break;
+                    self.index += 1;
+                }
+            } else return error.SyntaxError;
+            if (self.peek() == @as(T, '.')) {
+                had_fraction = true;
+                self.index += 1;
+                var digits: usize = 0;
+                while (self.peek()) |unit| {
+                    if (unit < '0' or unit > '9') break;
+                    self.index += 1;
+                    digits += 1;
+                }
+                if (digits == 0) return error.SyntaxError;
+            }
+            if (self.peek() == @as(T, 'e') or self.peek() == @as(T, 'E')) {
+                had_fraction = true;
+                self.index += 1;
+                if (self.peek() == @as(T, '+') or self.peek() == @as(T, '-')) self.index += 1;
+                var digits: usize = 0;
+                while (self.peek()) |unit| {
+                    if (unit < '0' or unit > '9') break;
+                    self.index += 1;
+                    digits += 1;
+                }
+                if (digits == 0) return error.SyntaxError;
+            }
+            try ascii.ensureTotalCapacity(self.rt.memory.allocator, self.index - start);
+            for (self.units[start..self.index]) |unit| ascii.appendAssumeCapacity(@intCast(unit));
+            const text = ascii.items;
+            if (!had_fraction) {
+                if (std.fmt.parseInt(i64, text, 10)) |int_value| {
+                    if (int_value >= std.math.minInt(i32) and int_value <= std.math.maxInt(i32)) {
+                        if (!(int_value == 0 and text[0] == '-')) return core.JSValue.int32(@intCast(int_value));
+                    }
+                    return core.JSValue.float64(@floatFromInt(int_value));
+                } else |_| {}
+            }
+            const float_value = std.fmt.parseFloat(f64, text) catch return error.SyntaxError;
+            return core.JSValue.float64(float_value);
+        }
+    };
+}
+
+fn jsonHexDigit(unit: anytype) ?u16 {
+    return switch (unit) {
+        '0'...'9' => @intCast(unit - '0'),
+        'a'...'f' => @intCast(unit - 'a' + 10),
+        'A'...'F' => @intCast(unit - 'A' + 10),
+        else => null,
+    };
+}
+
+/// Encode UTF-16 code units as WTF-8 bytes (surrogate pairs join; lone
+/// surrogates encode as their 3-byte form) — the atom-name byte encoding.
+fn appendWtf8FromUnits(rt: *core.JSRuntime, out: *std.ArrayList(u8), units: []const u16) !void {
+    var index: usize = 0;
+    while (index < units.len) : (index += 1) {
+        const unit = units[index];
+        var cp: u32 = unit;
+        if (unit >= 0xD800 and unit <= 0xDBFF and index + 1 < units.len) {
+            const next = units[index + 1];
+            if (next >= 0xDC00 and next <= 0xDFFF) {
+                cp = 0x10000 + ((@as(u32, unit) - 0xD800) << 10) + (next - 0xDC00);
+                index += 1;
+            }
+        }
+        if (cp < 0x80) {
+            try out.append(rt.memory.allocator, @intCast(cp));
+        } else if (cp < 0x800) {
+            try out.append(rt.memory.allocator, @intCast(0xc0 | (cp >> 6)));
+            try out.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
+        } else if (cp < 0x10000) {
+            try out.append(rt.memory.allocator, @intCast(0xe0 | (cp >> 12)));
+            try out.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
+            try out.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
+        } else {
+            try out.append(rt.memory.allocator, @intCast(0xf0 | (cp >> 18)));
+            try out.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 12) & 0x3f)));
+            try out.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
+            try out.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
+        }
+    }
 }
 
 pub fn rawJSON(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
@@ -185,11 +529,10 @@ pub fn rawJSON(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     };
     if (bytes.items.len == 0 or isRawJsonEdgeWhitespace(bytes.items[0]) or isRawJsonEdgeWhitespace(bytes.items[bytes.items.len - 1])) return error.SyntaxError;
 
-    var parsed = std.json.parseFromSlice(std.json.Value, rt.memory.allocator, bytes.items, .{}) catch return error.SyntaxError;
-    defer parsed.deinit();
-    switch (parsed.value) {
-        .array, .object => return error.SyntaxError,
-        else => {},
+    {
+        const validated = try jsonParseFullFromBytes(rt, null, bytes.items);
+        defer validated.free(rt);
+        if (validated.isObject()) return error.SyntaxError;
     }
 
     const object = try core.Object.create(rt, core.class.ids.raw_json, null);
@@ -206,6 +549,7 @@ pub fn rawJSON(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
         owned_text.free(rt);
     }
     try defineData(rt, object, core.atom.ids.rawJSON, text, true);
+    try object.seal(rt);
     return object_value;
 }
 
@@ -266,7 +610,7 @@ fn appendJsonValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
             try buffer.append(rt.memory.allocator, '0');
         } else {
             var number_buf: [128]u8 = undefined;
-            const printed = try std.fmt.bufPrint(&number_buf, "{d}", .{float_value});
+            const printed = try value_ops.formatFiniteNumber(&number_buf, float_value);
             try buffer.appendSlice(rt.memory.allocator, printed);
         }
     } else if (rooted_value.asBool()) |bool_value| {
@@ -837,7 +1181,7 @@ fn stringifyPropertyListAtom(rt: *core.JSRuntime, value: core.JSValue) !?core.At
         else if (float_value == 0)
             "0"
         else
-            try std.fmt.bufPrint(&buf, "{d}", .{float_value});
+            try value_ops.formatFiniteNumber(&buf, float_value);
         return try rt.internAtom(text);
     }
     const header = rooted_value.refHeader() orelse return null;
@@ -976,7 +1320,7 @@ fn appendJsonInputString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value:
     if (rooted_value.asFloat64()) |float_value| {
         if (float_value == 0) return buffer.append(rt.memory.allocator, '0');
         var float_buf: [128]u8 = undefined;
-        const printed = try std.fmt.bufPrint(&float_buf, "{d}", .{float_value});
+        const printed = try value_ops.formatFiniteNumber(&float_buf, float_value);
         return buffer.appendSlice(rt.memory.allocator, printed);
     }
     if (rooted_value.isBigInt()) return core.value_format.appendBigIntBase10(rt.memory.allocator, buffer, rooted_value);
@@ -1812,7 +2156,7 @@ fn qjsJsonAppendSimpleValue(
             try buffer.append(rt.memory.allocator, '0');
         } else {
             var number_buf: [128]u8 = undefined;
-            const printed = try std.fmt.bufPrint(&number_buf, "{d}", .{number});
+            const printed = try value_ops.formatFiniteNumber(&number_buf, number);
             try buffer.appendSlice(rt.memory.allocator, printed);
         }
         return .appended;
@@ -1900,6 +2244,7 @@ fn qjsJsonAppendSimpleObject(
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or !prop_flags.enumerable) continue;
         if (rt.atoms.isPublicSymbol(prop.atom_id)) continue;
+        if (rt.atoms.kind(prop.atom_id) == .private) continue;
         if (core.array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) != null) {
             buffer.shrinkRetainingCapacity(start);
             return .fallback;
@@ -2100,10 +2445,45 @@ pub fn qjsJsonStringifyGap(
         }
     }
     if (rooted_space.isString()) {
-        var raw = std.ArrayList(u8).empty;
-        defer raw.deinit(ctx.runtime.memory.allocator);
-        try value_ops.appendRawString(ctx.runtime, &raw, rooted_space);
-        try out.appendSlice(ctx.runtime.memory.allocator, raw.items[0..@min(raw.items.len, 10)]);
+        if (rooted_space.asStringBody()) |body| {
+            try body.ensureFlat(ctx.runtime);
+            switch (body.resolveData()) {
+                .latin1 => |bytes| {
+                    const take = @min(bytes.len, 10);
+                    for (bytes[0..take]) |byte| {
+                        if (byte < 0x80) {
+                            try out.append(ctx.runtime.memory.allocator, byte);
+                        } else {
+                            try out.append(ctx.runtime.memory.allocator, 0xc0 | (byte >> 6));
+                            try out.append(ctx.runtime.memory.allocator, 0x80 | (byte & 0x3f));
+                        }
+                    }
+                },
+                .utf16 => |units| {
+                    var take = @min(units.len, 10);
+                    // A pair split at the cut would leave a lone high surrogate
+                    // that the UTF-8 output pipeline cannot represent; drop it.
+                    if (take > 0 and take < units.len and unicode.isHighSurrogateUnit(units[take - 1]) and unicode.isLowSurrogateUnit(units[take])) take -= 1;
+                    var index: usize = 0;
+                    while (index < take) : (index += 1) {
+                        const unit = units[index];
+                        if (unicode.isHighSurrogateUnit(unit) and index + 1 < take and unicode.isLowSurrogateUnit(units[index + 1])) {
+                            var cp_buf: [4]u8 = undefined;
+                            const cp: u21 = @intCast(unicode.codePointFromSurrogatePair(unit, units[index + 1]));
+                            const cp_len = std.unicode.utf8Encode(cp, &cp_buf) catch continue;
+                            try out.appendSlice(ctx.runtime.memory.allocator, cp_buf[0..cp_len]);
+                            index += 1;
+                        } else if (unit < 0x80) {
+                            try out.append(ctx.runtime.memory.allocator, @intCast(unit));
+                        } else if (!unicode.isHighSurrogateUnit(unit) and !unicode.isLowSurrogateUnit(unit)) {
+                            var cp_buf: [4]u8 = undefined;
+                            const cp_len = std.unicode.utf8Encode(@intCast(unit), &cp_buf) catch continue;
+                            try out.appendSlice(ctx.runtime.memory.allocator, cp_buf[0..cp_len]);
+                        }
+                    }
+                },
+            }
+        }
     } else if (value_ops.numberValue(rooted_space)) |number| {
         const count_float = @min(@max(@floor(number), 0), 10);
         const count: usize = @intFromFloat(count_float);
@@ -2237,7 +2617,7 @@ pub fn qjsJsonAppendValue(
             try buffer.append(ctx.runtime.memory.allocator, '0');
         } else {
             var number_buf: [128]u8 = undefined;
-            const printed = try std.fmt.bufPrint(&number_buf, "{d}", .{number});
+            const printed = try value_ops.formatFiniteNumber(&number_buf, number);
             try buffer.appendSlice(ctx.runtime.memory.allocator, printed);
         }
     } else if (rooted_value.isBigInt()) {

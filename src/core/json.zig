@@ -63,6 +63,26 @@ pub fn appendJsonAtomName(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), atom_
         return appendEscapedJsonString(rt, buffer, printed);
     }
     const name = rt.atoms.name(atom_id) orelse "";
+    // Property KEYS escape like string values: atom names are WTF-8, and a
+    // lone-surrogate key must emit as \udXXX (qjs JO key via the same
+    // string_buffer escaper) instead of leaking raw WTF-8 bytes into the
+    // output (audit json#5).
+    if (std.unicode.wtf8ValidateSlice(name) and !std.unicode.utf8ValidateSlice(name)) {
+        const view = std.unicode.Wtf8View.init(name) catch return appendEscapedJsonString(rt, buffer, name);
+        var iter = view.iterator();
+        try buffer.append(rt.memory.allocator, '"');
+        while (iter.nextCodepoint()) |cp| {
+            if (cp >= 0xD800 and cp <= 0xDFFF) {
+                try appendEscapedJsonUnit(rt, buffer, @as(u16, @intCast(cp)));
+            } else if (cp <= 0x7f) {
+                try appendEscapedJsonByte(rt, buffer, @intCast(cp));
+            } else {
+                try appendUtf8CodePoint(rt, buffer, cp);
+            }
+        }
+        try buffer.append(rt.memory.allocator, '"');
+        return;
+    }
     return appendEscapedJsonString(rt, buffer, name);
 }
 
