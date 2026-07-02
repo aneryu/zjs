@@ -223,6 +223,20 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
     runtime.context.setPreserveUncaughtException(true);
+    // Install the file-loader dynamic import for every mode, mirroring qjs
+    // installing js_module_loader unconditionally (qjs.c JS_SetModuleLoaderFunc):
+    // import() works from scripts and -e, not only under -m. The state lives
+    // for the whole process, so import jobs drained after evaluation (event
+    // loop turns) still resolve.
+    var dynamic_import_state = engine.exec.module_graph.DynamicImportState{
+        .runtime = runtime.context.runtimePtr(),
+        .context = &runtime.context.core,
+        .output = &stdout_writer.interface,
+        .io = io,
+        .allocator = allocator,
+        .max_source_size = max_source_size,
+    };
+    engine.exec.module_graph.installDynamicImport(&dynamic_import_state);
     setup_ns = elapsedNanosSince(setup_start);
     // NB: we intentionally do NOT `defer runtime.deinit()` on the happy path.
     // `JSRuntime.destroy` asserts that the runtime has no outstanding
@@ -293,6 +307,10 @@ pub fn main(init: std.process.Init) !void {
 
     const jobs_start = monotonicNanos();
     _ = try runtime.event_loop.runUntilIdle();
+    // Post-eval jobs (module-mode microtasks in particular) print into the
+    // buffered stdout writer; flush before any exit path so their output is
+    // not dropped (qjs.c main: js_std_loop writes unbuffered per job).
+    try stdout_writer.interface.flush();
     jobs_ns = elapsedNanosSince(jobs_start);
     if (runtime.context.hasUnhandledRejection() or runtime.context.hasException()) {
         // Mirrors qjs js_std_promise_rejection_check (quickjs-libc.c:4276-4290):
@@ -433,110 +451,108 @@ fn detectFileMode(path: []const u8, source: []const u8, explicit_mode: zjs.conte
     return if (sourceLooksLikeModule(source)) .module else .script;
 }
 
+/// Mirrors qjs `JS_DetectModule` (quickjs.c:23792): after the shebang, only
+/// the FIRST token decides — `import` not followed by `(` or `.`, or a
+/// leading `export`. A late `export`/`import` no longer promotes the file to
+/// module mode (it is a SyntaxError in script mode, as in qjs), and
+/// `import.meta` / `import(...)` never promote.
 fn sourceLooksLikeModule(source: []const u8) bool {
-    var index: usize = 0;
-    var brace_depth: usize = 0;
+    var pos: usize = 0;
+    skipShebang(source, &pos);
+    switch (simpleNextToken(source, &pos)) {
+        .import_keyword => {
+            const tok = simpleNextToken(source, &pos);
+            return tok != .dot and tok != .left_paren;
+        },
+        .export_keyword => return true,
+        else => return false,
+    }
+}
+
+/// Token classes needed by `sourceLooksLikeModule`; the subset of qjs
+/// `simple_next_token` results that `JS_DetectModule` inspects.
+const DetectToken = enum {
+    import_keyword,
+    export_keyword,
+    ident,
+    dot,
+    left_paren,
+    other,
+    eof,
+};
+
+/// Mirrors qjs `simple_next_token` (quickjs.c:23670) for the token classes
+/// `JS_DetectModule` needs: skips whitespace and comments (and a UTF-8 BOM),
+/// then classifies the next token.
+fn simpleNextToken(source: []const u8, pos: *usize) DetectToken {
+    var index = pos.*;
     while (index < source.len) {
         const byte = source[index];
         if (unicode.isAsciiWhitespaceByte(byte)) {
             index += 1;
             continue;
         }
+        if (byte == '/' and index + 1 < source.len) {
+            if (source[index + 1] == '/') {
+                index += 2;
+                while (index < source.len and source[index] != '\n' and source[index] != '\r') index += 1;
+                continue;
+            }
+            if (source[index + 1] == '*') {
+                index += 2;
+                while (index + 1 < source.len and !(source[index] == '*' and source[index + 1] == '/')) index += 1;
+                index = if (index + 1 < source.len) index + 2 else source.len;
+                continue;
+            }
+        }
+        if (byte == 0xef and index + 2 < source.len and source[index + 1] == 0xbb and source[index + 2] == 0xbf) {
+            index += 3;
+            continue;
+        }
+        pos.* = index + 1;
         switch (byte) {
-            '/' => {
-                if (index + 1 < source.len and source[index + 1] == '/') {
-                    index += 2;
-                    while (index < source.len and source[index] != '\n' and source[index] != '\r') index += 1;
-                } else if (index + 1 < source.len and source[index + 1] == '*') {
-                    index += 2;
-                    while (index + 1 < source.len and !(source[index] == '*' and source[index + 1] == '/')) index += 1;
-                    if (index + 1 < source.len) index += 2;
-                } else {
-                    index += 1;
+            '.' => return .dot,
+            '(' => return .left_paren,
+            'i' => {
+                if (matchIdentifierRest(source, index + 1, "mport")) {
+                    pos.* = index + "import".len;
+                    return .import_keyword;
                 }
+                return .ident;
             },
-            '\'', '"' => {
-                index = skipQuoted(source, index, byte);
-            },
-            '`' => {
-                index = skipTemplate(source, index);
-            },
-            '{' => {
-                brace_depth += 1;
-                index += 1;
-            },
-            '}' => {
-                if (brace_depth != 0) brace_depth -= 1;
-                index += 1;
+            'e' => {
+                if (matchIdentifierRest(source, index + 1, "xport")) {
+                    pos.* = index + "export".len;
+                    return .export_keyword;
+                }
+                return .ident;
             },
             else => {
-                if (isIdentifierStart(byte)) {
-                    const start = index;
-                    index += 1;
-                    while (index < source.len and isIdentifierContinue(source[index])) index += 1;
-                    if (brace_depth == 0) {
-                        const word = source[start..index];
-                        if (std.mem.eql(u8, word, "export")) return true;
-                        if (std.mem.eql(u8, word, "import")) {
-                            const next = skipSpacesAndComments(source, index);
-                            if (next >= source.len or source[next] != '(') return true;
-                        }
-                    }
-                } else {
-                    index += 1;
-                }
+                if (isIdentifierStart(byte)) return .ident;
+                return .other;
             },
         }
     }
-    return false;
+    pos.* = index;
+    return .eof;
 }
 
-fn skipQuoted(source: []const u8, start: usize, quote: u8) usize {
-    var index = start + 1;
-    while (index < source.len) : (index += 1) {
-        if (source[index] == '\\') {
-            index += 1;
-            continue;
-        }
-        if (source[index] == quote) return index + 1;
-    }
-    return index;
+/// Mirrors qjs `match_identifier`: the remaining keyword bytes must match and
+/// must not be followed by an identifier-continue character.
+fn matchIdentifierRest(source: []const u8, pos: usize, rest: []const u8) bool {
+    if (pos + rest.len > source.len) return false;
+    if (!std.mem.eql(u8, source[pos .. pos + rest.len], rest)) return false;
+    if (pos + rest.len < source.len and isIdentifierContinue(source[pos + rest.len])) return false;
+    return true;
 }
 
-fn skipTemplate(source: []const u8, start: usize) usize {
-    var index = start + 1;
-    while (index < source.len) : (index += 1) {
-        if (source[index] == '\\') {
-            index += 1;
-            continue;
-        }
-        if (source[index] == '`') return index + 1;
+/// Mirrors qjs `skip_shebang` (quickjs.c:23761).
+fn skipShebang(source: []const u8, pos: *usize) void {
+    if (source.len >= 2 and source[0] == '#' and source[1] == '!') {
+        var index: usize = 2;
+        while (index < source.len and source[index] != '\n' and source[index] != '\r') index += 1;
+        pos.* = index;
     }
-    return index;
-}
-
-fn skipSpacesAndComments(source: []const u8, start: usize) usize {
-    var index = start;
-    while (index < source.len) {
-        if (unicode.isAsciiWhitespaceByte(source[index])) {
-            index += 1;
-            continue;
-        }
-        switch (source[index]) {
-            '/' => {
-                if (index + 1 < source.len and source[index + 1] == '/') {
-                    index += 2;
-                    while (index < source.len and source[index] != '\n' and source[index] != '\r') index += 1;
-                } else if (index + 1 < source.len and source[index + 1] == '*') {
-                    index += 2;
-                    while (index + 1 < source.len and !(source[index] == '*' and source[index + 1] == '/')) index += 1;
-                    if (index + 1 < source.len) index += 2;
-                } else return index;
-            },
-            else => return index,
-        }
-    }
-    return index;
 }
 
 fn isIdentifierStart(byte: u8) bool {
@@ -1028,13 +1044,24 @@ test "zjs args accept module file script arguments" {
     try std.testing.expectEqualStrings("arg", command.file.script_args[1]);
 }
 
-test "zjs detects module mode from extension and static syntax" {
+test "zjs detects module mode from extension and first token (qjs JS_DetectModule)" {
     try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.mjs", "console.log(1)", .script));
     try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "import value from './dep.mjs';\nconsole.log(value)", .script));
     try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "export const value = 1;", .script));
-    try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "console.log(import.meta.url)", .script));
+    try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "/* leading */ // comment\nimport 'x';", .script));
+    try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "#!/usr/bin/env zjs\nimport value from './dep.mjs';", .script));
+    // Only the first token decides (qjs JS_DetectModule quickjs.c:23792):
+    // `import.meta` / `import(...)` never promote, and a late export/import
+    // is a script-mode SyntaxError rather than a silent module promotion.
+    try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "console.log(import.meta.url)", .script));
+    try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "import('./dep.mjs')", .script));
+    try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "import\n('./dep.mjs')", .script));
+    try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "import.meta.url", .script));
     try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "const s = 'import x from y';\nimport('./dep.mjs')", .script));
+    try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "console.log(1);\nexport const late = 1;", .script));
     try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "// export const x = 1\nconsole.log('ok')", .script));
+    try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "importx.meta", .script));
+    try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "exports.value = 1;", .script));
 }
 
 test "zjs module specifier resolver uses referrer directory" {
