@@ -138,7 +138,9 @@ pub fn parseStringToBigInt(rt: *core.JSRuntime, value: core.JSValue) !bignum.Big
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
     try appendRawString(rt, &buffer, value);
-    const trimmed = std.mem.trim(u8, buffer.items, " \t\r\n");
+    // qjs JS_StringToBigInt (quickjs.c:14609) skips the full JS whitespace set
+    // via skip_spaces (quickjs.c:11230) — the same trimmer ToNumber uses.
+    const trimmed = core.value_format.trimJsWhitespace(buffer.items);
     if (trimmed.len == 0) return bignum.BigInt{ .allocator = rt.memory.allocator };
     return bignum.parseAutoAlloc(rt.memory.allocator, trimmed);
 }
@@ -570,7 +572,8 @@ pub fn toBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     defer buffer.deinit(rt.memory.allocator);
     if (value.isString() or value.isObject()) {
         try appendValueString(rt, &buffer, value);
-        const trimmed = std.mem.trim(u8, buffer.items, " \t\r\n");
+        // qjs JS_StringToBigInt (quickjs.c:14609) + skip_spaces (quickjs.c:11230).
+        const trimmed = core.value_format.trimJsWhitespace(buffer.items);
         if (trimmed.len == 0) return bignum.BigInt.fromIntAlloc(rt.memory.allocator, 0);
         return bignum.parseAutoAlloc(rt.memory.allocator, trimmed) catch error.SyntaxError;
     }

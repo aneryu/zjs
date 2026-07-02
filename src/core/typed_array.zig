@@ -902,7 +902,8 @@ fn toBigIntValue(rt: *JSRuntime, value: JSValue) !bignum.BigInt {
     defer buffer.deinit(rt.memory.allocator);
     if (value.isString() or value.isObject()) {
         try appendValueString(rt, &buffer, value);
-        const trimmed = std.mem.trim(u8, buffer.items, " \t\r\n");
+        // qjs JS_StringToBigInt (quickjs.c:14609) + skip_spaces (quickjs.c:11230).
+        const trimmed = value_format.trimJsWhitespace(buffer.items);
         if (trimmed.len == 0) return bignum.BigInt.fromIntAlloc(rt.memory.allocator, 0);
         return bignum.parseAutoAlloc(rt.memory.allocator, trimmed) catch error.SyntaxError;
     }
