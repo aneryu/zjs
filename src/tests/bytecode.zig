@@ -1,5 +1,4 @@
 const std = @import("std");
-const build_options = @import("build_options");
 const zjs = @import("zjs");
 const engine = zjs;
 
@@ -17,10 +16,10 @@ test "constant pool retains and releases values" {
     const value = text.value();
     const index = try pool.append(value);
     try std.testing.expectEqual(@as(u32, 0), index);
-    try std.testing.expectEqual(@as(i32, 2), text.header.rc);
+    try std.testing.expectEqual(@as(i32, 2), text.header().rc);
 
     const loaded = pool.get(0).?;
-    try std.testing.expectEqual(@as(i32, 3), text.header.rc);
+    try std.testing.expectEqual(@as(i32, 3), text.header().rc);
     loaded.free(rt);
     value.free(rt);
 }
@@ -36,7 +35,7 @@ test "constant pool appendOwned transfers refcounted values" {
     const value = text.value();
     _ = try pool.appendOwned(value);
 
-    try std.testing.expectEqual(@as(i32, 1), text.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), text.header().rc);
 }
 
 test "constant pool retains owned unique symbol atoms until release" {
@@ -216,7 +215,7 @@ test "FunctionDef: cpool transfers refcounted owned values" {
     const text = try core.string.String.createAscii(rt, "function-def-owned");
     _ = try fd.appendCpoolOwned(text.value());
 
-    try std.testing.expectEqual(@as(i32, 1), text.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), text.header().rc);
 }
 
 test "FunctionDef: cpool retains unique symbol atoms until release" {
@@ -369,64 +368,6 @@ test "FunctionDef: LabelSlot and JumpSlot" {
 
     try std.testing.expectEqual(@as(i32, 1), fd.jump_count);
     try std.testing.expectEqual(@as(i32, 100), fd.jump_slots[0].op);
-}
-
-test "Bytecode IC allocation skips direct eval and with functions" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const name = try rt.internAtom("ic_bypass");
-    const x_atom = try rt.internAtom("x");
-    defer rt.atoms.free(name);
-    defer rt.atoms.free(x_atom);
-
-    const op = bytecode.opcode.op;
-
-    var cached = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer cached.deinit(rt);
-    var cached_code = [_]u8{0} ** 4;
-    cached_code[0] = op.get_var;
-    std.mem.writeInt(u16, cached_code[1..3], 0, .little);
-    cached_code[3] = op.return_undef;
-    cached.var_ref_names = try rt.memory.alloc(core.Atom, 1);
-    cached.var_ref_names[0] = rt.atoms.dup(x_atom);
-    try cached.setCode(&cached_code);
-    try cached.allocateIcSlots();
-    const cacheable_ic_slot_count: usize = if (build_options.zjs_enable_ic) 1 else 0;
-    try std.testing.expectEqual(cacheable_ic_slot_count, cached.ic_slots.len);
-    try std.testing.expectEqual(build_options.zjs_enable_ic, cached.icSlotForPc(0) != null);
-
-    var direct_eval = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer direct_eval.deinit(rt);
-    var direct_eval_code = [_]u8{0} ** 9;
-    direct_eval_code[0] = op.get_var;
-    std.mem.writeInt(u16, direct_eval_code[1..3], 0, .little);
-    direct_eval_code[3] = op.eval;
-    std.mem.writeInt(u32, direct_eval_code[4..8], 0, .little);
-    direct_eval_code[8] = op.return_undef;
-    direct_eval.var_ref_names = try rt.memory.alloc(core.Atom, 1);
-    direct_eval.var_ref_names[0] = rt.atoms.dup(x_atom);
-    try direct_eval.setCode(&direct_eval_code);
-    try direct_eval.allocateIcSlots();
-    try std.testing.expectEqual(@as(usize, 0), direct_eval.ic_slots.len);
-    try std.testing.expectEqual(@as(usize, 0), direct_eval.ic_site_ids.len);
-
-    var with_function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer with_function.deinit(rt);
-    var with_code = [_]u8{0} ** 14;
-    with_code[0] = op.get_var;
-    std.mem.writeInt(u16, with_code[1..3], 0, .little);
-    with_code[3] = op.with_get_var;
-    std.mem.writeInt(u32, with_code[4..8], x_atom, .little);
-    std.mem.writeInt(u32, with_code[8..12], 0, .little);
-    with_code[12] = 1;
-    with_code[13] = op.return_undef;
-    with_function.var_ref_names = try rt.memory.alloc(core.Atom, 1);
-    with_function.var_ref_names[0] = rt.atoms.dup(x_atom);
-    try with_function.setCode(&with_code);
-    try with_function.allocateIcSlots();
-    try std.testing.expectEqual(@as(usize, 0), with_function.ic_slots.len);
-    try std.testing.expectEqual(@as(usize, 0), with_function.ic_site_ids.len);
 }
 
 test "resolve_variables: scope_get_var → get_var" {
@@ -1856,80 +1797,75 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
     const fb = &fb_slice[0];
     defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
-    try std.testing.expect(fb.is_strict_mode);
-    try std.testing.expect(fb.has_prototype);
-    try std.testing.expect(!fb.has_simple_parameter_list);
-    try std.testing.expect(fb.is_derived_class_constructor);
-    try std.testing.expect(fb.is_indirect_eval);
-    try std.testing.expectEqual(function_def.FunctionKind.async_generator, fb.func_kind);
-    try std.testing.expectEqual(@as(usize, 11), fb.byte_code.len);
+    try std.testing.expect(fb.flags.is_strict_mode);
+    try std.testing.expect(fb.flags.has_prototype);
+    try std.testing.expect(!fb.flags.has_simple_parameter_list);
+    try std.testing.expect(fb.flags.is_derived_class_constructor);
+    try std.testing.expect(fb.flags.is_indirect_eval);
+    try std.testing.expectEqual(function_def.FunctionKind.async_generator, fb.flags.func_kind);
+    try std.testing.expectEqual(@as(usize, 11), fb.byteCode().len);
     try std.testing.expectEqual(@as(i32, 11), fb.byte_code_len);
-    const cacheable_ic_slot_count: usize = if (build_options.zjs_enable_ic) 1 else 0;
-    try std.testing.expectEqual(cacheable_ic_slot_count, fb.ic_slots.len);
-    if (build_options.zjs_enable_ic) {
-        if (fb.ic_site_ids.len != 0) {
-            try std.testing.expectEqual(fb.byte_code.len, fb.ic_site_ids.len);
-            try std.testing.expectEqual(@as(usize, 0), fb.ic_site_ids[6]);
-        } else {
-            try std.testing.expectEqual(@as(usize, 1), fb.ic_sites.len);
-            try std.testing.expectEqual(@as(usize, 6), fb.ic_sites[0].pc);
-            try std.testing.expectEqual(@as(usize, 0), fb.ic_sites[0].slot_index);
-        }
-    } else {
-        try std.testing.expectEqual(@as(usize, 0), fb.ic_site_ids.len);
-        try std.testing.expectEqual(@as(usize, 0), fb.ic_sites.len);
-    }
-    const bc_view = bytecode.asBytecodeView(fb, rt);
-    try std.testing.expectEqual(build_options.zjs_enable_ic, bc_view.icSlotForPc(6) != null);
-    try std.testing.expect(bc_view.icSlotForPc(0) == null);
-    try std.testing.expectEqual(op.push_atom_value, fb.byte_code[0]);
-    try std.testing.expectEqual(op.drop, fb.byte_code[5]);
-    try std.testing.expectEqual(op.get_var, fb.byte_code[6]);
-    try std.testing.expectEqual(op.drop, fb.byte_code[9]);
-    try std.testing.expectEqual(op.return_undef, fb.byte_code[10]);
-    try std.testing.expectEqual(@as(usize, 1), fb.arg_names.len);
-    try std.testing.expectEqual(arg_name, fb.arg_names[0]);
-    try std.testing.expectEqual(@as(usize, 1), fb.vardefs.len);
-    try std.testing.expectEqual(name, fb.vardefs[0].var_name);
-    try std.testing.expectEqual(@as(usize, 1), fb.var_names.len);
-    try std.testing.expectEqual(name, fb.var_names[0]);
-    try std.testing.expect(fb.var_is_const[0]);
-    try std.testing.expectEqual(@as(usize, 1), fb.var_ref_names.len);
-    try std.testing.expectEqual(captured_name, fb.var_ref_names[0]);
-    try std.testing.expect(fb.var_ref_is_lexical[0]);
-    try std.testing.expect(fb.var_ref_is_const[0]);
-    try std.testing.expectEqual(@as(usize, 1), fb.private_bound_names.len);
-    try std.testing.expectEqual(private_name, fb.private_bound_names[0]);
+    try std.testing.expectEqual(op.push_atom_value, fb.byteCode()[0]);
+    try std.testing.expectEqual(op.drop, fb.byteCode()[5]);
+    try std.testing.expectEqual(op.get_var, fb.byteCode()[6]);
+    try std.testing.expectEqual(op.drop, fb.byteCode()[9]);
+    try std.testing.expectEqual(op.return_undef, fb.byteCode()[10]);
+    try std.testing.expectEqual(@as(usize, 1), fb.argNames().len);
+    try std.testing.expectEqual(arg_name, fb.argNames()[0]);
+    try std.testing.expectEqual(@as(usize, 1), fb.varDefs().len);
+    try std.testing.expectEqual(name, fb.varDefs()[0].var_name);
+    try std.testing.expect(fb.varDefs()[0].is_const);
+    // Var-ref names are derived from `closure_var[i].var_name` (the former
+    // parallel `var_ref_names` atom array was removed to shrink the FB struct).
+    try std.testing.expectEqual(@as(usize, 1), fb.closureVar().len);
+    try std.testing.expectEqual(captured_name, fb.closureVar()[0].var_name);
+    // is_lexical / is_const now derived from closure_var[i] (parallel `[]bool`
+    // arrays removed to match qjs JSClosureVar).
+    try std.testing.expect(fb.closureVar()[0].is_lexical);
+    try std.testing.expect(fb.closureVar()[0].is_const);
+    try std.testing.expectEqual(@as(usize, 1), fb.privateBoundNames().len);
+    try std.testing.expectEqual(private_name, fb.privateBoundNames()[0]);
     try std.testing.expectEqual(@as(u16, 1), fb.var_count);
     try std.testing.expectEqual(@as(u16, 1), fb.arg_count);
     try std.testing.expectEqual(@as(u16, 1), fb.defined_arg_count);
-    try std.testing.expectEqual(@as(u16, 1), fb.closure_var_count);
-    try std.testing.expectEqual(@as(usize, 1), fb.atom_operands.len);
-    try std.testing.expectEqual(name, fb.atom_operands[0]);
+    try std.testing.expectEqual(@as(u32, 1), fb.var_refs_len);
+    {
+        // Atom operands are retained inline in the bytecode (no side array);
+        // iterate them to confirm the single `name` operand survived finalize.
+        var it = fb.atomOperandIterator();
+        const first = it.next();
+        try std.testing.expectEqual(name, first.?);
+        try std.testing.expectEqual(@as(?atom_module.Atom, null), it.next());
+    }
     try std.testing.expectEqual(@as(i32, 1), fb.cpool_count);
-    try std.testing.expectEqual(@as(i32, 99), fb.cpool[0].asInt32().?);
-    try std.testing.expectEqual(@as(i32, 7), fb.line_num);
-    try std.testing.expectEqual(@as(i32, 3), fb.col_num);
-    try std.testing.expect(fb.pc2line_len > 0);
-    try std.testing.expectEqualStrings("async function* inner(arg) {}", fb.source.?);
+    try std.testing.expectEqual(@as(i32, 99), fb.cpoolSlice()[0].asInt32().?);
+    try std.testing.expectEqual(@as(i32, 7), fb.lineNum());
+    try std.testing.expectEqual(@as(i32, 3), fb.colNum());
+    try std.testing.expect(fb.pc2lineLen() > 0);
+    try std.testing.expectEqualStrings("async function* inner(arg) {}", fb.sourceText().?);
 
     const view = bytecode.asBytecodeView(fb, rt);
-    try std.testing.expectEqualSlices(engine.bytecode.ic.Slot, fb.ic_slots, view.ic_slots);
-    try std.testing.expectEqualSlices(usize, fb.ic_site_ids, view.ic_site_ids);
     try std.testing.expect(view.flags.is_strict);
     try std.testing.expect(view.flags.is_async);
     try std.testing.expect(view.flags.is_generator);
     try std.testing.expect(view.flags.is_derived_class_constructor);
     try std.testing.expect(view.flags.is_indirect_eval);
-    try std.testing.expectEqualSlices(u8, fb.byte_code, view.code);
-    try std.testing.expectEqualSlices(atom_module.Atom, fb.atom_operands, view.atom_operands);
-    try std.testing.expectEqualSlices(atom_module.Atom, fb.arg_names, view.arg_names);
-    try std.testing.expectEqualSlices(atom_module.Atom, fb.var_names, view.var_names);
-    try std.testing.expectEqualSlices(bool, fb.var_is_const, view.var_is_const);
-    try std.testing.expectEqualSlices(atom_module.Atom, fb.var_ref_names, view.var_ref_names);
-    try std.testing.expectEqualSlices(bool, fb.var_ref_is_const, view.var_ref_is_const);
-    try std.testing.expectEqualSlices(atom_module.Atom, fb.private_bound_names, view.private_bound_names);
-    try std.testing.expectEqualSlices(core.JSValue, fb.cpool, view.constants.values);
+    try std.testing.expectEqualSlices(u8, fb.byteCode(), view.code);
+    // The finalized FB no longer exposes a standalone atom-operand array; the
+    // view's `atom_operands` is empty and its atoms are read inline from `code`.
+    try std.testing.expectEqual(@as(usize, 0), view.atom_operands.len);
+    try std.testing.expectEqualSlices(atom_module.Atom, fb.argNames(), view.arg_names);
+    try std.testing.expectEqualSlices(bytecode.function_def.VarDef, fb.varDefs(), view.vardefs);
+    // The finalized FB no longer keeps a standalone `var_ref_names` array; the
+    // view leaves `var_ref_names` empty for normal (non-eval) functions and
+    // derives names from `closure_var[i].var_name` via `varRefName`.
+    try std.testing.expectEqual(@as(usize, 0), view.var_ref_names.len);
+    try std.testing.expectEqual(fb.closureVar().len, view.varRefNamesLen());
+    try std.testing.expectEqual(fb.closureVar()[0].var_name, view.varRefName(0));
+    try std.testing.expectEqual(fb.closureVar()[0].is_const, view.varRefIsConstAt(0));
+    try std.testing.expectEqual(fb.closureVar()[0].is_lexical, view.varRefIsLexicalAt(0));
+    try std.testing.expectEqualSlices(atom_module.Atom, fb.privateBoundNames(), view.private_bound_names);
+    try std.testing.expectEqualSlices(core.JSValue, fb.cpoolSlice(), view.constants.values);
     try std.testing.expectEqual(fb.stack_size, view.stack_size);
 }
 
@@ -1960,18 +1896,15 @@ test "createFunctionBytecode: copies global var records from FunctionDef" {
     const fb = &fb_slice[0];
     defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
-    try std.testing.expectEqual(@as(usize, 1), fb.global_var_names.len);
-    try std.testing.expectEqual(global_name, fb.global_var_names[0]);
-    try std.testing.expectEqual(@as(usize, 1), fb.global_vars.len);
-    try std.testing.expectEqual(global_name, fb.global_vars[0].var_name);
-    try std.testing.expect(fb.global_vars[0].force_init);
-    try std.testing.expect(fb.global_vars[0].is_configurable);
-    try std.testing.expect(fb.global_vars[0].is_lexical);
-    try std.testing.expect(fb.global_vars[0].is_const);
-    try std.testing.expectEqual(@as(i32, 0), fb.global_vars[0].scope_level);
+    try std.testing.expectEqual(@as(usize, 1), fb.globalVars().len);
+    try std.testing.expectEqual(global_name, fb.globalVars()[0].var_name);
+    try std.testing.expect(fb.globalVars()[0].force_init);
+    try std.testing.expect(fb.globalVars()[0].is_configurable);
+    try std.testing.expect(fb.globalVars()[0].is_lexical);
+    try std.testing.expect(fb.globalVars()[0].is_const);
+    try std.testing.expectEqual(@as(i32, 0), fb.globalVars()[0].scope_level);
 
     const view = bytecode.asBytecodeView(fb, rt);
-    try std.testing.expectEqualSlices(atom_module.Atom, fb.global_var_names, view.global_var_names);
     try std.testing.expectEqual(@as(usize, 1), view.global_vars.len);
     try std.testing.expectEqual(global_name, view.global_vars[0].var_name);
     try std.testing.expect(view.global_vars[0].force_init);
@@ -2008,7 +1941,7 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
 
     const heap_bytes = fb.heapByteSize();
     try std.testing.expect(heap_bytes >= large_threshold);
-    try std.testing.expectEqual(@as(u16, @intCast(@min(heap_bytes, std.math.maxInt(u16)))), fb.header.size_class);
+    try std.testing.expectEqual(@as(u16, @intCast(@min(heap_bytes, std.math.maxInt(u16)))), fb.header.meta().size_class);
 
     const stats = rt.gcStats();
     try std.testing.expectEqual(@as(usize, 1), stats.large_alloc_count);

@@ -235,11 +235,13 @@ pub fn initializeClassInstanceElements(
         const instance_object = try property_ops.expectObject(instance);
         try initializeClassPrivateMethods(ctx.runtime, instance_object, home_object);
     }
-    try initializeClassInstanceFields(ctx.runtime, instance, fb.class_instance_fields, remap_object);
+    try initializeClassInstanceFields(ctx.runtime, instance, fb.classInstanceFields(), remap_object);
     const init_function = if (constructor_object) |object|
         object.functionClassFieldsInit()
+    else if (fb.class_fields_init) |boxed|
+        boxed.*
     else
-        fb.class_fields_init;
+        null;
     if (init_function) |initializer| {
         const result = try callValueOrBytecode(ctx, output, global, instance, initializer, &.{}, caller_function, caller_frame);
         result.free(ctx.runtime);

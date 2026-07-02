@@ -207,7 +207,7 @@ pub fn JSBytes(comptime Value: type) type {
         fn objectFromValue(value: Value) ?*@import("object.zig").Object {
             if (!value.isObject()) return null;
             const header = value.refHeader() orelse return null;
-            if (header.kind != .object) return null;
+            if (header.meta().kind != .object) return null;
             return @fieldParentPtr("header", header);
         }
 
@@ -594,6 +594,6 @@ test "JSBytes views length-tracking DataView to end of buffer" {
 fn testObjectFromValue(comptime Value: type, value: Value) ?*@import("object.zig").Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
-    if (header.kind != .object) return null;
+    if (header.meta().kind != .object) return null;
     return @fieldParentPtr("header", header);
 }

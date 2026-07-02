@@ -3,7 +3,6 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const zjs_enable_ic = b.option(bool, "zjs_enable_ic", "Enable shape-keyed inline caches") orelse true;
     const zjs_enable_opcode_profile = b.option(bool, "zjs_enable_opcode_profile", "Enable per-opcode profiling scopes") orelse false;
     // Default: the 16-byte (payload+tag) JSValue layout — the portable
     // reference representation that does not assume a 48-bit virtual address
@@ -18,7 +17,6 @@ pub fn build(b: *std.Build) void {
     const zjs_oom_coverage = b.option(bool, "zjs_oom_coverage", "Record distinct allocation call sites for the OOM corpus coverage report") orelse false;
     const zjs_force_gc = b.option(bool, "zjs_force_gc", "Force a full GC before each runtime heap allocation") orelse false;
     const engine_options = b.addOptions();
-    engine_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
     engine_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
     engine_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     engine_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
@@ -33,7 +31,6 @@ pub fn build(b: *std.Build) void {
     engine_mod.addOptions("build_options", engine_options);
 
     const plugin_fixture_options = b.addOptions();
-    plugin_fixture_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
     plugin_fixture_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
     plugin_fixture_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     plugin_fixture_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
@@ -447,7 +444,6 @@ pub fn build(b: *std.Build) void {
         .mode = .simple,
     };
     const test_options = b.addOptions();
-    test_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
     test_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
     test_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     test_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);

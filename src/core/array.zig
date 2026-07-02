@@ -62,11 +62,18 @@ fn expectObject(value: JSValue) !*Object {
 /// via the object's `is_proxy`/`is_array` flags with no VM state. Relocated to
 /// engine core in Phase 6b-3 STEP 2; `builtins/array.zig` re-exports it.
 pub fn isArrayValue(value: JSValue) !bool {
-    const object = objectFromValue(value) orelse return false;
-    if (object.flags.is_proxy) {
+    // Iterative proxy-chain walk with a depth cap, mirroring QuickJS
+    // `js_resolve_proxy` (quickjs.c:51412-51434): a chain deeper than 1000 is a
+    // stack overflow (InternalError), not a native recursion crash. A revoked
+    // proxy (null handler) is a TypeError.
+    var object = objectFromValue(value) orelse return false;
+    var depth: usize = 0;
+    while (object.flags.is_proxy) {
+        if (depth > 1000) return error.StackOverflow;
+        depth += 1;
         if (object.proxyHandler() == null) return error.TypeError;
         const target = object.proxyTarget() orelse return error.TypeError;
-        return isArrayValue(target);
+        object = objectFromValue(target) orelse return false;
     }
     return object.flags.is_array;
 }

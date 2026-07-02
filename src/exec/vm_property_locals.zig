@@ -222,7 +222,7 @@ pub noinline fn checkedLocVm(
                 return err;
             }
             const value = try stack.pop();
-            if (idx < function.var_is_const.len and function.var_is_const[idx]) {
+            if (idx < function.vardefs.len and function.vardefs[idx].is_const) {
                 value.free(ctx.runtime);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
@@ -240,8 +240,8 @@ pub noinline fn checkedLocVm(
         },
         op.put_loc_check_init => {
             const is_derived_this = function.flags.is_derived_class_constructor and
-                idx < function.var_names.len and
-                function.var_names[idx] == 8;
+                idx < function.vardefs.len and
+                function.vardefs[idx].var_name == 8;
             if (is_derived_this and !slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;

@@ -30,16 +30,13 @@ pub fn parseJsNumber(bytes: []const u8) f64 {
     if (std.mem.eql(u8, trimmed, "Infinity") or std.mem.eql(u8, trimmed, "+Infinity")) return std.math.inf(f64);
     if (std.mem.eql(u8, trimmed, "-Infinity")) return -std.math.inf(f64);
     if (trimmed.len >= 2 and trimmed[0] == '0' and (trimmed[1] == 'x' or trimmed[1] == 'X')) {
-        const parsed = std.fmt.parseUnsigned(u64, trimmed[2..], 16) catch return std.math.nan(f64);
-        return @floatFromInt(parsed);
+        return parseRadixPrefixedDigits(trimmed[2..], 16);
     }
     if (trimmed.len >= 2 and trimmed[0] == '0' and (trimmed[1] == 'o' or trimmed[1] == 'O')) {
-        const parsed = std.fmt.parseUnsigned(u64, trimmed[2..], 8) catch return std.math.nan(f64);
-        return @floatFromInt(parsed);
+        return parseRadixPrefixedDigits(trimmed[2..], 8);
     }
     if (trimmed.len >= 2 and trimmed[0] == '0' and (trimmed[1] == 'b' or trimmed[1] == 'B')) {
-        const parsed = std.fmt.parseUnsigned(u64, trimmed[2..], 2) catch return std.math.nan(f64);
-        return @floatFromInt(parsed);
+        return parseRadixPrefixedDigits(trimmed[2..], 2);
     }
     const parsed = std.fmt.parseFloat(f64, trimmed) catch return std.math.nan(f64);
     if (std.math.isInf(parsed) and beginsWithAsciiAlphaAfterSign(trimmed)) return std.math.nan(f64);
@@ -58,6 +55,7 @@ fn formatSimpleFiniteDecimal(buffer: []u8, value: f64) ?[]const u8 {
     if (@trunc(scaled) != scaled) return null;
 
     const scaled_int: i64 = @intFromFloat(scaled);
+    if (@as(f64, @floatFromInt(scaled_int)) / 10.0 != value) return null;
     const sign_len: usize = if (scaled_int < 0) 1 else 0;
     const magnitude: u64 = @intCast(if (scaled_int < 0) -scaled_int else scaled_int);
     const integer = magnitude / 10;
@@ -149,6 +147,39 @@ fn startsWith(bytes: []const u8, prefix: []const u8) bool {
 
 fn endsWith(bytes: []const u8, suffix: []const u8) bool {
     return bytes.len >= suffix.len and std.mem.eql(u8, bytes[bytes.len - suffix.len ..], suffix);
+}
+
+/// Digits of a 0x/0o/0b literal for ToNumber(string). Exact through u128
+/// (one correctly-rounded int->double conversion); wider literals keep
+/// accumulating in f64, mirroring qjs js_atod's accumulate-into-double
+/// behaviour instead of failing to NaN.
+fn parseRadixPrefixedDigits(digits: []const u8, comptime radix: u8) f64 {
+    if (digits.len == 0) return std.math.nan(f64);
+    var wide: u128 = 0;
+    var overflowed = false;
+    var value: f64 = 0;
+    for (digits) |ch| {
+        const digit: u8 = switch (ch) {
+            '0'...'9' => ch - '0',
+            'a'...'f' => ch - 'a' + 10,
+            'A'...'F' => ch - 'A' + 10,
+            else => return std.math.nan(f64),
+        };
+        if (digit >= radix) return std.math.nan(f64);
+        if (!overflowed) {
+            const mul = @mulWithOverflow(wide, radix);
+            const add = @addWithOverflow(mul[0], digit);
+            if (mul[1] == 0 and add[1] == 0) {
+                wide = add[0];
+                continue;
+            }
+            overflowed = true;
+            value = @floatFromInt(wide);
+        }
+        value = value * @as(f64, @floatFromInt(radix)) + @as(f64, @floatFromInt(digit));
+    }
+    if (!overflowed) return @floatFromInt(wide);
+    return value;
 }
 
 fn hasSignedRadixPrefix(bytes: []const u8) bool {

@@ -199,7 +199,7 @@ pub fn originalArgCount(argc: usize, need_original_snapshot: bool) usize {
 pub fn frameVarRefStorageCount(function: *const bytecode.Bytecode, inherited_var_refs: []const JSValue) usize {
     if (inherited_var_refs.len != 0) return inherited_var_refs.len;
     if (function.closure_var.len != 0) return function.closure_var.len;
-    return function.var_ref_names.len;
+    return function.varRefNamesLen();
 }
 
 pub fn frameOpenVarRefStorageCount(function: *const bytecode.Bytecode, frame_arg_count: usize) usize {

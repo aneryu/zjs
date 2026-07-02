@@ -1,6 +1,0 @@
-test262/test/built-ins/RegExp/prototype/flags/this-val-regexp.js	Test262Error	Test262Error: unicodeSets Expected SameValue(Â«"uv"Â», Â«"v"Â») to be true
-test262/test/built-ins/String/prototype/matchAll/regexp-prototype-matchAll-v-u-flag.js	SyntaxError	SyntaxError
-test262/test/language/literals/regexp/u-surrogate-pairs-atom-char-class.js	Test262Error	Test262Error: Expected true but got false
-test262/test/language/literals/regexp/u-surrogate-pairs.js	Test262Error	Test262Error: Expected true but got false
-test262/test/staging/sm/RegExp/unicode-back-reference.js	Test262Error	Test262Error: Expected SameValue(Â«fooí ´barí ´,í ´Â», Â«nullÂ») to be true
-test262/test/staging/sm/RegExp/unicode-class-lead-trail.js	Test262Error	Test262Error: Actual argument [null] shouldn't be primitive.

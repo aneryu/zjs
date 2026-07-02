@@ -622,6 +622,7 @@ pub const RealmValueSlot = enum(u8) {
     std_file_prototype,
     regexp_constructor,
     callsite_prototype,
+    regexp_match_result_template,
     count,
 };
 
@@ -1090,12 +1091,43 @@ fn exoticMethodsForClassId(class_id: class.ClassId) ?*const ExoticMethods {
 /// (quickjs.c:8856-8860) still raises `ReferenceErrorUninitialized`.
 pub const BindingExistence = enum { absent, present, uninitialized };
 
+/// The single 8-byte slot qjs's JSObject union `u` occupies for either a class
+/// payload pointer OR the fast-array element base pointer. An object is EITHER a
+/// fast array (uses `array_values`, gated by `flags.is_array`) OR a class-payload
+/// object (uses `payload`, gated by `class_payload_kind`/class_id) — never both,
+/// so the two pointers are physically mutually exclusive. Untagged (`extern
+/// union`): the active arm is chosen by the external discriminant, exactly as qjs
+/// dispatches `u` by class_id. This overlap is the -8B that takes Object 72->64.
+pub const ObjectStorage = extern union {
+    /// `class_payload` for non-array classes (Map/Proxy/TypedArray/function/...).
+    payload: class.Payload,
+    /// Dense element base pointer for fast arrays (qjs `u.array.u.values`).
+    array_values: [*]JSValue,
+};
+
 pub const Object = struct {
+    pub const gc_kind_tag: u8 = @intFromEnum(gc.GcKind.object);
+    comptime {
+        // GC prefix model: BlockHeader.meta() reads objectPtr-8, so header MUST
+        // be at offset 0. Zig reorders non-extern fields; if this fails, force
+        // header first with `align(16)` (see FunctionBytecode).
+        std.debug.assert(@offsetOf(@This(), "header") == 0);
+        // qjs JSObject is 64B: the class payload and the fast-array base pointer
+        // share ONE 8-byte union slot (`u`); they are never both live. Locks the win.
+        std.debug.assert(@sizeOf(@This()) == 64);
+    }
     header: gc.GCObjectHeader,
-    class_payload: class.Payload = null,
+    // qjs `u` union slot: class payload (non-array) OR fast-array base (array).
+    u: ObjectStorage = .{ .payload = null },
     shape_ref: *shape.Shape,
-    properties: []property.Entry = &.{},
-    array_values: [*]JSValue = undefined,
+    // Bare pointer to the property VALUE array (qjs `JSObject.prop`, a bare
+    // `JSProperty *`). The element count is NOT stored here — it is the owning
+    // shape's `prop_count` (qjs reads count/size from `JSShape`), and the
+    // allocated capacity is `shape_ref.props().len` (`propertyStorageCapacity`).
+    // Guarded by `flags.has_property_storage`; `undefined` when no storage. Mirrors
+    // qjs storing only the pointer in JSObject and the count/size in the shared
+    // shape (this is the -8B vs a Zig slice header).
+    prop_values: [*]property.Entry = undefined,
     array_count: u32 = 0,
     array_capacity: u32 = 0,
     /// JS-observable `.length` for arrays. Distinct from `array_count` (the
@@ -1108,7 +1140,7 @@ pub const Object = struct {
     class_id: class.ClassId,
     flags: ObjectFlags = .{},
     class_payload_kind: class.PayloadKind = .none,
-    weakref_count: usize = 0,
+    weakref_count: u32 = 0,
 
     pub fn expect(val: JSValue) !*Object {
         const header = val.refHeader() orelse return error.TypeError;
@@ -1312,9 +1344,9 @@ pub const Object = struct {
         markObjectAsPrototype(rt, prototype);
         const has_exotic_methods = classHasExoticMethods(rt, class_id, class_record);
         self.* = .{
-            .header = .{ .kind = .object },
+            .header = .{},
             .class_id = class_id,
-            .class_payload = class_payload,
+            .u = .{ .payload = class_payload },
             .class_payload_kind = class_payload_kind,
             .flags = .{
                 .reserved_class_payload_finalizer_slot = reserved_class_payload_finalizer_slot,
@@ -1323,7 +1355,7 @@ pub const Object = struct {
                 .has_property_storage = property_capacity != 0,
             },
             .shape_ref = shape_ref,
-            .properties = property_storage[0..0],
+            .prop_values = property_storage.ptr,
         };
         property_storage_owned = false;
         reserved_class_payload_finalizer_slot = false;
@@ -1461,10 +1493,10 @@ pub const Object = struct {
 
     pub fn ensureOrdinaryPayload(self: *Object, rt: *JSRuntime) !*OrdinaryPayload {
         if (self.ordinaryPayload()) |payload| return payload;
-        std.debug.assert(self.class_payload == null);
+        std.debug.assert(self.u.payload == null);
         const payload = try rt.createRuntime(OrdinaryPayload);
         payload.* = .{};
-        self.class_payload = @ptrCast(payload);
+        self.u.payload = @ptrCast(payload);
         self.class_payload_kind = .ordinary;
         return payload;
     }
@@ -1481,7 +1513,7 @@ pub const Object = struct {
         if (self.realmPayload()) |payload| return payload;
         const payload = try rt.createRuntime(RealmPayload);
         payload.* = .{};
-        self.class_payload = @ptrCast(payload);
+        self.u.payload = @ptrCast(payload);
         self.class_payload_kind = .realm;
         return payload;
     }
@@ -1509,19 +1541,21 @@ pub const Object = struct {
     }
 
     pub fn installExternalClassPayload(self: *Object, payload: *anyopaque) void {
-        std.debug.assert(self.class_payload == null);
-        self.class_payload = payload;
+        std.debug.assert(self.u.payload == null);
+        self.u.payload = payload;
         self.class_payload_kind = .none;
     }
 
     pub fn externalClassPayload(self: *Object) ?*anyopaque {
-        if (self.class_payload_kind != .none) return null;
-        return self.class_payload;
+        // A fast array's `u` holds `array_values`, not a payload; only a
+        // non-array object with kind==.none carries an external payload pointer.
+        if (self.flags.is_array or self.class_payload_kind != .none) return null;
+        return self.u.payload;
     }
 
     pub fn externalClassPayloadConst(self: *const Object) ?*anyopaque {
-        if (self.class_payload_kind != .none) return null;
-        return self.class_payload;
+        if (self.flags.is_array or self.class_payload_kind != .none) return null;
+        return self.u.payload;
     }
 
     pub fn cachedFunctionProtoSlot(self: *Object, rt: *JSRuntime) !*?*Object {
@@ -1627,10 +1661,9 @@ pub const Object = struct {
         clearBorrowedReferencesForDestroyedObject(rt, self);
         self.enqueueDeferredStdFileClose(rt);
         if (!self.finalizeInlineClassPayload(rt)) self.enqueueClassPayloadFinalizer(rt);
-        const old_properties = self.properties;
+        const old_properties = self.propertyEntries();
         const old_property_capacity = self.propertyStorageCapacity();
-        const old_shape_props = self.shape_ref.props[0..@min(self.shape_ref.prop_count, old_properties.len)];
-        self.properties = &.{};
+        const old_shape_props = self.shape_ref.props()[0..@min(self.shape_ref.prop_count, old_properties.len)];
         self.flags.has_property_storage = false;
         for (old_properties, 0..) |entry, index| {
             const entry_atom = if (index < old_shape_props.len) old_shape_props[index].atom_id else atom.null_atom;
@@ -1664,18 +1697,34 @@ pub const Object = struct {
             rt.shapes.release(object_shape);
         }
         if (rt.gc.phase != .deinit and self.weakref_count != 0) {
-            self.header.rc = 0;
-            self.header.flags.mark = false;
+            self.header.meta().rc = 0;
+            self.header.meta().flags.mark = false;
+            return;
+        }
+        // Cycle removal: resources are gone but a not-yet-processed sibling in
+        // the batch may still decref (and thus dereference) this struct. Defer
+        // the struct-free to the Pass-B drain (qjs free_object, quickjs.c:6382).
+        if (rt.gc.phase == .remove_cycles) {
+            rt.gc.deferCycleStructFree(&self.header);
             return;
         }
         _ = rt.takeWeakObjectIdentity(self);
         freeObjectAllocation(rt, self, inline_layout);
     }
 
+    /// Pass-B drain of a cycle-deferred object: its resources were freed by the
+    /// resource pass; only the struct memory remains. Mirrors qjs Pass B
+    /// (quickjs.c:6797). Non-weakref objects only (weakref'd ones husk earlier).
+    pub fn freeCycleDeferredStruct(rt: *JSRuntime, self: *Object) void {
+        const inline_layout = inlineClassPayloadLayout(rt.classes.record(self.class_id));
+        _ = rt.takeWeakObjectIdentity(self);
+        freeObjectAllocation(rt, self, inline_layout);
+    }
+
     pub fn destroyDeadWeakHusk(rt: *JSRuntime, self: *Object) void {
-        std.debug.assert(self.header.rc == 0);
+        std.debug.assert(self.header.meta().rc == 0);
         std.debug.assert(self.weakref_count == 0);
-        std.debug.assert(!self.header.flags.mark);
+        std.debug.assert(!self.header.meta().flags.mark);
         const inline_layout = inlineClassPayloadLayout(rt.classes.record(self.class_id));
         _ = rt.takeWeakObjectIdentity(self);
         freeObjectAllocation(rt, self, inline_layout);
@@ -1685,25 +1734,25 @@ pub const Object = struct {
         const record = rt.classes.record(self.class_id) orelse return false;
         if (!record.hasInlinePayload()) return false;
         const finalizer = record.payload_finalizer orelse {
-            self.class_payload = null;
+            self.u.payload = null;
             self.class_payload_kind = .none;
             return true;
         };
-        finalizer(@ptrCast(rt), @ptrCast(self), &self.class_payload);
-        self.class_payload = null;
+        finalizer(@ptrCast(rt), @ptrCast(self), &self.u.payload);
+        self.u.payload = null;
         self.class_payload_kind = .none;
         return true;
     }
 
     fn enqueueClassPayloadFinalizer(self: *Object, rt: *JSRuntime) void {
         if (!self.flags.reserved_class_payload_finalizer_slot) return;
-        const payload = self.class_payload;
+        const payload = self.u.payload;
         const payload_kind = self.class_payload_kind;
         const object_identity = @intFromPtr(&self.header) & ~@as(usize, 1);
         self.flags.reserved_class_payload_finalizer_slot = false;
         const enqueued = rt.enqueueReservedDeferredClassPayloadFinalizer(self.class_id, payload, payload_kind, object_identity);
         if (!enqueued) return;
-        self.class_payload = null;
+        self.u.payload = null;
         self.class_payload_kind = .none;
     }
 
@@ -1763,7 +1812,7 @@ pub const Object = struct {
         var index: usize = 0;
         while (index < rt.borrowed_reference_holders.len) {
             const current = rt.borrowed_reference_holders[index];
-            if (current.header.rc == 0) {
+            if (current.header.meta().rc == 0) {
                 rt.unregisterBorrowedReferenceHolder(current);
                 continue;
             }
@@ -1799,7 +1848,7 @@ pub const Object = struct {
         var read_index: usize = 0;
         while (read_index < rt.borrowed_reference_holders.len) : (read_index += 1) {
             const current = rt.borrowed_reference_holders[read_index];
-            if (current.header.rc != 0) {
+            if (current.header.meta().rc != 0) {
                 if (write_index != read_index) rt.borrowed_reference_holders[write_index] = current;
                 write_index += 1;
                 continue;
@@ -1843,8 +1892,8 @@ pub const Object = struct {
             if (payload.cells.len != 0) return true;
         }
         if (self.functionRealmGlobalPtr() != null) return true;
-        const scanned = @min(self.properties.len, self.shape_ref.prop_count);
-        for (self.properties[0..scanned], 0..) |entry, index| {
+        const scanned = self.shape_ref.prop_count;
+        for (self.prop_values[0..scanned], 0..) |entry, index| {
             if (self.propFlagsAt(index).isAutoInit()) {
                 const info = property.autoInitAt(rt, entry.slot.auto_init).*;
                 if (info.host_function_realm_global != 0) return true;
@@ -1868,8 +1917,8 @@ pub const Object = struct {
                 const identity = @intFromPtr(&realm_global.header) & ~@as(usize, 1);
                 if (rt.borrowedWeakCleanupRealmIdentityMatches(identity)) return true;
             }
-            const scanned = @min(self.properties.len, self.shape_ref.prop_count);
-            for (self.properties[0..scanned], 0..) |entry, index| {
+            const scanned = self.shape_ref.prop_count;
+            for (self.prop_values[0..scanned], 0..) |entry, index| {
                 if (self.propFlagsAt(index).isAutoInit()) {
                     const info = property.autoInitAt(rt, entry.slot.auto_init).*;
                     if (info.host_function_realm_global != 0 and rt.borrowedWeakCleanupRealmIdentityMatches(info.host_function_realm_global)) return true;
@@ -1888,7 +1937,7 @@ pub const Object = struct {
         {
             var gc_iter = rt.gc.objectIterator();
             while (gc_iter.next()) |h| {
-                if (h.kind != .object or h.flags.mark) continue;
+                if (h.meta().kind != .object or h.meta().flags.mark) continue;
                 const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                 const payload = obj.collectionPayloadConst() orelse continue;
                 if (payload.weak_entries.len == 0) continue;
@@ -1902,7 +1951,7 @@ pub const Object = struct {
         }
 
         for (weak_holders.items) |obj| {
-            if (obj.header.rc == 0) continue;
+            if (obj.header.meta().rc == 0) continue;
             obj.sweepCycleGarbageWeakCollectionEntriesForHolder(rt, internal_bytecodes);
         }
     }
@@ -2064,8 +2113,8 @@ pub const Object = struct {
     }
 
     fn clearAutoInitRealmGlobals(self: *Object, rt: *JSRuntime, matcher: BorrowedIdentityMatcher) void {
-        const scanned = @min(self.properties.len, self.shape_ref.prop_count);
-        for (self.properties[0..scanned], 0..) |*entry, index| {
+        const scanned = self.shape_ref.prop_count;
+        for (self.prop_values[0..scanned], 0..) |*entry, index| {
             if (self.propFlagsAt(index).isAutoInit()) {
                 const info = property.autoInitAt(rt, entry.slot.auto_init);
                 if (matcher.matches(rt, info.host_function_realm_global)) info.host_function_realm_global = 0;
@@ -2672,10 +2721,10 @@ pub const Object = struct {
 
     pub fn ensureVarRefPayload(self: *Object, rt: *JSRuntime) !*VarRefPayload {
         if (self.varRefPayload()) |payload| return payload;
-        std.debug.assert(self.class_payload == null);
+        std.debug.assert(self.u.payload == null);
         const payload = try rt.createRuntime(VarRefPayload);
         payload.* = .{};
-        self.class_payload = @ptrCast(payload);
+        self.u.payload = @ptrCast(payload);
         self.class_payload_kind = .var_ref;
         return payload;
     }
@@ -2844,7 +2893,7 @@ pub const Object = struct {
         if (self.typedArrayPayload() != null) return;
         const payload = try rt.createRuntime(TypedArrayPayload);
         payload.* = .{};
-        self.class_payload = @ptrCast(payload);
+        self.u.payload = @ptrCast(payload);
         self.class_payload_kind = .typed_array;
         self.flags.needs_slow_property = true;
     }
@@ -3143,7 +3192,7 @@ pub const Object = struct {
         if (self.proxyPayload() != null) return;
         const payload = try rt.createRuntime(ProxyPayload);
         payload.* = .{};
-        self.class_payload = @ptrCast(payload);
+        self.u.payload = @ptrCast(payload);
         self.class_payload_kind = .proxy;
         self.flags.is_proxy = true;
         self.flags.needs_slow_property = true;
@@ -3246,19 +3295,19 @@ pub const Object = struct {
         if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return &.{};
         std.debug.assert(self.array_capacity >= self.array_count);
         std.debug.assert(self.array_length >= self.array_count);
-        return self.array_values[0..@as(usize, @intCast(self.array_count))];
+        return self.u.array_values[0..@as(usize, @intCast(self.array_count))];
     }
 
     fn arrayElementsMut(self: *Object) []JSValue {
         if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return &.{};
         std.debug.assert(self.array_capacity >= self.array_count);
         std.debug.assert(self.array_length >= self.array_count);
-        return self.array_values[0..@as(usize, @intCast(self.array_count))];
+        return self.u.array_values[0..@as(usize, @intCast(self.array_count))];
     }
 
     fn allocatedArrayElements(self: *Object) []JSValue {
         if (!self.flags.is_array or self.array_capacity == 0) return &.{};
-        return self.array_values[0..@as(usize, @intCast(self.array_capacity))];
+        return self.u.array_values[0..@as(usize, @intCast(self.array_capacity))];
     }
 
     pub fn arrayElementsCapacity(self: *const Object) usize {
@@ -3276,22 +3325,22 @@ pub const Object = struct {
 
     pub fn fastArrayElementAt(self: *const Object, index: u32) JSValue {
         std.debug.assert(self.isFastArrayIndexInBounds(index));
-        return self.array_values[@intCast(index)];
+        return self.u.array_values[@intCast(index)];
     }
 
     pub fn fastArrayElementSlot(self: *Object, index: u32) *JSValue {
         std.debug.assert(self.isFastArrayIndexInBounds(index));
-        return &self.array_values[@intCast(index)];
+        return &self.u.array_values[@intCast(index)];
     }
 
     pub fn fastArrayElementDup(self: *const Object, index: u32) ?JSValue {
         if (!self.isFastArrayIndexInBounds(index)) return null;
-        return self.array_values[@intCast(index)].dup();
+        return self.u.array_values[@intCast(index)].dup();
     }
 
     pub fn setFastArrayElementDup(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) bool {
         if (!self.isFastArrayIndexInBounds(index)) return false;
-        const slot = &self.array_values[@intCast(index)];
+        const slot = &self.u.array_values[@intCast(index)];
         const old = slot.*;
         slot.* = new_value.dup();
         old.free(rt);
@@ -3302,7 +3351,7 @@ pub const Object = struct {
         std.debug.assert(self.flags.is_array);
         std.debug.assert(self.array_count == 0);
         std.debug.assert(self.array_capacity == 0);
-        self.array_values = elements.ptr;
+        self.u.array_values = elements.ptr;
         self.array_count = @intCast(elements.len);
         self.array_capacity = @intCast(elements.len);
         // Fully-dense adoption: the logical length equals the dense extent.
@@ -3337,7 +3386,7 @@ pub const Object = struct {
     pub fn takeLastFastArrayElement(self: *Object) ?JSValue {
         if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return null;
         self.array_count -= 1;
-        return self.array_values[@intCast(self.array_count)];
+        return self.u.array_values[@intCast(self.array_count)];
     }
 
     /// Pop the last element of a FULLY DENSE fast array (count == length),
@@ -3350,12 +3399,12 @@ pub const Object = struct {
         if (self.array_count == 0 or self.array_count != self.array_length) return null;
         self.array_count -= 1;
         self.array_length -= 1;
-        return self.array_values[@intCast(self.array_count)];
+        return self.u.array_values[@intCast(self.array_count)];
     }
 
     pub fn borrowLastFastArrayElement(self: *Object) ?*JSValue {
         if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return null;
-        return &self.array_values[@intCast(self.array_count - 1)];
+        return &self.u.array_values[@intCast(self.array_count - 1)];
     }
 
     pub fn shrinkFastArrayByOne(self: *Object) void {
@@ -3368,7 +3417,7 @@ pub const Object = struct {
         if (self.flags.fast_array) {
             var index: usize = 0;
             const count: usize = @intCast(self.array_count);
-            while (index < count) : (index += 1) self.array_values[index].free(rt);
+            while (index < count) : (index += 1) self.u.array_values[index].free(rt);
         } else {
             std.debug.assert(self.array_capacity == 0);
         }
@@ -3405,7 +3454,7 @@ pub const Object = struct {
             // allocator, and some allocators decline relocation; keep the
             // copy/free fallback for those cases.
             if (try rt.remapRuntime(JSValue, old_allocated, next_capacity)) |next| {
-                self.array_values = next.ptr;
+                self.u.array_values = next.ptr;
                 self.array_capacity = @intCast(next_capacity);
                 return;
             }
@@ -3414,9 +3463,9 @@ pub const Object = struct {
         errdefer rt.memory.free(JSValue, next);
         if (self.flags.fast_array and self.array_count != 0) {
             const count: usize = @intCast(self.array_count);
-            @memcpy(next[0..count], self.array_values[0..count]);
+            @memcpy(next[0..count], self.u.array_values[0..count]);
         }
-        self.array_values = next.ptr;
+        self.u.array_values = next.ptr;
         self.array_capacity = @intCast(next_capacity);
         if (old_allocated.len != 0) rt.memory.free(JSValue, old_allocated);
     }
@@ -3426,7 +3475,7 @@ pub const Object = struct {
         try self.ensureArrayBufferCapacity(rt, @as(usize, @intCast(index)) + 1);
         self.array_count = index + 1;
         self.flags.fast_array = true;
-        return &self.array_values[@intCast(index)];
+        return &self.u.array_values[@intCast(index)];
     }
 
     pub fn fastArrayEnsureCapacity(self: *Object, rt: *JSRuntime, needed: u32) !void {
@@ -3435,7 +3484,7 @@ pub const Object = struct {
 
     pub fn fastArrayValuesPtr(self: *const Object) ?[*]JSValue {
         if (!self.isFastArray() or self.array_count == 0) return null;
-        return self.array_values;
+        return self.u.array_values;
     }
 
     pub fn fastArrayCount(self: *const Object) u32 {
@@ -3456,7 +3505,7 @@ pub const Object = struct {
 
     pub fn arrayElementsForCount(self: *const Object) []const JSValue {
         if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return &.{};
-        return self.array_values[0..@as(usize, @intCast(self.array_count))];
+        return self.u.array_values[0..@as(usize, @intCast(self.array_count))];
     }
 
     pub fn setFastArrayCountAssumeCapacity(self: *Object, count: u32) void {
@@ -3467,7 +3516,7 @@ pub const Object = struct {
 
     pub fn fastArraySlotAssumeCapacity(self: *Object, index: u32) *JSValue {
         std.debug.assert(index < self.array_capacity);
-        return &self.array_values[@intCast(index)];
+        return &self.u.array_values[@intCast(index)];
     }
 
     pub fn fastArraySetSparseLength(self: *Object, length: u32) void {
@@ -4866,17 +4915,17 @@ pub const Object = struct {
 
     fn ordinaryPayload(self: *Object) ?*OrdinaryPayload {
         if (self.class_payload_kind != .ordinary) return null;
-        return @ptrCast(@alignCast(self.class_payload.?));
+        return @ptrCast(@alignCast(self.u.payload.?));
     }
 
     fn ordinaryPayloadConst(self: *const Object) ?*const OrdinaryPayload {
         if (self.class_payload_kind != .ordinary) return null;
-        return @ptrCast(@alignCast(self.class_payload.?));
+        return @ptrCast(@alignCast(self.u.payload.?));
     }
 
     fn destroyOrdinaryPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.ordinaryPayload() orelse return;
-        self.class_payload = null;
+        self.u.payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(OrdinaryPayload, payload);
@@ -4884,19 +4933,19 @@ pub const Object = struct {
 
     fn iteratorPayload(self: *Object) ?*IteratorPayload {
         if (self.class_payload_kind != .iterator) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn iteratorPayloadConst(self: *const Object) ?*const IteratorPayload {
         if (self.class_payload_kind != .iterator) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyIteratorPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.iteratorPayload() orelse return;
-        self.class_payload = null;
+        self.u.payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(IteratorPayload, payload);
@@ -4904,19 +4953,19 @@ pub const Object = struct {
 
     fn collectionPayload(self: *Object) ?*CollectionPayload {
         if (self.class_payload_kind != .collection) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn collectionPayloadConst(self: *const Object) ?*const CollectionPayload {
         if (self.class_payload_kind != .collection) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyCollectionPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.collectionPayload() orelse return;
-        self.class_payload = null;
+        self.u.payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(CollectionPayload, payload);
@@ -4924,19 +4973,19 @@ pub const Object = struct {
 
     fn finalizationRegistryPayload(self: *Object) ?*FinalizationRegistryPayload {
         if (self.class_payload_kind != .finalization_registry) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn finalizationRegistryPayloadConst(self: *const Object) ?*const FinalizationRegistryPayload {
         if (self.class_payload_kind != .finalization_registry) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyFinalizationRegistryPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.finalizationRegistryPayload() orelse return;
-        self.class_payload = null;
+        self.u.payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(FinalizationRegistryPayload, payload);
@@ -4944,19 +4993,19 @@ pub const Object = struct {
 
     fn stdFilePayload(self: *Object) ?*StdFilePayload {
         if (self.class_payload_kind != .std_file) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn stdFilePayloadConst(self: *const Object) ?*const StdFilePayload {
         if (self.class_payload_kind != .std_file) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyStdFilePayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.stdFilePayload() orelse return;
-        self.class_payload = null;
+        self.u.payload = null;
         self.class_payload_kind = .none;
         payload.destroy();
         rt.memory.destroy(StdFilePayload, payload);
@@ -4964,19 +5013,19 @@ pub const Object = struct {
 
     fn disposableStackPayload(self: *Object) ?*DisposableStackPayload {
         if (self.class_payload_kind != .disposable_stack) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn disposableStackPayloadConst(self: *const Object) ?*const DisposableStackPayload {
         if (self.class_payload_kind != .disposable_stack) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyDisposableStackPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.disposableStackPayload() orelse return;
-        self.class_payload = null;
+        self.u.payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(DisposableStackPayload, payload);
@@ -4984,19 +5033,19 @@ pub const Object = struct {
 
     fn realmPayload(self: *Object) ?*RealmPayload {
         if (self.class_payload_kind != .realm) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn realmPayloadConst(self: *const Object) ?*const RealmPayload {
         if (self.class_payload_kind != .realm) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyRealmPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.realmPayload() orelse return;
-        self.class_payload = null;
+        self.u.payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(RealmPayload, payload);
@@ -5004,19 +5053,19 @@ pub const Object = struct {
 
     fn bufferPayload(self: *Object) ?*BufferPayload {
         if (self.class_payload_kind != .buffer) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn bufferPayloadConst(self: *const Object) ?*const BufferPayload {
         if (self.class_payload_kind != .buffer) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyBufferPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.bufferPayload() orelse return;
-        self.class_payload = null;
+        self.u.payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(BufferPayload, payload);
@@ -5024,17 +5073,17 @@ pub const Object = struct {
 
     fn typedArrayPayload(self: *Object) ?*TypedArrayPayload {
         if (self.class_payload_kind != .typed_array) return null;
-        return @ptrCast(@alignCast(self.class_payload.?));
+        return @ptrCast(@alignCast(self.u.payload.?));
     }
 
     fn typedArrayPayloadConst(self: *const Object) ?*const TypedArrayPayload {
         if (self.class_payload_kind != .typed_array) return null;
-        return @ptrCast(@alignCast(self.class_payload.?));
+        return @ptrCast(@alignCast(self.u.payload.?));
     }
 
     fn destroyTypedArrayPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.typedArrayPayload() orelse return;
-        self.class_payload = null;
+        self.u.payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(TypedArrayPayload, payload);
@@ -5042,19 +5091,19 @@ pub const Object = struct {
 
     fn regExpPayload(self: *Object) ?*RegExpPayload {
         if (self.class_payload_kind != .regexp) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn regExpPayloadConst(self: *const Object) ?*const RegExpPayload {
         if (self.class_payload_kind != .regexp) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyRegExpPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.regExpPayload() orelse return;
-        self.class_payload = null;
+        self.u.payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(RegExpPayload, payload);
@@ -5062,19 +5111,19 @@ pub const Object = struct {
 
     fn boundFunctionPayload(self: *Object) ?*BoundFunctionPayload {
         if (self.class_payload_kind != .bound_function) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn boundFunctionPayloadConst(self: *const Object) ?*const BoundFunctionPayload {
         if (self.class_payload_kind != .bound_function) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyBoundFunctionPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.boundFunctionPayload() orelse return;
-        self.class_payload = null;
+        self.u.payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(BoundFunctionPayload, payload);
@@ -5082,19 +5131,19 @@ pub const Object = struct {
 
     fn proxyPayload(self: *Object) ?*ProxyPayload {
         if (self.class_payload_kind != .proxy) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn proxyPayloadConst(self: *const Object) ?*const ProxyPayload {
         if (self.class_payload_kind != .proxy) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyProxyPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.proxyPayload() orelse return;
-        self.class_payload = null;
+        self.u.payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(ProxyPayload, payload);
@@ -5102,19 +5151,19 @@ pub const Object = struct {
 
     fn argumentsPayload(self: *Object) ?*ArgumentsPayload {
         if (self.class_payload_kind != .arguments) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn argumentsPayloadConst(self: *const Object) ?*const ArgumentsPayload {
         if (self.class_payload_kind != .arguments) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyArgumentsPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.argumentsPayload() orelse return;
-        self.class_payload = null;
+        self.u.payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(ArgumentsPayload, payload);
@@ -5122,19 +5171,19 @@ pub const Object = struct {
 
     fn objectDataPayload(self: *Object) ?*ObjectDataPayload {
         if (self.class_payload_kind != .object_data) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn objectDataPayloadConst(self: *const Object) ?*const ObjectDataPayload {
         if (self.class_payload_kind != .object_data) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyObjectDataPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.objectDataPayload() orelse return;
-        self.class_payload = null;
+        self.u.payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(ObjectDataPayload, payload);
@@ -5142,17 +5191,17 @@ pub const Object = struct {
 
     fn varRefPayload(self: *Object) ?*VarRefPayload {
         if (self.class_payload_kind != .var_ref) return null;
-        return @ptrCast(@alignCast(self.class_payload.?));
+        return @ptrCast(@alignCast(self.u.payload.?));
     }
 
     fn varRefPayloadConst(self: *const Object) ?*const VarRefPayload {
         if (self.class_payload_kind != .var_ref) return null;
-        return @ptrCast(@alignCast(self.class_payload.?));
+        return @ptrCast(@alignCast(self.u.payload.?));
     }
 
     fn destroyVarRefPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.varRefPayload() orelse return;
-        self.class_payload = null;
+        self.u.payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(VarRefPayload, payload);
@@ -5160,17 +5209,17 @@ pub const Object = struct {
 
     fn promisePayload(self: *Object) ?*PromisePayload {
         if (self.class_payload_kind != .promise) return null;
-        return @ptrCast(@alignCast(self.class_payload.?));
+        return @ptrCast(@alignCast(self.u.payload.?));
     }
 
     fn promisePayloadConst(self: *const Object) ?*const PromisePayload {
         if (self.class_payload_kind != .promise) return null;
-        return @ptrCast(@alignCast(self.class_payload.?));
+        return @ptrCast(@alignCast(self.u.payload.?));
     }
 
     fn destroyPromisePayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.promisePayload() orelse return;
-        self.class_payload = null;
+        self.u.payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(PromisePayload, payload);
@@ -5178,19 +5227,19 @@ pub const Object = struct {
 
     fn generatorPayload(self: *Object) ?*GeneratorPayload {
         if (self.class_payload_kind != .generator) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn generatorPayloadConst(self: *const Object) ?*const GeneratorPayload {
         if (self.class_payload_kind != .generator) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
     fn destroyGeneratorPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.generatorPayload() orelse return;
-        self.class_payload = null;
+        self.u.payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(GeneratorPayload, payload);
@@ -5198,17 +5247,17 @@ pub const Object = struct {
 
     fn functionPayload(self: *Object) ?*FunctionPayload {
         if (self.class_payload_kind != .function) return null;
-        return @ptrCast(@alignCast(self.class_payload.?));
+        return @ptrCast(@alignCast(self.u.payload.?));
     }
 
     fn functionPayloadConst(self: *const Object) ?*const FunctionPayload {
         if (self.class_payload_kind != .function) return null;
-        return @ptrCast(@alignCast(self.class_payload.?));
+        return @ptrCast(@alignCast(self.u.payload.?));
     }
 
     fn destroyFunctionPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.functionPayload() orelse return;
-        self.class_payload = null;
+        self.u.payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(FunctionPayload, payload);
@@ -5216,7 +5265,7 @@ pub const Object = struct {
 
     pub fn moduleNamespacePayload(self: *Object) ?*ModuleNamespacePayload {
         if (self.class_payload_kind != .module_namespace) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
@@ -5230,7 +5279,7 @@ pub const Object = struct {
 
     fn moduleNamespacePayloadConst(self: *const Object) ?*const ModuleNamespacePayload {
         if (self.class_payload_kind != .module_namespace) return null;
-        const ptr = self.class_payload orelse return null;
+        const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
@@ -5270,7 +5319,7 @@ pub const Object = struct {
 
     fn destroyModuleNamespacePayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.moduleNamespacePayload() orelse return;
-        self.class_payload = null;
+        self.u.payload = null;
         self.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(ModuleNamespacePayload, payload);
@@ -5281,15 +5330,15 @@ pub const Object = struct {
     }
 
     fn traceChildren(rt: *JSRuntime, header: *gc.Header, visitor: anytype) void {
-        switch (header.kind) {
+        switch (header.meta().kind) {
             .object => {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", header));
                 obj.traceChildEdgesNoFail(rt, visitor);
             },
             .function_bytecode => {
                 const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
-                if (fb.class_fields_init) |*stored| visitor.visitValue(stored);
-                for (fb.cpool) |*stored| visitor.visitValue(stored);
+                if (fb.class_fields_init) |stored| visitor.visitValue(stored);
+                for (fb.cpoolSlice()) |*stored| visitor.visitValue(stored);
             },
             .var_ref => {
                 const ref: *var_ref_mod.VarRef = @alignCast(@fieldParentPtr("header", header));
@@ -5304,7 +5353,7 @@ pub const Object = struct {
     }
 
     inline fn headerHasTraceableChildren(header: *const gc.Header) bool {
-        return header.kind == .object or header.kind == .function_bytecode or header.kind == .var_ref or header.kind == .shape;
+        return header.metaConst().kind == .object or header.metaConst().kind == .function_bytecode or header.metaConst().kind == .var_ref or header.metaConst().kind == .shape;
     }
 
     const DecrefVisitor = struct {
@@ -5343,8 +5392,8 @@ pub const Object = struct {
 
         fn visitHeader(self: DecrefVisitor, h: *gc.Header) void {
             _ = self;
-            if (h.rc == 0) return;
-            h.rc -= 1;
+            if (h.meta().rc == 0) return;
+            h.meta().rc -= 1;
         }
     };
 
@@ -5383,9 +5432,9 @@ pub const Object = struct {
         }
 
         fn visitHeader(self: ScanIncrefVisitor, h: *gc.Header) void {
-            h.rc += 1;
-            if (headerHasTraceableChildren(h) and h.flags.mark) {
-                h.flags.mark = false;
+            h.meta().rc += 1;
+            if (headerHasTraceableChildren(h) and h.meta().flags.mark) {
+                h.meta().flags.mark = false;
                 traceChildren(self.rt, h, self);
             }
         }
@@ -5427,7 +5476,7 @@ pub const Object = struct {
 
         fn visitHeader(self: ScanRestoreVisitor, h: *gc.Header) void {
             _ = self;
-            h.rc += 1;
+            h.meta().rc += 1;
         }
     };
 
@@ -5439,7 +5488,7 @@ pub const Object = struct {
         {
             var gc_iter = rt.gc.objectIterator();
             while (gc_iter.next()) |h| {
-                if (h.kind != .object) continue;
+                if (h.meta().kind != .object) continue;
                 const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                 if (!obj.hasWeakPayloadReferences()) continue;
                 gc.retain(&obj.header);
@@ -5452,7 +5501,7 @@ pub const Object = struct {
         }
 
         for (weak_holders.items) |obj| {
-            if (obj.header.rc == 0) continue;
+            if (obj.header.meta().rc == 0) continue;
             try obj.sweepDeadWeakPayloadReferences(rt);
         }
     }
@@ -5576,9 +5625,8 @@ pub const Object = struct {
         defer {
             var gc_iter = rt.gc.objectIterator();
             while (gc_iter.next()) |h| {
-                h.flags.mark = false;
-                h.flags.cycle_visited = false;
-                h.flags.cycle_preserved = false;
+                h.meta().flags.mark = false;
+                h.meta().flags.cycle_visited = false;
             }
         }
 
@@ -5586,7 +5634,7 @@ pub const Object = struct {
         {
             var gc_iter = rt.gc.objectIterator();
             while (gc_iter.next()) |h| {
-                h.flags.mark = true;
+                h.meta().flags.mark = true;
             }
 
             gc_iter = rt.gc.objectIterator();
@@ -5599,8 +5647,8 @@ pub const Object = struct {
         {
             var gc_iter = rt.gc.objectIterator();
             while (gc_iter.next()) |h| {
-                if (h.rc > 0 and h.flags.mark) {
-                    h.flags.mark = false;
+                if (h.meta().rc > 0 and h.meta().flags.mark) {
+                    h.meta().flags.mark = false;
                     traceChildren(rt, h, ScanIncrefVisitor{ .rt = rt });
                 }
             }
@@ -5612,7 +5660,7 @@ pub const Object = struct {
         {
             var gc_iter = rt.gc.objectIterator();
             while (gc_iter.next()) |h| {
-                if (h.flags.mark) garbage_headers.appendAssumeCapacity(h);
+                if (h.meta().flags.mark) garbage_headers.appendAssumeCapacity(h);
             }
         }
 
@@ -5628,13 +5676,12 @@ pub const Object = struct {
         {
             var gc_iter = rt.gc.objectIterator();
             while (gc_iter.next()) |h| {
-                h.flags.cycle_visited = false;
-                h.flags.cycle_preserved = false;
+                h.meta().flags.cycle_visited = false;
             }
             for (garbage_headers.items) |h| {
-                if (h.flags.mark) h.flags.cycle_visited = true;
-                if (h.kind == .function_bytecode) {
-                    if (!h.flags.mark) continue;
+                if (h.meta().flags.mark) h.meta().flags.cycle_visited = true;
+                if (h.meta().kind == .function_bytecode) {
+                    if (!h.meta().flags.mark) continue;
                     const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                     try free_internal_bytecodes.put(@intFromPtr(fb), {});
                 }
@@ -5646,9 +5693,13 @@ pub const Object = struct {
         var garbage_count: usize = 0;
         {
             for (garbage_headers.items) |h| {
-                if ((h.kind == .object or h.kind == .var_ref or h.kind == .shape) and h.flags.mark) garbage_count += 1;
+                if ((h.meta().kind == .object or h.meta().kind == .var_ref or h.meta().kind == .shape) and h.meta().flags.mark) garbage_count += 1;
             }
         }
+
+        // Reserve so the per-object Pass-B deferral (deferCycleStructFree) cannot
+        // OOM mid-batch; capacity bounds the whole garbage set.
+        try rt.gc.reserveCycleDeferred(garbage_headers.items.len);
 
         const old_phase = rt.gc.phase;
         rt.gc.phase = .remove_cycles;
@@ -5656,39 +5707,24 @@ pub const Object = struct {
 
         if (garbage_count == 0) {
             for (garbage_headers.items) |h| {
-                if (h.kind == .function_bytecode) {
-                    if (!h.flags.mark) continue;
-                    const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
-                    clearFunctionBytecodeReferencesToVisited(rt, fb, &free_internal_bytecodes);
-                }
-            }
-
-            for (garbage_headers.items) |h| {
-                if (h.kind == .function_bytecode) {
-                    if (!h.flags.mark) continue;
+                if (h.meta().kind == .function_bytecode) {
+                    if (!h.meta().flags.mark) continue;
                     rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
                     function_bytecode_mod.destroyFromHeader(rt, h);
                 }
             }
+            drainCycleDeferredFrees(rt);
             return 0;
         }
 
-        for (garbage_headers.items) |h| {
-            if (!h.flags.mark) continue;
-            if (h.kind == .object) {
-                const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                try obj.clearReferencesToVisited(rt, &free_internal_bytecodes);
-            } else if (h.kind == .var_ref) {
-                const ref: *var_ref_mod.VarRef = @alignCast(@fieldParentPtr("header", h));
-                clearValueReferenceToVisited(rt, ref.varRefValueSlot(), &free_internal_bytecodes);
-            } else if (h.kind == .function_bytecode) {
-                const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
-                clearFunctionBytecodeReferencesToVisited(rt, fb, &free_internal_bytecodes);
-            } else if (h.kind == .shape) {
-                const shape_ref: *shape.Shape = @alignCast(@fieldParentPtr("header", h));
-                rt.shapes.clearReferencesToVisited(shape_ref);
-            }
-        }
+        // STEP 3 (qjs faithful): no edge-nulling pre-pass. qjs has none — its
+        // cascade defense is the REMOVE_CYCLES gate in __JS_FreeValueRT
+        // (quickjs.c:6476), which we mirror in `gc.releaseAndDestroy`. With that
+        // gate, a garbage->garbage reference released during the destroy pass is a
+        // pure decref (no recursive free), and the restored refcounts (Phase 3b /
+        // gc_scan_incref_child2) net to zero. Weak-collection entries are handled
+        // by `sweepCycleGarbageWeakCollectionEntries` above; internal bytecode
+        // cpool edges are released by the gated fb teardown.
 
         const freed = garbage_count;
 
@@ -5696,19 +5732,19 @@ pub const Object = struct {
         try garbage_shapes.ensureTotalCapacity(rt.memory.persistent_allocator, garbage_count);
         defer garbage_shapes.deinit(rt.memory.persistent_allocator);
         for (garbage_headers.items) |h| {
-            if (!h.flags.mark or h.kind != .shape) continue;
+            if (!h.meta().flags.mark or h.meta().kind != .shape) continue;
             const shape_ref: *shape.Shape = @alignCast(@fieldParentPtr("header", h));
             garbage_shapes.appendAssumeCapacity(shape_ref);
         }
 
         for (garbage_headers.items) |h| {
-            if (!h.flags.mark) continue;
-            if (h.kind == .object) {
+            if (!h.meta().flags.mark) continue;
+            if (h.meta().kind == .object) {
                 destroyFromHeader(rt, h);
-            } else if (h.kind == .var_ref) {
+            } else if (h.meta().kind == .var_ref) {
                 rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
                 var_ref_mod.VarRef.destroyFromHeader(rt, h);
-            } else if (h.kind == .function_bytecode) {
+            } else if (h.meta().kind == .function_bytecode) {
                 rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
                 function_bytecode_mod.destroyFromHeader(rt, h);
             }
@@ -5716,13 +5752,37 @@ pub const Object = struct {
 
         for (garbage_shapes.items) |shape_ref| {
             const h = &shape_ref.header;
-            if (!h.flags.mark) continue;
-            if (h.flags.finalizing) continue;
+            if (!h.meta().flags.mark) continue;
+            if (h.meta().flags.finalizing) continue;
             if (h.prev == null and h.next == null and rt.gc.gc_object_head != h and rt.gc.gc_object_tail != h) continue;
             rt.shapes.destroyFromHeader(h);
         }
 
+        // Pass B: now every garbage object's resources are gone AND every shape
+        // (whose teardown re-releases protos) has run, so no deferred struct can
+        // still be dereferenced. Free the parked struct memory (qjs gc_free_cycles
+        // second loop, quickjs.c:6797).
+        drainCycleDeferredFrees(rt);
+
         return freed;
+    }
+
+    /// Free the struct memory of every cycle-deferred GC object (objects /
+    /// var_refs / function-bytecodes whose resources were torn down during the
+    /// REMOVE_CYCLES resource pass). Mirrors qjs Pass B (quickjs.c:6797-6810).
+    fn drainCycleDeferredFrees(rt: *JSRuntime) void {
+        for (rt.gc.cycle_deferred_frees.items) |h| {
+            switch (h.meta().kind) {
+                .object => {
+                    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
+                    freeCycleDeferredStruct(rt, obj);
+                },
+                .var_ref => var_ref_mod.VarRef.freeCycleDeferredStruct(rt, h),
+                .function_bytecode => function_bytecode_mod.freeCycleDeferredStruct(rt, h),
+                else => {},
+            }
+        }
+        rt.gc.cycle_deferred_frees.clearRetainingCapacity();
     }
 
     pub fn releaseCallbackOwnedFunctionBytecodeCycles(rt: *JSRuntime) void {
@@ -5756,7 +5816,7 @@ pub const Object = struct {
             while (iterator.next()) |address| {
                 const function_bytecode: *const FunctionBytecode = @ptrFromInt(address.*);
                 const internal_refs = countFunctionBytecodeRefsFromFunctionBytecodes(function_bytecode, candidates);
-                const ref_count = function_bytecode.header.rc;
+                const ref_count = function_bytecode.header.metaConst().rc;
                 if (ref_count == internal_refs or (ref_count != 0 and ref_count - 1 == internal_refs)) continue;
 
                 _ = candidates.remove(address.*);
@@ -5790,14 +5850,15 @@ pub const Object = struct {
         function_bytecode: *FunctionBytecode,
         candidates: *const ObjectVisitSet,
     ) void {
-        if (function_bytecode.class_fields_init) |*stored| {
-            if (valueReferencesFunctionBytecodeCandidate(stored.*, candidates)) {
-                const old_value = stored.*;
+        if (function_bytecode.class_fields_init) |boxed| {
+            if (valueReferencesFunctionBytecodeCandidate(boxed.*, candidates)) {
+                const old_value = boxed.*;
                 function_bytecode.class_fields_init = null;
                 old_value.free(rt);
+                rt.memory.destroy(JSValue, boxed);
             }
         }
-        for (function_bytecode.cpool) |*stored| {
+        for (function_bytecode.cpoolSlice()) |*stored| {
             if (!valueReferencesFunctionBytecodeCandidate(stored.*, candidates)) continue;
             const old_value = stored.*;
             stored.* = JSValue.undefinedValue();
@@ -5812,7 +5873,7 @@ pub const Object = struct {
 
     fn objectFromValue(stored: JSValue) ?*Object {
         const stored_header = stored.refHeader() orelse return null;
-        if (stored_header.kind != .object) return null;
+        if (stored_header.meta().kind != .object) return null;
         return @fieldParentPtr("header", stored_header);
     }
 
@@ -5840,8 +5901,11 @@ pub const Object = struct {
     };
 
     fn markClassPayload(self: *Object, rt: *JSRuntime, visitor: *class.PayloadVisitor) bool {
-        if (self.class_payload == null) return false;
-        return rt.classes.markPayload(self.class_id, @ptrCast(rt), @ptrCast(self), &self.class_payload, visitor);
+        // Arrays keep `array_values` (not a payload) in the union; short-circuit
+        // so markPayload never reinterprets that pointer (array classes register
+        // no payload_mark today, but keep the union access discriminant-correct).
+        if (self.flags.is_array or self.u.payload == null) return false;
+        return rt.classes.markPayload(self.class_id, @ptrCast(rt), @ptrCast(self), &self.u.payload, visitor);
     }
 
     fn countPayloadFunctionBytecodeRef(context_ptr: *anyopaque, value_ptr: *anyopaque) void {
@@ -5851,7 +5915,7 @@ pub const Object = struct {
     }
 
     fn collectReachableObjects(rt: *JSRuntime, visited: *ObjectVisitSet, current: *Object) ObjectGraphError!void {
-        if (current.header.rc == 0) return;
+        if (current.header.meta().rc == 0) return;
         const visit = try visited.getOrPut(@intFromPtr(current));
         if (visit.found_existing) return;
         try current.collectDirectChildObjects(rt, visited);
@@ -6004,8 +6068,12 @@ pub const Object = struct {
         // visit them from there. Visitors only read symbol atoms (set
         // insertion / no-op), so revisiting a shared shape from several
         // objects is safe.
-        for (self.shape_ref.props[0..self.shape_ref.prop_count]) |*prop| {
-            try Helper.callVisitSymbol(visitor, &prop.atom_id);
+        for (self.shape_ref.props()[0..self.shape_ref.prop_count]) |*prop| {
+            // `atom_id` is a packed-struct field (bit offset 32); visitors only
+            // read symbol atoms (set insertion / no-op, never mutate a shared
+            // shape's key), so pass a byte-aligned local copy.
+            var key_atom = prop.atom_id;
+            try Helper.callVisitSymbol(visitor, &key_atom);
         }
         // Only entries with a matching shape property record carry a derivable
         // kind. A property mid-`appendPreparedPropertyEntry` can have an entry
@@ -6014,8 +6082,8 @@ pub const Object = struct {
         // so clamp to the shape's prop_count (matching `shapeProps()`). Its value
         // is a freshly-created object that is not yet a cycle member, so skipping
         // it for this trace cannot collect it prematurely.
-        const traced_prop_count = @min(self.properties.len, self.shape_ref.prop_count);
-        for (self.properties[0..traced_prop_count], 0..) |*entry, index| {
+        const traced_prop_count = self.shape_ref.prop_count;
+        for (self.prop_values[0..traced_prop_count], 0..) |*entry, index| {
             const slot_flags = self.propFlagsAt(index);
             if (slot_flags.deleted) continue;
             switch (slot_flags.kind) {
@@ -6268,8 +6336,8 @@ pub const Object = struct {
     }
 
     fn collectFunctionBytecodeChildObjects(rt: *JSRuntime, visited: *ObjectVisitSet, function_bytecode: *const FunctionBytecode) ObjectGraphError!void {
-        if (function_bytecode.class_fields_init) |stored| try collectValueObject(rt, visited, stored);
-        for (function_bytecode.cpool) |stored| try collectValueObject(rt, visited, stored);
+        if (function_bytecode.class_fields_init) |stored| try collectValueObject(rt, visited, stored.*);
+        for (function_bytecode.cpoolSlice()) |stored| try collectValueObject(rt, visited, stored);
     }
 
     fn enqueueFinalizationCleanup(rt: *JSRuntime, cleanup_callback: ?JSValue, held_value: JSValue) ObjectGraphError!void {
@@ -6296,7 +6364,7 @@ pub const Object = struct {
 
     fn objectFromWeakCandidate(stored: JSValue) ?*Object {
         const header = stored.refHeader() orelse return null;
-        if (header.kind != .object) return null;
+        if (header.meta().kind != .object) return null;
         return @alignCast(@fieldParentPtr("header", header));
     }
 
@@ -6376,8 +6444,8 @@ pub const Object = struct {
         internal_bytecodes: *const ObjectVisitSet,
         processed_bytecodes: *ObjectVisitSet,
     ) ObjectGraphError!void {
-        if (function_bytecode.class_fields_init) |stored| try accumulateValueIncoming(stored, visited, incoming, internal_bytecodes, processed_bytecodes);
-        for (function_bytecode.cpool) |stored| try accumulateValueIncoming(stored, visited, incoming, internal_bytecodes, processed_bytecodes);
+        if (function_bytecode.class_fields_init) |stored| try accumulateValueIncoming(stored.*, visited, incoming, internal_bytecodes, processed_bytecodes);
+        for (function_bytecode.cpoolSlice()) |stored| try accumulateValueIncoming(stored, visited, incoming, internal_bytecodes, processed_bytecodes);
     }
 
     fn incrementIncomingIfVisited(visited: *const ObjectVisitSet, incoming: *ObjectIncomingMap, child: *Object) ObjectGraphError!void {
@@ -6388,75 +6456,21 @@ pub const Object = struct {
     }
 
     /// True when `child` is condemned garbage in the current cycle-removal round
-    /// (it was scanned and was not preserved/resurrected).
+    /// (it stayed `cycle_visited` after gc_scan, i.e. was not resurrected).
     inline fn objectIsCycleGarbage(child: *const Object) bool {
-        return child.header.flags.cycle_visited and !child.header.flags.cycle_preserved;
+        return child.header.metaConst().flags.cycle_visited;
     }
 
     inline fn headerIsCycleGarbage(header: *const gc.Header) bool {
-        return header.flags.cycle_visited and !header.flags.cycle_preserved;
+        return header.metaConst().flags.cycle_visited;
     }
 
-    fn clearReferencesToVisited(
-        self: *Object,
-        rt: *JSRuntime,
-        internal_bytecodes: *const ObjectVisitSet,
-    ) ObjectGraphError!void {
-        const ClearReferencesVisitor = struct {
-            rt: *JSRuntime,
-            internal_bytecodes: *const ObjectVisitSet,
-
-            pub fn visitObject(cv: @This(), obj_ptr: *?*Object) !void {
-                _ = cv;
-                if (obj_ptr.*) |obj| {
-                    if (@intFromPtr(obj) == 0) return;
-                    if (objectIsCycleGarbage(obj)) {
-                        obj_ptr.* = null;
-                    }
-                }
-            }
-
-            pub fn visitValue(cv: @This(), val_ptr: *JSValue) !void {
-                clearValueReferenceToVisited(cv.rt, val_ptr, cv.internal_bytecodes);
-            }
-
-            pub fn visitSymbol(cv: @This(), sym_ptr: *atom.Atom) !void {
-                _ = cv;
-                _ = sym_ptr;
-            }
-
-            pub fn visitWeakCollectionEntry(cv: @This(), entry: *WeakCollectionEntry) !void {
-                clearValueReferenceToVisited(cv.rt, &entry.value, cv.internal_bytecodes);
-            }
-
-            pub fn visitFinalizationCell(cv: @This(), entry: *FinalizationRegistryCell) !void {
-                clearValueReferenceToVisited(cv.rt, &entry.held_value, cv.internal_bytecodes);
-            }
-        };
-        try self.traceChildEdgesFallible(rt, ClearReferencesVisitor{
-            .rt = rt,
-            .internal_bytecodes = internal_bytecodes,
-        });
-    }
-
-    fn clearOptionalReferenceToVisited(
-        rt: *JSRuntime,
-        maybe_value: *?JSValue,
-        internal_bytecodes: *const ObjectVisitSet,
-    ) void {
-        if (maybe_value.*) |*stored| {
-            if (valueReferencesVisited(stored.*)) {
-                maybe_value.* = null;
-                return;
-            }
-            if (functionBytecodeFromValue(stored.*)) |function_bytecode| {
-                if (!internal_bytecodes.contains(@intFromPtr(function_bytecode))) return;
-                maybe_value.* = null;
-                clearFunctionBytecodeReferencesToVisited(rt, function_bytecode, internal_bytecodes);
-            }
-        }
-    }
-
+    // `clearValueReferenceToVisited` / `clearFunctionBytecodeReferencesToVisited`
+    // / `valueReferencesVisited` survive: they are used by the weak-collection
+    // cycle sweep (`sweepCycleGarbageWeakCollectionEntries`). The object/var_ref
+    // edge-nulling pre-pass that used to drive them during destruction was deleted
+    // (STEP 3) — the REMOVE_CYCLES gate in `gc.releaseAndDestroy` now defends
+    // against cascades, exactly as qjs relies on its `__JS_FreeValueRT` gate.
     fn clearValueReferenceToVisited(
         rt: *JSRuntime,
         stored: *JSValue,
@@ -6481,8 +6495,8 @@ pub const Object = struct {
         function_bytecode: *FunctionBytecode,
         internal_bytecodes: *const ObjectVisitSet,
     ) void {
-        if (function_bytecode.class_fields_init) |*stored| clearValueReferenceToVisited(rt, stored, internal_bytecodes);
-        for (function_bytecode.cpool) |*stored| clearValueReferenceToVisited(rt, stored, internal_bytecodes);
+        if (function_bytecode.class_fields_init) |stored| clearValueReferenceToVisited(rt, stored, internal_bytecodes);
+        for (function_bytecode.cpoolSlice()) |*stored| clearValueReferenceToVisited(rt, stored, internal_bytecodes);
     }
 
     fn valueReferencesVisited(stored: JSValue) bool {
@@ -6493,8 +6507,9 @@ pub const Object = struct {
 
     fn functionBytecodeFromValue(stored: JSValue) ?*FunctionBytecode {
         const header = stored.objectHeader() orelse return null;
-        if (header.kind != .function_bytecode) return null;
-        return @fieldParentPtr("header", header);
+        if (header.meta().kind != .function_bytecode) return null;
+        const aligned: *align(16) @TypeOf(header.*) = @alignCast(header);
+        return @fieldParentPtr("header", aligned);
     }
 
     fn collectInternalFunctionBytecodes(
@@ -6550,7 +6565,7 @@ pub const Object = struct {
                 const internal_refs =
                     (try countFunctionBytecodeRefsFromVisitedObjects(rt, function_bytecode, visited)) +
                     countFunctionBytecodeRefsFromFunctionBytecodes(function_bytecode, internal_bytecodes);
-                if (internal_refs == function_bytecode.header.rc) continue;
+                if (internal_refs == function_bytecode.header.meta().rc) continue;
 
                 _ = internal_bytecodes.remove(address.*);
                 removed = true;
@@ -6561,7 +6576,7 @@ pub const Object = struct {
     }
 
     fn functionBytecodeFromGcHeader(header: *gc.GCObjectHeader) ?*const FunctionBytecode {
-        if (header.kind != .function_bytecode) return null;
+        if (header.meta().kind != .function_bytecode) return null;
         return @alignCast(@fieldParentPtr("header", header));
     }
 
@@ -6597,8 +6612,8 @@ pub const Object = struct {
         function_bytecode: *const FunctionBytecode,
     ) usize {
         var count: usize = 0;
-        count += countOptionalFunctionBytecodeRef(owner.class_fields_init, function_bytecode);
-        for (owner.cpool) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
+        count += countOptionalFunctionBytecodeRef(if (owner.class_fields_init) |boxed| boxed.* else null, function_bytecode);
+        for (owner.cpoolSlice()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
         return count;
     }
 
@@ -6612,8 +6627,8 @@ pub const Object = struct {
         // Clamp to the shape's prop_count: a mid-append over-hang entry has no
         // shape prop yet (no derivable kind) and is a freshly-created value, so
         // it cannot reference this bytecode anyway.
-        const counted = @min(self.properties.len, self.shape_ref.prop_count);
-        for (self.properties[0..counted], 0..) |entry, index| count += countSlotFunctionBytecodeRefs(self.propFlagsAt(index), entry.slot, function_bytecode);
+        const counted = self.shape_ref.prop_count;
+        for (self.prop_values[0..counted], 0..) |entry, index| count += countSlotFunctionBytecodeRefs(self.propFlagsAt(index), entry.slot, function_bytecode);
         if (self.realmPayloadConst()) |payload| {
             if (payload.shared_lazy_native_functions) |cache| {
                 for (cache) |maybe_cached| count += countOptionalFunctionBytecodeRef(maybe_cached, function_bytecode);
@@ -6824,7 +6839,7 @@ pub const Object = struct {
             if (self.regexpLastIndex()) |stored| return descriptor.Descriptor.data(stored.dup(), self.regexpLastIndexWritable(), false, false);
         }
         if (self.findProperty(atom_id)) |index| {
-            const entry = self.properties[index];
+            const entry = self.prop_values[index];
             const entry_flags = self.propFlagsAt(index);
             if (entry_flags.deleted) return null;
             // Auto-init placeholders need to be materialized before
@@ -6864,7 +6879,7 @@ pub const Object = struct {
                     );
                 }
                 transient.free(info.rt);
-                return descriptor.Descriptor.fromSlot(self.propFlagsAt(index), self.properties[index].slot);
+                return descriptor.Descriptor.fromSlot(self.propFlagsAt(index), self.prop_values[index].slot);
             }
             return descriptor.Descriptor.fromSlot(entry_flags, entry.slot);
         }
@@ -6955,7 +6970,7 @@ pub const Object = struct {
         if (self.flags.is_array and atom_id == atom.ids.length) return true;
         if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex and self.regexpLastIndex() != null) return true;
         if (self.findProperty(atom_id)) |index| {
-            const entry = self.properties[index];
+            const entry = self.prop_values[index];
             if (self.propFlagsAt(index).deleted) return false;
             // VARREF existence path (quickjs.c:8856-8860): an uninitialized
             // cell still throws ReferenceError even though desc==NULL.
@@ -7006,12 +7021,12 @@ pub const Object = struct {
         if (self.moduleNamespaceBindingValue(atom_id)) |stored| return stored;
         if (self.flags.is_array and atom_id == atom.ids.length) return arrayLengthValue(self.arrayLength());
         if (self.findProperty(atom_id)) |index| {
-            const entry = self.properties[index];
+            const entry = self.prop_values[index];
             return switch (self.propKindAt(index)) {
                 .data => entry.slot.data.dup(),
                 .accessor => entry.slot.accessor.getterValue().dup(),
                 // First-access materialization for `auto_init`
-                // placeholders. We need to mutate `self.properties[index]`
+                // placeholders. We need to mutate `self.prop_values[index]`
                 // to replace the placeholder with the real value;
                 // `self` is `Object` (by value) here -- the same
                 // 300+-callsite shape as the rest of `getProperty`.
@@ -7152,7 +7167,7 @@ pub const Object = struct {
     fn installMaterializedAutoInit(self: *Object, rt: *JSRuntime, index: usize, materialized: JSValue) bool {
         const new_flags = self.propFlagsAt(index).withKind(.data);
         self.ensureUniqueShapeForMutation(rt) catch return false;
-        self.properties[index].slot = .{ .data = materialized };
+        self.prop_values[index].slot = .{ .data = materialized };
         rt.shapes.updatePropertyFlags(self.shape_ref, index, new_flags.bits());
         return true;
     }
@@ -7160,15 +7175,15 @@ pub const Object = struct {
     fn installMaterializedAccessorAutoInit(self: *Object, rt: *JSRuntime, index: usize, materialized: property.Accessor) bool {
         const new_flags = self.propFlagsAt(index).withKind(.accessor);
         self.ensureUniqueShapeForMutation(rt) catch return false;
-        self.properties[index].slot = .{ .accessor = materialized };
+        self.prop_values[index].slot = .{ .accessor = materialized };
         rt.shapes.updatePropertyFlags(self.shape_ref, index, new_flags.bits());
         return true;
     }
 
     fn materializeAutoInitEntryForMutation(self: *Object, index: usize) !void {
-        if (index >= self.properties.len) return error.IncompatibleDescriptor;
+        if (index >= self.shape_ref.prop_count) return error.IncompatibleDescriptor;
         if (!self.isAutoInitAt(index)) return;
-        const info = property.autoInit(self.properties[index].slot.auto_init).*;
+        const info = property.autoInit(self.prop_values[index].slot.auto_init).*;
         const transient = materializeAutoInit(self, index, info);
         transient.free(info.rt);
         if (self.isAutoInitAt(index)) return error.OutOfMemory;
@@ -7184,7 +7199,7 @@ pub const Object = struct {
         if (flags.deleted) return false;
         if (flags.kind == .accessor) return true;
         if (flags.kind == .auto_init) {
-            return property.autoInit(self.properties[index].slot.auto_init).kind == .native_accessor;
+            return property.autoInit(self.prop_values[index].slot.auto_init).kind == .native_accessor;
         }
         return false;
     }
@@ -7341,7 +7356,9 @@ pub const Object = struct {
         const rt = info.rt;
         const object = Object.create(rt, class.ids.object, null) catch return null;
         const unscopables_value = object.value();
+        // qjs js_array_unscopables (order incl. "at"; spec 23.1.3.41).
         const names = [_][]const u8{
+            "at",
             "copyWithin",
             "entries",
             "fill",
@@ -7691,10 +7708,10 @@ pub const Object = struct {
 
     pub fn getOwnDataPropertyValueAt(self: *const Object, index: usize, atom_id: atom.Atom) ?JSValue {
         if (self.hasExoticMethods() or index >= self.shapeProps().len) return null;
-        const prop = self.shape_ref.props[index];
+        const prop = self.shape_ref.props()[index];
         const prop_flags = property.Flags.fromBits(prop.flags);
         if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.kind != .data) return null;
-        return self.properties[index].slot.data.dup();
+        return self.prop_values[index].slot.data.dup();
     }
 
     pub fn getDenseArrayElementValue(self: *const Object, index: u32) ?JSValue {
@@ -7803,7 +7820,7 @@ pub const Object = struct {
         if (self.findProperty(atom_id)) |index| {
             try self.ensureUniqueShapeForMutation(rt);
             const old_flags = self.propFlagsAt(index);
-            const entry = &self.properties[index];
+            const entry = &self.prop_values[index];
             const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
             const old_slot = entry.slot;
@@ -7829,7 +7846,7 @@ pub const Object = struct {
         // creating a transition node per property.
         try self.ensureUniqueShapeForMutation(rt);
         try self.ensurePropertyCapacity(rt, needed);
-        try rt.shapes.reservePropertyHash(self.shape_ref, needed);
+        try rt.shapes.reservePropertyHash(&self.shape_ref, needed);
     }
 
     /// Install a placeholder property whose backing value is computed
@@ -8047,7 +8064,7 @@ pub const Object = struct {
                 try self.ensureUniqueShapeForMutation(rt);
                 rt.shapes.updatePropertyFlags(self.shape_ref, index, ai_flags.bits());
             }
-            self.properties[index].slot = .{ .auto_init = try property.internAutoInit(rt, .{
+            self.prop_values[index].slot = .{ .auto_init = try property.internAutoInit(rt, .{
                 .name = name,
                 .length = length,
                 .rt = rt,
@@ -8253,7 +8270,7 @@ pub const Object = struct {
             if (!self.propFlagsAt(index).configurable) return error.IncompatibleDescriptor;
             try self.ensureUniqueShapeForMutation(rt);
             const old_flags = self.propFlagsAt(index);
-            const entry = &self.properties[index];
+            const entry = &self.prop_values[index];
             const old_slot = entry.slot;
             entry.slot = .{ .auto_init = try property.internAutoInit(rt, .{
                 .name = "empty array",
@@ -8341,7 +8358,7 @@ pub const Object = struct {
     pub fn writeDenseArrayIndex(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
         if (!self.flags.is_array or !self.flags.length_writable) return false;
         if (self.arrayElementStorageMode() != .dense) return false;
-        if (self.properties.len != 0 and self.findProperty(atom_id) != null) return false;
+        if (self.shape_ref.prop_count != 0 and self.findProperty(atom_id) != null) return false;
         const elements = self.arrayElements();
         if (index >= elements.len) return false;
         if (self.getPrototype()) |proto| {
@@ -8359,7 +8376,7 @@ pub const Object = struct {
         if (!self.flags.is_array or index != self.array_count or !self.flags.length_writable) return false;
         if (self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
         if (!self.flags.extensible) return false;
-        if (self.properties.len != 0 and self.findProperty(atom_id) != null) return false;
+        if (self.shape_ref.prop_count != 0 and self.findProperty(atom_id) != null) return false;
         if (self.getPrototype()) |proto| {
             // Filling a hole (`index < array_length`) is an ordinary [[Set]] of a
             // missing index that must consult inherited setters / proxy traps; a
@@ -8394,7 +8411,7 @@ pub const Object = struct {
         var guard_index = start;
         while (guard_index < limit) : (guard_index += 1) {
             const atom_id = atom.atomFromUInt32(guard_index);
-            if (self.properties.len != 0 and self.findProperty(atom_id) != null) return false;
+            if (self.shape_ref.prop_count != 0 and self.findProperty(atom_id) != null) return false;
             if (indexed_proto) |proto| {
                 if (proto.hasProperty(atom_id)) return false;
             }
@@ -8403,7 +8420,7 @@ pub const Object = struct {
         try self.ensureArrayElementCapacity(rt, @intCast(limit));
         var element_index: usize = @intCast(start);
         for (values) |item| {
-            self.array_values[element_index] = item.dup();
+            self.u.array_values[element_index] = item.dup();
             element_index += 1;
         }
         self.setFastArrayCountAssumeCapacity(limit);
@@ -8439,7 +8456,7 @@ pub const Object = struct {
 
     pub fn initDenseArrayLiteralValuesAssumingEmpty(self: *Object, rt: *JSRuntime, values: []const JSValue) !bool {
         if (!self.flags.is_array or !self.flags.length_writable or !self.flags.extensible) return false;
-        if (self.array_count != 0 or self.array_length != 0 or self.properties.len != 0) return false;
+        if (self.array_count != 0 or self.array_length != 0 or self.shape_ref.prop_count != 0) return false;
         if (self.arrayElementStorageMode() != .dense) return false;
         if (values.len > array.max_array_length) return false;
 
@@ -8447,7 +8464,7 @@ pub const Object = struct {
         self.setFastArrayCountAssumeCapacity(@intCast(values.len));
         self.array_length = @intCast(values.len);
         for (values, 0..) |item, index| {
-            const element_slot = &self.array_values[index];
+            const element_slot = &self.u.array_values[index];
             element_slot.* = item.dup();
         }
         if (values.len != 0) self.markIndexedProperties(rt);
@@ -8471,7 +8488,7 @@ pub const Object = struct {
 
         var index = start_index;
         while (index < limit_index) : (index += 1) {
-            self.array_values[index] = JSValue.int32(@intCast(index));
+            self.u.array_values[index] = JSValue.int32(@intCast(index));
         }
         return true;
     }
@@ -8504,7 +8521,7 @@ pub const Object = struct {
             const index = start_element + @as(usize, @intCast(offset));
             const element_delta: i32 = @intCast(offset);
             const element_value = start_value + element_delta;
-            self.array_values[index] = JSValue.int32(element_value);
+            self.u.array_values[index] = JSValue.int32(element_value);
         }
         return true;
     }
@@ -8537,7 +8554,7 @@ pub const Object = struct {
             const product_exact = @as(i128, @intCast(index)) * @as(i128, multiplier);
             const product: i32 = @truncate(product_exact);
             const element_value = product & mask;
-            self.array_values[index] = JSValue.int32(element_value);
+            self.u.array_values[index] = JSValue.int32(element_value);
         }
         return true;
     }
@@ -8558,14 +8575,14 @@ pub const Object = struct {
         var guard_index: u32 = 0;
         while (guard_index <= mask) : (guard_index += 1) {
             const atom_id = atom.atomFromUInt32(guard_index);
-            if (self.properties.len != 0 and self.findProperty(atom_id) != null) return false;
+            if (self.shape_ref.prop_count != 0 and self.findProperty(atom_id) != null) return false;
             if (guard_index == std.math.maxInt(u32)) break;
         }
 
         var value_index = start;
         while (value_index < limit) : (value_index += 1) {
             const element_index: usize = @intCast(value_index & mask);
-            const element_slot = &self.array_values[element_index];
+            const element_slot = &self.u.array_values[element_index];
             const old = element_slot.*;
             const new_value = JSValue.int32(@intCast(value_index));
             element_slot.* = new_value;
@@ -8601,7 +8618,7 @@ pub const Object = struct {
 
         const next_value = new_value.dup();
         errdefer next_value.free(rt);
-        const element_slot = &self.array_values[element_index];
+        const element_slot = &self.u.array_values[element_index];
         const old = if (appended) JSValue.undefinedValue() else element_slot.*;
         element_slot.* = next_value;
         self.markIndexedProperties(rt);
@@ -8647,7 +8664,7 @@ pub const Object = struct {
             self.arrayElementStorageMode() == .dense and
             self.flags.fast_array and
             self.flags.extensible and
-            self.properties.len == 0;
+            self.shape_ref.prop_count == 0;
     }
 
     pub fn defineDenseArrayDataPropertyUnchecked(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !void {
@@ -8665,7 +8682,7 @@ pub const Object = struct {
 
         const next_value = new_value.dup();
         errdefer next_value.free(rt);
-        const element_slot = &self.array_values[element_index];
+        const element_slot = &self.u.array_values[element_index];
         const old = if (appended) JSValue.undefinedValue() else element_slot.*;
         element_slot.* = next_value;
         self.markIndexedProperties(rt);
@@ -8699,13 +8716,13 @@ pub const Object = struct {
             // real getter/setter exist, then route to the setter.
             if (self.isAccessorOrAccessorPlaceholderAt(index)) {
                 try self.materializeAutoInitEntryForMutation(index);
-                const entry = &self.properties[index];
+                const entry = &self.prop_values[index];
                 if (entry.slot.accessor.setterIsUndefined()) return error.AccessorWithoutSetter;
                 return;
             }
             const entry_flags = self.propFlagsAt(index);
             if (!entry_flags.writable) return error.ReadOnly;
-            const entry = &self.properties[index];
+            const entry = &self.prop_values[index];
             if (entry_flags.kind == .var_ref) {
                 const cell = entry.slot.var_ref;
                 const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
@@ -8740,7 +8757,7 @@ pub const Object = struct {
                 const is_accessor = proto.isAccessorOrAccessorPlaceholderAt(index);
                 if (is_accessor) {
                     try proto.materializeAutoInitEntryForMutation(index);
-                    const inherited = proto.properties[index];
+                    const inherited = proto.prop_values[index];
                     if (inherited.slot.accessor.setterIsUndefined()) return error.AccessorWithoutSetter;
                 } else if (!proto.propFlagsAt(index).writable) {
                     return error.ReadOnly;
@@ -8765,7 +8782,7 @@ pub const Object = struct {
             // writable data slot.
             if (self.isAccessorOrAccessorPlaceholderAt(index)) return false;
             if (!entry_flags.writable) return false;
-            const entry = &self.properties[index];
+            const entry = &self.prop_values[index];
             if (atom_id != atom.ids.Private_brand) {
                 switch (entry_flags.kind) {
                     .data => {
@@ -8812,10 +8829,10 @@ pub const Object = struct {
 
     pub inline fn setOwnDataPropertyAtForLexicalSyncOwned(self: *Object, rt: *JSRuntime, index: usize, atom_id: atom.Atom, new_value: JSValue) !bool {
         if (self.hasExoticMethods() or index >= self.shapeProps().len) return false;
-        const prop = self.shape_ref.props[index];
+        const prop = self.shape_ref.props()[index];
         const prop_flags = property.Flags.fromBits(prop.flags);
         if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.kind != .data) return false;
-        const entry = &self.properties[index];
+        const entry = &self.prop_values[index];
         const stored = &entry.slot.data;
         if (!prop_flags.writable and !stored.isUninitialized()) return false;
         if (atom_id == atom.ids.Private_brand) return false;
@@ -8836,7 +8853,7 @@ pub const Object = struct {
             const entry_flags = self.propFlagsAt(index);
             if (self.isAccessorOrAccessorPlaceholderAt(index)) return false;
             if (!entry_flags.writable) return false;
-            const entry = &self.properties[index];
+            const entry = &self.prop_values[index];
             if (atom_id != atom.ids.Private_brand) {
                 switch (entry_flags.kind) {
                     .data => {
@@ -8956,7 +8973,7 @@ pub const Object = struct {
         const old_flags = self.propFlagsAt(index);
         if (!old_flags.configurable) return false;
         self.ensureUniqueShapeForMutation(rt) catch return false;
-        const entry = &self.properties[index];
+        const entry = &self.prop_values[index];
         const old_slot = entry.slot;
         // `deleted` is a flag bit, not a kind/arm: keep a harmless data cell.
         entry.slot = .{ .data = JSValue.undefinedValue() };
@@ -9088,7 +9105,7 @@ pub const Object = struct {
     pub fn seal(self: *Object, rt: *JSRuntime) !void {
         self.flags.extensible = false;
         try self.ensureUniqueShapeForMutation(rt);
-        for (0..self.properties.len) |index| {
+        for (0..self.shape_ref.prop_count) |index| {
             var entry_flags = self.propFlagsAt(index);
             if (entry_flags.deleted or !entry_flags.configurable) continue;
             entry_flags.configurable = false;
@@ -9098,7 +9115,7 @@ pub const Object = struct {
 
     pub fn freeze(self: *Object, rt: *JSRuntime) !void {
         try self.seal(rt);
-        for (0..self.properties.len) |index| {
+        for (0..self.shape_ref.prop_count) |index| {
             var entry_flags = self.propFlagsAt(index);
             if (entry_flags.deleted or entry_flags.isAccessor() or !entry_flags.writable) continue;
             entry_flags.writable = false;
@@ -9116,7 +9133,7 @@ pub const Object = struct {
         }
         if (self.findProperty(atom_id)) |index| {
             try self.materializeAutoInitEntryForMutation(index);
-            if (!isCompatible(self.propFlagsAt(index), self.properties[index].slot, desc)) return error.IncompatibleDescriptor;
+            if (!isCompatible(self.propFlagsAt(index), self.prop_values[index].slot, desc)) return error.IncompatibleDescriptor;
             try self.replaceProperty(rt, index, desc);
             return;
         }
@@ -9165,7 +9182,7 @@ pub const Object = struct {
         // which leaves count untouched and never drops to sparse. (The trailing
         // setArrayLength(target_len) below performs the grow.)
         if (target_len < self.arrayLength()) {
-            var i = self.properties.len;
+            var i = self.shape_ref.prop_count;
             while (i > 0) {
                 i -= 1;
                 if (self.propFlagsAt(i).deleted) continue;
@@ -9218,7 +9235,7 @@ pub const Object = struct {
         const len: usize = @min(@as(usize, @intCast(new_len)), self.array_count);
         while (self.array_count > len) {
             self.array_count -= 1;
-            const old = self.array_values[@intCast(self.array_count)];
+            const old = self.u.array_values[@intCast(self.array_count)];
             old.free(rt);
         }
     }
@@ -9249,7 +9266,7 @@ pub const Object = struct {
         if (!atom.isTaggedInt(atom_id)) return null;
         const index = atom.atomToUInt32(atom_id);
         if (index >= self.array_count) return null;
-        return self.array_values[@intCast(index)];
+        return self.u.array_values[@intCast(index)];
     }
 
     fn hasDenseArrayElement(self: *const Object, index: u32) bool {
@@ -9294,9 +9311,9 @@ pub const Object = struct {
         var slot_owned = true;
         errdefer if (slot_owned) destroyPropertySlot(rt, atom_id, entry_flags, slot);
 
-        const old_len = self.properties.len;
+        const old_len = self.shape_ref.prop_count;
         const old_capacity = self.propertyStorageCapacity();
-        const old_properties: []property.Entry = if (old_capacity != 0) self.properties.ptr[0..old_capacity] else self.properties[0..0];
+        const old_properties: []property.Entry = if (old_capacity != 0) self.prop_values[0..old_capacity] else &.{};
         const old_has_property_storage = self.flags.has_property_storage;
         var current_capacity = old_capacity;
         var grew_properties = false;
@@ -9304,27 +9321,30 @@ pub const Object = struct {
             const next_capacity = shape.propertyCapacityForNeeded(old_len + 1);
             const next = try rt.allocRuntime(property.Entry, next_capacity);
             errdefer rt.memory.free(property.Entry, next);
-            @memcpy(next[0..old_len], self.properties);
-            self.properties = next[0..old_len];
+            @memcpy(next[0..old_len], self.prop_values[0..old_len]);
+            self.prop_values = next.ptr;
             self.flags.has_property_storage = true;
             current_capacity = next_capacity;
             grew_properties = true;
         }
 
         const old_may_have_indexed_properties = self.flags.may_have_indexed_properties;
-        self.properties = self.properties.ptr[0 .. old_len + 1];
-        self.properties[old_len] = .{ .slot = slot };
+        // Over-hang: write the value at index `old_len` (== current prop_count)
+        // BEFORE adoptShapeForNewProperty below commits prop_count = old_len + 1.
+        // Until that commit the entry is EXCLUDED from propertyEntries(); a GC
+        // triggered by the shape allocation skips it (a fresh, not-yet-cyclic
+        // value, so skipping cannot collect it prematurely).
+        self.prop_values[old_len] = .{ .slot = slot };
         slot_owned = false;
 
         var inserted = true;
         errdefer if (inserted) {
-            destroyPropertySlot(rt, atom_id, entry_flags, self.properties[old_len].slot);
-            self.properties[old_len] = .{};
-            self.properties = self.properties.ptr[0..old_len];
+            destroyPropertySlot(rt, atom_id, entry_flags, self.prop_values[old_len].slot);
+            self.prop_values[old_len] = .{};
             self.flags.may_have_indexed_properties = old_may_have_indexed_properties;
             if (grew_properties) {
-                const new_properties = self.properties.ptr[0..current_capacity];
-                self.properties = old_properties[0..old_len];
+                const new_properties = self.prop_values[0..current_capacity];
+                self.prop_values = old_properties.ptr;
                 self.flags.has_property_storage = old_has_property_storage;
                 rt.memory.free(property.Entry, new_properties);
             }
@@ -9340,7 +9360,7 @@ pub const Object = struct {
     }
 
     fn shapeNeedsMutationCopy(self: Object) bool {
-        return self.shape_ref.refCount() != 1 or self.shape_ref.is_transition_cacheable or self.shape_ref.parent != null;
+        return self.shape_ref.refCount() != 1;
     }
 
     fn ensureUniqueShapeForMutation(self: *Object, rt: *JSRuntime) !void {
@@ -9354,15 +9374,19 @@ pub const Object = struct {
     fn adoptShapeForNewProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, flags: u6, property_capacity: usize, array_index: ?u32) !void {
         const atom_guard = rt.atoms.dup(atom_id);
         defer rt.atoms.free(atom_guard);
+        // The shape is rc==1 here (made unique above / never shared), so the
+        // FAM grow inside reserveProperties/addProperty may relocate it; pass
+        // &self.shape_ref so the new address flows back (qjs resize_properties
+        // updates p->shape through `JSShape **psh`).
         if (array_index != null) {
             try self.ensureUniqueShapeForMutation(rt);
-            try rt.shapes.reserveProperties(self.shape_ref, property_capacity);
-            try rt.shapes.addProperty(self.shape_ref, atom_id, flags);
+            try rt.shapes.reserveProperties(&self.shape_ref, property_capacity);
+            try rt.shapes.addProperty(&self.shape_ref, atom_id, flags);
             return;
         }
         if (!self.shapeNeedsMutationCopy()) {
-            try rt.shapes.reserveProperties(self.shape_ref, property_capacity);
-            try rt.shapes.addProperty(self.shape_ref, atom_id, flags);
+            try rt.shapes.reserveProperties(&self.shape_ref, property_capacity);
+            try rt.shapes.addProperty(&self.shape_ref, atom_id, flags);
             return;
         }
         const next_shape = try rt.shapes.transitionProperty(self.shape_ref, atom_id, flags);
@@ -9377,22 +9401,34 @@ pub const Object = struct {
         const next_capacity = shape.propertyCapacityForNeeded(needed);
         const next = try rt.allocRuntime(property.Entry, next_capacity);
         errdefer rt.memory.free(property.Entry, next);
-        @memcpy(next[0..self.properties.len], self.properties);
-        const old_properties: []property.Entry = if (old_capacity != 0) self.properties.ptr[0..old_capacity] else self.properties[0..0];
-        try rt.shapes.reserveProperties(self.shape_ref, next_capacity);
-        self.properties = next[0..self.properties.len];
+        const used = self.shape_ref.prop_count;
+        @memcpy(next[0..used], self.propertyEntries());
+        const old_properties: []property.Entry = if (old_capacity != 0) self.prop_values[0..old_capacity] else &.{};
+        try rt.shapes.reserveProperties(&self.shape_ref, next_capacity);
+        self.prop_values = next.ptr;
         self.flags.has_property_storage = true;
         if (old_capacity != 0) rt.memory.free(property.Entry, old_properties);
     }
 
     fn propertyStorageCapacity(self: *const Object) usize {
-        return if (self.flags.has_property_storage) self.shape_ref.props.len else 0;
+        return if (self.flags.has_property_storage) self.shape_ref.prop_size else 0;
+    }
+
+    /// The live property VALUE entries `prop_values[0..prop_count]`. Count comes
+    /// from the owning shape (qjs JSObject reads count from JSShape). During the
+    /// brief `appendPreparedPropertyEntry` over-hang (a value written at index
+    /// `prop_count` before the shape transition commits), the pending entry sits
+    /// at `prop_values[prop_count]` and is intentionally EXCLUDED here — callers
+    /// that need it (the append path itself) index `prop_values` directly.
+    pub inline fn propertyEntries(self: *const Object) []property.Entry {
+        if (!self.flags.has_property_storage) return &.{};
+        return self.prop_values[0..self.shape_ref.prop_count];
     }
 
     fn replaceProperty(self: *Object, rt: *JSRuntime, index: usize, desc: descriptor.Descriptor) !void {
         const atom_id = self.propAtomAt(index);
         const old_flags = self.propFlagsAt(index);
-        const merged = mergeDescriptor(old_flags, self.properties[index].slot, desc);
+        const merged = mergeDescriptor(old_flags, self.prop_values[index].slot, desc);
         const next_flags = flagsFromDescriptor(merged);
         if (old_flags.kind == .var_ref and merged.kind == .data) {
             // Redefining a VARREF property as data writes THROUGH the cell and
@@ -9400,7 +9436,7 @@ pub const Object = struct {
             // therefore stays `.var_ref` — only w/e/c bits update; flipping the
             // kind to `.data` here would desync the cell (slot=var_ref) from the
             // shape (kind=data) and crash the next read.
-            const cell = self.properties[index].slot.var_ref;
+            const cell = self.prop_values[index].slot.var_ref;
             const next_value = dupPropertyDataValue(&rt.atoms, atom_id, merged.value);
             errdefer next_value.free(rt);
             try self.ensureUniqueShapeForMutation(rt);
@@ -9413,8 +9449,8 @@ pub const Object = struct {
         var next_owned = true;
         errdefer if (next_owned) destroyPropertySlot(rt, atom_id, next_flags, next_slot);
         try self.ensureUniqueShapeForMutation(rt);
-        const old_slot = self.properties[index].slot;
-        self.properties[index] = .{ .slot = next_slot };
+        const old_slot = self.prop_values[index].slot;
+        self.prop_values[index] = .{ .slot = next_slot };
         next_owned = false;
         rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.bits());
         destroyPropertySlot(rt, atom_id, old_flags, old_slot);
@@ -9425,12 +9461,12 @@ pub const Object = struct {
     /// metadata (atom + flags) lives in the shape; `self.properties`
     /// holds only the value slots, indexed 1:1 with the shape props.
     pub inline fn propAtomAt(self: *const Object, index: usize) atom.Atom {
-        return self.shape_ref.props[index].atom_id;
+        return self.shape_ref.props()[index].atom_id;
     }
 
     /// Flags for the own property stored at `index` (see `propAtomAt`).
     pub inline fn propFlagsAt(self: *const Object, index: usize) property.Flags {
-        return property.Flags.fromBits(self.shape_ref.props[index].flags);
+        return property.Flags.fromBits(self.shape_ref.props()[index].flags);
     }
 
     // --- Typed property-slot API (L2 chokepoint) --------------------------
@@ -9453,21 +9489,21 @@ pub const Object = struct {
     pub inline fn asDataAt(self: *const Object, index: usize) ?JSValue {
         const flags = self.propFlagsAt(index);
         if (flags.deleted or flags.kind != .data) return null;
-        return self.properties[index].slot.data;
+        return self.prop_values[index].slot.data;
     }
 
     /// The stored accessor at `index`, or null if not an accessor property.
     pub inline fn asAccessorAt(self: *const Object, index: usize) ?property.Accessor {
         const flags = self.propFlagsAt(index);
         if (flags.deleted or flags.kind != .accessor) return null;
-        return self.properties[index].slot.accessor;
+        return self.prop_values[index].slot.accessor;
     }
 
     /// The var_ref cell at `index`, or null if not a var_ref property.
     pub inline fn asVarRefAt(self: *const Object, index: usize) ?*var_ref_mod.VarRef {
         const flags = self.propFlagsAt(index);
         if (flags.deleted or flags.kind != .var_ref) return null;
-        return self.properties[index].slot.var_ref;
+        return self.prop_values[index].slot.var_ref;
     }
 
     pub inline fn isAutoInitAt(self: *const Object, index: usize) bool {
@@ -9492,8 +9528,8 @@ pub const Object = struct {
         next_slot: property.Slot,
     ) void {
         const old_flags = self.propFlagsAt(index);
-        const old_slot = self.properties[index].slot;
-        self.properties[index].slot = next_slot;
+        const old_slot = self.prop_values[index].slot;
+        self.prop_values[index].slot = next_slot;
         rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.bits());
         destroyPropertySlot(rt, atom_id, old_flags, old_slot);
     }
@@ -9525,13 +9561,13 @@ pub const Object = struct {
     /// Clamped to the entry count so a partially appended property
     /// (entry pushed, shape not yet transitioned) is never exposed.
     pub inline fn shapeProps(self: *const Object) []const shape.Property {
-        return self.shape_ref.props[0..@min(self.shape_ref.prop_count, self.properties.len)];
+        return self.shape_ref.props()[0..self.shape_ref.prop_count];
     }
 
     fn findPropertyProbeTrusted(self: *const Object, atom_id: atom.Atom) ?PropertyProbe {
         const prop_count = self.shape_ref.prop_count;
-        std.debug.assert(prop_count <= self.properties.len);
-        const props = self.shape_ref.props.ptr;
+        std.debug.assert(prop_count <= self.shape_ref.prop_count);
+        const props = self.shape_ref.props().ptr;
         std.debug.assert(self.shape_ref.hasPropertyHash());
         var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
         while (shape_index != shape.no_property_index) {
@@ -9549,14 +9585,41 @@ pub const Object = struct {
         const lookup = self.findPropertyProbeTrusted(atom_id) orelse return .missing;
         const flags = property.Flags.fromBits(lookup.prop.flags);
         if (flags.kind != .data) return .slow;
-        return .{ .value = .{ .index = lookup.index, .flags = flags, .value = self.properties[lookup.index].slot.data } };
+        return .{ .value = .{ .index = lookup.index, .flags = flags, .value = self.prop_values[lookup.index].slot.data } };
+    }
+
+    pub const OwnDataValueResult = union(enum) {
+        value: JSValue,
+        missing,
+        slow,
+    };
+
+    /// Lean own-data-property lookup for the hot get_field path: returns just the
+    /// BORROWED slot value (16B) instead of materializing the {index, flags, value}
+    /// probe struct, so the decoded flags/index stay in registers rather than
+    /// spilling to the stack. Mirrors qjs find_own_property + the data-kind guard;
+    /// folds the chain walk, deleted skip, and kind check into one pass.
+    pub inline fn findOwnDataValueFast(self: *const Object, atom_id: atom.Atom) OwnDataValueResult {
+        const props = self.shape_ref.props().ptr;
+        var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
+        while (shape_index != shape.no_property_index) {
+            const index: usize = @intCast(shape_index);
+            const prop = props[index];
+            shape_index = prop.hash_next;
+            const flags = property.Flags.fromBits(prop.flags);
+            if (prop.atom_id == atom_id and !flags.deleted) {
+                if (flags.kind != .data) return .slow;
+                return .{ .value = self.prop_values[index].slot.data };
+            }
+        }
+        return .missing;
     }
 
     pub fn findWritableOwnDataPropertyFast(self: *Object, atom_id: atom.Atom) ?WritableOwnDataPropertyFastLookup {
         const lookup = self.findPropertyProbeTrusted(atom_id) orelse return null;
         const flags = property.Flags.fromBits(lookup.prop.flags);
         if (flags.kind != .data or !flags.writable) return null;
-        const entry = &self.properties[lookup.index];
+        const entry = &self.prop_values[lookup.index];
         return .{ .index = lookup.index, .flags = flags, .value = &entry.slot.data };
     }
 
@@ -9568,7 +9631,7 @@ pub const Object = struct {
         while (shape_index != shape.no_property_index and steps < self.shape_ref.prop_count) : (steps += 1) {
             const index: usize = @intCast(shape_index);
             if (index >= self.shape_ref.prop_count) break;
-            shape_index = self.shape_ref.props[index].hash_next;
+            shape_index = self.shape_ref.props()[index].hash_next;
             if (index >= props.len) continue;
             const prop = props[index];
             if (prop.atom_id == atom_id and !property.Flags.fromBits(prop.flags).deleted) return index;

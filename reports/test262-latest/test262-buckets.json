@@ -1,9 +1,9 @@
 {
-  "total_failed": 6,
+  "total_failed": 0,
   "buckets": {
-    "SyntaxError": 1,
+    "SyntaxError": 0,
     "TypeError": 0,
-    "Test262Error": 5,
+    "Test262Error": 0,
     "RangeError": 0,
     "ReferenceError": 0,
     "UnhandledPromiseRejection": 0,

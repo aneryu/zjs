@@ -22,6 +22,15 @@ const context_mod = @import("context.zig");
 
 pub const default_stack_size = 1024 * 1024;
 pub const default_gc_threshold = 256 * 1024;
+/// Native C-stack budget for the recursion guard, matching QuickJS
+/// `JS_DEFAULT_STACK_SIZE` (quickjs.h:328, 1 MiB). The guard trips once this many
+/// bytes of native stack have been consumed below the outermost eval frame,
+/// turning pathological recursion (parser/JSON tens of thousands deep) into a
+/// catchable error. 1 MiB leaves ample headroom under the real thread stack
+/// (the main thread has only a few MiB free below the eval entry after the CLI
+/// call chain; worker threads have ~16 MiB) while sitting far above any
+/// legitimate nesting depth — the same value QuickJS passes test262 with.
+pub const default_native_stack_size = 1024 * 1024;
 
 pub const InterruptHandler = *const fn (*JSRuntime, ?*anyopaque) bool;
 
@@ -688,6 +697,17 @@ pub const JSRuntime = struct {
     gc_running: bool = false,
     current_exception: JSValue = JSValue.uninitialized(),
     stack_size: usize = default_stack_size,
+    /// Native (machine C-stack) recursion guard, mirroring QuickJS
+    /// `rt->stack_top`/`rt->stack_limit` (quickjs.c:349-350, 2841-2860). Captured
+    /// via `@frameAddress()` at the outermost eval entry (`updateNativeStackTop`,
+    /// the JS_UpdateStackTop analogue — refreshed per thread because worker
+    /// threads run on a different C stack than where the runtime was
+    /// constructed). Zero limit means "no limit yet". `native_stack_limit` is the
+    /// lower address bound (`native_stack_top - native_stack_size`); a native
+    /// frame pointer below it is an overflow. See `checkNativeStackOverflow`.
+    native_stack_top: usize = 0,
+    native_stack_limit: usize = 0,
+    native_stack_size: usize = default_native_stack_size,
     /// Per-runtime VM value-stack arena for bytecode call frames.
     vm_stack: VmStackArena = .{},
     interrupt_handler: ?InterruptHandler = null,
@@ -847,11 +867,26 @@ pub const JSRuntime = struct {
         rt.gc_running = false;
         rt.current_exception = JSValue.uninitialized();
         rt.stack_size = options.stack_size;
+        rt.native_stack_size = default_native_stack_size;
+        // Arm the native recursion guard at construction, mirroring QuickJS
+        // JS_NewRuntime2 -> JS_UpdateStackTop (quickjs.c:2116). This covers every
+        // entry path (eval / evalScript / ES module graph) even those that do not
+        // re-arm; the host creates the runtime and starts execution from the same
+        // shallow call level, so this baseline is valid. Outermost eval/module
+        // entries additionally re-arm (JS_UpdateStackTop analogue) for a precise
+        // per-thread base — required when execution runs on a different thread
+        // than construction (test262 workers).
+        rt.native_stack_top = @frameAddress();
+        rt.native_stack_limit = if (default_native_stack_size == 0) 0 else rt.native_stack_top -| default_native_stack_size;
         rt.vm_stack = .{};
         rt.interrupt_handler = options.interrupt_handler;
         rt.interrupt_context = options.interrupt_context;
         rt.can_block = options.can_block;
-        rt.random_state = 0x1234_5678_9abc_def0;
+        // Seed the Math.random xorshift state from wall-clock microseconds,
+        // mirroring qjs js_random_init (quickjs.c:47373); the state must be
+        // non-zero or xorshift64star degenerates to all-zeros.
+        rt.random_state = randomSeedMicros();
+        if (rt.random_state == 0) rt.random_state = 1;
         rt.single_byte_strings = @splat(null);
         rt.empty_string = null;
         rt.recent_two_unit_string = null;
@@ -890,30 +925,30 @@ pub const JSRuntime = struct {
         self.clearPendingFinalizationJobs();
         const recent_two_unit_string = self.recent_two_unit_string;
         self.recent_two_unit_string = null;
-        if (recent_two_unit_string) |cached| JSValue.string(&cached.string.header).free(self);
+        if (recent_two_unit_string) |cached| JSValue.string(cached.string.header()).free(self);
         for (&self.recent_atom_strings) |*slot| {
             const cached = slot.*;
             slot.* = null;
-            if (cached) |stored| JSValue.string(&stored.string.header).free(self);
+            if (cached) |stored| JSValue.string(stored.string.header()).free(self);
         }
         self.recent_atom_string_next = 0;
         const empty_string = self.empty_string;
         self.empty_string = null;
-        if (empty_string) |cached| JSValue.string(&cached.header).free(self);
+        if (empty_string) |cached| JSValue.string(cached.header()).free(self);
         for (&self.single_byte_strings) |*slot| {
             const cached = slot.*;
             slot.* = null;
-            if (cached) |stored| JSValue.string(&stored.header).free(self);
+            if (cached) |stored| JSValue.string(stored.header()).free(self);
         }
         for (&self.percent_hex_strings) |*slot| {
             const cached = slot.*;
             slot.* = null;
-            if (cached) |stored| JSValue.string(&stored.header).free(self);
+            if (cached) |stored| JSValue.string(stored.header()).free(self);
         }
         for (&self.small_int_strings) |*slot| {
             const cached = slot.*;
             slot.* = null;
-            if (cached) |stored| JSValue.string(&stored.header).free(self);
+            if (cached) |stored| JSValue.string(stored.header()).free(self);
         }
         for (&self.internal_destructuring_helpers) |*slot| {
             const cached = slot.*;
@@ -1372,7 +1407,7 @@ pub const JSRuntime = struct {
     pub fn retainWeakIdentity(self: *JSRuntime, identity: usize) void {
         if ((identity & 1) == 0) {
             const object = self.objectFromWeakIdentity(identity) orelse return;
-            std.debug.assert(object.header.rc > 0);
+            std.debug.assert(object.header.meta().rc > 0);
             object.weakref_count += 1;
             return;
         }
@@ -1386,7 +1421,7 @@ pub const JSRuntime = struct {
             const object = self.objectFromWeakIdentity(identity) orelse return;
             std.debug.assert(object.weakref_count > 0);
             object.weakref_count -= 1;
-            if (object.weakref_count == 0 and object.header.rc == 0 and !object.header.flags.mark) {
+            if (object.weakref_count == 0 and object.header.meta().rc == 0 and !object.header.meta().flags.mark) {
                 Object.destroyDeadWeakHusk(self, object);
             }
             return;
@@ -1429,7 +1464,7 @@ pub const JSRuntime = struct {
     pub fn liveObjectFromWeakIdentity(self: *const JSRuntime, identity: usize) ?*Object {
         if ((identity & 1) != 0) return null;
         const object = self.objectFromWeakIdentity(identity) orelse return null;
-        if (object.header.rc == 0) return null;
+        if (object.header.meta().rc == 0) return null;
         return object;
     }
 
@@ -1808,7 +1843,7 @@ pub const JSRuntime = struct {
         }
 
         const object_count = self.gc.liveCount();
-        const shape_count = self.shapes.shapes.len;
+        const shape_count = self.shapes.live_shape_count;
         const module_count = self.modules.modules.len;
         const class_record_count = self.classes.records.len;
         return .{
@@ -1912,7 +1947,7 @@ pub const JSRuntime = struct {
         }
         var gc_iter = self.gc.objectIterator();
         while (gc_iter.next()) |header| {
-            if (header.kind == .object) {
+            if (header.meta().kind == .object) {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", header));
                 count +|= obj.weakCollectionEntries().len;
                 count +|= obj.finalizationRegistryCells().len;
@@ -2039,7 +2074,7 @@ pub const JSRuntime = struct {
             .second = second,
             .string = created,
         };
-        if (old) |stored| JSValue.string(&stored.string.header).free(self);
+        if (old) |stored| JSValue.string(stored.string.header()).free(self);
         return created;
     }
 
@@ -2063,7 +2098,7 @@ pub const JSRuntime = struct {
             .string = created,
         };
         self.recent_atom_string_next = (slot_index + 1) % self.recent_atom_strings.len;
-        if (old) |stored| JSValue.string(&stored.string.header).free(self);
+        if (old) |stored| JSValue.string(stored.string.header()).free(self);
         return created;
     }
 
@@ -2098,6 +2133,31 @@ pub const JSRuntime = struct {
 
     pub fn stackSize(self: JSRuntime) usize {
         return self.stack_size;
+    }
+
+    /// Capture the current native frame pointer as the recursion base and derive
+    /// the lower limit. Mirrors QuickJS `JS_UpdateStackTop` + `update_stack_limit`
+    /// (quickjs.c:2841-2860). Must be called at the outermost JS entry on the
+    /// thread that will run the code (worker threads have their own C stack), so
+    /// deeper native frames (parser / JSON / interpreter) measure against a real,
+    /// same-stack base. A `native_stack_size` of 0 disables the limit.
+    pub fn updateNativeStackTop(self: *JSRuntime) void {
+        self.native_stack_top = @frameAddress();
+        self.native_stack_limit = if (self.native_stack_size == 0)
+            0
+        else
+            self.native_stack_top -| self.native_stack_size;
+    }
+
+    /// Return true if consuming `alloca_size` more native stack would cross the
+    /// recursion limit. Direct port of QuickJS `js_check_stack_overflow`
+    /// (quickjs.c:2059-2064): `sp = frame_address - alloca_size; sp < limit`.
+    /// Stack grows down, so "below the limit" is overflow. Returns false when the
+    /// limit is unset (0), matching the no-limit build.
+    pub inline fn checkNativeStackOverflow(self: *const JSRuntime, alloca_size: usize) bool {
+        if (self.native_stack_limit == 0) return false;
+        const sp = @frameAddress() -| alloca_size;
+        return sp < self.native_stack_limit;
     }
 
     pub fn internAtom(self: *JSRuntime, bytes: []const u8) !atom.Atom {
@@ -2456,9 +2516,9 @@ pub const JSRuntime = struct {
             self.current_deferred_weak_value_free_identity = skip_identity;
             defer self.current_deferred_weak_value_free_identity = previous_skip_identity;
             if (item.value.refCountHeader()) |header| {
-                if (header.rc == 0) {
+                if (header.meta().rc == 0) {
                     const already_consumed_prequeued_object =
-                        header.kind == .object and
+                        header.meta().kind == .object and
                         skip_identity != null and
                         skip_identity.? == (@intFromPtr(header) & ~@as(usize, 1));
                     std.debug.assert(already_consumed_prequeued_object);
@@ -2692,8 +2752,8 @@ pub const JSRuntime = struct {
 
 fn objectFromLastRefValue(value: JSValue) ?*Object {
     const header = value.refHeader() orelse return null;
-    if (header.kind != .object) return null;
-    if (header.rc != 1) return null;
+    if (header.meta().kind != .object) return null;
+    if (header.meta().rc != 1) return null;
     return @alignCast(@fieldParentPtr("header", header));
 }
 
@@ -2855,4 +2915,13 @@ test "external hard memory pressure requests urgent major gc" {
         try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_slice_count);
     }
     try std.testing.expect(!rt.gcPendingForTest());
+}
+
+/// Wall-clock microseconds for the Math.random seed (qjs js_random_init,
+/// quickjs.c:47373, gettimeofday-based). Falls back to 1 on clock failure.
+fn randomSeedMicros() u64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.REALTIME, &ts) != 0) return 1;
+    const micros = @as(i128, ts.sec) * std.time.us_per_s + @divTrunc(@as(i128, ts.nsec), std.time.ns_per_us);
+    return @truncate(@as(u128, @bitCast(micros)));
 }

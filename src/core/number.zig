@@ -82,15 +82,34 @@ pub fn parseIntLatin1Bytes(source: []const u8, initial_radix: i32) f64 {
         text = text[2..];
     }
 
+    var wide: u128 = 0;
+    var overflowed = false;
     var value: f64 = 0;
-    var consumed = false;
+    var consumed: usize = 0;
     for (text) |ch| {
         const digit: i32 = @intCast(unicode.asciiRadixDigitValueByte(ch) orelse break);
         if (digit >= radix) break;
-        consumed = true;
+        consumed += 1;
+        if (!overflowed) {
+            const mul = @mulWithOverflow(wide, @as(u128, @intCast(radix)));
+            const add = @addWithOverflow(mul[0], @as(u128, @intCast(digit)));
+            if (mul[1] == 0 and add[1] == 0) {
+                wide = add[0];
+                continue;
+            }
+            overflowed = true;
+            value = @floatFromInt(wide);
+        }
         value = value * @as(f64, @floatFromInt(radix)) + @as(f64, @floatFromInt(digit));
     }
-    if (!consumed) return std.math.nan(f64);
+    if (consumed == 0) return std.math.nan(f64);
+    if (!overflowed) {
+        value = @floatFromInt(wide);
+    } else if (radix == 10) {
+        // Beyond 128 bits of decimal digits: delegate to the correctly-rounded
+        // decimal parser (qjs js_atod exactness) instead of per-digit rounding.
+        value = std.fmt.parseFloat(f64, text[0..consumed]) catch value;
+    }
     const signed = value * sign;
     if (signed == 0 and sign < 0) return -0.0;
     return signed;

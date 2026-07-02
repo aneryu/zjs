@@ -31,7 +31,8 @@ pub fn isSimpleNativeErrorConstructorName(name: []const u8) bool {
         std.mem.eql(u8, name, "ReferenceError") or
         std.mem.eql(u8, name, "SyntaxError") or
         std.mem.eql(u8, name, "TypeError") or
-        std.mem.eql(u8, name, "URIError");
+        std.mem.eql(u8, name, "URIError") or
+        std.mem.eql(u8, name, "InternalError");
 }
 
 test "error constructor name groups stay aligned" {

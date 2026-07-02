@@ -165,6 +165,7 @@ pub const DynamicImportError = error{
     StackOverflow,
     StackUnderflow,
     StreamTooLong,
+    StringTooLong,
     SymLinkLoop,
     SyntaxError,
     SystemError,
@@ -596,7 +597,7 @@ pub const JSContext = struct {
         const value = self.class_prototypes[index];
         if (!value.isObject()) return null;
         const header = value.refHeader() orelse return null;
-        if (header.kind != .object) return null;
+        if (header.meta().kind != .object) return null;
         return @fieldParentPtr("header", header);
     }
 

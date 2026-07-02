@@ -187,14 +187,14 @@ pub fn execGetVarRefMaybeTdz(
 ) !bool {
     frame.pc += consume;
     if (idx >= frame.var_refs.len) try ensureVarRefsCapacity(ctx, frame, idx);
-    if (idx < function.var_ref_names.len) {
-        const atom_id = function.var_ref_names[idx];
+    if (idx < function.varRefNamesLen()) {
+        const atom_id = function.varRefName(idx);
         // Only a genuine top-level global_decl var-ref (qjs JS_CLOSURE_GLOBAL_DECL)
         // reads through the global lexical cell by name. A captured block/loop
         // lexical (.ref/.local) that merely shares a name must fall through to the
         // real frame.var_refs cell below so its TDZ check is honored — otherwise a
         // same-named outer top-level `let` shadows the captured per-iteration TDZ slot.
-        const is_global_decl_ref = idx < function.var_ref_is_global_decl.len and function.var_ref_is_global_decl[idx];
+        const is_global_decl_ref = function.varRefIsGlobalDeclAt(idx);
         if (is_global_decl_ref) {
             if (globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| {
                 if (lexical_value.isUninitialized()) {
@@ -307,8 +307,8 @@ pub fn execPutVarRef(
         value.free(ctx.runtime);
         return throwTdzReference(ctx);
     }
-    if (opc == op.put_var_ref_check and idx < function.var_ref_names.len) {
-        const atom_id = function.var_ref_names[idx];
+    if (opc == op.put_var_ref_check and idx < function.varRefNamesLen()) {
+        const atom_id = function.varRefName(idx);
         if (globalLexicalHasForGlobal(ctx, global, atom_id)) {
             _ = setGlobalLexicalValueForGlobal(ctx, global, atom_id, value) catch |err| {
                 value.free(ctx.runtime);
@@ -324,7 +324,7 @@ pub fn execPutVarRef(
             return;
         }
     }
-    if (opc == op.put_var_ref_check and idx < function.var_ref_is_const.len and function.var_ref_is_const[idx]) {
+    if (opc == op.put_var_ref_check and function.varRefIsConstAt(idx)) {
         value.free(ctx.runtime);
         _ = throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
         return error.TypeError;
@@ -357,7 +357,7 @@ pub fn publishTopLevelFunctionVarRef(
     eval_global_var_bindings: bool,
     is_eval_code: bool,
 ) !void {
-    if (idx >= function.var_ref_names.len) return;
+    if (idx >= function.varRefNamesLen()) return;
     if (!value.isObject()) return;
     if (function.flags.is_module) return;
     if (is_eval_code and !eval_global_var_bindings) return;
@@ -367,11 +367,11 @@ pub fn publishTopLevelFunctionVarRef(
     // the global lexical environment record only — qjs never creates a global
     // object property for it (a top-level `class A{}` / `let f = function(){}`
     // must leave `globalThis.A` undefined; `language/global-code/decl-lex.js`).
-    if (idx < function.var_ref_is_lexical.len and function.var_ref_is_lexical[idx]) return;
+    if (function.varRefIsLexicalAt(idx)) return;
     if (!sameObjectIdentity(frame.this_value, global.value())) return;
     const object = property_ops.expectObject(value) catch return;
     if (!isFunctionLikeClass(object.class_id)) return;
-    try defineGlobalFunctionBindingValue(rt, global, function.var_ref_names[idx], value, is_eval_code);
+    try defineGlobalFunctionBindingValue(rt, global, function.varRefName(idx), value, is_eval_code);
 }
 
 pub fn defineGlobalFunctionBindingValue(
@@ -485,8 +485,8 @@ noinline fn setSlotValueRefCounted(ctx: *core.JSContext, slot: *core.JSValue, va
 
 pub fn derivedConstructorThisLocalSlot(frame: *frame_mod.Frame) ?*core.JSValue {
     if (!frame.function.flags.is_derived_class_constructor) return null;
-    for (frame.function.var_names, 0..) |name, idx| {
-        if (name == 8 and idx < frame.locals.len) return &frame.locals[idx];
+    for (frame.function.vardefs, 0..) |vd, idx| {
+        if (vd.var_name == 8 and idx < frame.locals.len) return &frame.locals[idx];
     }
     return null;
 }

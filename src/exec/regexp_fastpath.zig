@@ -864,7 +864,7 @@ pub fn qjsRegExpExecCompiledResult(
                     };
                 }
             }
-            return try createRegExpMatchArrayFromValue(rt, global, string_value, found, has_indices);
+            return try createRegExpMatchArrayFromValue(rt, global, string_value, &found, has_indices);
         },
         .no_match, .out_of_range => {
             if (use_last_index and (is_global or is_sticky)) {
@@ -954,7 +954,7 @@ pub fn setRegExpLastIndex(rt: *core.JSRuntime, object: *core.Object, index: usiz
     object.setProperty(rt, core.atom.ids.lastIndex, value) catch return error.TypeError;
 }
 
-pub fn updateRegExpLegacyStaticsNoCaptures(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: RegExpMatch, input_len: usize) !void {
+pub fn updateRegExpLegacyStaticsNoCaptures(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: *const RegExpMatch, input_len: usize) !void {
     const regexp_ctor = regExpConstructorFromGlobal(rt, global) catch return;
     if (regexp_ctor.class_payload_kind != .function) return;
     const legacy = try regexp_ctor.ensureRegExpLegacyStatics(rt);

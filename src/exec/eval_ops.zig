@@ -80,8 +80,8 @@ fn namedRefValue(
 pub fn functionBytecodeHasDirectEval(fb: *const bytecode.FunctionBytecode, rt: *core.JSRuntime) bool {
     _ = rt;
     var pc: usize = 0;
-    while (pc < fb.byte_code.len) {
-        const opc = fb.byte_code[pc];
+    while (pc < fb.byteCode().len) {
+        const opc = fb.byteCode()[pc];
         if (opc == op.eval or opc == op.apply_eval) return true;
         const size = bytecode.opcode.sizeOf(opc);
         pc += if (size == 0) 1 else size;
@@ -91,9 +91,9 @@ pub fn functionBytecodeHasDirectEval(fb: *const bytecode.FunctionBytecode, rt: *
 
 pub fn functionBytecodeUsesImportMeta(fb: *const bytecode.FunctionBytecode) bool {
     var pc: usize = 0;
-    while (pc < fb.byte_code.len) {
-        const opc = fb.byte_code[pc];
-        if (opc == op.special_object and pc + 1 < fb.byte_code.len and fb.byte_code[pc + 1] == 4) return true;
+    while (pc < fb.byteCode().len) {
+        const opc = fb.byteCode()[pc];
+        if (opc == op.special_object and pc + 1 < fb.byteCode().len and fb.byteCode()[pc + 1] == 4) return true;
         const size = bytecode.opcode.sizeOf(opc);
         pc += if (size == 0) 1 else size;
     }
@@ -108,13 +108,17 @@ fn createDirectEvalOuterVarRefs(
 ) !DirectEvalOuterVarRefs {
     const function = caller_function orelse return .{ .names = &.{}, .refs = &.{} };
     const frame = caller_frame orelse return .{ .names = &.{}, .refs = &.{} };
-    const count = @min(function.var_ref_names.len, frame.var_refs.len);
+    const count = @min(function.varRefNamesLen(), frame.var_refs.len);
     if (count == 0) return .{ .names = &.{}, .refs = &.{} };
 
     var visible_count: usize = 0;
-    for (function.var_ref_names[0..count], 0..) |atom_id, idx| {
-        if (closureVarIsNonLexicalGlobalSentinel(function, idx) and global.hasOwnProperty(atom_id)) continue;
-        visible_count += 1;
+    {
+        var idx: usize = 0;
+        while (idx < count) : (idx += 1) {
+            const atom_id = function.varRefName(idx);
+            if (closureVarIsNonLexicalGlobalSentinel(function, idx) and global.hasOwnProperty(atom_id)) continue;
+            visible_count += 1;
+        }
     }
     if (visible_count == 0) return .{ .names = &.{}, .refs = &.{} };
 
@@ -138,13 +142,17 @@ fn createDirectEvalOuterVarRefs(
         ctx.runtime.memory.free(core.JSValue, refs);
     }
 
-    for (function.var_ref_names[0..count], 0..) |atom_id, idx| {
-        if (closureVarIsNonLexicalGlobalSentinel(function, idx) and global.hasOwnProperty(atom_id)) continue;
-        names[initialized_names] = ctx.runtime.atoms.dup(atom_id);
-        initialized_names += 1;
-        refs[initialized_refs] = frame.var_refs[idx].dup();
-        initialized_refs += 1;
-        rooted_refs = refs[0..initialized_refs];
+    {
+        var idx: usize = 0;
+        while (idx < count) : (idx += 1) {
+            const atom_id = function.varRefName(idx);
+            if (closureVarIsNonLexicalGlobalSentinel(function, idx) and global.hasOwnProperty(atom_id)) continue;
+            names[initialized_names] = ctx.runtime.atoms.dup(atom_id);
+            initialized_names += 1;
+            refs[initialized_refs] = frame.var_refs[idx].dup();
+            initialized_refs += 1;
+            rooted_refs = refs[0..initialized_refs];
+        }
     }
     return .{ .names = names, .refs = refs };
 }
@@ -171,7 +179,7 @@ fn initialDirectEvalFrameVarRef(
         return cell.valueRef();
     }
 
-    const atom_id = function.var_ref_names[idx];
+    const atom_id = function.varRefName(idx);
     var initial_value = call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id) orelse global.getProperty(atom_id);
     errdefer initial_value.free(ctx.runtime);
     const cell = try core.VarRef.createClosed(ctx.runtime, initial_value);
@@ -180,7 +188,7 @@ fn initialDirectEvalFrameVarRef(
 }
 
 fn directEvalFrameVarRefName(function: *const bytecode.Bytecode, idx: usize) ?core.Atom {
-    if (idx < function.var_ref_names.len) return function.var_ref_names[idx];
+    if (idx < function.varRefNamesLen()) return function.varRefName(idx);
     if (idx < function.closure_var.len) return function.closure_var[idx].var_name;
     return null;
 }
@@ -193,7 +201,7 @@ fn createDirectEvalFrameVarRefs(
     eval_var_refs: []const core.JSValue,
     outer_var_refs: DirectEvalOuterVarRefs,
 ) ![]core.JSValue {
-    const count = @max(function.closure_var.len, function.var_ref_names.len);
+    const count = @max(function.closure_var.len, function.varRefNamesLen());
     if (count == 0) return &.{};
 
     const refs = try ctx.runtime.memory.alloc(core.JSValue, count);
@@ -227,8 +235,8 @@ fn createDirectEvalFrameVarRefs(
 
 pub fn evalBytecodeHasVarDeclarations(rt: *core.JSRuntime, function: *const bytecode.Bytecode) bool {
     if (!value_ops.atomNameEql(rt, function.name, "<eval>")) return false;
-    for (function.var_names) |atom_id| {
-        if (!value_ops.atomNameEql(rt, atom_id, "<ret>")) return true;
+    for (function.vardefs) |vd| {
+        if (!value_ops.atomNameEql(rt, vd.var_name, "<ret>")) return true;
     }
     return false;
 }
@@ -243,7 +251,7 @@ pub fn shouldSkipDirectEvalLocalCapture(
     else
         slot;
     if (value.isUninitialized()) return true;
-    if (!fb.super_allowed) return false;
+    if (!fb.flags.super_allowed) return false;
     if (!value.isObject()) return false;
     for (skip_values) |skip_value| {
         if (skip_value.same(value)) return true;
@@ -252,17 +260,20 @@ pub fn shouldSkipDirectEvalLocalCapture(
 }
 
 pub fn functionBytecodeUsesAtom(rt: *core.JSRuntime, fb: *const bytecode.FunctionBytecode, atom_id: core.Atom) bool {
-    for (fb.atom_operands) |operand| {
+    // Atom operands live inline in the bytecode (no side array); walk them.
+    var it = fb.atomOperandIterator();
+    while (it.next()) |operand| {
         if (atomIdOrNameEql(rt, operand, atom_id)) return true;
     }
-    for (fb.var_ref_names) |name| {
+    for (fb.closureVar()) |cv| {
+        const name = cv.var_name;
         if (atomIdOrNameEql(rt, name, atom_id)) return true;
     }
     return false;
 }
 
 pub fn functionBytecodeHasClosureVarName(rt: *core.JSRuntime, fb: *const bytecode.FunctionBytecode, atom_id: core.Atom) bool {
-    for (fb.closure_var) |cv| {
+    for (fb.closureVar()) |cv| {
         if (atomIdOrNameEql(rt, cv.var_name, atom_id)) return true;
     }
     return false;
@@ -555,7 +566,18 @@ pub fn directEval(
     var rooted_outer_var_refs = outer_var_refs.refs;
     outer_var_refs_root.init(ctx.runtime, &rooted_outer_var_refs);
     defer outer_var_refs_root.deinit();
-    const base_outer_local_names = if (caller_function) |outer_function| outer_function.var_names else &.{};
+    // `vardefs` replaced the parallel `var_names` array, so materialize the
+    // caller's local names into a borrowed-atom slice (the atom ids are read
+    // only — downstream dups them — so we free just the backing storage here,
+    // not the individual atoms).
+    const base_outer_local_names: []core.Atom = if (caller_function) |outer_function| blk: {
+        const vardefs = outer_function.vardefs;
+        if (vardefs.len == 0) break :blk &.{};
+        const names = try ctx.runtime.memory.alloc(core.Atom, vardefs.len);
+        for (vardefs, 0..) |vd, idx| names[idx] = vd.var_name;
+        break :blk names;
+    } else &.{};
+    defer if (base_outer_local_names.len != 0) ctx.runtime.memory.free(core.Atom, base_outer_local_names);
     const base_outer_locals = if (caller_frame) |outer_frame| outer_frame.locals else empty_locals[0..];
     var direct_eval_local_names: []core.Atom = &.{};
     var direct_eval_local_slots: []core.JSValue = &.{};
@@ -710,7 +732,10 @@ pub fn directEvalPrivateBoundNames(
         for (function.private_bound_names) |atom_id| {
             try appendPrivateBoundName(rt, &atoms, atom_id);
         }
-        for (function.atom_operands) |atom_id| {
+        // Atom operands are embedded inline in the bytecode; iterate them
+        // directly (the finalized FB view no longer exposes a side array).
+        var atom_it = bytecode.FunctionBytecode.BytecodeAtomIterator{ .byte_code = function.code };
+        while (atom_it.next()) |atom_id| {
             try appendPrivateBoundName(rt, &atoms, atom_id);
         }
     }
@@ -732,21 +757,21 @@ pub fn directEvalVisibleBindingExists(rt: *core.JSRuntime, names: []const core.A
     return false;
 }
 
-pub fn directEvalVisibleLocalNameCount(rt: *core.JSRuntime, names: []const core.Atom, atom_id: core.Atom) usize {
+pub fn directEvalVisibleLocalNameCount(rt: *core.JSRuntime, vardefs: []const bytecode.function_bytecode.VarDef, atom_id: core.Atom) usize {
     var count: usize = 0;
-    for (names) |existing| {
-        if (atomIdOrNameEql(rt, existing, atom_id)) count += 1;
+    for (vardefs) |vd| {
+        if (atomIdOrNameEql(rt, vd.var_name, atom_id)) count += 1;
     }
     return count;
 }
 
 pub fn directEvalShouldExposeImplicitArguments(caller_frame: *frame_mod.Frame) bool {
     if (caller_frame.current_function.isUndefined()) return false;
-    if (functionBytecodeFromValue(caller_frame.current_function)) |fb| return !fb.is_arrow_function;
+    if (functionBytecodeFromValue(caller_frame.current_function)) |fb| return !fb.flags.is_arrow_function;
     if (objectFromValue(caller_frame.current_function)) |function_object| {
         const stored = function_object.functionBytecodeSlot().* orelse return false;
         const fb = functionBytecodeFromValue(stored) orelse return false;
-        return !fb.is_arrow_function;
+        return !fb.flags.is_arrow_function;
     }
     return false;
 }

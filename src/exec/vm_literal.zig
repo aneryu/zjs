@@ -159,8 +159,10 @@ fn canUseFastGlobalUndefinedLookup(
 }
 
 fn frameHasVarRefBinding(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
-    const count = @min(frame.var_refs.len, function.var_ref_names.len);
-    for (function.var_ref_names[0..count]) |name| {
+    const count = @min(frame.var_refs.len, function.varRefNamesLen());
+    var idx: usize = 0;
+    while (idx < count) : (idx += 1) {
+        const name = function.varRefName(idx);
         if (name == atom_id) return true;
     }
     return false;
@@ -185,7 +187,7 @@ pub noinline fn defineField(
                 !target.hasExoticMethods() and
                 target.proxyTarget() == null and
                 !target.flags.is_array and
-                target.properties.len == 0)
+                target.shape_ref.prop_count == 0)
             {
                 try target.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, core.Descriptor.data(value, true, true, true));
                 return .done;
@@ -209,7 +211,7 @@ pub noinline fn defineField(
     const target = try property_ops.expectObject(obj);
     const effective_atom = call_runtime.remapPrivateAtomForOperation(ctx.runtime, frame, target, atom_id);
     if (target.flags.is_array and effective_atom == core.atom.ids.length and
-        target.flags.length_writable and target.properties.len == 0)
+        target.flags.length_writable and target.shape_ref.prop_count == 0)
     {
         if (value.asInt32()) |length| {
             const new_len: u32 = @intCast(@max(length, 0));
@@ -236,7 +238,7 @@ pub noinline fn defineField(
         !target.hasExoticMethods() and
         target.proxyTarget() == null and
         !target.flags.is_array and
-        target.properties.len == 0)
+        target.shape_ref.prop_count == 0)
     {
         try target.defineOwnPropertyAssumingNew(ctx.runtime, effective_atom, core.Descriptor.data(rooted_value, true, true, true));
         return .done;

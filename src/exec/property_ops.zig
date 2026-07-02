@@ -105,6 +105,6 @@ pub fn expectObject(value: core.JSValue) !*core.Object {
 fn objectHeader(value: core.JSValue) ?*core.gc.Header {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
-    if (header.kind != .object) return null;
+    if (header.meta().kind != .object) return null;
     return header;
 }

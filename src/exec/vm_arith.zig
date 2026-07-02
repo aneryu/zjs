@@ -664,6 +664,10 @@ noinline fn addLocalString(
         if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs_primitive, 2)) {
             return;
         }
+        if (try value_ops.startAccumulatorRope(ctx.runtime, lhs, rhs_primitive)) |rope_val| {
+            try slot_ops.setSlotValue(ctx, &frame.locals[idx], rope_val);
+            return;
+        }
     }
 
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs_primitive);
@@ -774,6 +778,10 @@ noinline fn addLocalStringAt(
         if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs_primitive, 2)) {
             return;
         }
+        if (try value_ops.startAccumulatorRope(ctx.runtime, lhs, rhs_primitive)) |rope_val| {
+            try slot_ops.setSlotValue(ctx, slot, rope_val);
+            return;
+        }
     }
 
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs_primitive);
@@ -806,8 +814,10 @@ fn canFuseGlobalDataWrite(
 }
 
 fn frameHasVarRefBinding(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
-    const count = @min(frame.var_refs.len, function.var_ref_names.len);
-    for (function.var_ref_names[0..count]) |name| {
+    const count = @min(frame.var_refs.len, function.varRefNamesLen());
+    var idx: usize = 0;
+    while (idx < count) : (idx += 1) {
+        const name = function.varRefName(idx);
         if (name == atom_id) return true;
     }
     return false;

@@ -530,7 +530,7 @@ fn hostClassPrototype(host_class: HostClass) ?*core.Object {
     const value = host_class.prototype;
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
-    if (header.kind != .object) return null;
+    if (header.meta().kind != .object) return null;
     return @fieldParentPtr("header", header);
 }
 
@@ -737,7 +737,7 @@ fn installDescriptorForTesting(ctx: *zjs.JSContext, target_value: core.JSValue, 
 fn objectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
-    if (header.kind != .object) return null;
+    if (header.meta().kind != .object) return null;
     return @fieldParentPtr("header", header);
 }
 
@@ -1655,12 +1655,12 @@ test "runtime Plugin failed raw CallFrame calls do not free borrowed result valu
     defer retained_sentinel.free(rt);
     defer sentinel_value.free(rt);
 
-    const before_rc = sentinel.header.rc;
+    const before_rc = sentinel.header.meta().rc;
     var args = [_]core.JSValue{sentinel_value};
     try std.testing.expectError(error.JSException, exec.call.callValue(&ctx.core, null, fail_value, &args));
     try std.testing.expect(ctx.hasException());
     ctx.clearException();
-    try std.testing.expectEqual(before_rc, sentinel.header.rc);
+    try std.testing.expectEqual(before_rc, sentinel.header.meta().rc);
 }
 
 test "runtime Plugin maps unknown status values to generic errors" {

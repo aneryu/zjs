@@ -82,7 +82,7 @@ pub fn callWithThis(rt: *core.JSRuntime, closure_value: core.JSValue, this_value
             const threshold = try core.string.String.createUtf8(rt, "\xF0\x9F\x99\x8F");
             const threshold_value = threshold.value();
             defer threshold_value.free(rt);
-            const text = if (char.compare(threshold.*) < 0) "before" else "after";
+            const text = if (char.compare(threshold) < 0) "before" else "after";
             return try value_ops.createStringValue(rt, text);
         },
         19 => {
@@ -387,7 +387,11 @@ test "closure iteratorResult roots direct function bytecode value while creating
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        fb.cpool = __cp.ptr;
+        fb.cpool_count = @intCast(__cp.len);
+    }
     const symbol_atom = try rt.atoms.newValueSymbol("gc-closure-iterator-result-bytecode-symbol");
     fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
@@ -433,7 +437,11 @@ fn createTestFunctionBytecodeValue(rt: *core.JSRuntime, symbol_name: []const u8)
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        fb.cpool = __cp.ptr;
+        fb.cpool_count = @intCast(__cp.len);
+    }
     const symbol_atom = try rt.atoms.newValueSymbol(symbol_name);
     fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;

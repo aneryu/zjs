@@ -548,7 +548,11 @@ test "array iteratorResult roots direct function bytecode value while creating r
     fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        fb.cpool = __cp.ptr;
+        fb.cpool_count = @intCast(__cp.len);
+    }
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-iterator-result-bytecode-symbol");
     fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
@@ -597,7 +601,11 @@ test "array splice roots direct function bytecode insert values while creating r
 
     const first_symbol_value = try rt.newSymbolValue("gc-array-splice-first-bytecode-symbol");
     const first_symbol = first_symbol_value.asSymbolAtom().?;
-    first_fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        first_fb.cpool = __cp.ptr;
+        first_fb.cpool_count = @intCast(__cp.len);
+    }
     first_fb.cpool[0] = first_symbol_value;
     first_fb.cpool_count = 1;
 
@@ -608,7 +616,11 @@ test "array splice roots direct function bytecode insert values while creating r
 
     const second_symbol_value = try rt.newSymbolValue("gc-array-splice-second-bytecode-symbol");
     const second_symbol = second_symbol_value.asSymbolAtom().?;
-    second_fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        second_fb.cpool = __cp.ptr;
+        second_fb.cpool_count = @intCast(__cp.len);
+    }
     second_fb.cpool[0] = second_symbol_value;
     second_fb.cpool_count = 1;
 
@@ -667,7 +679,11 @@ test "array constructWithPrototype roots direct function bytecode elements while
     fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        fb.cpool = __cp.ptr;
+        fb.cpool_count = @intCast(__cp.len);
+    }
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-construct-bytecode-symbol");
     fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
@@ -716,7 +732,11 @@ test "array concat roots direct function bytecode argument while creating output
     fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        fb.cpool = __cp.ptr;
+        fb.cpool_count = @intCast(__cp.len);
+    }
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-concat-arg-bytecode-symbol");
     fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
@@ -1281,7 +1301,7 @@ fn compareStringValues(a: core.JSValue, b: core.JSValue) ?i32 {
     if (!a.isString() or !b.isString()) return null;
     const a_string = a.asStringBody() orelse return null;
     const b_string = b.asStringBody() orelse return null;
-    return a_string.compare(b_string.*);
+    return a_string.compare(b_string);
 }
 
 fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {

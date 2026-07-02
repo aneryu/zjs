@@ -89,6 +89,23 @@ const qjsObjectEnumerableOwnPropertiesCall = object_ops.qjsObjectEnumerableOwnPr
 const readInt = call_runtime.readInt;
 const sameObjectIdentity = object_ops.sameObjectIdentity;
 const setValueProperty = object_ops.setValueProperty;
+
+/// Receiver element/length write for the array mutator builtins with the qjs
+/// JS_PROP_THROW discipline (spec Set(O, P, V, true)): failures throw even for
+/// sloppy callers, mirroring qjs JS_SetPropertyInt64 at the js_array_* sites.
+fn setValuePropertyOrThrow(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    object_value: core.JSValue,
+    atom_id: core.Atom,
+    value: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const result = try object_ops.setValuePropertyWithThrow(ctx, output, global, object_value, atom_id, value, caller_function, caller_frame, true);
+    result.free(ctx.runtime);
+}
 const slotValueBorrow = slot_ops.slotValueBorrow;
 const stringSliceValue = string_ops.stringSliceValue;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
@@ -454,7 +471,7 @@ pub fn throwRegExpAccessorTypeError(ctx: *core.JSContext, global: *core.Object, 
     return error.JSException;
 }
 
-pub fn createRegExpIndicesArray(rt: *core.JSRuntime, global: *core.Object, input_bytes: []const u8, found: RegExpMatch) !core.JSValue {
+pub fn createRegExpIndicesArray(rt: *core.JSRuntime, global: *core.Object, input_bytes: []const u8, found: *const RegExpMatch) !core.JSValue {
     const out = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
     errdefer core.Object.destroyFromHeader(rt, &out.header);
 
@@ -2741,8 +2758,7 @@ pub fn qjsArraySpliceCall(
             if (try hasValueProperty(ctx, output, global, receiver_object_value, object, from_key.atom, null, null)) {
                 const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, null, null);
                 defer item.free(ctx.runtime);
-                const set_result = try setValueProperty(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
-                set_result.free(ctx.runtime);
+                try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
             } else {
                 try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, to_key.atom);
             }
@@ -2766,8 +2782,7 @@ pub fn qjsArraySpliceCall(
             if (try hasValueProperty(ctx, output, global, receiver_object_value, object, from_key.atom, null, null)) {
                 const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, null, null);
                 defer item.free(ctx.runtime);
-                const set_result = try setValueProperty(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
-                set_result.free(ctx.runtime);
+                try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
             } else {
                 try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, to_key.atom);
             }
@@ -2778,13 +2793,11 @@ pub fn qjsArraySpliceCall(
         for (args[2..], 0..) |item, offset| {
             const key = try propertyAtomFromLengthIndex(ctx.runtime, actual_start + offset);
             defer key.deinit(ctx.runtime);
-            const set_result = try setValueProperty(ctx, output, global, receiver_object_value, key.atom, item, null, null);
-            set_result.free(ctx.runtime);
+            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, item, null, null);
         }
     }
     try ensureLengthWritableForArrayBuiltin(ctx, object);
-    const set_result = try setValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(new_length), null, null);
-    set_result.free(ctx.runtime);
+    try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(new_length), null, null);
     if (verify_own_length_write) {
         const final_length = object.getProperty(core.atom.ids.length);
         defer final_length.free(ctx.runtime);
@@ -2899,8 +2912,7 @@ pub fn qjsArrayCopyWithinCall(
         if (try hasValueProperty(ctx, output, global, receiver_object_value, object, from_key.atom, null, null)) {
             const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, null, null);
             defer item.free(ctx.runtime);
-            const set_result = try setValueProperty(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
-            set_result.free(ctx.runtime);
+            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
         } else {
             try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, to_key.atom);
         }
@@ -3012,8 +3024,7 @@ pub fn qjsArrayFillCall(
             while (index < final) : (index += 1) {
                 const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
                 defer key.deinit(ctx.runtime);
-                const set_result = try setValueProperty(ctx, output, global, receiver_object_value, key.atom, value, null, null);
-                set_result.free(ctx.runtime);
+                try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, value, null, null);
             }
             return receiver_object_value.dup();
         }
@@ -3023,8 +3034,7 @@ pub fn qjsArrayFillCall(
     while (index < final) : (index += 1) {
         const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
         defer key.deinit(ctx.runtime);
-        const set_result = try setValueProperty(ctx, output, global, receiver_object_value, key.atom, value, null, null);
-        set_result.free(ctx.runtime);
+        try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, value, null, null);
     }
     return receiver_object_value.dup();
 }
@@ -3096,14 +3106,11 @@ fn qjsArrayPushCallImpl(
         const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
         defer key.deinit(ctx.runtime);
         try ensureSettableForArrayBuiltin(ctx, object, key.atom);
-        const set_result = try setValueProperty(ctx, output, global, receiver_object_value, key.atom, item, caller_function, caller_frame);
-        set_result.free(ctx.runtime);
+        try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, item, caller_function, caller_frame);
         index += 1;
     }
     try ensureLengthWritableForArrayBuiltin(ctx, object);
-    const set_length = try setValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(index), caller_function, caller_frame);
-    set_length.free(ctx.runtime);
-    try verifyArrayLikeLengthSet(ctx, output, global, receiver_object_value, index);
+    try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(index), caller_function, caller_frame);
     return lengthIndexValue(index);
 }
 
@@ -3145,9 +3152,7 @@ fn qjsArrayPopCallImpl(
 
     if (length == 0) {
         try ensureLengthWritableForArrayBuiltin(ctx, object);
-        const set_length = try setValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, core.JSValue.int32(0), caller_function, caller_frame);
-        set_length.free(ctx.runtime);
-        try verifyArrayLikeLengthSet(ctx, output, global, receiver_object_value, 0);
+        try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, core.atom.ids.length, core.JSValue.int32(0), caller_function, caller_frame);
         return core.JSValue.undefinedValue();
     }
 
@@ -3157,9 +3162,7 @@ fn qjsArrayPopCallImpl(
     const value = try getValueProperty(ctx, output, global, receiver_object_value, key.atom, caller_function, caller_frame);
     errdefer value.free(ctx.runtime);
     try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, key.atom);
-    const set_length = try setValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(index), caller_function, caller_frame);
-    set_length.free(ctx.runtime);
-    try verifyArrayLikeLengthSet(ctx, output, global, receiver_object_value, index);
+    try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(index), caller_function, caller_frame);
     return value;
 }
 
@@ -3210,9 +3213,7 @@ pub fn qjsArrayShiftCall(
 
     if (length == 0) {
         try ensureLengthWritableForArrayBuiltin(ctx, object);
-        const set_length = try setValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, core.JSValue.int32(0), null, null);
-        set_length.free(ctx.runtime);
-        try verifyArrayLikeLengthSet(ctx, output, global, receiver_object_value, 0);
+        try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, core.atom.ids.length, core.JSValue.int32(0), null, null);
         return core.JSValue.undefinedValue();
     }
 
@@ -3225,23 +3226,20 @@ pub fn qjsArrayShiftCall(
         defer from_key.deinit(ctx.runtime);
         const to_key = try propertyAtomFromLengthIndex(ctx.runtime, index - 1);
         defer to_key.deinit(ctx.runtime);
-        if (object.hasProperty(from_key.atom)) {
+        if (try hasValueProperty(ctx, output, global, receiver_object_value, object, from_key.atom, null, null)) {
             const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, null, null);
             defer item.free(ctx.runtime);
-            const set_result = try setValueProperty(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
-            set_result.free(ctx.runtime);
+            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
         } else {
-            if (!object.deleteProperty(ctx.runtime, to_key.atom)) return error.TypeError;
+            try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, to_key.atom);
         }
     }
 
     const tail_key = try propertyAtomFromLengthIndex(ctx.runtime, length - 1);
     defer tail_key.deinit(ctx.runtime);
-    if (!object.deleteProperty(ctx.runtime, tail_key.atom)) return error.TypeError;
+    try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, tail_key.atom);
     try ensureLengthWritableForArrayBuiltin(ctx, object);
-    const set_length = try setValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(length - 1), null, null);
-    set_length.free(ctx.runtime);
-    try verifyArrayLikeLengthSet(ctx, output, global, receiver_object_value, length - 1);
+    try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(length - 1), null, null);
     return first;
 }
 
@@ -3374,15 +3372,12 @@ pub fn qjsArrayUnshiftCall(
             const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
             defer key.deinit(ctx.runtime);
             try ensureSettableForArrayBuiltin(ctx, object, key.atom);
-            const set_result = try setValueProperty(ctx, output, global, receiver_object_value, key.atom, item, null, null);
-            set_result.free(ctx.runtime);
+            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, item, null, null);
         }
     }
 
     try ensureLengthWritableForArrayBuiltin(ctx, object);
-    const set_length = try setValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(new_length), null, null);
-    set_length.free(ctx.runtime);
-    try verifyArrayLikeLengthSet(ctx, output, global, receiver_object_value, new_length);
+    try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(new_length), null, null);
     return lengthIndexValue(new_length);
 }
 
@@ -3441,7 +3436,7 @@ pub fn qjsArrayReverseCall(
     // pointer-swap loop, a pure JSValue permutation with no dup/free (matches
     // qjs's set_value-free swap). count32 == len rejects tail holes; non-fast /
     // sparse / proxy / array-like fall through to the generic loop below.
-    if (object.isFastArray() and object.fastArrayCount() == length) {
+    if (object.flags.extensible and object.isFastArray() and object.fastArrayCount() == length) {
         if (length > 1) {
             const arrp = object.fastArrayValuesMut();
             var ll: usize = 0;
@@ -3485,18 +3480,14 @@ pub fn qjsArrayReverseCall(
         }
 
         if (lower_exists and upper_exists) {
-            const set_lower = try setValueProperty(ctx, output, global, receiver_object_value, lower_key.atom, upper_value, caller_function, caller_frame);
-            set_lower.free(ctx.runtime);
-            const set_upper = try setValueProperty(ctx, output, global, receiver_object_value, upper_key.atom, lower_value, caller_function, caller_frame);
-            set_upper.free(ctx.runtime);
+            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, lower_key.atom, upper_value, caller_function, caller_frame);
+            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, upper_key.atom, lower_value, caller_function, caller_frame);
         } else if (!lower_exists and upper_exists) {
-            const set_lower = try setValueProperty(ctx, output, global, receiver_object_value, lower_key.atom, upper_value, caller_function, caller_frame);
-            set_lower.free(ctx.runtime);
+            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, lower_key.atom, upper_value, caller_function, caller_frame);
             try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, upper_key.atom);
         } else if (lower_exists and !upper_exists) {
             try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, lower_key.atom);
-            const set_upper = try setValueProperty(ctx, output, global, receiver_object_value, upper_key.atom, lower_value, caller_function, caller_frame);
-            set_upper.free(ctx.runtime);
+            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, upper_key.atom, lower_value, caller_function, caller_frame);
         }
     }
 
@@ -3549,14 +3540,13 @@ pub fn unshiftMoveIndex(
     defer from_key.deinit(ctx.runtime);
     const to_key = try propertyAtomFromLengthIndex(ctx.runtime, from_index + insert_count);
     defer to_key.deinit(ctx.runtime);
-    if (object.hasProperty(from_key.atom)) {
+    if (try hasValueProperty(ctx, output, global, receiver, object, from_key.atom, null, null)) {
         const item = try getValueProperty(ctx, output, global, receiver, from_key.atom, null, null);
         defer item.free(ctx.runtime);
         try ensureSettableForArrayBuiltin(ctx, object, to_key.atom);
-        const set_result = try setValueProperty(ctx, output, global, receiver, to_key.atom, item, null, null);
-        set_result.free(ctx.runtime);
+        try setValuePropertyOrThrow(ctx, output, global, receiver, to_key.atom, item, null, null);
     } else {
-        if (!object.deleteProperty(ctx.runtime, to_key.atom)) return error.TypeError;
+        try deleteValuePropertyOrThrow(ctx, output, global, receiver, object, to_key.atom);
     }
 }
 
@@ -3565,7 +3555,14 @@ pub fn ensureSettableForArrayBuiltin(ctx: *core.JSContext, object: *core.Object,
         defer desc.destroy(ctx.runtime);
         if (desc.kind == .data and desc.writable == false) return error.TypeError;
         if (desc.kind == .accessor and desc.setter.isUndefined()) return error.TypeError;
+        return;
     }
+    // No data property and no setter anywhere on the chain: the write would
+    // CREATE a new own property, which a non-extensible receiver must reject
+    // (qjs JS_CreateProperty `if (!p->extensible) goto not_extensible` ->
+    // TypeError "object is not extensible", quickjs.c:10144). Without this,
+    // sealed-array push/unshift/splice silently grew length and LOST the value.
+    if (!object.flags.extensible) return error.NotExtensible;
 }
 
 pub fn ensureLengthWritableForArrayBuiltin(ctx: *core.JSContext, object: *core.Object) !void {
@@ -4225,12 +4222,12 @@ pub fn typedArrayConstructorObject(value: core.JSValue) ?*core.Object {
 
 pub fn isConstructorForArrayOf(rt: *core.JSRuntime, value: core.JSValue) !bool {
     if (functionBytecodeFromValue(value)) |fb| {
-        return !fb.is_arrow_function and fb.has_prototype and fb.func_kind != .generator and fb.func_kind != .async_generator;
+        return !fb.flags.is_arrow_function and fb.flags.has_prototype and fb.flags.func_kind != .generator and fb.flags.func_kind != .async_generator;
     }
     if (functionObjectFromValue(value)) |function_object| {
         const function_value = function_object.functionBytecodeSlot().* orelse return false;
         const fb = functionBytecodeFromValue(function_value) orelse return false;
-        return !fb.is_arrow_function and fb.has_prototype and fb.func_kind != .generator and fb.func_kind != .async_generator;
+        return !fb.flags.is_arrow_function and fb.flags.has_prototype and fb.flags.func_kind != .generator and fb.flags.func_kind != .async_generator;
     }
     const object = callableObjectFromValue(value) orelse return false;
     if (object.class_id == core.class.ids.bound_function) {
@@ -4369,16 +4366,14 @@ pub fn qjsArraySortCall(
         if (entry.order != sorted_index) {
             const key = try propertyAtomFromLengthIndex(ctx.runtime, sorted_index);
             defer key.deinit(ctx.runtime);
-            const result = try setValueProperty(ctx, output, global, receiver_object_value, key.atom, entry.value, caller_function, caller_frame);
-            result.free(ctx.runtime);
+            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, entry.value, caller_function, caller_frame);
         }
         index += 1;
     }
     while (index < entries.items.len + undefined_count) : (index += 1) {
         const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
         defer key.deinit(ctx.runtime);
-        const result = try setValueProperty(ctx, output, global, receiver_object_value, key.atom, core.JSValue.undefinedValue(), caller_function, caller_frame);
-        result.free(ctx.runtime);
+        try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, core.JSValue.undefinedValue(), caller_function, caller_frame);
     }
     while (index < length) : (index += 1) {
         const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
@@ -5308,9 +5303,15 @@ pub fn putDenseArrayElementFast(rt: *core.JSRuntime, object_value: core.JSValue,
     return try object.appendDenseArrayIndex(rt, index, core.atom.atomFromUInt32(index), value);
 }
 
+/// qjs `JS_MAX_LOCAL_VARS` (quickjs.c:210): the build_arg_list argument cap.
+pub const max_apply_arguments: usize = 65534;
+
 pub fn argsFromArray(rt: *core.JSRuntime, array_value: core.JSValue) ![]core.JSValue {
     const array = try property_ops.expectObject(array_value);
     if (!array.flags.is_array) return error.TypeError;
+    // qjs build_arg_list cap (quickjs.c:41173): applies to the fast-array copy
+    // path as well (the qjs length check precedes its fast_array branch).
+    if (array.arrayLength() > max_apply_arguments) return error.RangeError;
     if (array.arrayLength() == 0) return &.{};
     const args = try rt.memory.alloc(core.JSValue, array.arrayLength());
     errdefer rt.memory.free(core.JSValue, args);
@@ -5366,11 +5367,26 @@ pub fn argsFromArrayLike(
     caller_frame: ?*frame_mod.Frame,
 ) ![]core.JSValue {
     const object = objectFromValue(array_value) orelse return error.TypeError;
-    if (object.flags.is_array) return argsFromArray(ctx.runtime, array_value);
+    if (object.flags.is_array) {
+        return argsFromArray(ctx.runtime, array_value) catch |err| switch (err) {
+            error.RangeError => {
+                _ = try exception_ops.throwRangeErrorMessage(ctx, global, "too many arguments in function call (only 65534 allowed)");
+                return error.RangeError;
+            },
+            else => err,
+        };
+    }
 
     const length_value = try getValueProperty(ctx, output, global, array_value, core.atom.ids.length, caller_function, caller_frame);
     defer length_value.free(ctx.runtime);
     const length = try toLengthIndex(ctx, output, global, length_value);
+    // qjs build_arg_list cap (quickjs.c:41173-41177, JS_MAX_LOCAL_VARS = 65534):
+    // apply/Reflect.apply/Reflect.construct reject huge array-likes up front
+    // instead of materializing them.
+    if (length > max_apply_arguments) {
+        _ = try exception_ops.throwRangeErrorMessage(ctx, global, "too many arguments in function call (only 65534 allowed)");
+        return error.RangeError;
+    }
     if (length == 0) return &.{};
     const args = try ctx.runtime.memory.alloc(core.JSValue, length);
     errdefer ctx.runtime.memory.free(core.JSValue, args);
@@ -5573,7 +5589,11 @@ test "createArrayFromArgs roots direct function bytecode args while creating arr
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
-    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    {
+        const __cp = try rt.memory.alloc(core.JSValue, 1);
+        fb.cpool = __cp.ptr;
+        fb.cpool_count = @intCast(__cp.len);
+    }
     const symbol_atom = try rt.atoms.newValueSymbol("gc-create-array-from-args-bytecode-symbol");
     fb.cpool[0] = try rt.symbolValue(symbol_atom);
     fb.cpool_count = 1;
@@ -5742,6 +5762,12 @@ pub fn qjsArrayJoinCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
+    // Native recursion guard: a self-referential array (`a.push(a); a.join()`)
+    // recurses join -> element ToString -> join entirely in native frames. QuickJS
+    // bounds this at the JS_CallInternal stack guard reached via JS_ToString
+    // (InternalError "stack overflow"); zjs's native join loop needs its own check
+    // at the entry to match instead of crashing.
+    if (ctx.runtime.checkNativeStackOverflow(0)) return error.StackOverflow;
     if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
     const object_value = if (this_value.isObject()) this_value.dup() else try primitiveObjectForAccess(ctx.runtime, global, this_value);
     defer object_value.free(ctx.runtime);
@@ -5798,7 +5824,7 @@ pub fn qjsFastDensePrimitiveArrayJoin(
     args: []const core.JSValue,
 ) !?core.JSValue {
     if (!object.flags.is_array or object.hasExoticMethods() or object.arrayElementStorageMode() != .dense) return null;
-    if (object.properties.len != 0) return null;
+    if (object.shape_ref.prop_count != 0) return null;
 
     const length: usize = @intCast(object.arrayLength());
     const elements = object.arrayElements();

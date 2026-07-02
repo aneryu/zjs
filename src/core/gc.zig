@@ -321,44 +321,82 @@ pub const BlockFlags = packed struct(u8) {
     in_cycle_list: bool = false,
     finalizing: bool = false,
     is_pinned: bool = false,
-    /// Cycle-removal scan state (valid only during destroyRuntimeCyclesWithValueRoots;
+    /// Cycle-removal garbage flag (valid only during destroyRuntimeCyclesWithValueRoots;
     /// unconditionally re-initialized at the start of every cycle-removal round).
-    /// `cycle_visited` = object participates in the current scan (was on the live or
-    /// garbage list when the round started). `cycle_preserved` = object is known live
-    /// (initially live, or resurrected). Free/garbage membership is derived as
-    /// `cycle_visited and !cycle_preserved`.
+    /// `cycle_visited` = object is condemned garbage in the current round (it was still
+    /// `mark`ed after gc_scan, i.e. not resurrected). Resurrection is carried purely by
+    /// the `mark` bit (ScanIncrefVisitor clears `mark` on reachable objects, so they
+    /// never get `cycle_visited` set); there is no separate "preserved" bit.
     cycle_visited: bool = false,
-    cycle_preserved: bool = false,
-    _reserved: u2 = 0,
+    _reserved: u3 = 0,
 };
 
-/// Z-GE v1.0 block header with qjs-style intrusive GC list links.
-pub const BlockHeader = extern struct {
+/// Z-GE v1.0 block header metadata. Phase 1: grouped into a sub-struct so a
+/// later phase can relocate it to an allocator prefix. Layout/size unchanged.
+/// qjs-style block-prefix metadata. Mirrors `JSMallocBlockHeader`
+/// (quickjs.c:270): refcount + gc type + GC mark/cycle bits + heap-byte size
+/// live in an 8-byte prefix that the allocator places immediately BEFORE the
+/// object (at `objectPtr - 8`), so the in-object `BlockHeader` is just the
+/// intrusive GC list links (= qjs `JSGCObjectHeader`, 16 bytes).
+pub const Metadata = extern struct {
     size_class: u16 align(8) = 0,
-    kind: GcKind,
+    kind: GcKind = .object,
     flags: BlockFlags = .{},
     rc: i32 = 1,
+};
+
+/// Size of the metadata prefix that precedes every GC object (objectPtr - 8).
+pub const metadata_prefix_size: usize = @sizeOf(Metadata);
+
+comptime {
+    // The allocator initializes the prefix by raw byte writes (memory.zig has no
+    // gc import); these offsets must hold: kind at byte 2, rc (i32) at byte 4.
+    std.debug.assert(@offsetOf(Metadata, "kind") == 2);
+    std.debug.assert(@offsetOf(Metadata, "rc") == 4);
+}
+
+/// In-object GC header = intrusive list links only (qjs `JSGCObjectHeader`,
+/// 16 bytes). The refcount / kind / flags / heap-size live in the `Metadata`
+/// prefix 8 bytes before this header; reach them via `meta()`.
+pub const BlockHeader = extern struct {
     prev: ?*BlockHeader = null,
     next: ?*BlockHeader = null,
 
     comptime {
-        std.debug.assert(@sizeOf(BlockHeader) == 24);
+        std.debug.assert(@sizeOf(BlockHeader) == 16);
+        std.debug.assert(@sizeOf(Metadata) == 8);
+    }
+
+    pub inline fn meta(self: *BlockHeader) *Metadata {
+        return @ptrFromInt(@intFromPtr(self) - metadata_prefix_size);
+    }
+
+    pub inline fn metaConst(self: *const BlockHeader) *const Metadata {
+        return @ptrFromInt(@intFromPtr(self) - metadata_prefix_size);
     }
 
     pub inline fn retain(self: *BlockHeader) void {
-        std.debug.assert(self.rc > 0);
-        self.rc += 1;
+        const m = self.meta();
+        std.debug.assert(m.rc > 0);
+        m.rc += 1;
     }
 
     pub fn pinned(self: *const BlockHeader) bool {
-        return self.flags.is_pinned;
+        return self.metaConst().flags.is_pinned;
     }
 
     pub fn setPinned(self: *BlockHeader, value: bool) void {
-        self.flags.is_pinned = value;
+        self.meta().flags.is_pinned = value;
     }
 };
 
+/// Standalone refcount word for flat strings and string ropes. It is NOT
+/// embedded in the `String`/`StringRope` structs (which stay at their exact qjs
+/// sizes): each string/rope allocation reserves this 4-byte prefix immediately
+/// ahead of the struct (`objectPtr - string_rc_prefix_size`), mirroring qjs's
+/// `JSRefCountHeader` prefix. The struct reaches it through `String.header()` /
+/// `StringRope.header()`, and a `Tag.string`/`Tag.string_rope`/`Tag.symbol`
+/// JSValue's pointer payload IS this prefix.
 pub const StringHeader = extern struct {
     rc: i32 = 1,
 
@@ -371,6 +409,10 @@ pub const StringHeader = extern struct {
         self.rc += 1;
     }
 };
+
+/// Byte size of the refcount prefix reserved ahead of every flat `String` and
+/// `StringRope` allocation. Equal to `@sizeOf(StringHeader)` (4).
+pub const string_rc_prefix_size: usize = @sizeOf(StringHeader);
 
 pub const Header = BlockHeader;
 pub const GCObjectHeader = Header;
@@ -605,6 +647,12 @@ pub const Registry = struct {
     object_worklist: std.ArrayList(*object.Object),
     var_ref_worklist: std.ArrayList(*var_ref.VarRef),
     bytecode_worklist: std.ArrayList(*FunctionBytecode),
+    // Pass-B struct-free deferral for cycle removal (qjs gc_zero_ref_count_list,
+    // quickjs.c:6382/6797): during JS_GC_PHASE_REMOVE_CYCLES an object's
+    // resources are torn down but its struct memory survives until every sibling
+    // in the batch has run, so a sibling finalizer/decref never dereferences a
+    // freed struct. The batch driver drains this list after the resource pass.
+    cycle_deferred_frees: std.ArrayList(*GCObjectHeader),
 
     pub fn init(account: *memory.MemoryAccount, policy: Policy) Registry {
         return .{
@@ -616,27 +664,62 @@ pub const Registry = struct {
             .object_worklist = std.ArrayList(*object.Object).empty,
             .var_ref_worklist = std.ArrayList(*var_ref.VarRef).empty,
             .bytecode_worklist = std.ArrayList(*FunctionBytecode).empty,
+            .cycle_deferred_frees = std.ArrayList(*GCObjectHeader).empty,
+        };
+    }
+
+    /// Reserve capacity so `deferCycleStructFree` cannot fail mid-batch (a failed
+    /// defer would have to choose between an unsafe immediate free or a leak).
+    pub fn reserveCycleDeferred(self: *Registry, capacity: usize) !void {
+        try self.cycle_deferred_frees.ensureTotalCapacity(self.memory.persistent_allocator, capacity);
+    }
+
+    /// Park a resource-stripped GC object's struct for the Pass-B drain. The
+    /// header is already unlinked from the GC object list by the resource pass.
+    pub fn deferCycleStructFree(self: *Registry, header: *GCObjectHeader) void {
+        self.cycle_deferred_frees.append(self.memory.persistent_allocator, header) catch {
+            // Capacity was reserved up-front; reaching here means OOM. Leaking the
+            // struct is the only memory-safe fallback (freeing now risks the very
+            // use-after-free this deferral prevents).
         };
     }
 
     pub fn deinit(self: *Registry, rt: anytype) void {
         self.phase = .deinit;
 
-        // 释放可能存活的所有 Candidate 对象
+        // Phase 1: free every non-shape GC object. Shapes are spliced out of the
+        // GC list into a holding stack (reusing their now-unused `next` link) so
+        // they outlive every object that still owns a shape_ref — destroying a
+        // shape early would have those object destructors release freed memory.
+        // (qjs avoids the ordering hazard via its mark/decref cycle collector;
+        // we keep zjs's explicit teardown but defer shapes to a second pass.)
+        var held_shapes: ?*GCObjectHeader = null;
         while (self.gc_object_tail) |h| {
-            if (h.kind == .shape) {
+            if (h.meta().kind == .shape) {
                 self.removeGcObject(h);
+                h.next = held_shapes;
+                held_shapes = h;
                 continue;
             }
             self.removeGcObject(h);
             self.recordHeapFreeWithBytes(h, heapByteSizeFromHeader(rt, h));
-            h.flags.finalizing = true;
-            if (h.kind == .object) {
+            h.meta().flags.finalizing = true;
+            if (h.meta().kind == .object) {
                 object.Object.destroyFromHeader(rt, h);
                 rt.drainDeferredClassPayloadFinalizers();
-            } else if (h.kind == .function_bytecode) {
+            } else if (h.meta().kind == .function_bytecode) {
                 function_bytecode_mod.destroyFromHeader(rt, h);
             }
+        }
+
+        // Phase 2: now every object is gone, so destroying the held shapes can no
+        // longer dangle a shape_ref. `destroyShape` self-removes from the GC list
+        // (guarded no-op here) and frees property storage + bucket links.
+        while (held_shapes) |h| {
+            const next = h.next;
+            h.next = null;
+            rt.shapes.destroyFromHeader(h);
+            held_shapes = next;
         }
 
         rt.shapes.deinit();
@@ -649,6 +732,7 @@ pub const Registry = struct {
         self.object_worklist.deinit(self.memory.persistent_allocator);
         self.var_ref_worklist.deinit(self.memory.persistent_allocator);
         self.bytecode_worklist.deinit(self.memory.persistent_allocator);
+        self.cycle_deferred_frees.deinit(self.memory.persistent_allocator);
         if (self.external_tokens_capacity != 0) {
             self.memory.free(ExternalTokenEntry, self.external_tokens.ptr[0..self.external_tokens_capacity]);
         } else if (self.external_tokens.len != 0) {
@@ -984,22 +1068,27 @@ pub const Registry = struct {
         const is_large = self.isLargeAllocation(bytes);
         const tracked = isCycleCandidate(h);
 
-        h.rc = 1;
-        h.flags = .{};
+        h.meta().rc = 1;
+        h.meta().flags = .{};
         h.prev = null;
         h.next = null;
-        h.size_class = encodeHeapBytes(bytes);
+        h.meta().size_class = encodeHeapBytes(bytes);
         self.recordHeapAlloc(is_large, bytes);
 
         if (tracked) self.appendGcObject(h);
     }
 
     fn defaultHeapBytes(h: *const GCObjectHeader) usize {
-        return switch (h.kind) {
+        return switch (h.metaConst().kind) {
             .object => @sizeOf(object.Object),
             .function_bytecode => @sizeOf(FunctionBytecode),
             .var_ref => @sizeOf(var_ref.VarRef),
-            .shape => @sizeOf(shape.Shape),
+            // A shape's heap footprint includes its inline FAM (hash table +
+            // prop[]); recompute from the live capacity fields (qjs get_shape_size).
+            .shape => blk: {
+                const sh: *const shape.Shape = @alignCast(@fieldParentPtr("header", h));
+                break :blk sh.allocationSize();
+            },
             .string, .big_int => 0,
         };
     }
@@ -1009,14 +1098,14 @@ pub const Registry = struct {
     }
 
     fn storedHeapBytes(h: *const GCObjectHeader) ?usize {
-        if (h.size_class == 0) return 0;
-        if (h.size_class == large_heap_size_class) return null;
-        return h.size_class;
+        if (h.metaConst().size_class == 0) return 0;
+        if (h.metaConst().size_class == large_heap_size_class) return null;
+        return h.metaConst().size_class;
     }
 
     pub fn heapByteSizeFromHeader(rt: anytype, h: *const GCObjectHeader) usize {
         if (storedHeapBytes(h)) |bytes| return bytes;
-        return switch (h.kind) {
+        return switch (h.metaConst().kind) {
             .object => blk: {
                 const obj: *const object.Object = @alignCast(@fieldParentPtr("header", h));
                 break :blk obj.allocationSize(rt);
@@ -1026,7 +1115,10 @@ pub const Registry = struct {
                 break :blk fb.heapByteSize();
             },
             .var_ref => @sizeOf(var_ref.VarRef),
-            .shape => @sizeOf(shape.Shape),
+            .shape => blk: {
+                const sh: *const shape.Shape = @alignCast(@fieldParentPtr("header", h));
+                break :blk sh.allocationSize();
+            },
             .string, .big_int => 0,
         };
     }
@@ -1036,7 +1128,7 @@ pub const Registry = struct {
     }
 
     fn isCycleCandidate(h: *const GCObjectHeader) bool {
-        return h.kind == .object or h.kind == .function_bytecode or h.kind == .var_ref or h.kind == .shape;
+        return h.metaConst().kind == .object or h.metaConst().kind == .function_bytecode or h.metaConst().kind == .var_ref or h.metaConst().kind == .shape;
     }
 
     fn recordHeapAlloc(self: *Registry, is_large: bool, bytes: usize) void {
@@ -1059,11 +1151,11 @@ pub const Registry = struct {
     }
 
     fn recordHeapFreeWithBytes(self: *Registry, header: *GCObjectHeader, bytes: usize) void {
-        if (header.size_class == 0 or bytes == 0) return;
+        if (header.meta().size_class == 0 or bytes == 0) return;
         const is_large = self.isLargeAllocation(bytes);
         self.subtractLiveHeapBytes(is_large, bytes);
         self.recordSpaceFree(is_large, bytes);
-        header.size_class = 0;
+        header.meta().size_class = 0;
     }
 
     pub fn pinHeader(self: *Registry, header: *GCObjectHeader) !void {
@@ -1178,11 +1270,11 @@ pub const Registry = struct {
     }
 
     pub fn releaseObject(self: *Registry, h: *GCObjectHeader) bool {
-        std.debug.assert(h.rc > 0);
-        h.rc -= 1;
+        std.debug.assert(h.meta().rc > 0);
+        h.meta().rc -= 1;
         self.stats.rc_dec += 1;
 
-        if (h.rc == 0) {
+        if (h.meta().rc == 0) {
             self.unlinkObject(h);
             return true;
         }
@@ -1311,8 +1403,8 @@ pub const Registry = struct {
         var count: usize = 0;
         while (current) |h| {
             if (!isCycleCandidate(h)) return error.CorruptGcList;
-            if (h.rc < 0) return error.NegativeRefCount;
-            if (h.flags.mark and self.phase == .none) return error.MarkBitLeftSet;
+            if (h.meta().rc < 0) return error.NegativeRefCount;
+            if (h.meta().flags.mark and self.phase == .none) return error.MarkBitLeftSet;
 
             if (h.prev != previous) return error.CorruptGcList;
 
@@ -1416,7 +1508,7 @@ pub inline fn checkedHeaderFromPayload(rt: anytype, ptr: *anyopaque) *BlockHeade
     _ = rt;
     const h = headerFromPayload(ptr);
     if (builtin.mode == .Debug) {
-        std.debug.assert(h.rc >= 0);
+        std.debug.assert(h.meta().rc >= 0);
     }
     return h;
 }
@@ -1439,19 +1531,38 @@ pub inline fn release(rt: anytype, header: anytype) void {
         string.String.releaseFromHeader(rt, header);
         return;
     }
-    std.debug.assert(header.rc > 0);
-    header.rc -= 1;
+    std.debug.assert(header.meta().rc > 0);
+    header.meta().rc -= 1;
     rt.gc.stats.rc_dec += 1;
 
-    if (header.rc == 0) releaseAndDestroy(rt, header);
+    if (header.meta().rc == 0) releaseAndDestroy(rt, header);
 }
 
 noinline fn releaseAndDestroy(rt: anytype, header: *Header) void {
-    if (rt.gc.phase == .deinit and (header.kind == .object or header.kind == .var_ref or header.kind == .shape)) return;
+    if (rt.gc.phase == .deinit and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .shape)) return;
+    // During cycle removal, a child reaching rc 0 must NOT be freed here: the
+    // dedicated batch loop in `destroyRuntimeCyclesWithValueRoots` frees every
+    // marked-garbage object exactly once. Freeing it here (a cascade) would
+    // double-free it when the batch loop reaches it, and over-release any shape
+    // it shares. Pure no-op = qjs `__JS_FreeValueRT`'s `if (gc_phase !=
+    // JS_GC_PHASE_REMOVE_CYCLES)` gate (quickjs.c:6476): the object stays linked
+    // (and in the garbage snapshot) and is reclaimed by the batch pass. This
+    // makes a reference the mark phase missed harmless (leak at worst) instead of
+    // a use-after-free.
+    //
+    // Kind-set note: qjs gates {OBJECT, FUNCTION_BYTECODE, MODULE} (quickjs.c:6476);
+    // zjs gates {object, var_ref, function_bytecode} and intentionally OMITS shape.
+    // A garbage (dead-cycle) shape is freed exactly once by the `garbage_shapes`
+    // loop in destroyRuntimeCyclesWithValueRoots, and its owners skip releasing it
+    // via the `headerIsCycleGarbage` guard (object.zig destroyFromHeader shape-skip);
+    // a live/shared shape's eager release here can never reach rc 0 during a cycle
+    // round, so shape needs no gate. (zjs has no `.module` GC-kind in flight, so the
+    // MODULE arm of the qjs gate has no zjs analogue.)
+    if (rt.gc.phase == .remove_cycles and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode)) return;
     rt.gc.unlinkObjectWithBytes(header, Registry.heapByteSizeFromHeader(rt, header));
 
     // 10.1 静态 kind switch 派发销毁
-    switch (header.kind) {
+    switch (header.meta().kind) {
         .string => unreachable,
         .object => object.Object.destroyFromHeader(rt, header),
         .big_int => bigint.BigInt.destroyFromHeader(rt, header),

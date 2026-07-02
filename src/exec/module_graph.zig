@@ -137,6 +137,12 @@ pub fn evalFileModuleGraphWithOutput(
     allocator: std.mem.Allocator,
     max_source_size: usize,
 ) !core.JSValue {
+    // Arm the native recursion guard at this outermost ES-module entry (analogue
+    // of eval()'s JS_UpdateStackTop refresh) so module parse/exec on this thread
+    // measures against a precise base. The construction-time baseline already
+    // covers it; this tightens it for the running thread (test262 workers run on
+    // a different C stack than where the runtime was constructed).
+    if (context.call_depth == 0) runtime.updateNativeStackTop();
     const normalized_filename = try std.fs.path.resolve(allocator, &.{filename});
     defer allocator.free(normalized_filename);
 

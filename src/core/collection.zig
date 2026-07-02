@@ -115,7 +115,10 @@ pub fn strongEntryHashLatin1Concat(prefix: []const u8, digits: []const u8) u64 {
 }
 
 pub fn strongEntryHashLatin1ConcatWithSeed(prefix: []const u8, digits: []const u8, seed: u32) u64 {
-    const hash = core.string.hashLatin1(digits, seed);
+    // Fold to 30 bits so this matches `hashStringValue` → `String.contentHash()`
+    // (which folds); the concat fast path and the general string-key path must
+    // produce the same bucket for a content-equal key.
+    const hash: u32 = core.string.foldHash30(core.string.hashLatin1(digits, seed));
     return mix64(@as(u64, hash) ^ (@as(u64, prefix.len + digits.len) << 32));
 }
 

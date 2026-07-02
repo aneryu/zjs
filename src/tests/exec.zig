@@ -447,7 +447,7 @@ pub const helpers = struct {
                 thrown.free(eng.runtime);
             }
             if (eng.context.global) |g| {
-                shared_engine_baseline_property_count = g.properties.len;
+                shared_engine_baseline_property_count = g.shape_ref.prop_count;
                 shared_engine_baseline_shape_prop_count = g.shape_ref.prop_count;
                 shared_engine_baseline_shape_hash = g.shape_ref.hash;
                 shared_engine_baseline_shape_deleted_count = g.shape_ref.deleted_prop_count;
@@ -455,15 +455,15 @@ pub const helpers = struct {
                 // Snapshot the baseline property entries (value slots only;
                 // key atoms and flags are snapshotted with the shape props
                 // below).
-                shared_engine_baseline_properties = std.heap.page_allocator.alloc(core.property.Entry, g.properties.len) catch unreachable;
-                for (g.properties, 0..) |entry, idx| {
+                shared_engine_baseline_properties = std.heap.page_allocator.alloc(core.property.Entry, g.shape_ref.prop_count) catch unreachable;
+                for (g.propertyEntries(), 0..) |entry, idx| {
                     // Dup the slot using its kind (read from the shape flags); the
                     // value cell is untagged so dup/destroy need the flags.
                     shared_engine_baseline_properties.?[idx] = .{ .slot = entry.slot.dup(g.propFlagsAt(idx)) };
                 }
 
                 shared_engine_baseline_shape_props = std.heap.page_allocator.alloc(core.shape.Property, g.shape_ref.prop_count) catch unreachable;
-                for (g.shape_ref.props[0..g.shape_ref.prop_count], 0..) |prop, idx| {
+                for (g.shape_ref.props()[0..g.shape_ref.prop_count], 0..) |prop, idx| {
                     shared_engine_baseline_shape_props.?[idx] = prop;
                     shared_engine_baseline_shape_props.?[idx].hash_next = core.shape.no_property_index;
                     if (prop.atom_id != core.atom.null_atom) {
@@ -534,22 +534,23 @@ pub const helpers = struct {
             // indices below `shared_engine_baseline_property_count` and
             // are kept.
             const baseline = shared_engine_baseline_property_count;
-            if (global.properties.len > baseline) {
-                for (global.properties[baseline..], baseline..) |*entry, idx| {
+            if (global.shape_ref.prop_count > baseline) {
+                for (global.propertyEntries()[baseline..], baseline..) |*entry, idx| {
                     // Untagged value cell: destroy needs the kind (current shape
                     // flags are still valid; restorePropertyLayout runs below).
                     entry.slot.destroy(global.propFlagsAt(idx), eng.runtime);
                     // `deleted` is a flag, not a slot arm: leave a harmless cell.
                     entry.slot = .{ .data = core.JSValue.undefinedValue() };
                 }
-                global.properties = global.properties.ptr[0..baseline];
+                // Count shrink to baseline is handled by restorePropertyLayout
+                // below (the per-object count now lives in shape.prop_count).
             }
 
             // Restore baseline properties below baseline to their original states
             if (shared_engine_baseline_properties) |baselines| {
                 // First, destroy current values below baseline using the CURRENT
                 // shape flags (the layout has not been restored yet).
-                for (global.properties[0..baseline], 0..) |entry, idx| {
+                for (global.propertyEntries()[0..baseline], 0..) |entry, idx| {
                     entry.slot.destroy(global.propFlagsAt(idx), eng.runtime);
                 }
                 // Second, restore baseline values, dupping with the BASELINE
@@ -557,13 +558,13 @@ pub const helpers = struct {
                 const baseline_shape_props = shared_engine_baseline_shape_props.?;
                 for (baselines, 0..) |base, idx| {
                     const base_flags = core.property.Flags.fromBits(baseline_shape_props[idx].flags);
-                    global.properties[idx] = .{ .slot = base.slot.dup(base_flags) };
+                    global.prop_values[idx] = .{ .slot = base.slot.dup(base_flags) };
                 }
             }
 
             if (shared_engine_baseline_shape_props) |baseline_shape_props| {
                 eng.runtime.shapes.restorePropertyLayout(
-                    global.shape_ref,
+                    &global.shape_ref,
                     baseline_shape_props[0..shared_engine_baseline_shape_prop_count],
                     shared_engine_baseline_shape_hash,
                     shared_engine_baseline_shape_deleted_count,
@@ -728,11 +729,11 @@ test "frame setLocal handles self-assignment without dropping object" {
     try frame.setLocal(&rt.memory, rt, 0, object.value());
     object.value().free(rt);
 
-    try std.testing.expectEqual(@as(i32, 1), object.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), object.header.meta().rc);
     const current = frame.locals[0];
     try frame.setLocal(&rt.memory, rt, 0, current);
 
-    try std.testing.expectEqual(@as(i32, 1), object.header.rc);
+    try std.testing.expectEqual(@as(i32, 1), object.header.meta().rc);
     try std.testing.expectEqual(&object.header, frame.locals[0].refHeader().?);
 }
 
@@ -752,8 +753,8 @@ test "VM roots frame this symbol before derived constructor var-ref allocation" 
     function.flags.is_derived_class_constructor = true;
     function.var_count = 1;
     function.stack_size = 1;
-    function.var_names = try rt.memory.alloc(core.Atom, 1);
-    function.var_names[0] = rt.atoms.dup(this_name);
+    function.vardefs = try rt.memory.alloc(function_def.VarDef, 1);
+    function.vardefs[0] = .{ .var_name = rt.atoms.dup(this_name), .scope_level = 0 };
     try function.setCode(&.{ op.get_loc0, op.drop, op.return_undef });
 
     const this_symbol = try rt.atoms.newValueSymbol("gc-vm-frame-this-before-roots");
