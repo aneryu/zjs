@@ -80,8 +80,27 @@ fn mathOpEntry(comptime name: []const u8, comptime length: u8, comptime id: u32)
 /// With a realm global the arguments take the full spec ToNumber coercion
 /// path; without one (bare-runtime callers) the primitive-only `call`
 /// fallback below preserves the legacy host-path behavior.
+/// qjs `xorshift64star` (quickjs.c:47362).
+fn xorshift64star(state: *u64) u64 {
+    var x = state.*;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    state.* = x;
+    return x *% 0x2545F4914F6CDD1D;
+}
+
+/// qjs `js_math_random` (quickjs.c:47383): advance the per-runtime xorshift
+/// state and pack the top 52 bits into a [1.0, 2.0) double, returning d - 1.
+fn mathRandom(rt: *core.JSRuntime) f64 {
+    const v = xorshift64star(&rt.random_state);
+    const bits: u64 = (@as(u64, 0x3ff) << 52) | (v >> 12);
+    return @as(f64, @bitCast(bits)) - 1.0;
+}
+
 fn mathOpCall(host_call: InternalCall) HostError!core.JSValue {
     if (host_call.global == null) {
+        if (host_call.magic == 9) return value_ops.numberToValue(mathRandom(host_call.ctx.runtime));
         const number = call(host_call.magic, host_call.args) catch return error.TypeError;
         return value_ops.numberToValue(number);
     }
@@ -107,7 +126,7 @@ pub fn preparedOpCall(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *co
         6 => qjsMathPow(try mathArg(ctx, output, global, args, 0), try mathArg(ctx, output, global, args, 1)),
         7 => try qjsMathMinMax(ctx, output, global, args, false),
         8 => try qjsMathMinMax(ctx, output, global, args, true),
-        9 => 0.5,
+        9 => mathRandom(ctx.runtime),
         10 => exp(try mathArg(ctx, output, global, args, 0)),
         11 => @sin(try mathArg(ctx, output, global, args, 0)),
         12 => @cos(try mathArg(ctx, output, global, args, 0)),

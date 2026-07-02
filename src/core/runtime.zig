@@ -882,7 +882,11 @@ pub const JSRuntime = struct {
         rt.interrupt_handler = options.interrupt_handler;
         rt.interrupt_context = options.interrupt_context;
         rt.can_block = options.can_block;
-        rt.random_state = 0x1234_5678_9abc_def0;
+        // Seed the Math.random xorshift state from wall-clock microseconds,
+        // mirroring qjs js_random_init (quickjs.c:47373); the state must be
+        // non-zero or xorshift64star degenerates to all-zeros.
+        rt.random_state = randomSeedMicros();
+        if (rt.random_state == 0) rt.random_state = 1;
         rt.single_byte_strings = @splat(null);
         rt.empty_string = null;
         rt.recent_two_unit_string = null;
@@ -2911,4 +2915,13 @@ test "external hard memory pressure requests urgent major gc" {
         try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_slice_count);
     }
     try std.testing.expect(!rt.gcPendingForTest());
+}
+
+/// Wall-clock microseconds for the Math.random seed (qjs js_random_init,
+/// quickjs.c:47373, gettimeofday-based). Falls back to 1 on clock failure.
+fn randomSeedMicros() u64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.REALTIME, &ts) != 0) return 1;
+    const micros = @as(i128, ts.sec) * std.time.us_per_s + @divTrunc(@as(i128, ts.nsec), std.time.ns_per_us);
+    return @truncate(@as(u128, @bitCast(micros)));
 }
