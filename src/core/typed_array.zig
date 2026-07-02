@@ -656,8 +656,26 @@ pub fn dataViewRequireArrayBuffer(buffer_value: JSValue) !void {
 }
 
 fn checkDataViewBounds(rt: *JSRuntime, view: *Object, index: usize, width: usize) !void {
-    const length = try dataViewEffectiveByteLength(rt, view);
-    if (index > length or width > length - index) return error.RangeError;
+    _ = rt;
+    // Mirrors js_dataview_getValue / js_dataview_setValue
+    // (quickjs.c:60299-60306 and 60440-60446, "order matters"): the
+    // (pos + size) > ta->length RangeError runs BEFORE the
+    // offset + length > byte_length TypeError. qjs recomputes ta->length for
+    // length-tracking views on resize as the saturating
+    // (byte_length - offset), so a tracking view whose offset exceeds the
+    // shrunk buffer throws RangeError here, not the OOB TypeError the
+    // byteLength/byteOffset getters (dataview_is_oob) produce.
+    const buffer = try dataViewBuffer(view);
+    if (buffer.arrayBufferDetached()) return error.TypeError;
+    const byte_offset = view.typedArrayByteOffset();
+    const stored_length: usize = view.typedArrayFixedLength() orelse return error.TypeError;
+    const tracking = view.typedArrayKind() == 1 and buffer.arrayBufferMaxByteLength() != null;
+    const ta_length = if (tracking)
+        (if (buffer.byteStorage().len >= byte_offset) buffer.byteStorage().len - byte_offset else 0)
+    else
+        stored_length;
+    if (index > ta_length or width > ta_length - index) return error.RangeError;
+    if (!tracking and byte_offset + stored_length > buffer.byteStorage().len) return error.TypeError;
 }
 
 fn checkDataViewAttached(rt: *JSRuntime, view: *Object) !void {
