@@ -2108,7 +2108,13 @@ pub fn constructDynamicFunctionFromSource(
     };
     var compiled = try parser.compile(ctx.runtime, source.items, .{ .mode = .eval_direct, .filename = filename, .strict = false });
     defer compiled.deinit();
-    if (compiled.syntax_error != null) return exception_ops.throwSyntaxErrorMessage(ctx, function_global, "invalid syntax");
+    if (compiled.syntax_error) |*parse_error| {
+        // Compile-error surface: own fileName/lineNumber/columnNumber +
+        // leading stack line (build_backtrace filename branch,
+        // quickjs.c:7553-7570).
+        const parse_filename = ctx.runtime.atoms.name(parse_error.filename) orelse filename;
+        return error_stack_ops.throwParseSyntaxError(ctx, function_global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message);
+    }
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
     // A dynamic-function compilation is a *nested* eval inside a live VM call: the
@@ -4920,7 +4926,14 @@ pub fn indirectEval(
         if (regexp_literal) |value| break :blk value;
         var compiled = parser.compile(ctx.runtime, source.items, .{ .mode = .eval_indirect, .filename = "<eval>", .strict = false }) catch |err| break :blk err;
         defer compiled.deinit();
-        if (compiled.syntax_error != null) break :blk error.SyntaxError;
+        if (compiled.syntax_error) |*parse_error| {
+            // Compile-error surface: own fileName/lineNumber/columnNumber +
+            // leading stack line (build_backtrace filename branch,
+            // quickjs.c:7553-7570).
+            const parse_filename = ctx.runtime.atoms.name(parse_error.filename) orelse "<eval>";
+            _ = error_stack_ops.throwParseSyntaxError(ctx, eval_global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message) catch |err| break :blk err;
+            break :blk error.SyntaxError;
+        }
         if (!compiled.function.flags.is_strict) {
             validateGlobalEvalFunctionDeclarations(ctx, eval_global, source.items, true) catch |err| break :blk err;
         }

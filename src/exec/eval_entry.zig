@@ -4,6 +4,7 @@ const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const parser = @import("../parser.zig");
 const call = @import("call.zig");
+const error_stack_ops = @import("error_stack_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const module_exec = @import("module.zig");
 const module_graph = @import("module_graph.zig");
@@ -45,15 +46,15 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     });
     if (options.timing) |timing| timing.parse_ns += elapsedNanosSince(parse_start);
     defer compiled.deinit();
-    if (compiled.syntax_error) |err| {
+    if (compiled.syntax_error) |*err| {
         if (options.mode == .script and isWhitespaceSeparatedNumericScript(source_text)) return core.JSValue.undefinedValue();
         const global = try zjs_vm.contextGlobal(ctx);
-        var msg_buf = std.ArrayList(u8).empty;
-        defer msg_buf.deinit(rt.memory.allocator);
-        try msg_buf.print(rt.memory.allocator, "SYNTAX ERROR in {s}:{d}:{d} - {s}", .{ options.filename, err.position.line, err.position.column, err.message });
-        const error_val = try exception_ops.createNamedError(ctx, global, "SyntaxError", msg_buf.items);
-        _ = ctx.throwValue(error_val);
-        return error.SyntaxError;
+        // Compile-error surface: message is the bare parse diagnostic and the
+        // error carries own fileName/lineNumber/columnNumber plus the leading
+        // `at file:line:col` stack line (qjs JS_ThrowSyntaxError +
+        // build_backtrace filename branch, quickjs.c:7553-7570).
+        const parse_filename = rt.atoms.name(err.filename) orelse options.filename;
+        return error_stack_ops.throwParseSyntaxError(ctx, global, parse_filename, err.position.line, err.position.column, err.message);
     }
     if (options.runtime_strict and options.mode == .script) forceRuntimeStrict(rt, &compiled.function);
 
