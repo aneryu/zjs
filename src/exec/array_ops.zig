@@ -5087,6 +5087,9 @@ pub fn qjsUint8ArrayCodecCall(
         var bytes = try uint8ArrayStringBytes(ctx.runtime, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
         defer bytes.deinit(ctx.runtime.memory.allocator);
         const options = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+        // Mirrors js_uint8array_from_base64 (quickjs.c:59571): GetOptionsObject
+        // runs after the string check, before any option Get.
+        try uint8ArrayCheckOptionsObject(options);
         const alphabet = try uint8ArrayBase64Alphabet(ctx, output, global, options, caller_function, caller_frame);
         const last_chunk_handling = try uint8ArrayBase64LastChunkHandling(ctx, output, global, options, caller_function, caller_frame);
         var decoded = try decodeBase64Bytes(ctx.runtime, bytes.items, alphabet, last_chunk_handling);
@@ -5103,6 +5106,9 @@ pub fn qjsUint8ArrayCodecCall(
     if (std.mem.eql(u8, name, "toBase64")) {
         const object = try expectUint8ArrayObject(this_value);
         const options = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+        // Mirrors js_uint8array_to_base64 (quickjs.c:59484): GetOptionsObject
+        // runs after the receiver check, before any option Get.
+        try uint8ArrayCheckOptionsObject(options);
         const alphabet = try uint8ArrayBase64Alphabet(ctx, output, global, options, caller_function, caller_frame);
         const omit_padding = try uint8ArrayOmitPadding(ctx, output, global, options, caller_function, caller_frame);
         const bytes = try uint8ArrayViewBytes(ctx.runtime, object);
@@ -5125,6 +5131,10 @@ pub fn qjsUint8ArrayCodecCall(
         var source = try uint8ArrayStringBytes(ctx.runtime, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
         defer source.deinit(ctx.runtime.memory.allocator);
         const options = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+        // Mirrors js_uint8array_set_from_base64 (quickjs.c:59690):
+        // GetOptionsObject runs after the receiver and string checks, before
+        // any option Get.
+        try uint8ArrayCheckOptionsObject(options);
         const alphabet = try uint8ArrayBase64Alphabet(ctx, output, global, options, caller_function, caller_frame);
         const last_chunk_handling = try uint8ArrayBase64LastChunkHandling(ctx, output, global, options, caller_function, caller_frame);
         const target = try uint8ArrayViewBytes(ctx.runtime, object);
@@ -5137,6 +5147,15 @@ pub fn qjsUint8ArrayCodecCall(
 pub const Uint8ArrayBase64Alphabet = enum { base64, base64url };
 pub const Uint8ArrayBase64LastChunkHandling = enum { loose, strict, stop_before_partial };
 pub const Uint8ArrayCodecProgress = struct { read: usize, written: usize };
+
+/// Mirrors check_options_object (quickjs.c:59376), the GetOptionsObject step
+/// shared by toBase64 / fromBase64 / setFromBase64: options must be undefined
+/// or an Object, anything else is a TypeError ("options must be an object").
+/// The hex entry points take no options and never run this check.
+fn uint8ArrayCheckOptionsObject(options: core.JSValue) !void {
+    if (options.isUndefined()) return;
+    if (!options.isObject()) return error.TypeError;
+}
 
 pub fn expectUint8ArrayObject(value: core.JSValue) !*core.Object {
     const object = property_ops.expectObject(value) catch return error.TypeError;
