@@ -418,7 +418,13 @@ pub fn frameBacktraceSnapshot(frame: *const frame_mod.Frame) core.ActiveBacktrac
         .filename = function.filename,
         .line_num = function.line_num,
         .col_num = function.col_num,
-        .pc = frame.pc,
+        // The published frame.pc is the resume/return address (it points past
+        // the currently-executing instruction, like qjs sf->cur_pc). Back off
+        // one byte so the line/col lookup lands inside that instruction —
+        // mirrors build_backtrace's `sf->cur_pc - b->byte_code_buf - 1`
+        // (quickjs.c:7595); without it a frame whose call is the last
+        // statement maps past the call (even one line past EOF).
+        .pc = frame.pc -| 1,
         .location_data = function,
         .location_resolver = resolveBacktraceLocation,
         .function_value = frame.current_function,
