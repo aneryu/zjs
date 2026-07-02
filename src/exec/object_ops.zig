@@ -2211,6 +2211,11 @@ pub fn importMetaObject(
 
     const object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
+    // import.meta is a real null-prototype object (JS_GetImportMeta:
+    // JS_NewObjectProto(ctx, JS_NULL), quickjs.c:30900); without the flag,
+    // ToPrimitive fell through to %Object.prototype%.toString and
+    // import(import.meta) stringified instead of rejecting with TypeError.
+    object.flags.null_prototype = true;
     const url = try importMetaUrlValue(ctx.runtime, record);
     defer url.free(ctx.runtime);
     try defineValueProperty(ctx.runtime, object, "url", url);
