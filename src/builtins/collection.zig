@@ -239,13 +239,21 @@ fn collectionGroupByRecord(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) HostError!core.JSValue {
-    const receiver = object_ops.objectFromValue(this_value) orelse return error.TypeError;
-    if (!try call_runtime.constructorNameEqlLocal(ctx.runtime, receiver, "Map")) return error.TypeError;
-    const prototype = (try object_ops.constructorPrototypeObject(ctx.runtime, this_value));
+    // Mirrors js_object_groupBy (quickjs.c:52343, shared is_map=1 entry for
+    // Map.groupBy): the receiver is never read — qjs constructs the result via
+    // js_map_constructor with a JS_UNDEFINED this (the intrinsic Map
+    // prototype), so a detached `const g = Map.groupBy; g(items, fn)` works.
     if (global) |active_global| {
-        if (try qjsMapGroupByRecord(ctx, output, active_global, args, prototype, caller_function, caller_frame)) |value| return value;
+        if (try qjsMapGroupByCall(ctx, output, active_global, args, caller_function, caller_frame)) |value| return value;
         return error.TypeError;
     }
+    // Bare-runtime path (no realm intrinsics): keep deriving the result
+    // prototype from a constructor receiver when one is supplied, but never
+    // require the receiver.
+    const prototype: ?*core.Object = if (object_ops.objectFromValue(this_value) != null)
+        object_ops.constructorPrototypeObject(ctx.runtime, this_value) catch null
+    else
+        null;
     return groupByWithCallbackHost(ctx.runtime, args, prototype, collection_adapter.host(globals)) catch |err| switch (err) {
         error.TypeError => error.TypeError,
         else => err,
