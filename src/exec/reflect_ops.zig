@@ -93,6 +93,11 @@ pub fn reflectConstruct(ctx: *core.JSContext, args: []const core.JSValue, global
             defer construct_args.deinit();
             const primitive = if (construct_args.values.len >= 1) blk: {
                 if (construct_args.values[0].isSymbol()) return error.TypeError;
+                // qjs js_number_constructor (quickjs.c:44822-44841): ToNumeric,
+                // then a bigint result converts to float64 rather than throwing.
+                if (construct_args.values[0].isBigInt()) {
+                    break :blk value_ops.numberToValue(try value_ops.bigIntToNumber(rt, construct_args.values[0]));
+                }
                 break :blk value_ops.numberToValue(try value_ops.toIntegerOrInfinity(rt, construct_args.values[0]));
             } else core.JSValue.int32(0);
             const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);

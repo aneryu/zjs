@@ -410,6 +410,11 @@ fn fastStringToInt32(bytes: []const u8) ?i32 {
 
 pub fn toNumberValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isSymbol()) return error.TypeError;
+    // qjs JS_ToNumberHintFree (quickjs.c:12955-12959): the BIG_INT/SHORT_BIG_INT
+    // arm throws TypeError "cannot convert bigint to number" under the plain
+    // ToNumber hint; only ToNumeric passes bigints through. Callers that need
+    // ToNumeric semantics convert via bigIntToNumber before calling.
+    if (value.isBigInt()) return error.TypeError;
     if (numberValue(value)) |number| return numberToValue(number);
     if (value.asBool()) |bool_value| return core.JSValue.int32(if (bool_value) 1 else 0);
     if (value.isNull()) return core.JSValue.int32(0);
@@ -543,6 +548,9 @@ pub fn bigIntToNumber(rt: *core.JSRuntime, value: core.JSValue) !f64 {
 
 pub fn toIntegerOrInfinity(rt: *core.JSRuntime, value: core.JSValue) !f64 {
     if (numberValue(value)) |number| return number;
+    // ToIntegerOrInfinity starts with ToNumber: bigints throw TypeError
+    // (qjs JS_ToNumberHintFree quickjs.c:12955-12959 via JS_ToFloat64Free).
+    if (value.isBigInt()) return error.TypeError;
     if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
     if (value.isNull()) return 0;
     if (value.isUndefined()) return std.math.nan(f64);

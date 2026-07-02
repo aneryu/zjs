@@ -170,7 +170,15 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
         }
         if (std.mem.eql(u8, name, "Number")) {
             if (rooted_args.len >= 1 and rooted_args[0].isSymbol()) return error.TypeError;
-            const primitive = if (rooted_args.len >= 1) try value_ops.toNumberValue(rt, rooted_args[0]) else core.JSValue.int32(0);
+            // qjs js_number_constructor (quickjs.c:44822-44841): ToNumeric, then a
+            // bigint result converts to float64 rather than throwing.
+            const primitive = if (rooted_args.len >= 1)
+                (if (rooted_args[0].isBigInt())
+                    value_ops.numberToValue(try value_ops.bigIntToNumber(rt, rooted_args[0]))
+                else
+                    try value_ops.toNumberValue(rt, rooted_args[0]))
+            else
+                core.JSValue.int32(0);
             return constructPrimitiveWrapper(rt, core.class.ids.number, prototype, primitive);
         }
         if (std.mem.eql(u8, name, "Boolean")) return constructPrimitiveWrapper(rt, core.class.ids.boolean, prototype, core.JSValue.boolean(rooted_args.len >= 1 and value_ops.isTruthy(rooted_args[0])));
