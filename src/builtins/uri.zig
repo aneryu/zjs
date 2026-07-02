@@ -102,6 +102,99 @@ const fastHexPair = core.uri.fastHexPair;
 // STEP 2; re-exported here unchanged.
 pub const methodId = core.host_function.builtin_method_id_lookup.uri.methodId;
 
+fn uriHexDigitValue(unit: u32) ?u8 {
+    return switch (unit) {
+        '0'...'9' => @intCast(unit - '0'),
+        'a'...'f' => @intCast(unit - 'a' + 10),
+        'A'...'F' => @intCast(unit - 'A' + 10),
+        else => null,
+    };
+}
+
+/// qjs `hex_decode` (quickjs.c:54741): `k` points at '%'; two hex digits must
+/// follow within the string, else URIError "expecting hex digit".
+fn uriHexDecodeAt(comptime T: type, units: []const T, k: usize) !u8 {
+    if (k + 3 > units.len) return error.URIError;
+    const hi = uriHexDigitValue(units[k + 1]) orelse return error.URIError;
+    const lo = uriHexDigitValue(units[k + 2]) orelse return error.URIError;
+    return (hi << 4) | lo;
+}
+
+/// qjs `isURIReserved` (quickjs.c:54727).
+fn isUriReservedChar(c: u32) bool {
+    if (c >= 0x100) return false;
+    return std.mem.indexOfScalar(u8, "#$&+,/:;=?@", @intCast(c)) != null;
+}
+
+/// Faithful port of qjs `js_global_decodeURI` (quickjs.c:54755): walk the
+/// source string's code units; '%' starts a hex escape; a lead byte >= 0x80
+/// assembles a %XX-encoded UTF-8 sequence, validated (c_min / 0x10FFFF /
+/// surrogates -> URIError "malformed UTF-8", surfaced via error.InvalidUtf8)
+/// and emitted as a code point (surrogate pair when > 0xFFFF, the qjs
+/// string_buffer_putc); non-component keeps URI-reserved ASCII escaped.
+fn decodeUriUnits(comptime T: type, rt: *core.JSRuntime, units: []const T, component: bool) !core.JSValue {
+    var out = std.ArrayList(u16).empty;
+    defer out.deinit(rt.memory.allocator);
+    try out.ensureTotalCapacity(rt.memory.allocator, units.len);
+    var k: usize = 0;
+    while (k < units.len) {
+        var c: u32 = units[k];
+        if (c == '%') {
+            const lead = try uriHexDecodeAt(T, units, k);
+            k += 3;
+            c = lead;
+            if (lead < 0x80) {
+                if (!component and isUriReservedChar(c)) {
+                    c = '%';
+                    k -= 2;
+                }
+            } else {
+                var n: u8 = 0;
+                var c_min: u32 = 1;
+                if (lead >= 0xc0 and lead <= 0xdf) {
+                    n = 1;
+                    c_min = 0x80;
+                    c = lead & 0x1f;
+                } else if (lead >= 0xe0 and lead <= 0xef) {
+                    n = 2;
+                    c_min = 0x800;
+                    c = lead & 0x0f;
+                } else if (lead >= 0xf0 and lead <= 0xf7) {
+                    n = 3;
+                    c_min = 0x10000;
+                    c = lead & 0x07;
+                } else {
+                    n = 0;
+                    c_min = 1;
+                    c = 0;
+                }
+                while (n > 0) : (n -= 1) {
+                    const c1 = try uriHexDecodeAt(T, units, k);
+                    k += 3;
+                    if ((c1 & 0xc0) != 0x80) {
+                        c = 0;
+                        break;
+                    }
+                    c = (c << 6) | (c1 & 0x3f);
+                }
+                if (c < c_min or c > 0x10FFFF or (c >= 0xD800 and c <= 0xDFFF)) {
+                    return error.InvalidUtf8;
+                }
+            }
+        } else {
+            k += 1;
+        }
+        if (c > 0xFFFF) {
+            const v = c - 0x10000;
+            try out.append(rt.memory.allocator, @intCast(0xD800 + (v >> 10)));
+            try out.append(rt.memory.allocator, @intCast(0xDC00 + (v & 0x3FF)));
+        } else {
+            try out.append(rt.memory.allocator, @intCast(c));
+        }
+    }
+    return (try core.string.String.createUtf16(rt, out.items)).value();
+}
+
 /// QuickJS source map: global URI encode/decode functions in quickjs.c. This
 /// is the current narrow URI subset used by transitional `uri_call` bytecode.
 pub fn call(rt: *core.JSRuntime, mode: u32, input: core.JSValue) !core.JSValue {
@@ -118,6 +211,22 @@ pub fn call(rt: *core.JSRuntime, mode: u32, input: core.JSValue) !core.JSValue {
         if (try stringInputValue(input)) |string_value| {
             if (stringDataFromValue(string_value)) |string_data| {
                 if (!stringDataContainsPercent(string_data)) return string_value.dup();
+                try string_data.ensureFlat(rt);
+                switch (string_data.resolveData()) {
+                    // The stack-buffer fast path is ASCII-only; any non-ASCII
+                    // unit routes to the faithful qjs js_global_decodeURI walk
+                    // (previously non-ASCII was mangled byte-wise).
+                    .latin1 => |bytes| {
+                        for (bytes) |byte| {
+                            if (byte >= 0x80) return decodeUriUnits(u8, rt, bytes, mode == 4);
+                        }
+                    },
+                    .utf16 => |units| {
+                        for (units) |unit| {
+                            if (unit >= 0x80) return decodeUriUnits(u16, rt, units, mode == 4);
+                        }
+                    },
+                }
                 if (try decodeStringDataFast(rt, string_data, mode == 4)) |result| {
                     return result;
                 }
@@ -138,13 +247,23 @@ pub fn call(rt: *core.JSRuntime, mode: u32, input: core.JSValue) !core.JSValue {
     defer bytes.deinit(rt.memory.allocator);
     try appendValueString(rt, &bytes, input);
 
+    if (mode == 3 or mode == 4) {
+        // Coerced (non-string) inputs decode through the same faithful
+        // unit-level walk over the real string content.
+        const coerced = try core.string.String.createUtf8(rt, bytes.items);
+        defer coerced.value().free(rt);
+        try coerced.ensureFlat(rt);
+        return switch (coerced.resolveData()) {
+            .latin1 => |latin1| decodeUriUnits(u8, rt, latin1, mode == 4),
+            .utf16 => |units| decodeUriUnits(u16, rt, units, mode == 4),
+        };
+    }
+
     var out = std.ArrayList(u8).empty;
     defer out.deinit(rt.memory.allocator);
     switch (mode) {
         1 => try encodeBytes(rt, &out, bytes.items, false),
         2 => try encodeBytes(rt, &out, bytes.items, true),
-        3 => try decodeBytes(rt, &out, bytes.items, false),
-        4 => try decodeBytes(rt, &out, bytes.items, true),
         else => return error.TypeError,
     }
 

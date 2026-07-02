@@ -5308,9 +5308,15 @@ pub fn putDenseArrayElementFast(rt: *core.JSRuntime, object_value: core.JSValue,
     return try object.appendDenseArrayIndex(rt, index, core.atom.atomFromUInt32(index), value);
 }
 
+/// qjs `JS_MAX_LOCAL_VARS` (quickjs.c:210): the build_arg_list argument cap.
+pub const max_apply_arguments: usize = 65534;
+
 pub fn argsFromArray(rt: *core.JSRuntime, array_value: core.JSValue) ![]core.JSValue {
     const array = try property_ops.expectObject(array_value);
     if (!array.flags.is_array) return error.TypeError;
+    // qjs build_arg_list cap (quickjs.c:41173): applies to the fast-array copy
+    // path as well (the qjs length check precedes its fast_array branch).
+    if (array.arrayLength() > max_apply_arguments) return error.RangeError;
     if (array.arrayLength() == 0) return &.{};
     const args = try rt.memory.alloc(core.JSValue, array.arrayLength());
     errdefer rt.memory.free(core.JSValue, args);
@@ -5366,11 +5372,26 @@ pub fn argsFromArrayLike(
     caller_frame: ?*frame_mod.Frame,
 ) ![]core.JSValue {
     const object = objectFromValue(array_value) orelse return error.TypeError;
-    if (object.flags.is_array) return argsFromArray(ctx.runtime, array_value);
+    if (object.flags.is_array) {
+        return argsFromArray(ctx.runtime, array_value) catch |err| switch (err) {
+            error.RangeError => {
+                _ = try exception_ops.throwRangeErrorMessage(ctx, global, "too many arguments in function call (only 65534 allowed)");
+                return error.RangeError;
+            },
+            else => err,
+        };
+    }
 
     const length_value = try getValueProperty(ctx, output, global, array_value, core.atom.ids.length, caller_function, caller_frame);
     defer length_value.free(ctx.runtime);
     const length = try toLengthIndex(ctx, output, global, length_value);
+    // qjs build_arg_list cap (quickjs.c:41173-41177, JS_MAX_LOCAL_VARS = 65534):
+    // apply/Reflect.apply/Reflect.construct reject huge array-likes up front
+    // instead of materializing them.
+    if (length > max_apply_arguments) {
+        _ = try exception_ops.throwRangeErrorMessage(ctx, global, "too many arguments in function call (only 65534 allowed)");
+        return error.RangeError;
+    }
     if (length == 0) return &.{};
     const args = try ctx.runtime.memory.alloc(core.JSValue, length);
     errdefer ctx.runtime.memory.free(core.JSValue, args);
