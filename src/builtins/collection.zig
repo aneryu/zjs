@@ -691,7 +691,7 @@ fn iteratorPrototype(
         }
     }
 
-    const prototype = try createIteratorPrototype(rt, global, receiver, tag_name);
+    const prototype = try createIteratorPrototype(rt, global, receiver, iterator_class, tag_name);
     if (ctx) |context| {
         const slot: usize = iterator_class;
         if (slot < context.class_prototypes.len) {
@@ -708,6 +708,7 @@ fn createIteratorPrototype(
     rt: *core.JSRuntime,
     global: ?*core.Object,
     receiver: *core.Object,
+    iterator_class: core.ClassId,
     tag_name: []const u8,
 ) !*core.Object {
     var owned_base: ?*core.Object = null;
@@ -736,7 +737,12 @@ fn createIteratorPrototype(
     try defineToStringTag(rt, specific, tag_name);
     const next = try function_builtin.nativeFunction(rt, "next", 0);
     defer next.free(rt);
-    (try expectObject(next)).nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.collection, @intFromEnum(PrototypeMethod.iterator_next));
+    const next_object = try expectObject(next);
+    next_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.collection, @intFromEnum(PrototypeMethod.iterator_next));
+    // Mirrors js_map_iterator_next (quickjs.c:52576): the next function is
+    // bound to one iterator class (JS_GetOpaque2 with JS_CLASS_MAP_ITERATOR +
+    // magic), so a Map Iterator's next rejects Set iterators and vice versa.
+    if (!next_object.addCollectionMethodOwnerClass(rt, iterator_class)) return error.TypeError;
     try specific.defineOwnProperty(rt, core.atom.predefinedId("next", .string).?, core.Descriptor.data(next, true, false, true));
     return specific;
 }
@@ -2922,6 +2928,8 @@ fn collectionReceiverMessage(owner_class: core.ClassId) []const u8 {
     if (owner_class == core.class.ids.set) return "Set object expected";
     if (owner_class == core.class.ids.weakmap) return "WeakMap object expected";
     if (owner_class == core.class.ids.weakset) return "WeakSet object expected";
+    if (owner_class == core.class.ids.map_iterator) return "Map Iterator object expected";
+    if (owner_class == core.class.ids.set_iterator) return "Set Iterator object expected";
     return "not an object";
 }
 
