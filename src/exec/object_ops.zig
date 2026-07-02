@@ -742,9 +742,8 @@ pub fn qjsAggregateErrorConstructWithPrototype(
     const instance_value = instance.value();
     errdefer instance_value.free(rt);
 
-    const name_value = try value_ops.createStringValue(rt, "AggregateError");
-    defer name_value.free(rt);
-    try defineDataProperty(rt, instance, "name", name_value, true, false, true);
+    // No own `name` property: it lives on the per-class prototype only
+    // (qjs js_error_constructor quickjs.c:41441 defines message/cause/errors).
 
     if (rooted_args.len >= 2 and !rooted_args[1].isUndefined()) {
         const message = try toStringForAnnexB(ctx, output, global, rooted_args[1], caller_function, caller_frame);
@@ -985,9 +984,11 @@ pub fn qjsErrorConstructWithPrototype(
     const instance_value = instance.value();
     errdefer instance_value.free(rt);
 
-    const name_value = try value_ops.createStringValue(rt, name);
-    defer name_value.free(rt);
-    try defineDataProperty(rt, instance, "name", name_value, true, false, true);
+    // No own `name` property: it lives on the per-class prototype only, so
+    // patching `X.prototype.name` reflects on existing instances and a
+    // new.target-derived prototype supplies its own name (qjs
+    // js_error_constructor quickjs.c:41441 defines only message/cause).
+    _ = name;
 
     if (rooted_args.len >= 1 and !rooted_args[0].isUndefined()) {
         const message = try toStringForAnnexB(ctx, output, global, rooted_args[0], caller_function, caller_frame);
