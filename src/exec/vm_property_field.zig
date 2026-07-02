@@ -593,13 +593,6 @@ pub noinline fn arrayElement(
             defer key.free(ctx.runtime);
             const obj = try stack.pop();
             defer obj.free(ctx.runtime);
-            if (obj.isNull() or obj.isUndefined()) {
-                _ = object_ops.throwNullishComputedPropertyTypeError(ctx, global, obj, key) catch |err| {
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
-                    return err;
-                };
-                unreachable;
-            }
             switch (putTypedArrayElementFast(ctx.runtime, obj, key, value) catch |err| {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
@@ -613,6 +606,16 @@ pub noinline fn arrayElement(
                 return err;
             };
             defer key_value.free(ctx.runtime);
+            // qjs JS_SetPropertyValue slow path (quickjs.c:10060) runs
+            // JS_ValueToAtom on the key BEFORE JS_SetPropertyInternal's nullish
+            // base TypeError, so user key-coercion side effects fire first.
+            if (obj.isNull() or obj.isUndefined()) {
+                _ = object_ops.throwNullishComputedPropertyTypeError(ctx, global, obj, key_value) catch |err| {
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                    return err;
+                };
+                unreachable;
+            }
             if (try array_ops.putDenseArrayElementFast(ctx.runtime, obj, key_value, value)) return .continue_loop;
             const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
             defer ctx.runtime.atoms.free(atom_id);
