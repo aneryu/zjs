@@ -19183,6 +19183,7 @@ pub const parser_core = struct {
         const saved_in_class = s.in_class;
         const saved_is_static = s.is_static;
         const saved_is_strict = s.is_strict;
+        const saved_lex_is_strict = s.lex.is_strict_mode;
         const saved_static_name_seen = s.class_static_name_seen;
         const saved_class_constructor_cpool_idx = s.class_constructor_cpool_idx;
         const saved_class_private_elements_len = s.class_private_elements.items.len;
@@ -19202,11 +19203,20 @@ pub const parser_core = struct {
             s.class_fields_init_child_index = saved_class_fields_init_child_index;
             s.is_static = saved_is_static;
             s.is_strict = saved_is_strict;
+            s.lex.is_strict_mode = saved_lex_is_strict;
         }
 
         s.in_class = true;
         s.is_static = false;
         s.is_strict = true;
+        // The whole ClassTail — heritage, computed keys, method/getter/setter
+        // bodies, and field initializers — is strict code for the LEXER as
+        // well: legacy octal literals (08, 0777) and octal/\8 string escapes
+        // are SyntaxErrors. Mirrors js_parse_class quickjs.c:25289-25291
+        // ("classes are parsed and executed in strict mode",
+        // fd->js_mode |= JS_MODE_STRICT) gating the tokenizer octal checks
+        // (quickjs.c:23021 number literals, 22530-22536 string escapes).
+        s.lex.is_strict_mode = true;
         s.class_has_extends = s.peekKind() == tok.TOK_EXTENDS;
         s.class_static_name_seen = false;
         s.class_constructor_cpool_idx = null;
@@ -19264,6 +19274,7 @@ pub const parser_core = struct {
         s.in_class = saved_in_class;
         s.is_static = saved_is_static;
         s.is_strict = saved_is_strict;
+        s.lex.is_strict_mode = saved_lex_is_strict;
         s.class_has_extends = saved_has_extends;
         const class_static_name_seen = s.class_static_name_seen;
         s.class_static_name_seen = saved_static_name_seen;
