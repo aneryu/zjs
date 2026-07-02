@@ -5,6 +5,9 @@ const builtin_glue = @import("../exec/builtin_glue.zig");
 const coercion_ops = @import("../exec/coercion_ops.zig");
 const exceptions = @import("../exec/exceptions.zig");
 const object_ops = @import("../exec/object_ops.zig");
+const string_ops = @import("../exec/string_ops.zig");
+const value_ops = @import("../exec/value_ops.zig");
+const vm_exception_ops = @import("../exec/vm_exception_ops.zig");
 
 const HostError = exceptions.HostError;
 const InternalCall = core.host_function.InternalCall;
@@ -28,6 +31,26 @@ pub const ConstructorMethod = core.host_function.builtin_method_ids.date.Constru
 // importing builtins; re-exported here so the dispatch/install side keeps the
 // original name.
 pub const PrototypeMethod = core.host_function.builtin_method_ids.date.PrototypeMethod;
+
+/// Date-domain record ids that exist only on the builtins side (they continue
+/// the `PrototypeMethod` id space above without touching engine core): the
+/// UTC/local method split (QuickJS gives every name its own
+/// JS_CFUNC_MAGIC_DEF entry with an `is_local` magic bit, quickjs.c
+/// js_date_proto_funcs) and the qjs fmt=3 `toLocale*` shapes. Only date.zig
+/// produces and decodes these ids; the exec glue never sees them.
+pub const ExtendedPrototypeMethod = enum(u32) {
+    get_utc_day = 138,
+    set_utc_milliseconds = 139,
+    set_utc_seconds = 140,
+    set_utc_minutes = 141,
+    set_utc_hours = 142,
+    set_utc_date = 143,
+    set_utc_month = 144,
+    set_utc_full_year = 145,
+    to_locale_string = 146,
+    to_locale_date_string = 147,
+    to_locale_time_string = 148,
+};
 
 /// Declaration + dispatch table for the `.date` native-builtin domain
 /// (QuickJS js_date_funcs analogue). One shared record handler `dateCall`
@@ -88,6 +111,19 @@ pub const internal_entries = dateEntries: {
         // capture-then-apply setter bodies through the table.
         dateEntry("", 0, @intFromEnum(PrototypeMethod.set_year_with_captured_ms), false),
         dateEntry("", 0, @intFromEnum(PrototypeMethod.set_parts_with_captured_ms), false),
+        // Local/UTC method split + qjs fmt=3 locale shapes (see
+        // `ExtendedPrototypeMethod`); handled entirely inside `dateCall`.
+        dateEntry("getUTCDay", 0, @intFromEnum(ExtendedPrototypeMethod.get_utc_day), false),
+        dateEntry("setUTCMilliseconds", 1, @intFromEnum(ExtendedPrototypeMethod.set_utc_milliseconds), false),
+        dateEntry("setUTCSeconds", 2, @intFromEnum(ExtendedPrototypeMethod.set_utc_seconds), false),
+        dateEntry("setUTCMinutes", 3, @intFromEnum(ExtendedPrototypeMethod.set_utc_minutes), false),
+        dateEntry("setUTCHours", 4, @intFromEnum(ExtendedPrototypeMethod.set_utc_hours), false),
+        dateEntry("setUTCDate", 1, @intFromEnum(ExtendedPrototypeMethod.set_utc_date), false),
+        dateEntry("setUTCMonth", 2, @intFromEnum(ExtendedPrototypeMethod.set_utc_month), false),
+        dateEntry("setUTCFullYear", 3, @intFromEnum(ExtendedPrototypeMethod.set_utc_full_year), false),
+        dateEntry("toLocaleString", 0, @intFromEnum(ExtendedPrototypeMethod.to_locale_string), false),
+        dateEntry("toLocaleDateString", 0, @intFromEnum(ExtendedPrototypeMethod.to_locale_date_string), false),
+        dateEntry("toLocaleTimeString", 0, @intFromEnum(ExtendedPrototypeMethod.to_locale_time_string), false),
     };
 };
 
@@ -160,6 +196,20 @@ fn dateCall(host_call: InternalCall) HostError!core.JSValue {
             else => err,
         };
     }
+    if (id == @intFromEnum(StaticMethod.parse)) {
+        // js_Date_parse (quickjs.c:55907) ToString-coerces its argument (never
+        // a TypeError arity/type gate); the coercion runs in VM context so a
+        // user `toString`/`Symbol.toPrimitive` executes with the caller frame.
+        const active_global = host_call.global orelse realmGlobalFor(ctx, host_call.func_obj) orelse return error.TypeError;
+        const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+        const string_value = try string_ops.toStringForAnnexB(ctx, output, active_global, input, caller_function, caller_frame);
+        defer string_value.free(ctx.runtime);
+        return core.JSValue.float64(try parseDateString(ctx.runtime, string_value));
+    }
+    if (decodeExtendedPrototypeMethodId(id)) |method_id| {
+        const active_global = host_call.global orelse realmGlobalFor(ctx, host_call.func_obj) orelse return error.TypeError;
+        return dateExtendedPrototypeCall(ctx, output, active_global, host_call.this_value, method_id, args);
+    }
     if (decodePrototypeMethodId(id)) |method_id| {
         const active_global = host_call.global orelse return error.TypeError;
         return object_ops.qjsDatePrototypeMethod(ctx, output, active_global, host_call.this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
@@ -193,6 +243,9 @@ fn dateInternalBodyCall(rt: *core.JSRuntime, id: u32, this_value: core.JSValue, 
             const setter_id: u32 = @intFromFloat(args[1].asNumber() orelse 0);
             break :blk methodCallArgsWithCapturedMs(rt, this_value, setter_id, captured_ms, args[2..]);
         }
+        if (decodeExtendedPrototypeMethodId(id)) |method_id| {
+            break :blk methodCallArgs(rt, this_value, method_id, args);
+        }
         if (decodePrototypeMethodId(id)) |method_id| {
             break :blk methodCallArgs(rt, this_value, method_id, args);
         }
@@ -201,6 +254,42 @@ fn dateInternalBodyCall(rt: *core.JSRuntime, id: u32, this_value: core.JSValue, 
         break :blk staticCall(rt, id, args);
     };
     return result catch |err| return @as(HostError, @errorCast(err));
+}
+
+/// Coercing arm for the extended (builtins-local) prototype record ids.
+/// Mirrors QuickJS: `set_date_field` (quickjs.c:55253) checks `this` and reads
+/// the time value *before* coercing arguments, then coerces exactly
+/// `min(argc, end_field - first_field)` arguments; `get_date_field` /
+/// `get_date_string` bodies take no arguments.
+fn dateExtendedPrototypeCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    method_id: u32,
+    args: []const core.JSValue,
+) HostError!core.JSValue {
+    const rt = ctx.runtime;
+    if (setterSpan(method_id)) |span| {
+        const object = expectDateObject(this_value) catch
+            return vm_exception_ops.throwTypeErrorMessage(ctx, global, "not a Date object");
+        const captured_ms = dateValue(object) catch
+            return vm_exception_ops.throwTypeErrorMessage(ctx, global, "not a Date object");
+        var coerced_args: [4]core.JSValue = undefined;
+        var coerced_len: usize = 0;
+        defer {
+            for (coerced_args[0..coerced_len]) |value| value.free(rt);
+        }
+        const coerce_count = @min(args.len, span.end - span.first);
+        while (coerced_len < coerce_count) : (coerced_len += 1) {
+            coerced_args[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, global, args[coerced_len], null, null);
+        }
+        return setDateFieldBody(rt, object, captured_ms, coerced_args[0..coerced_len], args.len, span);
+    }
+    return methodCallArgs(rt, this_value, method_id, args) catch |err| switch (err) {
+        error.TypeError => return vm_exception_ops.throwTypeErrorMessage(ctx, global, "not a Date object"),
+        else => err,
+    };
 }
 
 fn realmGlobalFor(ctx: *core.JSContext, func_obj: ?*core.Object) ?*core.Object {
@@ -235,21 +324,32 @@ pub fn prototypeMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "getUTCMinutes")) return @intFromEnum(PrototypeMethod.get_utc_minutes);
     if (std.mem.eql(u8, name, "getUTCSeconds")) return @intFromEnum(PrototypeMethod.get_utc_seconds);
     if (std.mem.eql(u8, name, "getUTCMilliseconds")) return @intFromEnum(PrototypeMethod.get_utc_milliseconds);
-    if (std.mem.eql(u8, name, "getUTCDay") or std.mem.eql(u8, name, "getDay")) return @intFromEnum(PrototypeMethod.get_day);
-    if (std.mem.eql(u8, name, "toString") or std.mem.eql(u8, name, "toLocaleString")) return @intFromEnum(PrototypeMethod.to_string);
+    if (std.mem.eql(u8, name, "getUTCDay")) return @intFromEnum(ExtendedPrototypeMethod.get_utc_day);
+    if (std.mem.eql(u8, name, "getDay")) return @intFromEnum(PrototypeMethod.get_day);
+    if (std.mem.eql(u8, name, "toString")) return @intFromEnum(PrototypeMethod.to_string);
+    if (std.mem.eql(u8, name, "toLocaleString")) return @intFromEnum(ExtendedPrototypeMethod.to_locale_string);
     if (std.mem.eql(u8, name, "toUTCString") or std.mem.eql(u8, name, "toGMTString")) return @intFromEnum(PrototypeMethod.to_utc_string);
-    if (std.mem.eql(u8, name, "toDateString") or std.mem.eql(u8, name, "toLocaleDateString")) return @intFromEnum(PrototypeMethod.to_date_string);
-    if (std.mem.eql(u8, name, "toTimeString") or std.mem.eql(u8, name, "toLocaleTimeString")) return @intFromEnum(PrototypeMethod.to_time_string);
+    if (std.mem.eql(u8, name, "toDateString")) return @intFromEnum(PrototypeMethod.to_date_string);
+    if (std.mem.eql(u8, name, "toLocaleDateString")) return @intFromEnum(ExtendedPrototypeMethod.to_locale_date_string);
+    if (std.mem.eql(u8, name, "toTimeString")) return @intFromEnum(PrototypeMethod.to_time_string);
+    if (std.mem.eql(u8, name, "toLocaleTimeString")) return @intFromEnum(ExtendedPrototypeMethod.to_locale_time_string);
     if (std.mem.eql(u8, name, "getYear")) return @intFromEnum(PrototypeMethod.get_year);
     if (std.mem.eql(u8, name, "setYear")) return @intFromEnum(PrototypeMethod.set_year);
     if (std.mem.eql(u8, name, "setTime")) return @intFromEnum(PrototypeMethod.set_time);
-    if (std.mem.eql(u8, name, "setMilliseconds") or std.mem.eql(u8, name, "setUTCMilliseconds")) return @intFromEnum(PrototypeMethod.set_milliseconds);
-    if (std.mem.eql(u8, name, "setSeconds") or std.mem.eql(u8, name, "setUTCSeconds")) return @intFromEnum(PrototypeMethod.set_seconds);
-    if (std.mem.eql(u8, name, "setMinutes") or std.mem.eql(u8, name, "setUTCMinutes")) return @intFromEnum(PrototypeMethod.set_minutes);
-    if (std.mem.eql(u8, name, "setHours") or std.mem.eql(u8, name, "setUTCHours")) return @intFromEnum(PrototypeMethod.set_hours);
-    if (std.mem.eql(u8, name, "setDate") or std.mem.eql(u8, name, "setUTCDate")) return @intFromEnum(PrototypeMethod.set_date);
-    if (std.mem.eql(u8, name, "setMonth") or std.mem.eql(u8, name, "setUTCMonth")) return @intFromEnum(PrototypeMethod.set_month);
-    if (std.mem.eql(u8, name, "setFullYear") or std.mem.eql(u8, name, "setUTCFullYear")) return @intFromEnum(PrototypeMethod.set_full_year);
+    if (std.mem.eql(u8, name, "setMilliseconds")) return @intFromEnum(PrototypeMethod.set_milliseconds);
+    if (std.mem.eql(u8, name, "setUTCMilliseconds")) return @intFromEnum(ExtendedPrototypeMethod.set_utc_milliseconds);
+    if (std.mem.eql(u8, name, "setSeconds")) return @intFromEnum(PrototypeMethod.set_seconds);
+    if (std.mem.eql(u8, name, "setUTCSeconds")) return @intFromEnum(ExtendedPrototypeMethod.set_utc_seconds);
+    if (std.mem.eql(u8, name, "setMinutes")) return @intFromEnum(PrototypeMethod.set_minutes);
+    if (std.mem.eql(u8, name, "setUTCMinutes")) return @intFromEnum(ExtendedPrototypeMethod.set_utc_minutes);
+    if (std.mem.eql(u8, name, "setHours")) return @intFromEnum(PrototypeMethod.set_hours);
+    if (std.mem.eql(u8, name, "setUTCHours")) return @intFromEnum(ExtendedPrototypeMethod.set_utc_hours);
+    if (std.mem.eql(u8, name, "setDate")) return @intFromEnum(PrototypeMethod.set_date);
+    if (std.mem.eql(u8, name, "setUTCDate")) return @intFromEnum(ExtendedPrototypeMethod.set_utc_date);
+    if (std.mem.eql(u8, name, "setMonth")) return @intFromEnum(PrototypeMethod.set_month);
+    if (std.mem.eql(u8, name, "setUTCMonth")) return @intFromEnum(ExtendedPrototypeMethod.set_utc_month);
+    if (std.mem.eql(u8, name, "setFullYear")) return @intFromEnum(PrototypeMethod.set_full_year);
+    if (std.mem.eql(u8, name, "setUTCFullYear")) return @intFromEnum(ExtendedPrototypeMethod.set_utc_full_year);
     return null;
 }
 
@@ -259,19 +359,30 @@ pub fn prototypeMethodId(name: []const u8) ?u32 {
 pub const decodePrototypeMethodId = core.host_function.builtin_method_id_lookup.date.decodePrototypeMethodId;
 pub const encodePrototypeMethodId = core.host_function.builtin_method_id_lookup.date.encodePrototypeMethodId;
 
-pub fn dayFromTime(ms: i64) i64 {
-    return @divFloor(ms, ms_per_day);
+/// Extended record id -> legacy body selector (continues the 1..34 space the
+/// core decode covers): 35 getUTCDay, 36..42 setUTC*, 43..45 toLocale*.
+fn decodeExtendedPrototypeMethodId(id: u32) ?u32 {
+    return switch (id) {
+        @intFromEnum(ExtendedPrototypeMethod.get_utc_day) => 35,
+        @intFromEnum(ExtendedPrototypeMethod.set_utc_milliseconds) => 36,
+        @intFromEnum(ExtendedPrototypeMethod.set_utc_seconds) => 37,
+        @intFromEnum(ExtendedPrototypeMethod.set_utc_minutes) => 38,
+        @intFromEnum(ExtendedPrototypeMethod.set_utc_hours) => 39,
+        @intFromEnum(ExtendedPrototypeMethod.set_utc_date) => 40,
+        @intFromEnum(ExtendedPrototypeMethod.set_utc_month) => 41,
+        @intFromEnum(ExtendedPrototypeMethod.set_utc_full_year) => 42,
+        @intFromEnum(ExtendedPrototypeMethod.to_locale_string) => 43,
+        @intFromEnum(ExtendedPrototypeMethod.to_locale_date_string) => 44,
+        @intFromEnum(ExtendedPrototypeMethod.to_locale_time_string) => 45,
+        else => null,
+    };
 }
 
-pub fn timeWithinDay(ms: i64) i64 {
-    return @mod(ms, ms_per_day);
-}
-
-/// QuickJS source map: Date as a function. This is the current narrow Date
-/// subset used by transitional `date_call` bytecode.
+/// QuickJS source map: Date as a function. `js_date_constructor` with
+/// `new_target == undefined` returns `get_date_string(now, 0x13)`.
 pub fn call(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
     _ = args;
-    return dateString(rt, currentTimeMs(), .local);
+    return getDateStringValue(rt, currentTimeMs(), 0x13);
 }
 
 /// QuickJS source map: Date constructor. This preserves the current smoke/test
@@ -306,8 +417,7 @@ fn defineDateValue(rt: *core.JSRuntime, object: *core.Object, ms: f64) !void {
     try setDateValue(rt, object, ms);
 }
 
-/// QuickJS source map: Date.UTC / Date.parse / Date.now. This is still a narrow
-/// builtin implementation; unsupported Date shapes stay on transitional paths.
+/// QuickJS source map: Date.UTC / Date.parse / Date.now.
 pub fn staticCall(rt: *core.JSRuntime, method: u32, args: []const core.JSValue) !core.JSValue {
     return switch (method) {
         1 => utc(args),
@@ -326,79 +436,97 @@ pub fn methodCall(rt: *core.JSRuntime, object_value: core.JSValue, method: u32) 
 pub fn methodCallArgs(rt: *core.JSRuntime, object_value: core.JSValue, method: u32, args: []const core.JSValue) !core.JSValue {
     const object = try expectDateObject(object_value);
     const ms = try dateValue(object);
+    if (setterSpan(method)) |span| {
+        // Raw-args setter path (engine-internal callers): coerce here, then run
+        // the shared `set_date_field` body.
+        return setDateFieldBody(rt, object, ms, args, args.len, span);
+    }
     return switch (method) {
         1, 2 => numberResult(ms),
         24 => try setTime(rt, object, args),
-        3 => dateFullYear(ms),
-        4 => dateField(ms, .month),
-        5 => dateField(ms, .day),
-        6 => dateField(ms, .hour),
-        7 => dateField(ms, .minute),
-        8 => dateField(ms, .second),
-        9 => dateField(ms, .millis),
-        10 => try isoString(rt, ms, true),
-        11 => try jsonString(rt, ms),
-        20 => try dateString(rt, ms, .local),
-        21 => try dateString(rt, ms, .utc),
-        12...19 => utcDateField(ms, method),
-        22 => dateYear(ms),
+        // get_date_field (quickjs.c:55225): local getters n=0..6, getDay n=7.
+        3...9 => getDateFieldValue(ms, @intCast(method - 3), true, false),
+        19 => getDateFieldValue(ms, 7, true, false),
+        // getUTC* n=0..6, getUTCDay n=7.
+        12...18 => getDateFieldValue(ms, @intCast(method - 12), false, false),
+        35 => getDateFieldValue(ms, 7, false, false),
+        // getYear: magic 0x101 (local, fields[0] - 1900).
+        22 => getDateFieldValue(ms, 0, true, true),
+        // get_date_string magics (quickjs.c js_date_proto_funcs).
+        10 => try getDateStringValue(rt, ms, 0x23),
+        11 => if (std.math.isNan(ms)) core.JSValue.nullValue() else try getDateStringValue(rt, ms, 0x23),
+        20 => try getDateStringValue(rt, ms, 0x13),
+        21 => try getDateStringValue(rt, ms, 0x03),
+        33 => try getDateStringValue(rt, ms, 0x11),
+        34 => try getDateStringValue(rt, ms, 0x12),
+        43 => try getDateStringValue(rt, ms, 0x33),
+        44 => try getDateStringValue(rt, ms, 0x31),
+        45 => try getDateStringValue(rt, ms, 0x32),
         23 => try setYear(rt, object, ms, args),
-        25 => try setDateParts(rt, object, ms, args, .millis),
-        26 => try setDateParts(rt, object, ms, args, .second),
-        27 => try setDateParts(rt, object, ms, args, .minute),
-        28 => try setDateParts(rt, object, ms, args, .hour),
-        29 => try setDateParts(rt, object, ms, args, .day),
-        30 => try setDateParts(rt, object, ms, args, .month),
-        31 => try setDateParts(rt, object, ms, args, .year),
-        32 => if (std.math.isFinite(ms)) core.JSValue.int32(0) else core.JSValue.float64(std.math.nan(f64)),
-        33 => try dateString(rt, ms, .date),
-        34 => try dateString(rt, ms, .time),
+        // js_date_getTimezoneOffset (quickjs.c:55996).
+        32 => if (std.math.isNan(ms))
+            core.JSValue.float64(std.math.nan(f64))
+        else
+            numberResult(@floatFromInt(getTimezoneOffsetForTime(@intFromFloat(@trunc(ms))))),
         else => error.TypeError,
     };
 }
 
 pub fn methodCallArgsWithCapturedMs(rt: *core.JSRuntime, object_value: core.JSValue, method: u32, captured_ms: f64, args: []const core.JSValue) !core.JSValue {
     const object = try expectDateObject(object_value);
+    const span = setterSpan(method) orelse return error.TypeError;
+    return setDateFieldBody(rt, object, captured_ms, args, args.len, span);
+}
+
+/// set_date_field magic decode (quickjs.c js_date_proto_funcs): selector ->
+/// (first_field, end_field, is_local). 25..31 are the local setters, 36..42
+/// the setUTC* twins.
+const SetterSpan = struct { first: usize, end: usize, is_local: bool };
+
+fn setterSpan(method: u32) ?SetterSpan {
     return switch (method) {
-        25 => try setDateParts(rt, object, captured_ms, args, .millis),
-        26 => try setDateParts(rt, object, captured_ms, args, .second),
-        27 => try setDateParts(rt, object, captured_ms, args, .minute),
-        28 => try setDateParts(rt, object, captured_ms, args, .hour),
-        29 => try setDateParts(rt, object, captured_ms, args, .day),
-        30 => try setDateParts(rt, object, captured_ms, args, .month),
-        31 => try setDateParts(rt, object, captured_ms, args, .year),
-        else => error.TypeError,
+        25 => .{ .first = 6, .end = 7, .is_local = true }, // setMilliseconds 0x671
+        26 => .{ .first = 5, .end = 7, .is_local = true }, // setSeconds 0x571
+        27 => .{ .first = 4, .end = 7, .is_local = true }, // setMinutes 0x471
+        28 => .{ .first = 3, .end = 7, .is_local = true }, // setHours 0x371
+        29 => .{ .first = 2, .end = 3, .is_local = true }, // setDate 0x211
+        30 => .{ .first = 1, .end = 3, .is_local = true }, // setMonth 0x121
+        31 => .{ .first = 0, .end = 3, .is_local = true }, // setFullYear 0x011
+        36 => .{ .first = 6, .end = 7, .is_local = false }, // setUTCMilliseconds 0x670
+        37 => .{ .first = 5, .end = 7, .is_local = false }, // setUTCSeconds 0x570
+        38 => .{ .first = 4, .end = 7, .is_local = false }, // setUTCMinutes 0x470
+        39 => .{ .first = 3, .end = 7, .is_local = false }, // setUTCHours 0x370
+        40 => .{ .first = 2, .end = 3, .is_local = false }, // setUTCDate 0x210
+        41 => .{ .first = 1, .end = 3, .is_local = false }, // setUTCMonth 0x120
+        42 => .{ .first = 0, .end = 3, .is_local = false }, // setUTCFullYear 0x010
+        else => null,
     };
 }
 
-const DateSetField = enum { millis, second, minute, hour, day, month, year };
-const DateGetField = enum { millis, second, minute, hour, day, month };
-const DateStringKind = enum { local, utc, date, time };
+/// Mirrors qjs set_date_field (quickjs.c:55253) given the captured time value
+/// and (pre-coerced or raw-primitive) args. `argc` is the caller's argument
+/// count: `argc == 0` sets the date to NaN even without field writes.
+fn setDateFieldBody(rt: *core.JSRuntime, object: *core.Object, captured_ms: f64, args: []const core.JSValue, argc: usize, span: SetterSpan) !core.JSValue {
+    var fields: [9]f64 = undefined;
+    var res = getDateFields(captured_ms, &fields, span.is_local, span.first == 0);
+    const res1 = res;
 
-fn dateFullYear(ms: f64) core.JSValue {
-    if (!std.math.isFinite(ms)) return core.JSValue.float64(std.math.nan(f64));
-    const parts = utcDateParts(@intFromFloat(ms));
-    return core.JSValue.int32(@intCast(parts.year));
-}
+    // Argument coercion is observable and must be done unconditionally.
+    const n = @min(args.len, span.end - span.first);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const a = toNumber(args[i]) orelse return error.TypeError;
+        if (!std.math.isFinite(a)) res = false;
+        fields[span.first + i] = @trunc(a);
+    }
 
-fn dateYear(ms: f64) core.JSValue {
-    if (!std.math.isFinite(ms)) return core.JSValue.float64(std.math.nan(f64));
-    const parts = utcDateParts(@intFromFloat(ms));
-    return core.JSValue.int32(@intCast(parts.year - 1900));
-}
+    if (!res1) return core.JSValue.float64(std.math.nan(f64)); // thisTimeValue is NaN
 
-fn dateField(ms: f64, field: DateGetField) core.JSValue {
-    if (!std.math.isFinite(ms)) return core.JSValue.float64(std.math.nan(f64));
-    const parts = utcDateParts(@intFromFloat(ms));
-    const out: i32 = switch (field) {
-        .millis => @intCast(parts.millis),
-        .second => @intCast(parts.second),
-        .minute => @intCast(parts.minute),
-        .hour => @intCast(parts.hour),
-        .day => @intCast(parts.day),
-        .month => @intCast(parts.month - 1),
-    };
-    return core.JSValue.int32(out);
+    var d: f64 = std.math.nan(f64);
+    if (res and argc > 0) d = setDateFields(fields[0..7], span.is_local);
+
+    try setDateValue(rt, object, d);
+    return numberResult(d);
 }
 
 fn setYear(rt: *core.JSRuntime, object: *core.Object, ms: f64, args: []const core.JSValue) !core.JSValue {
@@ -411,25 +539,17 @@ pub fn setYearNumber(rt: *core.JSRuntime, object_value: core.JSValue, captured_m
     return setYearNumberOnObject(rt, object, captured_ms, year_number);
 }
 
+/// Mirrors qjs js_date_setYear (quickjs.c:56030): map finite years 0..99 to
+/// 1900..1999, then run set_date_field with magic 0x011 (first=0, end=1,
+/// local).
 fn setYearNumberOnObject(rt: *core.JSRuntime, object: *core.Object, ms: f64, year_number: f64) !core.JSValue {
-    if (std.math.isNan(year_number)) {
-        try setDateValue(rt, object, std.math.nan(f64));
-        return core.JSValue.float64(std.math.nan(f64));
+    var y = year_number;
+    if (std.math.isFinite(y)) {
+        y = @trunc(y);
+        if (y >= 0 and y < 100) y += 1900;
     }
-    if (!std.math.isFinite(year_number)) {
-        try setDateValue(rt, object, std.math.nan(f64));
-        return core.JSValue.float64(std.math.nan(f64));
-    }
-
-    const integer_year_float = toInteger(year_number);
-    var year: i64 = @intFromFloat(integer_year_float);
-    if (year >= 0 and year <= 99) year += 1900;
-
-    const base_ms: f64 = if (std.math.isFinite(ms)) ms else 0;
-    const parts = utcDateParts(@intFromFloat(base_ms));
-    const next_ms = timeClip(makeUtcMs(year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second, parts.millis));
-    try setDateValue(rt, object, next_ms);
-    return numberResult(next_ms);
+    const year_args = [1]core.JSValue{core.JSValue.float64(y)};
+    return setDateFieldBody(rt, object, ms, &year_args, 1, .{ .first = 0, .end = 1, .is_local = true });
 }
 
 fn setTime(rt: *core.JSRuntime, object: *core.Object, args: []const core.JSValue) !core.JSValue {
@@ -439,227 +559,801 @@ fn setTime(rt: *core.JSRuntime, object: *core.Object, args: []const core.JSValue
     return numberResult(next_ms);
 }
 
-fn setDateParts(rt: *core.JSRuntime, object: *core.Object, ms: f64, args: []const core.JSValue, field: DateSetField) !core.JSValue {
-    const had_finite_time = std.math.isFinite(ms);
-    const parts = if (had_finite_time) utcDateParts(@intFromFloat(ms)) else utcDateParts(0);
-    const first = if (args.len >= 1) (toNumber(args[0]) orelse return error.TypeError) else std.math.nan(f64);
-    const first_integer = dateSetterInteger(first) orelse {
-        return dateSetNaNResult(rt, object, had_finite_time, field);
-    };
-
-    var year: f64 = @floatFromInt(parts.year);
-    var month: f64 = @floatFromInt(parts.month - 1);
-    var day: f64 = @floatFromInt(parts.day);
-    var hour: f64 = @floatFromInt(parts.hour);
-    var minute: f64 = @floatFromInt(parts.minute);
-    var second: f64 = @floatFromInt(parts.second);
-    var millis: f64 = @floatFromInt(parts.millis);
-
-    switch (field) {
-        .millis => millis = first_integer,
-        .second => {
-            second = first_integer;
-            if (try providedNumber(args, 1)) |number| {
-                millis = dateSetterInteger(number) orelse return dateSetNaNResult(rt, object, had_finite_time, field);
-            }
-        },
-        .minute => {
-            minute = first_integer;
-            if (try providedNumber(args, 1)) |number| {
-                second = dateSetterInteger(number) orelse return dateSetNaNResult(rt, object, had_finite_time, field);
-            }
-            if (try providedNumber(args, 2)) |number| {
-                millis = dateSetterInteger(number) orelse return dateSetNaNResult(rt, object, had_finite_time, field);
-            }
-        },
-        .hour => {
-            hour = first_integer;
-            if (try providedNumber(args, 1)) |number| {
-                minute = dateSetterInteger(number) orelse return dateSetNaNResult(rt, object, had_finite_time, field);
-            }
-            if (try providedNumber(args, 2)) |number| {
-                second = dateSetterInteger(number) orelse return dateSetNaNResult(rt, object, had_finite_time, field);
-            }
-            if (try providedNumber(args, 3)) |number| {
-                millis = dateSetterInteger(number) orelse return dateSetNaNResult(rt, object, had_finite_time, field);
-            }
-        },
-        .day => day = first_integer,
-        .month => {
-            month = first_integer;
-            if (try providedNumber(args, 1)) |number| {
-                day = dateSetterInteger(number) orelse return dateSetNaNResult(rt, object, had_finite_time, field);
-            }
-        },
-        .year => {
-            year = first_integer;
-            if (try providedNumber(args, 1)) |number| {
-                month = dateSetterInteger(number) orelse return dateSetNaNResult(rt, object, had_finite_time, field);
-            }
-            if (try providedNumber(args, 2)) |number| {
-                day = dateSetterInteger(number) orelse return dateSetNaNResult(rt, object, had_finite_time, field);
-            }
-        },
-    }
-
-    if (!had_finite_time and field != .year) return core.JSValue.float64(std.math.nan(f64));
-    const next_ms = makeUtcMsFromNumbers(year, month, day, hour, minute, second, millis, false);
-    try setDateValue(rt, object, next_ms);
-    return numberResult(next_ms);
-}
-
-fn dateSetterInteger(value: f64) ?f64 {
-    if (!std.math.isFinite(value)) return null;
-    return toInteger(value);
-}
-
-fn providedNumber(args: []const core.JSValue, index: usize) !?f64 {
-    if (args.len <= index) return null;
-    return toNumber(args[index]) orelse return error.TypeError;
-}
-
-fn dateSetNaNResult(rt: *core.JSRuntime, object: *core.Object, had_finite_time: bool, field: DateSetField) !core.JSValue {
-    if (!had_finite_time and field != .year) return core.JSValue.float64(std.math.nan(f64));
-    try setDateValue(rt, object, std.math.nan(f64));
-    return core.JSValue.float64(std.math.nan(f64));
+/// Mirrors qjs get_date_field (quickjs.c:55225): n selects the field,
+/// `is_get_year` applies the getYear 0x100 bias.
+fn getDateFieldValue(ms: f64, n: usize, is_local: bool, is_get_year: bool) core.JSValue {
+    var fields: [9]f64 = undefined;
+    if (!getDateFields(ms, &fields, is_local, false)) return core.JSValue.float64(std.math.nan(f64));
+    var field_value = fields[n];
+    if (is_get_year) field_value -= 1900;
+    return numberResult(field_value);
 }
 
 fn utc(args: []const core.JSValue) !core.JSValue {
-    const year_number = if (args.len >= 1) (toNumber(args[0]) orelse return error.TypeError) else std.math.nan(f64);
-    const month_number = if (args.len >= 2) (toNumber(args[1]) orelse return error.TypeError) else 0;
-    const day_number = if (args.len >= 3) (toNumber(args[2]) orelse return error.TypeError) else 1;
-    const hour_number = if (args.len >= 4) (toNumber(args[3]) orelse return error.TypeError) else 0;
-    const minute_number = if (args.len >= 5) (toNumber(args[4]) orelse return error.TypeError) else 0;
-    const second_number = if (args.len >= 6) (toNumber(args[5]) orelse return error.TypeError) else 0;
-    const millis_number = if (args.len >= 7) (toNumber(args[6]) orelse return error.TypeError) else 0;
-    return numberResult(makeUtcMsFromNumbers(year_number, month_number, day_number, hour_number, minute_number, second_number, millis_number, true));
+    // js_Date_UTC (quickjs.c:55480).
+    if (args.len == 0) return core.JSValue.float64(std.math.nan(f64));
+    var fields = [7]f64{ 0, 0, 1, 0, 0, 0, 0 };
+    const n = @min(args.len, 7);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        fields[i] = toNumber(args[i]) orelse return error.TypeError;
+    }
+    return numberResult(setDateFieldsChecked(&fields, false));
+}
+
+fn constructDateFromParts(args: []const core.JSValue) !f64 {
+    // js_date_constructor n >= 2 branch (quickjs.c:55442): coerce up to 7
+    // fields, then set_date_fields_checked(fields, 1) — LOCAL time.
+    var fields = [7]f64{ 0, 0, 1, 0, 0, 0, 0 };
+    const n = @min(args.len, 7);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        fields[i] = toNumber(args[i]) orelse return error.TypeError;
+    }
+    return setDateFieldsChecked(&fields, true);
 }
 
 fn parse(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
-    if (args.len != 1 or !args[0].isString()) return error.TypeError;
-    return core.JSValue.float64(try parseDateString(rt, args[0]));
+    // js_Date_parse (quickjs.c:55907) ToString-coerces its argument. This pure
+    // body only sees pre-coerced args (the record arm in `dateCall` runs the
+    // VM ToString for objects); primitives are converted without VM re-entry.
+    const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    if (input.isString()) return core.JSValue.float64(try parseDateString(rt, input));
+    if (input.isObject()) return core.JSValue.float64(std.math.nan(f64));
+    const string_value = try value_ops.toStringValue(rt, input);
+    defer string_value.free(rt);
+    return core.JSValue.float64(try parseDateString(rt, string_value));
 }
 
-fn parseDateString(rt: *core.JSRuntime, value: core.JSValue) !f64 {
-    var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
-    try appendRawString(rt, &bytes, value);
-    return parseIsoDate(bytes.items) orelse parseLegacyDateString(bytes.items) orelse std.math.nan(f64);
-}
+// --- Host timezone offset (mirrors quickjs.c getTimezoneOffset:47454) -------
 
-fn jsonString(rt: *core.JSRuntime, ms: f64) !core.JSValue {
-    if (std.math.isNan(ms)) return core.JSValue.nullValue();
-    return isoString(rt, ms, false);
-}
+/// C `struct tm` (glibc/musl layout; POSIX.1-2024 mandates `tm_gmtoff`).
+const CTm = extern struct {
+    tm_sec: c_int,
+    tm_min: c_int,
+    tm_hour: c_int,
+    tm_mday: c_int,
+    tm_mon: c_int,
+    tm_year: c_int,
+    tm_wday: c_int,
+    tm_yday: c_int,
+    tm_isdst: c_int,
+    tm_gmtoff: c_long,
+    tm_zone: ?[*:0]const u8,
+};
 
-fn isoString(rt: *core.JSRuntime, ms: f64, throw_on_nan: bool) !core.JSValue {
-    if (!std.math.isFinite(ms)) {
-        if (throw_on_nan) return error.RangeError;
-        return core.JSValue.nullValue();
+extern "c" fn localtime_r(timep: *const std.c.time_t, result: *CTm) ?*CTm;
+
+/// OS dependent. `time` is in ms from 1970. Return the difference between UTC
+/// time and local time at `time`, in minutes (quickjs.c getTimezoneOffset).
+fn getTimezoneOffsetForTime(time_ms: i64) i32 {
+    var time = @divTrunc(time_ms, 1000); // convert to seconds (C truncation)
+    if (@sizeOf(std.c.time_t) == 4) {
+        // On 32-bit systems clamp to the range of `time_t` (qjs does the same).
+        if (time < std.math.minInt(i32)) {
+            time = std.math.minInt(i32);
+        } else if (time > std.math.maxInt(i32)) {
+            time = std.math.maxInt(i32);
+        }
     }
-    if (ms == 0) {
-        const str = try core.string.String.createUtf8(rt, "1970-01-01T00:00:00.000Z");
-        return str.value();
-    }
-    const parts = utcDateParts(@intFromFloat(ms));
-    var year_buffer: [16]u8 = undefined;
-    const year = try formatIsoYear(&year_buffer, parts.year);
-    var month_buffer: [2]u8 = undefined;
-    var day_buffer: [2]u8 = undefined;
-    var hour_buffer: [2]u8 = undefined;
-    var minute_buffer: [2]u8 = undefined;
-    var second_buffer: [2]u8 = undefined;
-    var millis_buffer: [3]u8 = undefined;
-    const month = twoDigit(&month_buffer, parts.month);
-    const day = twoDigit(&day_buffer, parts.day);
-    const hour = twoDigit(&hour_buffer, parts.hour);
-    const minute = twoDigit(&minute_buffer, parts.minute);
-    const second = twoDigit(&second_buffer, parts.second);
-    const millis = threeDigit(&millis_buffer, parts.millis);
-    var buffer: [40]u8 = undefined;
-    const text = try std.fmt.bufPrint(&buffer, "{s}-{s}-{s}T{s}:{s}:{s}.{s}Z", .{
-        year,
-        month,
-        day,
-        hour,
-        minute,
-        second,
-        millis,
-    });
-    const str = try core.string.String.createUtf8(rt, text);
-    return str.value();
+    var ti: std.c.time_t = @intCast(time);
+    var tm: CTm = std.mem.zeroes(CTm);
+    _ = localtime_r(&ti, &tm);
+    return @intCast(@divTrunc(-tm.tm_gmtoff, 60));
 }
 
-fn dateString(rt: *core.JSRuntime, ms: f64, kind: DateStringKind) !core.JSValue {
-    if (!std.math.isFinite(ms)) {
+// --- Calendar decomposition (mirrors quickjs.c date field helpers) ----------
+
+const month_days = [12]i64{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+const month_names = "JanFebMarAprMayJunJulAugSepOctNovDec";
+const day_names = "SunMonTueWedThuFriSat";
+
+/// floor_div (quickjs.c:55020): integer division rounding toward -Infinity.
+fn floorDiv(a: i64, b: i64) i64 {
+    return @divFloor(a, b);
+}
+
+/// days_from_year (quickjs.c:55053).
+fn daysFromYear(y: i64) i64 {
+    return 365 * (y - 1970) + floorDiv(y - 1969, 4) -
+        floorDiv(y - 1901, 100) + floorDiv(y - 1601, 400);
+}
+
+/// days_in_year (quickjs.c:55059).
+fn daysInYear(y: i64) i64 {
+    return 365 + @as(i64, @intFromBool(@rem(y, 4) == 0)) -
+        @as(i64, @intFromBool(@rem(y, 100) == 0)) +
+        @as(i64, @intFromBool(@rem(y, 400) == 0));
+}
+
+/// year_from_days (quickjs.c:55064): return the year, update days.
+fn yearFromDays(days: *i64) i64 {
+    const d = days.*;
+    var y = floorDiv(d * 10000, 3652425) + 1970;
+    // The initial approximation is very good, so only a few iterations are
+    // necessary.
+    while (true) {
+        var d1 = d - daysFromYear(y);
+        if (d1 < 0) {
+            y -= 1;
+            d1 += daysInYear(y);
+        } else {
+            const nd = daysInYear(y);
+            if (d1 < nd) {
+                days.* = d1;
+                break;
+            }
+            d1 -= nd;
+            y += 1;
+        }
+    }
+    return y;
+}
+
+/// Mirrors qjs get_date_fields (quickjs.c:55090). Returns false for a NaN time
+/// value when `force` is unset; with `force` the fields decompose from 0.
+/// fields: [y, mon(0-based), d, h, m, s, ms, wd, tz].
+fn getDateFields(dval: f64, fields: *[9]f64, is_local: bool, force: bool) bool {
+    var tz: i64 = 0;
+    var d: i64 = undefined;
+
+    if (std.math.isNan(dval)) {
+        if (!force) return false; // NaN
+        d = 0; // initialize all fields to 0
+    } else {
+        d = @intFromFloat(dval); // assuming -8.64e15 <= dval <= 8.64e15
+        if (is_local) {
+            tz = -@as(i64, getTimezoneOffsetForTime(d));
+            d += tz * 60000;
+        }
+    }
+
+    // result is >= 0, we can use plain remainders below
+    var h = @mod(d, 86400000);
+    var days = @divExact(d - h, 86400000);
+    const msec = @rem(h, 1000);
+    h = @divExact(h - msec, 1000);
+    const s = @rem(h, 60);
+    h = @divExact(h - s, 60);
+    const m = @rem(h, 60);
+    h = @divExact(h - m, 60);
+    const wd = @mod(days + 4, 7); // week day
+    const y = yearFromDays(&days);
+
+    var i: usize = 0;
+    while (i < 11) : (i += 1) {
+        var md = month_days[i];
+        if (i == 1) md += daysInYear(y) - 365;
+        if (days < md) break;
+        days -= md;
+    }
+    fields[0] = @floatFromInt(y);
+    fields[1] = @floatFromInt(i);
+    fields[2] = @floatFromInt(days + 1);
+    fields[3] = @floatFromInt(h);
+    fields[4] = @floatFromInt(m);
+    fields[5] = @floatFromInt(s);
+    fields[6] = @floatFromInt(msec);
+    fields[7] = @floatFromInt(wd);
+    fields[8] = @floatFromInt(tz);
+    return true;
+}
+
+/// time_clip (quickjs.c:55214).
+fn timeClip(value: f64) f64 {
+    if (value >= -8.64e15 and value <= 8.64e15) return @trunc(value) + 0.0; // convert -0 to +0
+    return std.math.nan(f64);
+}
+
+/// Mirrors qjs set_date_fields (quickjs.c:55153): the spec mandates `double`
+/// evaluation order (volatile intermediary as in qjs, see the
+/// fp-evaluation-order test262 note there).
+fn setDateFields(fields: *const [7]f64, is_local: bool) f64 {
+    // emulate 21.4.1.15 MakeDay ( year, month, date )
+    const y = fields[0];
+    const m = fields[1];
+    const dt = fields[2];
+    const ym = y + @floor(m / 12);
+    var mn = @rem(m, 12);
+    if (mn < 0) mn += 12;
+    if (ym < -271821 or ym > 275760) return std.math.nan(f64);
+
+    const yi: i64 = @intFromFloat(ym);
+    const mi: i64 = @intFromFloat(mn);
+    var days = daysFromYear(yi);
+    var i: i64 = 0;
+    while (i < mi) : (i += 1) {
+        days += month_days[@intCast(i)];
+        if (i == 1) days += daysInYear(yi) - 365;
+    }
+    const day = @as(f64, @floatFromInt(days)) + dt - 1;
+
+    // emulate 21.4.1.14 MakeTime ( hour, min, sec, ms ) — volatile temp keeps
+    // the evaluation order / prevents FMA, as in qjs.
+    var temp_storage: f64 = undefined;
+    const temp: *volatile f64 = &temp_storage;
+    var time: f64 = fields[3] * 3600000;
+    temp.* = fields[4] * 60000;
+    time += temp.*;
+    temp.* = fields[5] * 1000;
+    time += temp.*;
+    time += fields[6];
+
+    // emulate 21.4.1.16 MakeDate ( day, time )
+    temp.* = day * 86400000;
+    var tv = temp.* + time; // prevent generation of FMA
+    if (!std.math.isFinite(tv)) return std.math.nan(f64);
+
+    // adjust for local time and clip
+    if (is_local) {
+        const ti: i64 = if (tv < -0x1p63)
+            std.math.minInt(i64)
+        else if (tv >= 0x1p63)
+            std.math.maxInt(i64)
+        else
+            @intFromFloat(tv);
+        tv += @as(f64, @floatFromInt(@as(i64, getTimezoneOffsetForTime(ti)) * 60000));
+    }
+    return timeClip(tv);
+}
+
+/// Mirrors qjs set_date_fields_checked (quickjs.c:55206).
+fn setDateFieldsChecked(fields: *[7]f64, is_local: bool) f64 {
+    var i: usize = 0;
+    while (i < 7) : (i += 1) {
+        const a = fields[i];
+        if (!std.math.isFinite(a)) return std.math.nan(f64);
+        fields[i] = @trunc(a);
+        if (i == 0 and fields[0] >= 0 and fields[0] < 100) fields[0] += 1900;
+    }
+    return setDateFields(fields, is_local);
+}
+
+// --- Date -> string (mirrors quickjs.c get_date_string:55290) ---------------
+
+fn dayName(wd: usize) []const u8 {
+    return day_names[wd * 3 ..][0..3];
+}
+
+fn monthName(mon: usize) []const u8 {
+    return month_names[mon * 3 ..][0..3];
+}
+
+/// snprintf "%0*d" with width 4 + (y < 0): sign counts toward the width.
+/// (unsigned operand: Zig 0.16 std.fmt zero-fill prints an explicit '+' for
+/// signed integers.)
+fn writeYearPadded4(w: *std.Io.Writer, y: i64) !void {
+    if (y < 0) {
+        try w.print("-{d:0>4}", .{@as(u64, @intCast(-y))});
+    } else {
+        try w.print("{d:0>4}", .{@as(u64, @intCast(y))});
+    }
+}
+
+/// Mirrors qjs get_date_string (quickjs.c:55290).
+/// fmt: 0 toUTCString / 1 toString / 2 toISOString / 3 toLocaleString.
+/// part: 1 = date, 2 = time, 3 = both. NaN: fmt 2 raises RangeError, others
+/// produce "Invalid Date".
+fn getDateStringValue(rt: *core.JSRuntime, ms: f64, magic: u32) !core.JSValue {
+    const fmt = (magic >> 4) & 0x0F;
+    const part = magic & 0x0F;
+
+    var fields: [9]f64 = undefined;
+    if (!getDateFields(ms, &fields, (fmt & 1) == 1, false)) {
+        if (fmt == 2) return error.RangeError; // "Date value is NaN"
         const str = try core.string.String.createUtf8(rt, "Invalid Date");
         return str.value();
     }
-    const parts = utcDateParts(@intFromFloat(ms));
-    const weekday = dayName(parts.weekday);
-    const month = monthName(parts.month);
-    var year_buffer: [16]u8 = undefined;
-    const year = try formatDateStringYear(&year_buffer, parts.year);
-    var day_buffer: [2]u8 = undefined;
-    var hour_buffer: [2]u8 = undefined;
-    var minute_buffer: [2]u8 = undefined;
-    var second_buffer: [2]u8 = undefined;
-    const day = twoDigit(&day_buffer, parts.day);
-    const hour = twoDigit(&hour_buffer, parts.hour);
-    const minute = twoDigit(&minute_buffer, parts.minute);
-    const second = twoDigit(&second_buffer, parts.second);
+
+    // Non-negative print operands are unsigned (Zig 0.16 std.fmt zero-fill
+    // prints an explicit '+' for signed integers).
+    const y: i64 = @intFromFloat(fields[0]);
+    const mon: usize = @intFromFloat(fields[1]);
+    const d: u32 = @intFromFloat(fields[2]);
+    const h: u32 = @intFromFloat(fields[3]);
+    const m: u32 = @intFromFloat(fields[4]);
+    const s: u32 = @intFromFloat(fields[5]);
+    const msec: u32 = @intFromFloat(fields[6]);
+    const wd: usize = @intFromFloat(fields[7]);
+    var tz: i64 = @intFromFloat(fields[8]);
+
     var buffer: [64]u8 = undefined;
-    const text = switch (kind) {
-        .local => try std.fmt.bufPrint(&buffer, "{s} {s} {s} {s} {s}:{s}:{s} GMT+0000", .{
-            weekday,
-            month,
-            day,
-            year,
-            hour,
-            minute,
-            second,
-        }),
-        .utc => try std.fmt.bufPrint(&buffer, "{s}, {s} {s} {s} {s}:{s}:{s} GMT", .{
-            weekday,
-            day,
-            month,
-            year,
-            hour,
-            minute,
-            second,
-        }),
-        .date => try std.fmt.bufPrint(&buffer, "{s} {s} {s} {s}", .{
-            weekday,
-            month,
-            day,
-            year,
-        }),
-        .time => try std.fmt.bufPrint(&buffer, "{s}:{s}:{s} GMT+0000", .{
-            hour,
-            minute,
-            second,
-        }),
-    };
-    const str = try core.string.String.createUtf8(rt, text);
+    var w = std.Io.Writer.fixed(&buffer);
+
+    if (part & 1 != 0) { // date part
+        switch (fmt) {
+            0 => {
+                try w.print("{s}, {d:0>2} {s} ", .{ dayName(wd), d, monthName(mon) });
+                try writeYearPadded4(&w, y);
+                try w.writeByte(' ');
+            },
+            1 => {
+                try w.print("{s} {s} {d:0>2} ", .{ dayName(wd), monthName(mon), d });
+                try writeYearPadded4(&w, y);
+                if (part == 3) try w.writeByte(' ');
+            },
+            2 => {
+                if (y >= 0 and y <= 9999) {
+                    try w.print("{d:0>4}", .{@as(u64, @intCast(y))});
+                } else if (y < 0) {
+                    try w.print("-{d:0>6}", .{@as(u64, @intCast(-y))});
+                } else {
+                    try w.print("+{d:0>6}", .{@as(u64, @intCast(y))});
+                }
+                try w.print("-{d:0>2}-{d:0>2}T", .{ mon + 1, d });
+            },
+            3 => {
+                try w.print("{d:0>2}/{d:0>2}/", .{ mon + 1, d });
+                try writeYearPadded4(&w, y);
+                if (part == 3) try w.writeAll(", ");
+            },
+            else => {},
+        }
+    }
+    if (part & 2 != 0) { // time part
+        switch (fmt) {
+            0 => try w.print("{d:0>2}:{d:0>2}:{d:0>2} GMT", .{ h, m, s }),
+            1 => {
+                try w.print("{d:0>2}:{d:0>2}:{d:0>2} GMT", .{ h, m, s });
+                if (tz < 0) {
+                    try w.writeByte('-');
+                    tz = -tz;
+                } else {
+                    try w.writeByte('+');
+                }
+                // tz is >= 0, can use remainders
+                const tzu: u32 = @intCast(tz);
+                try w.print("{d:0>2}{d:0>2}", .{ tzu / 60, tzu % 60 });
+            },
+            2 => try w.print("{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{ h, m, s, msec }),
+            3 => try w.print("{d:0>2}:{d:0>2}:{d:0>2} {c}M", .{ @rem(h + 11, 12) + 1, m, s, @as(u8, if (h < 12) 'A' else 'P') }),
+            else => {},
+        }
+    }
+    const str = try core.string.String.createUtf8(rt, w.buffered());
     return str.value();
 }
 
-fn utcDateField(ms: f64, method: u32) core.JSValue {
-    if (!std.math.isFinite(ms)) return core.JSValue.float64(std.math.nan(f64));
-    const parts = utcDateParts(@intFromFloat(ms));
-    const out: i32 = switch (method) {
-        12 => @intCast(parts.year),
-        13 => @intCast(parts.month - 1),
-        14 => @intCast(parts.day),
-        15 => @intCast(parts.hour),
-        16 => @intCast(parts.minute),
-        17 => @intCast(parts.second),
-        18 => @intCast(parts.millis),
-        19 => @intCast(parts.weekday),
-        else => 0,
-    };
-    return core.JSValue.int32(out);
+// --- Date string parsing (mirrors quickjs.c js_Date_parse:55907) ------------
+
+/// js_Date_parse string -> byte-array conversion (quickjs.c:55926): 127-byte
+/// truncation, U+2212 -> '-', any other unit > 255 -> 'x'.
+fn parseDateString(rt: *core.JSRuntime, value: core.JSValue) !f64 {
+    const string_value = value.asStringBody() orelse return std.math.nan(f64);
+    try string_value.ensureFlat(rt);
+    var buf: [128]u8 = undefined;
+    var len: usize = 0;
+    switch (string_value.resolveData()) {
+        .latin1 => |bytes| {
+            len = @min(bytes.len, buf.len - 1);
+            @memcpy(buf[0..len], bytes[0..len]);
+        },
+        .utf16 => |units| {
+            len = @min(units.len, buf.len - 1);
+            for (units[0..len], 0..) |unit, i| {
+                buf[i] = if (unit > 255)
+                    (if (unit == 0x2212) '-' else 'x')
+                else
+                    @intCast(unit);
+            }
+        },
+    }
+    buf[len] = 0;
+    return dateParseBytes(buf[0..len :0]);
 }
+
+fn dateParseBytes(sp: [:0]const u8) f64 {
+    var fields: [9]i32 = undefined;
+    var is_local: bool = undefined;
+    if (jsDateParseIsostring(sp, &fields, &is_local) or
+        jsDateParseOtherstring(sp, &fields, &is_local))
+    {
+        const field_max = [6]i32{ 0, 11, 31, 24, 59, 59 };
+        var valid = true;
+        // check field maximum values
+        var i: usize = 1;
+        while (i < 6) : (i += 1) {
+            if (fields[i] > field_max[i]) valid = false;
+        }
+        // special case 24:00:00.000
+        if (fields[3] == 24 and (fields[4] | fields[5] | fields[6]) != 0) valid = false;
+        if (valid) {
+            var fields1: [7]f64 = undefined;
+            for (0..7) |j| fields1[j] = @floatFromInt(fields[j]);
+            return setDateFields(&fields1, is_local) - @as(f64, @floatFromInt(fields[8])) * 60000;
+        }
+    }
+    return std.math.nan(f64);
+}
+
+/// string_skip_char (quickjs.c:55495).
+fn stringSkipChar(sp: [:0]const u8, pp: *usize, c: u8) bool {
+    if (sp[pp.*] == c) {
+        pp.* += 1;
+        return true;
+    }
+    return false;
+}
+
+/// string_skip_spaces (quickjs.c:55505): skip spaces, return next char.
+fn stringSkipSpaces(sp: [:0]const u8, pp: *usize) u8 {
+    var c = sp[pp.*];
+    while (c == ' ') {
+        pp.* += 1;
+        c = sp[pp.*];
+    }
+    return c;
+}
+
+/// string_skip_separators (quickjs.c:55513): skip dashes, slashes, dots and
+/// commas.
+fn stringSkipSeparators(sp: [:0]const u8, pp: *usize) u8 {
+    var c = sp[pp.*];
+    while (c == '-' or c == '/' or c == '.' or c == ',') {
+        pp.* += 1;
+        c = sp[pp.*];
+    }
+    return c;
+}
+
+/// string_skip_until (quickjs.c:55521): skip a word, stop on chars in
+/// `stoplist` (C strchr also matches the NUL terminator, hence the c == 0
+/// stop).
+fn stringSkipUntil(sp: [:0]const u8, pp: *usize, stoplist: []const u8) u8 {
+    var c = sp[pp.*];
+    while (c != 0 and std.mem.indexOfScalar(u8, stoplist, c) == null) {
+        pp.* += 1;
+        c = sp[pp.*];
+    }
+    return c;
+}
+
+/// string_get_digits (quickjs.c:55529): parse a numeric field
+/// (max_digits == 0 -> no maximum, arbitrary limit of 9 digits).
+fn stringGetDigits(sp: [:0]const u8, pp: *usize, pval: *i32, min_digits: usize, max_digits: usize) bool {
+    var v: i32 = 0;
+    var p = pp.*;
+    const p_start = p;
+    while (true) {
+        const c = sp[p];
+        if (c < '0' or c > '9') break;
+        // arbitrary limit to 9 digits
+        if (v >= 100000000) return false;
+        v = v * 10 + @as(i32, c - '0');
+        p += 1;
+        if (p - p_start == max_digits) break;
+    }
+    if (p - p_start < min_digits) return false;
+    pval.* = v;
+    pp.* = p;
+    return true;
+}
+
+/// string_get_milliseconds (quickjs.c:55552): parse an optional fractional
+/// part as milliseconds and truncate.
+fn stringGetMilliseconds(sp: [:0]const u8, pp: *usize, pval: *i32) bool {
+    var mul: i32 = 100;
+    var msec: i32 = 0;
+    var p = pp.*;
+    const c = sp[p];
+    if (c == '.' or c == ',') {
+        p += 1;
+        const p_start = p;
+        while (sp[p] >= '0' and sp[p] <= '9') {
+            msec += @as(i32, sp[p] - '0') * mul;
+            mul = @divTrunc(mul, 10);
+            p += 1;
+            if (p - p_start == 9) break;
+        }
+        if (p > p_start) {
+            // only consume the separator if digits are present
+            pval.* = msec;
+            pp.* = p;
+        }
+    }
+    return true;
+}
+
+/// upper_ascii (quickjs.c:55577).
+fn upperAscii(c: u8) u8 {
+    return if (c >= 'a' and c <= 'z') c - 'a' + 'A' else c;
+}
+
+/// string_get_tzoffset (quickjs.c:55581).
+fn stringGetTzOffset(sp: [:0]const u8, pp: *usize, tzp: *i32, strict: bool) bool {
+    var p = pp.*;
+    const sgn = sp[p];
+    p += 1;
+    var tz: i32 = 0;
+    if (sgn == '+' or sgn == '-') {
+        var hh: i32 = undefined;
+        const digits_start = p;
+        if (!stringGetDigits(sp, &p, &hh, 1, 0)) return false;
+        var n = p - digits_start;
+        if (strict and n != 2 and n != 4) return false;
+        while (n > 4) {
+            n -= 2;
+            hh = @divTrunc(hh, 100);
+        }
+        var mm: i32 = 0;
+        if (n > 2) {
+            mm = @rem(hh, 100);
+            hh = @divTrunc(hh, 100);
+        } else {
+            mm = 0;
+            if (stringSkipChar(sp, &p, ':')) {
+                // optional separator
+                if (!stringGetDigits(sp, &p, &mm, 2, 2)) return false;
+            } else {
+                if (strict) return false; // [+-]HH is not accepted in strict mode
+            }
+        }
+        if (hh > 23 or mm > 59) return false;
+        tz = hh * 60 + mm;
+        if (sgn != '+') tz = -tz;
+    } else if (sgn != 'Z') {
+        return false;
+    }
+    pp.* = p;
+    tzp.* = tz;
+    return true;
+}
+
+/// string_match (quickjs.c:55622): case-insensitive keyword match.
+fn stringMatch(sp: [:0]const u8, pp: *usize, s: []const u8) bool {
+    var p = pp.*;
+    for (s) |ch| {
+        if (upperAscii(sp[p]) != upperAscii(ch)) return false;
+        p += 1;
+    }
+    pp.* = p;
+    return true;
+}
+
+/// find_abbrev (quickjs.c:55635): 3-letter abbreviation lookup.
+fn findAbbrev(sp: [:0]const u8, p: usize, list: []const u8, count: usize) ?usize {
+    var n: usize = 0;
+    while (n < count) : (n += 1) {
+        var i: usize = 0;
+        while (true) : (i += 1) {
+            if (upperAscii(sp[p + i]) != upperAscii(list[n * 3 + i])) break;
+            if (i == 2) return n;
+        }
+    }
+    return null;
+}
+
+/// string_get_month (quickjs.c:55649).
+fn stringGetMonth(sp: [:0]const u8, pp: *usize, pval: *i32) bool {
+    const n = findAbbrev(sp, pp.*, month_names, 12) orelse return false;
+    pval.* = @intCast(n + 1);
+    pp.* += 3;
+    return true;
+}
+
+/// js_date_parse_isostring (quickjs.c:55662): parse the toISOString format.
+/// A date-time without a timezone offset is LOCAL time (is_local = true at the
+/// 'T'; an explicit offset/Z clears it); a date-only form stays UTC.
+fn jsDateParseIsostring(sp: [:0]const u8, fields: *[9]i32, is_local: *bool) bool {
+    var p: usize = 0;
+
+    // initialize fields to the beginning of the Epoch
+    for (0..9) |i| fields[i] = @intFromBool(i == 2);
+    is_local.* = false;
+
+    // year is either yyyy digits or [+-]yyyyyy
+    const sgn = sp[p];
+    if (sgn == '-' or sgn == '+') {
+        p += 1;
+        if (!stringGetDigits(sp, &p, &fields[0], 6, 6)) return false;
+        if (sgn == '-') {
+            if (fields[0] == 0) return false; // reject -000000
+            fields[0] = -fields[0];
+        }
+    } else {
+        if (!stringGetDigits(sp, &p, &fields[0], 4, 4)) return false;
+    }
+    if (stringSkipChar(sp, &p, '-')) {
+        if (!stringGetDigits(sp, &p, &fields[1], 2, 2)) return false; // month
+        if (fields[1] < 1) return false;
+        fields[1] -= 1;
+        if (stringSkipChar(sp, &p, '-')) {
+            if (!stringGetDigits(sp, &p, &fields[2], 2, 2)) return false; // day
+            if (fields[2] < 1) return false;
+        }
+    }
+    if (stringSkipChar(sp, &p, 'T')) {
+        is_local.* = true;
+        if (!stringGetDigits(sp, &p, &fields[3], 2, 2) // hour
+        or !stringSkipChar(sp, &p, ':') or
+            !stringGetDigits(sp, &p, &fields[4], 2, 2)) // minute
+        {
+            fields[3] = 100; // reject unconditionally
+            return true;
+        }
+        if (stringSkipChar(sp, &p, ':')) {
+            if (!stringGetDigits(sp, &p, &fields[5], 2, 2)) return false; // second
+            _ = stringGetMilliseconds(sp, &p, &fields[6]);
+        }
+    }
+    // parse the time zone offset if present: [+-]HH:mm or [+-]HHmm
+    if (sp[p] != 0) {
+        is_local.* = false;
+        if (!stringGetTzOffset(sp, &p, &fields[8], true)) return false;
+    }
+    // error if extraneous characters
+    return sp[p] == 0;
+}
+
+/// js_tzabbr (quickjs.c:55722).
+const TzAbbr = struct { name: []const u8, offset: i32 };
+const js_tzabbr = [_]TzAbbr{
+    .{ .name = "GMT", .offset = 0 }, // Greenwich Mean Time
+    .{ .name = "UTC", .offset = 0 }, // Coordinated Universal Time
+    .{ .name = "UT", .offset = 0 }, // Universal Time
+    .{ .name = "Z", .offset = 0 }, // Zulu Time
+    .{ .name = "EDT", .offset = -4 * 60 }, // Eastern Daylight Time
+    .{ .name = "EST", .offset = -5 * 60 }, // Eastern Standard Time
+    .{ .name = "CDT", .offset = -5 * 60 }, // Central Daylight Time
+    .{ .name = "CST", .offset = -6 * 60 }, // Central Standard Time
+    .{ .name = "MDT", .offset = -6 * 60 }, // Mountain Daylight Time
+    .{ .name = "MST", .offset = -7 * 60 }, // Mountain Standard Time
+    .{ .name = "PDT", .offset = -7 * 60 }, // Pacific Daylight Time
+    .{ .name = "PST", .offset = -8 * 60 }, // Pacific Standard Time
+    .{ .name = "WET", .offset = 0 * 60 }, // Western European Time
+    .{ .name = "WEST", .offset = 1 * 60 }, // Western European Summer Time
+    .{ .name = "CET", .offset = 1 * 60 }, // Central European Time
+    .{ .name = "CEST", .offset = 2 * 60 }, // Central European Summer Time
+    .{ .name = "EET", .offset = 2 * 60 }, // Eastern European Time
+    .{ .name = "EEST", .offset = 3 * 60 }, // Eastern European Summer Time
+};
+
+/// string_get_tzabbr (quickjs.c:55747).
+fn stringGetTzAbbr(sp: [:0]const u8, pp: *usize, offset: *i32) bool {
+    for (js_tzabbr) |abbr| {
+        if (stringMatch(sp, pp, abbr.name)) {
+            offset.* = abbr.offset;
+            return true;
+        }
+    }
+    return false;
+}
+
+fn adjustTwoDigitYear(v: i32) i32 {
+    return v + @as(i32, if (v < 100) 1900 else 0) + @as(i32, if (v < 50) 100 else 0);
+}
+
+/// js_date_parse_otherstring (quickjs.c:55758): parse toString, toUTCString
+/// and other lenient formats (month names, slash dates, tz abbreviations,
+/// AM/PM, parenthesized phrases, skipped words).
+fn jsDateParseOtherstring(sp: [:0]const u8, fields: *[9]i32, is_local: *bool) bool {
+    var p: usize = 0;
+    var val: i32 = 0;
+    var num: [3]i32 = undefined;
+    var has_year = false;
+    var has_mon = false;
+    var has_time = false;
+    var num_index: usize = 0;
+
+    // initialize fields to the beginning of 2001-01-01
+    fields[0] = 2001;
+    fields[1] = 1;
+    fields[2] = 1;
+    for (3..9) |i| fields[i] = 0;
+    is_local.* = true;
+
+    while (stringSkipSpaces(sp, &p) != 0) {
+        const p_start = p;
+        var c = sp[p];
+        if (c == '+' or c == '-') {
+            if (has_time and stringGetTzOffset(sp, &p, &fields[8], false)) {
+                is_local.* = false;
+            } else {
+                p += 1;
+                if (stringGetDigits(sp, &p, &val, 1, 0)) {
+                    if (c == '-') {
+                        if (val == 0) return false;
+                        val = -val;
+                    }
+                    fields[0] = val;
+                    has_year = true;
+                }
+            }
+        } else if (stringGetDigits(sp, &p, &val, 1, 0)) {
+            if (stringSkipChar(sp, &p, ':')) {
+                // time part
+                fields[3] = val;
+                if (!stringGetDigits(sp, &p, &fields[4], 1, 2)) return false;
+                if (stringSkipChar(sp, &p, ':')) {
+                    if (!stringGetDigits(sp, &p, &fields[5], 1, 2)) return false;
+                    _ = stringGetMilliseconds(sp, &p, &fields[6]);
+                }
+                has_time = true;
+                if ((sp[p] == '+' or sp[p] == '-') and
+                    stringGetTzOffset(sp, &p, &fields[8], false))
+                {
+                    is_local.* = false;
+                }
+            } else {
+                if (p - p_start > 2 and !has_year) {
+                    fields[0] = val;
+                    has_year = true;
+                } else if ((val < 1 or val > 31) and !has_year) {
+                    fields[0] = adjustTwoDigitYear(val);
+                    has_year = true;
+                } else {
+                    if (num_index == 3) return false;
+                    num[num_index] = val;
+                    num_index += 1;
+                }
+            }
+        } else if (stringGetMonth(sp, &p, &fields[1])) {
+            has_mon = true;
+            _ = stringSkipUntil(sp, &p, "0123456789 -/(");
+        } else if (has_time and stringMatch(sp, &p, "PM")) {
+            if (fields[3] < 12) fields[3] += 12;
+            continue;
+        } else if (has_time and stringMatch(sp, &p, "AM")) {
+            if (fields[3] == 12) fields[3] -= 12;
+            continue;
+        } else if (stringGetTzAbbr(sp, &p, &fields[8])) {
+            is_local.* = false;
+            continue;
+        } else if (c == '(') { // skip parenthesized phrase
+            var level: i32 = 0;
+            while (sp[p] != 0) {
+                c = sp[p];
+                p += 1;
+                level += @intFromBool(c == '(');
+                level -= @intFromBool(c == ')');
+                if (level == 0) break;
+            }
+            if (level > 0) return false;
+        } else if (c == ')') {
+            return false;
+        } else {
+            if (has_year or has_mon or has_time or num_index > 0) return false;
+            // skip a word
+            _ = stringSkipUntil(sp, &p, " -/(");
+        }
+        _ = stringSkipSeparators(sp, &p);
+    }
+    if (num_index + @as(usize, @intFromBool(has_year)) + @as(usize, @intFromBool(has_mon)) > 3) return false;
+
+    switch (num_index) {
+        0 => if (!has_year) return false,
+        1 => {
+            if (has_mon) {
+                fields[2] = num[0];
+            } else {
+                fields[1] = num[0];
+            }
+        },
+        2 => {
+            if (has_year) {
+                fields[1] = num[0];
+                fields[2] = num[1];
+            } else if (has_mon) {
+                fields[0] = adjustTwoDigitYear(num[1]);
+                fields[2] = num[0];
+            } else {
+                fields[1] = num[0];
+                fields[2] = num[1];
+            }
+        },
+        3 => {
+            fields[0] = adjustTwoDigitYear(num[2]);
+            fields[1] = num[0];
+            fields[2] = num[1];
+        },
+        else => return false,
+    }
+    if (fields[1] < 1 or fields[2] < 1) return false;
+    fields[1] -= 1;
+    return true;
+}
+
+// --- Object plumbing ---------------------------------------------------------
 
 fn expectDateObject(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
@@ -689,25 +1383,6 @@ fn dateObjectFromValue(value: core.JSValue) ?*core.Object {
     return object;
 }
 
-fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
-    const string_value = value.asStringBody() orelse return;
-    try string_value.ensureFlat(rt);
-    switch (string_value.resolveData()) {
-        .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
-        .utf16 => |units| {
-            for (units) |unit| {
-                if (unit <= 0x7f) {
-                    try buffer.append(rt.memory.allocator, @intCast(unit));
-                } else {
-                    var unit_buf: [16]u8 = undefined;
-                    const printed = try std.fmt.bufPrint(&unit_buf, "\\u{x}", .{unit});
-                    try buffer.appendSlice(rt.memory.allocator, printed);
-                }
-            }
-        },
-    }
-}
-
 fn numberValue(value: core.JSValue) ?f64 {
     if (value.isInt()) return @floatFromInt(value.asInt32().?);
     if (value.isFloat64()) return value.asFloat64().?;
@@ -719,14 +1394,6 @@ fn numberResult(value: f64) core.JSValue {
         return core.JSValue.int32(@intFromFloat(value));
     }
     return core.JSValue.float64(value);
-}
-
-fn valueToI64(value: core.JSValue) ?i64 {
-    if (toNumber(value)) |number| {
-        if (!std.math.isFinite(number)) return null;
-        return @intFromFloat(toInteger(number));
-    }
-    return null;
 }
 
 fn toNumber(value: core.JSValue) ?f64 {
@@ -760,486 +1427,10 @@ fn appendStringValueAscii(writer: *std.Io.Writer, value: core.JSValue) !void {
     }
 }
 
-fn parseIsoDate(bytes: []const u8) ?f64 {
-    var index: usize = 0;
-    var year: i64 = 0;
-    var month: i64 = 1;
-    var day: i64 = 1;
-    var hour: i64 = 0;
-    var minute: i64 = 0;
-    var second: i64 = 0;
-    var millis: i64 = 0;
-    var offset_minutes: i64 = 0;
-
-    if (bytes.len == 0) return null;
-    if (bytes[0] == '-' or bytes[0] == '+') {
-        const sign = bytes[0];
-        index += 1;
-        const abs_year = parseFixedDigits(bytes, &index, 6) orelse return null;
-        if (sign == '-' and abs_year == 0) return null;
-        year = if (sign == '-') -abs_year else abs_year;
-    } else {
-        year = parseFixedDigits(bytes, &index, 4) orelse return null;
-    }
-
-    if (index < bytes.len and bytes[index] == '-') {
-        index += 1;
-        month = parseFixedDigits(bytes, &index, 2) orelse return null;
-        if (month < 1) return null;
-        if (index < bytes.len and bytes[index] == '-') {
-            index += 1;
-            day = parseFixedDigits(bytes, &index, 2) orelse return null;
-            if (day < 1) return null;
-        }
-    }
-
-    if (index < bytes.len and bytes[index] == 'T') {
-        index += 1;
-        hour = parseFixedDigits(bytes, &index, 2) orelse return null;
-        if (index >= bytes.len or bytes[index] != ':') return null;
-        index += 1;
-        minute = parseFixedDigits(bytes, &index, 2) orelse return null;
-        if (index < bytes.len and bytes[index] == ':') {
-            index += 1;
-            second = parseFixedDigits(bytes, &index, 2) orelse return null;
-        }
-        if (index < bytes.len and (bytes[index] == '.' or bytes[index] == ',')) {
-            index += 1;
-            var scale: i64 = 100;
-            var parsed_fraction = false;
-            while (index < bytes.len and bytes[index] >= '0' and bytes[index] <= '9') : (index += 1) {
-                parsed_fraction = true;
-                if (scale > 0) {
-                    millis += @as(i64, bytes[index] - '0') * scale;
-                    scale = @divTrunc(scale, 10);
-                }
-            }
-            if (!parsed_fraction) return null;
-        }
-    }
-
-    if (index < bytes.len) {
-        offset_minutes = parseIsoTimeZoneOffset(bytes, &index) orelse return null;
-    }
-    if (index != bytes.len) return null;
-    if (month > 12 or day > 31 or hour > 24 or minute > 59 or second > 59) return null;
-    if (hour == 24 and (minute != 0 or second != 0 or millis != 0)) return null;
-
-    const utc_ms = makeUtcMsFromNumbers(
-        @floatFromInt(year),
-        @floatFromInt(month - 1),
-        @floatFromInt(day),
-        @floatFromInt(hour),
-        @floatFromInt(minute),
-        @floatFromInt(second),
-        @floatFromInt(millis),
-        false,
-    );
-    if (!std.math.isFinite(utc_ms)) return utc_ms;
-    return timeClip(utc_ms - @as(f64, @floatFromInt(offset_minutes * 60 * 1000)));
-}
-
-fn parseFixedDigits(bytes: []const u8, index: *usize, count: usize) ?i64 {
-    if (index.* + count > bytes.len) return null;
-    const slice = bytes[index.* .. index.* + count];
-    for (slice) |ch| {
-        if (ch < '0' or ch > '9') return null;
-    }
-    index.* += count;
-    return std.fmt.parseInt(i64, slice, 10) catch return null;
-}
-
-fn parseIsoTimeZoneOffset(bytes: []const u8, index: *usize) ?i64 {
-    if (index.* >= bytes.len) return 0;
-    const sign = bytes[index.*];
-    if (sign == 'Z') {
-        index.* += 1;
-        return 0;
-    }
-    if (sign != '+' and sign != '-') return null;
-    index.* += 1;
-
-    const digit_start = index.*;
-    while (index.* < bytes.len and bytes[index.*] >= '0' and bytes[index.*] <= '9') : (index.* += 1) {}
-    const digit_count = index.* - digit_start;
-    if (digit_count != 2 and digit_count != 4) return null;
-
-    var hours: i64 = 0;
-    var minutes: i64 = 0;
-    if (digit_count == 4) {
-        hours = std.fmt.parseInt(i64, bytes[digit_start .. digit_start + 2], 10) catch return null;
-        minutes = std.fmt.parseInt(i64, bytes[digit_start + 2 .. digit_start + 4], 10) catch return null;
-    } else {
-        hours = std.fmt.parseInt(i64, bytes[digit_start..index.*], 10) catch return null;
-        if (index.* < bytes.len and bytes[index.*] == ':') {
-            index.* += 1;
-            minutes = parseFixedDigits(bytes, index, 2) orelse return null;
-        }
-    }
-    if (hours > 23 or minutes > 59) return null;
-    const total = hours * 60 + minutes;
-    return if (sign == '+') total else -total;
-}
-
-fn parseLegacyDateString(bytes: []const u8) ?f64 {
-    return parseLocalDateString(bytes) orelse parseUtcDateString(bytes);
-}
-
-fn parseLocalDateString(bytes: []const u8) ?f64 {
-    var tokens = std.mem.tokenizeScalar(u8, bytes, ' ');
-    const weekday = tokens.next() orelse return null;
-    if (!isWeekdayToken(weekday)) return null;
-    const month_token = tokens.next() orelse return null;
-    const day_token = tokens.next() orelse return null;
-    const year_token = tokens.next() orelse return null;
-    const time_token = tokens.next() orelse return null;
-    const zone_token = tokens.next() orelse return null;
-    if (tokens.next() != null) return null;
-
-    const month = parseMonthToken(month_token) orelse return null;
-    const day = parseDateComponent(day_token) orelse return null;
-    const year = parseDateComponent(year_token) orelse return null;
-    const time = parseClockToken(time_token) orelse return null;
-    const offset_ms = parseGmtOffsetToken(zone_token) orelse return null;
-
-    return timeClip(makeUtcMs(year, month - 1, day, time.hour, time.minute, time.second, 0) - @as(f64, @floatFromInt(offset_ms)));
-}
-
-fn parseUtcDateString(bytes: []const u8) ?f64 {
-    var tokens = std.mem.tokenizeScalar(u8, bytes, ' ');
-    const weekday = tokens.next() orelse return null;
-    if (weekday.len != 4 or weekday[3] != ',' or !isWeekdayToken(weekday[0..3])) return null;
-    const day_token = tokens.next() orelse return null;
-    const month_token = tokens.next() orelse return null;
-    const year_token = tokens.next() orelse return null;
-    const time_token = tokens.next() orelse return null;
-    const zone_token = tokens.next() orelse return null;
-    if (tokens.next() != null) return null;
-    if (!std.mem.eql(u8, zone_token, "GMT")) return null;
-
-    const day = parseDateComponent(day_token) orelse return null;
-    const month = parseMonthToken(month_token) orelse return null;
-    const year = parseDateComponent(year_token) orelse return null;
-    const time = parseClockToken(time_token) orelse return null;
-
-    return timeClip(makeUtcMs(year, month - 1, day, time.hour, time.minute, time.second, 0));
-}
-
-const ParsedClock = struct {
-    hour: i64,
-    minute: i64,
-    second: i64,
-};
-
-fn parseClockToken(bytes: []const u8) ?ParsedClock {
-    if (bytes.len != 8 or bytes[2] != ':' or bytes[5] != ':') return null;
-    return .{
-        .hour = parseDateComponent(bytes[0..2]) orelse return null,
-        .minute = parseDateComponent(bytes[3..5]) orelse return null,
-        .second = parseDateComponent(bytes[6..8]) orelse return null,
-    };
-}
-
-fn parseDateComponent(bytes: []const u8) ?i64 {
-    return std.fmt.parseInt(i64, bytes, 10) catch null;
-}
-
-fn parseMonthToken(bytes: []const u8) ?i64 {
-    return if (std.mem.eql(u8, bytes, "Jan"))
-        1
-    else if (std.mem.eql(u8, bytes, "Feb"))
-        2
-    else if (std.mem.eql(u8, bytes, "Mar"))
-        3
-    else if (std.mem.eql(u8, bytes, "Apr"))
-        4
-    else if (std.mem.eql(u8, bytes, "May"))
-        5
-    else if (std.mem.eql(u8, bytes, "Jun"))
-        6
-    else if (std.mem.eql(u8, bytes, "Jul"))
-        7
-    else if (std.mem.eql(u8, bytes, "Aug"))
-        8
-    else if (std.mem.eql(u8, bytes, "Sep"))
-        9
-    else if (std.mem.eql(u8, bytes, "Oct"))
-        10
-    else if (std.mem.eql(u8, bytes, "Nov"))
-        11
-    else if (std.mem.eql(u8, bytes, "Dec"))
-        12
-    else
-        null;
-}
-
-fn isWeekdayToken(bytes: []const u8) bool {
-    return std.mem.eql(u8, bytes, "Sun") or
-        std.mem.eql(u8, bytes, "Mon") or
-        std.mem.eql(u8, bytes, "Tue") or
-        std.mem.eql(u8, bytes, "Wed") or
-        std.mem.eql(u8, bytes, "Thu") or
-        std.mem.eql(u8, bytes, "Fri") or
-        std.mem.eql(u8, bytes, "Sat");
-}
-
-fn parseGmtOffsetToken(bytes: []const u8) ?i64 {
-    if (!std.mem.startsWith(u8, bytes, "GMT")) return null;
-    const suffix = bytes[3..];
-    if (suffix.len == 0) return 0;
-    if (suffix.len != 5) return null;
-    const sign = switch (suffix[0]) {
-        '+' => @as(i64, 1),
-        '-' => @as(i64, -1),
-        else => return null,
-    };
-    const hours = std.fmt.parseInt(i64, suffix[1..3], 10) catch return null;
-    const minutes = std.fmt.parseInt(i64, suffix[3..5], 10) catch return null;
-    if (hours > 23 or minutes > 59) return null;
-    return sign * (hours * ms_per_hour + minutes * ms_per_minute);
-}
-
-fn dayName(weekday: i64) []const u8 {
-    return switch (weekday) {
-        0 => "Sun",
-        1 => "Mon",
-        2 => "Tue",
-        3 => "Wed",
-        4 => "Thu",
-        5 => "Fri",
-        6 => "Sat",
-        else => "Sun",
-    };
-}
-
-fn monthName(month: i64) []const u8 {
-    return switch (month) {
-        1 => "Jan",
-        2 => "Feb",
-        3 => "Mar",
-        4 => "Apr",
-        5 => "May",
-        6 => "Jun",
-        7 => "Jul",
-        8 => "Aug",
-        9 => "Sep",
-        10 => "Oct",
-        11 => "Nov",
-        12 => "Dec",
-        else => "Jan",
-    };
-}
-
-fn formatIsoYear(buffer: []u8, year: i64) ![]const u8 {
-    if (year >= 0 and year <= 9999) return fourDigit(buffer, year);
-    const sign: u8 = if (year < 0) '-' else '+';
-    const abs_year = if (year < 0) -year else year;
-    if (buffer.len < 7) return error.NoSpaceLeft;
-    buffer[0] = sign;
-    _ = try sixDigit(buffer[1..], abs_year);
-    return buffer[0..7];
-}
-
-fn formatDateStringYear(buffer: []u8, year: i64) ![]const u8 {
-    if (year >= 0) {
-        if (year <= 9999) return fourDigit(buffer, year);
-        return std.fmt.bufPrint(buffer, "{d}", .{year});
-    }
-    const abs_year = -year;
-    if (abs_year <= 9999) {
-        if (buffer.len < 5) return error.NoSpaceLeft;
-        buffer[0] = '-';
-        _ = try fourDigit(buffer[1..], abs_year);
-        return buffer[0..5];
-    }
-    return std.fmt.bufPrint(buffer, "-{d}", .{abs_year});
-}
-
-fn twoDigit(buffer: *[2]u8, value: i64) []const u8 {
-    const v: u8 = @intCast(@mod(value, 100));
-    buffer[0] = '0' + @divTrunc(v, 10);
-    buffer[1] = '0' + @mod(v, 10);
-    return buffer[0..];
-}
-
-fn threeDigit(buffer: *[3]u8, value: i64) []const u8 {
-    const v: u16 = @intCast(@mod(value, 1000));
-    buffer[0] = '0' + @as(u8, @intCast(@divTrunc(v, 100)));
-    buffer[1] = '0' + @as(u8, @intCast(@mod(@divTrunc(v, 10), 10)));
-    buffer[2] = '0' + @as(u8, @intCast(@mod(v, 10)));
-    return buffer[0..];
-}
-
-fn fourDigit(buffer: []u8, value: i64) ![]const u8 {
-    if (buffer.len < 4) return error.NoSpaceLeft;
-    const v: u16 = @intCast(@mod(value, 10000));
-    buffer[0] = '0' + @as(u8, @intCast(@divTrunc(v, 1000)));
-    buffer[1] = '0' + @as(u8, @intCast(@mod(@divTrunc(v, 100), 10)));
-    buffer[2] = '0' + @as(u8, @intCast(@mod(@divTrunc(v, 10), 10)));
-    buffer[3] = '0' + @as(u8, @intCast(@mod(v, 10)));
-    return buffer[0..4];
-}
-
-fn sixDigit(buffer: []u8, value: i64) ![]const u8 {
-    if (buffer.len < 6) return error.NoSpaceLeft;
-    const v: u32 = @intCast(@mod(value, 1000000));
-    buffer[0] = '0' + @as(u8, @intCast(@divTrunc(v, 100000)));
-    buffer[1] = '0' + @as(u8, @intCast(@mod(@divTrunc(v, 10000), 10)));
-    buffer[2] = '0' + @as(u8, @intCast(@mod(@divTrunc(v, 1000), 10)));
-    buffer[3] = '0' + @as(u8, @intCast(@mod(@divTrunc(v, 100), 10)));
-    buffer[4] = '0' + @as(u8, @intCast(@mod(@divTrunc(v, 10), 10)));
-    buffer[5] = '0' + @as(u8, @intCast(@mod(v, 10)));
-    return buffer[0..6];
-}
-
-fn toInteger(value: f64) f64 {
-    if (std.math.isNan(value) or value == 0) return value;
-    return if (value < 0) -@floor(@abs(value)) else @floor(value);
-}
-
-fn timeClip(value: f64) f64 {
-    if (!std.math.isFinite(value) or @abs(value) > 8.64e15) return std.math.nan(f64);
-    return toInteger(value) + 0.0;
-}
-
-fn constructDateFromParts(args: []const core.JSValue) !f64 {
-    const year_number = toNumber(args[0]) orelse return error.TypeError;
-    const month_number = toNumber(args[1]) orelse return error.TypeError;
-    const day_number = if (args.len >= 3) (toNumber(args[2]) orelse return error.TypeError) else 1;
-    const hour_number = if (args.len >= 4) (toNumber(args[3]) orelse return error.TypeError) else 0;
-    const minute_number = if (args.len >= 5) (toNumber(args[4]) orelse return error.TypeError) else 0;
-    const second_number = if (args.len >= 6) (toNumber(args[5]) orelse return error.TypeError) else 0;
-    const millis_number = if (args.len >= 7) (toNumber(args[6]) orelse return error.TypeError) else 0;
-
-    return makeUtcMsFromNumbers(year_number, month_number, day_number, hour_number, minute_number, second_number, millis_number, true);
-}
-
 fn currentTimeMs() f64 {
     var tv: std.c.timeval = undefined;
     if (std.c.gettimeofday(&tv, null) == 0) {
         return @as(f64, @floatFromInt(tv.sec)) * 1000.0 + @as(f64, @floatFromInt(@divTrunc(tv.usec, 1000)));
     }
     return 0;
-}
-
-const DateParts = struct {
-    year: i64,
-    month: i64,
-    day: i64,
-    hour: i64,
-    minute: i64,
-    second: i64,
-    millis: i64,
-    weekday: i64,
-};
-
-fn makeUtcMs(year: i64, month_zero_based: i64, day: i64, hour: i64, minute: i64, second: i64, millis: i64) f64 {
-    const month_one_based = month_zero_based + 1;
-    const years_delta = @divFloor(month_one_based - 1, 12);
-    const normalized_year = year + years_delta;
-    const normalized_month = @mod(month_one_based - 1, 12) + 1;
-    const days = daysFromCivil(normalized_year, normalized_month, day);
-    const total = days * ms_per_day + hour * ms_per_hour + minute * ms_per_minute + second * ms_per_second + millis;
-    return @floatFromInt(total);
-}
-
-fn makeUtcMsFromNumbers(year_number: f64, month_number: f64, day_number: f64, hour_number: f64, minute_number: f64, second_number: f64, millis_number: f64, adjust_two_digit_year: bool) f64 {
-    if (!std.math.isFinite(year_number) or
-        !std.math.isFinite(month_number) or
-        !std.math.isFinite(day_number) or
-        !std.math.isFinite(hour_number) or
-        !std.math.isFinite(minute_number) or
-        !std.math.isFinite(second_number) or
-        !std.math.isFinite(millis_number))
-    {
-        return std.math.nan(f64);
-    }
-
-    var year = year_number;
-    if (adjust_two_digit_year) {
-        const year_integer = toInteger(year_number);
-        if (year_integer >= 0 and year_integer <= 99) year = year_integer + 1900;
-    }
-    const month = toInteger(month_number);
-    const day = toInteger(day_number);
-    const hour = toInteger(hour_number);
-    const minute = toInteger(minute_number);
-    const second = toInteger(second_number);
-    const millis = toInteger(millis_number);
-
-    const normalized_year_number = year + @floor(month / 12.0);
-    var normalized_month_number = @rem(month, 12.0);
-    if (normalized_month_number < 0) normalized_month_number += 12.0;
-    if (!std.math.isFinite(normalized_year_number) or normalized_year_number < -271821 or normalized_year_number > 275760) {
-        return std.math.nan(f64);
-    }
-
-    const normalized_year: i64 = @intFromFloat(normalized_year_number);
-    const normalized_month: i64 = @as(i64, @intFromFloat(normalized_month_number)) + 1;
-    const day_base = @as(f64, @floatFromInt(daysFromCivil(normalized_year, normalized_month, 1)));
-    const total_day = day_base + day - 1.0;
-    const ms_per_hour_f = @as(f64, @floatFromInt(ms_per_hour));
-    const ms_per_minute_f = @as(f64, @floatFromInt(ms_per_minute));
-    const ms_per_second_f = @as(f64, @floatFromInt(ms_per_second));
-    const ms_per_day_f = @as(f64, @floatFromInt(ms_per_day));
-
-    var temp_storage: f64 = hour * ms_per_hour_f;
-    const temp_ptr: *volatile f64 = &temp_storage;
-    var time = temp_ptr.*;
-    temp_storage = minute * ms_per_minute_f;
-    time += temp_ptr.*;
-    temp_storage = second * ms_per_second_f;
-    time += temp_ptr.*;
-    time += millis;
-
-    temp_storage = total_day * ms_per_day_f;
-    const value = temp_ptr.* + time;
-    if (!std.math.isFinite(value)) return std.math.nan(f64);
-    return timeClip(value);
-}
-
-fn utcDateParts(ms: i64) DateParts {
-    const days = @divFloor(ms, ms_per_day);
-    var time = @mod(ms, ms_per_day);
-    const civil = civilFromDays(days);
-    const hour = @divFloor(time, ms_per_hour);
-    time = @mod(time, ms_per_hour);
-    const minute = @divFloor(time, ms_per_minute);
-    time = @mod(time, ms_per_minute);
-    const second = @divFloor(time, ms_per_second);
-    const millis = @mod(time, ms_per_second);
-    return .{
-        .year = civil.year,
-        .month = civil.month,
-        .day = civil.day,
-        .hour = hour,
-        .minute = minute,
-        .second = second,
-        .millis = millis,
-        .weekday = @mod(days + 4, 7),
-    };
-}
-
-fn daysFromCivil(year: i64, month: i64, day: i64) i64 {
-    const y = year - @as(i64, if (month <= 2) 1 else 0);
-    const era = @divFloor(y, 400);
-    const yoe = y - era * 400;
-    const mp = month + @as(i64, if (month > 2) -3 else 9);
-    const doy = @divFloor(153 * mp + 2, 5) + day - 1;
-    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
-    return era * 146097 + doe - 719468;
-}
-
-fn civilFromDays(days_since_epoch: i64) struct { year: i64, month: i64, day: i64 } {
-    const z = days_since_epoch + 719468;
-    const era = @divFloor(z, 146097);
-    const doe = z - era * 146097;
-    const yoe = @divFloor(doe - @divFloor(doe, 1460) + @divFloor(doe, 36524) - @divFloor(doe, 146096), 365);
-    var year = yoe + era * 400;
-    const doy = doe - (365 * yoe + @divFloor(yoe, 4) - @divFloor(yoe, 100));
-    const mp = @divFloor(5 * doy + 2, 153);
-    const day = doy - @divFloor(153 * mp + 2, 5) + 1;
-    const month = mp + if (mp < 10) @as(i64, 3) else @as(i64, -9);
-    year += if (month <= 2) 1 else 0;
-    return .{ .year = year, .month = month, .day = day };
 }

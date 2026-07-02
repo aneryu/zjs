@@ -2222,7 +2222,9 @@ test "date constructor native builtin records ignore dispatch names" {
     var call_buffer = std.ArrayList(u8).empty;
     defer call_buffer.deinit(rt.memory.allocator);
     try engine.exec.value_ops.appendRawString(rt, &call_buffer, call_result);
-    try std.testing.expect(std.mem.indexOf(u8, call_buffer.items, "GMT+0000") != null);
+    // Local-time toString shape (offset varies with the host timezone).
+    try std.testing.expect(std.mem.indexOf(u8, call_buffer.items, "GMT+") != null or
+        std.mem.indexOf(u8, call_buffer.items, "GMT-") != null);
 
     const construct_result = try engine.exec.construct.constructValue(ctx, fake, &.{core.JSValue.int32(1)}, &.{});
     defer construct_result.free(rt);
@@ -2238,7 +2240,7 @@ test "date constructor native builtin records ignore dispatch names" {
         \\const d = new fakeDateConstructor({ valueOf: function(){ return 2; } });
         \\print(d instanceof Date);
         \\print(d.getTime());
-        \\print(fakeDateConstructor().indexOf('GMT+0000') >= 0);
+        \\print(fakeDateConstructor().indexOf('GMT') >= 0);
         \\print(Reflect.construct(fakeDateConstructor, [3], Date).getTime());
     , .{ .mode = .script, .filename = "date-constructor-native-record-dispatch.js" });
     defer parsed.deinit();

@@ -187,12 +187,25 @@ pub fn qjsDateCapturedSetterCall(
 
     const captured_ms = try captureDateValueMs(ctx, this_value);
 
+    // qjs set_date_field coerces exactly `min_int(argc, end_field -
+    // first_field)` arguments (quickjs.c:55265); extra arguments are not
+    // coerced (their valueOf must not run).
+    const field_count: usize = switch (method_id) {
+        25 => 1, // setMilliseconds 0x671
+        26 => 2, // setSeconds 0x571
+        27 => 3, // setMinutes 0x471
+        28 => 4, // setHours 0x371
+        29 => 1, // setDate 0x211
+        30 => 2, // setMonth 0x121
+        31 => 3, // setFullYear 0x011
+        else => unreachable,
+    };
     var coerced_args: [4]core.JSValue = undefined;
     var coerced_len: usize = 0;
     defer {
         for (coerced_args[0..coerced_len]) |value| value.free(ctx.runtime);
     }
-    while (coerced_len < args.len and coerced_len < coerced_args.len) : (coerced_len += 1) {
+    while (coerced_len < args.len and coerced_len < field_count) : (coerced_len += 1) {
         coerced_args[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, global, args[coerced_len], caller_function, caller_frame);
     }
 
