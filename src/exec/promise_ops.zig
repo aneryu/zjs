@@ -1326,10 +1326,12 @@ pub fn qjsPromiseResolvingFunctionCall(
     const reject = function_object.functionPromiseResolvingReject();
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     if (!reject and value.sameValue(target_value)) {
+        // qjs js_promise_resolve_function_call (quickjs.c:53608):
+        // JS_ThrowTypeError(ctx, "promise self resolution").
         const error_value = if (objectRealmGlobal(function_object)) |error_global|
-            try exception_ops.createNamedError(ctx, error_global, "TypeError", "")
+            try exception_ops.createNamedError(ctx, error_global, "TypeError", "promise self resolution")
         else
-            try exception_ops.createNamedErrorWithConstructor(ctx, global, core.JSValue.undefinedValue(), "TypeError", "");
+            try exception_ops.createNamedErrorWithConstructor(ctx, global, core.JSValue.undefinedValue(), "TypeError", "promise self resolution");
         defer error_value.free(ctx.runtime);
         try qjsPromiseSettleValue(ctx, global, target, error_value, true);
         return core.JSValue.undefinedValue();
