@@ -756,7 +756,7 @@ fn preloadFileModuleGraphInnerMode(
             const global_object = try @import("zjs_vm.zig").contextGlobal(ctx);
             var msg_buf = std.ArrayList(u8).empty;
             defer msg_buf.deinit(runtime.memory.allocator);
-            try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in preloadFileModuleGraphInner {s}:{d}:{d} - {s}", .{ path, err.position.line, err.position.column, err.message });
+            try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in {s}:{d}:{d} - {s}", .{ path, err.position.line, err.position.column, err.message });
             const error_val = try exception_ops.createNamedError(ctx, global_object, "SyntaxError", msg_buf.items);
             _ = ctx.throwValue(error_val);
         }
@@ -781,7 +781,10 @@ fn preloadFileModuleGraphInnerMode(
             continue;
         }
         const dep_source = std.Io.Dir.cwd().readFileAlloc(io, dep_path, allocator, .limited(max_source_size)) catch |err| switch (err) {
-            error.FileNotFound => return error.ModuleNotFound,
+            error.FileNotFound => {
+                if (context) |ctx| try throwCouldNotLoadModule(ctx, dep_path);
+                return error.ModuleNotFound;
+            },
             else => |e| return e,
         };
         defer allocator.free(dep_source);
@@ -790,6 +793,19 @@ fn preloadFileModuleGraphInnerMode(
     if (postorder) |order| {
         try appendTrackedPath(allocator, order, path);
     }
+}
+
+/// Throw the qjs module-loader failure as a catchable JS exception:
+/// `ReferenceError: could not load module filename '<name>'` (mirrors
+/// js_module_loader quickjs-libc.c:699).
+pub fn throwCouldNotLoadModule(ctx: *core.JSContext, filename: []const u8) !void {
+    const exception_ops = @import("vm_exception_ops.zig");
+    const global_object = try @import("zjs_vm.zig").contextGlobal(ctx);
+    var msg_buf = std.ArrayList(u8).empty;
+    defer msg_buf.deinit(ctx.runtime.memory.allocator);
+    try msg_buf.print(ctx.runtime.memory.allocator, "could not load module filename '{s}'", .{filename});
+    const error_val = try exception_ops.createNamedError(ctx, global_object, "ReferenceError", msg_buf.items);
+    _ = ctx.throwValue(error_val);
 }
 
 fn appendTrackedPath(allocator: std.mem.Allocator, paths: *std.ArrayList([]const u8), path: []const u8) !void {
@@ -812,6 +828,14 @@ fn syntheticKindForRequestIndex(
         if (std.mem.eql(u8, value, "text")) return .text;
         if (std.mem.eql(u8, value, "bytes")) return .bytes;
     }
+    // No `type` attribute: a `.json` specifier still loads as a JSON module,
+    // mirroring qjs js_module_loader's extension check
+    // (`has_suffix(module_name, ".json") || res > 0`, quickjs-libc.c:704).
+    if (request_index < record.requests.len) {
+        if (runtime.atoms.name(record.requests[@intCast(request_index)].module_name)) |specifier| {
+            if (std.mem.endsWith(u8, specifier, ".json")) return .json;
+        }
+    }
     return null;
 }
 
@@ -824,7 +848,7 @@ fn syntheticModuleKindName(kind: core.module.SyntheticKind) []const u8 {
     };
 }
 
-fn syntheticModuleRegistryName(allocator: std.mem.Allocator, path: []const u8, kind: core.module.SyntheticKind) ![]u8 {
+pub fn syntheticModuleRegistryName(allocator: std.mem.Allocator, path: []const u8, kind: core.module.SyntheticKind) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}#type={s}", .{ path, syntheticModuleKindName(kind) });
 }
 
@@ -837,7 +861,7 @@ pub fn syntheticModuleFilePath(path: []const u8) []const u8 {
     return syntheticModuleSourcePath(path);
 }
 
-fn preloadSyntheticFileModule(
+pub fn preloadSyntheticFileModule(
     runtime: *core.JSRuntime,
     path: []const u8,
     kind: core.module.SyntheticKind,
@@ -960,15 +984,32 @@ fn resolvedRequestAtom(runtime: *core.JSRuntime, request_atom: core.Atom, referr
 
 // import.meta.url synthesis (moved from the VM call runtime).
 
+/// Mirrors qjs `js_module_set_import_meta` (quickjs-libc.c:548): a module
+/// name containing a scheme separator (`:`) is used verbatim; anything else
+/// becomes `file://` + realpath(name), so import.meta.url is an absolute
+/// file:// URL even when the engine was invoked with a relative path.
 pub fn importMetaUrlValue(rt: *core.JSRuntime, record: *core.module.ModuleRecord) !core.JSValue {
     const name = rt.atoms.name(record.module_name) orelse "";
-    if (std.mem.startsWith(u8, name, "/") or std.mem.indexOfScalar(u8, name, '/') != null) {
-        const path = if (std.mem.startsWith(u8, name, "/"))
-            try rt.memory.allocator.dupe(u8, name)
-        else
-            try std.fs.path.resolve(rt.memory.allocator, &.{name});
-        defer rt.memory.allocator.free(path);
-        const url = try std.fmt.allocPrint(rt.memory.allocator, "file://{s}", .{path});
+    if (std.mem.indexOfScalar(u8, name, ':') != null) {
+        return value_ops.createStringValue(rt, name);
+    }
+    // Synthetic registry names carry a `#type=` suffix that is not part of
+    // the on-disk path; the URL uses the file path portion.
+    const file_path = syntheticModuleFilePath(name);
+    const path_z = rt.memory.allocator.dupeZ(u8, file_path) catch return error.OutOfMemory;
+    defer rt.memory.allocator.free(path_z);
+    var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (std.c.realpath(path_z, &resolved_buf)) |resolved| {
+        const resolved_path = std.mem.span(@as([*:0]u8, @ptrCast(resolved)));
+        const url = try std.fmt.allocPrint(rt.memory.allocator, "file://{s}", .{resolved_path});
+        defer rt.memory.allocator.free(url);
+        return value_ops.createStringValue(rt, url);
+    }
+    // realpath failure (e.g. "<eval>" pseudo-names): keep the pre-realpath
+    // behavior — absolute names still get the file:// scheme, other names are
+    // returned verbatim.
+    if (std.mem.startsWith(u8, file_path, "/")) {
+        const url = try std.fmt.allocPrint(rt.memory.allocator, "file://{s}", .{file_path});
         defer rt.memory.allocator.free(url);
         return value_ops.createStringValue(rt, url);
     }
