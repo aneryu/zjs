@@ -212,8 +212,13 @@ pub fn strictNotEqual(a: core.JSValue, b: core.JSValue) core.JSValue {
 
 pub fn length(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isString()) {
-        const string_value = value.asStringBody() orelse return error.TypeError;
-        return core.JSValue.int32(@intCast(string_value.len()));
+        // Rope-aware: read the length off the (possibly unmaterialized) string
+        // WITHOUT flattening. qjs stores the length in the rope node
+        // (`JSStringRope.len`), so `.length` is O(1); flattening here would turn
+        // an `s = s + x; s.length` accumulator loop into O(n) per iteration.
+        const string_len = core.string.stringValueLen(value);
+        if (string_len <= std.math.maxInt(i32)) return core.JSValue.int32(@intCast(string_len));
+        return core.JSValue.float64(@floatFromInt(string_len));
     }
     if (value.isObject()) {
         const header = value.refHeader() orelse return error.TypeError;
@@ -906,7 +911,7 @@ fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value
             if (node.header().rc == 1 and node.flat == null) {
                 var digits_buf: [16]u8 = undefined;
                 const digits = dtoa.formatInt32(&digits_buf, int_value);
-                if (try core.string.appendRopeTail(node, rt, .{ .latin1 = digits })) {
+                if (try core.string.appendRopeTail(node, rt, .{ .latin1 = digits }, 1)) {
                     return string_value.dup();
                 }
             }
@@ -964,7 +969,9 @@ fn stringAddStrings(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core
     // linking below instead of being copied.
     if (!b_is_rope) {
         if (a.ropeBody()) |node| {
-            if (node.header().rc == 1 and try appendRopeTailValue(rt, node, b)) {
+            // Generic binary add: the only known alias is `a` itself, so the
+            // rope may be extended in place only when it is exclusively held.
+            if (node.header().rc == 1 and try appendRopeTailValue(rt, node, b, 1)) {
                 return a.dup();
             }
         }
@@ -1019,11 +1026,11 @@ fn stringAddStrings(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core
 /// Extends an exclusively-held unmaterialized rope's tail with `rhs`'s flat
 /// content. `rhs` must NOT be a rope (the caller guards that so the rhs's own
 /// deferred content stays lazy through rope-of-rope linking instead).
-fn appendRopeTailValue(rt: *core.JSRuntime, node: *core.string.StringRope, rhs: core.JSValue) !bool {
+fn appendRopeTailValue(rt: *core.JSRuntime, node: *core.string.StringRope, rhs: core.JSValue, max_ref_count: usize) !bool {
     if (rhs.ropeBody() != null) return false;
     if (node.flat != null) return false;
     const rhs_string = stringObject(rhs) orelse return false;
-    return core.string.appendRopeTail(node, rt, rhs_string.resolveData());
+    return core.string.appendRopeTail(node, rt, rhs_string.resolveData(), max_ref_count);
 }
 
 pub fn tryAppendStringInPlace(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.JSValue, max_ref_count: usize) !bool {
@@ -1033,11 +1040,32 @@ pub fn tryAppendStringInPlace(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.
     // spare capacity — the caller copies into a fresh string instead.
     const node = lhs.ropeBody() orelse return false;
     if (@as(usize, @intCast(node.header().rc)) > max_ref_count) return false;
-    return appendRopeTailValue(rt, node, rhs);
+    return appendRopeTailValue(rt, node, rhs, max_ref_count);
 }
 
 pub fn tryAppendLatin1StringInPlace(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.JSValue, max_ref_count: usize) !bool {
     return tryAppendStringInPlace(rt, lhs, rhs, max_ref_count);
+}
+
+/// Fused-accumulator helper for `s = s + x` (OP_add_loc). A FLAT `lhs` has no
+/// spare capacity to append into — qjs grows the accumulator in place using the
+/// allocator's malloc slack (`JS_ConcatStringInPlace`), but zjs's flat `String`
+/// FAM is sized exactly to its length. Instead, start a rope whose growable
+/// private tail buffer becomes the accumulator, so the NEXT `s = s + x` step
+/// hits the O(1) rope tail-append fast path (`tryAppendStringInPlace`) rather
+/// than copying the whole flat string every iteration. `createRope` only dups
+/// its children and never mutates `lhs`, so this is safe for any aliasing.
+///
+/// Returns the new rope value (the caller stores it into the accumulator slot)
+/// or null to fall through to the plain-copy path (rope operands, or a trivial
+/// empty operand that `stringAddStrings` resolves without allocating).
+pub fn startAccumulatorRope(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.JSValue) !?core.JSValue {
+    if (lhs.ropeBody() != null) return null; // rope lhs: handled by tryAppendStringInPlace
+    if (rhs.ropeBody() != null) return null; // rope rhs: keep deferred via rope-of-rope chaining
+    if (core.string.stringValueLen(lhs) == 0) return null; // "" + x -> stringAddStrings returns x
+    if (core.string.stringValueLen(rhs) == 0) return null; // x + "" -> stringAddStrings returns x
+    const rope = try core.string.String.createRope(rt, lhs, rhs);
+    return rope.value();
 }
 
 pub fn tryAppendLatin1AtomRepeatedInPlace(rt: *core.JSRuntime, lhs: core.JSValue, atom_id: core.Atom, repeat_count: usize, max_ref_count: usize) !bool {

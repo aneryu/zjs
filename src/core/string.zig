@@ -731,13 +731,18 @@ pub fn stringValueWide(value: JSValue) bool {
 /// new-node linking (materialized rope). Aliasing is the caller's contract,
 /// exactly like the flat `append*InPlace` family (reference-count accounting at
 /// the call site). On allocation failure the rope is left untouched.
-pub fn appendRopeTail(node: *StringRope, rt: *JSRuntime, suffix: String.ResolvedData) !bool {
+pub fn appendRopeTail(node: *StringRope, rt: *JSRuntime, suffix: String.ResolvedData, max_ref_count: usize) !bool {
     std.debug.assert(node.rt == rt);
     if (node.flat != null) return false;
-    // A shared rope (a rope child, or otherwise held by more than one owner)
+    // A shared rope (a rope child, or otherwise held by an INDEPENDENT owner)
     // must not mutate in place: another owner's view would change under it.
-    // This is the refcount analogue of the old `rope_child` snapshot bit.
-    if (node.header().rc > 1) return false;
+    // The caller passes `max_ref_count` = the number of references it knows to
+    // be aliases of the accumulator it is overwriting (e.g. the fused
+    // `add_loc` path holds the local slot plus its own transient dup = 2). Any
+    // reference beyond that is an independent observer, so appending in place
+    // would corrupt it — bail. This is the refcount analogue of the old
+    // `rope_child` snapshot bit, generalized to the caller's known-alias count.
+    if (node.header().rc > max_ref_count) return false;
     // Tail appends happen strictly before flattening. A demanded rope hash
     // flattens first, so this in-place mutation cannot leave a live hash
     // cache stale.

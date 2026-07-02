@@ -805,7 +805,11 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
 pub fn op_get_length(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const value = (sp - 1)[0];
     if (value.isString()) {
-        const len_val = JSValue.int32(@intCast(value.asStringBody().?.len()));
+        // `stringValueLen` reads a rope's logical length off the node WITHOUT
+        // flattening (qjs `JSStringRope.len`). Using `asStringBody().len()` here
+        // would materialize the rope, turning an `s = s + x; s.length`
+        // accumulator loop into O(n) per iteration.
+        const len_val = JSValue.int32(@intCast(core.string.stringValueLen(value)));
         value.free(vm.ctx.runtime);
         (sp - 1)[0] = len_val;
         return cont(pc + 1, sp, var_buf, vm);

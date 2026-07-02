@@ -737,16 +737,16 @@ test "rope tail append extends an unmaterialized rope in place" {
     const rope_value = rope.value();
     defer rope_value.free(rt);
 
-    try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "ghi" }));
-    try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "jkl" }));
-    try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "" }));
+    try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "ghi" }, 1));
+    try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "jkl" }, 1));
+    try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "" }, 1));
     try std.testing.expectEqual(@as(usize, 12), rope.len);
     try std.testing.expect(!rope.isWide());
 
     // Length growth in a loop exercises the amortized-doubling regrowth.
     var round: usize = 0;
     while (round < 100) : (round += 1) {
-        try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "0123456789" }));
+        try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "0123456789" }, 1));
     }
     try std.testing.expectEqual(@as(usize, 1012), rope.len);
 
@@ -758,7 +758,7 @@ test "rope tail append extends an unmaterialized rope in place" {
     try std.testing.expectEqual(@as(u16, '9'), flat.codeUnitAt(1011));
 
     // Materialized ropes refuse tail appends: their content is captured.
-    try std.testing.expect(!try core.string.appendRopeTail(rope, rt, .{ .latin1 = "nope" }));
+    try std.testing.expect(!try core.string.appendRopeTail(rope, rt, .{ .latin1 = "nope" }, 1));
     try std.testing.expectEqual(@as(usize, 1012), rope.len);
 
     // An unflattened rope destroyed with a pending tail releases it.
@@ -767,7 +767,7 @@ test "rope tail append extends an unmaterialized rope in place" {
     const dropped = try core.string.String.createRope(rt, l2.value(), r2.value());
     l2.value().free(rt);
     r2.value().free(rt);
-    try std.testing.expect(try core.string.appendRopeTail(dropped, rt, .{ .latin1 = "tail" }));
+    try std.testing.expect(try core.string.appendRopeTail(dropped, rt, .{ .latin1 = "tail" }, 1));
     dropped.value().free(rt);
 }
 
@@ -783,13 +783,13 @@ test "rope tail append widens for utf16 suffixes" {
     const rope_value = rope.value();
     defer rope_value.free(rt);
 
-    try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "12" }));
+    try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "12" }, 1));
     try std.testing.expect(!rope.isWide());
     // A wide suffix widens the narrow tail in place and flips the rope wide.
-    try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .utf16 = &.{0x0100} }));
+    try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .utf16 = &.{0x0100} }, 1));
     try std.testing.expect(rope.isWide());
     // Narrow content keeps landing in the widened tail.
-    try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "z" }));
+    try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "z" }, 1));
     try std.testing.expectEqual(@as(usize, 8), rope.len);
 
     const expected = try core.string.String.createUtf16(rt, &.{ 'a', 'b', 'c', 'd', '1', '2', 0x0100, 'z' });
@@ -810,7 +810,7 @@ test "rope child snapshots content: shared child refuses tail appends" {
     right.value().free(rt);
     const inner_value = inner.value();
     defer inner_value.free(rt);
-    try std.testing.expect(try core.string.appendRopeTail(inner, rt, .{ .latin1 = "ghi" }));
+    try std.testing.expect(try core.string.appendRopeTail(inner, rt, .{ .latin1 = "ghi" }, 1));
 
     const suffix = try core.string.String.createLatin1(rt, "XY");
     // `inner` becomes a rope child (its rc rises to 2), so further in-place
@@ -821,7 +821,7 @@ test "rope child snapshots content: shared child refuses tail appends" {
     const outer_value = outer.value();
     defer outer_value.free(rt);
 
-    try std.testing.expect(!try core.string.appendRopeTail(inner, rt, .{ .latin1 = "no" }));
+    try std.testing.expect(!try core.string.appendRopeTail(inner, rt, .{ .latin1 = "no" }, 1));
 
     const outer_flat = try outer.flatten();
     try std.testing.expect(outer_flat.eqlBytes("abcdefghiXY"));

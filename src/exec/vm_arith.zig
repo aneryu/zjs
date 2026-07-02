@@ -664,6 +664,10 @@ noinline fn addLocalString(
         if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs_primitive, 2)) {
             return;
         }
+        if (try value_ops.startAccumulatorRope(ctx.runtime, lhs, rhs_primitive)) |rope_val| {
+            try slot_ops.setSlotValue(ctx, &frame.locals[idx], rope_val);
+            return;
+        }
     }
 
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs_primitive);
@@ -772,6 +776,10 @@ noinline fn addLocalStringAt(
 
     if (cell_is_null and rhs_primitive.isString()) {
         if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs_primitive, 2)) {
+            return;
+        }
+        if (try value_ops.startAccumulatorRope(ctx.runtime, lhs, rhs_primitive)) |rope_val| {
+            try slot_ops.setSlotValue(ctx, slot, rope_val);
             return;
         }
     }
