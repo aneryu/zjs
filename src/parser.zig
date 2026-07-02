@@ -8020,15 +8020,46 @@ pub const parser_core = struct {
         } else null;
         const pre_lhs_code_len = s.currentCodeLen();
         const pre_lhs_atom_len = s.currentAtomOperandLen();
+        // Fresh comma tracking for this operand (mirror of qjs
+        // `js_parse_expr2` setting `last_opcode_pos = -1` after a comma,
+        // quickjs.c:28289 — stale state from earlier statements must not
+        // leak into the classification below).
+        s.last_expr_had_comma = false;
         try parseUnary(s, .{ .pow_allowed = false, .in_accepted = flags.in_accepted });
+        // qjs invalidates `last_opcode_pos` when the operand tail is a
+        // control-flow merge point: a comma (`js_parse_expr2`,
+        // quickjs.c:28289) or a regular `emit_label` (ternary / `&&` /
+        // `||` / `??` ends update the last opcode to OP_label). In both
+        // cases `js_parse_delete` falls through to its default `ret_true`
+        // (drop ; push_true) instead of rewriting the trailing access.
+        const reference_blocked = s.last_expr_had_comma or s.last_expr_was_short_circuit_or_cond;
+        if (s.last_lhs_had_optional_chain and !reference_blocked) {
+            if (try tryRewriteOptionalChainDelete(s, pre_lhs_code_len)) return;
+            // No chain exit targets the operand tail: the optional chain
+            // completed inside a sub-expression (e.g. `delete (o?.x).y`),
+            // so the trailing access is a plain reference — exactly what
+            // qjs sees there (a plain OP_get_field after the raw
+            // opt-chain label inside the parentheses).
+            s.last_lhs_had_optional_chain = false;
+        }
         const code_after_lhs = s.currentCode();
         if (code_after_lhs.len > pre_lhs_code_len and code_after_lhs[code_after_lhs.len - 1] == opcode.op.get_length) {
+            if (reference_blocked or s.last_lhs_had_optional_chain) {
+                try s.emitOp(opcode.op.drop);
+                try s.emitOp(opcode.op.push_true);
+                return;
+            }
             try s.truncateCode(code_after_lhs.len - 1);
             try s.emitOpAtom(opcode.op.push_atom_value, atom_module.ids.length);
             try s.emitOp(opcode.op.delete);
             return;
         }
         const shape = classifyLhs(s, pre_lhs_code_len, pre_lhs_atom_len, saved_atom);
+        if (reference_blocked and (shape == .dotted or shape == .indexed)) {
+            try s.emitOp(opcode.op.drop);
+            try s.emitOp(opcode.op.push_true);
+            return;
+        }
         if (lhsShapeIsPrivateReference(s, shape)) return Error.UnexpectedToken;
         if (shape == .none and saved_atom != null and atomNameEquals(s, saved_atom.?, "arguments") and !hasCurrentFunctionBinding(s, saved_atom.?)) {
             try s.truncateCode(pre_lhs_code_len);
@@ -8088,6 +8119,155 @@ pub const parser_core = struct {
                 try s.emitOp(opcode.op.push_true);
             },
         }
+    }
+
+    /// `js_parse_delete` OP_get_field_opt_chain / OP_get_array_el_opt_chain
+    /// handling (`quickjs.c:27512-27562`): delete of an optional-chain
+    /// member access. qjs reads the chain label out of the `*_opt_chain`
+    /// opcode, truncates the access, emits `OP_delete`, then routes the
+    /// chain's short-circuit path through a `drop ; push_true` pad:
+    ///
+    ///     push_atom_value <prop> ; delete ; goto NEXT
+    ///     OPT_CHAIN: drop ; push_true
+    ///     NEXT:
+    ///
+    /// zjs has no parse-phase label table — `parseLhsExpr` patches the
+    /// chain-exit `goto`s to the byte offset just past the trailing
+    /// access — so the equivalent of "read the label" is: collect the
+    /// chain-exit gotos that target the operand tail and re-point them
+    /// at the landing pad. Returns false (emitting nothing) when the
+    /// trailing access is not an optional-chain reference form.
+    fn tryRewriteOptionalChainDelete(s: *State, pre_lhs_code_len: usize) Error!bool {
+        const code = s.currentCode();
+        const tail = code.len;
+        const Form = enum { dotted, indexed, length };
+        var form: Form = undefined;
+        var private_access = false;
+        if (code.len >= pre_lhs_code_len + 5 and code[code.len - 5] == opcode.op.get_field) {
+            const atom_id: Atom = std.mem.readInt(u32, code[code.len - 4 ..][0..4], .little);
+            private_access = atomNameIsPrivate(s, atom_id);
+            form = .dotted;
+        } else if (code.len > pre_lhs_code_len and code[code.len - 1] == opcode.op.get_array_el) {
+            form = .indexed;
+        } else if (code.len > pre_lhs_code_len and code[code.len - 1] == opcode.op.get_length) {
+            form = .length;
+        } else {
+            return false;
+        }
+        var exit_buf: [16]usize = undefined;
+        const exit_count = try collectOptionalChainExits(s, pre_lhs_code_len, tail, &exit_buf);
+        if (exit_count == 0) return false;
+        if (private_access) {
+            // qjs emits an opcode for chain-reached private accesses that
+            // js_parse_delete does not list as a reference, so it falls
+            // through to `ret_true`: `delete this?.#x` is a silent no-op
+            // returning true and the private field survives. The chain
+            // exits already target `tail`, where drop ; push_true lands.
+            try s.emitOpNoSource(opcode.op.drop);
+            try s.emitOpNoSource(opcode.op.push_true);
+            return true;
+        }
+        switch (form) {
+            .dotted => {
+                // Same in-place opcode flip as the plain `.dotted` delete:
+                // `push_atom_value` has the same atom-format width, so the
+                // retained atom operand stays balanced.
+                code[code.len - 5] = opcode.op.push_atom_value;
+                try s.emitOp(opcode.op.delete);
+            },
+            .indexed => {
+                try s.truncateCode(code.len - 1);
+                try s.emitOp(opcode.op.delete);
+            },
+            .length => {
+                // zjs-only wrinkle: `p?.y.length` ends in the fused
+                // `get_length`; expand it like the plain get_length path.
+                try s.truncateCode(code.len - 1);
+                try s.emitOpAtom(opcode.op.push_atom_value, atom_module.ids.length);
+                try s.emitOp(opcode.op.delete);
+            },
+        }
+        // qjs: next_label = emit_goto(OP_goto) ; emit_label(opt_chain_label) ;
+        // drop ; push_true ; emit_label(next_label) (quickjs.c:27531-27538).
+        const next_jump = try emitForwardJumpNoSource(s, opcode.op.goto);
+        const pad: u32 = @intCast(s.currentCodeLen());
+        {
+            const cur = s.currentCode();
+            for (exit_buf[0..exit_count]) |operand_offset| {
+                std.mem.writeInt(u32, cur[operand_offset..][0..4], pad, .little);
+            }
+        }
+        try s.emitOpNoSource(opcode.op.drop);
+        try s.emitOpNoSource(opcode.op.push_true);
+        try patchForwardJump(s, next_jump);
+        return true;
+    }
+
+    /// Collect the optional-chain short-circuit exits (the trailing `goto`
+    /// of each `emitOptionalChainTest` block) whose patched target is
+    /// exactly `tail` — the byte offset just past the operand's final
+    /// access. Instruction-accurate walk (same discipline as
+    /// `adjustJumpTargetsAfterInsert`); a goto qualifies only when it is
+    /// preceded by the full chain-test signature
+    /// `dup ; is_undefined_or_null ; if_false >END ; drop{1,2} ; undefined`
+    /// with the `if_false` target pointing just past the goto, which only
+    /// `emitOptionalChainTest` produces. Chain exits belonging to a chain
+    /// that completed earlier (inside parentheses / a subscript) target an
+    /// interior offset instead of `tail` and are left alone.
+    fn collectOptionalChainExits(
+        s: *State,
+        pre_lhs_code_len: usize,
+        tail: usize,
+        exit_buf: []usize,
+    ) Error!usize {
+        const code = s.currentCode();
+        const atoms = s.currentAtomOperands();
+        var count: usize = 0;
+        var pc: usize = 0;
+        var atom_index: usize = 0;
+        while (pc < code.len) {
+            const op_id = code[pc];
+            const instr = parserPhaseInstruction(code, atoms, pc, atom_index);
+            const size = instr.size;
+            if (size == 0 or pc + size > code.len) return Error.UnexpectedToken;
+            if (op_id == opcode.op.goto and !instr.is_temp and pc >= pre_lhs_code_len) {
+                const target = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+                if (target == tail and isOptionalChainExitGoto(code, pre_lhs_code_len, pc)) {
+                    if (count >= exit_buf.len) return Error.OutOfMemory;
+                    exit_buf[count] = pc + 1;
+                    count += 1;
+                }
+            }
+            if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
+            pc += size;
+        }
+        return count;
+    }
+
+    fn isOptionalChainExitGoto(code: []const u8, min_pos: usize, goto_pc: usize) bool {
+        if (goto_pc < min_pos + 2) return false;
+        if (code[goto_pc - 1] != opcode.op.undefined or code[goto_pc - 2] != opcode.op.drop) return false;
+        const end_after_goto: u32 = @intCast(goto_pc + 5);
+        // drop_count = 1 layout: dup ; is_undefined_or_null ; if_false ; drop ; undefined ; goto
+        if (goto_pc >= min_pos + 9 and
+            code[goto_pc - 9] == opcode.op.dup and
+            code[goto_pc - 8] == opcode.op.is_undefined_or_null and
+            code[goto_pc - 7] == opcode.op.if_false and
+            std.mem.readInt(u32, code[goto_pc - 6 ..][0..4], .little) == end_after_goto)
+        {
+            return true;
+        }
+        // drop_count = 2 layout (optional method call): one extra drop.
+        if (goto_pc >= min_pos + 10 and
+            code[goto_pc - 3] == opcode.op.drop and
+            code[goto_pc - 10] == opcode.op.dup and
+            code[goto_pc - 9] == opcode.op.is_undefined_or_null and
+            code[goto_pc - 8] == opcode.op.if_false and
+            std.mem.readInt(u32, code[goto_pc - 7 ..][0..4], .little) == end_after_goto)
+        {
+            return true;
+        }
+        return false;
     }
 
     fn lhsShapeIsPrivateReference(s: *State, shape: LhsShape) bool {
