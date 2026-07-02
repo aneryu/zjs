@@ -1206,17 +1206,53 @@ pub fn qjsArrayBufferSliceToImmutable(
 }
 
 pub fn qjsArrayBufferResize(ctx: *core.JSContext, receiver: core.JSValue, new_length_value: core.JSValue) !core.JSValue {
+    // Mirrors js_array_buffer_resize (quickjs.c:57216-57237): class check,
+    // then the length coercion (user side effects run first, like JS_ToInt64),
+    // then detached TypeError, then not-resizable TypeError, and only then the
+    // range RangeError. zjs keeps spec ToIntegerOrInfinity range semantics for
+    // the coerced number (huge/negative lengths -> RangeError) instead of
+    // importing qjs's modular JS_ToInt64 wrap (red-line: spec/test262).
     const object = objectFromValue(receiver) orelse return error.TypeError;
     if (object.class_id != core.class.ids.array_buffer) return error.TypeError;
     if (core.object.arrayBufferIsImmutable(ctx.runtime, object)) return error.TypeError;
-    const new_length = try qjsArrayBufferLengthArgument(ctx, new_length_value, null);
+    const number = try qjsArrayBufferLengthNumber(ctx, new_length_value);
     if (object.arrayBufferDetached()) return error.TypeError;
-    return core.typed_array.arrayBufferResizeLength(ctx.runtime, receiver, new_length);
+    const max = object.arrayBufferMaxByteLength() orelse return error.TypeError;
+    if (number < 0 or number > @as(f64, @floatFromInt(max))) return error.RangeError;
+    return core.typed_array.arrayBufferResizeLength(ctx.runtime, receiver, @intFromFloat(number));
 }
 
 pub fn qjsSharedArrayBufferGrow(ctx: *core.JSContext, receiver: core.JSValue, new_length_value: core.JSValue) !core.JSValue {
-    const new_length = try qjsArrayBufferLengthArgument(ctx, new_length_value, null);
-    return core.typed_array.sharedArrayBufferGrowLength(ctx.runtime, receiver, new_length);
+    // Mirrors js_array_buffer_resize invoked with the SHARED_ARRAY_BUFFER
+    // magic (quickjs.c:57216 via quickjs.c:57354): class check precedes the
+    // coercion, and the not-growable TypeError precedes the range RangeError.
+    const object = objectFromValue(receiver) orelse return error.TypeError;
+    if (object.class_id != core.class.ids.shared_array_buffer) return error.TypeError;
+    const number = try qjsArrayBufferLengthNumber(ctx, new_length_value);
+    const max = object.arrayBufferMaxByteLength() orelse return error.TypeError;
+    if (number < 0 or number > @as(f64, @floatFromInt(max))) return error.RangeError;
+    return core.typed_array.sharedArrayBufferGrowLength(ctx.runtime, receiver, @intFromFloat(number));
+}
+
+/// The coercion half of js_array_buffer_resize's JS_ToInt64 step: run the
+/// ToNumber conversion (including user valueOf/toPrimitive side effects) and
+/// return the truncated integer as f64 (ToIntegerOrInfinity), leaving the
+/// range validation to the caller so it can sit AFTER the detached /
+/// not-resizable TypeErrors exactly like quickjs.c:57229-57238.
+fn qjsArrayBufferLengthNumber(ctx: *core.JSContext, value: core.JSValue) !f64 {
+    if (value.isUndefined()) return 0;
+    const global = ctx.global orelse {
+        // Non-VM contexts only see primitives; keep the narrow coercion.
+        return @floatFromInt(try value_ops.toIndexUsize(ctx.runtime, value));
+    };
+    const primitive = try toPrimitiveForNumber(ctx, null, global, value);
+    defer primitive.free(ctx.runtime);
+    if (primitive.isBigInt()) return error.TypeError;
+    const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
+    defer number_value.free(ctx.runtime);
+    const number = value_ops.numberValue(number_value) orelse std.math.nan(f64);
+    if (std.math.isNan(number)) return 0;
+    return @trunc(number);
 }
 
 pub fn qjsArrayBufferTransfer(ctx: *core.JSContext, receiver: core.JSValue, new_length_value: core.JSValue, fixed_length: bool) !core.JSValue {

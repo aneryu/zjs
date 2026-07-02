@@ -244,6 +244,12 @@ pub fn sharedArrayBufferSliceRange(rt: *JSRuntime, buffer_value: JSValue, start:
 }
 
 pub fn sharedArrayBufferGrow(rt: *JSRuntime, buffer_value: JSValue, new_length_value: JSValue) !JSValue {
+    // Mirrors js_array_buffer_resize check order (quickjs.c:57216-57237): the
+    // not-growable TypeError fires before the length range RangeError (qjs's
+    // JS_ToInt64 coercion never range-throws), so grow(-1) on a non-growable
+    // SAB is a TypeError.
+    const buffer = try expectSharedArrayBufferObject(buffer_value);
+    if (buffer.arrayBufferMaxByteLength() == null) return error.TypeError;
     const new_length = try toIndexUsize(rt, new_length_value);
     return sharedArrayBufferGrowLength(rt, buffer_value, new_length);
 }
@@ -276,10 +282,16 @@ pub fn sharedArrayBufferGrowLength(rt: *JSRuntime, buffer_value: JSValue, new_le
 }
 
 pub fn arrayBufferResize(rt: *JSRuntime, buffer_value: JSValue, new_length_value: JSValue) !JSValue {
+    // Mirrors js_array_buffer_resize check order (quickjs.c:57216-57237):
+    // detached TypeError, then not-resizable TypeError, then the length range
+    // RangeError (qjs's JS_ToInt64 coercion never range-throws), so
+    // resize(-1) on a non-resizable buffer is a TypeError. This narrow entry
+    // only sees primitives (no user side effects in the coercion).
     const buffer = try expectArrayBufferOnlyObject(buffer_value);
     if (object.arrayBufferIsImmutable(rt, buffer)) return error.TypeError;
-    const new_length = try toIndexUsize(rt, new_length_value);
     if (buffer.arrayBufferDetached()) return error.TypeError;
+    if (buffer.arrayBufferMaxByteLength() == null) return error.TypeError;
+    const new_length = try toIndexUsize(rt, new_length_value);
     return arrayBufferResizeLength(rt, buffer_value, new_length);
 }
 
