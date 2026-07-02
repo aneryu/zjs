@@ -163,27 +163,15 @@ pub fn rejectedWithUnhandledPrototype(ctx: *core.JSContext, reason: core.JSValue
     return promise;
 }
 
+/// Mirrors qjs perform_promise_then on an already-rejected unhandled promise
+/// (quickjs.c:54224-54229, tracker fired with is_handled=TRUE →
+/// js_std_promise_rejection_tracker quickjs-libc.c:4259-4268): unreport THIS
+/// promise only. Handling one promise must not suppress the report of a
+/// different promise, even one rejected with a sameValue reason.
 pub fn markHandled(ctx: *core.JSContext, promise: *core.Object) void {
     if (!promise.promiseIsRejected()) return;
     const reason = promise.promiseResult() orelse return;
-    const pending_exception_is_unhandled =
-        ctx.exception_slot.hasException() and
-        ctx.unhandled_rejection_slot.hasException() and
-        ctx.exception_slot.value.sameValue(ctx.unhandled_rejection_slot.value);
-    const matches_unhandled_promise =
-        ctx.unhandled_rejection_promise_slot.hasException() and
-        ctx.unhandled_rejection_promise_slot.value.same(promise.value());
-    const matches_unhandled_reason =
-        ctx.unhandled_rejection_slot.hasException() and
-        ctx.unhandled_rejection_slot.value.sameValue(reason);
-
-    if (matches_unhandled_promise or matches_unhandled_reason) {
-        ctx.clearUnhandledRejection();
-        if (pending_exception_is_unhandled) {
-            ctx.clearException();
-            return;
-        }
-    }
+    ctx.removeUnhandledPromiseRejection(promise.value());
     if (!ctx.exception_slot.hasException()) return;
     if (ctx.exception_slot.value.sameValue(reason)) {
         ctx.clearException();

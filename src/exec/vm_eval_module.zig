@@ -7,6 +7,7 @@ const property_ops = @import("property_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const eval_ops = @import("eval_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
+const module_graph = @import("module_graph.zig");
 const object_ops = @import("object_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const string_ops = @import("string_ops.zig");
@@ -134,30 +135,20 @@ pub noinline fn dynamicImport(
         }
     }
 
-    if (ctx.dynamic_import_callback) |callback| {
-        const referrer_path = ctx.runtime.atoms.name(function.filename) orelse "";
-        var specifier_bytes = std.ArrayList(u8).empty;
-        defer specifier_bytes.deinit(ctx.runtime.memory.allocator);
-        try value_ops.appendRawString(ctx.runtime, &specifier_bytes, specifier_string);
-
-        const namespace = callback(ctx.dynamic_import_userdata, ctx, output, global, referrer_path, specifier_bytes.items) catch |err| {
-            if (err == error.ModuleNotFound) {
-                try pushRejectedTypeError(ctx, global, stack, prototype, "module not found");
-                return;
-            }
-            const rejected = try exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
-            errdefer rejected.free(ctx.runtime);
-            try stack.pushOwned(rejected);
-            return;
-        };
-        defer namespace.free(ctx.runtime);
-        const promise = try core.promise.fulfilledWithPrototype(ctx.runtime, namespace, prototype);
-        errdefer promise.free(ctx.runtime);
-        try stack.pushOwned(promise);
+    // Mirror qjs js_dynamic_import (quickjs.c:31073): only the specifier
+    // ToString and options validation run synchronously; the load/link/
+    // evaluate work is deferred to an enqueued job (JS_EnqueueJob
+    // quickjs.c:31155) that settles the returned pending promise, so the
+    // statement after import() runs before any module side effect.
+    const referrer_path = ctx.runtime.atoms.name(function.filename) orelse "";
+    const promise = module_graph.enqueueDynamicImportJob(ctx, global, prototype, referrer_path, specifier_string) catch |err| {
+        const rejected = try exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
+        errdefer rejected.free(ctx.runtime);
+        try stack.pushOwned(rejected);
         return;
-    }
-
-    try pushRejectedTypeError(ctx, global, stack, prototype, "dynamic import is not supported");
+    };
+    errdefer promise.free(ctx.runtime);
+    try stack.pushOwned(promise);
 }
 
 fn enumerateImportAttributes(

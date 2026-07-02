@@ -91,6 +91,12 @@ pub const ModuleRecord = struct {
     import_meta_main: bool = false,
     synthetic_kind: SyntheticKind = .none,
     has_top_level_await: bool = false,
+    /// Cached evaluation exception: a module whose evaluation threw stays
+    /// `.errored` and every later import rethrows this value instead of
+    /// re-running the body (mirrors qjs `JSModuleDef.eval_has_exception` /
+    /// `eval_exception`, rethrown by js_inner_module_evaluation
+    /// quickjs.c:31442).
+    eval_exception: ?value_mod.JSValue = null,
 
     pub fn create(account: *memory.MemoryAccount, atoms: *atom.AtomTable, name: atom.Atom) ModuleRecord {
         return .{
@@ -113,6 +119,7 @@ pub const ModuleRecord = struct {
         const resolved_imports = self.resolved_imports;
         const local_bindings = self.local_bindings;
         const import_meta = self.import_meta;
+        const eval_exception = self.eval_exception;
         self.* = .{
             .memory = account,
             .atoms = atoms,
@@ -155,6 +162,7 @@ pub const ModuleRecord = struct {
             cell.free(rt);
         }
         if (import_meta) |value| value.free(rt);
+        if (eval_exception) |value| value.free(rt);
         if (requested_modules.len != 0) account.free(atom.Atom, requested_modules);
         if (imports.len != 0) account.free(ImportEntry, imports);
         if (exports.len != 0) account.free(ExportEntry, exports);
@@ -167,6 +175,14 @@ pub const ModuleRecord = struct {
 
     pub fn setStatus(self: *ModuleRecord, status: Status) void {
         self.status = status;
+    }
+
+    /// Take ownership of `value` as the cached evaluation exception
+    /// (mirrors qjs js_set_module_evaluated error path setting
+    /// `m->eval_exception`, quickjs.c:31279).
+    pub fn setEvalException(self: *ModuleRecord, rt: anytype, value: value_mod.JSValue) void {
+        if (self.eval_exception) |old| old.free(rt);
+        self.eval_exception = value;
     }
 
     pub fn addRequestedModule(self: *ModuleRecord, name: atom.Atom) !void {
@@ -300,20 +316,48 @@ pub const ModuleRecord = struct {
     }
 };
 
+/// Failed export resolution details captured during linking so callers can
+/// build qjs-shaped SyntaxError messages (mirrors
+/// js_resolve_export_throw_error quickjs.c:30232, which formats the export
+/// and module names at the point of failure).
+pub const LinkErrorInfo = struct {
+    kind: enum { missing_export, ambiguous_export },
+    module_name: atom.Atom,
+    export_name: atom.Atom,
+};
+
 pub const Registry = struct {
     memory: *memory.MemoryAccount,
     atoms: *atom.AtomTable,
     modules: []ModuleRecord = &.{},
+    link_error: ?LinkErrorInfo = null,
 
     pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable) Registry {
         return .{ .memory = account, .atoms = atoms };
     }
 
     pub fn deinit(self: *Registry, rt: anytype) void {
+        self.clearLinkError();
         const modules = self.modules;
         self.modules = &.{};
         for (modules) |*record| record.destroy(rt);
         if (modules.len != 0) self.memory.free(ModuleRecord, modules);
+    }
+
+    pub fn clearLinkError(self: *Registry) void {
+        const info = self.link_error orelse return;
+        self.link_error = null;
+        self.atoms.free(info.module_name);
+        self.atoms.free(info.export_name);
+    }
+
+    fn recordLinkError(self: *Registry, kind: @FieldType(LinkErrorInfo, "kind"), module_name: atom.Atom, export_name: atom.Atom) void {
+        self.clearLinkError();
+        self.link_error = .{
+            .kind = kind,
+            .module_name = self.atoms.dup(module_name),
+            .export_name = self.atoms.dup(export_name),
+        };
     }
 
     pub fn create(self: *Registry, name: atom.Atom) !*ModuleRecord {
@@ -468,8 +512,14 @@ pub const Registry = struct {
         const resolution = try self.resolveExport(module_name, export_name);
         return switch (resolution) {
             .resolved => |binding| binding,
-            .not_found => return error.MissingExport,
-            .ambiguous => return error.AmbiguousExport,
+            .not_found => {
+                self.recordLinkError(.missing_export, module_name, export_name);
+                return error.MissingExport;
+            },
+            .ambiguous => {
+                self.recordLinkError(.ambiguous_export, module_name, export_name);
+                return error.AmbiguousExport;
+            },
         };
     }
 };

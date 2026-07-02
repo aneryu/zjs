@@ -1893,6 +1893,9 @@ fn toUint32Limit(rt: *core.JSRuntime, value: core.JSValue) !u32 {
 
 fn toIntegerOrInfinity(rt: *core.JSRuntime, value: core.JSValue) !f64 {
     if (numberValue(value)) |number| return number;
+    // ToIntegerOrInfinity starts with ToNumber: bigints throw TypeError
+    // (qjs JS_ToNumberHintFree quickjs.c:12955-12959 via JS_ToFloat64Free).
+    if (value.isBigInt()) return error.TypeError;
     if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
     if (value.isNull()) return 0;
     if (value.isUndefined()) return std.math.nan(f64);

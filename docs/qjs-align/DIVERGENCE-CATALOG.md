@@ -427,3 +427,39 @@ asserts the inner `return` trap fires EXACTLY once (`returnCount === 1`) — mir
 qjs double-close would turn the mandatory 0/49775 gate red. The no-active-inner case and
 the map helper agree between engines (divergence is flatMap-specific). Probes:
 `/tmp/b7/gen10_flatmap.js`, `/tmp/b7/gen10_var.js` (2026-07-02).
+
+## 🚫 Intentional divergence (test262 legacy-regexp mandates it — do NOT align): RegExp.prototype.compile subclass/cross-realm TypeError gate (2026-07-03, D8 regexp-surface #2)
+
+`RegExp.prototype.compile` receiver check:
+
+- **zjs (KEEP)**: after the class-id check, `qjsRegExpCompile`
+  (src/exec/regexp_fastpath.zig) also requires `getPrototype() == %RegExp.prototype%` of the
+  active realm — so subclass instances (`new (class extends RegExp{})('a')`) and cross-realm
+  regexps throw TypeError. This approximates the legacy-RegExp proposal's
+  `[[LegacyFeaturesEnabled]]`/same-realm gate.
+- **qjs 04be246**: `js_regexp_compile` (quickjs.c:47811) only does
+  `js_get_regexp(ctx, this_val, TRUE)` = class-id check (quickjs.c:47700), so
+  `(new (class R extends RegExp{})('a')).compile('b')` compiles and returns 'b'.
+
+**Why not aligned**: zjs deliberately enables the test262 `legacy-regexp` feature
+(test262.conf:149, COMPATIBILITY.md:89);
+`annexB/built-ins/RegExp/prototype/compile/this-subclass-instance.js` and
+`this-cross-realm-instance.js` assert the TypeError, so mirroring qjs's class-only check
+turns the mandatory 0/49775 gate red. Probes: /tmp/d8_item2.js (2026-07-03).
+
+## 🚫 Intentional divergence (spec/test262 side — do NOT align): RegExp.escape C0/DEL/Latin-1 escaping (2026-07-03, D8 regexp-surface #4)
+
+- **zjs (spec EncodeForRegExpEscape, KEEP)**: src/builtins/regexp.zig `appendEscapedCodeUnit`
+  escapes exactly the spec sets (syntax chars, otherPunctuators, whitespace/line terminators,
+  surrogates, leading digit/ascii-letter hex); C0 controls other than \t\n\v\f\r, DEL (0x7f)
+  and Latin-1 0x80-0xFF stay raw. `RegExp.escape('é')` → `'é'`.
+- **qjs 04be246**: `js_regexp_escape` (quickjs.c:48021-48072) hex-escapes ALL C0 controls
+  (`c < 33 → hex2`) and ALL Latin-1 (`c < 256 → hex2`) and backslash-prefixes every remaining
+  non-alphanumeric ASCII incl. DEL (`c != '_' → putc8('\\')`). `RegExp.escape('é')` → `'\xe9'`;
+  its DEL output `\`+0x7f is even an invalid identity escape under the u flag.
+- Printable ASCII (otherPunctuators, space, quotes, syntax chars) is escaped identically by
+  both engines — the divergence set is only C0-sans-\t\n\v\f\r / DEL / 0x80-0xFF.
+
+**Why not aligned**: test262 `built-ins/RegExp/escape/*` (escaped-* / non-escaped-*) encodes
+the spec's EncodeForRegExpEscape; mirroring qjs's broader table turns the gate red.
+Probes: /tmp/d8_item4.js (2026-07-03).

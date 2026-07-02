@@ -15,6 +15,7 @@ const runWithArgsState = zjs_vm.runWithArgsState;
 
 const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
+const error_stack_ops = @import("error_stack_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const object_ops = @import("object_ops.zig");
 const slot_ops = @import("slot_ops.zig");
@@ -547,7 +548,13 @@ pub fn directEval(
         .eval_private_bound_names = eval_private_bound_names,
     });
     defer compiled.deinit();
-    if (compiled.syntax_error != null) return error.SyntaxError;
+    if (compiled.syntax_error) |*parse_error| {
+        // qjs parse errors throw with the compile-error surface: own
+        // fileName/lineNumber/columnNumber and a leading `at file:line:col`
+        // stack line (build_backtrace filename branch, quickjs.c:7553-7570).
+        const parse_filename = ctx.runtime.atoms.name(parse_error.filename) orelse "<eval>";
+        return error_stack_ops.throwParseSyntaxError(ctx, global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message);
+    }
     const eval_strict = compiled.function.flags.is_strict;
     if (eval_global_var_bindings and !eval_strict) {
         try validateGlobalEvalFunctionDeclarations(ctx, global, source.items, false);

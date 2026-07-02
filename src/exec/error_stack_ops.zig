@@ -97,6 +97,64 @@ pub fn formatCapturedErrorStackValue(
     return formatCapturedErrorStackStringValue(ctx, sites_value, site_count);
 }
 
+/// Throw the compile-error SyntaxError for a parse failure, mirroring qjs's
+/// parse-error surface: build_backtrace's filename branch (quickjs.c:7553-7570)
+/// defines own fileName/lineNumber/columnNumber data properties
+/// (JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, non-enumerable) and prepends a
+/// `    at <file>:<line>:<col>` line to the stack, which for compile errors is
+/// built eagerly at throw time (JS_ThrowError2 -> build_backtrace with
+/// filename != NULL). zjs stores the eagerly-built string via `setErrorStack`
+/// so the lazy `stack` accessor returns it verbatim.
+pub fn throwParseSyntaxError(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    filename: []const u8,
+    line: u32,
+    col: u32,
+    message: []const u8,
+) !core.JSValue {
+    const rt = ctx.runtime;
+    const line_num: i32 = std.math.cast(i32, line) orelse std.math.maxInt(i32);
+    const col_num: i32 = std.math.cast(i32, col) orelse std.math.maxInt(i32);
+    const error_value = try exception_ops.createNamedErrorWithoutStack(rt, global, "SyntaxError", message);
+    // Ownership: on construction failure below free the value; once
+    // `throwValue` has stored it the exception slot owns it (the final
+    // `return error.SyntaxError` is the intended result, not a failure).
+    defineParseErrorSurface(ctx, global, error_value, filename, line_num, col_num) catch |err| {
+        error_value.free(rt);
+        return err;
+    };
+    _ = ctx.throwValue(error_value);
+    return error.SyntaxError;
+}
+
+fn defineParseErrorSurface(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    error_value: core.JSValue,
+    filename: []const u8,
+    line_num: i32,
+    col_num: i32,
+) !void {
+    const rt = ctx.runtime;
+    const instance = property_ops.expectObject(error_value) catch return;
+    const filename_value = try value_ops.createStringValue(rt, filename);
+    defer filename_value.free(rt);
+    try defineDataProperty(rt, instance, "fileName", filename_value, true, false, true);
+    try defineDataProperty(rt, instance, "lineNumber", core.JSValue.int32(line_num), true, false, true);
+    try defineDataProperty(rt, instance, "columnNumber", core.JSValue.int32(col_num), true, false, true);
+
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(rt.memory.allocator);
+    try bytes.print(rt.memory.allocator, "    at {s}:{d}:{d}\n", .{ filename, line_num, col_num });
+    const frames_value = try buildErrorStackStringValue(ctx, global, null);
+    defer frames_value.free(rt);
+    try value_ops.appendRawString(rt, &bytes, frames_value);
+    const stack_value = try value_ops.createStringValue(rt, bytes.items);
+    defer stack_value.free(rt);
+    try instance.setErrorStack(rt, stack_value);
+}
+
 pub fn errorPrepareStackTrace(rt: *core.JSRuntime, global: *core.Object) !?core.JSValue {
     const error_key = try rt.internAtom("Error");
     defer rt.atoms.free(error_key);
@@ -117,17 +175,27 @@ pub fn backtraceFunctionNameEql(ctx: *core.JSContext, entry: core.BacktraceFrame
     return std.mem.eql(u8, callSiteFunctionName(ctx, entry), expected);
 }
 
+/// Display name for a backtrace frame. Mirrors qjs build_backtrace
+/// (quickjs.c:7580-7586): an empty name renders "<anonymous>", a top-level
+/// script/eval frame renders "<eval>". qjs gets the latter for free because
+/// the compiler names every top-level function def JS_ATOM__eval_
+/// (quickjs.c:37252); zjs's top-level bytecode instead carries name ==
+/// filename (the name-equality is also its eval-frame detection convention,
+/// e.g. vm_call.zig / eval_ops.zig), so the "<eval>" mapping is applied at
+/// this rendering seam.
 pub fn callSiteFunctionName(ctx: *core.JSContext, entry: core.BacktraceFrame) []const u8 {
     const name = ctx.runtime.atoms.name(entry.function_name) orelse "";
     const file = ctx.runtime.atoms.name(entry.filename) orelse "";
-    if (name.len == 0 or std.mem.eql(u8, name, file)) return "<anonymous>";
+    if (name.len == 0) return "<anonymous>";
+    if (std.mem.eql(u8, name, file)) return "<eval>";
     return name;
 }
 
 pub fn callSiteFunctionNameValue(ctx: *core.JSContext, entry: core.BacktraceFrame) !core.JSValue {
     const name = ctx.runtime.atoms.name(entry.function_name) orelse "";
     const file = ctx.runtime.atoms.name(entry.filename) orelse "";
-    if (name.len == 0 or std.mem.eql(u8, name, file)) return core.JSValue.nullValue();
+    if (name.len == 0) return core.JSValue.nullValue();
+    if (std.mem.eql(u8, name, file)) return value_ops.createStringValue(ctx.runtime, "<eval>");
     return value_ops.createStringValue(ctx.runtime, name);
 }
 
@@ -157,8 +225,11 @@ pub fn appendBacktraceFunctionName(
 ) !void {
     const name = ctx.runtime.atoms.name(function_name) orelse "";
     const file = ctx.runtime.atoms.name(filename) orelse "";
-    if (name.len == 0 or std.mem.eql(u8, name, file)) {
+    if (name.len == 0) {
         try bytes.appendSlice(ctx.runtime.memory.allocator, "<anonymous>");
+    } else if (std.mem.eql(u8, name, file)) {
+        // Top-level script/eval frame (see callSiteFunctionName).
+        try bytes.appendSlice(ctx.runtime.memory.allocator, "<eval>");
     } else {
         try bytes.appendSlice(ctx.runtime.memory.allocator, name);
     }

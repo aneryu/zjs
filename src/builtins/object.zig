@@ -967,7 +967,10 @@ pub fn qjsObjectTestIntegrityCall(
 ) !?core.JSValue {
     const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const object = objectFromValue(target_value) orelse return core.JSValue.boolean(true);
-    if (try objectIsExtensibleForIntegrity(ctx, output, global, object)) return core.JSValue.boolean(false);
+    // qjs js_object_isSealed (quickjs.c:40717) walks ownKeys + per-key gopd
+    // FIRST (short-circuiting false on a configurable/writable prop without
+    // ever consulting extensibility) and calls JS_IsExtensible LAST — the
+    // reverse of the spec's TestIntegrityLevel order.
     const own_keys = try objectRestOwnKeys(ctx, output, global, object);
     defer core.Object.freeKeys(ctx.runtime, own_keys);
     for (own_keys) |key| {
@@ -976,7 +979,7 @@ pub fn qjsObjectTestIntegrityCall(
         if (desc.configurable == true) return core.JSValue.boolean(false);
         if (level == .frozen and desc.kind == .data and desc.writable == true) return core.JSValue.boolean(false);
     }
-    return core.JSValue.boolean(true);
+    return core.JSValue.boolean(!(try objectIsExtensibleForIntegrity(ctx, output, global, object)));
 }
 
 pub fn objectIsExtensibleForIntegrity(

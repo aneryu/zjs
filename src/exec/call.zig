@@ -14,6 +14,7 @@ const array_ops = @import("array_ops.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const coercion_ops = @import("coercion_ops.zig");
 const disposable_ops = @import("disposable_ops.zig");
+const error_stack_ops = @import("error_stack_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const math_ops = @import("math_ops.zig");
 const object_ops = @import("object_ops.zig");
@@ -3381,7 +3382,14 @@ pub fn qjsEvalGlobalScriptSource(
     const result: EvalResult = blk: {
         var compiled = parser.compile(ctx.runtime, source, .{ .mode = .script, .filename = filename, .strict = false, .return_completion = true }) catch |err| break :blk err;
         defer compiled.deinit();
-        if (compiled.syntax_error != null) break :blk error.SyntaxError;
+        if (compiled.syntax_error) |*parse_error| {
+            // Compile-error surface: own fileName/lineNumber/columnNumber +
+            // leading stack line (build_backtrace filename branch,
+            // quickjs.c:7553-7570).
+            const parse_filename = ctx.runtime.atoms.name(parse_error.filename) orelse filename;
+            _ = error_stack_ops.throwParseSyntaxError(ctx, global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message) catch |err| break :blk err;
+            break :blk error.SyntaxError;
+        }
         var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
         defer nested_stack.deinit(ctx.runtime);
         break :blk zjs_vm.runWithArgsState(ctx, &nested_stack, &compiled.function, global.value(), &.{}, &.{}, output, global, true, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), false) catch |err| exception_ops.normalizeEvalRuntimeError(err);

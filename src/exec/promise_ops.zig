@@ -601,13 +601,9 @@ pub fn qjsAsyncDisposableStackAwaitValue(
     const on_rejected = try qjsAsyncDisposableStackContinuation(ctx.runtime, global, stack, true);
     defer on_rejected.free(ctx.runtime);
 
-    const then_atom = try ctx.runtime.internAtom("then");
-    defer ctx.runtime.atoms.free(then_atom);
-    const then_value = try getValueProperty(ctx, output, global, awaited, then_atom, caller_function, caller_frame);
-    defer then_value.free(ctx.runtime);
-    if (!isCallableValue(then_value)) return error.TypeError;
-    const then_result = try callValueOrBytecode(ctx, output, global, awaited, then_value, &.{ on_fulfilled, on_rejected }, caller_function, caller_frame);
-    then_result.free(ctx.runtime);
+    // Same await-shaped internal attach as qjs js_async_function_resume
+    // (quickjs.c:21268-21290): perform_promise_then, never a .then read.
+    try qjsPerformPromiseThen(ctx, output, global, awaited, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
 }
 
 pub fn qjsAsyncDisposableStackRecordError(
@@ -1330,53 +1326,23 @@ pub fn qjsPromiseResolvingFunctionCall(
     const reject = function_object.functionPromiseResolvingReject();
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     if (!reject and value.sameValue(target_value)) {
+        // qjs js_promise_resolve_function_call (quickjs.c:53608):
+        // JS_ThrowTypeError(ctx, "promise self resolution").
         const error_value = if (objectRealmGlobal(function_object)) |error_global|
-            try exception_ops.createNamedError(ctx, error_global, "TypeError", "")
+            try exception_ops.createNamedError(ctx, error_global, "TypeError", "promise self resolution")
         else
-            try exception_ops.createNamedErrorWithConstructor(ctx, global, core.JSValue.undefinedValue(), "TypeError", "");
+            try exception_ops.createNamedErrorWithConstructor(ctx, global, core.JSValue.undefinedValue(), "TypeError", "promise self resolution");
         defer error_value.free(ctx.runtime);
         try qjsPromiseSettleValue(ctx, global, target, error_value, true);
         return core.JSValue.undefinedValue();
     }
     if (!reject and value.isObject()) {
-        if (objectFromValue(value)) |resolution_object| {
-            if (resolution_object.class_id == core.class.ids.promise) {
-                if (resolution_object.promiseResult()) |stored| {
-                    try qjsPromiseSettleValue(ctx, global, target, stored, resolution_object.promiseIsRejected());
-                    return core.JSValue.undefinedValue();
-                }
-                const then_key = try ctx.runtime.internAtom("then");
-                defer ctx.runtime.atoms.free(then_key);
-                const then_value = getValueProperty(ctx, output, global, value, then_key, caller_function, caller_frame) catch |err| {
-                    var reason = promiseRejectionReason(ctx, global, err);
-                    defer reason.deinit(ctx.runtime);
-                    try qjsPromiseSettleValue(ctx, global, target, reason.value, true);
-                    reason.commit(ctx);
-                    return core.JSValue.undefinedValue();
-                };
-                defer then_value.free(ctx.runtime);
-                if (isCallableValue(then_value)) {
-                    const resolving = try createPromiseResolvingPair(ctx.runtime, global, target_value);
-                    const resolve = resolving.resolve;
-                    defer resolve.free(ctx.runtime);
-                    const reject_value = resolving.reject;
-                    defer reject_value.free(ctx.runtime);
-                    const then_result = callValueOrBytecode(ctx, output, global, value, then_value, &.{ resolve, reject_value }, caller_function, caller_frame) catch |err| {
-                        if (target.promiseResultSlot().* == null) {
-                            var reason = promiseRejectionReason(ctx, global, err);
-                            defer reason.deinit(ctx.runtime);
-                            try qjsPromiseSettleValue(ctx, global, target, reason.value, true);
-                            reason.commit(ctx);
-                        }
-                        return core.JSValue.undefinedValue();
-                    };
-                    then_result.free(ctx.runtime);
-                    return core.JSValue.undefinedValue();
-                }
-                try qjsPromiseSettleValue(ctx, global, target, value, reject);
-                return core.JSValue.undefinedValue();
-            }
-
+        if (objectFromValue(value) != null) {
+            // No native-promise special case: qjs js_promise_resolve_function_call
+            // (quickjs.c:53600-53630) treats every object resolution uniformly —
+            // Get(resolution, "then") once, and if callable enqueue the thenable
+            // job (a settled/pending native promise is adopted via its `then`,
+            // costing the same 2 ticks and observing patched `then`).
             const then_key = try ctx.runtime.internAtom("then");
             defer ctx.runtime.atoms.free(then_key);
             const then_value = getValueProperty(ctx, output, global, value, then_key, caller_function, caller_frame) catch |err| {
@@ -1388,10 +1354,13 @@ pub fn qjsPromiseResolvingFunctionCall(
             };
             defer then_value.free(ctx.runtime);
             if (isCallableValue(then_value)) {
+                // Mirrors js_promise_resolve_function_call (quickjs.c:53626):
+                // resolving with a callable-then object ALWAYS enqueues a
+                // js_promise_resolve_thenable_job — never stored lazily, never
+                // run synchronously; then is invoked exactly once, as a job.
                 const thenable_job = try qjsPromiseThenableJob(ctx.runtime, global, target_value, value, then_value);
                 defer thenable_job.free(ctx.runtime);
-                try target.setPromiseReactionCallback(ctx.runtime, thenable_job.dup());
-                try target.setPromiseReactionArg(ctx.runtime, null);
+                try enqueuePendingPromiseJob(ctx, thenable_job);
                 return core.JSValue.undefinedValue();
             }
         }
@@ -1482,19 +1451,6 @@ pub fn qjsPromiseThenableJobPending(callback: core.JSValue) bool {
     return callback_object.functionPromiseThenableTarget() != null;
 }
 
-pub fn qjsSettlePendingThenableJobs(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    promise: *core.Object,
-) !void {
-    while (promise.promiseResultSlot().* == null) {
-        const callback = promise.promiseReactionCallback() orelse break;
-        if (!qjsPromiseThenableJobPending(callback)) break;
-        try settlePendingPromiseReaction(ctx, output, global, promise);
-    }
-}
-
 pub fn qjsPromiseThenableJobCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1545,6 +1501,11 @@ pub fn qjsPromiseReactionJobCall(
 
     if (!isCallableValue(handler)) {
         const settle = if (rejected) reject_value else resolve_value;
+        // qjs promise_reaction_job (quickjs.c:53415-53421): "as an extension,
+        // we support undefined as value to avoid creating a dummy promise in
+        // the 'await' implementation of async functions" — an undefined
+        // resolving function is skipped and the value dropped.
+        if (settle.isUndefined()) return core.JSValue.undefinedValue();
         const settle_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), settle, &.{payload}, caller_function, caller_frame);
         settle_result.free(ctx.runtime);
         return core.JSValue.undefinedValue();
@@ -1553,12 +1514,14 @@ pub fn qjsPromiseReactionJobCall(
     const callback_result = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), handler, &.{payload}, caller_function, caller_frame) catch |err| {
         const reason = try qjsPromiseErrorValue(ctx, global, err);
         defer reason.free(ctx.runtime);
+        if (reject_value.isUndefined()) return core.JSValue.undefinedValue();
         const reject_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{reason}, caller_function, caller_frame);
         reject_result.free(ctx.runtime);
         return core.JSValue.undefinedValue();
     };
     if (rejected) clearHandledRejectionException(ctx);
     defer callback_result.free(ctx.runtime);
+    if (resolve_value.isUndefined()) return core.JSValue.undefinedValue();
     const resolve_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{callback_result}, caller_function, caller_frame);
     resolve_result.free(ctx.runtime);
     return core.JSValue.undefinedValue();
@@ -2097,6 +2060,14 @@ pub fn qjsPromiseResolveIdentity(
 }
 
 pub fn qjsPromiseDefaultConstructor(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
+    // qjs uses the cached intrinsic ctx->promise_ctor (js_async_function_resume
+    // quickjs.c:21268, js_new_promise_capability quickjs.c:53745; set at
+    // JS_AddIntrinsicPromise quickjs.c:54663) — never a globalThis.Promise
+    // lookup, so deleting/replacing the global binding cannot break await or
+    // the default species. The realm slot is populated at install time
+    // (installPromiseExtras); the global read remains only as a fallback for
+    // bare non-realm globals (unit-test contexts).
+    if (global.cachedRealmValue(.promise_constructor)) |stored| return stored.dup();
     const promise_key = try ctx.runtime.internAtom("Promise");
     defer ctx.runtime.atoms.free(promise_key);
     return global.getProperty(promise_key);
@@ -2944,13 +2915,11 @@ pub fn qjsAsyncFunctionAwait(
     const on_rejected = try qjsAsyncFunctionResumeCallback(ctx.runtime, global, continuation, true);
     defer on_rejected.free(ctx.runtime);
 
-    const then_atom = try ctx.runtime.internAtom("then");
-    defer ctx.runtime.atoms.free(then_atom);
-    const then_value = try getValueProperty(ctx, output, global, awaited, then_atom, caller_function, caller_frame);
-    defer then_value.free(ctx.runtime);
-    if (!isCallableValue(then_value)) return error.TypeError;
-    const then_result = try callValueOrBytecode(ctx, output, global, awaited, then_value, &.{ on_fulfilled, on_rejected }, caller_function, caller_frame);
-    then_result.free(ctx.runtime);
+    // qjs js_async_function_resume (quickjs.c:21268-21290): the resume
+    // callbacks attach through the INTERNAL perform_promise_then with
+    // undefined resolving funcs — a (patched) Promise.prototype.then property
+    // is never read for a native-promise await.
+    try qjsPerformPromiseThen(ctx, output, global, awaited, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
 }
 
 pub fn qjsAsyncFunctionResumeCallback(
@@ -3495,15 +3464,22 @@ pub fn qjsPerformPromiseThen(
     resolve_value: core.JSValue,
     reject_value: core.JSValue,
 ) !void {
+    _ = output;
     const object = objectFromValue(receiver) orelse return error.TypeError;
     if (object.class_id != core.class.ids.promise) return error.TypeError;
     try processExpiredAtomicsWaiters(ctx);
-    if (object.promiseResultSlot().* == null and object.promiseReactionCallback() != null and
-        qjsPromiseThenableJobPending(object.promiseReactionCallback().?))
+    // zjs-specific Atomics.waitAsync promises settle through the lazy
+    // promiseReactionCallback machinery only (atomicsSettleAsyncWaiter never
+    // fires the reactions list, it may run cross-thread from a notify); keep
+    // the same fast path qjsPromiseThen uses so awaiting a waitAsync promise
+    // still resumes.
+    if (object.promiseResultSlot().* == null and !object.promiseIsRejected() and
+        qjsAtomicsWaitAsyncPromise(ctx.runtime, object) and isCallableValue(on_fulfilled))
     {
-        try qjsSettlePendingThenableJobs(ctx, output, global, object);
+        try object.setPromiseReactionCallback(ctx.runtime, on_fulfilled.dup());
+        try object.setPromiseReactionArg(ctx.runtime, null);
+        return;
     }
-
     if (object.promiseIsRejected()) core.promise.markHandled(ctx, object);
     const reaction = try qjsPromiseReactionRecord(ctx.runtime, on_fulfilled, on_rejected, resolve_value, reject_value);
     defer reaction.free(ctx.runtime);
@@ -3550,12 +3526,6 @@ pub fn qjsPromiseThen(
     defer constructor_value.free(ctx.runtime);
     var capability = try qjsPromiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
     errdefer capability.deinit(ctx.runtime);
-    if (object.promiseResultSlot().* == null and object.promiseReactionCallback() != null and
-        qjsPromiseThenableJobPending(object.promiseReactionCallback().?))
-    {
-        try qjsSettlePendingThenableJobs(ctx, output, global, object);
-    }
-
     if (object.promiseIsRejected()) core.promise.markHandled(ctx, object);
     const on_fulfilled = if (is_catch) core.JSValue.undefinedValue() else if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const on_rejected = if (is_catch) (if (args.len >= 1) args[0] else core.JSValue.undefinedValue()) else if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
@@ -3853,7 +3823,13 @@ pub fn awaitThenableValue(
     };
     then_result.free(ctx.runtime);
 
-    try qjsSettlePendingThenableJobs(ctx, output, global, promise_object);
+    // resolve(anotherThenable) inside `then` enqueues a nested thenable job
+    // (js_promise_resolve_function_call -> JS_EnqueueJob). This helper serves
+    // the drain-model await paths (async generators / module TLA), which
+    // synchronously run the pending queue until the awaited promise settles.
+    if (promise_object.promiseResultSlot().* == null and ctx.pending_promise_jobs.len != 0) {
+        try drainPendingPromiseJobs(ctx, output, global);
+    }
     return try finishAwaitedPromise(ctx, promise_object);
 }
 

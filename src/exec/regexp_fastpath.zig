@@ -145,6 +145,13 @@ pub fn qjsRegExpFunctionCall(
             owned_pattern = string_value;
             pattern = string_value;
         }
+    } else if (!pattern_is_regexp and !pattern.isString() and !pattern.isUndefined()) {
+        // Mirrors js_regexp_constructor (quickjs.c:47786-47793): any non-regexp,
+        // non-undefined pattern goes through JS_ToString, which throws TypeError
+        // for symbols instead of leaking '[object Object]'.
+        const string_value = try toStringForAnnexB(ctx, output, global, pattern, caller_function, caller_frame);
+        owned_pattern = string_value;
+        pattern = string_value;
     }
 
     var owned_flags: ?core.JSValue = null;
@@ -164,7 +171,9 @@ pub fn qjsRegExpFunctionCall(
         owned_flags = empty;
         break :blk empty;
     };
-    if (!flags.isUndefined() and flags.isObject()) {
+    // Mirrors js_compile_regexp (quickjs.c:47577-47578): the flags operand is
+    // ToString'd via JS_ToCStringLen, which throws TypeError for symbols.
+    if (!flags.isUndefined() and !flags.isString()) {
         const string_value = try toStringForAnnexB(ctx, output, global, flags, caller_function, caller_frame);
         if (owned_flags) |old| old.free(ctx.runtime);
         owned_flags = string_value;
@@ -231,6 +240,13 @@ pub fn qjsRegExpConstructCall(
             owned_pattern = string_value;
             pattern = string_value;
         }
+    } else if (!pattern.isString()) {
+        // Mirrors js_regexp_constructor (quickjs.c:47786-47793): any non-regexp,
+        // non-undefined pattern goes through JS_ToString, which throws TypeError
+        // for symbols instead of leaking '[object Object]'.
+        const string_value = try toStringForAnnexB(ctx, output, global, pattern, caller_function, caller_frame);
+        owned_pattern = string_value;
+        pattern = string_value;
     }
 
     var owned_flags: ?core.JSValue = null;
@@ -250,14 +266,18 @@ pub fn qjsRegExpConstructCall(
         owned_flags = pattern_flags;
         break :blk pattern_flags;
     } else core.JSValue.undefinedValue();
-    if (!flags.isUndefined() and flags.isObject()) {
+
+    const prototype = try reflectConstructPrototypeVm(ctx, output, global, "RegExp", new_target, caller_function, caller_frame);
+    // Mirrors js_regexp_constructor + js_compile_regexp (quickjs.c:47795-47797 +
+    // 47577-47578): the flags operand is ToString'd inside js_compile_regexp —
+    // after js_create_from_ctor resolved new.target's prototype — and
+    // JS_ToCStringLen throws TypeError for symbols (not SyntaxError).
+    if (!flags.isUndefined() and !flags.isString()) {
         const string_value = try toStringForAnnexB(ctx, output, global, flags, caller_function, caller_frame);
         if (owned_flags) |old| old.free(ctx.runtime);
         owned_flags = string_value;
         flags = string_value;
     }
-
-    const prototype = try reflectConstructPrototypeVm(ctx, output, global, "RegExp", new_target, caller_function, caller_frame);
     return constructRegExpRecord(ctx, output, global, prototype, pattern, flags, caller_function, caller_frame);
 }
 

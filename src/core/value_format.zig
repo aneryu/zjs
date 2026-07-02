@@ -92,7 +92,12 @@ fn formatSimpleFiniteDecimal(buffer: []u8, value: f64) ?[]const u8 {
     return buffer[0..total_len];
 }
 
-fn trimJsWhitespace(bytes: []const u8) []const u8 {
+/// Shared StrWhiteSpaceChar trimmer used by both ToNumber (`parseJsNumber`)
+/// and StringToBigInt, mirroring qjs `skip_spaces` (quickjs.c:11230) which is
+/// shared by `js_atof` and `JS_StringToBigInt` (quickjs.c:14609): ASCII
+/// 0x09-0x0d + 0x20 plus the Unicode space set (NBSP, U+1680, U+2000-200A,
+/// U+2028/2029, U+202F, U+205F, U+3000, BOM U+FEFF).
+pub fn trimJsWhitespace(bytes: []const u8) []const u8 {
     var start: usize = 0;
     var end: usize = bytes.len;
     while (start < end) {

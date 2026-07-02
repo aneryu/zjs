@@ -1481,6 +1481,9 @@ pub fn constructValueOrBytecodeWithNewTarget(
                             coerced_storage[0] = primitive;
                         } else {
                             defer primitive.free(ctx.runtime);
+                            // JS_ToFloat64Free on a bigint primitive throws
+                            // (qjs js_date_constructor single-arg branch).
+                            if (primitive.isBigInt()) return error.TypeError;
                             coerced_storage[0] = try value_ops.toNumberValue(ctx.runtime, primitive);
                         }
                     }
@@ -1488,6 +1491,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
                     coerced_owned = true;
                     date_args = coerced;
                 } else if (!args[0].isString()) {
+                    if (args[0].isBigInt()) return error.TypeError;
                     coerced_storage[0] = try value_ops.toNumberValue(ctx.runtime, args[0]);
                     coerced = coerced_storage[0..1];
                     coerced_owned = true;
@@ -2104,7 +2108,13 @@ pub fn constructDynamicFunctionFromSource(
     };
     var compiled = try parser.compile(ctx.runtime, source.items, .{ .mode = .eval_direct, .filename = filename, .strict = false });
     defer compiled.deinit();
-    if (compiled.syntax_error != null) return exception_ops.throwSyntaxErrorMessage(ctx, function_global, "invalid syntax");
+    if (compiled.syntax_error) |*parse_error| {
+        // Compile-error surface: own fileName/lineNumber/columnNumber +
+        // leading stack line (build_backtrace filename branch,
+        // quickjs.c:7553-7570).
+        const parse_filename = ctx.runtime.atoms.name(parse_error.filename) orelse filename;
+        return error_stack_ops.throwParseSyntaxError(ctx, function_global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message);
+    }
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
     // A dynamic-function compilation is a *nested* eval inside a live VM call: the
@@ -3102,8 +3112,7 @@ pub fn qjsAtomicsReadModifyWrite(
     const view = try array_ops.atomicsTypedArray(view_value, false);
     if (atomic_op != .load) try core.object.typedArrayRejectImmutableBuffer(ctx.runtime, view);
     const index_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    const index = try toIndexForAtomics(ctx, output, global, index_value, caller_function, caller_frame);
-    try atomicsValidateIndex(ctx.runtime, view, index);
+    const index = try atomicsGetBufIndex(ctx, output, global, view, index_value, caller_function, caller_frame);
 
     const is_bigint = array_ops.atomicsTypedArrayIsBigInt(view);
     const value_arg = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
@@ -3118,7 +3127,10 @@ pub fn qjsAtomicsReadModifyWrite(
         else
             try toUint32ForAtomics(ctx, output, global, replacement_arg, caller_function, caller_frame);
     } else @as(u64, 0);
-    try atomicsValidateIndex(ctx.runtime, view, index);
+    // js_atomics_op (quickjs.c:60604): LOAD coerces no operand, so qjs skips
+    // the post-coercion re-check for it; every other op re-validates after
+    // the operand conversions ran user code.
+    if (atomic_op != .load) try atomicsRevalidateIndex(ctx.runtime, view, index);
 
     const bytes = try atomicsElementBytes(view, index);
     const old = atomicsReadBits(view, bytes);
@@ -3148,8 +3160,7 @@ pub fn qjsAtomicsStore(
     const view = try array_ops.atomicsTypedArray(view_value, false);
     try core.object.typedArrayRejectImmutableBuffer(ctx.runtime, view);
     const index_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    const index = try toIndexForAtomics(ctx, output, global, index_value, caller_function, caller_frame);
-    try atomicsValidateIndex(ctx.runtime, view, index);
+    const index = try atomicsGetBufIndex(ctx, output, global, view, index_value, caller_function, caller_frame);
 
     const value_arg = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
     const is_bigint = array_ops.atomicsTypedArrayIsBigInt(view);
@@ -3162,7 +3173,10 @@ pub fn qjsAtomicsStore(
         try bigintBitsForAtomics(ctx.runtime, stored_value)
     else
         try uint32FromIntegerValueForAtomics(ctx.runtime, stored_value);
-    try atomicsValidateIndex(ctx.runtime, view, index);
+    // Mirrors js_atomics_store (quickjs.c:60770-60773): re-check
+    // typed_array_is_oob (TypeError) then the fresh count (RangeError) after
+    // the value coercion ran user code.
+    try atomicsRevalidateIndex(ctx.runtime, view, index);
     const bytes = try atomicsElementBytes(view, index);
     atomicsWriteBits(view, bytes, bits);
     return stored_value;
@@ -3210,11 +3224,15 @@ pub fn qjsAtomicsWait(
         try toInt32BitsForAtomics(ctx, output, global, expected_arg, caller_function, caller_frame);
     const timeout_arg = if (args.len >= 4) args[3] else core.JSValue.float64(std.math.inf(f64));
     const timeout = try toNumberForAtomics(ctx, output, global, timeout_arg, caller_function, caller_frame);
+    // Mirrors js_atomics_wait (quickjs.c:60900-60901): the can-block check
+    // runs after the operand coercions but BEFORE the memory load/compare, so
+    // a non-blockable thread throws TypeError instead of returning
+    // "not-equal".
+    if (!ctx.runtime.canBlock()) return exception_ops.throwTypeErrorMessage(ctx, global, "cannot block in this thread");
     try atomicsValidateIndex(ctx.runtime, view, index);
     const bytes = try atomicsElementBytes(view, index);
     const current = atomicsReadBits(view, bytes);
     if (current != atomicsMaskBits(view, expected)) return value_ops.createStringValue(ctx.runtime, "not-equal");
-    if (!ctx.runtime.canBlock()) return error.TypeError;
     const wait_ms = atomicsWaitTimeoutMilliseconds(timeout);
     if (wait_ms == 0) return value_ops.createStringValue(ctx.runtime, "timed-out");
     const key = try atomicsWaiterKey(view, bytes);
@@ -3445,6 +3463,39 @@ pub fn atomicsValidateAccess(
 pub fn atomicsValidateIndex(rt: *core.JSRuntime, object: *core.Object, index: usize) !void {
     const length = try core.object.typedArrayLength(rt, object);
     if (index >= length) return error.RangeError;
+}
+
+/// Mirrors js_atomics_get_buf (quickjs.c:60526) for the non-waitable Atomics
+/// ops (is_waitable == 0): after the class check, a detached non-shared buffer
+/// throws TypeError BEFORE ToIndex; the view length is captured BEFORE ToIndex
+/// (`old_len`) so an index-coercion side effect that grows a length-tracking
+/// view cannot legitimize an index that was out of bounds at validation time
+/// (`idx >= old_len` -> RangeError); then RevalidateAtomicAccess re-checks
+/// typed_array_is_oob (-> TypeError) and the fresh count (-> RangeError).
+pub fn atomicsGetBufIndex(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    view: *core.Object,
+    index_value: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !usize {
+    const buffer = try object_ops.atomicsBufferObject(view);
+    if (buffer.class_id != core.class.ids.shared_array_buffer and buffer.arrayBufferDetached()) return error.TypeError;
+    const old_len = try core.object.typedArrayLength(ctx.runtime, view);
+    const index = try toIndexForAtomics(ctx, output, global, index_value, caller_function, caller_frame);
+    if (index >= old_len) return error.RangeError;
+    try atomicsRevalidateIndex(ctx.runtime, view, index);
+    return index;
+}
+
+/// Mirrors the js_atomics_op (quickjs.c:60628-60631) / js_atomics_store
+/// post-coercion re-check: typed_array_is_oob (detached or shrunk-resizable)
+/// -> TypeError, then the fresh count -> RangeError.
+pub fn atomicsRevalidateIndex(rt: *core.JSRuntime, view: *core.Object, index: usize) !void {
+    if (try core.object.typedArrayDetached(view) or try core.object.typedArrayOutOfBounds(view)) return error.TypeError;
+    try atomicsValidateIndex(rt, view, index);
 }
 
 pub fn atomicsElementBytes(object: *core.Object, index: usize) ![]u8 {
@@ -4875,7 +4926,14 @@ pub fn indirectEval(
         if (regexp_literal) |value| break :blk value;
         var compiled = parser.compile(ctx.runtime, source.items, .{ .mode = .eval_indirect, .filename = "<eval>", .strict = false }) catch |err| break :blk err;
         defer compiled.deinit();
-        if (compiled.syntax_error != null) break :blk error.SyntaxError;
+        if (compiled.syntax_error) |*parse_error| {
+            // Compile-error surface: own fileName/lineNumber/columnNumber +
+            // leading stack line (build_backtrace filename branch,
+            // quickjs.c:7553-7570).
+            const parse_filename = ctx.runtime.atoms.name(parse_error.filename) orelse "<eval>";
+            _ = error_stack_ops.throwParseSyntaxError(ctx, eval_global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message) catch |err| break :blk err;
+            break :blk error.SyntaxError;
+        }
         if (!compiled.function.flags.is_strict) {
             validateGlobalEvalFunctionDeclarations(ctx, eval_global, source.items, true) catch |err| break :blk err;
         }

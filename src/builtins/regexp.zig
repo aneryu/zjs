@@ -1491,7 +1491,11 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
             try buffer.appendSlice(rt.memory.allocator, "[object Object]");
         }
     } else {
-        try buffer.appendSlice(rt.memory.allocator, "[object Object]");
+        // Only symbols (and future exotic tags) can land here; JS_ToString
+        // (js_regexp_constructor quickjs.c:47789 / js_compile_regexp
+        // quickjs.c:47578,47627) throws TypeError for them — never a silent
+        // '[object Object]' pattern.
+        return error.TypeError;
     }
 }
 

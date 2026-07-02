@@ -212,9 +212,13 @@ pub fn toNumberForDateMethod(
     if (value.isObject()) {
         const primitive = try toPrimitiveForNumber(ctx, output, global, value);
         defer primitive.free(ctx.runtime);
+        // JS_ToFloat64 on a bigint primitive throws (qjs date argument
+        // coercion never accepts bigints).
+        if (primitive.isBigInt()) return error.TypeError;
         return value_ops.toNumberValue(ctx.runtime, primitive);
     }
     _ = caller_function;
     _ = caller_frame;
+    if (value.isBigInt()) return error.TypeError;
     return value_ops.toNumberValue(ctx.runtime, value);
 }

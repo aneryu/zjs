@@ -92,9 +92,9 @@ fn reflectCall(host_call: InternalCall) HostError!core.JSValue {
         return reflect_ops.revokeProxy(ctx.runtime, function_object);
     }
     if (id == @intFromEnum(StaticMethod.proxy_revocable)) {
-        const receiver = call.thisObject(host_call.this_value) orelse return error.TypeError;
-        if (!call_runtime.isCallableValue(host_call.this_value)) return error.TypeError;
-        if (!try call_runtime.constructorNameEqlLocal(ctx.runtime, receiver, "Proxy")) return error.TypeError;
+        // qjs js_proxy_revocable (quickjs.c:51502) is a plain JS_CFUNC_DEF that
+        // never reads this_val: detached/rebound calls (`const {revocable} =
+        // Proxy; revocable(t, h)`) work. No receiver validation.
         return reflect_ops.proxyRevocable(ctx.runtime, global, args);
     }
     if (global) |global_object| return try call_runtime.qjsReflectCallForNativeRecord(ctx, output, global_object, id, args, caller_function, caller_frame);

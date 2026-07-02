@@ -1206,17 +1206,53 @@ pub fn qjsArrayBufferSliceToImmutable(
 }
 
 pub fn qjsArrayBufferResize(ctx: *core.JSContext, receiver: core.JSValue, new_length_value: core.JSValue) !core.JSValue {
+    // Mirrors js_array_buffer_resize (quickjs.c:57216-57237): class check,
+    // then the length coercion (user side effects run first, like JS_ToInt64),
+    // then detached TypeError, then not-resizable TypeError, and only then the
+    // range RangeError. zjs keeps spec ToIntegerOrInfinity range semantics for
+    // the coerced number (huge/negative lengths -> RangeError) instead of
+    // importing qjs's modular JS_ToInt64 wrap (red-line: spec/test262).
     const object = objectFromValue(receiver) orelse return error.TypeError;
     if (object.class_id != core.class.ids.array_buffer) return error.TypeError;
     if (core.object.arrayBufferIsImmutable(ctx.runtime, object)) return error.TypeError;
-    const new_length = try qjsArrayBufferLengthArgument(ctx, new_length_value, null);
+    const number = try qjsArrayBufferLengthNumber(ctx, new_length_value);
     if (object.arrayBufferDetached()) return error.TypeError;
-    return core.typed_array.arrayBufferResizeLength(ctx.runtime, receiver, new_length);
+    const max = object.arrayBufferMaxByteLength() orelse return error.TypeError;
+    if (number < 0 or number > @as(f64, @floatFromInt(max))) return error.RangeError;
+    return core.typed_array.arrayBufferResizeLength(ctx.runtime, receiver, @intFromFloat(number));
 }
 
 pub fn qjsSharedArrayBufferGrow(ctx: *core.JSContext, receiver: core.JSValue, new_length_value: core.JSValue) !core.JSValue {
-    const new_length = try qjsArrayBufferLengthArgument(ctx, new_length_value, null);
-    return core.typed_array.sharedArrayBufferGrowLength(ctx.runtime, receiver, new_length);
+    // Mirrors js_array_buffer_resize invoked with the SHARED_ARRAY_BUFFER
+    // magic (quickjs.c:57216 via quickjs.c:57354): class check precedes the
+    // coercion, and the not-growable TypeError precedes the range RangeError.
+    const object = objectFromValue(receiver) orelse return error.TypeError;
+    if (object.class_id != core.class.ids.shared_array_buffer) return error.TypeError;
+    const number = try qjsArrayBufferLengthNumber(ctx, new_length_value);
+    const max = object.arrayBufferMaxByteLength() orelse return error.TypeError;
+    if (number < 0 or number > @as(f64, @floatFromInt(max))) return error.RangeError;
+    return core.typed_array.sharedArrayBufferGrowLength(ctx.runtime, receiver, @intFromFloat(number));
+}
+
+/// The coercion half of js_array_buffer_resize's JS_ToInt64 step: run the
+/// ToNumber conversion (including user valueOf/toPrimitive side effects) and
+/// return the truncated integer as f64 (ToIntegerOrInfinity), leaving the
+/// range validation to the caller so it can sit AFTER the detached /
+/// not-resizable TypeErrors exactly like quickjs.c:57229-57238.
+fn qjsArrayBufferLengthNumber(ctx: *core.JSContext, value: core.JSValue) !f64 {
+    if (value.isUndefined()) return 0;
+    const global = ctx.global orelse {
+        // Non-VM contexts only see primitives; keep the narrow coercion.
+        return @floatFromInt(try value_ops.toIndexUsize(ctx.runtime, value));
+    };
+    const primitive = try toPrimitiveForNumber(ctx, null, global, value);
+    defer primitive.free(ctx.runtime);
+    if (primitive.isBigInt()) return error.TypeError;
+    const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
+    defer number_value.free(ctx.runtime);
+    const number = value_ops.numberValue(number_value) orelse std.math.nan(f64);
+    if (std.math.isNan(number)) return 0;
+    return @trunc(number);
 }
 
 pub fn qjsArrayBufferTransfer(ctx: *core.JSContext, receiver: core.JSValue, new_length_value: core.JSValue, fixed_length: bool) !core.JSValue {
@@ -4430,7 +4466,13 @@ pub fn stableArraySortEntries(
             var right = mid;
             var out_index = start;
             while (left < mid and right < end) : (out_index += 1) {
-                if (try arrayByCopySortCompare(ctx, output, global, typed_numeric_default, comparator, &entries[right], &entries[left], caller_function, caller_frame) < 0) {
+                // Faithful to js_array_cmp_generic (quickjs.c:43362) /
+                // js_TA_cmp_generic (quickjs.c:58759): the user comparator
+                // receives (earlier, later) — argv[0] is the element from the
+                // lower original run. Take the right run only on a strictly
+                // positive result so equal elements keep the left-first
+                // (stable) order, matching qjs's a_idx<b_idx tie-break.
+                if (try arrayByCopySortCompare(ctx, output, global, typed_numeric_default, comparator, &entries[left], &entries[right], caller_function, caller_frame) > 0) {
                     temp[out_index] = entries[right];
                     right += 1;
                 } else {
@@ -5081,6 +5123,9 @@ pub fn qjsUint8ArrayCodecCall(
         var bytes = try uint8ArrayStringBytes(ctx.runtime, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
         defer bytes.deinit(ctx.runtime.memory.allocator);
         const options = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+        // Mirrors js_uint8array_from_base64 (quickjs.c:59571): GetOptionsObject
+        // runs after the string check, before any option Get.
+        try uint8ArrayCheckOptionsObject(options);
         const alphabet = try uint8ArrayBase64Alphabet(ctx, output, global, options, caller_function, caller_frame);
         const last_chunk_handling = try uint8ArrayBase64LastChunkHandling(ctx, output, global, options, caller_function, caller_frame);
         var decoded = try decodeBase64Bytes(ctx.runtime, bytes.items, alphabet, last_chunk_handling);
@@ -5097,6 +5142,9 @@ pub fn qjsUint8ArrayCodecCall(
     if (std.mem.eql(u8, name, "toBase64")) {
         const object = try expectUint8ArrayObject(this_value);
         const options = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+        // Mirrors js_uint8array_to_base64 (quickjs.c:59484): GetOptionsObject
+        // runs after the receiver check, before any option Get.
+        try uint8ArrayCheckOptionsObject(options);
         const alphabet = try uint8ArrayBase64Alphabet(ctx, output, global, options, caller_function, caller_frame);
         const omit_padding = try uint8ArrayOmitPadding(ctx, output, global, options, caller_function, caller_frame);
         const bytes = try uint8ArrayViewBytes(ctx.runtime, object);
@@ -5119,6 +5167,10 @@ pub fn qjsUint8ArrayCodecCall(
         var source = try uint8ArrayStringBytes(ctx.runtime, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
         defer source.deinit(ctx.runtime.memory.allocator);
         const options = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+        // Mirrors js_uint8array_set_from_base64 (quickjs.c:59690):
+        // GetOptionsObject runs after the receiver and string checks, before
+        // any option Get.
+        try uint8ArrayCheckOptionsObject(options);
         const alphabet = try uint8ArrayBase64Alphabet(ctx, output, global, options, caller_function, caller_frame);
         const last_chunk_handling = try uint8ArrayBase64LastChunkHandling(ctx, output, global, options, caller_function, caller_frame);
         const target = try uint8ArrayViewBytes(ctx.runtime, object);
@@ -5131,6 +5183,15 @@ pub fn qjsUint8ArrayCodecCall(
 pub const Uint8ArrayBase64Alphabet = enum { base64, base64url };
 pub const Uint8ArrayBase64LastChunkHandling = enum { loose, strict, stop_before_partial };
 pub const Uint8ArrayCodecProgress = struct { read: usize, written: usize };
+
+/// Mirrors check_options_object (quickjs.c:59376), the GetOptionsObject step
+/// shared by toBase64 / fromBase64 / setFromBase64: options must be undefined
+/// or an Object, anything else is a TypeError ("options must be an object").
+/// The hex entry points take no options and never run this check.
+fn uint8ArrayCheckOptionsObject(options: core.JSValue) !void {
+    if (options.isUndefined()) return;
+    if (!options.isObject()) return error.TypeError;
+}
 
 pub fn expectUint8ArrayObject(value: core.JSValue) !*core.Object {
     const object = property_ops.expectObject(value) catch return error.TypeError;

@@ -1685,7 +1685,14 @@ fn runOneTest(
     defer allocator.free(source);
 
     var stderr: []const u8 = "";
-    const can_block = metadata.hasFlag("CanBlockIsTrue");
+    // Mirrors qjs run-test262.c:1805: the main test agent defaults to
+    // can_block = TRUE (a shell host can block), and only the
+    // `CanBlockIsFalse` flag turns it off. The harness's
+    // $262.agent.safeBroadcast probes `Atomics.wait` on the main agent and
+    // relies on this default; with the engine's faithful js_atomics_wait
+    // ordering (can-block TypeError before the value compare) an inverted
+    // default fails every wait/notify agent test.
+    const can_block = !metadata.hasFlag("CanBlockIsFalse");
     const is_async = metadata.hasFlag("async");
     const exited_zero = if (use_external_engine)
         try runExternalEngine(allocator, io, engine_path, source, test_path, test_index, run_as_module, can_block, is_async, timeout_ms, stderr_storage, &stderr)

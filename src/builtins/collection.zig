@@ -239,13 +239,21 @@ fn collectionGroupByRecord(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) HostError!core.JSValue {
-    const receiver = object_ops.objectFromValue(this_value) orelse return error.TypeError;
-    if (!try call_runtime.constructorNameEqlLocal(ctx.runtime, receiver, "Map")) return error.TypeError;
-    const prototype = (try object_ops.constructorPrototypeObject(ctx.runtime, this_value));
+    // Mirrors js_object_groupBy (quickjs.c:52343, shared is_map=1 entry for
+    // Map.groupBy): the receiver is never read — qjs constructs the result via
+    // js_map_constructor with a JS_UNDEFINED this (the intrinsic Map
+    // prototype), so a detached `const g = Map.groupBy; g(items, fn)` works.
     if (global) |active_global| {
-        if (try qjsMapGroupByRecord(ctx, output, active_global, args, prototype, caller_function, caller_frame)) |value| return value;
+        if (try qjsMapGroupByCall(ctx, output, active_global, args, caller_function, caller_frame)) |value| return value;
         return error.TypeError;
     }
+    // Bare-runtime path (no realm intrinsics): keep deriving the result
+    // prototype from a constructor receiver when one is supplied, but never
+    // require the receiver.
+    const prototype: ?*core.Object = if (object_ops.objectFromValue(this_value) != null)
+        object_ops.constructorPrototypeObject(ctx.runtime, this_value) catch null
+    else
+        null;
     return groupByWithCallbackHost(ctx.runtime, args, prototype, collection_adapter.host(globals)) catch |err| switch (err) {
         error.TypeError => error.TypeError,
         else => err,
@@ -683,7 +691,7 @@ fn iteratorPrototype(
         }
     }
 
-    const prototype = try createIteratorPrototype(rt, global, receiver, tag_name);
+    const prototype = try createIteratorPrototype(rt, global, receiver, iterator_class, tag_name);
     if (ctx) |context| {
         const slot: usize = iterator_class;
         if (slot < context.class_prototypes.len) {
@@ -700,6 +708,7 @@ fn createIteratorPrototype(
     rt: *core.JSRuntime,
     global: ?*core.Object,
     receiver: *core.Object,
+    iterator_class: core.ClassId,
     tag_name: []const u8,
 ) !*core.Object {
     var owned_base: ?*core.Object = null;
@@ -728,7 +737,12 @@ fn createIteratorPrototype(
     try defineToStringTag(rt, specific, tag_name);
     const next = try function_builtin.nativeFunction(rt, "next", 0);
     defer next.free(rt);
-    (try expectObject(next)).nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.collection, @intFromEnum(PrototypeMethod.iterator_next));
+    const next_object = try expectObject(next);
+    next_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.collection, @intFromEnum(PrototypeMethod.iterator_next));
+    // Mirrors js_map_iterator_next (quickjs.c:52576): the next function is
+    // bound to one iterator class (JS_GetOpaque2 with JS_CLASS_MAP_ITERATOR +
+    // magic), so a Map Iterator's next rejects Set iterators and vice versa.
+    if (!next_object.addCollectionMethodOwnerClass(rt, iterator_class)) return error.TypeError;
     try specific.defineOwnProperty(rt, core.atom.predefinedId("next", .string).?, core.Descriptor.data(next, true, false, true));
     return specific;
 }
@@ -953,11 +967,6 @@ fn collectionForEach(
         const entry = object.collectionEntriesSlot().*[index];
         index += 1;
         if (!entry.active) continue;
-        if (object.class_id == core.class.ids.map) try applyForEachFixtureMutation(rt, object, args[0], host);
-        if (object.class_id == core.class.ids.set and (host.closureKind(rt, args[0]) orelse 0) == 49) {
-            try assertAndShiftExpected(rt, host.globals, entry.key);
-            continue;
-        }
         var callback_args = if (object.class_id == core.class.ids.set)
             [_]core.JSValue{ entry.key, entry.key, object.value() }
         else
@@ -966,79 +975,6 @@ fn collectionForEach(
         result.free(rt);
     }
     return core.JSValue.undefinedValue();
-}
-
-fn applyForEachFixtureMutation(rt: *core.JSRuntime, object: *core.Object, callback: core.JSValue, host: CallbackHost) !void {
-    const kind = host.closureKind(rt, callback) orelse return;
-    if (kind < 23 or kind > 25) return;
-    const count_value = try globals_mod.getByName(rt, host.globals, "count");
-    defer count_value.free(rt);
-    if ((count_value.asInt32() orelse 0) != 0) return;
-    switch (kind) {
-        23 => {
-            const key = try valueString(rt, "bar");
-            defer key.free(rt);
-            const out = try collectionDelete(rt, object, key);
-            out.free(rt);
-        },
-        24 => {
-            const key = try valueString(rt, "baz");
-            defer key.free(rt);
-            const out = try mapSet(rt, object, key, core.JSValue.int32(2));
-            out.free(rt);
-        },
-        25 => {
-            const key = try valueString(rt, "foo");
-            defer key.free(rt);
-            var out = try collectionDelete(rt, object, key);
-            out.free(rt);
-            const value = try valueString(rt, "baz");
-            defer value.free(rt);
-            out = try mapSet(rt, object, key, value);
-            out.free(rt);
-        },
-        else => {},
-    }
-}
-
-fn valueString(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
-    const string = try core.string.String.createUtf8(rt, bytes);
-    return string.value();
-}
-
-fn assertAndShiftExpected(rt: *core.JSRuntime, globals: []globals_mod.Slot, actual: core.JSValue) !void {
-    var expects_value = try globals_mod.getByName(rt, globals, "expects");
-    if (expects_value.isUndefined()) {
-        expects_value.free(rt);
-        expects_value = try getGlobalObjectProperty(rt, globals, "expects");
-    }
-    defer expects_value.free(rt);
-    const expects = try expectObject(expects_value);
-    if (!expects.flags.is_array or expects.arrayLength() == 0) return error.TypeError;
-    const expected = expects.getProperty(core.atom.atomFromUInt32(0));
-    defer expected.free(rt);
-    if (!actual.sameValue(expected)) return error.JSException;
-    var index: u32 = 1;
-    while (index < expects.arrayLength()) : (index += 1) {
-        const next = expects.getProperty(core.atom.atomFromUInt32(index));
-        defer next.free(rt);
-        try expects.defineOwnProperty(rt, core.atom.atomFromUInt32(index - 1), core.Descriptor.data(next, true, true, true));
-    }
-    // Drop the now-duplicated tail: lower the dense extent (no-op when the
-    // copy-down already converted to sparse) before lowering .length, so we
-    // never leave array_length < array_count.
-    const shrunk = expects.arrayLength() - 1;
-    expects.truncateArrayElements(rt, shrunk);
-    expects.setArrayLength(shrunk);
-}
-
-fn getGlobalObjectProperty(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8) !core.JSValue {
-    const global_value = try globals_mod.getByName(rt, globals, "globalThis");
-    defer global_value.free(rt);
-    const global = try expectObject(global_value);
-    const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
-    return global.getProperty(key);
 }
 
 fn mapGetOrInsert(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, value: core.JSValue) !core.JSValue {
@@ -1072,16 +1008,12 @@ fn mapGetOrInsertComputed(
         const key_identity = (try weakKeyIdentityRegister(rt, key)) orelse return error.TypeError;
         if (findWeakEntry(object, key_identity)) |index| return object.weakCollectionEntriesSlot().*[index].value.dup();
         var callback_args = [_]core.JSValue{key};
-        const value = if (isCallableClosure(callback)) try host.callValue(rt, callback, &callback_args) else try callNativeCallback(rt, callback);
+        const value = try host.callValue(rt, callback, &callback_args);
         errdefer value.free(rt);
-        if (findWeakEntry(object, key_identity)) |index| {
-            const entry = &object.weakCollectionEntriesSlot().*[index];
-            const next_value = value.dup();
-            const old_value = entry.value;
-            entry.value = next_value;
-            old_value.free(rt);
-            return value;
-        }
+        // Mirrors js_map_getOrInsert computed branch (quickjs.c:52206):
+        // map_delete_record + map_add_record after the callback, so a record
+        // the callback inserted re-appends at the tail with the computed value.
+        if (findWeakEntry(object, key_identity)) |index| try removeWeakEntry(rt, object, index);
         var entry = core.object.WeakCollectionEntry{ .key_identity = key_identity, .value = value.dup() };
         errdefer entry.value.free(rt);
         try appendWeakEntry(rt, object, entry);
@@ -1093,20 +1025,13 @@ fn mapGetOrInsertComputed(
     defer canonical_key.free(rt);
     if (findStrongEntry(object, canonical_key)) |index| return object.collectionEntriesSlot().*[index].value.dup();
     var callback_args = [_]core.JSValue{canonical_key};
-    const value = if (isCallableClosure(callback)) value: {
-        const out = try host.callValue(rt, callback, &callback_args);
-        try applyGetOrInsertComputedCallbackMutation(rt, object, callback, canonical_key, host);
-        break :value out;
-    } else try callNativeCallback(rt, callback);
+    const value = try host.callValue(rt, callback, &callback_args);
     errdefer value.free(rt);
-    if (findStrongEntry(object, canonical_key)) |index| {
-        const entry = &object.collectionEntriesSlot().*[index];
-        const next_value = value.dup();
-        const old_value = entry.value;
-        entry.value = next_value;
-        old_value.free(rt);
-        return value;
-    }
+    // Mirrors js_map_getOrInsert computed branch (quickjs.c:52206):
+    // map_delete_record + map_add_record after the callback, so a record the
+    // callback inserted re-appends at the iteration tail with the computed
+    // value instead of being overwritten in place.
+    if (findStrongEntry(object, canonical_key)) |index| removeStrongEntry(rt, object, index);
     const entry = core.object.CollectionEntry{ .key = canonical_key.dup(), .value = value.dup() };
     try appendStrongEntryOwned(rt, object, entry);
     return value;
@@ -1117,30 +1042,6 @@ fn canonicalizeKey(key: core.JSValue) core.JSValue {
         if (number == 0) return core.JSValue.int32(0);
     }
     return key.dup();
-}
-
-fn applyGetOrInsertComputedCallbackMutation(rt: *core.JSRuntime, object: *core.Object, callback: core.JSValue, key: core.JSValue, host: CallbackHost) !void {
-    const kind = host.closureKind(rt, callback) orelse return;
-    const mutation_value: ?core.JSValue = switch (kind) {
-        34 => core.JSValue.int32(0),
-        35 => core.JSValue.int32(1),
-        36 => core.JSValue.int32(2),
-        else => null,
-    };
-    if (mutation_value) |value| {
-        const out = try mapSet(rt, object, key, value);
-        out.free(rt);
-    }
-}
-
-fn callNativeCallback(rt: *core.JSRuntime, callback: core.JSValue) !core.JSValue {
-    const object = expectObject(callback) catch return core.JSValue.undefinedValue();
-    const name_value = object.getProperty(core.atom.ids.name);
-    defer name_value.free(rt);
-    if (!name_value.isString()) return core.JSValue.undefinedValue();
-    const name = stringFromValue(name_value) orelse return core.JSValue.undefinedValue();
-    if (name.eqlBytes("three")) return core.JSValue.int32(3);
-    return core.JSValue.undefinedValue();
 }
 
 fn collectionHas(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue) !core.JSValue {
@@ -1229,14 +1130,13 @@ const SetComparison = enum {
 const SetLikeRecord = struct {
     object: *core.Object,
     size: usize,
-    mode: i32,
 };
 
 fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.JSValue, operation: SetComposition, host: CallbackHost) !core.JSValue {
     if (object.class_id != core.class.ids.set) return error.TypeError;
     if (args.len < 1) return error.TypeError;
     const other = try expectObject(args[0]);
-    const other_record = try setLikeRecord(rt, other, host);
+    const other_record = try setLikeRecord(rt, other);
     const result_value = try constructWithPrototype(rt, 2, object.getPrototype());
     errdefer result_value.free(rt);
     const result = try expectObject(result_value);
@@ -1261,7 +1161,7 @@ fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.
             } else {
                 for (object.collectionEntriesSlot().*) |entry| {
                     if (!entry.active) continue;
-                    if (!try setLikeHas(rt, other_record, entry.key, object, host)) {
+                    if (!try setLikeHas(rt, other_record, entry.key, host)) {
                         const out = try setAdd(rt, result, entry.key);
                         out.free(rt);
                     }
@@ -1272,7 +1172,7 @@ fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.
             if (strongSize(object) <= other_record.size) {
                 for (object.collectionEntriesSlot().*) |entry| {
                     if (!entry.active) continue;
-                    if (try setLikeHas(rt, other_record, entry.key, object, host)) {
+                    if (try setLikeHas(rt, other_record, entry.key, host)) {
                         const out = try setAdd(rt, result, entry.key);
                         out.free(rt);
                     }
@@ -1337,22 +1237,14 @@ fn setComparison(rt: *core.JSRuntime, object: *core.Object, args: []const core.J
     if (object.class_id != core.class.ids.set) return error.TypeError;
     if (args.len < 1) return error.TypeError;
     const other = try expectObject(args[0]);
-    const other_record = try setLikeRecord(rt, other, host);
-    if (other_record.mode == 8 and (operation == .is_disjoint_from or operation == .is_superset_of) and strongSize(object) > other_record.size) {
-        return setComparisonIterReturn(rt, object, operation, host.globals);
-    }
-    if ((other_record.mode == 1 and operation == .is_disjoint_from and strongSize(object) > other_record.size) or
-        (other_record.mode == 2 and operation == .is_superset_of and strongSize(object) >= other_record.size))
-    {
-        return setComparisonObservableKeys(rt, object, operation, host.globals);
-    }
+    const other_record = try setLikeRecord(rt, other);
 
     switch (operation) {
         .is_disjoint_from => {
             if (strongSize(object) <= other_record.size) {
                 for (object.collectionEntriesSlot().*) |entry| {
                     if (!entry.active) continue;
-                    if (try setLikeHas(rt, other_record, entry.key, object, host)) return core.JSValue.boolean(false);
+                    if (try setLikeHas(rt, other_record, entry.key, host)) return core.JSValue.boolean(false);
                 }
             } else {
                 const other_keys = try setLikeKeys(rt, other_record, host);
@@ -1369,7 +1261,7 @@ fn setComparison(rt: *core.JSRuntime, object: *core.Object, args: []const core.J
             if (strongSize(object) > other_record.size) return core.JSValue.boolean(false);
             for (object.collectionEntriesSlot().*) |entry| {
                 if (!entry.active) continue;
-                if (!try setLikeHas(rt, other_record, entry.key, object, host)) return core.JSValue.boolean(false);
+                if (!try setLikeHas(rt, other_record, entry.key, host)) return core.JSValue.boolean(false);
             }
             return core.JSValue.boolean(true);
         },
@@ -1385,28 +1277,14 @@ fn setComparison(rt: *core.JSRuntime, object: *core.Object, args: []const core.J
     }
 }
 
-fn setLikeRecord(rt: *core.JSRuntime, object: *core.Object, host: CallbackHost) !SetLikeRecord {
-    const mode = setLikeMode(rt, object) orelse 0;
-    const size = try setLikeSize(rt, object, mode, host.globals);
-    try validateSetLikeMethods(rt, object, mode, host.globals);
-    return .{ .object = object, .size = size, .mode = mode };
+fn setLikeRecord(rt: *core.JSRuntime, object: *core.Object) !SetLikeRecord {
+    const size = try setLikeSize(rt, object);
+    try validateSetLikeMethods(rt, object);
+    return .{ .object = object, .size = size };
 }
 
-fn setLikeMode(rt: *core.JSRuntime, object: *core.Object) ?i32 {
-    const key = rt.internAtom("__setlike_mode") catch return null;
-    defer rt.atoms.free(key);
-    const value = object.getProperty(key);
-    defer value.free(rt);
-    return value.asInt32();
-}
-
-fn setLikeSize(rt: *core.JSRuntime, object: *core.Object, mode: i32, globals: []globals_mod.Slot) !usize {
+fn setLikeSize(rt: *core.JSRuntime, object: *core.Object) !usize {
     if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) return strongSize(object);
-    if (mode == 1 or mode == 2) {
-        try appendGlobalString(rt, globals, "observedOrder", "getting size");
-        try appendGlobalString(rt, globals, "observedOrder", "ToNumber(size)");
-    }
-    if (mode == 8) return 3;
     const size_value = object.getProperty(core.atom.predefinedId("size", .string).?);
     defer size_value.free(rt);
     const size = size_value.asInt32() orelse return error.TypeError;
@@ -1414,15 +1292,8 @@ fn setLikeSize(rt: *core.JSRuntime, object: *core.Object, mode: i32, globals: []
     return @intCast(size);
 }
 
-fn validateSetLikeMethods(rt: *core.JSRuntime, object: *core.Object, mode: i32, globals: []globals_mod.Slot) !void {
+fn validateSetLikeMethods(rt: *core.JSRuntime, object: *core.Object) !void {
     if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) return;
-    if (mode == 1 or mode == 2) {
-        try appendGlobalString(rt, globals, "observedOrder", "getting has");
-        try appendGlobalString(rt, globals, "observedOrder", "getting keys");
-    }
-    if (mode == 3 or mode == 4 or mode == 5) {
-        try addStringToGlobalSet(rt, globals, "baseSet", "q");
-    }
 
     const has_key = try rt.internAtom("has");
     defer rt.atoms.free(has_key);
@@ -1437,40 +1308,11 @@ fn validateSetLikeMethods(rt: *core.JSRuntime, object: *core.Object, mode: i32, 
     if (!isCallableClosure(keys_value)) return error.TypeError;
 }
 
-fn setLikeHas(rt: *core.JSRuntime, record: SetLikeRecord, key: core.JSValue, receiver: *core.Object, host: CallbackHost) !bool {
+fn setLikeHas(rt: *core.JSRuntime, record: SetLikeRecord, key: core.JSValue, host: CallbackHost) !bool {
     const object = record.object;
     if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) {
         const out = try collectionHas(rt, object, key);
         return out.asBool() orelse false;
-    }
-    switch (record.mode) {
-        1 => {
-            try appendGlobalString(rt, host.globals, "observedOrder", "calling has");
-            return valueStringEql(key, "a") or valueStringEql(key, "b") or valueStringEql(key, "c");
-        },
-        2 => return error.JSException,
-        6 => {
-            if (valueStringEql(key, "a")) try deleteStringFromSet(rt, receiver, "c");
-            return valueStringEql(key, "x") or valueStringEql(key, "a") or valueStringEql(key, "b");
-        },
-        9 => {
-            if (valueStringEql(key, "a")) {
-                try deleteStringFromSet(rt, receiver, "b");
-                try deleteStringFromSet(rt, receiver, "c");
-                const b_value = try makeString(rt, "b");
-                defer b_value.free(rt);
-                const out = try setAdd(rt, receiver, b_value);
-                out.free(rt);
-                return false;
-            }
-            if (valueStringEql(key, "b")) return false;
-            return error.JSException;
-        },
-        8 => {
-            const value = key.asInt32() orelse return false;
-            return value == 4 or value == 5 or value == 6;
-        },
-        else => {},
     }
     const has_key = try rt.internAtom("has");
     defer rt.atoms.free(has_key);
@@ -1494,29 +1336,6 @@ fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, host: CallbackHost) !
         }
         return values;
     }
-    switch (record.mode) {
-        1, 2 => return observableOrderKeys(rt, host.globals),
-        3 => {
-            try applyBaseSetIteratorMutation(rt, host.globals);
-            return stringList(rt, &.{ "x", "y" });
-        },
-        4 => {
-            try applyBaseSetIteratorMutation(rt, host.globals);
-            return stringList(rt, &.{ "x", "b", "b" });
-        },
-        5 => {
-            try applyBaseSetIteratorMutation(rt, host.globals);
-            return stringList(rt, &.{ "x", "b", "c", "c" });
-        },
-        7 => {
-            try deleteStringFromGlobalSet(rt, host.globals, "baseSet", "b");
-            try deleteStringFromGlobalSet(rt, host.globals, "baseSet", "c");
-            try addStringToGlobalSet(rt, host.globals, "baseSet", "b");
-            return stringList(rt, &.{ "a", "b" });
-        },
-        8 => return intList(rt, &.{ 4, 5, 6 }),
-        else => {},
-    }
 
     const keys_key = try rt.internAtom("keys");
     defer rt.atoms.free(keys_key);
@@ -1538,163 +1357,6 @@ fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, host: CallbackHost) !
         return values;
     }
     return error.TypeError;
-}
-
-fn setComparisonIterReturn(rt: *core.JSRuntime, object: *core.Object, operation: SetComparison, globals: []globals_mod.Slot) !core.JSValue {
-    const values = [_]i32{ 4, 5, 6 };
-    var next_calls: i32 = 0;
-    for (values) |value| {
-        next_calls += 1;
-        const present = findStrongEntry(object, core.JSValue.int32(value)) != null;
-        if (operation == .is_disjoint_from and present) {
-            try addIterCounter(rt, globals, "nextCalls", next_calls);
-            try addIterCounter(rt, globals, "returnCalls", 1);
-            return core.JSValue.boolean(false);
-        }
-        if (operation == .is_superset_of and !present) {
-            try addIterCounter(rt, globals, "nextCalls", next_calls);
-            try addIterCounter(rt, globals, "returnCalls", 1);
-            return core.JSValue.boolean(false);
-        }
-    }
-    try addIterCounter(rt, globals, "nextCalls", next_calls + 1);
-    return core.JSValue.boolean(true);
-}
-
-fn setComparisonObservableKeys(rt: *core.JSRuntime, object: *core.Object, operation: SetComparison, globals: []globals_mod.Slot) !core.JSValue {
-    try appendGlobalString(rt, globals, "observedOrder", "calling keys");
-    try appendGlobalString(rt, globals, "observedOrder", "getting next");
-    inline for (.{ "a", "b", "c" }) |name| {
-        try appendGlobalString(rt, globals, "observedOrder", "calling next");
-        try appendGlobalString(rt, globals, "observedOrder", "getting done");
-        try appendGlobalString(rt, globals, "observedOrder", "getting value");
-        const value = try makeString(rt, name);
-        defer value.free(rt);
-        const present = findStrongEntry(object, value) != null;
-        if (operation == .is_disjoint_from and present) return core.JSValue.boolean(false);
-        if (operation == .is_superset_of and !present) return core.JSValue.boolean(false);
-    }
-    try appendGlobalString(rt, globals, "observedOrder", "calling next");
-    try appendGlobalString(rt, globals, "observedOrder", "getting done");
-    return core.JSValue.boolean(true);
-}
-
-fn observableOrderKeys(rt: *core.JSRuntime, globals: []globals_mod.Slot) ![]core.JSValue {
-    try appendGlobalString(rt, globals, "observedOrder", "calling keys");
-    try appendGlobalString(rt, globals, "observedOrder", "getting next");
-    var values: []core.JSValue = &.{};
-    errdefer freeValueList(rt, values);
-    inline for (.{ "a", "b", "c" }) |name| {
-        try appendGlobalString(rt, globals, "observedOrder", "calling next");
-        try appendGlobalString(rt, globals, "observedOrder", "getting done");
-        try appendGlobalString(rt, globals, "observedOrder", "getting value");
-        const value = try makeString(rt, name);
-        defer value.free(rt);
-        try appendValue(rt, &values, value);
-    }
-    try appendGlobalString(rt, globals, "observedOrder", "calling next");
-    try appendGlobalString(rt, globals, "observedOrder", "getting done");
-    return values;
-}
-
-fn stringList(rt: *core.JSRuntime, comptime names: []const []const u8) ![]core.JSValue {
-    var values: []core.JSValue = &.{};
-    errdefer freeValueList(rt, values);
-    inline for (names) |name| {
-        const value = try makeString(rt, name);
-        defer value.free(rt);
-        try appendValue(rt, &values, value);
-    }
-    return values;
-}
-
-fn intList(rt: *core.JSRuntime, comptime ints: []const i32) ![]core.JSValue {
-    var values: []core.JSValue = &.{};
-    errdefer freeValueList(rt, values);
-    inline for (ints) |int_value| {
-        try appendValue(rt, &values, core.JSValue.int32(int_value));
-    }
-    return values;
-}
-
-fn applyBaseSetIteratorMutation(rt: *core.JSRuntime, globals: []globals_mod.Slot) !void {
-    try deleteStringFromGlobalSet(rt, globals, "baseSet", "b");
-    try deleteStringFromGlobalSet(rt, globals, "baseSet", "c");
-    try addStringToGlobalSet(rt, globals, "baseSet", "b");
-    try addStringToGlobalSet(rt, globals, "baseSet", "d");
-}
-
-fn appendGlobalString(rt: *core.JSRuntime, globals: []globals_mod.Slot, array_name: []const u8, bytes: []const u8) !void {
-    var array_value = try globals_mod.getByName(rt, globals, array_name);
-    if (array_value.isUndefined()) {
-        array_value.free(rt);
-        array_value = try getGlobalObjectProperty(rt, globals, array_name);
-    }
-    defer array_value.free(rt);
-    const array = try expectObject(array_value);
-    if (!array.flags.is_array) return error.TypeError;
-    const value = try makeString(rt, bytes);
-    defer value.free(rt);
-    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.arrayLength()), core.Descriptor.data(value, true, true, true));
-}
-
-fn addStringToGlobalSet(rt: *core.JSRuntime, globals: []globals_mod.Slot, set_name: []const u8, bytes: []const u8) !void {
-    const set = try globalSetObject(rt, globals, set_name);
-    const value = try makeString(rt, bytes);
-    defer value.free(rt);
-    const out = try setAdd(rt, set, value);
-    out.free(rt);
-}
-
-fn deleteStringFromGlobalSet(rt: *core.JSRuntime, globals: []globals_mod.Slot, set_name: []const u8, bytes: []const u8) !void {
-    const set = try globalSetObject(rt, globals, set_name);
-    try deleteStringFromSet(rt, set, bytes);
-}
-
-fn deleteStringFromSet(rt: *core.JSRuntime, set: *core.Object, bytes: []const u8) !void {
-    if (set.class_id != core.class.ids.set) return error.TypeError;
-    const value = try makeString(rt, bytes);
-    defer value.free(rt);
-    if (findStrongEntry(set, value)) |index| {
-        removeStrongEntry(rt, set, index);
-    }
-}
-
-fn globalSetObject(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8) !*core.Object {
-    var set_value = try globals_mod.getByName(rt, globals, name);
-    if (set_value.isUndefined()) {
-        set_value.free(rt);
-        set_value = try getGlobalObjectProperty(rt, globals, name);
-    }
-    defer set_value.free(rt);
-    const set = try expectObject(set_value);
-    if (set.class_id != core.class.ids.set) return error.TypeError;
-    return set;
-}
-
-fn addIterCounter(rt: *core.JSRuntime, globals: []globals_mod.Slot, property: []const u8, delta: i32) !void {
-    var iter_value = try globals_mod.getByName(rt, globals, "iter");
-    if (iter_value.isUndefined()) {
-        iter_value.free(rt);
-        iter_value = try getGlobalObjectProperty(rt, globals, "iter");
-    }
-    defer iter_value.free(rt);
-    const iter = try expectObject(iter_value);
-    const key = try rt.internAtom(property);
-    defer rt.atoms.free(key);
-    const current_value = iter.getProperty(key);
-    defer current_value.free(rt);
-    const current = current_value.asInt32() orelse 0;
-    try iter.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(current + delta), true, true, true));
-}
-
-fn makeString(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
-    return (try core.string.String.createUtf8(rt, bytes)).value();
-}
-
-fn valueStringEql(value: core.JSValue, bytes: []const u8) bool {
-    const string = stringFromValue(value) orelse return false;
-    return string.eqlBytes(bytes);
 }
 
 fn appendValue(rt: *core.JSRuntime, values: *[]core.JSValue, value: core.JSValue) !void {
@@ -2018,10 +1680,9 @@ const SetMethodMode = enum {
 
 const SetLikeRecordVm = struct {
     object_value: core.JSValue,
-    size: f64,
+    size: i64,
     has: core.JSValue,
     keys: core.JSValue,
-    native_kind: enum { none, set, map },
 
     fn deinit(self: *const SetLikeRecordVm, rt: *core.JSRuntime) void {
         self.object_value.free(rt);
@@ -2320,46 +1981,74 @@ fn qjsGetSetRecord(
     caller_frame: ?*builtin_dispatch.Frame,
 ) !SetLikeRecordVm {
     const object = object_ops.objectFromValue(other_value) orelse return error.TypeError;
-    if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) {
-        return .{
-            .object_value = other_value.dup(),
-            .size = @floatFromInt(qjsSetStrongSize(object)),
-            .has = core.JSValue.undefinedValue(),
-            .keys = core.JSValue.undefinedValue(),
-            .native_kind = if (object.class_id == core.class.ids.set) .set else .map,
-        };
+    // Mirrors get_set_record (quickjs.c:52641): only a native Set argument gets
+    // the internal record-count fast path (`JS_GetOpaque(obj, JS_CLASS_SET)`);
+    // Map and set-like arguments read the observable `.size` property, and the
+    // `has`/`keys` properties are always read (and later called), even for
+    // native Set/Map arguments, so instance-level overrides stay observable.
+    var size: i64 = undefined;
+    if (object.class_id == core.class.ids.set) {
+        size = @intCast(qjsSetStrongSize(object));
+    } else {
+        const raw_size = try object_ops.getValueProperty(ctx, output, global, other_value, core.atom.predefinedId("size", .string).?, caller_function, caller_frame);
+        defer raw_size.free(ctx.runtime);
+        const size_value = if (raw_size.isObject())
+            try coercion_ops.toPrimitiveForNumber(ctx, output, global, raw_size)
+        else
+            raw_size.dup();
+        defer size_value.free(ctx.runtime);
+        const number_value = try value_ops.toNumberValue(ctx.runtime, size_value);
+        defer number_value.free(ctx.runtime);
+        const size_number = value_ops.numberValue(number_value) orelse return error.TypeError;
+        if (std.math.isNan(size_number)) {
+            _ = try exception_ops.throwTypeErrorMessage(ctx, global, ".size is not a number");
+            unreachable;
+        }
+        // int64 clamp exactly as qjs (INT64_MAX cannot be represented as a
+        // double, so the upper bound compares against 0x1p63).
+        if (size_number < -9223372036854775808.0)
+            size = std.math.minInt(i64)
+        else if (size_number >= 9223372036854775808.0)
+            size = std.math.maxInt(i64)
+        else
+            size = @intFromFloat(size_number);
+        if (size < 0) {
+            _ = try exception_ops.throwRangeErrorMessage(ctx, global, ".size must be positive");
+            unreachable;
+        }
     }
-
-    const raw_size = try object_ops.getValueProperty(ctx, output, global, other_value, core.atom.predefinedId("size", .string).?, caller_function, caller_frame);
-    defer raw_size.free(ctx.runtime);
-    const size_value = if (raw_size.isObject())
-        try coercion_ops.toPrimitiveForNumber(ctx, output, global, raw_size)
-    else
-        raw_size.dup();
-    defer size_value.free(ctx.runtime);
-    const number_value = try value_ops.toNumberValue(ctx.runtime, size_value);
-    defer number_value.free(ctx.runtime);
-    const size_number = value_ops.numberValue(number_value) orelse return error.TypeError;
-    if (std.math.isNan(size_number)) return error.TypeError;
 
     const has_key = try ctx.runtime.internAtom("has");
     defer ctx.runtime.atoms.free(has_key);
     const has_value = try object_ops.getValueProperty(ctx, output, global, other_value, has_key, caller_function, caller_frame);
     errdefer has_value.free(ctx.runtime);
-    if (!call_runtime.isCallableValue(has_value)) return error.TypeError;
+    if (has_value.isUndefined()) {
+        _ = try exception_ops.throwTypeErrorMessage(ctx, global, ".has is undefined");
+        unreachable;
+    }
+    if (!call_runtime.isCallableValue(has_value)) {
+        _ = try exception_ops.throwTypeErrorMessage(ctx, global, ".has is not a function");
+        unreachable;
+    }
 
     const keys_key = try ctx.runtime.internAtom("keys");
     defer ctx.runtime.atoms.free(keys_key);
     const keys_value = try object_ops.getValueProperty(ctx, output, global, other_value, keys_key, caller_function, caller_frame);
     errdefer keys_value.free(ctx.runtime);
-    if (!call_runtime.isCallableValue(keys_value)) return error.TypeError;
+    if (keys_value.isUndefined()) {
+        _ = try exception_ops.throwTypeErrorMessage(ctx, global, ".keys is undefined");
+        unreachable;
+    }
+    if (!call_runtime.isCallableValue(keys_value)) {
+        _ = try exception_ops.throwTypeErrorMessage(ctx, global, ".keys is not a function");
+        unreachable;
+    }
 
     return .{
         .object_value = other_value.dup(),
-        .size = size_number,
+        .size = size,
         .has = has_value,
         .keys = keys_value,
-        .native_kind = .none,
     };
 }
 
@@ -2401,11 +2090,9 @@ fn qjsSetLikeHas(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !bool {
-    if (record.native_kind != .none) {
-        const out = try methodCall(ctx.runtime, record.object_value, 3, &.{key});
-        defer out.free(ctx.runtime);
-        return coercion_ops.valueTruthy(out);
-    }
+    // Mirrors js_set_isSubsetOf and friends (quickjs.c:52813): the record's
+    // retrieved `has` is JS_Call'ed for every argument kind, native Sets
+    // included.
     const out = try call_runtime.callValueOrBytecode(ctx, output, global, record.object_value, record.has, &.{key}, caller_function, caller_frame);
     defer out.free(ctx.runtime);
     return coercion_ops.valueTruthy(out);
@@ -2419,10 +2106,9 @@ fn qjsSetLikeKeysIterator(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
-    const source = if (record.native_kind != .none)
-        try methodCall(ctx.runtime, record.object_value, 7, &.{})
-    else
-        try call_runtime.callValueOrBytecode(ctx, output, global, record.object_value, record.keys, &.{}, caller_function, caller_frame);
+    // Mirrors js_set_union (quickjs.c:53144): the record's retrieved `keys` is
+    // JS_Call'ed for every argument kind, native Sets/Maps included.
+    const source = try call_runtime.callValueOrBytecode(ctx, output, global, record.object_value, record.keys, &.{}, caller_function, caller_frame);
     errdefer source.free(ctx.runtime);
     const iterator_object = object_ops.objectFromValue(source) orelse return error.TypeError;
     const next_key = try ctx.runtime.internAtom("next");
@@ -2497,7 +2183,7 @@ fn qjsSetDifference(
 ) !core.JSValue {
     const result_value = try qjsConstructPlainSet(ctx, global);
     errdefer result_value.free(ctx.runtime);
-    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) > other_record.size) {
+    if (@as(i64, @intCast(qjsSetStrongSize(receiver))) > other_record.size) {
         var copy_index: usize = 0;
         while (copy_index < receiver.collectionEntriesSlot().*.len) : (copy_index += 1) {
             const entry = receiver.collectionEntriesSlot().*[copy_index];
@@ -2545,7 +2231,7 @@ fn qjsSetIntersection(
 ) !core.JSValue {
     const result_value = try qjsConstructPlainSet(ctx, global);
     errdefer result_value.free(ctx.runtime);
-    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) <= other_record.size) {
+    if (@as(i64, @intCast(qjsSetStrongSize(receiver))) <= other_record.size) {
         var index: usize = 0;
         while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
             const entry = receiver.collectionEntriesSlot().*[index];
@@ -2647,7 +2333,7 @@ fn qjsSetIsDisjointFrom(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
-    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) <= other_record.size) {
+    if (@as(i64, @intCast(qjsSetStrongSize(receiver))) <= other_record.size) {
         var index: usize = 0;
         while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
             const entry = receiver.collectionEntriesSlot().*[index];
@@ -2689,7 +2375,7 @@ fn qjsSetIsSubsetOf(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
-    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) > other_record.size) return core.JSValue.boolean(false);
+    if (@as(i64, @intCast(qjsSetStrongSize(receiver))) > other_record.size) return core.JSValue.boolean(false);
     var index: usize = 0;
     while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
         const entry = receiver.collectionEntriesSlot().*[index];
@@ -2710,7 +2396,7 @@ fn qjsSetIsSupersetOf(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
-    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) < other_record.size) return core.JSValue.boolean(false);
+    if (@as(i64, @intCast(qjsSetStrongSize(receiver))) < other_record.size) return core.JSValue.boolean(false);
     var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
     defer iterator_value.free(ctx.runtime);
     var iterator_done = false;
@@ -2842,6 +2528,12 @@ pub fn qjsMapGetOrInsertComputed(
         caller_frame,
     );
     errdefer computed.free(ctx.runtime);
+    // Mirrors js_map_getOrInsert computed branch (quickjs.c:52206): after the
+    // callback qjs does map_delete_record + map_add_record, so a record the
+    // callback inserted for this key is deleted and the key re-appends at the
+    // iteration tail with the computed value.
+    const delete_result = try methodCall(ctx.runtime, receiver_value, 4, &.{key});
+    delete_result.free(ctx.runtime);
     const set_result = try methodCall(ctx.runtime, receiver_value, 1, &.{ key, computed });
     set_result.free(ctx.runtime);
     return computed;
@@ -2891,6 +2583,8 @@ fn collectionReceiverMessage(owner_class: core.ClassId) []const u8 {
     if (owner_class == core.class.ids.set) return "Set object expected";
     if (owner_class == core.class.ids.weakmap) return "WeakMap object expected";
     if (owner_class == core.class.ids.weakset) return "WeakSet object expected";
+    if (owner_class == core.class.ids.map_iterator) return "Map Iterator object expected";
+    if (owner_class == core.class.ids.set_iterator) return "Set Iterator object expected";
     return "not an object";
 }
 

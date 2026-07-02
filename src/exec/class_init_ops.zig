@@ -140,7 +140,15 @@ pub fn constructBuiltinSuperConstructor(
     if (std.mem.eql(u8, name, "String")) return try qjsStringConstructWithPrototype(ctx, output, global, prototype, args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "Number")) {
         if (args.len >= 1 and args[0].isSymbol()) return error.TypeError;
-        const primitive = if (args.len >= 1) try value_ops.toNumberValue(ctx.runtime, args[0]) else core.JSValue.int32(0);
+        // qjs js_number_constructor (quickjs.c:44822-44841): ToNumeric, then a
+        // bigint result converts to float64 rather than throwing.
+        const primitive = if (args.len >= 1)
+            (if (args[0].isBigInt())
+                value_ops.numberToValue(try value_ops.bigIntToNumber(ctx.runtime, args[0]))
+            else
+                try value_ops.toNumberValue(ctx.runtime, args[0]))
+        else
+            core.JSValue.int32(0);
         return try constructPrimitiveWrapperWithPrototype(ctx.runtime, core.class.ids.number, prototype, primitive);
     }
     if (std.mem.eql(u8, name, "Boolean")) {
@@ -273,6 +281,12 @@ pub fn initializeClassPrivateMethods(rt: *core.JSRuntime, instance: *core.Object
         if (instance.hasOwnProperty(prop.atom_id)) return error.TypeError;
         if (home_object.getOwnProperty(rt, prop.atom_id)) |desc| {
             defer desc.destroy(rt);
+            // NO-ALIGN(qjs): qjs brands instances with raw add_property
+            // (JS_AddBrand quickjs.c:8464) ignoring extensibility; test262's
+            // `nonextensible-applies-to-private` feature mandates the
+            // TypeError on non-extensible instances
+            // (staging/sm/PrivateName/modify-non-extensible.js), so zjs keeps
+            // the NotExtensible -> TypeError behavior.
             instance.defineOwnProperty(rt, prop.atom_id, desc) catch |err| switch (err) {
                 error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
                 else => return err,

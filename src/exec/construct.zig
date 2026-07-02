@@ -170,7 +170,15 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
         }
         if (std.mem.eql(u8, name, "Number")) {
             if (rooted_args.len >= 1 and rooted_args[0].isSymbol()) return error.TypeError;
-            const primitive = if (rooted_args.len >= 1) try value_ops.toNumberValue(rt, rooted_args[0]) else core.JSValue.int32(0);
+            // qjs js_number_constructor (quickjs.c:44822-44841): ToNumeric, then a
+            // bigint result converts to float64 rather than throwing.
+            const primitive = if (rooted_args.len >= 1)
+                (if (rooted_args[0].isBigInt())
+                    value_ops.numberToValue(try value_ops.bigIntToNumber(rt, rooted_args[0]))
+                else
+                    try value_ops.toNumberValue(rt, rooted_args[0]))
+            else
+                core.JSValue.int32(0);
             return constructPrimitiveWrapper(rt, core.class.ids.number, prototype, primitive);
         }
         if (std.mem.eql(u8, name, "Boolean")) return constructPrimitiveWrapper(rt, core.class.ids.boolean, prototype, core.JSValue.boolean(rooted_args.len >= 1 and value_ops.isTruthy(rooted_args[0])));
@@ -282,9 +290,8 @@ pub fn constructErrorObject(rt: *core.JSRuntime, name: []const u8, constructor: 
     if (std.mem.eql(u8, name, "AggregateError")) return constructAggregateErrorObject(rt, constructor, prototype, rooted_args);
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
     errdefer core.Object.destroyFromHeader(rt, &instance.header);
-    const name_value = try value_ops.createStringValue(rt, name);
-    defer name_value.free(rt);
-    try defineData(rt, instance, "name", name_value, true, false, true);
+    // No own `name` property: it lives on the per-class prototype only
+    // (qjs js_error_constructor quickjs.c:41441 defines only message/cause).
     if (rooted_args.len >= 1 and !rooted_args[0].isUndefined()) {
         const message = try value_ops.toStringValue(rt, rooted_args[0]);
         defer message.free(rt);
@@ -471,9 +478,8 @@ fn constructAggregateErrorObject(rt: *core.JSRuntime, constructor: core.JSValue,
 
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
     errdefer core.Object.destroyFromHeader(rt, &instance.header);
-    const name_value = try value_ops.createStringValue(rt, "AggregateError");
-    defer name_value.free(rt);
-    try defineData(rt, instance, "name", name_value, true, false, true);
+    // No own `name` property: it lives on AggregateError.prototype
+    // (qjs js_error_constructor quickjs.c:41441, JS_AGGREGATE_ERROR magic).
 
     if (rooted_args.len < 1 or !rooted_args[0].isObject()) return error.TypeError;
     const errors_source = try expectObject(rooted_args[0]);

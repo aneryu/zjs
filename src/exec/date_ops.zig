@@ -7,6 +7,7 @@ const frame_mod = @import("frame.zig");
 const value_ops = @import("value_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const coercion_ops = @import("coercion_ops.zig");
+const exception_ops = @import("vm_exception_ops.zig");
 const object_ops = @import("object_ops.zig");
 const string_ops = @import("string_ops.zig");
 
@@ -187,12 +188,25 @@ pub fn qjsDateCapturedSetterCall(
 
     const captured_ms = try captureDateValueMs(ctx, this_value);
 
+    // qjs set_date_field coerces exactly `min_int(argc, end_field -
+    // first_field)` arguments (quickjs.c:55265); extra arguments are not
+    // coerced (their valueOf must not run).
+    const field_count: usize = switch (method_id) {
+        25 => 1, // setMilliseconds 0x671
+        26 => 2, // setSeconds 0x571
+        27 => 3, // setMinutes 0x471
+        28 => 4, // setHours 0x371
+        29 => 1, // setDate 0x211
+        30 => 2, // setMonth 0x121
+        31 => 3, // setFullYear 0x011
+        else => unreachable,
+    };
     var coerced_args: [4]core.JSValue = undefined;
     var coerced_len: usize = 0;
     defer {
         for (coerced_args[0..coerced_len]) |value| value.free(ctx.runtime);
     }
-    while (coerced_len < args.len and coerced_len < coerced_args.len) : (coerced_len += 1) {
+    while (coerced_len < args.len and coerced_len < field_count) : (coerced_len += 1) {
         coerced_args[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, global, args[coerced_len], caller_function, caller_frame);
     }
 
@@ -246,12 +260,16 @@ pub fn qjsDateConstructWithPrototype(
             const primitive = try coercion_ops.toPrimitiveForAddition(ctx, output, global, args[0]);
             defer primitive.free(ctx.runtime);
             if (primitive.isString()) return constructDateRecord(ctx, prototype, &.{primitive});
+            // JS_ToFloat64Free on a bigint primitive throws (qjs
+            // js_date_constructor single-arg branch).
+            if (primitive.isBigInt()) return error.TypeError;
             const number = try value_ops.toNumberValue(ctx.runtime, primitive);
             defer number.free(ctx.runtime);
             return constructDateRecord(ctx, prototype, &.{number});
         }
 
         if (args[0].isString()) return constructDateRecord(ctx, prototype, args);
+        if (args[0].isBigInt()) return error.TypeError;
         const number = try value_ops.toNumberValue(ctx.runtime, args[0]);
         defer number.free(ctx.runtime);
         return constructDateRecord(ctx, prototype, &.{number});
@@ -277,10 +295,11 @@ pub fn qjsDateToPrimitiveCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (!this_value.isObject()) return error.TypeError;
+    if (!this_value.isObject()) return exception_ops.throwTypeErrorMessage(ctx, global, "not an object");
 
     const hint_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const hint = qjsDateToPrimitiveHint(hint_value) orelse return error.TypeError;
+    const hint = qjsDateToPrimitiveHint(hint_value) orelse
+        return exception_ops.throwTypeErrorMessage(ctx, global, "invalid hint");
     return switch (hint) {
         .string => try qjsDateOrdinaryToPrimitive(ctx, output, global, this_value, true, caller_function, caller_frame),
         .number => try qjsDateOrdinaryToPrimitive(ctx, output, global, this_value, false, caller_function, caller_frame),
@@ -290,7 +309,10 @@ pub fn qjsDateToPrimitiveCall(
 fn qjsDateToPrimitiveHint(value: core.JSValue) ?DateToPrimitiveHint {
     if (!value.isString()) return null;
     if (string_ops.stringValueUnitsEqualBytes(value, "string") or string_ops.stringValueUnitsEqualBytes(value, "default")) return .string;
-    if (string_ops.stringValueUnitsEqualBytes(value, "number")) return .number;
+    // qjs js_date_Symbol_toPrimitive (quickjs.c:55964) maps JS_ATOM_integer to
+    // HINT_NUMBER alongside JS_ATOM_number (nonstandard qjs extension;
+    // test262 does not exercise the 'integer' hint).
+    if (string_ops.stringValueUnitsEqualBytes(value, "number") or string_ops.stringValueUnitsEqualBytes(value, "integer")) return .number;
     return null;
 }
 

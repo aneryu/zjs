@@ -138,7 +138,9 @@ pub fn parseStringToBigInt(rt: *core.JSRuntime, value: core.JSValue) !bignum.Big
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
     try appendRawString(rt, &buffer, value);
-    const trimmed = std.mem.trim(u8, buffer.items, " \t\r\n");
+    // qjs JS_StringToBigInt (quickjs.c:14609) skips the full JS whitespace set
+    // via skip_spaces (quickjs.c:11230) — the same trimmer ToNumber uses.
+    const trimmed = core.value_format.trimJsWhitespace(buffer.items);
     if (trimmed.len == 0) return bignum.BigInt{ .allocator = rt.memory.allocator };
     return bignum.parseAutoAlloc(rt.memory.allocator, trimmed);
 }
@@ -408,6 +410,11 @@ fn fastStringToInt32(bytes: []const u8) ?i32 {
 
 pub fn toNumberValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isSymbol()) return error.TypeError;
+    // qjs JS_ToNumberHintFree (quickjs.c:12955-12959): the BIG_INT/SHORT_BIG_INT
+    // arm throws TypeError "cannot convert bigint to number" under the plain
+    // ToNumber hint; only ToNumeric passes bigints through. Callers that need
+    // ToNumeric semantics convert via bigIntToNumber before calling.
+    if (value.isBigInt()) return error.TypeError;
     if (numberValue(value)) |number| return numberToValue(number);
     if (value.asBool()) |bool_value| return core.JSValue.int32(if (bool_value) 1 else 0);
     if (value.isNull()) return core.JSValue.int32(0);
@@ -541,6 +548,9 @@ pub fn bigIntToNumber(rt: *core.JSRuntime, value: core.JSValue) !f64 {
 
 pub fn toIntegerOrInfinity(rt: *core.JSRuntime, value: core.JSValue) !f64 {
     if (numberValue(value)) |number| return number;
+    // ToIntegerOrInfinity starts with ToNumber: bigints throw TypeError
+    // (qjs JS_ToNumberHintFree quickjs.c:12955-12959 via JS_ToFloat64Free).
+    if (value.isBigInt()) return error.TypeError;
     if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
     if (value.isNull()) return 0;
     if (value.isUndefined()) return std.math.nan(f64);
@@ -570,9 +580,15 @@ pub fn toBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     defer buffer.deinit(rt.memory.allocator);
     if (value.isString() or value.isObject()) {
         try appendValueString(rt, &buffer, value);
-        const trimmed = std.mem.trim(u8, buffer.items, " \t\r\n");
+        // qjs JS_StringToBigInt (quickjs.c:14609) + skip_spaces (quickjs.c:11230).
+        const trimmed = core.value_format.trimJsWhitespace(buffer.items);
         if (trimmed.len == 0) return bignum.BigInt.fromIntAlloc(rt.memory.allocator, 0);
-        return bignum.parseAutoAlloc(rt.memory.allocator, trimmed) catch error.SyntaxError;
+        return bignum.parseAutoAlloc(rt.memory.allocator, trimmed) catch |err| switch (err) {
+            // qjs js_atobigint throws its RangeError through js_atof rather
+            // than folding it into the bad-literal SyntaxError (quickjs.c:12471).
+            error.BigIntTooLarge => error.BigIntTooLarge,
+            else => error.SyntaxError,
+        };
     }
     return error.TypeError;
 }
@@ -782,7 +798,10 @@ fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !
         bytecode.opcode.op.add => try bignum.addAlloc(allocator, lhs, rhs),
         bytecode.opcode.op.sub => try bignum.subAlloc(allocator, lhs, rhs),
         bytecode.opcode.op.pow => lhs.pow(rhs, allocator) catch |err| switch (err) {
-            error.NegativeExponent, error.BigIntTooLarge => return error.RangeError,
+            error.NegativeExponent => return error.RangeError,
+            // error.BigIntTooLarge propagates: the exception mapping renders it
+            // as RangeError "BigInt is too large to allocate" (js_bigint_new
+            // quickjs.c:11593-11594).
             else => return err,
         },
         bytecode.opcode.op.@"and" => try lhs.bitwise(rhs, allocator, .@"and"),
@@ -1153,7 +1172,16 @@ fn shiftBigInt(allocator: std.mem.Allocator, lhs: bignum.BigInt, rhs: bignum.Big
     defer shift_value.deinit();
     const negative_shift = shift_value.negative;
     shift_value.negative = false;
-    const amount = shift_value.toUsize() orelse return error.RangeError;
+    const effective_right = (direction == .right) != negative_shift;
+    const amount = shift_value.toUsize() orelse {
+        // Shift counts beyond one limb: qjs saturates the effective right
+        // shift to 0/-1 (js_bigint_shr d >= a->len arm) and fails the
+        // effective left shift of a nonzero value against JS_BIGINT_MAX_SIZE
+        // (js_bigint_shl -> js_bigint_new quickjs.c:11592-11596).
+        if (effective_right) return bignum.BigInt.fromIntAlloc(allocator, if (lhs.negative) -1 else 0);
+        if (lhs.isZero()) return bignum.BigInt{ .allocator = allocator };
+        return error.BigIntTooLarge;
+    };
     return switch (direction) {
         .left => if (negative_shift) lhs.shr(allocator, amount) else lhs.shl(allocator, amount),
         .right => if (negative_shift) lhs.shl(allocator, amount) else lhs.shr(allocator, amount),

@@ -74,8 +74,13 @@ pub fn sharedArrayBufferConstructLength(rt: *JSRuntime, byte_length: usize, max_
     errdefer Object.destroyFromHeader(rt, &obj.header);
     try validateArrayBufferLength(byte_length);
     if (max_byte_length) |max| try validateArrayBufferLength(max);
-    const store = try object.SharedBufferStore.create(rt, byte_length);
+    // Mirrors js_array_buffer_constructor3 (quickjs.c:56777-56786): a growable
+    // SharedArrayBuffer commits maxByteLength bytes upfront, and the visible
+    // byte length is a prefix of that committed block, so grow never moves or
+    // re-identifies the backing store.
+    const store = try object.SharedBufferStore.create(rt, max_byte_length orelse byte_length);
     obj.installSharedByteStorage(rt, store);
+    obj.byteStorageSlot().* = store.bytes[0..byte_length];
     obj.arrayBufferMaxByteLengthSlot().* = max_byte_length;
     return obj.value();
 }
@@ -186,7 +191,12 @@ pub fn arrayBufferTransferLength(rt: *JSRuntime, buffer_value: JSValue, new_leng
     if (object.arrayBufferIsImmutable(rt, buffer)) return error.TypeError;
     if (!fixed_length) {
         if (buffer.arrayBufferMaxByteLength()) |max| {
-            if (new_length > max) return error.RangeError;
+            // Mirrors js_array_buffer_transfer (quickjs.c:57141-57142):
+            // "invalid array buffer length" is a TypeError in qjs when the
+            // preserved-resizability transfer target exceeds maxByteLength
+            // (spec AllocateArrayBuffer says RangeError; test262 has no
+            // coverage, so the qjs behavior wins per the mainline principle).
+            if (new_length > max) return error.TypeError;
         }
     }
     const out = try createArrayBufferWithPrototype(rt, new_length, if (fixed_length) null else buffer.arrayBufferMaxByteLength(), buffer.getPrototype());
@@ -239,6 +249,12 @@ pub fn sharedArrayBufferSliceRange(rt: *JSRuntime, buffer_value: JSValue, start:
 }
 
 pub fn sharedArrayBufferGrow(rt: *JSRuntime, buffer_value: JSValue, new_length_value: JSValue) !JSValue {
+    // Mirrors js_array_buffer_resize check order (quickjs.c:57216-57237): the
+    // not-growable TypeError fires before the length range RangeError (qjs's
+    // JS_ToInt64 coercion never range-throws), so grow(-1) on a non-growable
+    // SAB is a TypeError.
+    const buffer = try expectSharedArrayBufferObject(buffer_value);
+    if (buffer.arrayBufferMaxByteLength() == null) return error.TypeError;
     const new_length = try toIndexUsize(rt, new_length_value);
     return sharedArrayBufferGrowLength(rt, buffer_value, new_length);
 }
@@ -248,6 +264,20 @@ pub fn sharedArrayBufferGrowLength(rt: *JSRuntime, buffer_value: JSValue, new_le
     const max = buffer.arrayBufferMaxByteLength() orelse return error.TypeError;
     if (new_length < buffer.byteStorage().len) return error.RangeError;
     if (new_length > max) return error.RangeError;
+    // Mirrors js_array_buffer_resize shared branch (quickjs.c:57243-57253):
+    // memory was committed upfront at maxByteLength by the constructor, so
+    // grow only bumps the visible byte length (`abuf->byte_length = len`).
+    // The store identity stays stable, keeping cross-runtime sharers and
+    // Atomics waiter keys valid.
+    if (buffer.sharedByteStorageStore()) |store| {
+        if (store.bytes.len >= new_length) {
+            buffer.byteStorageSlot().* = store.bytes[0..new_length];
+            return JSValue.undefinedValue();
+        }
+    }
+    // Fallback for embedder-adopted stores committed below maxByteLength
+    // (sharedArrayBufferFromStore with max > store capacity): qjs has no such
+    // under-committed state, so keep the legacy copy-into-larger-store path.
     const old = buffer.byteStorage();
     const store = try object.SharedBufferStore.create(rt, new_length);
     errdefer store.release();
@@ -257,10 +287,16 @@ pub fn sharedArrayBufferGrowLength(rt: *JSRuntime, buffer_value: JSValue, new_le
 }
 
 pub fn arrayBufferResize(rt: *JSRuntime, buffer_value: JSValue, new_length_value: JSValue) !JSValue {
+    // Mirrors js_array_buffer_resize check order (quickjs.c:57216-57237):
+    // detached TypeError, then not-resizable TypeError, then the length range
+    // RangeError (qjs's JS_ToInt64 coercion never range-throws), so
+    // resize(-1) on a non-resizable buffer is a TypeError. This narrow entry
+    // only sees primitives (no user side effects in the coercion).
     const buffer = try expectArrayBufferOnlyObject(buffer_value);
     if (object.arrayBufferIsImmutable(rt, buffer)) return error.TypeError;
-    const new_length = try toIndexUsize(rt, new_length_value);
     if (buffer.arrayBufferDetached()) return error.TypeError;
+    if (buffer.arrayBufferMaxByteLength() == null) return error.TypeError;
+    const new_length = try toIndexUsize(rt, new_length_value);
     return arrayBufferResizeLength(rt, buffer_value, new_length);
 }
 
@@ -620,8 +656,26 @@ pub fn dataViewRequireArrayBuffer(buffer_value: JSValue) !void {
 }
 
 fn checkDataViewBounds(rt: *JSRuntime, view: *Object, index: usize, width: usize) !void {
-    const length = try dataViewEffectiveByteLength(rt, view);
-    if (index > length or width > length - index) return error.RangeError;
+    _ = rt;
+    // Mirrors js_dataview_getValue / js_dataview_setValue
+    // (quickjs.c:60299-60306 and 60440-60446, "order matters"): the
+    // (pos + size) > ta->length RangeError runs BEFORE the
+    // offset + length > byte_length TypeError. qjs recomputes ta->length for
+    // length-tracking views on resize as the saturating
+    // (byte_length - offset), so a tracking view whose offset exceeds the
+    // shrunk buffer throws RangeError here, not the OOB TypeError the
+    // byteLength/byteOffset getters (dataview_is_oob) produce.
+    const buffer = try dataViewBuffer(view);
+    if (buffer.arrayBufferDetached()) return error.TypeError;
+    const byte_offset = view.typedArrayByteOffset();
+    const stored_length: usize = view.typedArrayFixedLength() orelse return error.TypeError;
+    const tracking = view.typedArrayKind() == 1 and buffer.arrayBufferMaxByteLength() != null;
+    const ta_length = if (tracking)
+        (if (buffer.byteStorage().len >= byte_offset) buffer.byteStorage().len - byte_offset else 0)
+    else
+        stored_length;
+    if (index > ta_length or width > ta_length - index) return error.RangeError;
+    if (!tracking and byte_offset + stored_length > buffer.byteStorage().len) return error.TypeError;
 }
 
 fn checkDataViewAttached(rt: *JSRuntime, view: *Object) !void {
@@ -848,9 +902,15 @@ fn toBigIntValue(rt: *JSRuntime, value: JSValue) !bignum.BigInt {
     defer buffer.deinit(rt.memory.allocator);
     if (value.isString() or value.isObject()) {
         try appendValueString(rt, &buffer, value);
-        const trimmed = std.mem.trim(u8, buffer.items, " \t\r\n");
+        // qjs JS_StringToBigInt (quickjs.c:14609) + skip_spaces (quickjs.c:11230).
+        const trimmed = value_format.trimJsWhitespace(buffer.items);
         if (trimmed.len == 0) return bignum.BigInt.fromIntAlloc(rt.memory.allocator, 0);
-        return bignum.parseAutoAlloc(rt.memory.allocator, trimmed) catch error.SyntaxError;
+        return bignum.parseAutoAlloc(rt.memory.allocator, trimmed) catch |err| switch (err) {
+            // qjs js_atobigint throws its RangeError through js_atof rather
+            // than folding it into the bad-literal SyntaxError (quickjs.c:12471).
+            error.BigIntTooLarge => error.BigIntTooLarge,
+            else => error.SyntaxError,
+        };
     }
     return error.TypeError;
 }
