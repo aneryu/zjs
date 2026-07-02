@@ -4985,15 +4985,9 @@ pub const parser_core = struct {
 
         fn canTreatLetAsForInitializerExpression(s: *State) bool {
             if (s.peekKind() != tok.TOK_LET) return false;
-            if (s.is_strict or s.cur_func().is_strict_mode) return false;
-            const next_kind = s.peekNextKind();
-            if (next_kind == tok.TOK_YIELD) return false;
-            if (next_kind == tok.TOK_AWAIT and canUseAwaitAsIdentifier(s)) return false;
-            if (next_kind == tok.TOK_STATIC) return false;
-            if (isSloppyFutureReservedToken(next_kind)) return false;
-            return next_kind != tok.TOK_IDENT and
-                next_kind != @as(tok.TokenKind, @intCast('[')) and
-                next_kind != @as(tok.TokenKind, @intCast('{'));
+            // qjs calls is_let(s, DECL_MASK_OTHER) for the for-initializer and
+            // the for-in/of head (quickjs.c:29164, quickjs.c:28703).
+            return canTreatLetAsExpressionStatement(s, DeclMask{ .other = true });
         }
 
         // ---- emit primitives -------------------------------------------------
@@ -11642,7 +11636,7 @@ pub const parser_core = struct {
                 _ = try s.expectSemicolon();
             },
             tok.TOK_VAR, tok.TOK_LET, tok.TOK_CONST => {
-                if (tok_kind == tok.TOK_LET and canTreatLetAsExpressionStatement(s)) {
+                if (tok_kind == tok.TOK_LET and canTreatLetAsExpressionStatement(s, decl_mask)) {
                     try parseLetKeywordExpressionStatement(s);
                     return;
                 }
@@ -12437,10 +12431,21 @@ pub const parser_core = struct {
         return s.lex.is_module and s.cur_func_stack.len == 0 and s.scope_level == 0;
     }
 
-    fn canTreatLetAsExpressionStatement(s: *State) bool {
+    /// Mirrors QuickJS `is_let` (quickjs.c:28619), inverted: returns true when
+    /// a leading `let` token introduces an ExpressionStatement instead of a
+    /// lexical declaration. In qjs, `let [` never introduces an
+    /// ExpressionStatement; `let` followed by `{`, a non-reserved identifier,
+    /// `let`, `yield`, or `await` is a declaration when there is no
+    /// intervening line terminator OR when scanning for a Declaration
+    /// (decl_mask & DECL_MASK_OTHER). Anything else is an expression. In
+    /// strict mode qjs lexes `let` as TOK_LET and never consults is_let, so
+    /// `let` is always a declaration there.
+    fn canTreatLetAsExpressionStatement(s: *State, decl_mask: DeclMask) bool {
+        if (s.is_strict or s.cur_func().is_strict_mode) return false;
         const saved_pos = s.lex.pos;
         const saved_line = s.lex.line;
         const saved_col = s.lex.col;
+        const saved_got_lf = s.lex.got_lf;
         const saved_mark_pos = s.lex.mark_pos;
         const saved_mark_line = s.lex.mark_line;
         const saved_mark_col = s.lex.mark_col;
@@ -12451,15 +12456,36 @@ pub const parser_core = struct {
             s.lex.pos = saved_pos;
             s.lex.line = saved_line;
             s.lex.col = saved_col;
+            s.lex.got_lf = saved_got_lf;
             s.lex.mark_pos = saved_mark_pos;
             s.lex.mark_line = saved_mark_line;
             s.lex.mark_col = saved_mark_col;
         }
-        if (peek_token.line_num == current_line) {
-            return peek_token.val == @as(tok.TokenKind, @intCast('=')) or
-                peek_token.val == @as(tok.TokenKind, @intCast(';'));
+        const val = peek_token.val;
+        if (val == @as(tok.TokenKind, @intCast('['))) {
+            // `let [` is a syntax restriction: it never introduces an
+            // ExpressionStatement (quickjs.c:28632).
+            return false;
         }
-        return peek_token.val == @as(tok.TokenKind, @intCast('{')) or peek_token.val == tok.TOK_IDENT;
+        // qjs checks `{`, non-reserved TOK_IDENT, TOK_LET, TOK_YIELD and
+        // TOK_AWAIT. In sloppy mode qjs lexes the contextual keywords
+        // (static, implements, interface, package, private, protected,
+        // public) as plain identifiers (update_token_ident); zjs gives them
+        // distinct tokens, so they are matched explicitly here.
+        const declaration_start = val == @as(tok.TokenKind, @intCast('{')) or
+            val == tok.TOK_IDENT or
+            val == tok.TOK_LET or
+            val == tok.TOK_YIELD or
+            val == tok.TOK_AWAIT or
+            val == tok.TOK_STATIC or
+            isSloppyFutureReservedToken(val);
+        if (declaration_start) {
+            // Check for possible ASI if not scanning for a Declaration
+            // (quickjs.c:28644-28652).
+            if (peek_token.line_num == current_line or decl_mask.other) return false;
+            return true;
+        }
+        return true;
     }
 
     fn parseLetKeywordExpressionStatement(s: *State) Error!void {
