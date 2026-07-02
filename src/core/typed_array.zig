@@ -74,8 +74,13 @@ pub fn sharedArrayBufferConstructLength(rt: *JSRuntime, byte_length: usize, max_
     errdefer Object.destroyFromHeader(rt, &obj.header);
     try validateArrayBufferLength(byte_length);
     if (max_byte_length) |max| try validateArrayBufferLength(max);
-    const store = try object.SharedBufferStore.create(rt, byte_length);
+    // Mirrors js_array_buffer_constructor3 (quickjs.c:56777-56786): a growable
+    // SharedArrayBuffer commits maxByteLength bytes upfront, and the visible
+    // byte length is a prefix of that committed block, so grow never moves or
+    // re-identifies the backing store.
+    const store = try object.SharedBufferStore.create(rt, max_byte_length orelse byte_length);
     obj.installSharedByteStorage(rt, store);
+    obj.byteStorageSlot().* = store.bytes[0..byte_length];
     obj.arrayBufferMaxByteLengthSlot().* = max_byte_length;
     return obj.value();
 }
@@ -248,6 +253,20 @@ pub fn sharedArrayBufferGrowLength(rt: *JSRuntime, buffer_value: JSValue, new_le
     const max = buffer.arrayBufferMaxByteLength() orelse return error.TypeError;
     if (new_length < buffer.byteStorage().len) return error.RangeError;
     if (new_length > max) return error.RangeError;
+    // Mirrors js_array_buffer_resize shared branch (quickjs.c:57243-57253):
+    // memory was committed upfront at maxByteLength by the constructor, so
+    // grow only bumps the visible byte length (`abuf->byte_length = len`).
+    // The store identity stays stable, keeping cross-runtime sharers and
+    // Atomics waiter keys valid.
+    if (buffer.sharedByteStorageStore()) |store| {
+        if (store.bytes.len >= new_length) {
+            buffer.byteStorageSlot().* = store.bytes[0..new_length];
+            return JSValue.undefinedValue();
+        }
+    }
+    // Fallback for embedder-adopted stores committed below maxByteLength
+    // (sharedArrayBufferFromStore with max > store capacity): qjs has no such
+    // under-committed state, so keep the legacy copy-into-larger-store path.
     const old = buffer.byteStorage();
     const store = try object.SharedBufferStore.create(rt, new_length);
     errdefer store.release();
