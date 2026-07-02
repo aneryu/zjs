@@ -7,6 +7,7 @@ const frame_mod = @import("frame.zig");
 const value_ops = @import("value_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const coercion_ops = @import("coercion_ops.zig");
+const exception_ops = @import("vm_exception_ops.zig");
 const object_ops = @import("object_ops.zig");
 const string_ops = @import("string_ops.zig");
 
@@ -294,10 +295,11 @@ pub fn qjsDateToPrimitiveCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (!this_value.isObject()) return error.TypeError;
+    if (!this_value.isObject()) return exception_ops.throwTypeErrorMessage(ctx, global, "not an object");
 
     const hint_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const hint = qjsDateToPrimitiveHint(hint_value) orelse return error.TypeError;
+    const hint = qjsDateToPrimitiveHint(hint_value) orelse
+        return exception_ops.throwTypeErrorMessage(ctx, global, "invalid hint");
     return switch (hint) {
         .string => try qjsDateOrdinaryToPrimitive(ctx, output, global, this_value, true, caller_function, caller_frame),
         .number => try qjsDateOrdinaryToPrimitive(ctx, output, global, this_value, false, caller_function, caller_frame),
@@ -307,7 +309,10 @@ pub fn qjsDateToPrimitiveCall(
 fn qjsDateToPrimitiveHint(value: core.JSValue) ?DateToPrimitiveHint {
     if (!value.isString()) return null;
     if (string_ops.stringValueUnitsEqualBytes(value, "string") or string_ops.stringValueUnitsEqualBytes(value, "default")) return .string;
-    if (string_ops.stringValueUnitsEqualBytes(value, "number")) return .number;
+    // qjs js_date_Symbol_toPrimitive (quickjs.c:55964) maps JS_ATOM_integer to
+    // HINT_NUMBER alongside JS_ATOM_number (nonstandard qjs extension;
+    // test262 does not exercise the 'integer' hint).
+    if (string_ops.stringValueUnitsEqualBytes(value, "number") or string_ops.stringValueUnitsEqualBytes(value, "integer")) return .number;
     return null;
 }
 
