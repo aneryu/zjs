@@ -1734,6 +1734,13 @@ pub fn qjsDataViewConstructWithPrototype(
 }
 
 pub fn defineClassFieldDataProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: core.JSValue) !void {
+    // NO-ALIGN(qjs): JS_DefinePrivateField (quickjs.c:8374) raw-adds private
+    // fields with add_property and never consults extensibility, so qjs lands
+    // private fields on preventExtensions'd/frozen instances. test262's
+    // `nonextensible-applies-to-private` feature (PrivateFieldAdd step 1:
+    // "If O.[[Extensible]] is false, throw a TypeError") mandates the throw
+    // (language/statements/class/elements/private-class-field-on-nonextensible-
+    // objects.js), so zjs keeps the NotExtensible -> TypeError behavior.
     if (rt.atoms.kind(atom_id) == .private and object.hasOwnProperty(atom_id)) return error.TypeError;
     object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true)) catch |err| switch (err) {
         error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
@@ -4478,6 +4485,10 @@ pub fn addBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     if (rooted_obj.isObject()) {
         const object = try property_ops.expectObject(rooted_obj);
         if (object.hasOwnProperty(brand_atom)) return error.TypeError;
+        // NO-ALIGN(qjs): JS_AddBrand (quickjs.c:8464) raw-adds the instance
+        // brand ignoring extensibility; test262's
+        // `nonextensible-applies-to-private` feature mandates the TypeError,
+        // so zjs keeps the NotExtensible -> TypeError behavior.
         object.defineOwnProperty(ctx.runtime, brand_atom, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true)) catch |err| switch (err) {
             error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
             else => return err,

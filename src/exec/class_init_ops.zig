@@ -273,6 +273,12 @@ pub fn initializeClassPrivateMethods(rt: *core.JSRuntime, instance: *core.Object
         if (instance.hasOwnProperty(prop.atom_id)) return error.TypeError;
         if (home_object.getOwnProperty(rt, prop.atom_id)) |desc| {
             defer desc.destroy(rt);
+            // NO-ALIGN(qjs): qjs brands instances with raw add_property
+            // (JS_AddBrand quickjs.c:8464) ignoring extensibility; test262's
+            // `nonextensible-applies-to-private` feature mandates the
+            // TypeError on non-extensible instances
+            // (staging/sm/PrivateName/modify-non-extensible.js), so zjs keeps
+            // the NotExtensible -> TypeError behavior.
             instance.defineOwnProperty(rt, prop.atom_id, desc) catch |err| switch (err) {
                 error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
                 else => return err,

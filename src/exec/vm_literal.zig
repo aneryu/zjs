@@ -183,10 +183,15 @@ pub noinline fn defineField(
     const obj = stack.peekBorrowed() orelse return error.StackUnderflow;
     if (!value.requiresRefCount() and ctx.runtime.atoms.kind(atom_id) != .private) {
         if (property_ops.expectObject(obj)) |target| {
+            // flags.extensible gate: qjs OP_define_field (quickjs.c:19269) goes
+            // through JS_DefinePropertyValue with JS_PROP_THROW, which enforces
+            // extensibility in JS_CreateProperty — a non-extensible 0-prop
+            // object must fall through to createDataPropertyOrThrow's TypeError.
             if (target.class_id == core.class.ids.object and
                 !target.hasExoticMethods() and
                 target.proxyTarget() == null and
                 !target.flags.is_array and
+                target.flags.extensible and
                 target.shape_ref.prop_count == 0)
             {
                 try target.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, core.Descriptor.data(value, true, true, true));
@@ -238,6 +243,7 @@ pub noinline fn defineField(
         !target.hasExoticMethods() and
         target.proxyTarget() == null and
         !target.flags.is_array and
+        target.flags.extensible and
         target.shape_ref.prop_count == 0)
     {
         try target.defineOwnPropertyAssumingNew(ctx.runtime, effective_atom, core.Descriptor.data(rooted_value, true, true, true));
