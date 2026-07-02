@@ -295,8 +295,19 @@ pub fn main(init: std.process.Init) !void {
     _ = try runtime.event_loop.runUntilIdle();
     jobs_ns = elapsedNanosSince(jobs_start);
     if (runtime.context.hasUnhandledRejection() or runtime.context.hasException()) {
-        const exception = takePendingRejectionOrException(&runtime);
-        try printUnhandledRejection(io, &runtime, exception);
+        // Mirrors qjs js_std_promise_rejection_check (quickjs-libc.c:4276-4290):
+        // every still-unhandled rejection is reported, in rejection order,
+        // before the process exits with 1. One shared stderr writer: fresh
+        // per-report writers restart at position 0 on regular files.
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
+        const stderr = &stderr_writer.interface;
+        while (true) {
+            const exception = takePendingRejectionOrException(&runtime);
+            try printUnhandledRejectionTo(stderr, &runtime, exception);
+            exception.free(runtime.runtime);
+            if (!runtime.context.hasUnhandledRejection()) break;
+        }
         std.process.exit(1);
     }
 
@@ -877,6 +888,14 @@ fn printUnhandledRejection(io: std.Io, runtime: *Runtime, value: zjs.JSValue) !v
     var stderr_buf: [4096]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
     const stderr = &stderr_writer.interface;
+    try printUnhandledRejectionTo(stderr, runtime, value);
+}
+
+/// Reports one rejection into a caller-owned stderr writer. Reporting loops
+/// must reuse ONE writer: each fresh File.stderr().writer() starts at its own
+/// position 0, so successive reports would overwrite each other when stderr
+/// is redirected to a regular file.
+fn printUnhandledRejectionTo(stderr: *std.Io.Writer, runtime: *Runtime, value: zjs.JSValue) !void {
     try stderr.print("Possibly unhandled promise rejection: ", .{});
     if (value.asInt32()) |int_value| {
         try stderr.print("{d}", .{int_value});

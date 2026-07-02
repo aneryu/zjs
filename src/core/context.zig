@@ -409,6 +409,19 @@ pub const PendingPromiseJob = struct {
 
 const class_prototype_inline_capacity: usize = class.ids.init_count;
 
+/// One tracked unhandled rejection: the rejected promise (undefined when the
+/// producer had no promise object at hand) plus its reason. Mirrors the qjs
+/// CLI JSRejectedPromiseEntry (quickjs-libc.c:147-151).
+pub const UnhandledRejectionEntry = struct {
+    promise: JSValue = JSValue.undefinedValue(),
+    reason: JSValue = JSValue.undefinedValue(),
+
+    pub fn deinit(self: UnhandledRejectionEntry, rt: *JSRuntime) void {
+        self.promise.free(rt);
+        self.reason.free(rt);
+    }
+};
+
 pub const JSContext = struct {
     pub const Options = ContextOptions;
     pub const EvalOptions = ContextEvalOptions;
@@ -416,8 +429,15 @@ pub const JSContext = struct {
 
     runtime: *JSRuntime,
     exception_slot: exception.ExceptionSlot = .{},
-    unhandled_rejection_slot: exception.ExceptionSlot = .{},
-    unhandled_rejection_promise_slot: exception.ExceptionSlot = .{},
+    /// Not-yet-handled rejected promises, in rejection order. Mirrors the qjs
+    /// CLI host tracker list (js_std_promise_rejection_tracker's
+    /// rejected_promise_list, quickjs-libc.c:4240-4269, driven by the
+    /// per-promise is_handled transitions in fulfill_or_reject_promise
+    /// quickjs.c:53451 and perform_promise_then quickjs.c:54224): one entry
+    /// per promise, appended when it rejects unhandled, removed when that
+    /// same promise later gets handled; every remaining entry is reported.
+    unhandled_rejections: []UnhandledRejectionEntry = &.{},
+    unhandled_rejections_capacity: usize = 0,
     stack_limit: usize = 0,
     /// Logical JS call depth (recursive interpreter entries + inline frames).
     call_depth: usize = 0,
@@ -606,8 +626,7 @@ pub const JSContext = struct {
         rt.unregisterRootProvider(self.rootProvider());
         self.host_event_loop = null;
         self.exception_slot.clear(rt);
-        self.unhandled_rejection_slot.clear(rt);
-        self.unhandled_rejection_promise_slot.clear(rt);
+        self.clearUnhandledRejection();
         const old_eval = self.eval_function;
         self.eval_function = JSValue.nullValue();
         const old_lexicals = self.lexicals;
@@ -660,8 +679,10 @@ pub const JSContext = struct {
 
     pub fn traceRoots(self: *JSContext, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
         try visitor.value(&self.exception_slot.value);
-        try visitor.value(&self.unhandled_rejection_slot.value);
-        try visitor.value(&self.unhandled_rejection_promise_slot.value);
+        for (self.unhandled_rejections) |*entry| {
+            try visitor.value(&entry.promise);
+            try visitor.value(&entry.reason);
+        }
         try visitor.value(&self.eval_function);
         try visitor.values(self.class_prototypes);
         try visitor.optionalObject(&self.global);
@@ -748,30 +769,89 @@ pub const JSContext = struct {
         self.recordUnhandledPromiseRejection(null, value);
     }
 
+    /// Mirrors the qjs CLI tracker's !is_handled branch
+    /// (js_std_promise_rejection_tracker quickjs-libc.c:4248-4258): append a
+    /// (promise, reason) entry unless this promise is already tracked; every
+    /// unhandled rejection is reported once, in rejection order. Allocation
+    /// failure silently drops the entry, exactly as the qjs CLI's unchecked
+    /// malloc does.
     pub fn recordUnhandledPromiseRejection(self: *JSContext, promise: ?JSValue, value: JSValue) void {
-        self.unhandled_rejection_slot.set(self.runtime, value.dup());
         if (promise) |promise_value| {
-            self.unhandled_rejection_promise_slot.set(self.runtime, promise_value.dup());
-        } else {
-            self.unhandled_rejection_promise_slot.clear(self.runtime);
+            for (self.unhandled_rejections) |entry| {
+                if (entry.promise.same(promise_value)) return;
+            }
         }
+        self.appendUnhandledRejection(promise, value) catch return;
         if (!self.exception_slot.hasException()) {
             self.exception_slot.set(self.runtime, value.dup());
         }
     }
 
-    pub fn hasUnhandledRejection(self: JSContext) bool {
-        return self.unhandled_rejection_slot.hasException();
+    fn appendUnhandledRejection(self: *JSContext, promise: ?JSValue, value: JSValue) !void {
+        const index = self.unhandled_rejections.len;
+        if (index + 1 > self.unhandled_rejections_capacity) {
+            var next_capacity = if (self.unhandled_rejections_capacity == 0) @as(usize, 4) else self.unhandled_rejections_capacity * 2;
+            while (next_capacity < index + 1) : (next_capacity *= 2) {}
+            const next = try self.runtime.memory.alloc(UnhandledRejectionEntry, next_capacity);
+            const old = self.unhandled_rejections;
+            const old_capacity = self.unhandled_rejections_capacity;
+            @memcpy(next[0..old.len], old);
+            self.unhandled_rejections = next[0..old.len];
+            self.unhandled_rejections_capacity = next_capacity;
+            if (old_capacity != 0) self.runtime.memory.free(UnhandledRejectionEntry, old.ptr[0..old_capacity]);
+        }
+        self.unhandled_rejections = self.unhandled_rejections.ptr[0 .. index + 1];
+        self.unhandled_rejections[index] = .{
+            .promise = if (promise) |promise_value| promise_value.dup() else JSValue.undefinedValue(),
+            .reason = value.dup(),
+        };
     }
 
+    /// Mirrors the tracker's is_handled branch (js_std_promise_rejection_tracker
+    /// quickjs-libc.c:4259-4268): handling a promise unreports THAT promise
+    /// only — entries for other promises stay tracked (even with a sameValue
+    /// reason).
+    pub fn removeUnhandledPromiseRejection(self: *JSContext, promise_value: JSValue) void {
+        const entries = self.unhandled_rejections;
+        for (entries, 0..) |entry, index| {
+            if (!entry.promise.same(promise_value)) continue;
+            entry.deinit(self.runtime);
+            const old_len = entries.len;
+            if (index + 1 < old_len) {
+                @memmove(entries[index .. old_len - 1], entries[index + 1 .. old_len]);
+            }
+            self.unhandled_rejections = entries[0 .. old_len - 1];
+            return;
+        }
+    }
+
+    pub fn hasUnhandledRejection(self: JSContext) bool {
+        return self.unhandled_rejections.len != 0;
+    }
+
+    /// Pops the OLDEST tracked rejection and returns its reason (owned by the
+    /// caller); reporting loops call this until the list drains, matching
+    /// js_std_promise_rejection_check's in-order walk (quickjs-libc.c:4281).
     pub fn takeUnhandledRejection(self: *JSContext) JSValue {
-        self.unhandled_rejection_promise_slot.clear(self.runtime);
-        return self.unhandled_rejection_slot.take();
+        const entries = self.unhandled_rejections;
+        if (entries.len == 0) return JSValue.undefinedValue();
+        const entry = entries[0];
+        if (entries.len > 1) {
+            @memmove(entries[0 .. entries.len - 1], entries[1..entries.len]);
+        }
+        self.unhandled_rejections = entries[0 .. entries.len - 1];
+        entry.promise.free(self.runtime);
+        return entry.reason;
     }
 
     pub fn clearUnhandledRejection(self: *JSContext) void {
-        self.unhandled_rejection_slot.clear(self.runtime);
-        self.unhandled_rejection_promise_slot.clear(self.runtime);
+        const rt = self.runtime;
+        const entries = self.unhandled_rejections;
+        const capacity = self.unhandled_rejections_capacity;
+        self.unhandled_rejections = &.{};
+        self.unhandled_rejections_capacity = 0;
+        for (entries) |entry| entry.deinit(rt);
+        if (capacity != 0) rt.memory.free(UnhandledRejectionEntry, entries.ptr[0..capacity]);
     }
 
     pub fn classPrototypeSlotCount(self: JSContext) usize {
