@@ -4209,6 +4209,27 @@ pub const parser_core = struct {
             return false;
         }
 
+        /// qjs find_global_var (quickjs.c:24066): any global_vars entry with this
+        /// name — top-level var, hoisted function declaration, or lexical.
+        fn findGlobalVar(self: *State, name: Atom) bool {
+            for (self.cur_func().global_vars) |gv| {
+                if (gv.var_name == name) return true;
+            }
+            return false;
+        }
+
+        /// True when a lexical declaration is being made at the body scope of
+        /// global script or global sloppy-eval code, where qjs runs the
+        /// `fd->is_global_var` redefinition check of define_var
+        /// (quickjs.c:24352-24360). At the body scope every global_vars entry
+        /// satisfies is_child_scope(hf->scope_level, fd->scope_level), so the
+        /// check degenerates to find_global_var.
+        fn atGlobalLexicalBodyScope(self: *State) bool {
+            return self.cur_func_stack.len == 0 and self.scope_level == 0 and
+                !self.top_level_lexical_as_module_ref and
+                (!self.is_eval or self.eval_global_var_bindings);
+        }
+
         fn ensureFunctionScopeVar(self: *State, name: Atom) Error!u16 {
             if (self.scopeHasVar(0, name)) {
                 if (self.findFunctionScopeVar(name)) |idx| return idx;
@@ -12439,7 +12460,19 @@ pub const parser_core = struct {
                     } else {
                         try s.expectToken('(');
                         if (s.peekKind() == '[' or s.peekKind() == '{') {
-                            if (s.peekKind() == '[' and try catchArrayPatternHasDuplicateNames(s)) return Error.UnexpectedToken;
+                            // qjs parses catch patterns as TOK_LET destructuring
+                            // (js_parse_destructuring_element quickjs.c:29439);
+                            // every binding runs define_var(JS_VAR_DEF_LET) whose
+                            // same-scope find_lexical_decl rejects duplicate names
+                            // ("invalid redefinition of lexical identifier",
+                            // quickjs.c:24337). Pre-collect the bound names of both
+                            // array and object patterns and reject duplicates.
+                            {
+                                var catch_pattern_names = std.ArrayList(Atom).empty;
+                                defer catch_pattern_names.deinit(s.function.memory.allocator);
+                                const pattern_kind: DestructuringKind = if (s.peekKind() == '[') .array else .object;
+                                try collectArrowPatternBindingNamesSnapshot(s, pattern_kind, &catch_pattern_names);
+                            }
                             const temp_idx = try appendTempLocal(s);
                             try s.emitOpU16(opcode.op.put_loc, temp_idx);
                             const kind: DestructuringKind = if (s.peekKind() == '[') .array else .object;
@@ -13145,67 +13178,6 @@ pub const parser_core = struct {
         try s.emitScopePutVar(State.eval_ret_atom);
     }
 
-    fn catchArrayPatternHasDuplicateNames(s: *State) Error!bool {
-        const snapshot = takeParserSnapshot(s);
-        defer restoreParserLexerSnapshot(s, snapshot);
-
-        var names = std.ArrayList(Atom).empty;
-        defer names.deinit(s.function.memory.allocator);
-
-        var depth: usize = 0;
-        var expect_binding = false;
-        while (s.peekKind() != tok.TOK_EOF) {
-            const kind = s.peekKind();
-            if (kind == '[') {
-                depth += 1;
-                expect_binding = true;
-                try s.advance();
-                continue;
-            }
-            if (kind == ']') {
-                if (depth == 0) return false;
-                depth -= 1;
-                try s.advance();
-                if (depth == 0) break;
-                expect_binding = false;
-                continue;
-            }
-            if (kind == ',' or kind == tok.TOK_ELLIPSIS) {
-                expect_binding = true;
-                try s.advance();
-                continue;
-            }
-            if (kind == '{') {
-                var object_depth: usize = 0;
-                while (s.peekKind() != tok.TOK_EOF) {
-                    if (s.peekKind() == '{') object_depth += 1;
-                    if (s.peekKind() == '}') {
-                        if (object_depth == 0) break;
-                        object_depth -= 1;
-                        try s.advance();
-                        if (object_depth == 0) break;
-                        continue;
-                    }
-                    try s.advance();
-                }
-                expect_binding = false;
-                continue;
-            }
-            if (expect_binding and kind == tok.TOK_IDENT) {
-                const atom_id = s.token.payload.ident.atom;
-                for (names.items) |seen| {
-                    if (seen == atom_id) return true;
-                }
-                try names.append(s.function.memory.allocator, atom_id);
-                expect_binding = false;
-            } else {
-                expect_binding = false;
-            }
-            try s.advance();
-        }
-        return false;
-    }
-
     fn catchBlockHasDirectLexicalDeclaration(s: *State, atom_id: Atom) Error!bool {
         if (s.peekKind() != '{') return false;
         const snapshot = takeParserSnapshot(s);
@@ -13330,6 +13302,14 @@ pub const parser_core = struct {
                     if (findCurrentScopeVar(s, atom_id)) |existing_idx| {
                         if (s.cur_func().vars[existing_idx].is_lexical) return Error.UnexpectedToken;
                     }
+                    // qjs define_var JS_VAR_DEF_VAR (quickjs.c:24395-24399): a var
+                    // colliding with a top-level lexical (global_vars entry with
+                    // is_lexical, reached through find_lexical_decl →
+                    // find_lexical_global_var quickjs.c:24099-24102) is a
+                    // SyntaxError at any block depth of global code.
+                    if (s.cur_func_stack.len == 0 and s.findLexicalGlobalVar(atom_id)) {
+                        return Error.UnexpectedToken;
+                    }
                     if (module_top_level_var) {
                         if (State.findClosureVarIndex(s.cur_func(), atom_id)) |existing_ref_idx| {
                             if (s.cur_func().closure_var[existing_ref_idx].is_lexical) return Error.UnexpectedToken;
@@ -13338,6 +13318,14 @@ pub const parser_core = struct {
                 } else {
                     try s.registerBlockLexicalDeclaration(atom_id);
                     if (findCurrentScopeVar(s, atom_id) != null) return Error.UnexpectedToken;
+                    // qjs define_var JS_VAR_DEF_LET/CONST is_global_var branch
+                    // (quickjs.c:24352-24360): at the global body scope a lexical
+                    // declaration colliding with any global_vars entry (top-level
+                    // var, function declaration, or another lexical) is a
+                    // SyntaxError ("invalid redefinition of global identifier").
+                    if (s.atGlobalLexicalBodyScope() and s.findGlobalVar(atom_id)) {
+                        return Error.UnexpectedToken;
+                    }
                     if (module_top_level_lexical and State.findClosureVarIndex(s.cur_func(), atom_id) != null) {
                         return Error.UnexpectedToken;
                     }
@@ -13685,6 +13673,12 @@ pub const parser_core = struct {
     }
 
     fn declareForInOfVarBinding(s: *State, atom_id: Atom) Error!void {
+        // qjs define_var JS_VAR_DEF_VAR (quickjs.c:24395-24399) also runs for
+        // `for (var x in/of ...)` heads: a collision with a top-level lexical
+        // (find_lexical_global_var quickjs.c:24099-24102) is a SyntaxError.
+        if (s.cur_func_stack.len == 0 and s.findLexicalGlobalVar(atom_id)) {
+            return Error.UnexpectedToken;
+        }
         if (s.top_level_lexical_as_module_ref and s.scope_level == 0) {
             if (State.findClosureVarIndex(s.cur_func(), atom_id) == null) {
                 const ref_idx: u16 = @intCast(try s.cur_func().addClosureVar(.{
@@ -14893,7 +14887,19 @@ pub const parser_core = struct {
             return Error.UnexpectedToken;
         }
         const function_body_scope: i32 = if (s.cur_func_stack.len > 0) 1 else 0;
-        if (s.scope_level > function_body_scope) try s.registerBlockLexicalDeclaration(name_atom);
+        if (s.scope_level > function_body_scope) {
+            try s.registerBlockLexicalDeclaration(name_atom);
+        } else if (!s.annex_b_if_function_decl_clause) {
+            // A function declaration at the function body scope hoists a var;
+            // a later same-function lexical redeclaration is a SyntaxError via
+            // qjs find_var_in_child_scope (quickjs.c:24349-24351, "invalid
+            // redefinition of a variable"). Record it with the block var
+            // machinery so registerBlockLexicalDeclaration rejects the later
+            // let/const/class. Annex B `if (x) function f(){}` clauses stay
+            // exempt (they only hoist when no lexical conflicts, and a later
+            // lexical wins — see the annex_b_if_function_var path).
+            try s.registerBlockVarDeclaration(name_atom);
+        }
         try s.advance();
 
         // Set generator flag for yield parsing
@@ -16576,6 +16582,12 @@ pub const parser_core = struct {
                 if (s.destructuring_predeclare_only) return Error.UnexpectedToken;
                 return idx;
             }
+            // qjs define_var JS_VAR_DEF_LET/CONST is_global_var branch
+            // (quickjs.c:24352-24360): lexical destructuring at the global body
+            // scope colliding with any global_vars entry is a SyntaxError.
+            if (s.atGlobalLexicalBodyScope() and s.findGlobalVar(atom_id)) {
+                return Error.UnexpectedToken;
+            }
             const idx: u16 = @intCast(try s.addScopeVar(atom_id, .normal, true, s.destructuring_binding_is_const));
             if (s.collect_module_export_bindings) {
                 try addModuleExportName(s, atom_id, atom_id);
@@ -16595,6 +16607,16 @@ pub const parser_core = struct {
             return idx;
         }
         try s.registerBlockVarDeclaration(atom_id);
+        // qjs define_var JS_VAR_DEF_VAR (quickjs.c:24395-24399): a var-pattern
+        // binding colliding with a same-scope lexical (find_lexical_decl) or a
+        // top-level lexical of global code (find_lexical_global_var,
+        // quickjs.c:24099-24102) is a SyntaxError.
+        if (findCurrentScopeVar(s, atom_id)) |existing_idx| {
+            if (s.cur_func().vars[existing_idx].is_lexical) return Error.UnexpectedToken;
+        }
+        if (s.cur_func_stack.len == 0 and s.findLexicalGlobalVar(atom_id)) {
+            return Error.UnexpectedToken;
+        }
         const existing = s.cur_func().findVar(atom_id);
         if (existing >= 0) {
             const idx: usize = @intCast(existing);
@@ -19096,6 +19118,14 @@ pub const parser_core = struct {
         var top_level_class_ref_idx: ?u16 = null;
         if (is_decl) {
             const class_atom = class_name orelse return Error.UnexpectedToken;
+            // qjs js_parse_class routes the class binding through
+            // define_var(JS_VAR_DEF_LET) (quickjs.c:26214); its is_global_var
+            // branch (quickjs.c:24352-24360) rejects a class declaration at the
+            // global body scope that collides with any global_vars entry
+            // (top-level var, function declaration, or lexical).
+            if (s.atGlobalLexicalBodyScope() and s.findGlobalVar(class_atom)) {
+                return Error.UnexpectedToken;
+            }
             // Script-mode top-level class declaration → single global VarRef cell
             // (qjs JS_CLOSURE_GLOBAL_DECL): mirrors the let/const handler at the
             // `top_level_lexical_as_global_ref` predicate (~parser_core.zig:9562).
