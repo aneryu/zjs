@@ -3961,6 +3961,12 @@ pub const parser_core = struct {
         class_static_deferred_code: std.ArrayList(u8) = .empty,
         class_static_deferred_atoms: std.ArrayList(Atom) = .empty,
         class_fields_init_child_index: ?u16 = null,
+        // Var index (into cur_func().vars) of the CURRENT class's
+        // `<class_fields_init>` binding; saved/restored around nested
+        // parseClass so constructor capture never resolves to a nested
+        // class's atom-120 var (qjs resolves it per class scope,
+        // quickjs.c:25702 + emit_class_field_init quickjs.c:25185).
+        class_fields_init_var_idx: ?u16 = null,
         class_field_initializer_depth: u32 = 0,
         class_static_field_this_atom: ?Atom = null,
 
@@ -15136,14 +15142,18 @@ pub const parser_core = struct {
                     child_fd.vars[@intCast(child_fd.this_var_idx)].tdz_emitted_at_decl = true;
                 }
                 child_fd.is_derived_class_constructor = func_kind == .derived_class_constructor;
-                const fields_init_var_idx = parent_fd.findVar(atom_class_fields_init);
-                if (fields_init_var_idx < 0) return Error.UnexpectedToken;
+                // Capture THIS class's `<class_fields_init>` var via the index
+                // recorded by parseClass, not by-name findVar (newest-first
+                // findVar picks a nested heritage class's atom-120 var).
+                // Mirrors qjs per-class-scope resolution of
+                // JS_ATOM_class_fields_init (quickjs.c:25702 + 25185).
+                const fields_init_var_idx = s.class_fields_init_var_idx orelse return Error.UnexpectedToken;
                 _ = try child_fd.addClosureVar(.{
                     .closure_type = .local,
                     .is_lexical = true,
                     .is_const = true,
                     .var_kind = .normal,
-                    .var_idx = @intCast(fields_init_var_idx),
+                    .var_idx = fields_init_var_idx,
                     .var_name = atom_class_fields_init,
                 });
             }
@@ -19192,6 +19202,7 @@ pub const parser_core = struct {
         const saved_class_static_deferred_code_len = s.class_static_deferred_code.items.len;
         const saved_class_static_deferred_atom_len = s.class_static_deferred_atoms.items.len;
         const saved_class_fields_init_child_index = s.class_fields_init_child_index;
+        const saved_class_fields_init_var_idx = s.class_fields_init_var_idx;
         var class_name_scope_pushed = false;
         var class_name_local_idx: ?u16 = null;
         errdefer {
@@ -19201,6 +19212,7 @@ pub const parser_core = struct {
             s.truncateClassPublicInstanceFields(saved_class_public_instance_fields_len);
             s.truncateClassStaticDeferred(saved_class_static_deferred_code_len, saved_class_static_deferred_atom_len);
             s.class_fields_init_child_index = saved_class_fields_init_child_index;
+            s.class_fields_init_var_idx = saved_class_fields_init_var_idx;
             s.is_static = saved_is_static;
             s.is_strict = saved_is_strict;
             s.lex.is_strict_mode = saved_lex_is_strict;
@@ -19225,6 +19237,7 @@ pub const parser_core = struct {
             class_fields_init_local_idx = @intCast(try s.addScopeVar(120, .normal, true, true)); // <class_fields_init>
             s.cur_func().vars[class_fields_init_local_idx.?].tdz_emitted_at_decl = true;
         }
+        s.class_fields_init_var_idx = class_fields_init_local_idx;
         if (class_name) |class_atom| {
             try s.pushScope();
             class_name_scope_pushed = true;
@@ -19284,6 +19297,7 @@ pub const parser_core = struct {
         s.truncateClassPublicInstanceFields(saved_class_public_instance_fields_len);
         s.truncateClassStaticDeferred(saved_class_static_deferred_code_len, saved_class_static_deferred_atom_len);
         s.class_fields_init_child_index = saved_class_fields_init_child_index;
+        s.class_fields_init_var_idx = saved_class_fields_init_var_idx;
 
         const name_atom = class_name orelse s.function.name;
         if (is_decl) {
@@ -19386,14 +19400,21 @@ pub const parser_core = struct {
         if (s.class_has_extends) {
             child_fd.vars[@intCast(child_fd.this_var_idx)].tdz_emitted_at_decl = true;
         }
-        const fields_init_var_idx = parent_fd.findVar(atom_class_fields_init);
-        if (fields_init_var_idx < 0) return Error.UnexpectedToken;
+        // The constructor closes over THIS class's `<class_fields_init>` var.
+        // Resolve through the parse-state index recorded by parseClass instead
+        // of a by-name findVar: a nested class expression (e.g. in the extends
+        // clause) adds a second atom-120 var to the same enclosing function,
+        // and newest-first findVar would capture the inner class's slot.
+        // Mirrors qjs, where JS_ATOM_class_fields_init is defined in the
+        // class's own scope (define_var, quickjs.c:25702) and the constructor
+        // resolves it lexically (emit_class_field_init, quickjs.c:25185).
+        const fields_init_var_idx = s.class_fields_init_var_idx orelse return Error.UnexpectedToken;
         _ = try child_fd.addClosureVar(.{
             .closure_type = .local,
             .is_lexical = true,
             .is_const = true,
             .var_kind = .normal,
-            .var_idx = @intCast(fields_init_var_idx),
+            .var_idx = fields_init_var_idx,
             .var_name = atom_class_fields_init,
         });
         if (s.class_has_extends) {
