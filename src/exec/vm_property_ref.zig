@@ -449,31 +449,42 @@ pub noinline fn deletePropertyVm(
     defer prop.free(ctx.runtime);
     const obj = try stack.pop();
     defer obj.free(ctx.runtime);
+    // qjs js_operator_delete (quickjs.c:16072) runs JS_ValueToAtom on the key
+    // FIRST: user toString/Symbol.toPrimitive side effects (and their
+    // exceptions) fire before any base check.
+    const atom_id = object_ops.toPropertyKeyAtom(ctx, output, global, prop, function, frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    defer ctx.runtime.atoms.free(atom_id);
     if (obj.isNull() or obj.isUndefined()) {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
         return error.TypeError;
-    } else if (!obj.isObject()) {
-        try stack.pushOwned(core.JSValue.boolean(true));
-    } else {
-        const object = try property_ops.expectObject(obj);
-        const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, prop);
-        defer ctx.runtime.atoms.free(atom_id);
-        const deleted = if (object.proxyTarget() != null) blk: {
-            break :blk object_ops.deleteValueProperty(ctx, output, global, obj, object, atom_id, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
-                return err;
-            };
-        } else if (object.flags.is_array and atom_id == core.atom.ids.length)
-            false
-        else if (try array_ops.typedArrayCanonicalDelete(ctx.runtime, object, atom_id)) |typed_deleted|
-            typed_deleted
-        else
-            object.deleteProperty(ctx.runtime, atom_id);
-        if (!deleted and function.flags.is_strict) {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
-            return error.TypeError;
-        }
-        try stack.pushOwned(core.JSValue.boolean(deleted));
     }
+    // JS_DeleteProperty (quickjs.c:10920) converts the base via JS_ToObject and
+    // runs the real delete on the wrapper, so string-exotic non-configurable
+    // props (indices, .length) report false and strict mode throws.
+    const obj_value = if (obj.isObject()) obj.dup() else object_ops.primitiveObjectForAccess(ctx.runtime, global, obj) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    defer obj_value.free(ctx.runtime);
+    const object = try property_ops.expectObject(obj_value);
+    const deleted = if (object.proxyTarget() != null) blk: {
+        break :blk object_ops.deleteValueProperty(ctx, output, global, obj_value, object, atom_id, function, frame) catch |err| {
+            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            return err;
+        };
+    } else if (object.flags.is_array and atom_id == core.atom.ids.length)
+        false
+    else if (try array_ops.typedArrayCanonicalDelete(ctx.runtime, object, atom_id)) |typed_deleted|
+        typed_deleted
+    else
+        object.deleteProperty(ctx.runtime, atom_id);
+    if (!deleted and function.flags.is_strict) {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+        return error.TypeError;
+    }
+    try stack.pushOwned(core.JSValue.boolean(deleted));
     return .done;
 }
