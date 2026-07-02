@@ -425,7 +425,9 @@ pub fn runtimeErrorInfo(err: anytype) ?ErrorInfo {
         error.StackOverflow => .{ .name = "InternalError", .message = "stack overflow" },
         // JS_STRING_LEN_MAX creation/concat cap (qjs quickjs.c:4078/4368/4655/4898).
         error.StringTooLong => .{ .name = "InternalError", .message = "string too long" },
-        error.TypeError, error.NotExtensible => .{ .name = "TypeError", .message = "" },
+        error.TypeError => .{ .name = "TypeError", .message = "" },
+        // qjs JS_CreateProperty not_extensible (quickjs.c:10144).
+        error.NotExtensible => .{ .name = "TypeError", .message = "object is not extensible" },
         error.InvalidCharacterError => .{ .name = "InvalidCharacterError", .message = "" },
         error.SyntaxError => .{ .name = "SyntaxError", .message = "invalid syntax" },
         error.RangeError => .{ .name = "RangeError", .message = "" },

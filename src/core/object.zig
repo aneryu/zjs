@@ -7356,7 +7356,9 @@ pub const Object = struct {
         const rt = info.rt;
         const object = Object.create(rt, class.ids.object, null) catch return null;
         const unscopables_value = object.value();
+        // qjs js_array_unscopables (order incl. "at"; spec 23.1.3.41).
         const names = [_][]const u8{
+            "at",
             "copyWithin",
             "entries",
             "fill",

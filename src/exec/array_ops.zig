@@ -3565,7 +3565,14 @@ pub fn ensureSettableForArrayBuiltin(ctx: *core.JSContext, object: *core.Object,
         defer desc.destroy(ctx.runtime);
         if (desc.kind == .data and desc.writable == false) return error.TypeError;
         if (desc.kind == .accessor and desc.setter.isUndefined()) return error.TypeError;
+        return;
     }
+    // No data property and no setter anywhere on the chain: the write would
+    // CREATE a new own property, which a non-extensible receiver must reject
+    // (qjs JS_CreateProperty `if (!p->extensible) goto not_extensible` ->
+    // TypeError "object is not extensible", quickjs.c:10144). Without this,
+    // sealed-array push/unshift/splice silently grew length and LOST the value.
+    if (!object.flags.extensible) return error.NotExtensible;
 }
 
 pub fn ensureLengthWritableForArrayBuiltin(ctx: *core.JSContext, object: *core.Object) !void {
