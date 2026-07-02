@@ -1398,6 +1398,9 @@ fn numberResult(value: f64) core.JSValue {
 
 fn toNumber(value: core.JSValue) ?f64 {
     if (value.isSymbol()) return null;
+    // JS_ToFloat64 throws "cannot convert bigint to number" (qjs
+    // js_date_constructor/set_date_field/js_Date_UTC all coerce through it).
+    if (value.isBigInt()) return null;
     if (numberValue(value)) |number| return number;
     if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
     if (value.isNull()) return 0;

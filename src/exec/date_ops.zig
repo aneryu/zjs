@@ -259,12 +259,16 @@ pub fn qjsDateConstructWithPrototype(
             const primitive = try coercion_ops.toPrimitiveForAddition(ctx, output, global, args[0]);
             defer primitive.free(ctx.runtime);
             if (primitive.isString()) return constructDateRecord(ctx, prototype, &.{primitive});
+            // JS_ToFloat64Free on a bigint primitive throws (qjs
+            // js_date_constructor single-arg branch).
+            if (primitive.isBigInt()) return error.TypeError;
             const number = try value_ops.toNumberValue(ctx.runtime, primitive);
             defer number.free(ctx.runtime);
             return constructDateRecord(ctx, prototype, &.{number});
         }
 
         if (args[0].isString()) return constructDateRecord(ctx, prototype, args);
+        if (args[0].isBigInt()) return error.TypeError;
         const number = try value_ops.toNumberValue(ctx.runtime, args[0]);
         defer number.free(ctx.runtime);
         return constructDateRecord(ctx, prototype, &.{number});

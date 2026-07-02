@@ -1481,6 +1481,9 @@ pub fn constructValueOrBytecodeWithNewTarget(
                             coerced_storage[0] = primitive;
                         } else {
                             defer primitive.free(ctx.runtime);
+                            // JS_ToFloat64Free on a bigint primitive throws
+                            // (qjs js_date_constructor single-arg branch).
+                            if (primitive.isBigInt()) return error.TypeError;
                             coerced_storage[0] = try value_ops.toNumberValue(ctx.runtime, primitive);
                         }
                     }
@@ -1488,6 +1491,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
                     coerced_owned = true;
                     date_args = coerced;
                 } else if (!args[0].isString()) {
+                    if (args[0].isBigInt()) return error.TypeError;
                     coerced_storage[0] = try value_ops.toNumberValue(ctx.runtime, args[0]);
                     coerced = coerced_storage[0..1];
                     coerced_owned = true;
