@@ -621,6 +621,7 @@ pub const RealmValueSlot = enum(u8) {
     wrap_for_valid_iterator_prototype,
     std_file_prototype,
     regexp_constructor,
+    promise_constructor,
     callsite_prototype,
     regexp_match_result_template,
     count,

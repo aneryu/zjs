@@ -2060,6 +2060,14 @@ pub fn qjsPromiseResolveIdentity(
 }
 
 pub fn qjsPromiseDefaultConstructor(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
+    // qjs uses the cached intrinsic ctx->promise_ctor (js_async_function_resume
+    // quickjs.c:21268, js_new_promise_capability quickjs.c:53745; set at
+    // JS_AddIntrinsicPromise quickjs.c:54663) — never a globalThis.Promise
+    // lookup, so deleting/replacing the global binding cannot break await or
+    // the default species. The realm slot is populated at install time
+    // (installPromiseExtras); the global read remains only as a fallback for
+    // bare non-realm globals (unit-test contexts).
+    if (global.cachedRealmValue(.promise_constructor)) |stored| return stored.dup();
     const promise_key = try ctx.runtime.internAtom("Promise");
     defer ctx.runtime.atoms.free(promise_key);
     return global.getProperty(promise_key);

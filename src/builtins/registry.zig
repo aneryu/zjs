@@ -2310,6 +2310,11 @@ fn installPromiseExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.O
         try bindNativeRecordByName(rt, ctor, method.name, .promise, id);
     }
     try global.setCachedPromiseProto(rt, constructorPrototypeObject(rt, ctor));
+    // Mirror qjs ctx->promise_ctor (JS_AddIntrinsicPromise quickjs.c:54663):
+    // the realm retains the intrinsic constructor so await / the default
+    // species never depend on the mutable globalThis.Promise binding.
+    const cached_ctor = try global.cachedRealmValueSlot(rt, .promise_constructor);
+    try global.setOptionalValueSlot(rt, cached_ctor, ctor.value().dup());
 }
 
 fn installIteratorExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
