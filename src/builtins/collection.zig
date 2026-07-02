@@ -1082,14 +1082,10 @@ fn mapGetOrInsertComputed(
         var callback_args = [_]core.JSValue{key};
         const value = if (isCallableClosure(callback)) try host.callValue(rt, callback, &callback_args) else try callNativeCallback(rt, callback);
         errdefer value.free(rt);
-        if (findWeakEntry(object, key_identity)) |index| {
-            const entry = &object.weakCollectionEntriesSlot().*[index];
-            const next_value = value.dup();
-            const old_value = entry.value;
-            entry.value = next_value;
-            old_value.free(rt);
-            return value;
-        }
+        // Mirrors js_map_getOrInsert computed branch (quickjs.c:52206):
+        // map_delete_record + map_add_record after the callback, so a record
+        // the callback inserted re-appends at the tail with the computed value.
+        if (findWeakEntry(object, key_identity)) |index| try removeWeakEntry(rt, object, index);
         var entry = core.object.WeakCollectionEntry{ .key_identity = key_identity, .value = value.dup() };
         errdefer entry.value.free(rt);
         try appendWeakEntry(rt, object, entry);
@@ -1107,14 +1103,11 @@ fn mapGetOrInsertComputed(
         break :value out;
     } else try callNativeCallback(rt, callback);
     errdefer value.free(rt);
-    if (findStrongEntry(object, canonical_key)) |index| {
-        const entry = &object.collectionEntriesSlot().*[index];
-        const next_value = value.dup();
-        const old_value = entry.value;
-        entry.value = next_value;
-        old_value.free(rt);
-        return value;
-    }
+    // Mirrors js_map_getOrInsert computed branch (quickjs.c:52206):
+    // map_delete_record + map_add_record after the callback, so a record the
+    // callback inserted re-appends at the iteration tail with the computed
+    // value instead of being overwritten in place.
+    if (findStrongEntry(object, canonical_key)) |index| removeStrongEntry(rt, object, index);
     const entry = core.object.CollectionEntry{ .key = canonical_key.dup(), .value = value.dup() };
     try appendStrongEntryOwned(rt, object, entry);
     return value;
@@ -2874,6 +2867,12 @@ pub fn qjsMapGetOrInsertComputed(
         caller_frame,
     );
     errdefer computed.free(ctx.runtime);
+    // Mirrors js_map_getOrInsert computed branch (quickjs.c:52206): after the
+    // callback qjs does map_delete_record + map_add_record, so a record the
+    // callback inserted for this key is deleted and the key re-appends at the
+    // iteration tail with the computed value.
+    const delete_result = try methodCall(ctx.runtime, receiver_value, 4, &.{key});
+    delete_result.free(ctx.runtime);
     const set_result = try methodCall(ctx.runtime, receiver_value, 1, &.{ key, computed });
     set_result.free(ctx.runtime);
     return computed;
