@@ -1278,6 +1278,12 @@ pub const function_bytecode = struct {
         pc2line_buf: [*]u8 = @ptrFromInt(@alignOf(u8)),
         source_ptr: ?[*]const u8 = null,
         arg_names: [*]atom.Atom = @ptrFromInt(@alignOf(atom.Atom)),
+        /// Lazily-built per-FB execution view (see `cachedBytecodeView`). Stored
+        /// here in the out-of-line debug box so the 128B FunctionBytecode struct
+        /// stays unchanged while restoring the `execution_view` cache the
+        /// struct-alignment program removed. Non-owning (its slices borrow the FB
+        /// `block`); `FunctionBytecode.deinit` frees only the struct allocation.
+        cached_view: ?*function_mod.BytecodeImpl = null,
     };
 
     /// Mirrors `JSFunctionBytecode` (`quickjs.c:768-804`).
@@ -1745,6 +1751,12 @@ pub const function_bytecode = struct {
             // the `DebugInfo` box itself is always a side allocation freed here.
             if (self.debug) |dbg| {
                 self.debug = null;
+                // The cached execution view is non-owning (its slices borrow the
+                // FB block), so freeing the struct allocation is all that's needed.
+                if (dbg.cached_view) |view| {
+                    dbg.cached_view = null;
+                    mem.free(function_mod.BytecodeImpl, view[0..1]);
+                }
                 const pc2line_buf = dbg.pc2line_buf[0..@intCast(dbg.pc2line_len)];
                 if (owned and pc2line_buf.len != 0) mem.free(u8, pc2line_buf);
                 if (dbg.source_ptr) |src_ptr| {
@@ -7548,6 +7560,30 @@ const function_mod = struct {
         };
     }
 
+    /// Per-FB cached execution view. Restores the `execution_view` cache the
+    /// struct-alignment program removed (FunctionBytecode 528→128): qjs
+    /// dispatches the VM directly off `JSFunctionBytecode`, but zjs still runs
+    /// the older `Bytecode` view API, so `resolveInlineTarget` rebuilt the
+    /// ~300B view via `makeBytecodeView` on EVERY call — ~43% of the call cost
+    /// on call-heavy code (fib/funcall). The view is a pure function of the
+    /// immutable FB, so build it once and cache it OUT-OF-LINE in the
+    /// `DebugInfo` box; the 128B FB struct is unchanged. The cached view is
+    /// non-owning (all slices borrow the FB `block`), so `deinit` frees only the
+    /// struct allocation. Returns null when the FB carries no `DebugInfo` box
+    /// (fixture/synthetic FBs) — the caller rebuilds per-call in that rare case.
+    ///
+    /// Behaviour-identical to `makeBytecodeView`: the returned view is copied by
+    /// value into the per-call `InlineTarget`/`Entry.view_storage`, so any later
+    /// eval-overlay mutation lands on the copy, never the shared cache.
+    pub fn cachedBytecodeView(fb: *const FunctionBytecode, mem: *memory.MemoryAccount, atoms: *atom.AtomTable) ?*BytecodeImpl {
+        const dbg = fb.debug orelse return null;
+        if (dbg.cached_view) |view| return view;
+        const slot = mem.alloc(BytecodeImpl, 1) catch return null;
+        slot[0] = function_mod.makeBytecodeView(fb, mem, atoms);
+        dbg.cached_view = &slot[0];
+        return &slot[0];
+    }
+
     fn bytesMayContainEvalCall(bytes: []const u8) bool {
         return std.mem.indexOfScalar(u8, bytes, opcode.op.eval) != null or
             std.mem.indexOfScalar(u8, bytes, opcode.op.apply_eval) != null;
@@ -7751,3 +7787,4 @@ pub const FunctionBytecode = function_bytecode.FunctionBytecode;
 pub const FunctionDef = function_def.FunctionDef;
 pub const asBytecodeView = function_mod.asBytecodeView;
 pub const makeBytecodeView = function_mod.makeBytecodeView;
+pub const cachedBytecodeView = function_mod.cachedBytecodeView;
