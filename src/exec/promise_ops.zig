@@ -601,13 +601,9 @@ pub fn qjsAsyncDisposableStackAwaitValue(
     const on_rejected = try qjsAsyncDisposableStackContinuation(ctx.runtime, global, stack, true);
     defer on_rejected.free(ctx.runtime);
 
-    const then_atom = try ctx.runtime.internAtom("then");
-    defer ctx.runtime.atoms.free(then_atom);
-    const then_value = try getValueProperty(ctx, output, global, awaited, then_atom, caller_function, caller_frame);
-    defer then_value.free(ctx.runtime);
-    if (!isCallableValue(then_value)) return error.TypeError;
-    const then_result = try callValueOrBytecode(ctx, output, global, awaited, then_value, &.{ on_fulfilled, on_rejected }, caller_function, caller_frame);
-    then_result.free(ctx.runtime);
+    // Same await-shaped internal attach as qjs js_async_function_resume
+    // (quickjs.c:21268-21290): perform_promise_then, never a .then read.
+    try qjsPerformPromiseThen(ctx, output, global, awaited, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
 }
 
 pub fn qjsAsyncDisposableStackRecordError(
@@ -1503,6 +1499,11 @@ pub fn qjsPromiseReactionJobCall(
 
     if (!isCallableValue(handler)) {
         const settle = if (rejected) reject_value else resolve_value;
+        // qjs promise_reaction_job (quickjs.c:53415-53421): "as an extension,
+        // we support undefined as value to avoid creating a dummy promise in
+        // the 'await' implementation of async functions" — an undefined
+        // resolving function is skipped and the value dropped.
+        if (settle.isUndefined()) return core.JSValue.undefinedValue();
         const settle_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), settle, &.{payload}, caller_function, caller_frame);
         settle_result.free(ctx.runtime);
         return core.JSValue.undefinedValue();
@@ -1511,12 +1512,14 @@ pub fn qjsPromiseReactionJobCall(
     const callback_result = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), handler, &.{payload}, caller_function, caller_frame) catch |err| {
         const reason = try qjsPromiseErrorValue(ctx, global, err);
         defer reason.free(ctx.runtime);
+        if (reject_value.isUndefined()) return core.JSValue.undefinedValue();
         const reject_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{reason}, caller_function, caller_frame);
         reject_result.free(ctx.runtime);
         return core.JSValue.undefinedValue();
     };
     if (rejected) clearHandledRejectionException(ctx);
     defer callback_result.free(ctx.runtime);
+    if (resolve_value.isUndefined()) return core.JSValue.undefinedValue();
     const resolve_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{callback_result}, caller_function, caller_frame);
     resolve_result.free(ctx.runtime);
     return core.JSValue.undefinedValue();
@@ -2902,13 +2905,11 @@ pub fn qjsAsyncFunctionAwait(
     const on_rejected = try qjsAsyncFunctionResumeCallback(ctx.runtime, global, continuation, true);
     defer on_rejected.free(ctx.runtime);
 
-    const then_atom = try ctx.runtime.internAtom("then");
-    defer ctx.runtime.atoms.free(then_atom);
-    const then_value = try getValueProperty(ctx, output, global, awaited, then_atom, caller_function, caller_frame);
-    defer then_value.free(ctx.runtime);
-    if (!isCallableValue(then_value)) return error.TypeError;
-    const then_result = try callValueOrBytecode(ctx, output, global, awaited, then_value, &.{ on_fulfilled, on_rejected }, caller_function, caller_frame);
-    then_result.free(ctx.runtime);
+    // qjs js_async_function_resume (quickjs.c:21268-21290): the resume
+    // callbacks attach through the INTERNAL perform_promise_then with
+    // undefined resolving funcs — a (patched) Promise.prototype.then property
+    // is never read for a native-promise await.
+    try qjsPerformPromiseThen(ctx, output, global, awaited, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
 }
 
 pub fn qjsAsyncFunctionResumeCallback(
