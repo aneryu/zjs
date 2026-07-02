@@ -140,7 +140,10 @@ fn numberPrototypeMethod(
         error.TypeError => return exception_ops.throwTypeErrorMessage(ctx, global, "not a number"),
     };
     defer primitive.free(rt);
-    const coerced_arg: ?core.JSValue = try coercion_ops.coerceOptionalNumberMethodArgument(ctx, output, global, args, true);
+    const coerced_arg: ?core.JSValue = if (id == @intFromEnum(PrototypeMethod.to_locale_string))
+        null
+    else
+        try coercion_ops.coerceOptionalNumberMethodArgument(ctx, output, global, args, true);
     defer if (coerced_arg) |value| value.free(rt);
     var coerced_storage: [1]core.JSValue = undefined;
     const method_args = if (coerced_arg) |value| blk: {
@@ -256,7 +259,33 @@ fn integerDigitsArgument(rt: *core.JSRuntime, args: []const core.JSValue, defaul
     return @intFromFloat(truncated);
 }
 
+const radix_digit_chars = "0123456789abcdefghijklmnopqrstuvwxyz";
+
+/// Unbiased exponent minus mantissa width: > 0 means the double's unit in the
+/// last place exceeds 1, i.e. successive integers are no longer representable.
+fn radixDoubleExponent(value: f64) i32 {
+    const bits: u64 = @bitCast(value);
+    const biased: i32 = @intCast((bits >> 52) & 0x7ff);
+    return biased - 1075;
+}
+
+/// Free-format radix conversion for Number.prototype.toString(radix != 10)
+/// (qjs js_number_toString -> js_dtoa2(d, base, 0, JS_DTOA_FORMAT_FREE |
+/// JS_DTOA_EXP_DISABLED), quickjs.c:44989). Delta-terminated shortest digit
+/// generation: fractional digits emit until the remaining fraction is within
+/// half an ulp of the source value (with round-half-even and carry
+/// propagation into the integer part), and integer digits are produced
+/// exactly for the whole double range (no more >= 2^128 @intFromFloat).
+/// Output parity with qjs is enforced by the dual-engine fuzz suite.
 fn appendRadixInteger(rt: *core.JSRuntime, out: *std.ArrayList(u8), number: f64, radix: u8) !void {
+    if (std.math.isNan(number)) {
+        try out.appendSlice(rt.memory.allocator, "NaN");
+        return;
+    }
+    if (!std.math.isFinite(number)) {
+        try out.appendSlice(rt.memory.allocator, if (number < 0) "-Infinity" else "Infinity");
+        return;
+    }
     if (number == 0) {
         try out.append(rt.memory.allocator, '0');
         return;
@@ -266,14 +295,72 @@ fn appendRadixInteger(rt: *core.JSRuntime, out: *std.ArrayList(u8), number: f64,
         try out.append(rt.memory.allocator, '-');
         value = -value;
     }
-    var remaining: u128 = @intFromFloat(@floor(value));
-    var buffer: [128]u8 = undefined;
-    var index = buffer.len;
-    while (remaining != 0) {
-        index -= 1;
-        const digit: u8 = @intCast(remaining % radix);
-        buffer[index] = if (digit < 10) '0' + digit else 'a' + (digit - 10);
-        remaining /= radix;
+    const radix_f: f64 = @floatFromInt(radix);
+
+    var integer_part = @floor(value);
+    var fraction = value - integer_part;
+    // Half the distance to the next representable double; floor at the
+    // smallest subnormal so the loop always terminates.
+    const value_bits: u64 = @bitCast(value);
+    const next_up: f64 = @bitCast(value_bits + 1);
+    var delta: f64 = 0.5 * (next_up - value);
+    const min_subnormal: f64 = @bitCast(@as(u64, 1));
+    if (delta < min_subnormal) delta = min_subnormal;
+
+    var fraction_buf: [1200]u8 = undefined;
+    var fraction_len: usize = 0;
+    if (fraction >= delta) {
+        while (true) {
+            fraction *= radix_f;
+            delta *= radix_f;
+            var digit: usize = @intFromFloat(fraction);
+            fraction -= @as(f64, @floatFromInt(digit));
+            fraction_buf[fraction_len] = radix_digit_chars[digit];
+            fraction_len += 1;
+            var rounded_up = false;
+            if (fraction > 0.5 or (fraction == 0.5 and (digit & 1) == 1)) {
+                if (fraction + delta > 1.0) {
+                    // Round up the tail, carrying into the integer part when
+                    // every fractional digit overflows.
+                    while (true) {
+                        if (fraction_len == 0) {
+                            integer_part += 1;
+                            break;
+                        }
+                        fraction_len -= 1;
+                        const c = fraction_buf[fraction_len];
+                        digit = if (c > '9') c - 'a' + 10 else c - '0';
+                        if (digit + 1 < radix) {
+                            fraction_buf[fraction_len] = radix_digit_chars[digit + 1];
+                            fraction_len += 1;
+                            break;
+                        }
+                    }
+                    rounded_up = true;
+                }
+            }
+            if (rounded_up or fraction < delta) break;
+        }
     }
-    try out.appendSlice(rt.memory.allocator, buffer[index..]);
+
+    var integer_buf: [1200]u8 = undefined;
+    var integer_cursor: usize = integer_buf.len;
+    // Digits below the double's precision are exact zeros.
+    while (radixDoubleExponent(integer_part / radix_f) > 0) {
+        integer_part /= radix_f;
+        integer_cursor -= 1;
+        integer_buf[integer_cursor] = '0';
+    }
+    while (true) {
+        const remainder = @rem(integer_part, radix_f);
+        integer_cursor -= 1;
+        integer_buf[integer_cursor] = radix_digit_chars[@intFromFloat(remainder)];
+        integer_part = (integer_part - remainder) / radix_f;
+        if (integer_part <= 0) break;
+    }
+    try out.appendSlice(rt.memory.allocator, integer_buf[integer_cursor..]);
+    if (fraction_len != 0) {
+        try out.append(rt.memory.allocator, '.');
+        try out.appendSlice(rt.memory.allocator, fraction_buf[0..fraction_len]);
+    }
 }
