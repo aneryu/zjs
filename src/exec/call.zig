@@ -3365,6 +3365,12 @@ pub fn qjsEvalGlobalScriptSource(
     const stack_mod = @import("stack.zig");
     const zjs_vm = @import("zjs_vm.zig");
 
+    // Arm the native recursion guard at this outermost script entry (the public
+    // ctx.evalScript embedding API + test262 $262.evalScript) — analogue of
+    // eval()'s JS_UpdateStackTop refresh — so deeply nested source here surfaces
+    // a catchable SyntaxError/InternalError instead of a native crash.
+    if (ctx.call_depth == 0) ctx.runtime.updateNativeStackTop();
+
     const context_global = ctx.global;
     const use_global_lexicals = context_global == null or context_global.? != global;
     const keep_active_lexicals = context_global == null;

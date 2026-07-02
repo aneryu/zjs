@@ -22,6 +22,15 @@ const context_mod = @import("context.zig");
 
 pub const default_stack_size = 1024 * 1024;
 pub const default_gc_threshold = 256 * 1024;
+/// Native C-stack budget for the recursion guard, matching QuickJS
+/// `JS_DEFAULT_STACK_SIZE` (quickjs.h:328, 1 MiB). The guard trips once this many
+/// bytes of native stack have been consumed below the outermost eval frame,
+/// turning pathological recursion (parser/JSON tens of thousands deep) into a
+/// catchable error. 1 MiB leaves ample headroom under the real thread stack
+/// (the main thread has only a few MiB free below the eval entry after the CLI
+/// call chain; worker threads have ~16 MiB) while sitting far above any
+/// legitimate nesting depth — the same value QuickJS passes test262 with.
+pub const default_native_stack_size = 1024 * 1024;
 
 pub const InterruptHandler = *const fn (*JSRuntime, ?*anyopaque) bool;
 
@@ -688,6 +697,17 @@ pub const JSRuntime = struct {
     gc_running: bool = false,
     current_exception: JSValue = JSValue.uninitialized(),
     stack_size: usize = default_stack_size,
+    /// Native (machine C-stack) recursion guard, mirroring QuickJS
+    /// `rt->stack_top`/`rt->stack_limit` (quickjs.c:349-350, 2841-2860). Captured
+    /// via `@frameAddress()` at the outermost eval entry (`updateNativeStackTop`,
+    /// the JS_UpdateStackTop analogue — refreshed per thread because worker
+    /// threads run on a different C stack than where the runtime was
+    /// constructed). Zero limit means "no limit yet". `native_stack_limit` is the
+    /// lower address bound (`native_stack_top - native_stack_size`); a native
+    /// frame pointer below it is an overflow. See `checkNativeStackOverflow`.
+    native_stack_top: usize = 0,
+    native_stack_limit: usize = 0,
+    native_stack_size: usize = default_native_stack_size,
     /// Per-runtime VM value-stack arena for bytecode call frames.
     vm_stack: VmStackArena = .{},
     interrupt_handler: ?InterruptHandler = null,
@@ -847,6 +867,17 @@ pub const JSRuntime = struct {
         rt.gc_running = false;
         rt.current_exception = JSValue.uninitialized();
         rt.stack_size = options.stack_size;
+        rt.native_stack_size = default_native_stack_size;
+        // Arm the native recursion guard at construction, mirroring QuickJS
+        // JS_NewRuntime2 -> JS_UpdateStackTop (quickjs.c:2116). This covers every
+        // entry path (eval / evalScript / ES module graph) even those that do not
+        // re-arm; the host creates the runtime and starts execution from the same
+        // shallow call level, so this baseline is valid. Outermost eval/module
+        // entries additionally re-arm (JS_UpdateStackTop analogue) for a precise
+        // per-thread base — required when execution runs on a different thread
+        // than construction (test262 workers).
+        rt.native_stack_top = @frameAddress();
+        rt.native_stack_limit = if (default_native_stack_size == 0) 0 else rt.native_stack_top -| default_native_stack_size;
         rt.vm_stack = .{};
         rt.interrupt_handler = options.interrupt_handler;
         rt.interrupt_context = options.interrupt_context;
@@ -2098,6 +2129,31 @@ pub const JSRuntime = struct {
 
     pub fn stackSize(self: JSRuntime) usize {
         return self.stack_size;
+    }
+
+    /// Capture the current native frame pointer as the recursion base and derive
+    /// the lower limit. Mirrors QuickJS `JS_UpdateStackTop` + `update_stack_limit`
+    /// (quickjs.c:2841-2860). Must be called at the outermost JS entry on the
+    /// thread that will run the code (worker threads have their own C stack), so
+    /// deeper native frames (parser / JSON / interpreter) measure against a real,
+    /// same-stack base. A `native_stack_size` of 0 disables the limit.
+    pub fn updateNativeStackTop(self: *JSRuntime) void {
+        self.native_stack_top = @frameAddress();
+        self.native_stack_limit = if (self.native_stack_size == 0)
+            0
+        else
+            self.native_stack_top -| self.native_stack_size;
+    }
+
+    /// Return true if consuming `alloca_size` more native stack would cross the
+    /// recursion limit. Direct port of QuickJS `js_check_stack_overflow`
+    /// (quickjs.c:2059-2064): `sp = frame_address - alloca_size; sp < limit`.
+    /// Stack grows down, so "below the limit" is overflow. Returns false when the
+    /// limit is unset (0), matching the no-limit build.
+    pub inline fn checkNativeStackOverflow(self: *const JSRuntime, alloca_size: usize) bool {
+        if (self.native_stack_limit == 0) return false;
+        const sp = @frameAddress() -| alloca_size;
+        return sp < self.native_stack_limit;
     }
 
     pub fn internAtom(self: *JSRuntime, bytes: []const u8) !atom.Atom {

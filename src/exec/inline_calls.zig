@@ -267,8 +267,11 @@ pub const Machine = struct {
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
         if (chunk_index >= max_chunks) {
-            _ = exception_ops.throwRangeErrorMessage(self.ctx, global, "Maximum call stack size exceeded") catch |err| return err;
-            return error.RangeError;
+            // QuickJS throws InternalError "stack overflow" for call-depth
+            // exhaustion (JS_ThrowStackOverflow at the JS_CallInternal guard,
+            // quickjs.c:17837/7789), not a RangeError.
+            _ = exception_ops.throwInternalErrorMessage(self.ctx, global, "stack overflow") catch |err| return err;
+            return error.StackOverflow;
         }
         if (chunk_index == self.chunk_count) {
             if (self.chunks.len == 0) {

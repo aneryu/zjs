@@ -48,6 +48,8 @@ Phase 3  叶子：GC-无关忠实对齐 + 余下赢回退 + global-var 稳定 ce
 
 - `QJS-FAITHFUL-ALIGN.md`（本文件）— 原则 + 验收门 + 相结构总图 + 各相状态。
 - `docs/qjs-align/` — 当前态 + qjs 参考 + 落地特性的忠实设计依据（已退役的施工蓝图/分轮 handover 留存于 git 历史）：
+  - **`AUDIT-2026-07-02-full-surface.md`** — 全功能面行为/特性审计（18 面、175 条确认偏离，~110 条二次人工复核；每条含 repro+双引擎输出+锚点）。与本文件的 perf 结构对齐互补：这是**正确性/特性面**的偏离总账。
+  - **`FIX-PLAN-2026-07-02.md`** — 上述审计的修复方案与执行计划（Phase A 基础设施 → B 崩溃/数据丢失 → C 解析器批 → D 行为对齐 9 切片 → E 深前沿 keystone → P 策略决策点；含 no-align 登记与门禁阶梯）。**未动工**。
   - **`CALL-MACHINERY-FAITHFUL-FRONTIER.md`** — 调用机制/dispatch **当前结论与前沿**（tail-call 已对齐；单函数重写经 route-2 证实**无必要**——全规模 labeled-switch≈tail-call；剩余=激进塌缩 call 路径 + per-call 瘦身、保留 tail-call；含不可破不变式 + 已证伪勿重试清单 + native-recursion 待验问题）。
   - `CALL-MACHINERY-QJS.md` — qjs 调用机制实锤参考（quickjs.c 逐行：帧/dispatch/var_refs/backtrace）。当前 zjs 结论见上 `CALL-MACHINERY-FAITHFUL-FRONTIER.md`。
   - `DIVERGENCE-CATALOG.md` — 偏离登记 + 当前 roadmap（DO_NEXT / BACKLOG / ALREADY，L2/L3/A4 落地后状态）。

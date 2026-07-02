@@ -52,6 +52,7 @@ const ConstructorKind = enum {
     syntax_error,
     type_error,
     uri_error,
+    internal_error,
     dom_exception,
     disposable_stack,
     async_disposable_stack,
@@ -584,6 +585,7 @@ fn prototypeExtraPropertyCount(kind: ConstructorKind) usize {
         .syntax_error,
         .type_error,
         .uri_error,
+        .internal_error,
         => 2,
         .error_ => 3,
         .dom_exception => 1 + dom_exception_constants.len,
@@ -696,6 +698,7 @@ fn isErrorConstructorKind(kind: ConstructorKind) bool {
         .syntax_error,
         .type_error,
         .uri_error,
+        .internal_error,
         => true,
         else => false,
     };
@@ -810,6 +813,7 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
                 .syntax_error,
                 .type_error,
                 .uri_error,
+                .internal_error,
                 => {
                     if (spec.kind == .error_) {
                         try installErrorPrototypeExtras(rt, constructor);
@@ -1082,6 +1086,7 @@ fn isNativeErrorSubclassKind(kind: ConstructorKind) bool {
         .syntax_error,
         .type_error,
         .uri_error,
+        .internal_error,
         => true,
         else => false,
     };
@@ -1978,6 +1983,7 @@ const constructor_specs = [_]ConstructorSpec{
     .{ .name = "SyntaxError", .kind = .syntax_error, .length = 1, .prototype_methods = &no_methods },
     .{ .name = "TypeError", .kind = .type_error, .length = 1, .prototype_methods = &no_methods },
     .{ .name = "URIError", .kind = .uri_error, .length = 1, .prototype_methods = &no_methods },
+    .{ .name = "InternalError", .kind = .internal_error, .length = 1, .prototype_methods = &no_methods },
     .{ .name = "DOMException", .kind = .dom_exception, .length = 2, .prototype_methods = &no_methods },
     .{ .name = "DisposableStack", .kind = .disposable_stack, .length = 0, .prototype_methods = &disposable_stack_prototype },
     .{ .name = "AsyncDisposableStack", .kind = .async_disposable_stack, .length = 0, .prototype_methods = &async_disposable_stack_prototype },

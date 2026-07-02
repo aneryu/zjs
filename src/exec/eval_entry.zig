@@ -27,6 +27,13 @@ pub fn evalScriptValue(ctx: *core.JSContext, source_value: core.JSValue, options
 
 pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context.ContextEvalOptions) !core.JSValue {
     const rt = ctx.runtime;
+    // Refresh the native C-stack recursion base at the outermost JS entry only
+    // (QuickJS JS_UpdateStackTop): a nested direct `eval()` runs while bytecode
+    // is executing (call_depth > 0) and must keep measuring against the true
+    // outermost base. Doing it here — on the thread that will run the parser and
+    // interpreter — makes the guard correct even when the runtime was
+    // constructed on a different thread's stack (test262 worker threads).
+    if (ctx.call_depth == 0) rt.updateNativeStackTop();
     const parse_start = monotonicNanos();
     var compiled = try parser.compile(rt, source_text, .{
         .mode = parserMode(options.mode),

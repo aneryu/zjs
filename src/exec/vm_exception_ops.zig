@@ -257,6 +257,24 @@ pub fn throwRangeErrorMessage(ctx: *core.JSContext, global: *core.Object, messag
     return error.RangeError;
 }
 
+/// Throw an `InternalError` with `message` (mirrors QuickJS `JS_ThrowInternalError`).
+pub fn throwInternalErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
+    const error_value = try createNamedError(ctx, global, "InternalError", message);
+    _ = ctx.throwValue(error_value);
+    return error.StackOverflow;
+}
+
+/// Throw `InternalError "stack overflow"` and return the native-recursion
+/// sentinel. Mirrors QuickJS `JS_ThrowStackOverflow` (quickjs.c:7789-7791). The
+/// `error.StackOverflow` sentinel is mapped back to this InternalError by
+/// `runtimeErrorInfo`/`promiseErrorInfo` for any path that does not observe the
+/// already-thrown value directly.
+pub fn throwStackOverflow(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
+    const error_value = try createNamedError(ctx, global, "InternalError", "stack overflow");
+    _ = ctx.throwValue(error_value);
+    return error.StackOverflow;
+}
+
 pub fn throwReferenceErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
     const error_value = try createNamedError(ctx, global, "ReferenceError", message);
     _ = ctx.throwValue(error_value);
@@ -402,6 +420,9 @@ pub fn runtimeErrorInfo(err: anytype) ?ErrorInfo {
         // QuickJS's InternalError "out of memory" exception; paths without a
         // JS catch handler still surface error.OutOfMemory to the embedder.
         error.OutOfMemory => .{ .name = "InternalError", .message = "out of memory" },
+        // Native C-stack recursion guard (QuickJS JS_ThrowStackOverflow ->
+        // InternalError "stack overflow", quickjs.c:7789-7791).
+        error.StackOverflow => .{ .name = "InternalError", .message = "stack overflow" },
         error.TypeError, error.NotExtensible => .{ .name = "TypeError", .message = "" },
         error.InvalidCharacterError => .{ .name = "InvalidCharacterError", .message = "" },
         error.SyntaxError => .{ .name = "SyntaxError", .message = "invalid syntax" },
@@ -414,6 +435,7 @@ pub fn runtimeErrorInfo(err: anytype) ?ErrorInfo {
 pub fn promiseErrorInfo(err: anytype) ErrorInfo {
     return switch (@as(anyerror, err)) {
         error.URIError, error.InvalidUtf8 => .{ .name = "URIError", .message = "expecting hex digit" },
+        error.StackOverflow => .{ .name = "InternalError", .message = "stack overflow" },
         error.TypeError => .{ .name = "TypeError", .message = "" },
         error.SyntaxError => .{ .name = "SyntaxError", .message = "invalid syntax" },
         error.RangeError => .{ .name = "RangeError", .message = "" },
@@ -425,6 +447,7 @@ pub fn promiseErrorInfo(err: anytype) ErrorInfo {
 fn errorNameForRuntimeError(err: anytype) ?[]const u8 {
     return switch (@as(anyerror, err)) {
         error.URIError, error.InvalidUtf8 => "URIError",
+        error.StackOverflow => "InternalError",
         error.TypeError => "TypeError",
         error.InvalidCharacterError => "InvalidCharacterError",
         error.SyntaxError => "SyntaxError",

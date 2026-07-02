@@ -5746,6 +5746,12 @@ pub fn qjsArrayJoinCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
+    // Native recursion guard: a self-referential array (`a.push(a); a.join()`)
+    // recurses join -> element ToString -> join entirely in native frames. QuickJS
+    // bounds this at the JS_CallInternal stack guard reached via JS_ToString
+    // (InternalError "stack overflow"); zjs's native join loop needs its own check
+    // at the entry to match instead of crashing.
+    if (ctx.runtime.checkNativeStackOverflow(0)) return error.StackOverflow;
     if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
     const object_value = if (this_value.isObject()) this_value.dup() else try primitiveObjectForAccess(ctx.runtime, global, this_value);
     defer object_value.free(ctx.runtime);

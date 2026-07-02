@@ -74,8 +74,10 @@ pub const CallProfileGuard = if (build_options.zjs_enable_opcode_profile) struct
 
 pub fn enterCallDepth(ctx: *core.JSContext, global: *core.Object) !CallDepthGuard {
     if (ctx.native_call_depth >= maxNativeJsCallDepth(ctx) or ctx.call_depth >= maxLogicalJsCallDepth(ctx)) {
-        _ = exception_ops.throwRangeErrorMessage(ctx, global, "Maximum call stack size exceeded") catch |err| return err;
-        return error.RangeError;
+        // QuickJS JS_CallInternal stack guard -> JS_ThrowStackOverflow =
+        // InternalError "stack overflow" (quickjs.c:17837, 7789-7791).
+        _ = exception_ops.throwInternalErrorMessage(ctx, global, "stack overflow") catch |err| return err;
+        return error.StackOverflow;
     }
     ctx.call_depth += 1;
     ctx.native_call_depth += 1;
@@ -85,8 +87,10 @@ pub fn enterCallDepth(ctx: *core.JSContext, global: *core.Object) !CallDepthGuar
 /// Depth accounting for inline (same interpreter loop) call frames.
 pub fn enterInlineCallDepth(ctx: *core.JSContext, global: *core.Object) !void {
     if (ctx.call_depth >= maxLogicalJsCallDepth(ctx)) {
-        _ = exception_ops.throwRangeErrorMessage(ctx, global, "Maximum call stack size exceeded") catch |err| return err;
-        return error.RangeError;
+        // QuickJS JS_CallInternal stack guard -> InternalError "stack overflow"
+        // (quickjs.c:17837, 7789-7791).
+        _ = exception_ops.throwInternalErrorMessage(ctx, global, "stack overflow") catch |err| return err;
+        return error.StackOverflow;
     }
     ctx.call_depth += 1;
 }

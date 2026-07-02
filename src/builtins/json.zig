@@ -25,6 +25,7 @@ const JsonStringifyError = std.mem.Allocator.Error || error{
     InvalidAtom,
     NoSpaceLeft,
     TypeError,
+    StackOverflow,
 };
 
 const SimpleJsonError = std.mem.Allocator.Error || error{
@@ -34,6 +35,9 @@ const SimpleJsonError = std.mem.Allocator.Error || error{
     NotExtensible,
     ReadOnly,
     UnsupportedSimpleJson,
+    // Native recursion guard: QuickJS surfaces deep JSON.parse nesting as a
+    // catchable SyntaxError (json parser js_parse_error, quickjs.c:23483).
+    SyntaxError,
 };
 
 const StringifyOptions = struct {
@@ -228,6 +232,7 @@ fn createSimpleJsonAsciiStringValue(rt: *core.JSRuntime, bytes: []const u8) !cor
 }
 
 fn appendJsonValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue, array_slot: bool, stack: *std.ArrayList(*core.Object), options: StringifyOptions, depth: usize) JsonStringifyError!void {
+    if (rt.checkNativeStackOverflow(0)) return error.StackOverflow;
     var rooted_value = value;
     var raw = core.JSValue.undefinedValue();
     var primitive = core.JSValue.undefinedValue();
@@ -395,6 +400,7 @@ const SimpleJsonParser = struct {
     }
 
     fn parseValue(self: *SimpleJsonParser) SimpleJsonError!core.JSValue {
+        if (self.rt.checkNativeStackOverflow(0)) return error.SyntaxError;
         self.skipWhitespace();
         const byte = self.peek() orelse return error.UnsupportedSimpleJson;
         return switch (byte) {
@@ -1020,6 +1026,7 @@ const SimpleJsonStringifyError = std.mem.Allocator.Error || error{
     InvalidUtf8,
     NoSpaceLeft,
     TypeError,
+    StackOverflow,
 };
 
 const JsonStringifyVmOptions = struct {
@@ -1766,6 +1773,11 @@ fn qjsJsonAppendSimpleValue(
     array_slot: bool,
     stack: *std.ArrayList(*core.Object),
 ) SimpleJsonStringifyError!SimpleJsonResult {
+    // Native recursion guard: the no-options fast path is the live JSON.stringify
+    // route for plain values, so its per-value recursion is where deep nesting
+    // must turn into a catchable InternalError "stack overflow" (QuickJS
+    // js_json_to_str, quickjs.c:50075) instead of a native crash.
+    if (rt.checkNativeStackOverflow(0)) return error.StackOverflow;
     if (value.isUndefined() or value.isSymbol()) {
         if (array_slot) {
             try buffer.appendSlice(rt.memory.allocator, "null");
@@ -2113,6 +2125,11 @@ pub fn qjsJsonSerializeProperty(
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
 ) HostError!void {
+    // Native recursion guard: deep JSON.stringify nesting is a catchable
+    // InternalError "stack overflow" in QuickJS (js_json_to_str
+    // JS_ThrowStackOverflow, quickjs.c:50075). error.StackOverflow maps to that
+    // InternalError via runtimeErrorInfo.
+    if (ctx.runtime.checkNativeStackOverflow(0)) return error.StackOverflow;
     var rooted_holder_value = holder_value;
     var rooted_replacer = options.replacer;
     var value = core.JSValue.undefinedValue();

@@ -3516,6 +3516,10 @@ pub const parser_core = struct {
         YieldOutsideGenerator,
         AwaitOutsideAsyncFunction,
         SyntaxError,
+        // Native recursion-descent guard (QuickJS next_token
+        // `js_check_stack_overflow` -> js_parse_error "stack overflow",
+        // quickjs.c:22836). Surfaced by `compile` as a catchable SyntaxError.
+        StackOverflow,
     };
 
     /// Parse flags mirror the QuickJS `PF_*` macros (`quickjs.c:21358..21370`).
@@ -4369,6 +4373,14 @@ pub const parser_core = struct {
 
         /// Advance one token. Frees the payload of the consumed token.
         fn advance(self: *State) Error!void {
+            // Native C-stack recursion guard. Every recursive-descent path
+            // (parens, arrays, objects, nested statements) consumes tokens
+            // through here, so a single check mirrors QuickJS guarding
+            // `next_token` (quickjs.c:22836) and turns pathological nesting into
+            // a catchable SyntaxError instead of a native stack overflow.
+            if (self.runtime) |rt| {
+                if (rt.checkNativeStackOverflow(0)) return error.StackOverflow;
+            }
             self.last_token_end_offset = self.currentTokenEndOffset();
             self.last_token_line_num = self.token.line_num;
             self.last_token_col_num = self.token.col_num;
