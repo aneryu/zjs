@@ -69,25 +69,36 @@ fn buildNamedErrorObject(rt: *core.JSRuntime, ctor_value: core.JSValue, name: []
 
     const object = try core.Object.create(rt, core.class.ids.error_, null);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
-    const name_value = try value_ops.createStringValue(rt, name);
-    defer name_value.free(rt);
-    try defineValueProperty(rt, object, "name", name_value);
+    // Mirror JS_ThrowError2 (quickjs.c:7637-7658): the thrown error carries a
+    // single own `message` data property (JS_PROP_WRITABLE|JS_PROP_CONFIGURABLE,
+    // non-enumerable); `name`/`constructor` resolve through the prototype
+    // installed below (qjs allocates directly on ctx->native_error_proto[]).
     const message_value = try value_ops.createStringValue(rt, message);
     defer message_value.free(rt);
-    try defineValueProperty(rt, object, "message", message_value);
-    if (!rooted_ctor_value.isUndefined()) {
-        try defineValueProperty(rt, object, "constructor", rooted_ctor_value);
-        if (rooted_ctor_value.isObject()) {
-            const ctor = property_ops.expectObject(rooted_ctor_value) catch null;
-            if (ctor) |ctor_object| {
-                const proto_value = ctor_object.getProperty(core.atom.ids.prototype);
-                defer proto_value.free(rt);
-                if (proto_value.isObject()) {
-                    const proto = property_ops.expectObject(proto_value) catch null;
-                    if (proto) |prototype| try object.setPrototype(rt, prototype);
+    try defineNonEnumValueProperty(rt, object, "message", message_value);
+    var prototype_installed = false;
+    if (rooted_ctor_value.isObject()) {
+        const ctor = property_ops.expectObject(rooted_ctor_value) catch null;
+        if (ctor) |ctor_object| {
+            const proto_value = ctor_object.getProperty(core.atom.ids.prototype);
+            defer proto_value.free(rt);
+            if (proto_value.isObject()) {
+                const proto = property_ops.expectObject(proto_value) catch null;
+                if (proto) |prototype| {
+                    try object.setPrototype(rt, prototype);
+                    prototype_installed = true;
                 }
             }
         }
+    }
+    if (!prototype_installed) {
+        // Degraded fallback for names with no realm constructor (e.g. the
+        // zjs-specific InvalidCharacterError): keep a self-describing own
+        // `name` so `e.name` still identifies the error class. qjs cannot
+        // reach this state — every JSErrorEnum has a native_error_proto.
+        const name_value = try value_ops.createStringValue(rt, name);
+        defer name_value.free(rt);
+        try defineNonEnumValueProperty(rt, object, "name", name_value);
     }
     return object.value();
 }
@@ -110,13 +121,32 @@ test "buildNamedErrorObject roots direct symbol constructor while creating error
     defer if (error_alive) error_value.free(rt);
     const object = try property_ops.expectObject(error_value);
 
+    // The ctor value stays rooted across the allocating construction even
+    // though it is no longer stored as an own `constructor` property
+    // (JS_ThrowError2 discipline: only `message` is an own property).
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
+    const message_key = try rt.internAtom("message");
+    defer rt.atoms.free(message_key);
+    {
+        const stored = object.getProperty(message_key);
+        defer stored.free(rt);
+        try std.testing.expect(stored.isString());
+    }
     const constructor_key = try rt.internAtom("constructor");
     defer rt.atoms.free(constructor_key);
     {
         const stored = object.getProperty(constructor_key);
         defer stored.free(rt);
-        try std.testing.expect(stored.same(ctor_value));
+        try std.testing.expect(!stored.same(ctor_value));
+    }
+    // Non-object ctor (symbol) => no prototype; the degraded fallback stamps
+    // an own self-describing `name`.
+    const name_key = try rt.internAtom("name");
+    defer rt.atoms.free(name_key);
+    {
+        const stored = object.getProperty(name_key);
+        defer stored.free(rt);
+        try std.testing.expect(stored.isString());
     }
     ctor_value.free(rt);
     ctor_alive = false;
@@ -208,12 +238,36 @@ pub fn runtimeErrorValueForGeneratorCatch(ctx: *core.JSContext, global: *core.Ob
     return value;
 }
 
+/// Internally built AggregateError for Promise.any/allSettled rejection.
+/// Mirrors js_aggregate_error_constructor (quickjs.c:41582): a bare
+/// error-class object on AggregateError.prototype whose only own property is
+/// `errors` (JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, non-enumerable) — no
+/// own `message`/`name`. qjs does not run build_backtrace here either; zjs
+/// still snapshots the call sites because its lazy `stack` accessor would
+/// otherwise rebuild a backtrace from whichever context first reads it.
 pub fn qjsPromiseAggregateError(ctx: *core.JSContext, global: *core.Object, errors: *core.Object) !core.JSValue {
     const rt = ctx.runtime;
-    const aggregate_error = try createNamedError(ctx, global, "AggregateError", "");
+    const ctor_key = try rt.internAtom("AggregateError");
+    defer rt.atoms.free(ctor_key);
+    const ctor_value = global.getProperty(ctor_key);
+    defer ctor_value.free(rt);
+
+    const object = try core.Object.create(rt, core.class.ids.error_, null);
+    const aggregate_error = object.value();
     errdefer aggregate_error.free(rt);
-    const object = objectFromValue(aggregate_error) orelse return error.TypeError;
-    try defineValueProperty(rt, object, "errors", errors.value());
+    if (ctor_value.isObject()) {
+        if (property_ops.expectObject(ctor_value) catch null) |ctor_object| {
+            const proto_value = ctor_object.getProperty(core.atom.ids.prototype);
+            defer proto_value.free(rt);
+            if (proto_value.isObject()) {
+                if (property_ops.expectObject(proto_value) catch null) |prototype| {
+                    try object.setPrototype(rt, prototype);
+                }
+            }
+        }
+    }
+    try defineNonEnumValueProperty(rt, object, "errors", errors.value());
+    try error_stack_ops.attachStackToErrorValue(ctx, global, aggregate_error);
     return aggregate_error;
 }
 
@@ -549,6 +603,16 @@ fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const 
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, true, true));
+}
+
+/// JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE (non-enumerable) data property —
+/// the attribute set qjs uses for every own property it defines on error
+/// objects (JS_ThrowError2 quickjs.c:7652, js_aggregate_error_constructor
+/// quickjs.c:41593).
+fn defineNonEnumValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
+    const key = try rt.internAtom(name);
+    defer rt.atoms.free(key);
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, false, true));
 }
 
 fn throwReferenceErrorSentinel(ctx: *core.JSContext) void {
