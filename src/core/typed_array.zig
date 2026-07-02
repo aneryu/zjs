@@ -191,7 +191,12 @@ pub fn arrayBufferTransferLength(rt: *JSRuntime, buffer_value: JSValue, new_leng
     if (object.arrayBufferIsImmutable(rt, buffer)) return error.TypeError;
     if (!fixed_length) {
         if (buffer.arrayBufferMaxByteLength()) |max| {
-            if (new_length > max) return error.RangeError;
+            // Mirrors js_array_buffer_transfer (quickjs.c:57141-57142):
+            // "invalid array buffer length" is a TypeError in qjs when the
+            // preserved-resizability transfer target exceeds maxByteLength
+            // (spec AllocateArrayBuffer says RangeError; test262 has no
+            // coverage, so the qjs behavior wins per the mainline principle).
+            if (new_length > max) return error.TypeError;
         }
     }
     const out = try createArrayBufferWithPrototype(rt, new_length, if (fixed_length) null else buffer.arrayBufferMaxByteLength(), buffer.getPrototype());
