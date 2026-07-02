@@ -20,7 +20,7 @@ const value_ops = @import("value_ops.zig");
 
 const IteratorZipError = exceptions.HostError;
 const for_await_record_marker: i32 = -0x7fff0001;
-pub const simple_for_in_iterator_kind: u8 = 251;
+pub const for_in_iterator_kind: u8 = 251;
 pub const Step = enum { done, continue_loop };
 
 pub fn forOfStart(
@@ -844,131 +844,177 @@ pub noinline fn forOfNextVm(
     return .done;
 }
 
+/// Mirrors qjs js_for_in_next (quickjs.c:16404): step the snapshot of the
+/// CURRENT chain object; on exhaustion walk the prototype chain LAZILY (one
+/// prototype per step, own keys re-snapshotted on entry, visited-key dedup on
+/// the iterator object) and re-check every candidate key with an OWN-property
+/// existence probe on the current chain object (JS_GetOwnPropertyInternal
+/// desc==NULL, quickjs.c:16480 "check if the property was deleted" -- the
+/// gopd trap for proxies, NEVER a proto-walking [[HasProperty]]).
 pub noinline fn forInNext(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
 ) !void {
+    const rt = ctx.runtime;
     const iterator_value = stack.peek() orelse return error.StackUnderflow;
-    defer iterator_value.free(ctx.runtime);
-    const iterator = try property_ops.expectObject(iterator_value);
-    if ((iterator.iteratorKindSlot().*) == simple_for_in_iterator_kind) {
-        return try simpleForInNext(ctx, output, global, stack, iterator);
-    }
-    const index_key = try ctx.runtime.internAtom("__index");
-    defer ctx.runtime.atoms.free(index_key);
-    const source_key = try ctx.runtime.internAtom("__source");
-    defer ctx.runtime.atoms.free(source_key);
-    while (true) {
-        const index_value = iterator.getProperty(index_key);
-        defer index_value.free(ctx.runtime);
-        const index: u32 = @intCast(index_value.asInt32() orelse 0);
-        if (index >= iterator.iteratorLength()) {
-            try stack.reserveAdditional(2);
-            stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
-            stack.pushOwnedAssumeCapacity(core.JSValue.boolean(true));
-            break;
-        }
-        const key_value = iterator.getProperty(core.atom.atomFromUInt32(index));
-        defer key_value.free(ctx.runtime);
-        try stack.reserveAdditional(2);
-        try iterator.defineOwnProperty(ctx.runtime, index_key, core.Descriptor.data(core.JSValue.int32(@intCast(index + 1)), true, true, true));
+    defer iterator_value.free(rt);
+    // fail safe (quickjs.c:16418-16422).
+    const iterator = property_ops.expectObject(iterator_value) catch return pushForInDone(stack);
+    if (iterator.class_id != core.class.ids.for_in_iterator) return pushForInDone(stack);
 
-        const source_value = iterator.getProperty(source_key);
-        defer source_value.free(ctx.runtime);
-        if (!source_value.isUndefined()) {
-            const source = try property_ops.expectObject(source_value);
-            const key_atom = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
-            defer ctx.runtime.atoms.free(key_atom);
-            if (core.object.isTypedArrayObject(source)) {
-                if (core.array.arrayIndexFromAtom(&ctx.runtime.atoms, key_atom)) |typed_index| {
-                    if (typed_index >= (core.object.typedArrayLength(ctx.runtime, source) catch 0)) continue;
-                } else if (!try object_ops.hasValueProperty(ctx, output, global, source_value, source, key_atom, null, null)) {
-                    continue;
+    const yielded_key: core.Atom = loop: while (true) {
+        const index = iterator.iteratorIndexSlot().*;
+        if (index >= iterator.iteratorLength()) {
+            // not an object / no more prototype (quickjs.c:16428-16429).
+            const obj_value = iterator.iteratorTargetSlot().* orelse return pushForInDone(stack);
+            const obj = try property_ops.expectObject(obj_value);
+            // "no more property in the current object: look in the prototype"
+            // (quickjs.c:16430-16437).
+            if (forof_ops.forInInProtoChainSlot(iterator).* == 0) {
+                if (try forInPrepareProtoChainEnum(ctx, output, global, iterator, obj)) {
+                    return pushForInDone(stack);
                 }
-            } else if (!try object_ops.hasValueProperty(ctx, output, global, source_value, source, key_atom, null, null)) continue;
+                forof_ops.forInInProtoChainSlot(iterator).* = 1;
+            }
+            // it->obj = JS_GetPrototypeFree(ctx, it->obj) (quickjs.c:16438).
+            const proto_value = try object_ops.qjsObjectGetPrototypeOfValue(ctx, output, global, obj, null, null);
+            if (proto_value.isNull()) {
+                iterator.clearOptionalValueSlot(rt, iterator.iteratorTargetSlot());
+                return pushForInDone(stack); // no more prototype (quickjs.c:16441)
+            }
+            const proto = property_ops.expectObject(proto_value) catch |err| {
+                proto_value.free(rt);
+                return err;
+            };
+            try iterator.setOptionalValueSlot(rt, iterator.iteratorTargetSlot(), proto_value);
+            // snapshot the prototype's own string keys (quickjs.c:16447-16455).
+            const keys = try forof_ops.forInSnapshotOwnStringKeys(ctx, output, global, proto, iterator);
+            core.atom.freeAtomList(rt, iterator.iteratorAtomKeysSlot().*);
+            iterator.iteratorAtomKeysSlot().* = keys;
+            iterator.setIteratorLength(std.math.cast(u32, keys.len) orelse return error.OutOfMemory);
+            iterator.iteratorIndexSlot().* = 0;
+            continue;
         }
 
-        stack.pushAssumeCapacity(key_value);
-        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
-        break;
-    }
+        const obj_value = iterator.iteratorTargetSlot().* orelse return pushForInDone(stack);
+        const obj = try property_ops.expectObject(obj_value);
+        if (forof_ops.forInIsArraySlot(iterator).* != 0) {
+            // prop = __JS_AtomFromUInt32(it->idx) (quickjs.c:16457-16459).
+            const key = core.atom.atomFromUInt32(@intCast(index));
+            iterator.iteratorIndexSlot().* = index + 1;
+            // check if the property was deleted (quickjs.c:16480-16485).
+            if (try object_ops.proxyAwareExistsOwnProperty(ctx, output, global, obj, key, null, null)) break :loop key;
+            continue;
+        }
+
+        const key = iterator.iteratorAtomKeys()[index];
+        iterator.iteratorIndexSlot().* = index + 1;
+        if (forof_ops.forInInProtoChainSlot(iterator).* != 0) {
+            // "slow case: we are in the prototype chain" -- visited-key dedup
+            // via an own-prop probe on the enum object itself, then add to
+            // the visited list (quickjs.c:16463-16472).
+            if (try iterator.existsOwnProperty(rt, key)) continue; // already visited
+            try forof_ops.forInDefineVisited(rt, iterator, key);
+        }
+        // qjs's `if (!is_enumerable) continue` (quickjs.c:16476) is folded
+        // into the snapshot: atom_keys holds only the enumerable tab entries.
+        // check if the property was deleted (quickjs.c:16480-16485).
+        if (try object_ops.proxyAwareExistsOwnProperty(ctx, output, global, obj, key, null, null)) break :loop key;
+    };
+
+    // return the property (quickjs.c:16487-16489).
+    const key_value = try rt.atoms.toStringValue(rt, yielded_key);
+    errdefer key_value.free(rt);
+    try stack.reserveAdditional(2);
+    stack.pushOwnedAssumeCapacity(key_value);
+    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
 }
 
-fn simpleForInNext(
+fn pushForInDone(stack: *stack_mod.Stack) !void {
+    try stack.reserveAdditional(2);
+    stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
+    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(true));
+}
+
+/// Mirrors qjs js_for_in_prepare_prototype_chain_enum (quickjs.c:16341).
+/// Returns true when the enumeration is finished (no enumerable string key
+/// anywhere in the prototype chain); false to enter the slow prototype-chain
+/// phase after seeding the visited-key set with the root snapshot.
+fn forInPrepareProtoChainEnum(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    iterator: *core.Object,
+    root: *core.Object,
+) !bool {
+    const rt = ctx.runtime;
+
+    // "check if there are enumerable properties in the prototype chain (fast
+    // path)" (quickjs.c:16353-16377): walk the chain with the ENUM_ONLY probe.
+    var obj1_val = try object_ops.qjsObjectGetPrototypeOfValue(ctx, output, global, root, null, null);
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &obj1_val },
+    };
+    const value_root_frame = core.runtime.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = &root_values,
+    };
+    rt.active_value_roots = &value_root_frame;
+    defer rt.active_value_roots = value_root_frame.previous;
+    defer obj1_val.free(rt);
+
+    var has_enumerable = false;
+    while (!obj1_val.isNull()) {
+        const obj1 = try property_ops.expectObject(obj1_val);
+        if (try forof_ops.forInHasEnumerableStringKey(ctx, output, global, obj1)) {
+            has_enumerable = true;
+            break; // goto slow_path (quickjs.c:16367-16368)
+        }
+        const next_val = try object_ops.qjsObjectGetPrototypeOfValue(ctx, output, global, obj1, null, null);
+        obj1_val.free(rt);
+        obj1_val = next_val;
+    }
+    if (!has_enumerable) return true;
+
+    // slow_path: "add the visited properties, even if they are not
+    // enumerable" (quickjs.c:16379-16391).
+    if (forof_ops.forInIsArraySlot(iterator).* != 0) {
+        // convert the fast-array count snapshot into a real key tab
+        // (quickjs.c:16381-16388). qjs stores the converted tab in
+        // it->tab_atom, but the caller immediately steps it->obj to the
+        // prototype and replaces the tab (quickjs.c:16438-16455); it is only
+        // ever read by the visited defines, so it stays local here.
+        const keys = try forof_ops.forInSnapshotOwnStringKeys(ctx, output, global, root, iterator);
+        defer core.atom.freeAtomList(rt, keys);
+        forof_ops.forInIsArraySlot(iterator).* = 0;
+        for (keys) |key| try forof_ops.forInDefineVisited(rt, iterator, key);
+    } else {
+        // the snapshot's non-enumerable entries were folded into the visited
+        // set when the tab was built; define the enumerable remainder.
+        for (iterator.iteratorAtomKeys()) |key| try forof_ops.forInDefineVisited(rt, iterator, key);
+    }
+    return false;
+}
+
+/// VM wrapper routing forInNext errors to the active catch handler, exactly
+/// like forInStartVm/forOfNextVm: a gopd trap / prototype-walk throw raised
+/// mid-iteration is an ordinary catchable JS exception in qjs (js_for_in_next
+/// returning -1 unwinds OP_for_in_next into the exception path).
+pub noinline fn forInNextVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    iterator: *core.Object,
-) !void {
-    const atom_keys = iterator.iteratorAtomKeys();
-    if (atom_keys.len != 0) {
-        return try simpleForInNextAtomKeys(ctx, output, global, stack, iterator, atom_keys);
-    }
-
-    while (true) {
-        const index = iterator.iteratorIndexSlot().*;
-        if (index >= iterator.iteratorLength()) {
-            try stack.reserveAdditional(2);
-            iterator.clearOptionalValueSlot(ctx.runtime, iterator.iteratorTargetSlot());
-            stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
-            stack.pushOwnedAssumeCapacity(core.JSValue.boolean(true));
-            return;
-        }
-
-        const key_value = iterator.getProperty(core.atom.atomFromUInt32(@intCast(index)));
-        defer key_value.free(ctx.runtime);
-        try stack.reserveAdditional(2);
-        iterator.iteratorIndexSlot().* = index + 1;
-
-        if ((iterator.iteratorTargetSlot().*)) |source_value| {
-            const source = try property_ops.expectObject(source_value);
-            const key_atom = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
-            defer ctx.runtime.atoms.free(key_atom);
-            if (!try object_ops.hasValueProperty(ctx, output, global, source_value, source, key_atom, null, null)) continue;
-        }
-
-        stack.pushAssumeCapacity(key_value);
-        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
-        return;
-    }
-}
-
-fn simpleForInNextAtomKeys(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    iterator: *core.Object,
-    atom_keys: []const core.Atom,
-) !void {
-    while (true) {
-        const index = iterator.iteratorIndexSlot().*;
-        if (index >= atom_keys.len) {
-            try stack.reserveAdditional(2);
-            iterator.clearOptionalValueSlot(ctx.runtime, iterator.iteratorTargetSlot());
-            stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
-            stack.pushOwnedAssumeCapacity(core.JSValue.boolean(true));
-            return;
-        }
-
-        const key_atom = atom_keys[index];
-        iterator.iteratorIndexSlot().* = index + 1;
-
-        if ((iterator.iteratorTargetSlot().*)) |source_value| {
-            const source = try property_ops.expectObject(source_value);
-            if (!try object_ops.hasValueProperty(ctx, output, global, source_value, source, key_atom, null, null)) continue;
-        }
-
-        const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, key_atom);
-        errdefer key_value.free(ctx.runtime);
-        try stack.reserveAdditional(2);
-        stack.pushOwnedAssumeCapacity(key_value);
-        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
-        return;
-    }
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+) !Step {
+    forInNext(ctx, output, global, stack) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
 }
 
 pub fn iteratorClose(

@@ -2491,7 +2491,10 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
             op.for_in_next => {
                 syncDown(function, frame, stack, reg_ip, reg_sp);
-                try iter_vm.forInNext(ctx, output, global, stack);
+                switch (try iter_vm.forInNextVm(ctx, output, global, stack, frame, catch_target)) {
+                    .done => {},
+                    .continue_loop => continue,
+                }
             },
             op.iterator_close => {
                 syncDown(function, frame, stack, reg_ip, reg_sp);

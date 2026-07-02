@@ -737,7 +737,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }.b);
     t[op.for_in_next] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            try iter_vm.forInNext(vm.ctx, vm.output, vm.global, vm.stack);
+            _ = try iter_vm.forInNextVm(vm.ctx, vm.output, vm.global, vm.stack, vm.frame, vm.catch_target);
         }
     }.b);
     t[op.iterator_close] = h(struct {
