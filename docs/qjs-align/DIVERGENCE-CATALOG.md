@@ -406,3 +406,24 @@ divergence against current HEAD. Key **doc-staleness fixes**:
 - instanceof's `@@hasInstance` GetProperty+call (the bulk of its 3.64×) is **broad tax**: qjs
   `JS_IsInstanceOf` (quickjs.c:8133) also does `GetProperty(@@hasInstance)` + `JS_CallFree` of
   the default. Only the inner `JS_OrdinaryIsInstanceOf` was a real divergence (now aligned).
+
+## 🚫 Intentional divergence (qjs-side bug — do NOT align): flatMap helper `.return()` inner-close count (2026-07-02, B7 audit gen#10)
+
+`Iterator.prototype.flatMap` result `.return()` with an ACTIVE inner iterator:
+
+- **zjs (spec-conformant, KEEP)**: closes the inner iterator once, then the outer —
+  trap order `inner-return,outer-return`, result `{done:true}`. Spec: the abrupt yield
+  completion runs `IteratorCloseAll(« innerIterator, iterated », completion)` — each
+  closed exactly once.
+- **qjs 04be246 (bug)**: `js_iterator_helper_next` FLAT_MAP GEN_MAGIC_RETURN calls
+  `inner.return` via JS_IteratorNext (quickjs.c:44628), then `inner_end` closes the SAME
+  inner again via JS_IteratorClose (quickjs.c:44636), then closes the outer — trap order
+  `inner-return,inner-return,outer-return`. Stronger sub-case: when `inner.return`
+  reports `{done:false}`, qjs skips closing the outer entirely and propagates the inner
+  result (`{value,done:false}`) as the helper's `return()` result.
+
+**Why not aligned**: test262 `built-ins/Iterator/prototype/flatMap/return-is-forwarded-to-mapper-result.js`
+asserts the inner `return` trap fires EXACTLY once (`returnCount === 1`) — mirroring the
+qjs double-close would turn the mandatory 0/49775 gate red. The no-active-inner case and
+the map helper agree between engines (divergence is flatMap-specific). Probes:
+`/tmp/b7/gen10_flatmap.js`, `/tmp/b7/gen10_var.js` (2026-07-02).
