@@ -15419,7 +15419,6 @@ pub const parser_core = struct {
     /// Parse arrow function
     /// Mirrors arrow function parsing in quickjs.c
     fn parseArrowFunction(s: *State, func_kind: ParseFunctionKind, source_start: usize, body_flags: ParseFlags) Error!void {
-        _ = body_flags;
         s.features.insert(.function_);
         s.features.insert(.arrow);
         if (func_kind == .async or func_kind == .async_generator) {
@@ -15732,10 +15731,13 @@ pub const parser_core = struct {
                 }
             }
         } else {
-            // Expression body: mirrors `js_parse_assign_expr`
-            // (quickjs.c:31829) — the arrow expression body parses with
-            // `PF_IN_ACCEPTED` regardless of the enclosing for-init.
-            try parseAssignExpr2(s, ParseFlags.default);
+            // Expression body. Deliberate spec-over-qjs divergence: ES6
+            // ConciseBody[?In] inherits the no-`in` restriction (so
+            // `for (x => 0 in 1;;)` is a SyntaxError, test262
+            // staging/sm/statements/arrow-function-in-for-statement-head.js);
+            // qjs parses arrow bodies with `js_parse_assign_expr`
+            // (PF_IN_ACCEPTED, quickjs.c:31829) and accepts it.
+            try parseAssignExpr2(s, .{ .in_accepted = body_flags.in_accepted });
             if (rewriteTrailingCallAsTailCall(s) != .rewrote) {
                 try s.emitOp(opcode.op.@"return");
             }
