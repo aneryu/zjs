@@ -4,6 +4,18 @@ const limb_bits = 64;
 pub const Limb = u64;
 const DoubleLimb = u128;
 
+/// qjs JS_BIGINT_MAX_SIZE (quickjs.c:11266): `(1024*1024)/JS_LIMB_BITS` limbs —
+/// a 1M-bit cap enforced at every fresh bigint allocation by js_bigint_new
+/// (quickjs.c:11592-11596, RangeError "BigInt is too large to allocate").
+pub const max_bits: usize = 1024 * 1024;
+pub const max_limbs: usize = max_bits / limb_bits;
+
+/// Mirror of the js_bigint_new length check (quickjs.c:11592-11596), applied at
+/// the zjs result-allocation choke points.
+fn checkLimbCount(len: usize) error{BigIntTooLarge}!void {
+    if (len > max_limbs) return error.BigIntTooLarge;
+}
+
 pub const BigInt = struct {
     negative: bool = false,
     limbs: []Limb = &.{},
@@ -133,7 +145,28 @@ pub const BigInt = struct {
 
     pub fn pow(self: BigInt, exponent: BigInt, allocator: std.mem.Allocator) !BigInt {
         if (exponent.negative) return error.NegativeExponent;
+        // qjs js_bigint_pow small shortcuts (quickjs.c:12118-12130): a^0 = 1,
+        // 0^e = 0, (±1)^e = ±1 by exponent parity — all valid for arbitrarily
+        // wide exponents and computed before any exponent-width check.
+        if (exponent.isZero()) return BigInt.fromIntAlloc(allocator, 1);
+        if (self.isZero()) return .{ .allocator = allocator };
+        if (self.bitLengthAbs() == 1) {
+            const negative = self.negative and exponent.testBit(0);
+            return BigInt.fromIntAlloc(allocator, if (negative) -1 else 1);
+        }
         const exp = exponent.toUsize() orelse return error.BigIntTooLarge;
+        // qjs js_bigint_pow power-of-two base shortcut (quickjs.c:12131-12150):
+        // |a| = 2^n builds ±2^(e*n) directly, with the exponent capped at
+        // JS_BIGINT_MAX_SIZE bits (quickjs.c:12142) instead of walking the
+        // repeated-squaring ladder whose intermediates would hit the mul cap.
+        if (self.isPowerOfTwoAbs()) {
+            const n = self.bitLengthAbs() - 1;
+            const e1 = std.math.mul(usize, exp, n) catch return error.BigIntTooLarge;
+            if (e1 > max_bits) return error.BigIntTooLarge;
+            var out = try pow2(allocator, e1);
+            out.negative = self.negative and (exp & 1) == 1;
+            return out;
+        }
         var result = try BigInt.fromIntAlloc(allocator, 1);
         errdefer result.deinit();
         var base_value = try self.cloneWithAllocator(allocator);
@@ -167,6 +200,9 @@ pub const BigInt = struct {
     pub fn bitwise(self: BigInt, other: BigInt, allocator: std.mem.Allocator, op: enum { @"and", @"or", xor }) !BigInt {
         const width = @max(self.bitLengthAbs(), other.bitLengthAbs()) + 1;
         const limb_count = (width + limb_bits - 1) / limb_bits;
+        // qjs js_bigint_logic allocates the operand-width result through
+        // js_bigint_new's cap (quickjs.c:11592-11596).
+        try checkLimbCount(limb_count);
         const lhs = try self.toTwosComplement(allocator, limb_count);
         defer allocator.free(lhs);
         const rhs = try other.toTwosComplement(allocator, limb_count);
@@ -183,6 +219,12 @@ pub const BigInt = struct {
 
     pub fn shl(self: BigInt, allocator: std.mem.Allocator, shift: usize) !BigInt {
         if (self.isZero()) return .{ .allocator = allocator };
+        // qjs js_bigint_shl allocates a->len + d limbs through js_bigint_new's
+        // cap and extends by the carry limb (quickjs.c:12049-2076): the result
+        // value may use at most JS_BIGINT_MAX_SIZE bits. Enforce the cap on the
+        // result's bit length. The `shift >= max_bits` pre-test keeps the sum
+        // from overflowing usize for huge shifts.
+        if (shift >= max_bits or self.bitLengthAbs() + shift > max_bits) return error.BigIntTooLarge;
         const limb_shift = shift / limb_bits;
         const bit_shift: u6 = @intCast(shift % limb_bits);
         const extra: usize = if (bit_shift == 0) 0 else 1;
@@ -200,6 +242,12 @@ pub const BigInt = struct {
 
     pub fn shr(self: BigInt, allocator: std.mem.Allocator, shift: usize) !BigInt {
         if (self.isZero()) return .{ .allocator = allocator };
+        // qjs js_bigint_shr (quickjs.c:12078-2088): when d >= a->len the result
+        // saturates to -sign (0 for positive, -1 for negative) before any
+        // allocation — the guard that keeps huge right-shifts allocation-free.
+        if (shift / limb_bits >= self.limbs.len) {
+            return BigInt.fromIntAlloc(allocator, if (self.negative) -1 else 0);
+        }
         if (!self.negative) return self.shrAbs(allocator, shift);
         var abs_value = try self.absCloneWithAllocator(allocator);
         defer abs_value.deinit();
@@ -253,6 +301,18 @@ pub const BigInt = struct {
         if (self.limbs.len == 0) return 0;
         const top = self.limbs[self.limbs.len - 1];
         return (self.limbs.len - 1) * limb_bits + (limb_bits - @clz(top));
+    }
+
+    /// True when |self| is a power of two (exactly one bit set); zero is not.
+    /// Mirrors the `(v & (v - 1)) == 0` test in js_bigint_pow (quickjs.c:12131).
+    pub fn isPowerOfTwoAbs(self: BigInt) bool {
+        if (self.limbs.len == 0) return false;
+        const top = self.limbs[self.limbs.len - 1];
+        if ((top & (top - 1)) != 0) return false;
+        for (self.limbs[0 .. self.limbs.len - 1]) |limb| {
+            if (limb != 0) return false;
+        }
+        return true;
     }
 
     pub fn modPowerOfTwo(self: BigInt, allocator: std.mem.Allocator, bits: usize) !BigInt {
@@ -318,6 +378,9 @@ pub const BigInt = struct {
 
     fn addAbsInPlace(self: *BigInt, other: BigInt) !void {
         const max_len = @max(self.limbs.len, other.limbs.len);
+        // Same 1M-bit result bound as js_bigint_add's js_bigint_new cap
+        // (quickjs.c:11811); checked on the real (carry-resolved) length below.
+        try checkLimbCount(max_len);
         if (self.limbs.len < max_len) {
             const next = try self.allocator.realloc(self.limbs, max_len);
             @memset(next[self.limbs.len..], 0);
@@ -332,6 +395,7 @@ pub const BigInt = struct {
             carry = sum >> limb_bits;
         }
         if (carry != 0) {
+            try checkLimbCount(max_len + 1);
             const next = try self.allocator.realloc(self.limbs, max_len + 1);
             next[max_len] = @intCast(carry);
             self.limbs = next;
@@ -449,6 +513,10 @@ pub fn parseAutoAlloc(allocator: std.mem.Allocator, bytes: []const u8) !BigInt {
 
 pub fn pow2(allocator: std.mem.Allocator, bits: usize) !BigInt {
     const limb_index = bits / limb_bits;
+    // Materializing 2^bits allocates limb_index+1 limbs; qjs reaches the same
+    // js_bigint_new cap when asUintN/asIntN materialize the modulus
+    // (quickjs.c:11592-11596). Fixes BigInt.asUintN(2**32, -1n) hanging.
+    try checkLimbCount(limb_index + 1);
     const offset: u6 = @intCast(bits % limb_bits);
     const limbs = try allocator.alloc(Limb, limb_index + 1);
     @memset(limbs, 0);
@@ -517,6 +585,10 @@ pub fn subAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !BigInt 
 
 pub fn mulAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !BigInt {
     if (lhs.isZero() or rhs.isZero()) return .{ .allocator = allocator };
+    // qjs js_bigint_mul: js_bigint_new(ctx, a->len + b->len) (quickjs.c:11860),
+    // capped by js_bigint_new. This also bounds js_bigint_pow's repeated
+    // squaring (quickjs.c:12169/12175) the same way qjs does.
+    try checkLimbCount(lhs.limbs.len + rhs.limbs.len);
     const limbs = try allocator.alloc(Limb, lhs.limbs.len + rhs.limbs.len);
     @memset(limbs, 0);
     for (lhs.limbs, 0..) |a, i| {
@@ -540,6 +612,16 @@ fn parseBaseAlloc(allocator: std.mem.Allocator, bytes: []const u8, base: u32) !B
         text = text[1..];
     }
     if (text.len == 0) return error.InvalidBigInt;
+    // qjs js_atobigint (quickjs.c:12455-12490): skip leading zeros, bound the
+    // digit count, then bound the estimated bit width (radix 10 uses
+    // (n_digits*27+7)/8 >= n_digits*log2(10); power-of-two radixes use
+    // ceil(log2(radix)) bits per digit) before any allocation.
+    var digits = text;
+    while (digits.len != 0 and digits[0] == '0') digits = digits[1..];
+    if (digits.len > max_bits) return error.BigIntTooLarge;
+    const log2_radix: usize = 32 - @clz(base - 1);
+    const estimated_bits = if (base == 10) (digits.len * 27 + 7) / 8 else digits.len * log2_radix;
+    try checkLimbCount((estimated_bits + limb_bits - 1) / limb_bits);
     var out = BigInt{ .allocator = allocator };
     errdefer out.deinit();
     for (text) |ch| {
@@ -564,7 +646,16 @@ fn addAbsAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !BigInt {
         carry = sum >> limb_bits;
     }
     limbs[max_len] = @intCast(carry);
-    return normalize(.{ .limbs = limbs, .allocator = allocator });
+    // qjs js_bigint_add hits the js_bigint_new cap on its max(a,b)+1 result
+    // allocation (quickjs.c:11811); with 64-bit sign-magnitude limbs the
+    // speculative +1 would throw a band earlier than qjs's 32-bit limbs, so
+    // the cap is enforced on the normalized result instead.
+    var out = try normalize(.{ .limbs = limbs, .allocator = allocator });
+    if (out.limbs.len > max_limbs) {
+        out.deinit();
+        return error.BigIntTooLarge;
+    }
+    return out;
 }
 
 fn subAbsAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !BigInt {

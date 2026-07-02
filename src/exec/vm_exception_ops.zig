@@ -491,6 +491,8 @@ pub fn runtimeErrorInfo(err: anytype) ?ErrorInfo {
         error.InvalidCharacterError => .{ .name = "InvalidCharacterError", .message = "" },
         error.SyntaxError => .{ .name = "SyntaxError", .message = "invalid syntax" },
         error.RangeError => .{ .name = "RangeError", .message = "" },
+        // qjs js_bigint_new single throw site (quickjs.c:11593-11594).
+        error.BigIntTooLarge => .{ .name = "RangeError", .message = "BigInt is too large to allocate" },
         error.ReferenceError => .{ .name = "ReferenceError", .message = "not defined" },
         else => null,
     };
@@ -504,6 +506,8 @@ pub fn promiseErrorInfo(err: anytype) ErrorInfo {
         error.TypeError => .{ .name = "TypeError", .message = "" },
         error.SyntaxError => .{ .name = "SyntaxError", .message = "invalid syntax" },
         error.RangeError => .{ .name = "RangeError", .message = "" },
+        // qjs js_bigint_new single throw site (quickjs.c:11593-11594).
+        error.BigIntTooLarge => .{ .name = "RangeError", .message = "BigInt is too large to allocate" },
         error.ReferenceError => .{ .name = "ReferenceError", .message = "not defined" },
         else => .{ .name = "Error", .message = "" },
     };
@@ -517,7 +521,7 @@ fn errorNameForRuntimeError(err: anytype) ?[]const u8 {
         error.TypeError => "TypeError",
         error.InvalidCharacterError => "InvalidCharacterError",
         error.SyntaxError => "SyntaxError",
-        error.RangeError => "RangeError",
+        error.RangeError, error.BigIntTooLarge => "RangeError",
         error.ReferenceError => "ReferenceError",
         else => null,
     };

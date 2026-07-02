@@ -905,7 +905,12 @@ fn toBigIntValue(rt: *JSRuntime, value: JSValue) !bignum.BigInt {
         // qjs JS_StringToBigInt (quickjs.c:14609) + skip_spaces (quickjs.c:11230).
         const trimmed = value_format.trimJsWhitespace(buffer.items);
         if (trimmed.len == 0) return bignum.BigInt.fromIntAlloc(rt.memory.allocator, 0);
-        return bignum.parseAutoAlloc(rt.memory.allocator, trimmed) catch error.SyntaxError;
+        return bignum.parseAutoAlloc(rt.memory.allocator, trimmed) catch |err| switch (err) {
+            // qjs js_atobigint throws its RangeError through js_atof rather
+            // than folding it into the bad-literal SyntaxError (quickjs.c:12471).
+            error.BigIntTooLarge => error.BigIntTooLarge,
+            else => error.SyntaxError,
+        };
     }
     return error.TypeError;
 }
