@@ -2018,10 +2018,9 @@ const SetMethodMode = enum {
 
 const SetLikeRecordVm = struct {
     object_value: core.JSValue,
-    size: f64,
+    size: i64,
     has: core.JSValue,
     keys: core.JSValue,
-    native_kind: enum { none, set, map },
 
     fn deinit(self: *const SetLikeRecordVm, rt: *core.JSRuntime) void {
         self.object_value.free(rt);
@@ -2320,46 +2319,74 @@ fn qjsGetSetRecord(
     caller_frame: ?*builtin_dispatch.Frame,
 ) !SetLikeRecordVm {
     const object = object_ops.objectFromValue(other_value) orelse return error.TypeError;
-    if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) {
-        return .{
-            .object_value = other_value.dup(),
-            .size = @floatFromInt(qjsSetStrongSize(object)),
-            .has = core.JSValue.undefinedValue(),
-            .keys = core.JSValue.undefinedValue(),
-            .native_kind = if (object.class_id == core.class.ids.set) .set else .map,
-        };
+    // Mirrors get_set_record (quickjs.c:52641): only a native Set argument gets
+    // the internal record-count fast path (`JS_GetOpaque(obj, JS_CLASS_SET)`);
+    // Map and set-like arguments read the observable `.size` property, and the
+    // `has`/`keys` properties are always read (and later called), even for
+    // native Set/Map arguments, so instance-level overrides stay observable.
+    var size: i64 = undefined;
+    if (object.class_id == core.class.ids.set) {
+        size = @intCast(qjsSetStrongSize(object));
+    } else {
+        const raw_size = try object_ops.getValueProperty(ctx, output, global, other_value, core.atom.predefinedId("size", .string).?, caller_function, caller_frame);
+        defer raw_size.free(ctx.runtime);
+        const size_value = if (raw_size.isObject())
+            try coercion_ops.toPrimitiveForNumber(ctx, output, global, raw_size)
+        else
+            raw_size.dup();
+        defer size_value.free(ctx.runtime);
+        const number_value = try value_ops.toNumberValue(ctx.runtime, size_value);
+        defer number_value.free(ctx.runtime);
+        const size_number = value_ops.numberValue(number_value) orelse return error.TypeError;
+        if (std.math.isNan(size_number)) {
+            _ = try exception_ops.throwTypeErrorMessage(ctx, global, ".size is not a number");
+            unreachable;
+        }
+        // int64 clamp exactly as qjs (INT64_MAX cannot be represented as a
+        // double, so the upper bound compares against 0x1p63).
+        if (size_number < -9223372036854775808.0)
+            size = std.math.minInt(i64)
+        else if (size_number >= 9223372036854775808.0)
+            size = std.math.maxInt(i64)
+        else
+            size = @intFromFloat(size_number);
+        if (size < 0) {
+            _ = try exception_ops.throwRangeErrorMessage(ctx, global, ".size must be positive");
+            unreachable;
+        }
     }
-
-    const raw_size = try object_ops.getValueProperty(ctx, output, global, other_value, core.atom.predefinedId("size", .string).?, caller_function, caller_frame);
-    defer raw_size.free(ctx.runtime);
-    const size_value = if (raw_size.isObject())
-        try coercion_ops.toPrimitiveForNumber(ctx, output, global, raw_size)
-    else
-        raw_size.dup();
-    defer size_value.free(ctx.runtime);
-    const number_value = try value_ops.toNumberValue(ctx.runtime, size_value);
-    defer number_value.free(ctx.runtime);
-    const size_number = value_ops.numberValue(number_value) orelse return error.TypeError;
-    if (std.math.isNan(size_number)) return error.TypeError;
 
     const has_key = try ctx.runtime.internAtom("has");
     defer ctx.runtime.atoms.free(has_key);
     const has_value = try object_ops.getValueProperty(ctx, output, global, other_value, has_key, caller_function, caller_frame);
     errdefer has_value.free(ctx.runtime);
-    if (!call_runtime.isCallableValue(has_value)) return error.TypeError;
+    if (has_value.isUndefined()) {
+        _ = try exception_ops.throwTypeErrorMessage(ctx, global, ".has is undefined");
+        unreachable;
+    }
+    if (!call_runtime.isCallableValue(has_value)) {
+        _ = try exception_ops.throwTypeErrorMessage(ctx, global, ".has is not a function");
+        unreachable;
+    }
 
     const keys_key = try ctx.runtime.internAtom("keys");
     defer ctx.runtime.atoms.free(keys_key);
     const keys_value = try object_ops.getValueProperty(ctx, output, global, other_value, keys_key, caller_function, caller_frame);
     errdefer keys_value.free(ctx.runtime);
-    if (!call_runtime.isCallableValue(keys_value)) return error.TypeError;
+    if (keys_value.isUndefined()) {
+        _ = try exception_ops.throwTypeErrorMessage(ctx, global, ".keys is undefined");
+        unreachable;
+    }
+    if (!call_runtime.isCallableValue(keys_value)) {
+        _ = try exception_ops.throwTypeErrorMessage(ctx, global, ".keys is not a function");
+        unreachable;
+    }
 
     return .{
         .object_value = other_value.dup(),
-        .size = size_number,
+        .size = size,
         .has = has_value,
         .keys = keys_value,
-        .native_kind = .none,
     };
 }
 
@@ -2401,11 +2428,9 @@ fn qjsSetLikeHas(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !bool {
-    if (record.native_kind != .none) {
-        const out = try methodCall(ctx.runtime, record.object_value, 3, &.{key});
-        defer out.free(ctx.runtime);
-        return coercion_ops.valueTruthy(out);
-    }
+    // Mirrors js_set_isSubsetOf and friends (quickjs.c:52813): the record's
+    // retrieved `has` is JS_Call'ed for every argument kind, native Sets
+    // included.
     const out = try call_runtime.callValueOrBytecode(ctx, output, global, record.object_value, record.has, &.{key}, caller_function, caller_frame);
     defer out.free(ctx.runtime);
     return coercion_ops.valueTruthy(out);
@@ -2419,10 +2444,9 @@ fn qjsSetLikeKeysIterator(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
-    const source = if (record.native_kind != .none)
-        try methodCall(ctx.runtime, record.object_value, 7, &.{})
-    else
-        try call_runtime.callValueOrBytecode(ctx, output, global, record.object_value, record.keys, &.{}, caller_function, caller_frame);
+    // Mirrors js_set_union (quickjs.c:53144): the record's retrieved `keys` is
+    // JS_Call'ed for every argument kind, native Sets/Maps included.
+    const source = try call_runtime.callValueOrBytecode(ctx, output, global, record.object_value, record.keys, &.{}, caller_function, caller_frame);
     errdefer source.free(ctx.runtime);
     const iterator_object = object_ops.objectFromValue(source) orelse return error.TypeError;
     const next_key = try ctx.runtime.internAtom("next");
@@ -2497,7 +2521,7 @@ fn qjsSetDifference(
 ) !core.JSValue {
     const result_value = try qjsConstructPlainSet(ctx, global);
     errdefer result_value.free(ctx.runtime);
-    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) > other_record.size) {
+    if (@as(i64, @intCast(qjsSetStrongSize(receiver))) > other_record.size) {
         var copy_index: usize = 0;
         while (copy_index < receiver.collectionEntriesSlot().*.len) : (copy_index += 1) {
             const entry = receiver.collectionEntriesSlot().*[copy_index];
@@ -2545,7 +2569,7 @@ fn qjsSetIntersection(
 ) !core.JSValue {
     const result_value = try qjsConstructPlainSet(ctx, global);
     errdefer result_value.free(ctx.runtime);
-    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) <= other_record.size) {
+    if (@as(i64, @intCast(qjsSetStrongSize(receiver))) <= other_record.size) {
         var index: usize = 0;
         while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
             const entry = receiver.collectionEntriesSlot().*[index];
@@ -2647,7 +2671,7 @@ fn qjsSetIsDisjointFrom(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
-    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) <= other_record.size) {
+    if (@as(i64, @intCast(qjsSetStrongSize(receiver))) <= other_record.size) {
         var index: usize = 0;
         while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
             const entry = receiver.collectionEntriesSlot().*[index];
@@ -2689,7 +2713,7 @@ fn qjsSetIsSubsetOf(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
-    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) > other_record.size) return core.JSValue.boolean(false);
+    if (@as(i64, @intCast(qjsSetStrongSize(receiver))) > other_record.size) return core.JSValue.boolean(false);
     var index: usize = 0;
     while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
         const entry = receiver.collectionEntriesSlot().*[index];
@@ -2710,7 +2734,7 @@ fn qjsSetIsSupersetOf(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
-    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) < other_record.size) return core.JSValue.boolean(false);
+    if (@as(i64, @intCast(qjsSetStrongSize(receiver))) < other_record.size) return core.JSValue.boolean(false);
     var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
     defer iterator_value.free(ctx.runtime);
     var iterator_done = false;
