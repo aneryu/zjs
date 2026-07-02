@@ -423,6 +423,8 @@ pub fn runtimeErrorInfo(err: anytype) ?ErrorInfo {
         // Native C-stack recursion guard (QuickJS JS_ThrowStackOverflow ->
         // InternalError "stack overflow", quickjs.c:7789-7791).
         error.StackOverflow => .{ .name = "InternalError", .message = "stack overflow" },
+        // JS_STRING_LEN_MAX creation/concat cap (qjs quickjs.c:4078/4368/4655/4898).
+        error.StringTooLong => .{ .name = "InternalError", .message = "string too long" },
         error.TypeError, error.NotExtensible => .{ .name = "TypeError", .message = "" },
         error.InvalidCharacterError => .{ .name = "InvalidCharacterError", .message = "" },
         error.SyntaxError => .{ .name = "SyntaxError", .message = "invalid syntax" },
@@ -436,6 +438,7 @@ pub fn promiseErrorInfo(err: anytype) ErrorInfo {
     return switch (@as(anyerror, err)) {
         error.URIError, error.InvalidUtf8 => .{ .name = "URIError", .message = "expecting hex digit" },
         error.StackOverflow => .{ .name = "InternalError", .message = "stack overflow" },
+        error.StringTooLong => .{ .name = "InternalError", .message = "string too long" },
         error.TypeError => .{ .name = "TypeError", .message = "" },
         error.SyntaxError => .{ .name = "SyntaxError", .message = "invalid syntax" },
         error.RangeError => .{ .name = "RangeError", .message = "" },
@@ -448,6 +451,7 @@ fn errorNameForRuntimeError(err: anytype) ?[]const u8 {
     return switch (@as(anyerror, err)) {
         error.URIError, error.InvalidUtf8 => "URIError",
         error.StackOverflow => "InternalError",
+        error.StringTooLong => "InternalError",
         error.TypeError => "TypeError",
         error.InvalidCharacterError => "InvalidCharacterError",
         error.SyntaxError => "SyntaxError",

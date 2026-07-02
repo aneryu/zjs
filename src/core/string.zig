@@ -8,6 +8,13 @@ pub const StringError = error{
     InvalidUtf8,
 };
 
+/// Maximum string length in code units, mirroring QuickJS `JS_STRING_LEN_MAX`
+/// ((1 << 30) - 1, quickjs.c:212). Every creation/concat path enforces it
+/// (`error.StringTooLong` -> InternalError "string too long", the qjs
+/// JS_ThrowInternalError sites at quickjs.c:4078/4368/4655/4898); without it the
+/// packed u31 `len_meta.len` field wraps at 2^31 and `.length` goes negative.
+pub const max_length: usize = (1 << 30) - 1;
+
 /// Deferred concatenation node (QuickJS `JSStringRope` analogue). A rope is a
 /// STANDALONE refcounted heap object reached through a `JSValue` tagged
 /// `Tag.string_rope` (never a `*String`). It owns its `left`/`right` children
@@ -428,6 +435,8 @@ pub const String = struct {
     /// `JSValue`s.
     pub fn createRope(rt: *JSRuntime, left: JSValue, right: JSValue) !*StringRope {
         const total = try std.math.add(usize, stringValueLen(left), stringValueLen(right));
+        // Rope-concat length cap (qjs JS_ConcatString rope path, quickjs.c:4898).
+        if (total > max_length) return error.StringTooLong;
         const node = try allocRopeNode(rt);
         node.* = .{
             .left = left,
@@ -609,6 +618,10 @@ pub const String = struct {
     const StorageTag = enum { latin1, utf16 };
 
     fn createUninitialized(rt: *JSRuntime, comptime tag: StorageTag, unit_count: usize) !*String {
+        // Central allocation cap (qjs js_alloc_string / string_buffer_realloc,
+        // quickjs.c:4078): every flat creator funnels through here, so this one
+        // compare bounds all string construction.
+        if (unit_count > max_length) return error.StringTooLong;
         const inline_layout = inlineAllocationLayout(tag, unit_count) orelse return error.OutOfMemory;
         // Reserve a 4-byte refcount prefix ahead of the struct so `String`
         // itself stays exactly 12B (qjs `JSString`). The block base is
@@ -750,6 +763,10 @@ pub fn appendRopeTail(node: *StringRope, rt: *JSRuntime, suffix: String.Resolved
     const add_len = suffix.len();
     if (add_len == 0) return true;
     const new_total = checkedAddLength(node.len, add_len) orelse return false;
+    // Length cap on the in-place tail-append fast path: past JS_STRING_LEN_MAX
+    // the append bails to createRope, which throws error.StringTooLong (qjs
+    // JS_ConcatString cap, quickjs.c:4898). One compare on the hot churn loop.
+    if (new_total > max_length) return false;
     const used = node.tail_len;
     const need = checkedAddLength(used, add_len) orelse return false;
 

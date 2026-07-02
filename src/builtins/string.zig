@@ -1340,12 +1340,17 @@ fn repeatReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const cor
     };
 
     const count = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
-    if (count < 0 or count == std.math.maxInt(i64)) return error.RangeError;
+    // qjs js_string_repeat (quickjs.c:46371): count outside [0, 2^31-1] is
+    // RangeError "invalid repeat count"; a result past JS_STRING_LEN_MAX is
+    // RangeError "invalid string length". Both messages are attached by the
+    // string_ops dispatch wrapper (error.RangeError / error.InvalidLength).
+    if (count < 0 or count > 2147483647) return error.RangeError;
     try string_value.ensureFlat(rt);
     const unit_len = string_value.len();
     if (unit_len == 0 or count == 0) return createStringValue(rt, "");
     const repeat_count: usize = @intCast(count);
     const total = try std.math.mul(usize, unit_len, repeat_count);
+    if (total > core.string.max_length) return error.InvalidLength;
     switch (string_value.resolveData()) {
         .latin1 => |src| {
             var out = try rt.memory.allocator.alloc(u8, total);
@@ -1366,10 +1371,12 @@ fn repeatReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const cor
 
 fn repeat(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     const count = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
-    if (count < 0 or count == std.math.maxInt(i64)) return error.RangeError;
+    // Mirror of repeatReceiver's qjs js_string_repeat checks (quickjs.c:46371).
+    if (count < 0 or count > 2147483647) return error.RangeError;
     if (bytes.len == 0 or count == 0) return createStringValue(rt, "");
     const repeat_count: usize = @intCast(count);
     const total = try std.math.mul(usize, bytes.len, repeat_count);
+    if (total > core.string.max_length) return error.InvalidLength;
     var out = try rt.memory.allocator.alloc(u8, total);
     defer rt.memory.allocator.free(out);
     var index: usize = 0;

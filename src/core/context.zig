@@ -165,6 +165,7 @@ pub const DynamicImportError = error{
     StackOverflow,
     StackUnderflow,
     StreamTooLong,
+    StringTooLong,
     SymLinkLoop,
     SyntaxError,
     SystemError,

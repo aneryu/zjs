@@ -29,6 +29,7 @@ const ModuleNamespaceError = error{
     InvalidLength,
     ReadOnly,
     TypeError,
+    StringTooLong,
 };
 
 const ValueSliceRoot = struct {

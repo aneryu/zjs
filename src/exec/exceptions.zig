@@ -54,6 +54,7 @@ pub const RuntimeError = error{
     StackMismatch,
     StackOverflow,
     StackUnderflow,
+    StringTooLong,
     SyntaxError,
     SystemError,
     JSException,

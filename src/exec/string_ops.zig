@@ -2204,6 +2204,7 @@ pub fn qjsStringPrototypeMethod(
     defer string_value.free(ctx.runtime);
     return callStringBody(ctx, string_value, method_id, args) catch |err| switch (err) {
         error.RangeError => return throwRangeErrorMessage(ctx, global, "invalid repeat count"),
+        error.InvalidLength => return throwRangeErrorMessage(ctx, global, "invalid string length"),
         else => err,
     };
 }
@@ -4530,7 +4531,7 @@ pub fn isLowSurrogateUnit(unit: u16) bool {
 
 // qjs JS_STRING_LEN_MAX (quickjs.c:212): js_string_pad throws RangeError when the
 // requested length exceeds it (quickjs.c:46331).
-const js_string_len_max: usize = (1 << 30) - 1;
+const js_string_len_max: usize = core.string.max_length;
 
 /// A narrow-first pad accumulator mirroring qjs's StringBuffer (js_string_pad,
 /// quickjs.c:46304-46356): source/fill code units are copied into a latin1 (u8)
@@ -4797,6 +4798,7 @@ pub fn qjsStringNumericArgsMethod(
     }
     return callStringBody(ctx, string_value, method_id, coerced[0..count]) catch |err| switch (err) {
         error.RangeError => return throwRangeErrorMessage(ctx, global, "invalid repeat count"),
+        error.InvalidLength => return throwRangeErrorMessage(ctx, global, "invalid string length"),
         else => err,
     };
 }

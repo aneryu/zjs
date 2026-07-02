@@ -38,6 +38,7 @@ const SimpleJsonError = std.mem.Allocator.Error || error{
     // Native recursion guard: QuickJS surfaces deep JSON.parse nesting as a
     // catchable SyntaxError (json parser js_parse_error, quickjs.c:23483).
     SyntaxError,
+    StringTooLong,
 };
 
 const StringifyOptions = struct {
@@ -1027,6 +1028,7 @@ const SimpleJsonStringifyError = std.mem.Allocator.Error || error{
     NoSpaceLeft,
     TypeError,
     StackOverflow,
+    StringTooLong,
 };
 
 const JsonStringifyVmOptions = struct {
