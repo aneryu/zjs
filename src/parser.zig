@@ -4887,18 +4887,61 @@ pub const parser_core = struct {
                 }
             }
             if (saw_decl and s.peekKind() == '=') {
+                // `var x = ...` inside a for-head. Mirror
+                // `js_parse_skip_parens_token` (`quickjs.c:24800`) +
+                // `SKIP_HAS_SEMI` (`quickjs.c:29151`): scan the rest of the
+                // head tracking paren/bracket/brace/template nesting. A
+                // top-level `;` selects the C-style `for` (a nested `in`
+                // — parens, args, literals, templates — is NOT a for-in);
+                // reaching the head's closing `)` without one selects
+                // for-in/of (the Annex-B `for (var x = init in obj)` form).
                 if (!advanceLocal(s, &advanced)) return false;
-                var depth: usize = 0;
+                var state_buf: [256]u8 = undefined;
+                var level: usize = 0;
                 while (true) {
                     const kind = s.peekKind();
                     if (kind == tok.TOK_EOF) return false;
-                    if (depth == 0 and (kind == tok.TOK_IN or s.isOfToken())) break;
-                    if (depth == 0 and (kind == ';' or kind == @as(tok.TokenKind, @intCast(')')))) return false;
-                    if (kind == @as(tok.TokenKind, @intCast('(')) or kind == @as(tok.TokenKind, @intCast('[')) or kind == @as(tok.TokenKind, @intCast('{'))) {
-                        depth += 1;
-                    } else if (kind == @as(tok.TokenKind, @intCast(')')) or kind == @as(tok.TokenKind, @intCast(']')) or kind == @as(tok.TokenKind, @intCast('}'))) {
-                        if (depth == 0) return false;
-                        depth -= 1;
+                    if (kind == @as(tok.TokenKind, @intCast('(')) or
+                        kind == @as(tok.TokenKind, @intCast('[')) or
+                        kind == @as(tok.TokenKind, @intCast('{')))
+                    {
+                        if (level >= state_buf.len) return false;
+                        state_buf[level] = @intCast(kind);
+                        level += 1;
+                    } else if (kind == @as(tok.TokenKind, @intCast(')'))) {
+                        if (level == 0) return true; // head closed, no `;`
+                        if (state_buf[level - 1] != '(') return false;
+                        level -= 1;
+                    } else if (kind == @as(tok.TokenKind, @intCast(']'))) {
+                        if (level == 0 or state_buf[level - 1] != '[') return false;
+                        level -= 1;
+                    } else if (kind == @as(tok.TokenKind, @intCast('}'))) {
+                        if (level == 0) return false;
+                        const c = state_buf[level - 1];
+                        if (c == '`') {
+                            // `}` closes a template substitution: resume
+                            // template lexing (mirrors the '`' state in
+                            // js_parse_skip_parens_token).
+                            const next_part = s.lex.nextTemplatePartAfterBrace() catch return false;
+                            s.lex.freeToken(&s.token);
+                            s.token = next_part;
+                            advanced = true;
+                            const part = s.token.payload.str.template orelse return false;
+                            if (part != .middle) level -= 1; // tail ends the template
+                            if (!advanceLocal(s, &advanced)) return false;
+                            continue;
+                        }
+                        if (c != '{') return false;
+                        level -= 1;
+                    } else if (kind == tok.TOK_TEMPLATE) {
+                        const part = s.token.payload.str.template orelse return false;
+                        if (part == .head or part == .middle) {
+                            if (level >= state_buf.len) return false;
+                            state_buf[level] = '`';
+                            level += 1;
+                        }
+                    } else if (kind == ';') {
+                        if (level == 0) return false; // C-style for
                     }
                     if (!advanceLocal(s, &advanced)) return false;
                 }
@@ -8846,9 +8889,12 @@ pub const parser_core = struct {
     /// Caller consumed nothing yet — this consumes the leading `(` and the
     /// matching `)`.
     fn parseCallArgs(s: *State, flags: ParseFlags) Error!CallArgsShape {
+        _ = flags;
         try expectPunct(s, '(');
-        var arg_flags = flags;
-        arg_flags.result_needed = true;
+        // Call arguments always parse with `PF_IN_ACCEPTED`
+        // (`js_parse_assign_expr`, quickjs.c:26630/26744) — argument
+        // positions reset the for-init no-`in` restriction.
+        const arg_flags = ParseFlags.default;
         var argc: u16 = 0;
         var has_spread = false;
         while (s.peekKind() != @as(tok.TokenKind, @intCast(')'))) {
@@ -9176,7 +9222,12 @@ pub const parser_core = struct {
                         return;
                     }
                     try s.advance();
-                    try parseExpr2(s, forceResultNeeded(flags));
+                    // Parenthesized group: mirrors `js_parse_expr_paren`
+                    // (`quickjs.c:26195`) -> `js_parse_expr` which parses
+                    // with `PF_IN_ACCEPTED` set — grouping resets the
+                    // for-init no-`in` restriction (and unary-context
+                    // restrictions like the yield guard).
+                    try parseExpr2(s, ParseFlags.default);
                     const parenthesized_had_comma = s.last_expr_had_comma;
                     const parenthesized_had_branchy_tail = s.last_expr_was_short_circuit_or_cond;
                     const parenthesized_had_optional_chain = s.last_lhs_had_optional_chain;
@@ -9203,11 +9254,11 @@ pub const parser_core = struct {
     }
 
     fn parseDynamicImportCall(s: *State, flags: ParseFlags) Error!void {
+        _ = flags;
         s.features.insert(.dynamic_import);
         try s.advance();
         try expectPunct(s, '(');
-        var import_flags = flags;
-        import_flags.in_accepted = true;
+        const import_flags = ParseFlags.default;
         try parseAssignExpr2(s, import_flags);
         if (s.peekKind() == @as(tok.TokenKind, @intCast(','))) {
             try s.advance();
@@ -9381,6 +9432,7 @@ pub const parser_core = struct {
     /// and `append` (for spread entries). The trailing `drop` removes
     /// the index, leaving the constructed array on the stack.
     fn parseArrayLiteral(s: *State, flags: ParseFlags) Error!void {
+        _ = flags;
         try s.advance(); // consume '['
         var count: u16 = 0;
         var sparse_active = false;
@@ -9415,11 +9467,14 @@ pub const parser_core = struct {
                     spread_active = true;
                 }
                 try s.advance();
-                try parseAssignExprWithoutPendingFunctionName(s, flags);
+                // Array elements always parse with `PF_IN_ACCEPTED`
+                // (`js_parse_assign_expr`, quickjs.c:28283) — the bracket
+                // resets the for-init no-`in` restriction.
+                try parseAssignExprWithoutPendingFunctionName(s, ParseFlags.default);
                 s.last_anonymous_function_expr = false;
                 try s.emitOp(opcode.op.append);
             } else {
-                try parseAssignExprWithoutPendingFunctionName(s, flags);
+                try parseAssignExprWithoutPendingFunctionName(s, ParseFlags.default);
                 s.last_anonymous_function_expr = false;
                 if (spread_active) {
                     try s.emitOp(opcode.op.define_array_el);
@@ -9475,19 +9530,19 @@ pub const parser_core = struct {
     }
 
     fn parseObjectProperty(s: *State, flags: ParseFlags, proto_field_seen: *bool) Error!void {
+        _ = flags;
         const k = s.peekKind();
         const property_source_start = s.currentTokenStartOffset();
-        const computed_flags = ParseFlags{
-            .in_accepted = true,
-            .pow_allowed = flags.pow_allowed,
-            .result_needed = flags.result_needed,
-        };
+        // Property keys/values always parse with `PF_IN_ACCEPTED`
+        // (`js_parse_assign_expr`, quickjs.c:28283) — the object literal
+        // resets the for-init no-`in` restriction.
+        const computed_flags = ParseFlags.default;
 
         // Spread property: ...obj
         if (k == tok.TOK_ELLIPSIS) {
             s.features.insert(.spread_rest);
             try s.advance();
-            try parseAssignExpr2(s, flags);
+            try parseAssignExpr2(s, ParseFlags.default);
             try s.emitOp(opcode.op.null); // dummy excludeList, matching QuickJS object-spread lowering
             try s.emitOpU8(opcode.op.copy_data_properties, 2 | (1 << 2) | (0 << 5));
             try s.emitOp(opcode.op.drop); // excludeList
@@ -9556,7 +9611,7 @@ pub const parser_core = struct {
             } else {
                 try expectPunct(s, ':');
                 try s.emitOp(opcode.op.to_propkey);
-                try parseAssignExprWithPendingFunctionName(s, flags, null);
+                try parseAssignExprWithPendingFunctionName(s, ParseFlags.default, null);
                 if (s.last_anonymous_function_expr) {
                     try s.emitOp(opcode.op.set_name_computed);
                     s.last_anonymous_function_expr = false;
@@ -9579,7 +9634,7 @@ pub const parser_core = struct {
                 try parseObjectAccessorProperty(s, computed_flags, if (is_getter) .get else .set, if (is_getter) 1 else 2, property_source_start);
             } else if (s.peekKind() == @as(tok.TokenKind, @intCast(':'))) {
                 try s.advance();
-                try parseAssignExprWithPendingFunctionName(s, flags, if (name_info.is_proto) null else name);
+                try parseAssignExprWithPendingFunctionName(s, ParseFlags.default, if (name_info.is_proto) null else name);
                 if (name_info.is_proto) {
                     if (proto_field_seen.*) return Error.UnexpectedToken;
                     proto_field_seen.* = true;
@@ -15292,6 +15347,7 @@ pub const parser_core = struct {
     /// Parse arrow function
     /// Mirrors arrow function parsing in quickjs.c
     fn parseArrowFunction(s: *State, func_kind: ParseFunctionKind, source_start: usize, body_flags: ParseFlags) Error!void {
+        _ = body_flags;
         s.features.insert(.function_);
         s.features.insert(.arrow);
         if (func_kind == .async or func_kind == .async_generator) {
@@ -15604,8 +15660,10 @@ pub const parser_core = struct {
                 }
             }
         } else {
-            // Expression body
-            try parseAssignExpr2(s, .{ .in_accepted = body_flags.in_accepted });
+            // Expression body: mirrors `js_parse_assign_expr`
+            // (quickjs.c:31829) — the arrow expression body parses with
+            // `PF_IN_ACCEPTED` regardless of the enclosing for-init.
+            try parseAssignExpr2(s, ParseFlags.default);
             if (rewriteTrailingCallAsTailCall(s) != .rewrote) {
                 try s.emitOp(opcode.op.@"return");
             }
