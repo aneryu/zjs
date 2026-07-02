@@ -5400,6 +5400,20 @@ pub fn qjsGeneratorNext(
         }
         return done_result.dup();
     }
+    if (takeGeneratorPendingReturn(object)) |pending| {
+        // Suspended at a yield inside a finally block entered via .return(v): finish
+        // the finally range, then complete with the pending return value (qjs
+        // js_generator_next GEN_MAGIC_RETURN, quickjs.c:21077).
+        if (object.class_id == core.class.ids.async_generator) {
+            return try resumeAsyncGeneratorPendingReturn(ctx, output, generator_global, receiver, object, pending, args);
+        }
+        const step = try resumeGeneratorPendingReturnStep(ctx, output, generator_global, receiver, object, pending, args);
+        if (!step.done and (object.generatorYieldStarIterator() != null or generatorYieldStarSuspended(ctx.runtime, object))) {
+            return step.value;
+        }
+        defer step.value.free(ctx.runtime);
+        return try createIteratorResult(ctx.runtime, generator_global, step.value, step.done);
+    }
     const function_value = object.functionBytecodeSlot().* orelse return error.TypeError;
     const stored_current_function = if (object.generatorCurrentFunction()) |value| value.dup() else null;
     defer if (stored_current_function) |value| value.free(ctx.runtime);
@@ -5432,29 +5446,7 @@ pub fn qjsGeneratorNext(
         return err;
     };
     if (object.class_id == core.class.ids.async_generator) {
-        defer result.free(ctx.runtime);
-        const promise = object_ops.objectFromValue(result) orelse return error.TypeError;
-        if (promise.class_id != core.class.ids.promise) return error.TypeError;
-        if (promise.promiseIsRejected()) {
-            object.generatorDoneSlot().* = true;
-            return result.dup();
-        }
-        const done = !object.generatorJustYielded();
-        if (promise.promiseResult() == null) {
-            return try promise_ops.asyncGeneratorIteratorResultFromPromise(ctx, output, generator_global, result, done);
-        }
-        const value = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
-        defer value.free(ctx.runtime);
-        if (object_ops.objectFromValue(value)) |inner_promise| {
-            if (inner_promise.class_id == core.class.ids.promise and inner_promise.promiseIsRejected()) {
-                object.generatorDoneSlot().* = true;
-                if (ctx.hasException()) ctx.clearException();
-                return value.dup();
-            }
-        }
-        const iterator_result = try createIteratorResult(ctx.runtime, generator_global, value, done);
-        defer iterator_result.free(ctx.runtime);
-        return try core.promise.fulfilledWithPrototype(ctx.runtime, iterator_result, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
+        return try finishAsyncGeneratorStep(ctx, output, generator_global, receiver, object, result, null);
     }
     defer result.free(ctx.runtime);
     if (object.generatorJustYielded() and
@@ -5463,6 +5455,151 @@ pub fn qjsGeneratorNext(
         return result.dup();
     }
     return try createIteratorResult(ctx.runtime, generator_global, result, !object.generatorJustYielded());
+}
+
+/// Await an async-generator operand with the drain model used for the body's internal
+/// await points. Mirrors the compiler-emitted OP_await qjs places before OP_yield
+/// (quickjs.c:28134-28136) and before OP_return (emit_return quickjs.c:28404): the
+/// settled value is returned, a rejection surfaces as error.JSException with the
+/// reason pending on ctx.
+fn awaitAsyncGeneratorOperand(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    value: core.JSValue,
+) !core.JSValue {
+    if (object_ops.objectFromValue(value)) |awaited| {
+        if (awaited.class_id == core.class.ids.promise) {
+            try promise_ops.settlePendingPromiseReaction(ctx, output, global, awaited);
+            if (awaited.promiseResult() == null) try promise_ops.drainPendingPromiseJobs(ctx, output, global);
+            if (awaited.promiseResult() == null) try promise_ops.awaitPendingPromise(ctx, output, global, awaited);
+            const settled = if (awaited.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
+            if (awaited.promiseIsRejected()) {
+                // The await consumes the rejection (qjs attaches a reaction, which
+                // marks the promise handled).
+                core.promise.markHandled(ctx, awaited);
+                _ = ctx.throwValue(settled);
+                return error.JSException;
+            }
+            return settled;
+        }
+        if (try promise_ops.awaitThenableValue(ctx, output, global, value, null, null)) |settled| {
+            return settled;
+        }
+    }
+    return value.dup();
+}
+
+/// Deliver one async-generator body step. `body_result` (owned here) is the promise the
+/// body run wrapped its yielded/returned value into. Mirrors the qjs async-generator
+/// yield protocol: the yield operand is awaited before the request settles (the
+/// compiler-emitted OP_await before OP_yield, quickjs.c:28134-28136), and a rejected
+/// operand is thrown INTO the generator body at the yield site (the await reaction
+/// resuming with a throw completion, js_async_generator_resume_next
+/// quickjs.c:21596/21640); the body may catch it and keep yielding, so loop.
+///
+/// `pending_return` (owned here, value already awaited) is the pending .return()
+/// completion when the step runs inside a finally block entered via .return(v): it is
+/// re-stashed if the finally suspends at another yield, delivered as the completion
+/// value once the finally range finishes, and discarded when a throw unwinds the frame
+/// (qjs js_generator_next GEN_MAGIC_RETURN protocol, quickjs.c:21109).
+fn finishAsyncGeneratorStep(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    generator_global: *core.Object,
+    receiver: core.JSValue,
+    object: *core.Object,
+    body_result: core.JSValue,
+    pending_return: ?GeneratorPendingReturn,
+) !core.JSValue {
+    var result = body_result;
+    defer result.free(ctx.runtime);
+    var pending_state = pending_return;
+    defer if (pending_state) |p| p.value.free(ctx.runtime);
+    while (true) {
+        const promise = object_ops.objectFromValue(result) orelse return error.TypeError;
+        if (promise.class_id != core.class.ids.promise) return error.TypeError;
+        if (promise.promiseIsRejected()) {
+            object.generatorDoneSlot().* = true;
+            return result.dup();
+        }
+        const done = !object.generatorJustYielded();
+        if (promise.promiseResult() == null) {
+            if (!done) {
+                if (pending_state) |p| {
+                    try stashGeneratorPendingReturn(ctx.runtime, object, p.value, p.stop_pc);
+                    p.value.free(ctx.runtime);
+                    pending_state = null;
+                }
+            }
+            return try promise_ops.asyncGeneratorIteratorResultFromPromise(ctx, output, generator_global, result, done);
+        }
+        const value = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
+        defer value.free(ctx.runtime);
+        const awaited = awaitAsyncGeneratorOperand(ctx, output, generator_global, value) catch |err| {
+            if (err != error.JSException or done) {
+                object.generatorDoneSlot().* = true;
+                return try exception_ops.rejectedPromiseForRuntimeError(ctx, generator_global, err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
+            }
+            // Rejected yield operand: resume the body with a throw completion at the
+            // yield site so the rejection is catchable there (qjs: the await reaction
+            // rejects and js_async_generator_resume_next re-enters with
+            // GEN_MAGIC_THROW semantics). A pending return completion is discarded
+            // (qjs: the stacked completion slots unwind with the frame).
+            const stop_pc: ?usize = if (pending_state) |p| p.stop_pc else null;
+            if (pending_state) |p| {
+                p.value.free(ctx.runtime);
+                pending_state = null;
+            }
+            const reason = if (ctx.hasException()) ctx.takeException() else core.JSValue.undefinedValue();
+            defer reason.free(ctx.runtime);
+            try setGeneratorResumeCompletionType(ctx.runtime, object, 2);
+            const function_value = object.functionBytecodeSlot().* orelse return error.TypeError;
+            const stored_current_function = if (object.generatorCurrentFunction()) |stored| stored.dup() else null;
+            defer if (stored_current_function) |stored| stored.free(ctx.runtime);
+            const resumed = callFunctionBytecodeModeState(
+                ctx,
+                function_value,
+                stored_current_function orelse receiver,
+                object.generatorThis() orelse core.JSValue.undefinedValue(),
+                object.generatorArgs(),
+                object.functionCapturesSlot().*,
+                output,
+                generator_global,
+                object.functionEvalLocalNames(),
+                object.functionEvalLocalRefs(),
+                false,
+                object,
+                reason,
+                stop_pc,
+                core.JSValue.undefinedValue(),
+                core.JSValue.undefinedValue(),
+            ) catch |resume_err| {
+                object.generatorDoneSlot().* = true;
+                return try exception_ops.rejectedPromiseForRuntimeError(ctx, generator_global, resume_err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
+            };
+            result.free(ctx.runtime);
+            result = resumed;
+            continue;
+        };
+        defer awaited.free(ctx.runtime);
+        if (!done) {
+            if (pending_state) |p| {
+                try stashGeneratorPendingReturn(ctx.runtime, object, p.value, p.stop_pc);
+                p.value.free(ctx.runtime);
+                pending_state = null;
+            }
+            return try promise_ops.asyncGeneratorFulfilledIteratorResult(ctx, generator_global, awaited, false);
+        }
+        if (pending_state) |p| {
+            // The finally range finished: complete with the pending return value
+            // unless the finally overrode it with its own completion.
+            object.generatorDoneSlot().* = true;
+            const deliver = if (value.isUndefined()) p.value else awaited;
+            return try promise_ops.asyncGeneratorFulfilledIteratorResult(ctx, generator_global, deliver, true);
+        }
+        return try promise_ops.asyncGeneratorFulfilledIteratorResult(ctx, generator_global, awaited, true);
+    }
 }
 
 /// A raw generator step result: the yielded/returned value + done flag, with no
@@ -5494,6 +5631,10 @@ pub fn qjsSyncGeneratorStep(
     if (object.generatorExecuting()) return error.TypeError;
     const generator_global = object_ops.objectRealmGlobal(object) orelse global;
     if (object.generatorDone()) return .{ .value = core.JSValue.undefinedValue(), .done = true };
+    // Pending return completion stashed by .return(v) suspended in a finally block:
+    // fall back to the generic protocol, whose .next() call lands in qjsGeneratorNext
+    // and threads the completion through the finally.
+    if (object.generatorResumeCompletionType() == 1) return null;
     const function_value = object.functionBytecodeSlot().* orelse return error.TypeError;
     const stored_current_function = if (object.generatorCurrentFunction()) |value| value.dup() else null;
     defer if (stored_current_function) |value| value.free(ctx.runtime);
@@ -5621,6 +5762,169 @@ pub fn resumeGeneratorYieldStarCompletion(
     return try createIteratorResult(ctx.runtime, global, result, done);
 }
 
+/// Pending return completion stash. When `.return(v)` enters a finally block and the
+/// finally itself yields, the pending return completion must survive the suspension so
+/// the following `.next()` can complete `{value: v, done: true}`. Mirror qjs
+/// js_generator_next GEN_MAGIC_RETURN (quickjs.c:21109: `sf->cur_sp[-1] = ret;
+/// sf->cur_sp[0] = JS_NewInt32(ctx, magic)` — the completion value and its magic live
+/// on the generator's own saved stack): the value plus an int32 stop-pc marker are
+/// pushed onto the generator's saved operand stack (GC-traced and freed with the
+/// generator payload) and `resume_completion_type` is set to 1 = GEN_MAGIC_RETURN.
+/// Every resume entry point must consume the stash first (`takeGeneratorPendingReturn`)
+/// so the saved stack regains the exact shape the suspended bytecode expects.
+pub fn stashGeneratorPendingReturn(
+    rt: *core.JSRuntime,
+    generator: *core.Object,
+    pending_value: core.JSValue,
+    stop_pc: usize,
+) !void {
+    const values = generator.generatorStack();
+    const capacity = generator.generatorStackCapacity();
+    if (values.len + 2 > capacity) {
+        var next_capacity: usize = if (capacity == 0) 8 else capacity;
+        while (next_capacity < values.len + 2) next_capacity *= 2;
+        const next = try rt.memory.alloc(core.JSValue, next_capacity);
+        @memcpy(next[0..values.len], values);
+        generator.generatorStackSlot().* = next[0..values.len];
+        generator.generatorStackCapacitySlot().* = next_capacity;
+        if (capacity != 0) {
+            rt.memory.free(core.JSValue, values.ptr[0..capacity]);
+        } else if (values.len != 0) {
+            rt.memory.free(core.JSValue, values);
+        }
+    }
+    const stack = generator.generatorStack();
+    stack.ptr[stack.len] = pending_value.dup();
+    stack.ptr[stack.len + 1] = core.JSValue.int32(@intCast(stop_pc));
+    generator.generatorStackSlot().* = stack.ptr[0 .. stack.len + 2];
+    generator.generatorResumeCompletionTypeSlot().* = 1; // GEN_MAGIC_RETURN
+}
+
+pub const GeneratorPendingReturn = struct {
+    /// Owned by the caller.
+    value: core.JSValue,
+    stop_pc: usize,
+};
+
+/// Pop the pending return completion stashed by `stashGeneratorPendingReturn`, if any.
+/// Outside an active resume, `resume_completion_type == 1` only ever means a stashed
+/// pending return (the transient yield-star magic is consumed within the same resume,
+/// guarded by the executing flag).
+pub fn takeGeneratorPendingReturn(generator: *core.Object) ?GeneratorPendingReturn {
+    if (generator.generatorResumeCompletionType() != 1) return null;
+    generator.generatorResumeCompletionTypeSlot().* = 0;
+    const values = generator.generatorStack();
+    std.debug.assert(values.len >= 2);
+    const marker = values[values.len - 1];
+    const value = values[values.len - 2];
+    generator.generatorStackSlot().* = values.ptr[0 .. values.len - 2];
+    return .{ .value = value, .stop_pc = @intCast(marker.asInt32() orelse 0) };
+}
+
+/// Resume a generator suspended at a yield INSIDE a finally block that was entered via
+/// `.return(v)`: run the rest of the finally range and complete with the pending return
+/// value once the range finishes (qjs threads this natively through OP_return / OP_ret
+/// with the completion on the generator stack, js_generator_next quickjs.c:21077).
+/// Takes ownership of `pending.value`; the returned value is owned by the caller.
+fn resumeGeneratorPendingReturnStep(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    generator_global: *core.Object,
+    receiver: core.JSValue,
+    object: *core.Object,
+    pending: GeneratorPendingReturn,
+    args: []const core.JSValue,
+) !GeneratorValueDone {
+    const pending_value = pending.value;
+    defer pending_value.free(ctx.runtime);
+    const function_value = object.functionBytecodeSlot().* orelse return error.TypeError;
+    const stored_current_function = if (object.generatorCurrentFunction()) |value| value.dup() else null;
+    defer if (stored_current_function) |value| value.free(ctx.runtime);
+    const current_function_value = stored_current_function orelse receiver;
+    const resume_value = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
+    object.generatorExecutingSlot().* = true;
+    defer object.generatorExecutingSlot().* = false;
+    const result = callFunctionBytecodeModeState(
+        ctx,
+        function_value,
+        current_function_value,
+        object.generatorThis() orelse core.JSValue.undefinedValue(),
+        object.generatorArgs(),
+        object.functionCapturesSlot().*,
+        output,
+        generator_global,
+        object.functionEvalLocalNames(),
+        object.functionEvalLocalRefs(),
+        false,
+        object,
+        resume_value,
+        pending.stop_pc,
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+    ) catch |err| {
+        object.generatorDoneSlot().* = true;
+        return err;
+    };
+    defer result.free(ctx.runtime);
+    if (object.generatorJustYielded()) {
+        // Suspended again inside the finally (plain yield or yield* delegation):
+        // keep the pending return completion stashed. This is safe because every
+        // resume entry point pops the stash before restoring the saved stack.
+        try stashGeneratorPendingReturn(ctx.runtime, object, pending_value, pending.stop_pc);
+        return .{ .value = result.dup(), .done = false };
+    }
+    object.generatorDoneSlot().* = true;
+    const value = if (result.isUndefined()) pending_value.dup() else result.dup();
+    return .{ .value = value, .done = true };
+}
+
+/// Async twin of `resumeGeneratorPendingReturnStep`: resume the finally range with the
+/// pending .return() completion and route the resulting body promise through
+/// `finishAsyncGeneratorStep`, which re-stashes / delivers / discards the pending
+/// completion. Takes ownership of `pending.value`.
+fn resumeAsyncGeneratorPendingReturn(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    generator_global: *core.Object,
+    receiver: core.JSValue,
+    object: *core.Object,
+    pending: GeneratorPendingReturn,
+    args: []const core.JSValue,
+) !core.JSValue {
+    const function_value = object.functionBytecodeSlot().* orelse {
+        pending.value.free(ctx.runtime);
+        return error.TypeError;
+    };
+    const stored_current_function = if (object.generatorCurrentFunction()) |value| value.dup() else null;
+    defer if (stored_current_function) |value| value.free(ctx.runtime);
+    const resume_value = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
+    object.generatorExecutingSlot().* = true;
+    defer object.generatorExecutingSlot().* = false;
+    const result = callFunctionBytecodeModeState(
+        ctx,
+        function_value,
+        stored_current_function orelse receiver,
+        object.generatorThis() orelse core.JSValue.undefinedValue(),
+        object.generatorArgs(),
+        object.functionCapturesSlot().*,
+        output,
+        generator_global,
+        object.functionEvalLocalNames(),
+        object.functionEvalLocalRefs(),
+        false,
+        object,
+        resume_value,
+        pending.stop_pc,
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+    ) catch |err| {
+        pending.value.free(ctx.runtime);
+        object.generatorDoneSlot().* = true;
+        return try exception_ops.rejectedPromiseForRuntimeError(ctx, generator_global, err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
+    };
+    return try finishAsyncGeneratorStep(ctx, output, generator_global, receiver, object, result, pending);
+}
+
 pub fn qjsGeneratorReturn(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -5633,9 +5937,61 @@ pub fn qjsGeneratorReturn(
     if (object.class_id != core.class.ids.generator and object.class_id != core.class.ids.async_generator) return null;
     if (object.generatorExecuting()) return error.TypeError;
     const generator_global = object_ops.objectRealmGlobal(object) orelse global;
+    // A fresh .return(v) replaces any pending return completion stashed by an earlier
+    // return that suspended inside a finally block (qjs: the new completion resumes at
+    // the yield and the old stack slots unwind with the frame).
+    if (takeGeneratorPendingReturn(object)) |pending| pending.value.free(ctx.runtime);
     try closeGeneratorDestructuringIterators(ctx, output, generator_global, object);
     var return_value = if (args.len > 0) args[0].dup() else core.JSValue.undefinedValue();
     defer return_value.free(ctx.runtime);
+    if (object.class_id == core.class.ids.async_generator) {
+        // qjs awaits the .return() argument in every state: at a suspension the
+        // compiled return path awaits it before running finally blocks (emit_return
+        // OP_await, quickjs.c:28404 "the await must be done before handling the
+        // finally"); on a completed generator js_async_generator_completed_return
+        // resolves it via JS_PromiseResolve + reaction (quickjs.c:21530). A rejection
+        // is raised inside the body when it can still run (catchable at the yield),
+        // otherwise it rejects the request promise (js_async_generator_resolve_function
+        // magic>=2 is_reject, quickjs.c:21686).
+        const awaited = awaitAsyncGeneratorOperand(ctx, output, generator_global, return_value) catch |err| {
+            if (err != error.JSException) return err;
+            const reason = if (ctx.hasException()) ctx.takeException() else core.JSValue.undefinedValue();
+            defer reason.free(ctx.runtime);
+            if (!object.generatorDone() and object.generatorPc() != 0 and object.generatorStarted()) {
+                if (generatorYieldStarSuspended(ctx.runtime, object)) {
+                    return try resumeGeneratorYieldStarCompletion(ctx, output, generator_global, receiver, object, reason, 2);
+                }
+                try setGeneratorResumeCompletionType(ctx.runtime, object, 2);
+                const function_value = object.functionBytecodeSlot().* orelse return error.TypeError;
+                const resumed = callFunctionBytecodeModeState(
+                    ctx,
+                    function_value,
+                    receiver,
+                    object.generatorThis() orelse core.JSValue.undefinedValue(),
+                    object.generatorArgs(),
+                    object.functionCapturesSlot().*,
+                    output,
+                    generator_global,
+                    object.functionEvalLocalNames(),
+                    object.functionEvalLocalRefs(),
+                    false,
+                    object,
+                    reason,
+                    null,
+                    core.JSValue.undefinedValue(),
+                    core.JSValue.undefinedValue(),
+                ) catch |resume_err| {
+                    object.generatorDoneSlot().* = true;
+                    return try exception_ops.rejectedPromiseForRuntimeError(ctx, generator_global, resume_err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
+                };
+                return try finishAsyncGeneratorStep(ctx, output, generator_global, receiver, object, resumed, null);
+            }
+            object.generatorDoneSlot().* = true;
+            return try core.promise.rejectedWithPrototype(ctx.runtime, reason, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
+        };
+        return_value.free(ctx.runtime);
+        return_value = awaited;
+    }
     if (generatorYieldStarSuspended(ctx.runtime, object)) {
         return try resumeGeneratorYieldStarCompletion(ctx, output, generator_global, receiver, object, return_value, 1);
     }
@@ -5684,16 +6040,35 @@ pub fn qjsGeneratorReturn(
                 core.JSValue.undefinedValue(),
             ) catch |err| {
                 object.generatorDoneSlot().* = true;
+                if (object.class_id == core.class.ids.async_generator) {
+                    return try exception_ops.rejectedPromiseForRuntimeError(ctx, generator_global, err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
+                }
                 return err;
             };
+            if (object.class_id == core.class.ids.async_generator) {
+                // The body result is a promise; finishAsyncGeneratorStep unwraps it,
+                // stashes the pending return completion if the finally suspended at a
+                // yield, and delivers {value: return_value, done: true} once the
+                // finally range finishes.
+                return try finishAsyncGeneratorStep(ctx, output, generator_global, receiver, object, result, .{
+                    .value = return_value.dup(),
+                    .stop_pc = finally_range.stop,
+                });
+            }
             defer result.free(ctx.runtime);
             const done = !object.generatorJustYielded();
             if (done) object.generatorDoneSlot().* = true;
-            const iterator_value = if (done and result.isUndefined()) return_value else result;
-            if (object.class_id == core.class.ids.async_generator) {
-                const promise = try promise_ops.asyncGeneratorFulfilledIteratorResult(ctx, generator_global, iterator_value, done);
-                return promise;
+            if (!done) {
+                // The finally block itself yielded: preserve the pending return
+                // completion across the suspension (qjs js_generator_next
+                // GEN_MAGIC_RETURN, quickjs.c:21109).
+                try stashGeneratorPendingReturn(ctx.runtime, object, return_value, finally_range.stop);
+                if (object.generatorYieldStarIterator() != null or generatorYieldStarSuspended(ctx.runtime, object)) {
+                    // yield* passthrough: `result` is already an iterator-result object.
+                    return result.dup();
+                }
             }
+            const iterator_value = if (done and result.isUndefined()) return_value else result;
             return try createIteratorResult(ctx.runtime, generator_global, iterator_value, done);
         }
     }
@@ -5893,6 +6268,10 @@ pub fn qjsGeneratorThrow(
     if (object.generatorExecuting()) return error.TypeError;
     const generator_global = object_ops.objectRealmGlobal(object) orelse global;
     const thrown = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
+    // A throw injected at a yield inside a finally block discards any pending return
+    // completion stashed there (qjs: the exception unwinds the frame and the stacked
+    // completion slots are freed with it).
+    if (takeGeneratorPendingReturn(object)) |pending| pending.value.free(ctx.runtime);
 
     if (generatorYieldStarSuspended(ctx.runtime, object)) {
         return try resumeGeneratorYieldStarCompletion(ctx, output, generator_global, receiver, object, thrown, 2);

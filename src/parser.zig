@@ -3916,6 +3916,10 @@ pub const parser_core = struct {
         destructuring_binding_is_lexical: bool = false,
         destructuring_binding_is_const: bool = false,
         destructuring_predeclare_only: bool = false,
+        // True while parsing the parameter list of a class/object-literal
+        // method. Mirrors qjs func_type == JS_PARSE_FUNC_METHOD in the
+        // duplicate-argument check gate (quickjs.c:36443-36448).
+        parsing_method_params: bool = false,
         destructuring_assignment_target_mode: bool = false,
         suppress_destructuring_capture_retrofit: bool = false,
         collect_module_export_bindings: bool = false,
@@ -3957,6 +3961,12 @@ pub const parser_core = struct {
         class_static_deferred_code: std.ArrayList(u8) = .empty,
         class_static_deferred_atoms: std.ArrayList(Atom) = .empty,
         class_fields_init_child_index: ?u16 = null,
+        // Var index (into cur_func().vars) of the CURRENT class's
+        // `<class_fields_init>` binding; saved/restored around nested
+        // parseClass so constructor capture never resolves to a nested
+        // class's atom-120 var (qjs resolves it per class scope,
+        // quickjs.c:25702 + emit_class_field_init quickjs.c:25185).
+        class_fields_init_var_idx: ?u16 = null,
         class_field_initializer_depth: u32 = 0,
         class_static_field_this_atom: ?Atom = null,
 
@@ -4203,6 +4213,27 @@ pub const parser_core = struct {
                 if (gv.var_name == name and gv.is_lexical) return true;
             }
             return false;
+        }
+
+        /// qjs find_global_var (quickjs.c:24066): any global_vars entry with this
+        /// name — top-level var, hoisted function declaration, or lexical.
+        fn findGlobalVar(self: *State, name: Atom) bool {
+            for (self.cur_func().global_vars) |gv| {
+                if (gv.var_name == name) return true;
+            }
+            return false;
+        }
+
+        /// True when a lexical declaration is being made at the body scope of
+        /// global script or global sloppy-eval code, where qjs runs the
+        /// `fd->is_global_var` redefinition check of define_var
+        /// (quickjs.c:24352-24360). At the body scope every global_vars entry
+        /// satisfies is_child_scope(hf->scope_level, fd->scope_level), so the
+        /// check degenerates to find_global_var.
+        fn atGlobalLexicalBodyScope(self: *State) bool {
+            return self.cur_func_stack.len == 0 and self.scope_level == 0 and
+                !self.top_level_lexical_as_module_ref and
+                (!self.is_eval or self.eval_global_var_bindings);
         }
 
         fn ensureFunctionScopeVar(self: *State, name: Atom) Error!u16 {
@@ -4887,18 +4918,61 @@ pub const parser_core = struct {
                 }
             }
             if (saw_decl and s.peekKind() == '=') {
+                // `var x = ...` inside a for-head. Mirror
+                // `js_parse_skip_parens_token` (`quickjs.c:24800`) +
+                // `SKIP_HAS_SEMI` (`quickjs.c:29151`): scan the rest of the
+                // head tracking paren/bracket/brace/template nesting. A
+                // top-level `;` selects the C-style `for` (a nested `in`
+                // — parens, args, literals, templates — is NOT a for-in);
+                // reaching the head's closing `)` without one selects
+                // for-in/of (the Annex-B `for (var x = init in obj)` form).
                 if (!advanceLocal(s, &advanced)) return false;
-                var depth: usize = 0;
+                var state_buf: [256]u8 = undefined;
+                var level: usize = 0;
                 while (true) {
                     const kind = s.peekKind();
                     if (kind == tok.TOK_EOF) return false;
-                    if (depth == 0 and (kind == tok.TOK_IN or s.isOfToken())) break;
-                    if (depth == 0 and (kind == ';' or kind == @as(tok.TokenKind, @intCast(')')))) return false;
-                    if (kind == @as(tok.TokenKind, @intCast('(')) or kind == @as(tok.TokenKind, @intCast('[')) or kind == @as(tok.TokenKind, @intCast('{'))) {
-                        depth += 1;
-                    } else if (kind == @as(tok.TokenKind, @intCast(')')) or kind == @as(tok.TokenKind, @intCast(']')) or kind == @as(tok.TokenKind, @intCast('}'))) {
-                        if (depth == 0) return false;
-                        depth -= 1;
+                    if (kind == @as(tok.TokenKind, @intCast('(')) or
+                        kind == @as(tok.TokenKind, @intCast('[')) or
+                        kind == @as(tok.TokenKind, @intCast('{')))
+                    {
+                        if (level >= state_buf.len) return false;
+                        state_buf[level] = @intCast(kind);
+                        level += 1;
+                    } else if (kind == @as(tok.TokenKind, @intCast(')'))) {
+                        if (level == 0) return true; // head closed, no `;`
+                        if (state_buf[level - 1] != '(') return false;
+                        level -= 1;
+                    } else if (kind == @as(tok.TokenKind, @intCast(']'))) {
+                        if (level == 0 or state_buf[level - 1] != '[') return false;
+                        level -= 1;
+                    } else if (kind == @as(tok.TokenKind, @intCast('}'))) {
+                        if (level == 0) return false;
+                        const c = state_buf[level - 1];
+                        if (c == '`') {
+                            // `}` closes a template substitution: resume
+                            // template lexing (mirrors the '`' state in
+                            // js_parse_skip_parens_token).
+                            const next_part = s.lex.nextTemplatePartAfterBrace() catch return false;
+                            s.lex.freeToken(&s.token);
+                            s.token = next_part;
+                            advanced = true;
+                            const part = s.token.payload.str.template orelse return false;
+                            if (part != .middle) level -= 1; // tail ends the template
+                            if (!advanceLocal(s, &advanced)) return false;
+                            continue;
+                        }
+                        if (c != '{') return false;
+                        level -= 1;
+                    } else if (kind == tok.TOK_TEMPLATE) {
+                        const part = s.token.payload.str.template orelse return false;
+                        if (part == .head or part == .middle) {
+                            if (level >= state_buf.len) return false;
+                            state_buf[level] = '`';
+                            level += 1;
+                        }
+                    } else if (kind == ';') {
+                        if (level == 0) return false; // C-style for
                     }
                     if (!advanceLocal(s, &advanced)) return false;
                 }
@@ -4942,15 +5016,9 @@ pub const parser_core = struct {
 
         fn canTreatLetAsForInitializerExpression(s: *State) bool {
             if (s.peekKind() != tok.TOK_LET) return false;
-            if (s.is_strict or s.cur_func().is_strict_mode) return false;
-            const next_kind = s.peekNextKind();
-            if (next_kind == tok.TOK_YIELD) return false;
-            if (next_kind == tok.TOK_AWAIT and canUseAwaitAsIdentifier(s)) return false;
-            if (next_kind == tok.TOK_STATIC) return false;
-            if (isSloppyFutureReservedToken(next_kind)) return false;
-            return next_kind != tok.TOK_IDENT and
-                next_kind != @as(tok.TokenKind, @intCast('[')) and
-                next_kind != @as(tok.TokenKind, @intCast('{'));
+            // qjs calls is_let(s, DECL_MASK_OTHER) for the for-initializer and
+            // the for-in/of head (quickjs.c:29164, quickjs.c:28703).
+            return canTreatLetAsExpressionStatement(s, DeclMask{ .other = true });
         }
 
         // ---- emit primitives -------------------------------------------------
@@ -6098,7 +6166,8 @@ pub const parser_core = struct {
         // already emitted unrelated bytes — wiping the whole buffer is
         // unsound, e.g. `1 + (a = b)`).
         const direct_lhs_atom: ?Atom = if (isIdentifierLikeToken(s)) identifierLikeAtom(s) else null;
-        const saved_atom: ?Atom = direct_lhs_atom orelse peekParenthesizedBareIdent(s);
+        const saved_atom: ?Atom = direct_lhs_atom orelse
+            (if (peekParenthesizedBareIdent(s)) |info| info.atom else null);
         const pre_lhs_code_len = s.currentCodeLen();
         const pre_lhs_atom_len = s.currentAtomOperandLen();
 
@@ -6227,7 +6296,11 @@ pub const parser_core = struct {
                     try s.truncateCode(d.code_pos);
                     try parseAssignExpr2(s, rhs_flags);
                     if (flags.result_needed) {
-                        try s.emitOp(opcode.op.insert3);
+                        // put_super_value pops 4 ([this, obj, prop, v]); keep
+                        // the assignment value below them. Mirrors qjs
+                        // OP_insert4 for the super lvalue (quickjs.c:26150
+                        // "this obj prop v -> v this obj prop v").
+                        try s.emitOp(opcode.op.insert4);
                     } else {
                         s.suppress_expr_statement_drop = true;
                     }
@@ -7180,6 +7253,35 @@ pub const parser_core = struct {
         return k == @as(tok.TokenKind, @intCast('/')) or k == tok.TOK_DIV_ASSIGN;
     }
 
+    /// Emit the identifier read for the `typeof <ident>` shortcut. Mirrors
+    /// the observable result of qjs's parse-then-patch: the operand's
+    /// trailing `scope_get_var` becomes `scope_get_var_undef`
+    /// (quickjs.c:27660-27666), which for an active `with` scope means the
+    /// with-object lookup chain still runs and only the final fallback get
+    /// is the non-throwing `undef` form.
+    fn emitTypeofIdentRead(s: *State, ident: Atom) Error!void {
+        if (s.active_with_atom != null and s.active_with_func_depth != s.cur_func_stack.len and hasCurrentFunctionBinding(s, ident)) {
+            try s.emitScopeGetVar(ident);
+            return;
+        }
+        if (s.active_with_atom) |with_atom| {
+            try s.emitScopeGetVar(with_atom);
+            const label_offset = try s.emitOpAtomLabelU8(opcode.op.with_get_var, ident, 0, 1);
+            if (hasKnownBinding(s, ident)) {
+                try s.emitScopeGetVar(ident);
+            } else {
+                try s.emitScopeGetVarUndef(ident);
+            }
+            try patchAbsoluteTarget(s, label_offset);
+            return;
+        }
+        if (hasKnownBinding(s, ident)) {
+            try s.emitScopeGetVar(ident);
+        } else {
+            try s.emitScopeGetVarUndef(ident);
+        }
+    }
+
     fn emitWithGetVarFallback(s: *State, with_atom: Atom, ident: Atom) Error!void {
         try s.emitScopeGetVar(with_atom);
         const label_offset = try s.emitOpAtomLabelU8(opcode.op.with_get_var, ident, 0, 1);
@@ -7495,35 +7597,38 @@ pub const parser_core = struct {
         if (k == tok.TOK_TYPEOF) {
             try s.advance();
             // typeof on a missing global returns "undefined", not a
-            // ReferenceError. QuickJS uses `get_var_undef` for that.
-            if (peekParenthesizedBareIdent(s)) |ident| {
+            // ReferenceError. QuickJS parses the full unary operand and
+            // patches a trailing `scope_get_var` to `scope_get_var_undef`
+            // (quickjs.c:27654-27667); zjs's parse-time shortcut below must
+            // therefore only fire when the identifier IS the whole operand
+            // — never when a member access, call, tagged template, postfix
+            // update, or `async function` expression continues it.
+            const paren_ident = peekParenthesizedBareIdent(s);
+            if (paren_ident != null and !identOperandContinues(paren_ident.?.next_kind)) {
+                const info = paren_ident.?;
+                const ident = info.atom;
                 if (s.class_field_initializer_depth > 0 and atomNameEquals(s, ident, "arguments")) {
                     return Error.UnexpectedToken;
                 }
-                try s.advance(); // (
+                var open: u32 = 0;
+                while (open < info.parens) : (open += 1) try s.advance(); // '('
                 try s.advance(); // ident
-                try expectPunct(s, ')');
-                if (hasKnownBinding(s, ident)) {
-                    try s.emitScopeGetVar(ident);
-                } else {
-                    try s.emitScopeGetVarUndef(ident);
-                }
+                var close: u32 = 0;
+                while (close < info.parens) : (close += 1) try expectPunct(s, ')');
+                try emitTypeofIdentRead(s, ident);
             } else if (isIdentifierLikeToken(s) and
                 s.peekNextKind() != @as(tok.TokenKind, @intCast('(')) and
                 s.peekNextKind() != @as(tok.TokenKind, @intCast('.')) and
                 s.peekNextKind() != @as(tok.TokenKind, @intCast('[')) and
-                s.peekNextKind() != tok.TOK_QUESTION_MARK_DOT)
+                s.peekNextKind() != tok.TOK_FUNCTION and
+                !identOperandContinues(s.peekNextKind()))
             {
                 const ident = identifierLikeAtom(s);
                 if (s.class_field_initializer_depth > 0 and atomNameEquals(s, ident, "arguments")) {
                     return Error.UnexpectedToken;
                 }
                 try s.advance();
-                if (hasKnownBinding(s, ident)) {
-                    try s.emitScopeGetVar(ident);
-                } else {
-                    try s.emitScopeGetVarUndef(ident);
-                }
+                try emitTypeofIdentRead(s, ident);
             } else {
                 try parseUnary(s, .{ .pow_allowed = false, .in_accepted = flags.in_accepted, .yield_forbidden = true });
             }
@@ -7532,21 +7637,26 @@ pub const parser_core = struct {
         }
         if (k == tok.TOK_DELETE) {
             try s.advance();
-            if (peekParenthesizedBareIdent(s)) |ident| {
-                try s.advance(); // (
-                try s.advance(); // ident
-                try expectPunct(s, ')');
-                if (s.is_strict or s.cur_func().is_strict_mode) return Error.UnexpectedToken;
-                if (s.active_with_atom) |with_atom| {
-                    try emitWithDeleteVarFallback(s, with_atom, ident);
-                } else if (hasEvalNonLexicalBinding(s, ident)) {
-                    try s.emitOpAtom(opcode.op.delete_var, ident);
-                } else if (hasKnownBinding(s, ident) or atomNameEquals(s, ident, "arguments")) {
-                    try s.emitOp(opcode.op.push_false);
-                } else {
-                    try s.emitOpAtom(opcode.op.delete_var, ident);
+            if (peekParenthesizedBareIdent(s)) |info| {
+                if (!identOperandContinues(info.next_kind)) {
+                    const ident = info.atom;
+                    var open: u32 = 0;
+                    while (open < info.parens) : (open += 1) try s.advance(); // '('
+                    try s.advance(); // ident
+                    var close: u32 = 0;
+                    while (close < info.parens) : (close += 1) try expectPunct(s, ')');
+                    if (s.is_strict or s.cur_func().is_strict_mode) return Error.UnexpectedToken;
+                    if (s.active_with_atom) |with_atom| {
+                        try emitWithDeleteVarFallback(s, with_atom, ident);
+                    } else if (hasEvalNonLexicalBinding(s, ident)) {
+                        try s.emitOpAtom(opcode.op.delete_var, ident);
+                    } else if (hasKnownBinding(s, ident) or atomNameEquals(s, ident, "arguments")) {
+                        try s.emitOp(opcode.op.push_false);
+                    } else {
+                        try s.emitOpAtom(opcode.op.delete_var, ident);
+                    }
+                    return;
                 }
-                return;
             }
             if (s.active_with_atom) |with_atom| {
                 if (s.peekKind() == tok.TOK_IDENT and
@@ -7568,8 +7678,8 @@ pub const parser_core = struct {
         if (k == tok.TOK_INC or k == tok.TOK_DEC) {
             const update_op: u8 = if (k == tok.TOK_INC) opcode.op.inc else opcode.op.dec;
             try s.advance();
-            const saved_atom: ?Atom = if (peekParenthesizedBareIdent(s)) |ident| blk: {
-                break :blk ident;
+            const saved_atom: ?Atom = if (peekParenthesizedBareIdent(s)) |info| blk: {
+                break :blk info.atom;
             } else if (isIdentifierLikeToken(s)) blk: {
                 break :blk identifierLikeAtom(s);
             } else null;
@@ -7787,7 +7897,19 @@ pub const parser_core = struct {
         try s.return_finally_frames.items[frame_index].fixups.append(s.function.memory.allocator, off);
     }
 
-    fn peekParenthesizedBareIdent(s: *State) ?Atom {
+    /// Result of `peekParenthesizedBareIdent`: a bare identifier wrapped in
+    /// one or more parenthesis groups, plus the token kind that follows the
+    /// outermost `)` so callers can reject identifiers that are only a
+    /// prefix of a longer operand (postfix `++`/`--`, tagged template,
+    /// `?.` — qjs has no such shortcut: `js_parse_unary` always parses the
+    /// full operand and only then patches `scope_get_var`, quickjs.c:27654).
+    const ParenBareIdent = struct {
+        atom: Atom,
+        parens: u32,
+        next_kind: tok.TokenKind,
+    };
+
+    fn peekParenthesizedBareIdent(s: *State) ?ParenBareIdent {
         if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return null;
 
         const saved_pos = s.lex.pos;
@@ -7817,8 +7939,11 @@ pub const parser_core = struct {
             advanced = true;
             paren_count += 1;
         }
-        if (s.peekKind() != tok.TOK_IDENT) return null;
-        const ident = s.token.payload.ident.atom;
+        // Any context-legal IdentifierReference qualifies (qjs lexes
+        // sloppy-mode `yield`/`await`/`let`/... as plain identifiers here
+        // and patches their `scope_get_var` after the fact).
+        if (!isIdentifierLikeToken(s)) return null;
+        const ident = identifierLikeAtom(s);
         s.advance() catch return null; // ident
         advanced = true;
         var close_count: usize = 0;
@@ -7828,7 +7953,57 @@ pub const parser_core = struct {
             advanced = true;
         }
         if (isMemberStart(s.peekKind())) return null;
-        return ident;
+        return .{
+            .atom = ident,
+            .parens = @intCast(paren_count),
+            .next_kind = s.peekKind(),
+        };
+    }
+
+    /// Tokens (beyond `isMemberStart`) that continue a unary operand after
+    /// a bare or parenthesized identifier: postfix `++`/`--`, a tagged
+    /// template, or an optional chain. Used to keep the typeof/delete
+    /// identifier shortcuts from consuming a prefix of a longer operand
+    /// (qjs parses the full operand first: `js_parse_unary` ->
+    /// `js_parse_postfix_expr`, quickjs.c:27654/26176).
+    fn identOperandContinues(k: tok.TokenKind) bool {
+        return k == tok.TOK_QUESTION_MARK_DOT or
+            k == tok.TOK_TEMPLATE or
+            k == tok.TOK_INC or
+            k == tok.TOK_DEC;
+    }
+
+    /// Emit `this` for a super-property receiver. In inline static-field
+    /// initializer code (`class_static_field_this_atom` set, including
+    /// arrows nested in the initializer) `this` is the constructor held in
+    /// the static-field temp var — the same remap parsePrimary TOK_THIS
+    /// applies.
+    fn emitSuperThis(s: *State) Error!void {
+        if (s.class_static_field_this_atom) |this_atom| {
+            try s.emitScopeGetVar(this_atom);
+            return;
+        }
+        try s.emitOp(opcode.op.push_this);
+    }
+
+    /// Emit the `[this, home_object]` pair a super property reference
+    /// consumes. Normally `push_this ; special_object 4` (frame home
+    /// object); in inline static-field initializer code both are the
+    /// constructor held in the static-field temp var. qjs compiles static
+    /// field initializers into a fields-init function (emit_class_init_start
+    /// quickjs.c:25223, static field body quickjs.c:25533-25550) whose home
+    /// object IS the constructor (emit_class_init_end OP_set_home_object
+    /// quickjs.c:25258-25271, called with the ctor on the stack and as
+    /// `this`, quickjs.c:25737-25743), so super.x there resolves against
+    /// the constructor; the temp var holds that same constructor value at
+    /// class-definition time.
+    fn emitSuperThisAndHomeObject(s: *State) Error!void {
+        try emitSuperThis(s);
+        if (s.class_static_field_this_atom) |this_atom| {
+            try s.emitScopeGetVar(this_atom);
+            return;
+        }
+        try s.emitOpU8(opcode.op.special_object, 4);
     }
 
     fn isDeleteSuperReference(s: *State) bool {
@@ -7904,8 +8079,8 @@ pub const parser_core = struct {
     /// access. Optional-chain `delete a?.b` / `delete super.x` /
     /// `delete #priv` are deferred.
     fn parseDelete(s: *State, flags: ParseFlags) Error!void {
-        const saved_atom: ?Atom = if (peekParenthesizedBareIdent(s)) |ident| blk: {
-            break :blk ident;
+        const saved_atom: ?Atom = if (peekParenthesizedBareIdent(s)) |info| blk: {
+            break :blk info.atom;
         } else if (s.peekKind() == tok.TOK_IDENT) blk: {
             break :blk s.token.payload.ident.atom;
         } else if (s.peekKind() == tok.TOK_YIELD and !s.in_generator and !(s.is_strict or s.cur_func().is_strict_mode)) blk: {
@@ -7913,15 +8088,46 @@ pub const parser_core = struct {
         } else null;
         const pre_lhs_code_len = s.currentCodeLen();
         const pre_lhs_atom_len = s.currentAtomOperandLen();
+        // Fresh comma tracking for this operand (mirror of qjs
+        // `js_parse_expr2` setting `last_opcode_pos = -1` after a comma,
+        // quickjs.c:28289 — stale state from earlier statements must not
+        // leak into the classification below).
+        s.last_expr_had_comma = false;
         try parseUnary(s, .{ .pow_allowed = false, .in_accepted = flags.in_accepted });
+        // qjs invalidates `last_opcode_pos` when the operand tail is a
+        // control-flow merge point: a comma (`js_parse_expr2`,
+        // quickjs.c:28289) or a regular `emit_label` (ternary / `&&` /
+        // `||` / `??` ends update the last opcode to OP_label). In both
+        // cases `js_parse_delete` falls through to its default `ret_true`
+        // (drop ; push_true) instead of rewriting the trailing access.
+        const reference_blocked = s.last_expr_had_comma or s.last_expr_was_short_circuit_or_cond;
+        if (s.last_lhs_had_optional_chain and !reference_blocked) {
+            if (try tryRewriteOptionalChainDelete(s, pre_lhs_code_len)) return;
+            // No chain exit targets the operand tail: the optional chain
+            // completed inside a sub-expression (e.g. `delete (o?.x).y`),
+            // so the trailing access is a plain reference — exactly what
+            // qjs sees there (a plain OP_get_field after the raw
+            // opt-chain label inside the parentheses).
+            s.last_lhs_had_optional_chain = false;
+        }
         const code_after_lhs = s.currentCode();
         if (code_after_lhs.len > pre_lhs_code_len and code_after_lhs[code_after_lhs.len - 1] == opcode.op.get_length) {
+            if (reference_blocked or s.last_lhs_had_optional_chain) {
+                try s.emitOp(opcode.op.drop);
+                try s.emitOp(opcode.op.push_true);
+                return;
+            }
             try s.truncateCode(code_after_lhs.len - 1);
             try s.emitOpAtom(opcode.op.push_atom_value, atom_module.ids.length);
             try s.emitOp(opcode.op.delete);
             return;
         }
         const shape = classifyLhs(s, pre_lhs_code_len, pre_lhs_atom_len, saved_atom);
+        if (reference_blocked and (shape == .dotted or shape == .indexed)) {
+            try s.emitOp(opcode.op.drop);
+            try s.emitOp(opcode.op.push_true);
+            return;
+        }
         if (lhsShapeIsPrivateReference(s, shape)) return Error.UnexpectedToken;
         if (shape == .none and saved_atom != null and atomNameEquals(s, saved_atom.?, "arguments") and !hasCurrentFunctionBinding(s, saved_atom.?)) {
             try s.truncateCode(pre_lhs_code_len);
@@ -7981,6 +8187,155 @@ pub const parser_core = struct {
                 try s.emitOp(opcode.op.push_true);
             },
         }
+    }
+
+    /// `js_parse_delete` OP_get_field_opt_chain / OP_get_array_el_opt_chain
+    /// handling (`quickjs.c:27512-27562`): delete of an optional-chain
+    /// member access. qjs reads the chain label out of the `*_opt_chain`
+    /// opcode, truncates the access, emits `OP_delete`, then routes the
+    /// chain's short-circuit path through a `drop ; push_true` pad:
+    ///
+    ///     push_atom_value <prop> ; delete ; goto NEXT
+    ///     OPT_CHAIN: drop ; push_true
+    ///     NEXT:
+    ///
+    /// zjs has no parse-phase label table — `parseLhsExpr` patches the
+    /// chain-exit `goto`s to the byte offset just past the trailing
+    /// access — so the equivalent of "read the label" is: collect the
+    /// chain-exit gotos that target the operand tail and re-point them
+    /// at the landing pad. Returns false (emitting nothing) when the
+    /// trailing access is not an optional-chain reference form.
+    fn tryRewriteOptionalChainDelete(s: *State, pre_lhs_code_len: usize) Error!bool {
+        const code = s.currentCode();
+        const tail = code.len;
+        const Form = enum { dotted, indexed, length };
+        var form: Form = undefined;
+        var private_access = false;
+        if (code.len >= pre_lhs_code_len + 5 and code[code.len - 5] == opcode.op.get_field) {
+            const atom_id: Atom = std.mem.readInt(u32, code[code.len - 4 ..][0..4], .little);
+            private_access = atomNameIsPrivate(s, atom_id);
+            form = .dotted;
+        } else if (code.len > pre_lhs_code_len and code[code.len - 1] == opcode.op.get_array_el) {
+            form = .indexed;
+        } else if (code.len > pre_lhs_code_len and code[code.len - 1] == opcode.op.get_length) {
+            form = .length;
+        } else {
+            return false;
+        }
+        var exit_buf: [16]usize = undefined;
+        const exit_count = try collectOptionalChainExits(s, pre_lhs_code_len, tail, &exit_buf);
+        if (exit_count == 0) return false;
+        if (private_access) {
+            // qjs emits an opcode for chain-reached private accesses that
+            // js_parse_delete does not list as a reference, so it falls
+            // through to `ret_true`: `delete this?.#x` is a silent no-op
+            // returning true and the private field survives. The chain
+            // exits already target `tail`, where drop ; push_true lands.
+            try s.emitOpNoSource(opcode.op.drop);
+            try s.emitOpNoSource(opcode.op.push_true);
+            return true;
+        }
+        switch (form) {
+            .dotted => {
+                // Same in-place opcode flip as the plain `.dotted` delete:
+                // `push_atom_value` has the same atom-format width, so the
+                // retained atom operand stays balanced.
+                code[code.len - 5] = opcode.op.push_atom_value;
+                try s.emitOp(opcode.op.delete);
+            },
+            .indexed => {
+                try s.truncateCode(code.len - 1);
+                try s.emitOp(opcode.op.delete);
+            },
+            .length => {
+                // zjs-only wrinkle: `p?.y.length` ends in the fused
+                // `get_length`; expand it like the plain get_length path.
+                try s.truncateCode(code.len - 1);
+                try s.emitOpAtom(opcode.op.push_atom_value, atom_module.ids.length);
+                try s.emitOp(opcode.op.delete);
+            },
+        }
+        // qjs: next_label = emit_goto(OP_goto) ; emit_label(opt_chain_label) ;
+        // drop ; push_true ; emit_label(next_label) (quickjs.c:27531-27538).
+        const next_jump = try emitForwardJumpNoSource(s, opcode.op.goto);
+        const pad: u32 = @intCast(s.currentCodeLen());
+        {
+            const cur = s.currentCode();
+            for (exit_buf[0..exit_count]) |operand_offset| {
+                std.mem.writeInt(u32, cur[operand_offset..][0..4], pad, .little);
+            }
+        }
+        try s.emitOpNoSource(opcode.op.drop);
+        try s.emitOpNoSource(opcode.op.push_true);
+        try patchForwardJump(s, next_jump);
+        return true;
+    }
+
+    /// Collect the optional-chain short-circuit exits (the trailing `goto`
+    /// of each `emitOptionalChainTest` block) whose patched target is
+    /// exactly `tail` — the byte offset just past the operand's final
+    /// access. Instruction-accurate walk (same discipline as
+    /// `adjustJumpTargetsAfterInsert`); a goto qualifies only when it is
+    /// preceded by the full chain-test signature
+    /// `dup ; is_undefined_or_null ; if_false >END ; drop{1,2} ; undefined`
+    /// with the `if_false` target pointing just past the goto, which only
+    /// `emitOptionalChainTest` produces. Chain exits belonging to a chain
+    /// that completed earlier (inside parentheses / a subscript) target an
+    /// interior offset instead of `tail` and are left alone.
+    fn collectOptionalChainExits(
+        s: *State,
+        pre_lhs_code_len: usize,
+        tail: usize,
+        exit_buf: []usize,
+    ) Error!usize {
+        const code = s.currentCode();
+        const atoms = s.currentAtomOperands();
+        var count: usize = 0;
+        var pc: usize = 0;
+        var atom_index: usize = 0;
+        while (pc < code.len) {
+            const op_id = code[pc];
+            const instr = parserPhaseInstruction(code, atoms, pc, atom_index);
+            const size = instr.size;
+            if (size == 0 or pc + size > code.len) return Error.UnexpectedToken;
+            if (op_id == opcode.op.goto and !instr.is_temp and pc >= pre_lhs_code_len) {
+                const target = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+                if (target == tail and isOptionalChainExitGoto(code, pre_lhs_code_len, pc)) {
+                    if (count >= exit_buf.len) return Error.OutOfMemory;
+                    exit_buf[count] = pc + 1;
+                    count += 1;
+                }
+            }
+            if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
+            pc += size;
+        }
+        return count;
+    }
+
+    fn isOptionalChainExitGoto(code: []const u8, min_pos: usize, goto_pc: usize) bool {
+        if (goto_pc < min_pos + 2) return false;
+        if (code[goto_pc - 1] != opcode.op.undefined or code[goto_pc - 2] != opcode.op.drop) return false;
+        const end_after_goto: u32 = @intCast(goto_pc + 5);
+        // drop_count = 1 layout: dup ; is_undefined_or_null ; if_false ; drop ; undefined ; goto
+        if (goto_pc >= min_pos + 9 and
+            code[goto_pc - 9] == opcode.op.dup and
+            code[goto_pc - 8] == opcode.op.is_undefined_or_null and
+            code[goto_pc - 7] == opcode.op.if_false and
+            std.mem.readInt(u32, code[goto_pc - 6 ..][0..4], .little) == end_after_goto)
+        {
+            return true;
+        }
+        // drop_count = 2 layout (optional method call): one extra drop.
+        if (goto_pc >= min_pos + 10 and
+            code[goto_pc - 3] == opcode.op.drop and
+            code[goto_pc - 10] == opcode.op.dup and
+            code[goto_pc - 9] == opcode.op.is_undefined_or_null and
+            code[goto_pc - 8] == opcode.op.if_false and
+            std.mem.readInt(u32, code[goto_pc - 7 ..][0..4], .little) == end_after_goto)
+        {
+            return true;
+        }
+        return false;
     }
 
     fn lhsShapeIsPrivateReference(s: *State, shape: LhsShape) bool {
@@ -8096,8 +8451,8 @@ pub const parser_core = struct {
     /// `js_parse_postfix_expr` (`quickjs.c:26176`). Wraps `parseLhsExpr`
     /// with the postfix `++` / `--` update operators.
     pub fn parsePostfixExpr(s: *State, flags: ParseFlags) Error!void {
-        const saved_atom: ?Atom = if (peekParenthesizedBareIdent(s)) |ident| blk: {
-            break :blk ident;
+        const saved_atom: ?Atom = if (peekParenthesizedBareIdent(s)) |info| blk: {
+            break :blk info.atom;
         } else if (s.peekKind() == tok.TOK_IDENT) blk: {
             break :blk s.token.payload.ident.atom;
         } else null;
@@ -8307,6 +8662,12 @@ pub const parser_core = struct {
         }
         if (s.peekKind() == tok.TOK_NEW) {
             try parseNewExpr(s, flags);
+            // The member tail following the inner NewExpression binds to the
+            // inner `new`'s result: `new new F().m` is `new ((new F()).m)`.
+            // qjs gets this from the recursive `js_parse_postfix_expr(s, 0)`
+            // (`quickjs.c:27016`) whose postfix loop consumes `.x`/`[x]`
+            // before the outer `new` applies.
+            try parseNewCalleeMemberAccess(s, flags);
         } else if (s.peekKind() == tok.TOK_IMPORT) {
             if (s.peekNextKind() != @as(tok.TokenKind, @intCast('.'))) return Error.UnexpectedToken;
             try parsePrimary(s, flags);
@@ -8330,12 +8691,16 @@ pub const parser_core = struct {
             switch (shape) {
                 .direct => |argc| try s.emitOpU16At(opcode.op.call_constructor, argc, callee_line, callee_col),
                 .applied => {
-                    // `new X(...args)`. Stack on entry to apply: [func, array].
-                    // QuickJS rewrites with perm3 to feed apply a dummy `this`
-                    // (`quickjs.c:26693-26697`); for the plain `new` path we
-                    // synthesize that `this` slot here.
-                    try s.emitOp(opcode.op.undefined);
-                    try s.emitOp(opcode.op.swap);
+                    // `new X(...args)`. Stack here: [func, func(dup =
+                    // new.target), array]. QuickJS FUNC_CALL_NEW emits
+                    // `perm3 ; apply 1` (`quickjs.c:27359-27364`,
+                    // "obj func array -> func obj array") so apply consumes
+                    // the dup'd callee as the new.target slot. The previous
+                    // `undefined ; swap` synthesized an extra `this` slot and
+                    // left the dup'd callee on the stack, permanently
+                    // off-balancing the verifier depth (StackMismatch at any
+                    // merge point: try/catch bookkeeping, loop back-edges).
+                    try s.emitOp(opcode.op.perm3);
                     try s.emitOpU16At(opcode.op.apply, 1, callee_line, callee_col); // 1 = is_new
                 },
             }
@@ -8424,8 +8789,7 @@ pub const parser_core = struct {
                         const code = s.currentCode();
                         if (code.len == 0 or code[code.len - 1] != opcode.op.get_super) return Error.UnexpectedToken;
                         try s.truncateCode(code.len - 1);
-                        try s.emitOp(opcode.op.push_this);
-                        try s.emitOpU8(opcode.op.special_object, 4);
+                        try emitSuperThisAndHomeObject(s);
                         try s.emitOp(opcode.op.get_super);
                         try s.emitOpAtom(opcode.op.push_atom_value, retained_name);
                         try s.emitOp(opcode.op.get_array_el);
@@ -8452,13 +8816,12 @@ pub const parser_core = struct {
                         const code = s.currentCode();
                         if (code.len == 0 or code[code.len - 1] != opcode.op.get_super) return Error.UnexpectedToken;
                         try s.truncateCode(code.len - 1);
-                        try s.emitOp(opcode.op.push_this);
-                        try s.emitOpU8(opcode.op.special_object, 4);
+                        try emitSuperThisAndHomeObject(s);
                         try s.emitOp(opcode.op.get_super);
                         try s.emitOpAtom(opcode.op.push_atom_value, retained_name);
                         try s.emitOp(opcode.op.get_super_value);
                         if (optionalCallFollows(s)) {
-                            try s.emitOp(opcode.op.push_this);
+                            try emitSuperThis(s);
                             try s.emitOp(opcode.op.swap);
                             s.last_was_with_method_ref = true;
                         }
@@ -8591,8 +8954,7 @@ pub const parser_core = struct {
                     const code = s.currentCode();
                     if (code.len == 0 or code[code.len - 1] != opcode.op.get_super) return Error.UnexpectedToken;
                     try s.truncateCode(code.len - 1);
-                    try s.emitOp(opcode.op.push_this);
-                    try s.emitOpU8(opcode.op.special_object, 4);
+                    try emitSuperThisAndHomeObject(s);
                     try s.emitOp(opcode.op.get_super);
                 }
                 try parseExpr(s);
@@ -8620,7 +8982,7 @@ pub const parser_core = struct {
                     if (was_super) {
                         try s.emitOp(opcode.op.get_super_value);
                         if (optionalCallFollows(s)) {
-                            try s.emitOp(opcode.op.push_this);
+                            try emitSuperThis(s);
                             try s.emitOp(opcode.op.swap);
                             s.last_was_with_method_ref = true;
                         }
@@ -8846,9 +9208,12 @@ pub const parser_core = struct {
     /// Caller consumed nothing yet — this consumes the leading `(` and the
     /// matching `)`.
     fn parseCallArgs(s: *State, flags: ParseFlags) Error!CallArgsShape {
+        _ = flags;
         try expectPunct(s, '(');
-        var arg_flags = flags;
-        arg_flags.result_needed = true;
+        // Call arguments always parse with `PF_IN_ACCEPTED`
+        // (`js_parse_assign_expr`, quickjs.c:26630/26744) — argument
+        // positions reset the for-init no-`in` restriction.
+        const arg_flags = ParseFlags.default;
         var argc: u16 = 0;
         var has_spread = false;
         while (s.peekKind() != @as(tok.TokenKind, @intCast(')'))) {
@@ -9176,7 +9541,12 @@ pub const parser_core = struct {
                         return;
                     }
                     try s.advance();
-                    try parseExpr2(s, forceResultNeeded(flags));
+                    // Parenthesized group: mirrors `js_parse_expr_paren`
+                    // (`quickjs.c:26195`) -> `js_parse_expr` which parses
+                    // with `PF_IN_ACCEPTED` set — grouping resets the
+                    // for-init no-`in` restriction (and unary-context
+                    // restrictions like the yield guard).
+                    try parseExpr2(s, ParseFlags.default);
                     const parenthesized_had_comma = s.last_expr_had_comma;
                     const parenthesized_had_branchy_tail = s.last_expr_was_short_circuit_or_cond;
                     const parenthesized_had_optional_chain = s.last_lhs_had_optional_chain;
@@ -9203,11 +9573,11 @@ pub const parser_core = struct {
     }
 
     fn parseDynamicImportCall(s: *State, flags: ParseFlags) Error!void {
+        _ = flags;
         s.features.insert(.dynamic_import);
         try s.advance();
         try expectPunct(s, '(');
-        var import_flags = flags;
-        import_flags.in_accepted = true;
+        const import_flags = ParseFlags.default;
         try parseAssignExpr2(s, import_flags);
         if (s.peekKind() == @as(tok.TokenKind, @intCast(','))) {
             try s.advance();
@@ -9381,6 +9751,7 @@ pub const parser_core = struct {
     /// and `append` (for spread entries). The trailing `drop` removes
     /// the index, leaving the constructed array on the stack.
     fn parseArrayLiteral(s: *State, flags: ParseFlags) Error!void {
+        _ = flags;
         try s.advance(); // consume '['
         var count: u16 = 0;
         var sparse_active = false;
@@ -9415,11 +9786,14 @@ pub const parser_core = struct {
                     spread_active = true;
                 }
                 try s.advance();
-                try parseAssignExprWithoutPendingFunctionName(s, flags);
+                // Array elements always parse with `PF_IN_ACCEPTED`
+                // (`js_parse_assign_expr`, quickjs.c:28283) — the bracket
+                // resets the for-init no-`in` restriction.
+                try parseAssignExprWithoutPendingFunctionName(s, ParseFlags.default);
                 s.last_anonymous_function_expr = false;
                 try s.emitOp(opcode.op.append);
             } else {
-                try parseAssignExprWithoutPendingFunctionName(s, flags);
+                try parseAssignExprWithoutPendingFunctionName(s, ParseFlags.default);
                 s.last_anonymous_function_expr = false;
                 if (spread_active) {
                     try s.emitOp(opcode.op.define_array_el);
@@ -9475,19 +9849,19 @@ pub const parser_core = struct {
     }
 
     fn parseObjectProperty(s: *State, flags: ParseFlags, proto_field_seen: *bool) Error!void {
+        _ = flags;
         const k = s.peekKind();
         const property_source_start = s.currentTokenStartOffset();
-        const computed_flags = ParseFlags{
-            .in_accepted = true,
-            .pow_allowed = flags.pow_allowed,
-            .result_needed = flags.result_needed,
-        };
+        // Property keys/values always parse with `PF_IN_ACCEPTED`
+        // (`js_parse_assign_expr`, quickjs.c:28283) — the object literal
+        // resets the for-init no-`in` restriction.
+        const computed_flags = ParseFlags.default;
 
         // Spread property: ...obj
         if (k == tok.TOK_ELLIPSIS) {
             s.features.insert(.spread_rest);
             try s.advance();
-            try parseAssignExpr2(s, flags);
+            try parseAssignExpr2(s, ParseFlags.default);
             try s.emitOp(opcode.op.null); // dummy excludeList, matching QuickJS object-spread lowering
             try s.emitOpU8(opcode.op.copy_data_properties, 2 | (1 << 2) | (0 << 5));
             try s.emitOp(opcode.op.drop); // excludeList
@@ -9556,7 +9930,7 @@ pub const parser_core = struct {
             } else {
                 try expectPunct(s, ':');
                 try s.emitOp(opcode.op.to_propkey);
-                try parseAssignExprWithPendingFunctionName(s, flags, null);
+                try parseAssignExprWithPendingFunctionName(s, ParseFlags.default, null);
                 if (s.last_anonymous_function_expr) {
                     try s.emitOp(opcode.op.set_name_computed);
                     s.last_anonymous_function_expr = false;
@@ -9579,7 +9953,7 @@ pub const parser_core = struct {
                 try parseObjectAccessorProperty(s, computed_flags, if (is_getter) .get else .set, if (is_getter) 1 else 2, property_source_start);
             } else if (s.peekKind() == @as(tok.TokenKind, @intCast(':'))) {
                 try s.advance();
-                try parseAssignExprWithPendingFunctionName(s, flags, if (name_info.is_proto) null else name);
+                try parseAssignExprWithPendingFunctionName(s, ParseFlags.default, if (name_info.is_proto) null else name);
                 if (name_info.is_proto) {
                     if (proto_field_seen.*) return Error.UnexpectedToken;
                     proto_field_seen.* = true;
@@ -9842,12 +10216,14 @@ pub const parser_core = struct {
         const saved_in_generator = s.in_generator;
         const saved_in_async = s.in_async;
         const saved_allow_super = s.allow_super;
+        const saved_parsing_method_params = s.parsing_method_params;
         s.pending_function_name = name;
         s.pending_function_is_decl = false;
         s.top_level_functions_as_children = true;
         s.in_generator = func_kind == .generator or func_kind == .async_generator;
         s.in_async = func_kind == .async or func_kind == .async_generator;
         s.allow_super = true;
+        s.parsing_method_params = true;
         defer {
             s.pending_function_name = saved_name;
             s.pending_function_is_decl = saved_decl;
@@ -9855,6 +10231,7 @@ pub const parser_core = struct {
             s.in_generator = saved_in_generator;
             s.in_async = saved_in_async;
             s.allow_super = saved_allow_super;
+            s.parsing_method_params = saved_parsing_method_params;
         }
         try parseFunctionParamsAndBody(s, func_kind, source_start);
         // Object literal methods are named by OP_define_method. Do not let
@@ -11517,7 +11894,7 @@ pub const parser_core = struct {
                 _ = try s.expectSemicolon();
             },
             tok.TOK_VAR, tok.TOK_LET, tok.TOK_CONST => {
-                if (tok_kind == tok.TOK_LET and canTreatLetAsExpressionStatement(s)) {
+                if (tok_kind == tok.TOK_LET and canTreatLetAsExpressionStatement(s, decl_mask)) {
                     try parseLetKeywordExpressionStatement(s);
                     return;
                 }
@@ -12127,7 +12504,19 @@ pub const parser_core = struct {
                     } else {
                         try s.expectToken('(');
                         if (s.peekKind() == '[' or s.peekKind() == '{') {
-                            if (s.peekKind() == '[' and try catchArrayPatternHasDuplicateNames(s)) return Error.UnexpectedToken;
+                            // qjs parses catch patterns as TOK_LET destructuring
+                            // (js_parse_destructuring_element quickjs.c:29439);
+                            // every binding runs define_var(JS_VAR_DEF_LET) whose
+                            // same-scope find_lexical_decl rejects duplicate names
+                            // ("invalid redefinition of lexical identifier",
+                            // quickjs.c:24337). Pre-collect the bound names of both
+                            // array and object patterns and reject duplicates.
+                            {
+                                var catch_pattern_names = std.ArrayList(Atom).empty;
+                                defer catch_pattern_names.deinit(s.function.memory.allocator);
+                                const pattern_kind: DestructuringKind = if (s.peekKind() == '[') .array else .object;
+                                try collectArrowPatternBindingNamesSnapshot(s, pattern_kind, &catch_pattern_names);
+                            }
                             const temp_idx = try appendTempLocal(s);
                             try s.emitOpU16(opcode.op.put_loc, temp_idx);
                             const kind: DestructuringKind = if (s.peekKind() == '[') .array else .object;
@@ -12312,10 +12701,21 @@ pub const parser_core = struct {
         return s.lex.is_module and s.cur_func_stack.len == 0 and s.scope_level == 0;
     }
 
-    fn canTreatLetAsExpressionStatement(s: *State) bool {
+    /// Mirrors QuickJS `is_let` (quickjs.c:28619), inverted: returns true when
+    /// a leading `let` token introduces an ExpressionStatement instead of a
+    /// lexical declaration. In qjs, `let [` never introduces an
+    /// ExpressionStatement; `let` followed by `{`, a non-reserved identifier,
+    /// `let`, `yield`, or `await` is a declaration when there is no
+    /// intervening line terminator OR when scanning for a Declaration
+    /// (decl_mask & DECL_MASK_OTHER). Anything else is an expression. In
+    /// strict mode qjs lexes `let` as TOK_LET and never consults is_let, so
+    /// `let` is always a declaration there.
+    fn canTreatLetAsExpressionStatement(s: *State, decl_mask: DeclMask) bool {
+        if (s.is_strict or s.cur_func().is_strict_mode) return false;
         const saved_pos = s.lex.pos;
         const saved_line = s.lex.line;
         const saved_col = s.lex.col;
+        const saved_got_lf = s.lex.got_lf;
         const saved_mark_pos = s.lex.mark_pos;
         const saved_mark_line = s.lex.mark_line;
         const saved_mark_col = s.lex.mark_col;
@@ -12326,15 +12726,36 @@ pub const parser_core = struct {
             s.lex.pos = saved_pos;
             s.lex.line = saved_line;
             s.lex.col = saved_col;
+            s.lex.got_lf = saved_got_lf;
             s.lex.mark_pos = saved_mark_pos;
             s.lex.mark_line = saved_mark_line;
             s.lex.mark_col = saved_mark_col;
         }
-        if (peek_token.line_num == current_line) {
-            return peek_token.val == @as(tok.TokenKind, @intCast('=')) or
-                peek_token.val == @as(tok.TokenKind, @intCast(';'));
+        const val = peek_token.val;
+        if (val == @as(tok.TokenKind, @intCast('['))) {
+            // `let [` is a syntax restriction: it never introduces an
+            // ExpressionStatement (quickjs.c:28632).
+            return false;
         }
-        return peek_token.val == @as(tok.TokenKind, @intCast('{')) or peek_token.val == tok.TOK_IDENT;
+        // qjs checks `{`, non-reserved TOK_IDENT, TOK_LET, TOK_YIELD and
+        // TOK_AWAIT. In sloppy mode qjs lexes the contextual keywords
+        // (static, implements, interface, package, private, protected,
+        // public) as plain identifiers (update_token_ident); zjs gives them
+        // distinct tokens, so they are matched explicitly here.
+        const declaration_start = val == @as(tok.TokenKind, @intCast('{')) or
+            val == tok.TOK_IDENT or
+            val == tok.TOK_LET or
+            val == tok.TOK_YIELD or
+            val == tok.TOK_AWAIT or
+            val == tok.TOK_STATIC or
+            isSloppyFutureReservedToken(val);
+        if (declaration_start) {
+            // Check for possible ASI if not scanning for a Declaration
+            // (quickjs.c:28644-28652).
+            if (peek_token.line_num == current_line or decl_mask.other) return false;
+            return true;
+        }
+        return true;
     }
 
     fn parseLetKeywordExpressionStatement(s: *State) Error!void {
@@ -12801,67 +13222,6 @@ pub const parser_core = struct {
         try s.emitScopePutVar(State.eval_ret_atom);
     }
 
-    fn catchArrayPatternHasDuplicateNames(s: *State) Error!bool {
-        const snapshot = takeParserSnapshot(s);
-        defer restoreParserLexerSnapshot(s, snapshot);
-
-        var names = std.ArrayList(Atom).empty;
-        defer names.deinit(s.function.memory.allocator);
-
-        var depth: usize = 0;
-        var expect_binding = false;
-        while (s.peekKind() != tok.TOK_EOF) {
-            const kind = s.peekKind();
-            if (kind == '[') {
-                depth += 1;
-                expect_binding = true;
-                try s.advance();
-                continue;
-            }
-            if (kind == ']') {
-                if (depth == 0) return false;
-                depth -= 1;
-                try s.advance();
-                if (depth == 0) break;
-                expect_binding = false;
-                continue;
-            }
-            if (kind == ',' or kind == tok.TOK_ELLIPSIS) {
-                expect_binding = true;
-                try s.advance();
-                continue;
-            }
-            if (kind == '{') {
-                var object_depth: usize = 0;
-                while (s.peekKind() != tok.TOK_EOF) {
-                    if (s.peekKind() == '{') object_depth += 1;
-                    if (s.peekKind() == '}') {
-                        if (object_depth == 0) break;
-                        object_depth -= 1;
-                        try s.advance();
-                        if (object_depth == 0) break;
-                        continue;
-                    }
-                    try s.advance();
-                }
-                expect_binding = false;
-                continue;
-            }
-            if (expect_binding and kind == tok.TOK_IDENT) {
-                const atom_id = s.token.payload.ident.atom;
-                for (names.items) |seen| {
-                    if (seen == atom_id) return true;
-                }
-                try names.append(s.function.memory.allocator, atom_id);
-                expect_binding = false;
-            } else {
-                expect_binding = false;
-            }
-            try s.advance();
-        }
-        return false;
-    }
-
     fn catchBlockHasDirectLexicalDeclaration(s: *State, atom_id: Atom) Error!bool {
         if (s.peekKind() != '{') return false;
         const snapshot = takeParserSnapshot(s);
@@ -12986,6 +13346,14 @@ pub const parser_core = struct {
                     if (findCurrentScopeVar(s, atom_id)) |existing_idx| {
                         if (s.cur_func().vars[existing_idx].is_lexical) return Error.UnexpectedToken;
                     }
+                    // qjs define_var JS_VAR_DEF_VAR (quickjs.c:24395-24399): a var
+                    // colliding with a top-level lexical (global_vars entry with
+                    // is_lexical, reached through find_lexical_decl →
+                    // find_lexical_global_var quickjs.c:24099-24102) is a
+                    // SyntaxError at any block depth of global code.
+                    if (s.cur_func_stack.len == 0 and s.findLexicalGlobalVar(atom_id)) {
+                        return Error.UnexpectedToken;
+                    }
                     if (module_top_level_var) {
                         if (State.findClosureVarIndex(s.cur_func(), atom_id)) |existing_ref_idx| {
                             if (s.cur_func().closure_var[existing_ref_idx].is_lexical) return Error.UnexpectedToken;
@@ -12994,6 +13362,14 @@ pub const parser_core = struct {
                 } else {
                     try s.registerBlockLexicalDeclaration(atom_id);
                     if (findCurrentScopeVar(s, atom_id) != null) return Error.UnexpectedToken;
+                    // qjs define_var JS_VAR_DEF_LET/CONST is_global_var branch
+                    // (quickjs.c:24352-24360): at the global body scope a lexical
+                    // declaration colliding with any global_vars entry (top-level
+                    // var, function declaration, or another lexical) is a
+                    // SyntaxError ("invalid redefinition of global identifier").
+                    if (s.atGlobalLexicalBodyScope() and s.findGlobalVar(atom_id)) {
+                        return Error.UnexpectedToken;
+                    }
                     if (module_top_level_lexical and State.findClosureVarIndex(s.cur_func(), atom_id) != null) {
                         return Error.UnexpectedToken;
                     }
@@ -13283,8 +13659,8 @@ pub const parser_core = struct {
         var restored = false;
         errdefer if (!restored) restoreParserLexerSnapshot(s, after_target);
         try restoreLexerReplayPoint(s, target_point);
-        const saved_atom: ?Atom = if (peekParenthesizedBareIdent(s)) |ident| blk: {
-            break :blk ident;
+        const saved_atom: ?Atom = if (peekParenthesizedBareIdent(s)) |info| blk: {
+            break :blk info.atom;
         } else if (isIdentifierLikeToken(s)) blk: {
             break :blk identifierLikeAtom(s);
         } else null;
@@ -13341,6 +13717,12 @@ pub const parser_core = struct {
     }
 
     fn declareForInOfVarBinding(s: *State, atom_id: Atom) Error!void {
+        // qjs define_var JS_VAR_DEF_VAR (quickjs.c:24395-24399) also runs for
+        // `for (var x in/of ...)` heads: a collision with a top-level lexical
+        // (find_lexical_global_var quickjs.c:24099-24102) is a SyntaxError.
+        if (s.cur_func_stack.len == 0 and s.findLexicalGlobalVar(atom_id)) {
+            return Error.UnexpectedToken;
+        }
         if (s.top_level_lexical_as_module_ref and s.scope_level == 0) {
             if (State.findClosureVarIndex(s.cur_func(), atom_id) == null) {
                 const ref_idx: u16 = @intCast(try s.cur_func().addClosureVar(.{
@@ -13635,11 +14017,13 @@ pub const parser_core = struct {
         } else if (var_tok == tok.TOK_THIS) {
             target_this_private_prop = try parseThisPrivateAssignmentTarget(s);
         } else if (var_tok == @as(tok.TokenKind, @intCast('('))) {
-            if (peekParenthesizedBareIdent(s)) |atom_id| {
-                try s.advance();
-                try s.advance();
-                target_atom = atom_id;
-                try s.expectToken(')');
+            if (peekParenthesizedBareIdent(s)) |info| {
+                var open: u32 = 0;
+                while (open < info.parens) : (open += 1) try s.advance(); // '('
+                try s.advance(); // ident
+                target_atom = info.atom;
+                var close: u32 = 0;
+                while (close < info.parens) : (close += 1) try s.expectToken(')');
             } else {
                 const target_point = takeLexerReplayPoint(s);
                 const pre_lhs_code_len = s.currentCodeLen();
@@ -14547,7 +14931,19 @@ pub const parser_core = struct {
             return Error.UnexpectedToken;
         }
         const function_body_scope: i32 = if (s.cur_func_stack.len > 0) 1 else 0;
-        if (s.scope_level > function_body_scope) try s.registerBlockLexicalDeclaration(name_atom);
+        if (s.scope_level > function_body_scope) {
+            try s.registerBlockLexicalDeclaration(name_atom);
+        } else if (!s.annex_b_if_function_decl_clause) {
+            // A function declaration at the function body scope hoists a var;
+            // a later same-function lexical redeclaration is a SyntaxError via
+            // qjs find_var_in_child_scope (quickjs.c:24349-24351, "invalid
+            // redefinition of a variable"). Record it with the block var
+            // machinery so registerBlockLexicalDeclaration rejects the later
+            // let/const/class. Annex B `if (x) function f(){}` clauses stay
+            // exempt (they only hoist when no lexical conflicts, and a later
+            // lexical wins — see the annex_b_if_function_var path).
+            try s.registerBlockVarDeclaration(name_atom);
+        }
         try s.advance();
 
         // Set generator flag for yield parsing
@@ -14653,6 +15049,12 @@ pub const parser_core = struct {
         s.last_function_child_index = null;
         const parent_fd = s.cur_func();
         const capture_child = s.cur_func_stack.len > 0 or s.top_level_functions_as_children;
+        // Consume the method-context marker set by emitObjectMethodFunction /
+        // parseClassElementFunction so nested functions parsed inside this
+        // function's parameters or body do not inherit it. Mirrors qjs
+        // fd->func_type == JS_PARSE_FUNC_METHOD (quickjs.c:36443-36448).
+        const is_method_params = s.parsing_method_params;
+        s.parsing_method_params = false;
         const saved_emit_to_function_def = s.emit_to_function_def;
         const saved_last_opcode_source_offset = s.last_opcode_source_offset;
         const saved_scope_level = s.scope_level;
@@ -14778,14 +15180,18 @@ pub const parser_core = struct {
                     child_fd.vars[@intCast(child_fd.this_var_idx)].tdz_emitted_at_decl = true;
                 }
                 child_fd.is_derived_class_constructor = func_kind == .derived_class_constructor;
-                const fields_init_var_idx = parent_fd.findVar(atom_class_fields_init);
-                if (fields_init_var_idx < 0) return Error.UnexpectedToken;
+                // Capture THIS class's `<class_fields_init>` var via the index
+                // recorded by parseClass, not by-name findVar (newest-first
+                // findVar picks a nested heritage class's atom-120 var).
+                // Mirrors qjs per-class-scope resolution of
+                // JS_ATOM_class_fields_init (quickjs.c:25702 + 25185).
+                const fields_init_var_idx = s.class_fields_init_var_idx orelse return Error.UnexpectedToken;
                 _ = try child_fd.addClosureVar(.{
                     .closure_type = .local,
                     .is_lexical = true,
                     .is_const = true,
                     .var_kind = .normal,
-                    .var_idx = @intCast(fields_init_var_idx),
+                    .var_idx = fields_init_var_idx,
                     .var_name = atom_class_fields_init,
                 });
             }
@@ -14976,6 +15382,12 @@ pub const parser_core = struct {
         var param_count: u32 = 0;
         var simple_param_names = std.ArrayList(Atom).empty;
         defer simple_param_names.deinit(s.function.memory.allocator);
+        // Names bound inside destructuring parameter patterns. Any collision
+        // between these and any other parameter name is a SyntaxError
+        // regardless of strictness, mirroring js_parse_check_duplicate_parameter
+        // (quickjs.c:26276) and the post-parse arg-vs-var scan (quickjs.c:36455).
+        var pattern_param_names = std.ArrayList(Atom).empty;
+        defer pattern_param_names.deinit(s.function.memory.allocator);
         var has_duplicate_simple_params = false;
         var has_simple_parameter_list = true;
         var first_default_param: ?u32 = null;
@@ -15019,6 +15431,13 @@ pub const parser_core = struct {
                             if (strict_params) return Error.UnexpectedToken;
                             break;
                         }
+                    }
+                    // An argument that duplicates a name bound by an earlier
+                    // destructuring parameter is always an error (the pattern
+                    // makes the list non-simple). Mirrors the arg-vs-var scan
+                    // in js_parse_function_check_names (quickjs.c:36455-36462).
+                    for (pattern_param_names.items) |existing| {
+                        if (existing == param_atom) return Error.UnexpectedToken;
                     }
                     try simple_param_names.append(s.function.memory.allocator, param_atom);
                     if (capture_child) {
@@ -15066,6 +15485,7 @@ pub const parser_core = struct {
                     // Object destructuring parameter: {a, b}
                     has_simple_parameter_list = false;
                     const arg_index = param_count;
+                    try collectParamPatternDupNames(s, .object, &simple_param_names, &pattern_param_names);
                     if (capture_child) try ensureDestructuringArgSlot(s, arg_index);
                     try parseDestructuringParam(s, .object, if (capture_child) arg_index else null);
                     param_count += 1;
@@ -15073,6 +15493,7 @@ pub const parser_core = struct {
                     // Array destructuring parameter: [a, b]
                     has_simple_parameter_list = false;
                     const arg_index = param_count;
+                    try collectParamPatternDupNames(s, .array, &simple_param_names, &pattern_param_names);
                     if (capture_child) try ensureDestructuringArgSlot(s, arg_index);
                     try parseDestructuringParam(s, .array, if (capture_child) arg_index else null);
                     param_count += 1;
@@ -15087,6 +15508,9 @@ pub const parser_core = struct {
                         if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
                         const rest_atom = identifierLikeAtom(s);
                         for (simple_param_names.items) |existing| {
+                            if (existing == rest_atom) return Error.UnexpectedToken;
+                        }
+                        for (pattern_param_names.items) |existing| {
                             if (existing == rest_atom) return Error.UnexpectedToken;
                         }
                         try simple_param_names.append(s.function.memory.allocator, rest_atom);
@@ -15106,6 +15530,7 @@ pub const parser_core = struct {
                         }
                         try s.advance();
                     } else if (s.peekKind() == '[') {
+                        try collectParamPatternDupNames(s, .array, &simple_param_names, &pattern_param_names);
                         if (capture_child) {
                             try ensureDestructuringArgSlot(s, arg_index);
                             try s.emitOpU16(opcode.op.rest, @intCast(arg_index));
@@ -15115,6 +15540,7 @@ pub const parser_core = struct {
                         }
                         try parseDestructuringParam(s, .array, if (capture_child) arg_index else null);
                     } else if (s.peekKind() == '{') {
+                        try collectParamPatternDupNames(s, .object, &simple_param_names, &pattern_param_names);
                         if (capture_child) {
                             try ensureDestructuringArgSlot(s, arg_index);
                             try s.emitOpU16(opcode.op.rest, @intCast(arg_index));
@@ -15181,7 +15607,18 @@ pub const parser_core = struct {
                 if (isInvalidStrictFunctionBindingName(s, param_name)) return Error.UnexpectedToken;
             }
         }
-        if (has_duplicate_simple_params and (func_kind != .normal or !has_simple_parameter_list or s.is_strict or s.cur_func().is_strict_mode)) return Error.UnexpectedToken;
+        // Mirrors the duplicate-argument gate in js_parse_function_check_names
+        // (quickjs.c:36443-36448): strict mode, a non-simple parameter list,
+        // methods (incl. getters/setters/class elements) and arrows reject
+        // duplicates; plain sloppy function/generator/async declarations and
+        // expressions with a simple list keep them legal.
+        if (has_duplicate_simple_params and
+            (is_method_params or
+                func_kind == .method or func_kind == .get or func_kind == .set or
+                func_kind == .arrow or
+                func_kind == .class_constructor or func_kind == .derived_class_constructor or
+                !has_simple_parameter_list or s.is_strict or s.cur_func().is_strict_mode))
+            return Error.UnexpectedToken;
         s.leaveControlBoundary(saved_control_frames);
         control_boundary_active = false;
         if (capture_child) {
@@ -15604,7 +16041,12 @@ pub const parser_core = struct {
                 }
             }
         } else {
-            // Expression body
+            // Expression body. Deliberate spec-over-qjs divergence: ES6
+            // ConciseBody[?In] inherits the no-`in` restriction (so
+            // `for (x => 0 in 1;;)` is a SyntaxError, test262
+            // staging/sm/statements/arrow-function-in-for-statement-head.js);
+            // qjs parses arrow bodies with `js_parse_assign_expr`
+            // (PF_IN_ACCEPTED, quickjs.c:31829) and accepts it.
             try parseAssignExpr2(s, .{ .in_accepted = body_flags.in_accepted });
             if (rewriteTrailingCallAsTailCall(s) != .rewrote) {
                 try s.emitOp(opcode.op.@"return");
@@ -15736,6 +16178,30 @@ pub const parser_core = struct {
         const snapshot = takeParserSnapshot(s);
         defer restoreParserLexerSnapshot(s, snapshot);
         try collectArrowPatternBindingNames(s, kind, names);
+    }
+
+    /// Pre-scan a destructuring parameter pattern of an ordinary function or
+    /// method and reject any bound name that duplicates a previous argument or
+    /// a name bound by an earlier destructuring parameter. Mirrors
+    /// js_parse_check_duplicate_parameter (quickjs.c:26276), which qjs runs for
+    /// every binding added during destructuring parameter parsing
+    /// (quickjs.c:26325 identifiers, 26574 object shorthand props); duplicates
+    /// inside a single pattern are also caught here, matching the same check.
+    fn collectParamPatternDupNames(
+        s: *State,
+        kind: DestructuringKind,
+        simple_param_names: *const std.ArrayList(Atom),
+        pattern_param_names: *std.ArrayList(Atom),
+    ) Error!void {
+        var collected = std.ArrayList(Atom).empty;
+        defer collected.deinit(s.function.memory.allocator);
+        try collectArrowPatternBindingNamesSnapshot(s, kind, &collected);
+        for (collected.items) |name| {
+            for (simple_param_names.items) |existing| {
+                if (existing == name) return Error.UnexpectedToken;
+            }
+            try appendArrowParamBindingName(s, pattern_param_names, name);
+        }
     }
 
     fn collectArrowArrayBindingNames(s: *State, names: *std.ArrayList(Atom)) Error!void {
@@ -16164,6 +16630,12 @@ pub const parser_core = struct {
                 if (s.destructuring_predeclare_only) return Error.UnexpectedToken;
                 return idx;
             }
+            // qjs define_var JS_VAR_DEF_LET/CONST is_global_var branch
+            // (quickjs.c:24352-24360): lexical destructuring at the global body
+            // scope colliding with any global_vars entry is a SyntaxError.
+            if (s.atGlobalLexicalBodyScope() and s.findGlobalVar(atom_id)) {
+                return Error.UnexpectedToken;
+            }
             const idx: u16 = @intCast(try s.addScopeVar(atom_id, .normal, true, s.destructuring_binding_is_const));
             if (s.collect_module_export_bindings) {
                 try addModuleExportName(s, atom_id, atom_id);
@@ -16183,6 +16655,16 @@ pub const parser_core = struct {
             return idx;
         }
         try s.registerBlockVarDeclaration(atom_id);
+        // qjs define_var JS_VAR_DEF_VAR (quickjs.c:24395-24399): a var-pattern
+        // binding colliding with a same-scope lexical (find_lexical_decl) or a
+        // top-level lexical of global code (find_lexical_global_var,
+        // quickjs.c:24099-24102) is a SyntaxError.
+        if (findCurrentScopeVar(s, atom_id)) |existing_idx| {
+            if (s.cur_func().vars[existing_idx].is_lexical) return Error.UnexpectedToken;
+        }
+        if (s.cur_func_stack.len == 0 and s.findLexicalGlobalVar(atom_id)) {
+            return Error.UnexpectedToken;
+        }
         const existing = s.cur_func().findVar(atom_id);
         if (existing >= 0) {
             const idx: usize = @intCast(existing);
@@ -16523,8 +17005,8 @@ pub const parser_core = struct {
     }
 
     fn parseDestructuringAssignmentTargetShape(s: *State) Error!LhsShape {
-        const saved_atom: ?Atom = if (peekParenthesizedBareIdent(s)) |ident| blk: {
-            break :blk ident;
+        const saved_atom: ?Atom = if (peekParenthesizedBareIdent(s)) |info| blk: {
+            break :blk info.atom;
         } else if (isIdentifierLikeToken(s)) blk: {
             break :blk identifierLikeAtom(s);
         } else null;
@@ -16933,6 +17415,12 @@ pub const parser_core = struct {
                                     try parseAssignExpr(s);
                                 }
                                 try patchForwardJump(s, keep_value);
+                                // Member/computed targets store from value_tmp
+                                // below; thread the post-default value back so
+                                // the store sees it (qjs keeps the value on top
+                                // of the lvalue ref and put_lvalue stores the
+                                // defaulted TOS, quickjs.c:26621-26640).
+                                if (value_tmp) |tmp| try s.emitOpU16(opcode.op.put_loc, tmp);
                             } else {
                                 try parseAssignExpr(s);
                                 try s.emitOp(opcode.op.drop);
@@ -18234,6 +18722,7 @@ pub const parser_core = struct {
         const saved_is_strict = s.is_strict;
         const saved_allow_super = s.allow_super;
         const saved_top_level_children = s.top_level_functions_as_children;
+        const saved_parsing_method_params = s.parsing_method_params;
         s.pending_function_name = null;
         s.pending_function_is_decl = false;
         s.in_async = kind == .async or kind == .async_generator;
@@ -18241,6 +18730,7 @@ pub const parser_core = struct {
         s.is_strict = true;
         s.allow_super = true;
         s.top_level_functions_as_children = true;
+        s.parsing_method_params = true;
         defer {
             s.pending_function_name = saved_pending_name;
             s.pending_function_is_decl = saved_pending_decl;
@@ -18249,6 +18739,7 @@ pub const parser_core = struct {
             s.is_strict = saved_is_strict;
             s.allow_super = saved_allow_super;
             s.top_level_functions_as_children = saved_top_level_children;
+            s.parsing_method_params = saved_parsing_method_params;
         }
         try parseFunctionParamsAndBody(s, kind, source_start);
         try attachClassPrivateBoundNamesToLastFunction(s);
@@ -18675,6 +19166,14 @@ pub const parser_core = struct {
         var top_level_class_ref_idx: ?u16 = null;
         if (is_decl) {
             const class_atom = class_name orelse return Error.UnexpectedToken;
+            // qjs js_parse_class routes the class binding through
+            // define_var(JS_VAR_DEF_LET) (quickjs.c:26214); its is_global_var
+            // branch (quickjs.c:24352-24360) rejects a class declaration at the
+            // global body scope that collides with any global_vars entry
+            // (top-level var, function declaration, or lexical).
+            if (s.atGlobalLexicalBodyScope() and s.findGlobalVar(class_atom)) {
+                return Error.UnexpectedToken;
+            }
             // Script-mode top-level class declaration → single global VarRef cell
             // (qjs JS_CLOSURE_GLOBAL_DECL): mirrors the let/const handler at the
             // `top_level_lexical_as_global_ref` predicate (~parser_core.zig:9562).
@@ -18732,6 +19231,7 @@ pub const parser_core = struct {
         const saved_in_class = s.in_class;
         const saved_is_static = s.is_static;
         const saved_is_strict = s.is_strict;
+        const saved_lex_is_strict = s.lex.is_strict_mode;
         const saved_static_name_seen = s.class_static_name_seen;
         const saved_class_constructor_cpool_idx = s.class_constructor_cpool_idx;
         const saved_class_private_elements_len = s.class_private_elements.items.len;
@@ -18740,6 +19240,7 @@ pub const parser_core = struct {
         const saved_class_static_deferred_code_len = s.class_static_deferred_code.items.len;
         const saved_class_static_deferred_atom_len = s.class_static_deferred_atoms.items.len;
         const saved_class_fields_init_child_index = s.class_fields_init_child_index;
+        const saved_class_fields_init_var_idx = s.class_fields_init_var_idx;
         var class_name_scope_pushed = false;
         var class_name_local_idx: ?u16 = null;
         errdefer {
@@ -18749,13 +19250,23 @@ pub const parser_core = struct {
             s.truncateClassPublicInstanceFields(saved_class_public_instance_fields_len);
             s.truncateClassStaticDeferred(saved_class_static_deferred_code_len, saved_class_static_deferred_atom_len);
             s.class_fields_init_child_index = saved_class_fields_init_child_index;
+            s.class_fields_init_var_idx = saved_class_fields_init_var_idx;
             s.is_static = saved_is_static;
             s.is_strict = saved_is_strict;
+            s.lex.is_strict_mode = saved_lex_is_strict;
         }
 
         s.in_class = true;
         s.is_static = false;
         s.is_strict = true;
+        // The whole ClassTail — heritage, computed keys, method/getter/setter
+        // bodies, and field initializers — is strict code for the LEXER as
+        // well: legacy octal literals (08, 0777) and octal/\8 string escapes
+        // are SyntaxErrors. Mirrors js_parse_class quickjs.c:25289-25291
+        // ("classes are parsed and executed in strict mode",
+        // fd->js_mode |= JS_MODE_STRICT) gating the tokenizer octal checks
+        // (quickjs.c:23021 number literals, 22530-22536 string escapes).
+        s.lex.is_strict_mode = true;
         s.class_has_extends = s.peekKind() == tok.TOK_EXTENDS;
         s.class_static_name_seen = false;
         s.class_constructor_cpool_idx = null;
@@ -18764,6 +19275,7 @@ pub const parser_core = struct {
             class_fields_init_local_idx = @intCast(try s.addScopeVar(120, .normal, true, true)); // <class_fields_init>
             s.cur_func().vars[class_fields_init_local_idx.?].tdz_emitted_at_decl = true;
         }
+        s.class_fields_init_var_idx = class_fields_init_local_idx;
         if (class_name) |class_atom| {
             try s.pushScope();
             class_name_scope_pushed = true;
@@ -18813,6 +19325,7 @@ pub const parser_core = struct {
         s.in_class = saved_in_class;
         s.is_static = saved_is_static;
         s.is_strict = saved_is_strict;
+        s.lex.is_strict_mode = saved_lex_is_strict;
         s.class_has_extends = saved_has_extends;
         const class_static_name_seen = s.class_static_name_seen;
         s.class_static_name_seen = saved_static_name_seen;
@@ -18822,6 +19335,7 @@ pub const parser_core = struct {
         s.truncateClassPublicInstanceFields(saved_class_public_instance_fields_len);
         s.truncateClassStaticDeferred(saved_class_static_deferred_code_len, saved_class_static_deferred_atom_len);
         s.class_fields_init_child_index = saved_class_fields_init_child_index;
+        s.class_fields_init_var_idx = saved_class_fields_init_var_idx;
 
         const name_atom = class_name orelse s.function.name;
         if (is_decl) {
@@ -18924,14 +19438,21 @@ pub const parser_core = struct {
         if (s.class_has_extends) {
             child_fd.vars[@intCast(child_fd.this_var_idx)].tdz_emitted_at_decl = true;
         }
-        const fields_init_var_idx = parent_fd.findVar(atom_class_fields_init);
-        if (fields_init_var_idx < 0) return Error.UnexpectedToken;
+        // The constructor closes over THIS class's `<class_fields_init>` var.
+        // Resolve through the parse-state index recorded by parseClass instead
+        // of a by-name findVar: a nested class expression (e.g. in the extends
+        // clause) adds a second atom-120 var to the same enclosing function,
+        // and newest-first findVar would capture the inner class's slot.
+        // Mirrors qjs, where JS_ATOM_class_fields_init is defined in the
+        // class's own scope (define_var, quickjs.c:25702) and the constructor
+        // resolves it lexically (emit_class_field_init, quickjs.c:25185).
+        const fields_init_var_idx = s.class_fields_init_var_idx orelse return Error.UnexpectedToken;
         _ = try child_fd.addClosureVar(.{
             .closure_type = .local,
             .is_lexical = true,
             .is_const = true,
             .var_kind = .normal,
-            .var_idx = @intCast(fields_init_var_idx),
+            .var_idx = fields_init_var_idx,
             .var_name = atom_class_fields_init,
         });
         if (s.class_has_extends) {
