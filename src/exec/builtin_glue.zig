@@ -15,6 +15,7 @@ const value_ops = @import("value_ops.zig");
 
 const call_runtime = @import("call_runtime.zig");
 const coercion_ops = @import("coercion_ops.zig");
+const exception_ops = @import("vm_exception_ops.zig");
 const object_ops = @import("object_ops.zig");
 const string_ops = @import("string_ops.zig");
 
@@ -62,12 +63,19 @@ pub fn qjsBigIntFunctionCall(
     global: *core.Object,
     args: []const core.JSValue,
 ) !core.JSValue {
-    const input = if (args.len >= 1) args[0] else core.JSValue.int32(0);
+    // qjs js_bigint_constructor (quickjs.c:56232) passes argv[0] — undefined
+    // when absent — into JS_ToBigIntCtorFree; ToBigInt(undefined) throws.
+    const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const primitive = try toPrimitiveForNumber(ctx, output, global, input);
     defer primitive.free(ctx.runtime);
     if (primitive.asInt32()) |int_value| return value_ops.createBigIntI128(ctx.runtime, int_value);
     if (primitive.asFloat64()) |float_value| {
         return value_ops.integerNumberToBigIntValue(ctx.runtime, float_value);
+    }
+    // qjs JS_ToBigIntCtorFree null/undefined/default arm (quickjs.c:56223-56227):
+    // symbols fall into the same default arm and share the message.
+    if (primitive.isUndefined() or primitive.isNull() or primitive.isSymbol()) {
+        return exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert to BigInt");
     }
     var bigint = try value_ops.toBigIntValue(ctx.runtime, primitive);
     defer bigint.deinit();
