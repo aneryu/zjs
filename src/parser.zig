@@ -6296,7 +6296,11 @@ pub const parser_core = struct {
                     try s.truncateCode(d.code_pos);
                     try parseAssignExpr2(s, rhs_flags);
                     if (flags.result_needed) {
-                        try s.emitOp(opcode.op.insert3);
+                        // put_super_value pops 4 ([this, obj, prop, v]); keep
+                        // the assignment value below them. Mirrors qjs
+                        // OP_insert4 for the super lvalue (quickjs.c:26150
+                        // "this obj prop v -> v this obj prop v").
+                        try s.emitOp(opcode.op.insert4);
                     } else {
                         s.suppress_expr_statement_drop = true;
                     }
@@ -7969,6 +7973,39 @@ pub const parser_core = struct {
             k == tok.TOK_DEC;
     }
 
+    /// Emit `this` for a super-property receiver. In inline static-field
+    /// initializer code (`class_static_field_this_atom` set, including
+    /// arrows nested in the initializer) `this` is the constructor held in
+    /// the static-field temp var — the same remap parsePrimary TOK_THIS
+    /// applies.
+    fn emitSuperThis(s: *State) Error!void {
+        if (s.class_static_field_this_atom) |this_atom| {
+            try s.emitScopeGetVar(this_atom);
+            return;
+        }
+        try s.emitOp(opcode.op.push_this);
+    }
+
+    /// Emit the `[this, home_object]` pair a super property reference
+    /// consumes. Normally `push_this ; special_object 4` (frame home
+    /// object); in inline static-field initializer code both are the
+    /// constructor held in the static-field temp var. qjs compiles static
+    /// field initializers into a fields-init function (emit_class_init_start
+    /// quickjs.c:25223, static field body quickjs.c:25533-25550) whose home
+    /// object IS the constructor (emit_class_init_end OP_set_home_object
+    /// quickjs.c:25258-25271, called with the ctor on the stack and as
+    /// `this`, quickjs.c:25737-25743), so super.x there resolves against
+    /// the constructor; the temp var holds that same constructor value at
+    /// class-definition time.
+    fn emitSuperThisAndHomeObject(s: *State) Error!void {
+        try emitSuperThis(s);
+        if (s.class_static_field_this_atom) |this_atom| {
+            try s.emitScopeGetVar(this_atom);
+            return;
+        }
+        try s.emitOpU8(opcode.op.special_object, 4);
+    }
+
     fn isDeleteSuperReference(s: *State) bool {
         if (s.peekKind() != tok.TOK_SUPER) return false;
         const next = s.peekNextKind();
@@ -8748,8 +8785,7 @@ pub const parser_core = struct {
                         const code = s.currentCode();
                         if (code.len == 0 or code[code.len - 1] != opcode.op.get_super) return Error.UnexpectedToken;
                         try s.truncateCode(code.len - 1);
-                        try s.emitOp(opcode.op.push_this);
-                        try s.emitOpU8(opcode.op.special_object, 4);
+                        try emitSuperThisAndHomeObject(s);
                         try s.emitOp(opcode.op.get_super);
                         try s.emitOpAtom(opcode.op.push_atom_value, retained_name);
                         try s.emitOp(opcode.op.get_array_el);
@@ -8776,13 +8812,12 @@ pub const parser_core = struct {
                         const code = s.currentCode();
                         if (code.len == 0 or code[code.len - 1] != opcode.op.get_super) return Error.UnexpectedToken;
                         try s.truncateCode(code.len - 1);
-                        try s.emitOp(opcode.op.push_this);
-                        try s.emitOpU8(opcode.op.special_object, 4);
+                        try emitSuperThisAndHomeObject(s);
                         try s.emitOp(opcode.op.get_super);
                         try s.emitOpAtom(opcode.op.push_atom_value, retained_name);
                         try s.emitOp(opcode.op.get_super_value);
                         if (optionalCallFollows(s)) {
-                            try s.emitOp(opcode.op.push_this);
+                            try emitSuperThis(s);
                             try s.emitOp(opcode.op.swap);
                             s.last_was_with_method_ref = true;
                         }
@@ -8915,8 +8950,7 @@ pub const parser_core = struct {
                     const code = s.currentCode();
                     if (code.len == 0 or code[code.len - 1] != opcode.op.get_super) return Error.UnexpectedToken;
                     try s.truncateCode(code.len - 1);
-                    try s.emitOp(opcode.op.push_this);
-                    try s.emitOpU8(opcode.op.special_object, 4);
+                    try emitSuperThisAndHomeObject(s);
                     try s.emitOp(opcode.op.get_super);
                 }
                 try parseExpr(s);
@@ -8944,7 +8978,7 @@ pub const parser_core = struct {
                     if (was_super) {
                         try s.emitOp(opcode.op.get_super_value);
                         if (optionalCallFollows(s)) {
-                            try s.emitOp(opcode.op.push_this);
+                            try emitSuperThis(s);
                             try s.emitOp(opcode.op.swap);
                             s.last_was_with_method_ref = true;
                         }
