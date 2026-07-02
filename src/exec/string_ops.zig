@@ -2543,11 +2543,10 @@ pub fn qjsStringRegExpCreateAndInvoke(
     const rx = try qjsRegExpConstructCall(ctx, output, global, constructor, &.{regexp}, caller_function, caller_frame);
     defer rx.free(ctx.runtime);
     if (try callStringWellKnownMethod(ctx, output, global, string_value, rx, symbol_name, caller_function, caller_frame)) |value| return value;
-    if (std.mem.eql(u8, symbol_name, "Symbol.search")) {
-        if (try qjsRegExpSearch(ctx.runtime, rx, string_value)) |value| return value;
-    } else {
-        if (try qjsRegExpMatch(ctx.runtime, global, rx, string_value)) |value| return value;
-    }
+    // Mirrors js_string_match (quickjs.c:45881): the tail is
+    // JS_InvokeFree(ctx, rx, atom, 1, &S) which throws TypeError when the
+    // freshly constructed rx has no callable @@match/@@search; there is no
+    // silent builtin-match fallback.
     return error.TypeError;
 }
 
@@ -2622,8 +2621,9 @@ pub fn qjsStringSplit(
         count = 2;
     }
 
-    if (try qjsRegExpSplit(ctx.runtime, separator, string_value, coerced[1])) |result| return result;
-
+    // Mirrors js_string_split (quickjs.c:46139-46165): once the @@split lookup
+    // above yielded undefined/null, even a regexp separator takes the string
+    // path via R = JS_ToString(ctx, separator) — no builtin regexp split.
     if (args[0].isUndefined()) {
         coerced[0] = core.JSValue.undefinedValue();
     } else {
@@ -2758,128 +2758,6 @@ pub fn qjsRegExpSplitWholeString(rt: *core.JSRuntime, string_value: core.JSValue
     const out = try core.Object.createArray(rt, null);
     errdefer core.Object.destroyFromHeader(rt, &out.header);
     try defineSplitValueElement(rt, out, 0, string_value);
-    return out.value();
-}
-
-pub fn qjsRegExpSearch(rt: *core.JSRuntime, regexp: core.JSValue, string_value: core.JSValue) !?core.JSValue {
-    const regexp_object = property_ops.expectObject(regexp) catch return null;
-    if (regexp_object.class_id != core.class.ids.regexp) return null;
-    var source = std.ArrayList(u8).empty;
-    defer source.deinit(rt.memory.allocator);
-    if (!try appendRegExpSource(rt, regexp_object, &source)) return null;
-
-    var flags = std.ArrayList(u8).empty;
-    defer flags.deinit(rt.memory.allocator);
-    if (!try appendRegExpFlags(rt, regexp_object, &flags)) return null;
-
-    var compiled = regexp_adapter.compile(rt.memory.allocator, source.items, flags.items) catch |err| switch (err) {
-        error.InvalidPattern, error.Unsupported => return null,
-        else => |other| return other,
-    };
-    defer compiled.deinit(rt.memory.allocator);
-
-    const input_len = try stringLengthIndex(rt, string_value);
-    const status = regexp_adapter.execOnStringFromIndex(rt, compiled, string_value, 0) catch |err| switch (err) {
-        error.BytecodeCorrupt, error.Timeout => return null,
-        else => return err,
-    };
-    switch (status.result) {
-        .match => {
-            if (status.match.start > input_len) return core.JSValue.int32(-1);
-            return core.JSValue.int32(@intCast(status.match.start));
-        },
-        .no_match, .out_of_range => return core.JSValue.int32(-1),
-        .not_available => return null,
-    }
-}
-
-pub fn qjsRegExpMatch(rt: *core.JSRuntime, global: *core.Object, regexp: core.JSValue, string_value: core.JSValue) !?core.JSValue {
-    const regexp_object = property_ops.expectObject(regexp) catch return null;
-    if (regexp_object.class_id != core.class.ids.regexp) return null;
-    var source = std.ArrayList(u8).empty;
-    defer source.deinit(rt.memory.allocator);
-    if (!try appendRegExpSource(rt, regexp_object, &source)) return null;
-
-    var flags = std.ArrayList(u8).empty;
-    defer flags.deinit(rt.memory.allocator);
-    if (!try appendRegExpFlags(rt, regexp_object, &flags)) return null;
-    const is_global = std.mem.indexOfScalar(u8, flags.items, 'g') != null;
-    const has_indices = std.mem.indexOfScalar(u8, flags.items, 'd') != null;
-
-    if (!is_global) {
-        // Non-global: single LRE match.
-        var compiled = regexp_adapter.compile(rt.memory.allocator, source.items, flags.items) catch |err| switch (err) {
-            error.InvalidPattern, error.Unsupported => return null,
-            else => |other| return other,
-        };
-        defer compiled.deinit(rt.memory.allocator);
-        const input_len = try stringLengthIndex(rt, string_value);
-        const status = regexp_adapter.execOnStringFromIndex(rt, compiled, string_value, 0) catch |err| switch (err) {
-            error.BytecodeCorrupt, error.Timeout => return null,
-            else => return err,
-        };
-        switch (status.result) {
-            .match => {
-                if (status.match.start > input_len) return core.JSValue.nullValue();
-                var found = RegExpMatch{
-                    .index = status.match.start,
-                    .len = status.match.end - status.match.start,
-                    .capture_count = status.match.capture_count,
-                };
-                var ci: usize = 0;
-                while (ci < status.match.capture_count) : (ci += 1) {
-                    const capture = status.match.captures[ci];
-                    if (capture.start) |cs| {
-                        found.captures[ci] = .{ .start = cs, .len = capture.end.? - cs, .undefined = false, .name = capture.name };
-                    } else {
-                        found.captures[ci] = .{ .start = 0, .len = 0, .undefined = true, .name = capture.name };
-                    }
-                }
-                return try createRegExpMatchArrayFromValue(rt, global, string_value, &found, has_indices);
-            },
-            .no_match, .out_of_range, .not_available => return null,
-        }
-    }
-
-    // Global: iterate through all matches
-    var compiled = regexp_adapter.compile(rt.memory.allocator, source.items, flags.items) catch |err| switch (err) {
-        error.InvalidPattern, error.Unsupported => return null,
-        else => |other| return other,
-    };
-    defer compiled.deinit(rt.memory.allocator);
-    const input_len = try stringLengthIndex(rt, string_value);
-
-    const out = try core.Object.createArray(rt, null);
-    errdefer core.Object.destroyFromHeader(rt, &out.header);
-    var out_index: u32 = 0;
-    var search_pos: usize = 0;
-    while (search_pos <= input_len) {
-        const status = regexp_adapter.execOnStringFromIndex(rt, compiled, string_value, search_pos) catch |err| switch (err) {
-            error.BytecodeCorrupt, error.Timeout => return null,
-            else => return err,
-        };
-        switch (status.result) {
-            .match => {
-                const match = status.match;
-                if (match.start > input_len) break;
-                const match_str = try stringSliceValue(rt, string_value, match.start, match.end - match.start);
-                defer match_str.free(rt);
-                try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out_index), core.Descriptor.data(match_str, true, true, true));
-                out_index += 1;
-                if (match.end == search_pos) {
-                    // Advance past zero-length match
-                    search_pos = match.end + 1;
-                } else {
-                    search_pos = match.end;
-                }
-            },
-            .no_match, .out_of_range, .not_available => break,
-        }
-    }
-    if (out_index == 0) {
-        core.Object.destroyFromHeader(rt, &out.header);
-        return core.JSValue.nullValue();
-    }
     return out.value();
 }
 
