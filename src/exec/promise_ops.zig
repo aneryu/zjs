@@ -3458,6 +3458,18 @@ pub fn qjsPerformPromiseThen(
     const object = objectFromValue(receiver) orelse return error.TypeError;
     if (object.class_id != core.class.ids.promise) return error.TypeError;
     try processExpiredAtomicsWaiters(ctx);
+    // zjs-specific Atomics.waitAsync promises settle through the lazy
+    // promiseReactionCallback machinery only (atomicsSettleAsyncWaiter never
+    // fires the reactions list, it may run cross-thread from a notify); keep
+    // the same fast path qjsPromiseThen uses so awaiting a waitAsync promise
+    // still resumes.
+    if (object.promiseResultSlot().* == null and !object.promiseIsRejected() and
+        qjsAtomicsWaitAsyncPromise(ctx.runtime, object) and isCallableValue(on_fulfilled))
+    {
+        try object.setPromiseReactionCallback(ctx.runtime, on_fulfilled.dup());
+        try object.setPromiseReactionArg(ctx.runtime, null);
+        return;
+    }
     if (object.promiseIsRejected()) core.promise.markHandled(ctx, object);
     const reaction = try qjsPromiseReactionRecord(ctx.runtime, on_fulfilled, on_rejected, resolve_value, reject_value);
     defer reaction.free(ctx.runtime);
