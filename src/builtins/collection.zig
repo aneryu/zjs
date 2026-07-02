@@ -967,11 +967,6 @@ fn collectionForEach(
         const entry = object.collectionEntriesSlot().*[index];
         index += 1;
         if (!entry.active) continue;
-        if (object.class_id == core.class.ids.map) try applyForEachFixtureMutation(rt, object, args[0], host);
-        if (object.class_id == core.class.ids.set and (host.closureKind(rt, args[0]) orelse 0) == 49) {
-            try assertAndShiftExpected(rt, host.globals, entry.key);
-            continue;
-        }
         var callback_args = if (object.class_id == core.class.ids.set)
             [_]core.JSValue{ entry.key, entry.key, object.value() }
         else
@@ -980,79 +975,6 @@ fn collectionForEach(
         result.free(rt);
     }
     return core.JSValue.undefinedValue();
-}
-
-fn applyForEachFixtureMutation(rt: *core.JSRuntime, object: *core.Object, callback: core.JSValue, host: CallbackHost) !void {
-    const kind = host.closureKind(rt, callback) orelse return;
-    if (kind < 23 or kind > 25) return;
-    const count_value = try globals_mod.getByName(rt, host.globals, "count");
-    defer count_value.free(rt);
-    if ((count_value.asInt32() orelse 0) != 0) return;
-    switch (kind) {
-        23 => {
-            const key = try valueString(rt, "bar");
-            defer key.free(rt);
-            const out = try collectionDelete(rt, object, key);
-            out.free(rt);
-        },
-        24 => {
-            const key = try valueString(rt, "baz");
-            defer key.free(rt);
-            const out = try mapSet(rt, object, key, core.JSValue.int32(2));
-            out.free(rt);
-        },
-        25 => {
-            const key = try valueString(rt, "foo");
-            defer key.free(rt);
-            var out = try collectionDelete(rt, object, key);
-            out.free(rt);
-            const value = try valueString(rt, "baz");
-            defer value.free(rt);
-            out = try mapSet(rt, object, key, value);
-            out.free(rt);
-        },
-        else => {},
-    }
-}
-
-fn valueString(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
-    const string = try core.string.String.createUtf8(rt, bytes);
-    return string.value();
-}
-
-fn assertAndShiftExpected(rt: *core.JSRuntime, globals: []globals_mod.Slot, actual: core.JSValue) !void {
-    var expects_value = try globals_mod.getByName(rt, globals, "expects");
-    if (expects_value.isUndefined()) {
-        expects_value.free(rt);
-        expects_value = try getGlobalObjectProperty(rt, globals, "expects");
-    }
-    defer expects_value.free(rt);
-    const expects = try expectObject(expects_value);
-    if (!expects.flags.is_array or expects.arrayLength() == 0) return error.TypeError;
-    const expected = expects.getProperty(core.atom.atomFromUInt32(0));
-    defer expected.free(rt);
-    if (!actual.sameValue(expected)) return error.JSException;
-    var index: u32 = 1;
-    while (index < expects.arrayLength()) : (index += 1) {
-        const next = expects.getProperty(core.atom.atomFromUInt32(index));
-        defer next.free(rt);
-        try expects.defineOwnProperty(rt, core.atom.atomFromUInt32(index - 1), core.Descriptor.data(next, true, true, true));
-    }
-    // Drop the now-duplicated tail: lower the dense extent (no-op when the
-    // copy-down already converted to sparse) before lowering .length, so we
-    // never leave array_length < array_count.
-    const shrunk = expects.arrayLength() - 1;
-    expects.truncateArrayElements(rt, shrunk);
-    expects.setArrayLength(shrunk);
-}
-
-fn getGlobalObjectProperty(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8) !core.JSValue {
-    const global_value = try globals_mod.getByName(rt, globals, "globalThis");
-    defer global_value.free(rt);
-    const global = try expectObject(global_value);
-    const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
-    return global.getProperty(key);
 }
 
 fn mapGetOrInsert(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, value: core.JSValue) !core.JSValue {
@@ -1086,7 +1008,7 @@ fn mapGetOrInsertComputed(
         const key_identity = (try weakKeyIdentityRegister(rt, key)) orelse return error.TypeError;
         if (findWeakEntry(object, key_identity)) |index| return object.weakCollectionEntriesSlot().*[index].value.dup();
         var callback_args = [_]core.JSValue{key};
-        const value = if (isCallableClosure(callback)) try host.callValue(rt, callback, &callback_args) else try callNativeCallback(rt, callback);
+        const value = try host.callValue(rt, callback, &callback_args);
         errdefer value.free(rt);
         // Mirrors js_map_getOrInsert computed branch (quickjs.c:52206):
         // map_delete_record + map_add_record after the callback, so a record
@@ -1103,11 +1025,7 @@ fn mapGetOrInsertComputed(
     defer canonical_key.free(rt);
     if (findStrongEntry(object, canonical_key)) |index| return object.collectionEntriesSlot().*[index].value.dup();
     var callback_args = [_]core.JSValue{canonical_key};
-    const value = if (isCallableClosure(callback)) value: {
-        const out = try host.callValue(rt, callback, &callback_args);
-        try applyGetOrInsertComputedCallbackMutation(rt, object, callback, canonical_key, host);
-        break :value out;
-    } else try callNativeCallback(rt, callback);
+    const value = try host.callValue(rt, callback, &callback_args);
     errdefer value.free(rt);
     // Mirrors js_map_getOrInsert computed branch (quickjs.c:52206):
     // map_delete_record + map_add_record after the callback, so a record the
@@ -1124,30 +1042,6 @@ fn canonicalizeKey(key: core.JSValue) core.JSValue {
         if (number == 0) return core.JSValue.int32(0);
     }
     return key.dup();
-}
-
-fn applyGetOrInsertComputedCallbackMutation(rt: *core.JSRuntime, object: *core.Object, callback: core.JSValue, key: core.JSValue, host: CallbackHost) !void {
-    const kind = host.closureKind(rt, callback) orelse return;
-    const mutation_value: ?core.JSValue = switch (kind) {
-        34 => core.JSValue.int32(0),
-        35 => core.JSValue.int32(1),
-        36 => core.JSValue.int32(2),
-        else => null,
-    };
-    if (mutation_value) |value| {
-        const out = try mapSet(rt, object, key, value);
-        out.free(rt);
-    }
-}
-
-fn callNativeCallback(rt: *core.JSRuntime, callback: core.JSValue) !core.JSValue {
-    const object = expectObject(callback) catch return core.JSValue.undefinedValue();
-    const name_value = object.getProperty(core.atom.ids.name);
-    defer name_value.free(rt);
-    if (!name_value.isString()) return core.JSValue.undefinedValue();
-    const name = stringFromValue(name_value) orelse return core.JSValue.undefinedValue();
-    if (name.eqlBytes("three")) return core.JSValue.int32(3);
-    return core.JSValue.undefinedValue();
 }
 
 fn collectionHas(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue) !core.JSValue {
@@ -1236,14 +1130,13 @@ const SetComparison = enum {
 const SetLikeRecord = struct {
     object: *core.Object,
     size: usize,
-    mode: i32,
 };
 
 fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.JSValue, operation: SetComposition, host: CallbackHost) !core.JSValue {
     if (object.class_id != core.class.ids.set) return error.TypeError;
     if (args.len < 1) return error.TypeError;
     const other = try expectObject(args[0]);
-    const other_record = try setLikeRecord(rt, other, host);
+    const other_record = try setLikeRecord(rt, other);
     const result_value = try constructWithPrototype(rt, 2, object.getPrototype());
     errdefer result_value.free(rt);
     const result = try expectObject(result_value);
@@ -1268,7 +1161,7 @@ fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.
             } else {
                 for (object.collectionEntriesSlot().*) |entry| {
                     if (!entry.active) continue;
-                    if (!try setLikeHas(rt, other_record, entry.key, object, host)) {
+                    if (!try setLikeHas(rt, other_record, entry.key, host)) {
                         const out = try setAdd(rt, result, entry.key);
                         out.free(rt);
                     }
@@ -1279,7 +1172,7 @@ fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.
             if (strongSize(object) <= other_record.size) {
                 for (object.collectionEntriesSlot().*) |entry| {
                     if (!entry.active) continue;
-                    if (try setLikeHas(rt, other_record, entry.key, object, host)) {
+                    if (try setLikeHas(rt, other_record, entry.key, host)) {
                         const out = try setAdd(rt, result, entry.key);
                         out.free(rt);
                     }
@@ -1344,22 +1237,14 @@ fn setComparison(rt: *core.JSRuntime, object: *core.Object, args: []const core.J
     if (object.class_id != core.class.ids.set) return error.TypeError;
     if (args.len < 1) return error.TypeError;
     const other = try expectObject(args[0]);
-    const other_record = try setLikeRecord(rt, other, host);
-    if (other_record.mode == 8 and (operation == .is_disjoint_from or operation == .is_superset_of) and strongSize(object) > other_record.size) {
-        return setComparisonIterReturn(rt, object, operation, host.globals);
-    }
-    if ((other_record.mode == 1 and operation == .is_disjoint_from and strongSize(object) > other_record.size) or
-        (other_record.mode == 2 and operation == .is_superset_of and strongSize(object) >= other_record.size))
-    {
-        return setComparisonObservableKeys(rt, object, operation, host.globals);
-    }
+    const other_record = try setLikeRecord(rt, other);
 
     switch (operation) {
         .is_disjoint_from => {
             if (strongSize(object) <= other_record.size) {
                 for (object.collectionEntriesSlot().*) |entry| {
                     if (!entry.active) continue;
-                    if (try setLikeHas(rt, other_record, entry.key, object, host)) return core.JSValue.boolean(false);
+                    if (try setLikeHas(rt, other_record, entry.key, host)) return core.JSValue.boolean(false);
                 }
             } else {
                 const other_keys = try setLikeKeys(rt, other_record, host);
@@ -1376,7 +1261,7 @@ fn setComparison(rt: *core.JSRuntime, object: *core.Object, args: []const core.J
             if (strongSize(object) > other_record.size) return core.JSValue.boolean(false);
             for (object.collectionEntriesSlot().*) |entry| {
                 if (!entry.active) continue;
-                if (!try setLikeHas(rt, other_record, entry.key, object, host)) return core.JSValue.boolean(false);
+                if (!try setLikeHas(rt, other_record, entry.key, host)) return core.JSValue.boolean(false);
             }
             return core.JSValue.boolean(true);
         },
@@ -1392,28 +1277,14 @@ fn setComparison(rt: *core.JSRuntime, object: *core.Object, args: []const core.J
     }
 }
 
-fn setLikeRecord(rt: *core.JSRuntime, object: *core.Object, host: CallbackHost) !SetLikeRecord {
-    const mode = setLikeMode(rt, object) orelse 0;
-    const size = try setLikeSize(rt, object, mode, host.globals);
-    try validateSetLikeMethods(rt, object, mode, host.globals);
-    return .{ .object = object, .size = size, .mode = mode };
+fn setLikeRecord(rt: *core.JSRuntime, object: *core.Object) !SetLikeRecord {
+    const size = try setLikeSize(rt, object);
+    try validateSetLikeMethods(rt, object);
+    return .{ .object = object, .size = size };
 }
 
-fn setLikeMode(rt: *core.JSRuntime, object: *core.Object) ?i32 {
-    const key = rt.internAtom("__setlike_mode") catch return null;
-    defer rt.atoms.free(key);
-    const value = object.getProperty(key);
-    defer value.free(rt);
-    return value.asInt32();
-}
-
-fn setLikeSize(rt: *core.JSRuntime, object: *core.Object, mode: i32, globals: []globals_mod.Slot) !usize {
+fn setLikeSize(rt: *core.JSRuntime, object: *core.Object) !usize {
     if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) return strongSize(object);
-    if (mode == 1 or mode == 2) {
-        try appendGlobalString(rt, globals, "observedOrder", "getting size");
-        try appendGlobalString(rt, globals, "observedOrder", "ToNumber(size)");
-    }
-    if (mode == 8) return 3;
     const size_value = object.getProperty(core.atom.predefinedId("size", .string).?);
     defer size_value.free(rt);
     const size = size_value.asInt32() orelse return error.TypeError;
@@ -1421,15 +1292,8 @@ fn setLikeSize(rt: *core.JSRuntime, object: *core.Object, mode: i32, globals: []
     return @intCast(size);
 }
 
-fn validateSetLikeMethods(rt: *core.JSRuntime, object: *core.Object, mode: i32, globals: []globals_mod.Slot) !void {
+fn validateSetLikeMethods(rt: *core.JSRuntime, object: *core.Object) !void {
     if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) return;
-    if (mode == 1 or mode == 2) {
-        try appendGlobalString(rt, globals, "observedOrder", "getting has");
-        try appendGlobalString(rt, globals, "observedOrder", "getting keys");
-    }
-    if (mode == 3 or mode == 4 or mode == 5) {
-        try addStringToGlobalSet(rt, globals, "baseSet", "q");
-    }
 
     const has_key = try rt.internAtom("has");
     defer rt.atoms.free(has_key);
@@ -1444,40 +1308,11 @@ fn validateSetLikeMethods(rt: *core.JSRuntime, object: *core.Object, mode: i32, 
     if (!isCallableClosure(keys_value)) return error.TypeError;
 }
 
-fn setLikeHas(rt: *core.JSRuntime, record: SetLikeRecord, key: core.JSValue, receiver: *core.Object, host: CallbackHost) !bool {
+fn setLikeHas(rt: *core.JSRuntime, record: SetLikeRecord, key: core.JSValue, host: CallbackHost) !bool {
     const object = record.object;
     if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) {
         const out = try collectionHas(rt, object, key);
         return out.asBool() orelse false;
-    }
-    switch (record.mode) {
-        1 => {
-            try appendGlobalString(rt, host.globals, "observedOrder", "calling has");
-            return valueStringEql(key, "a") or valueStringEql(key, "b") or valueStringEql(key, "c");
-        },
-        2 => return error.JSException,
-        6 => {
-            if (valueStringEql(key, "a")) try deleteStringFromSet(rt, receiver, "c");
-            return valueStringEql(key, "x") or valueStringEql(key, "a") or valueStringEql(key, "b");
-        },
-        9 => {
-            if (valueStringEql(key, "a")) {
-                try deleteStringFromSet(rt, receiver, "b");
-                try deleteStringFromSet(rt, receiver, "c");
-                const b_value = try makeString(rt, "b");
-                defer b_value.free(rt);
-                const out = try setAdd(rt, receiver, b_value);
-                out.free(rt);
-                return false;
-            }
-            if (valueStringEql(key, "b")) return false;
-            return error.JSException;
-        },
-        8 => {
-            const value = key.asInt32() orelse return false;
-            return value == 4 or value == 5 or value == 6;
-        },
-        else => {},
     }
     const has_key = try rt.internAtom("has");
     defer rt.atoms.free(has_key);
@@ -1501,29 +1336,6 @@ fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, host: CallbackHost) !
         }
         return values;
     }
-    switch (record.mode) {
-        1, 2 => return observableOrderKeys(rt, host.globals),
-        3 => {
-            try applyBaseSetIteratorMutation(rt, host.globals);
-            return stringList(rt, &.{ "x", "y" });
-        },
-        4 => {
-            try applyBaseSetIteratorMutation(rt, host.globals);
-            return stringList(rt, &.{ "x", "b", "b" });
-        },
-        5 => {
-            try applyBaseSetIteratorMutation(rt, host.globals);
-            return stringList(rt, &.{ "x", "b", "c", "c" });
-        },
-        7 => {
-            try deleteStringFromGlobalSet(rt, host.globals, "baseSet", "b");
-            try deleteStringFromGlobalSet(rt, host.globals, "baseSet", "c");
-            try addStringToGlobalSet(rt, host.globals, "baseSet", "b");
-            return stringList(rt, &.{ "a", "b" });
-        },
-        8 => return intList(rt, &.{ 4, 5, 6 }),
-        else => {},
-    }
 
     const keys_key = try rt.internAtom("keys");
     defer rt.atoms.free(keys_key);
@@ -1545,163 +1357,6 @@ fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, host: CallbackHost) !
         return values;
     }
     return error.TypeError;
-}
-
-fn setComparisonIterReturn(rt: *core.JSRuntime, object: *core.Object, operation: SetComparison, globals: []globals_mod.Slot) !core.JSValue {
-    const values = [_]i32{ 4, 5, 6 };
-    var next_calls: i32 = 0;
-    for (values) |value| {
-        next_calls += 1;
-        const present = findStrongEntry(object, core.JSValue.int32(value)) != null;
-        if (operation == .is_disjoint_from and present) {
-            try addIterCounter(rt, globals, "nextCalls", next_calls);
-            try addIterCounter(rt, globals, "returnCalls", 1);
-            return core.JSValue.boolean(false);
-        }
-        if (operation == .is_superset_of and !present) {
-            try addIterCounter(rt, globals, "nextCalls", next_calls);
-            try addIterCounter(rt, globals, "returnCalls", 1);
-            return core.JSValue.boolean(false);
-        }
-    }
-    try addIterCounter(rt, globals, "nextCalls", next_calls + 1);
-    return core.JSValue.boolean(true);
-}
-
-fn setComparisonObservableKeys(rt: *core.JSRuntime, object: *core.Object, operation: SetComparison, globals: []globals_mod.Slot) !core.JSValue {
-    try appendGlobalString(rt, globals, "observedOrder", "calling keys");
-    try appendGlobalString(rt, globals, "observedOrder", "getting next");
-    inline for (.{ "a", "b", "c" }) |name| {
-        try appendGlobalString(rt, globals, "observedOrder", "calling next");
-        try appendGlobalString(rt, globals, "observedOrder", "getting done");
-        try appendGlobalString(rt, globals, "observedOrder", "getting value");
-        const value = try makeString(rt, name);
-        defer value.free(rt);
-        const present = findStrongEntry(object, value) != null;
-        if (operation == .is_disjoint_from and present) return core.JSValue.boolean(false);
-        if (operation == .is_superset_of and !present) return core.JSValue.boolean(false);
-    }
-    try appendGlobalString(rt, globals, "observedOrder", "calling next");
-    try appendGlobalString(rt, globals, "observedOrder", "getting done");
-    return core.JSValue.boolean(true);
-}
-
-fn observableOrderKeys(rt: *core.JSRuntime, globals: []globals_mod.Slot) ![]core.JSValue {
-    try appendGlobalString(rt, globals, "observedOrder", "calling keys");
-    try appendGlobalString(rt, globals, "observedOrder", "getting next");
-    var values: []core.JSValue = &.{};
-    errdefer freeValueList(rt, values);
-    inline for (.{ "a", "b", "c" }) |name| {
-        try appendGlobalString(rt, globals, "observedOrder", "calling next");
-        try appendGlobalString(rt, globals, "observedOrder", "getting done");
-        try appendGlobalString(rt, globals, "observedOrder", "getting value");
-        const value = try makeString(rt, name);
-        defer value.free(rt);
-        try appendValue(rt, &values, value);
-    }
-    try appendGlobalString(rt, globals, "observedOrder", "calling next");
-    try appendGlobalString(rt, globals, "observedOrder", "getting done");
-    return values;
-}
-
-fn stringList(rt: *core.JSRuntime, comptime names: []const []const u8) ![]core.JSValue {
-    var values: []core.JSValue = &.{};
-    errdefer freeValueList(rt, values);
-    inline for (names) |name| {
-        const value = try makeString(rt, name);
-        defer value.free(rt);
-        try appendValue(rt, &values, value);
-    }
-    return values;
-}
-
-fn intList(rt: *core.JSRuntime, comptime ints: []const i32) ![]core.JSValue {
-    var values: []core.JSValue = &.{};
-    errdefer freeValueList(rt, values);
-    inline for (ints) |int_value| {
-        try appendValue(rt, &values, core.JSValue.int32(int_value));
-    }
-    return values;
-}
-
-fn applyBaseSetIteratorMutation(rt: *core.JSRuntime, globals: []globals_mod.Slot) !void {
-    try deleteStringFromGlobalSet(rt, globals, "baseSet", "b");
-    try deleteStringFromGlobalSet(rt, globals, "baseSet", "c");
-    try addStringToGlobalSet(rt, globals, "baseSet", "b");
-    try addStringToGlobalSet(rt, globals, "baseSet", "d");
-}
-
-fn appendGlobalString(rt: *core.JSRuntime, globals: []globals_mod.Slot, array_name: []const u8, bytes: []const u8) !void {
-    var array_value = try globals_mod.getByName(rt, globals, array_name);
-    if (array_value.isUndefined()) {
-        array_value.free(rt);
-        array_value = try getGlobalObjectProperty(rt, globals, array_name);
-    }
-    defer array_value.free(rt);
-    const array = try expectObject(array_value);
-    if (!array.flags.is_array) return error.TypeError;
-    const value = try makeString(rt, bytes);
-    defer value.free(rt);
-    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.arrayLength()), core.Descriptor.data(value, true, true, true));
-}
-
-fn addStringToGlobalSet(rt: *core.JSRuntime, globals: []globals_mod.Slot, set_name: []const u8, bytes: []const u8) !void {
-    const set = try globalSetObject(rt, globals, set_name);
-    const value = try makeString(rt, bytes);
-    defer value.free(rt);
-    const out = try setAdd(rt, set, value);
-    out.free(rt);
-}
-
-fn deleteStringFromGlobalSet(rt: *core.JSRuntime, globals: []globals_mod.Slot, set_name: []const u8, bytes: []const u8) !void {
-    const set = try globalSetObject(rt, globals, set_name);
-    try deleteStringFromSet(rt, set, bytes);
-}
-
-fn deleteStringFromSet(rt: *core.JSRuntime, set: *core.Object, bytes: []const u8) !void {
-    if (set.class_id != core.class.ids.set) return error.TypeError;
-    const value = try makeString(rt, bytes);
-    defer value.free(rt);
-    if (findStrongEntry(set, value)) |index| {
-        removeStrongEntry(rt, set, index);
-    }
-}
-
-fn globalSetObject(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8) !*core.Object {
-    var set_value = try globals_mod.getByName(rt, globals, name);
-    if (set_value.isUndefined()) {
-        set_value.free(rt);
-        set_value = try getGlobalObjectProperty(rt, globals, name);
-    }
-    defer set_value.free(rt);
-    const set = try expectObject(set_value);
-    if (set.class_id != core.class.ids.set) return error.TypeError;
-    return set;
-}
-
-fn addIterCounter(rt: *core.JSRuntime, globals: []globals_mod.Slot, property: []const u8, delta: i32) !void {
-    var iter_value = try globals_mod.getByName(rt, globals, "iter");
-    if (iter_value.isUndefined()) {
-        iter_value.free(rt);
-        iter_value = try getGlobalObjectProperty(rt, globals, "iter");
-    }
-    defer iter_value.free(rt);
-    const iter = try expectObject(iter_value);
-    const key = try rt.internAtom(property);
-    defer rt.atoms.free(key);
-    const current_value = iter.getProperty(key);
-    defer current_value.free(rt);
-    const current = current_value.asInt32() orelse 0;
-    try iter.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(current + delta), true, true, true));
-}
-
-fn makeString(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
-    return (try core.string.String.createUtf8(rt, bytes)).value();
-}
-
-fn valueStringEql(value: core.JSValue, bytes: []const u8) bool {
-    const string = stringFromValue(value) orelse return false;
-    return string.eqlBytes(bytes);
 }
 
 fn appendValue(rt: *core.JSRuntime, values: *[]core.JSValue, value: core.JSValue) !void {

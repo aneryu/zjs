@@ -2532,7 +2532,60 @@ test "host WeakMap mutation closure links entries into existing weak index" {
     try helpers.expectStringValueBytes(get_result, "mutated");
 }
 
-test "Set.prototype.symmetricDifference tracks receiver mutations without fixture skips" {
+// Test-side stand-in for the retired engine `__setlike_mode` fixture: a
+// CallbackHost whose `keys` call mutates the base set mid-operation (delete
+// "b"/"c", re-add "b", add "d") before returning the real key array
+// ["x","b","c","c"]. The set-like object itself is a plain object carrying
+// real `size`/`has`/`keys` properties.
+fn symmetricDifferenceMutatingKeysHost(
+    rt: *core.JSRuntime,
+    callback: core.JSValue,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    globals: []engine.exec.globals.Slot,
+) core.host_function.CallbackError!core.JSValue {
+    _ = callback;
+    _ = this_value;
+    return symmetricDifferenceMutatingKeysImpl(rt, args, globals) catch |err| return @errorCast(err);
+}
+
+fn symmetricDifferenceMutatingKeysImpl(
+    rt: *core.JSRuntime,
+    args: []const core.JSValue,
+    globals: []engine.exec.globals.Slot,
+) !core.JSValue {
+    // `has` (one argument) is never reached by symmetricDifference; only the
+    // zero-argument `keys` call arrives here.
+    if (args.len != 0) return core.JSValue.boolean(false);
+
+    const base_set_value = try engine.exec.globals.getByName(rt, globals, "baseSet");
+    defer base_set_value.free(rt);
+    inline for (.{ "b", "c" }) |name| {
+        const value = (try core.string.String.createUtf8(rt, name)).value();
+        defer value.free(rt);
+        const out = try engine.builtins.collection.methodCall(rt, base_set_value, 4, &.{value});
+        out.free(rt);
+    }
+    inline for (.{ "b", "d" }) |name| {
+        const value = (try core.string.String.createUtf8(rt, name)).value();
+        defer value.free(rt);
+        const out = try engine.builtins.collection.methodCall(rt, base_set_value, 6, &.{value});
+        out.free(rt);
+    }
+
+    const array = try core.Object.createArray(rt, null);
+    errdefer core.Object.destroyFromHeader(rt, &array.header);
+    comptime var index: u32 = 0;
+    inline for (.{ "x", "b", "c", "c" }) |name| {
+        const value = (try core.string.String.createUtf8(rt, name)).value();
+        defer value.free(rt);
+        try array.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, true, true, true));
+        index += 1;
+    }
+    return array.value();
+}
+
+test "Set.prototype.symmetricDifference tracks receiver mutations from a set-like keys call" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -2555,10 +2608,6 @@ test "Set.prototype.symmetricDifference tracks receiver mutations without fixtur
     defer rt.atoms.free(size_key);
     try setlike.defineOwnProperty(rt, size_key, core.Descriptor.data(core.JSValue.int32(4), true, true, true));
 
-    const mode_key = try rt.internAtom("__setlike_mode");
-    defer rt.atoms.free(mode_key);
-    try setlike.defineOwnProperty(rt, mode_key, core.Descriptor.data(core.JSValue.int32(5), true, true, true));
-
     const noop = try engine.exec.closure.create(rt, 13, 0, 0, 0);
     defer noop.free(rt);
 
@@ -2577,7 +2626,11 @@ test "Set.prototype.symmetricDifference tracks receiver mutations without fixtur
     };
     defer globals[0].value.free(rt);
 
-    const result_value = try engine.builtins.collection.methodCallWithCallbackHost(rt, base_set_value, 20, &.{setlike_value}, engine.exec.collection_adapter.host(globals[0..]));
+    const host = core.host_function.CallbackHost{
+        .globals = globals[0..],
+        .call = &symmetricDifferenceMutatingKeysHost,
+    };
+    const result_value = try engine.builtins.collection.methodCallWithCallbackHost(rt, base_set_value, 20, &.{setlike_value}, host);
     defer result_value.free(rt);
     const result_set = objectFromValue(result_value);
 
