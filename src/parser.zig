@@ -6141,7 +6141,8 @@ pub const parser_core = struct {
         // already emitted unrelated bytes — wiping the whole buffer is
         // unsound, e.g. `1 + (a = b)`).
         const direct_lhs_atom: ?Atom = if (isIdentifierLikeToken(s)) identifierLikeAtom(s) else null;
-        const saved_atom: ?Atom = direct_lhs_atom orelse peekParenthesizedBareIdent(s);
+        const saved_atom: ?Atom = direct_lhs_atom orelse
+            (if (peekParenthesizedBareIdent(s)) |info| info.atom else null);
         const pre_lhs_code_len = s.currentCodeLen();
         const pre_lhs_atom_len = s.currentAtomOperandLen();
 
@@ -7223,6 +7224,35 @@ pub const parser_core = struct {
         return k == @as(tok.TokenKind, @intCast('/')) or k == tok.TOK_DIV_ASSIGN;
     }
 
+    /// Emit the identifier read for the `typeof <ident>` shortcut. Mirrors
+    /// the observable result of qjs's parse-then-patch: the operand's
+    /// trailing `scope_get_var` becomes `scope_get_var_undef`
+    /// (quickjs.c:27660-27666), which for an active `with` scope means the
+    /// with-object lookup chain still runs and only the final fallback get
+    /// is the non-throwing `undef` form.
+    fn emitTypeofIdentRead(s: *State, ident: Atom) Error!void {
+        if (s.active_with_atom != null and s.active_with_func_depth != s.cur_func_stack.len and hasCurrentFunctionBinding(s, ident)) {
+            try s.emitScopeGetVar(ident);
+            return;
+        }
+        if (s.active_with_atom) |with_atom| {
+            try s.emitScopeGetVar(with_atom);
+            const label_offset = try s.emitOpAtomLabelU8(opcode.op.with_get_var, ident, 0, 1);
+            if (hasKnownBinding(s, ident)) {
+                try s.emitScopeGetVar(ident);
+            } else {
+                try s.emitScopeGetVarUndef(ident);
+            }
+            try patchAbsoluteTarget(s, label_offset);
+            return;
+        }
+        if (hasKnownBinding(s, ident)) {
+            try s.emitScopeGetVar(ident);
+        } else {
+            try s.emitScopeGetVarUndef(ident);
+        }
+    }
+
     fn emitWithGetVarFallback(s: *State, with_atom: Atom, ident: Atom) Error!void {
         try s.emitScopeGetVar(with_atom);
         const label_offset = try s.emitOpAtomLabelU8(opcode.op.with_get_var, ident, 0, 1);
@@ -7538,35 +7568,38 @@ pub const parser_core = struct {
         if (k == tok.TOK_TYPEOF) {
             try s.advance();
             // typeof on a missing global returns "undefined", not a
-            // ReferenceError. QuickJS uses `get_var_undef` for that.
-            if (peekParenthesizedBareIdent(s)) |ident| {
+            // ReferenceError. QuickJS parses the full unary operand and
+            // patches a trailing `scope_get_var` to `scope_get_var_undef`
+            // (quickjs.c:27654-27667); zjs's parse-time shortcut below must
+            // therefore only fire when the identifier IS the whole operand
+            // — never when a member access, call, tagged template, postfix
+            // update, or `async function` expression continues it.
+            const paren_ident = peekParenthesizedBareIdent(s);
+            if (paren_ident != null and !identOperandContinues(paren_ident.?.next_kind)) {
+                const info = paren_ident.?;
+                const ident = info.atom;
                 if (s.class_field_initializer_depth > 0 and atomNameEquals(s, ident, "arguments")) {
                     return Error.UnexpectedToken;
                 }
-                try s.advance(); // (
+                var open: u32 = 0;
+                while (open < info.parens) : (open += 1) try s.advance(); // '('
                 try s.advance(); // ident
-                try expectPunct(s, ')');
-                if (hasKnownBinding(s, ident)) {
-                    try s.emitScopeGetVar(ident);
-                } else {
-                    try s.emitScopeGetVarUndef(ident);
-                }
+                var close: u32 = 0;
+                while (close < info.parens) : (close += 1) try expectPunct(s, ')');
+                try emitTypeofIdentRead(s, ident);
             } else if (isIdentifierLikeToken(s) and
                 s.peekNextKind() != @as(tok.TokenKind, @intCast('(')) and
                 s.peekNextKind() != @as(tok.TokenKind, @intCast('.')) and
                 s.peekNextKind() != @as(tok.TokenKind, @intCast('[')) and
-                s.peekNextKind() != tok.TOK_QUESTION_MARK_DOT)
+                s.peekNextKind() != tok.TOK_FUNCTION and
+                !identOperandContinues(s.peekNextKind()))
             {
                 const ident = identifierLikeAtom(s);
                 if (s.class_field_initializer_depth > 0 and atomNameEquals(s, ident, "arguments")) {
                     return Error.UnexpectedToken;
                 }
                 try s.advance();
-                if (hasKnownBinding(s, ident)) {
-                    try s.emitScopeGetVar(ident);
-                } else {
-                    try s.emitScopeGetVarUndef(ident);
-                }
+                try emitTypeofIdentRead(s, ident);
             } else {
                 try parseUnary(s, .{ .pow_allowed = false, .in_accepted = flags.in_accepted, .yield_forbidden = true });
             }
@@ -7575,21 +7608,26 @@ pub const parser_core = struct {
         }
         if (k == tok.TOK_DELETE) {
             try s.advance();
-            if (peekParenthesizedBareIdent(s)) |ident| {
-                try s.advance(); // (
-                try s.advance(); // ident
-                try expectPunct(s, ')');
-                if (s.is_strict or s.cur_func().is_strict_mode) return Error.UnexpectedToken;
-                if (s.active_with_atom) |with_atom| {
-                    try emitWithDeleteVarFallback(s, with_atom, ident);
-                } else if (hasEvalNonLexicalBinding(s, ident)) {
-                    try s.emitOpAtom(opcode.op.delete_var, ident);
-                } else if (hasKnownBinding(s, ident) or atomNameEquals(s, ident, "arguments")) {
-                    try s.emitOp(opcode.op.push_false);
-                } else {
-                    try s.emitOpAtom(opcode.op.delete_var, ident);
+            if (peekParenthesizedBareIdent(s)) |info| {
+                if (!identOperandContinues(info.next_kind)) {
+                    const ident = info.atom;
+                    var open: u32 = 0;
+                    while (open < info.parens) : (open += 1) try s.advance(); // '('
+                    try s.advance(); // ident
+                    var close: u32 = 0;
+                    while (close < info.parens) : (close += 1) try expectPunct(s, ')');
+                    if (s.is_strict or s.cur_func().is_strict_mode) return Error.UnexpectedToken;
+                    if (s.active_with_atom) |with_atom| {
+                        try emitWithDeleteVarFallback(s, with_atom, ident);
+                    } else if (hasEvalNonLexicalBinding(s, ident)) {
+                        try s.emitOpAtom(opcode.op.delete_var, ident);
+                    } else if (hasKnownBinding(s, ident) or atomNameEquals(s, ident, "arguments")) {
+                        try s.emitOp(opcode.op.push_false);
+                    } else {
+                        try s.emitOpAtom(opcode.op.delete_var, ident);
+                    }
+                    return;
                 }
-                return;
             }
             if (s.active_with_atom) |with_atom| {
                 if (s.peekKind() == tok.TOK_IDENT and
@@ -7611,8 +7649,8 @@ pub const parser_core = struct {
         if (k == tok.TOK_INC or k == tok.TOK_DEC) {
             const update_op: u8 = if (k == tok.TOK_INC) opcode.op.inc else opcode.op.dec;
             try s.advance();
-            const saved_atom: ?Atom = if (peekParenthesizedBareIdent(s)) |ident| blk: {
-                break :blk ident;
+            const saved_atom: ?Atom = if (peekParenthesizedBareIdent(s)) |info| blk: {
+                break :blk info.atom;
             } else if (isIdentifierLikeToken(s)) blk: {
                 break :blk identifierLikeAtom(s);
             } else null;
@@ -7830,7 +7868,19 @@ pub const parser_core = struct {
         try s.return_finally_frames.items[frame_index].fixups.append(s.function.memory.allocator, off);
     }
 
-    fn peekParenthesizedBareIdent(s: *State) ?Atom {
+    /// Result of `peekParenthesizedBareIdent`: a bare identifier wrapped in
+    /// one or more parenthesis groups, plus the token kind that follows the
+    /// outermost `)` so callers can reject identifiers that are only a
+    /// prefix of a longer operand (postfix `++`/`--`, tagged template,
+    /// `?.` — qjs has no such shortcut: `js_parse_unary` always parses the
+    /// full operand and only then patches `scope_get_var`, quickjs.c:27654).
+    const ParenBareIdent = struct {
+        atom: Atom,
+        parens: u32,
+        next_kind: tok.TokenKind,
+    };
+
+    fn peekParenthesizedBareIdent(s: *State) ?ParenBareIdent {
         if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return null;
 
         const saved_pos = s.lex.pos;
@@ -7860,8 +7910,11 @@ pub const parser_core = struct {
             advanced = true;
             paren_count += 1;
         }
-        if (s.peekKind() != tok.TOK_IDENT) return null;
-        const ident = s.token.payload.ident.atom;
+        // Any context-legal IdentifierReference qualifies (qjs lexes
+        // sloppy-mode `yield`/`await`/`let`/... as plain identifiers here
+        // and patches their `scope_get_var` after the fact).
+        if (!isIdentifierLikeToken(s)) return null;
+        const ident = identifierLikeAtom(s);
         s.advance() catch return null; // ident
         advanced = true;
         var close_count: usize = 0;
@@ -7871,7 +7924,24 @@ pub const parser_core = struct {
             advanced = true;
         }
         if (isMemberStart(s.peekKind())) return null;
-        return ident;
+        return .{
+            .atom = ident,
+            .parens = @intCast(paren_count),
+            .next_kind = s.peekKind(),
+        };
+    }
+
+    /// Tokens (beyond `isMemberStart`) that continue a unary operand after
+    /// a bare or parenthesized identifier: postfix `++`/`--`, a tagged
+    /// template, or an optional chain. Used to keep the typeof/delete
+    /// identifier shortcuts from consuming a prefix of a longer operand
+    /// (qjs parses the full operand first: `js_parse_unary` ->
+    /// `js_parse_postfix_expr`, quickjs.c:27654/26176).
+    fn identOperandContinues(k: tok.TokenKind) bool {
+        return k == tok.TOK_QUESTION_MARK_DOT or
+            k == tok.TOK_TEMPLATE or
+            k == tok.TOK_INC or
+            k == tok.TOK_DEC;
     }
 
     fn isDeleteSuperReference(s: *State) bool {
@@ -7947,8 +8017,8 @@ pub const parser_core = struct {
     /// access. Optional-chain `delete a?.b` / `delete super.x` /
     /// `delete #priv` are deferred.
     fn parseDelete(s: *State, flags: ParseFlags) Error!void {
-        const saved_atom: ?Atom = if (peekParenthesizedBareIdent(s)) |ident| blk: {
-            break :blk ident;
+        const saved_atom: ?Atom = if (peekParenthesizedBareIdent(s)) |info| blk: {
+            break :blk info.atom;
         } else if (s.peekKind() == tok.TOK_IDENT) blk: {
             break :blk s.token.payload.ident.atom;
         } else if (s.peekKind() == tok.TOK_YIELD and !s.in_generator and !(s.is_strict or s.cur_func().is_strict_mode)) blk: {
@@ -8139,8 +8209,8 @@ pub const parser_core = struct {
     /// `js_parse_postfix_expr` (`quickjs.c:26176`). Wraps `parseLhsExpr`
     /// with the postfix `++` / `--` update operators.
     pub fn parsePostfixExpr(s: *State, flags: ParseFlags) Error!void {
-        const saved_atom: ?Atom = if (peekParenthesizedBareIdent(s)) |ident| blk: {
-            break :blk ident;
+        const saved_atom: ?Atom = if (peekParenthesizedBareIdent(s)) |info| blk: {
+            break :blk info.atom;
         } else if (s.peekKind() == tok.TOK_IDENT) blk: {
             break :blk s.token.payload.ident.atom;
         } else null;
@@ -13338,8 +13408,8 @@ pub const parser_core = struct {
         var restored = false;
         errdefer if (!restored) restoreParserLexerSnapshot(s, after_target);
         try restoreLexerReplayPoint(s, target_point);
-        const saved_atom: ?Atom = if (peekParenthesizedBareIdent(s)) |ident| blk: {
-            break :blk ident;
+        const saved_atom: ?Atom = if (peekParenthesizedBareIdent(s)) |info| blk: {
+            break :blk info.atom;
         } else if (isIdentifierLikeToken(s)) blk: {
             break :blk identifierLikeAtom(s);
         } else null;
@@ -13690,11 +13760,13 @@ pub const parser_core = struct {
         } else if (var_tok == tok.TOK_THIS) {
             target_this_private_prop = try parseThisPrivateAssignmentTarget(s);
         } else if (var_tok == @as(tok.TokenKind, @intCast('('))) {
-            if (peekParenthesizedBareIdent(s)) |atom_id| {
-                try s.advance();
-                try s.advance();
-                target_atom = atom_id;
-                try s.expectToken(')');
+            if (peekParenthesizedBareIdent(s)) |info| {
+                var open: u32 = 0;
+                while (open < info.parens) : (open += 1) try s.advance(); // '('
+                try s.advance(); // ident
+                target_atom = info.atom;
+                var close: u32 = 0;
+                while (close < info.parens) : (close += 1) try s.expectToken(')');
             } else {
                 const target_point = takeLexerReplayPoint(s);
                 const pre_lhs_code_len = s.currentCodeLen();
@@ -16581,8 +16653,8 @@ pub const parser_core = struct {
     }
 
     fn parseDestructuringAssignmentTargetShape(s: *State) Error!LhsShape {
-        const saved_atom: ?Atom = if (peekParenthesizedBareIdent(s)) |ident| blk: {
-            break :blk ident;
+        const saved_atom: ?Atom = if (peekParenthesizedBareIdent(s)) |info| blk: {
+            break :blk info.atom;
         } else if (isIdentifierLikeToken(s)) blk: {
             break :blk identifierLikeAtom(s);
         } else null;
