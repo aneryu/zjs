@@ -84,7 +84,12 @@ pub const DynamicImportState = struct {
             state.io,
             state.allocator,
             state.max_source_size,
-        );
+        ) catch |err| {
+            // Any pending JS exception must reach the import() promise as-is
+            // (js_dynamic_import_job quickjs.c:31063: exception → reject).
+            if (state.context.hasException()) return error.JSException;
+            return err;
+        };
     }
 };
 
@@ -114,9 +119,172 @@ pub const DynamicImportHostState = struct {
             referrer_path,
             specifier,
             state.allocator,
-        ) catch |err| return dynamicImportHostError(err);
+        ) catch |err| {
+            // Any pending JS exception must reach the import() promise as-is
+            // (js_dynamic_import_job quickjs.c:31063: exception → reject).
+            if (state.context.hasException()) return error.JSException;
+            return dynamicImportHostError(err);
+        };
     }
 };
+
+/// Identity marker for the shared dynamic-import job registration in the
+/// runtime's external-host-function table (one registration per runtime,
+/// found again by (ptr, call) identity).
+var dynamic_import_job_marker: u8 = 0;
+
+fn dynamicImportJobExternalId(rt: *core.JSRuntime) !u32 {
+    const marker: *anyopaque = @ptrCast(&dynamic_import_job_marker);
+    for (rt.external_host_functions, 0..) |record, index| {
+        if (record.call == dynamicImportJobCall and record.ptr == marker) return @intCast(index + 1);
+    }
+    return rt.registerExternalHostFunction(.{ .ptr = marker, .call = dynamicImportJobCall });
+}
+
+/// Mirror of qjs js_dynamic_import (quickjs.c:31073): build a promise
+/// capability, bind [resolve, reject, basename, specifier] onto a job
+/// callable, and enqueue it on the promise-job queue (JS_EnqueueJob
+/// quickjs.c:31155 — "cannot run JS_LoadModuleInternal synchronously because
+/// it would cause an unexpected recursion in js_evaluate_module()"). The
+/// returned pending promise is the value of the import() expression; the
+/// module loads and evaluates only when the job runs.
+pub fn enqueueDynamicImportJob(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    prototype: ?*core.Object,
+    referrer_path: []const u8,
+    specifier: core.JSValue,
+) !core.JSValue {
+    const rt = ctx.runtime;
+    const resolvers_value = try core.promise.withResolvers(rt, prototype);
+    defer resolvers_value.free(rt);
+    const resolvers = try exec.property_ops.expectObject(resolvers_value);
+
+    const promise_atom = try rt.internAtom("promise");
+    defer rt.atoms.free(promise_atom);
+    const resolve_atom = try rt.internAtom("resolve");
+    defer rt.atoms.free(resolve_atom);
+    const reject_atom = try rt.internAtom("reject");
+    defer rt.atoms.free(reject_atom);
+    const basename_atom = try rt.internAtom("basename");
+    defer rt.atoms.free(basename_atom);
+    const specifier_atom = try rt.internAtom("specifier");
+    defer rt.atoms.free(specifier_atom);
+
+    const promise_value = resolvers.getProperty(promise_atom);
+    errdefer promise_value.free(rt);
+    const resolve_value = resolvers.getProperty(resolve_atom);
+    defer resolve_value.free(rt);
+    const reject_value = resolvers.getProperty(reject_atom);
+    defer reject_value.free(rt);
+
+    const basename_value = try exec.value_ops.createStringValue(rt, referrer_path);
+    defer basename_value.free(rt);
+
+    const job_value = try core.function.nativeFunction(rt, "", 0);
+    defer job_value.free(rt);
+    const job_object = try exec.property_ops.expectObject(job_value);
+    job_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
+    job_object.externalHostFunctionIdSlot().* = try dynamicImportJobExternalId(rt);
+    try job_object.setFunctionRealmGlobalPtr(rt, global);
+    // Bound job data lives as ordinary (GC-traced) properties on the job
+    // callable, mirroring JS_NewCFunctionData's func_data slots.
+    try job_object.defineOwnProperty(rt, resolve_atom, core.Descriptor.data(resolve_value, false, false, false));
+    try job_object.defineOwnProperty(rt, reject_atom, core.Descriptor.data(reject_value, false, false, false));
+    try job_object.defineOwnProperty(rt, basename_atom, core.Descriptor.data(basename_value, false, false, false));
+    try job_object.defineOwnProperty(rt, specifier_atom, core.Descriptor.data(specifier, false, false, false));
+
+    try exec.promise_ops.enqueuePendingPromiseJob(ctx, job_value);
+    return promise_value;
+}
+
+/// Mirror of qjs js_dynamic_import_job (quickjs.c:31037): run the module
+/// loader and settle the import() capability — any failure (including a
+/// pending JS exception) rejects the promise instead of aborting evaluation.
+fn dynamicImportJobCall(_: *anyopaque, call: core.host_function.ExternalCall) anyerror!core.JSValue {
+    const ctx: *core.JSContext = @ptrCast(@alignCast(call.ctx));
+    const rt = ctx.runtime;
+    const job_object = call.func_obj;
+    const global = call.global orelse job_object.functionRealmGlobalPtr() orelse return error.TypeError;
+
+    const resolve_atom = try rt.internAtom("resolve");
+    defer rt.atoms.free(resolve_atom);
+    const reject_atom = try rt.internAtom("reject");
+    defer rt.atoms.free(reject_atom);
+    const basename_atom = try rt.internAtom("basename");
+    defer rt.atoms.free(basename_atom);
+    const specifier_atom = try rt.internAtom("specifier");
+    defer rt.atoms.free(specifier_atom);
+
+    const resolve_value = job_object.getProperty(resolve_atom);
+    defer resolve_value.free(rt);
+    const reject_value = job_object.getProperty(reject_atom);
+    defer reject_value.free(rt);
+    const basename_value = job_object.getProperty(basename_atom);
+    defer basename_value.free(rt);
+    const specifier_value = job_object.getProperty(specifier_atom);
+    defer specifier_value.free(rt);
+
+    var basename_bytes = std.ArrayList(u8).empty;
+    defer basename_bytes.deinit(rt.memory.allocator);
+    try exec.value_ops.appendRawString(rt, &basename_bytes, basename_value);
+    var specifier_bytes = std.ArrayList(u8).empty;
+    defer specifier_bytes.deinit(rt.memory.allocator);
+    try exec.value_ops.appendRawString(rt, &specifier_bytes, specifier_value);
+
+    const load_result: core.context.DynamicImportError!core.JSValue = blk: {
+        const callback = ctx.dynamic_import_callback orelse break :blk error.OperationUnsupported;
+        break :blk callback(ctx.dynamic_import_userdata, ctx, call.output, global, basename_bytes.items, specifier_bytes.items);
+    };
+
+    if (load_result) |namespace| {
+        defer namespace.free(rt);
+        const settle = try exec.call_runtime.callValueOrBytecode(ctx, call.output, global, core.JSValue.undefinedValue(), resolve_value, &.{namespace}, null, null);
+        settle.free(rt);
+    } else |err| {
+        if (err == error.OutOfMemory or err == error.ProcessExit or err == error.StackOverflow) return err;
+        const reason = try dynamicImportRejectionValue(ctx, global, err, specifier_bytes.items);
+        defer reason.free(rt);
+        const settle = try exec.call_runtime.callValueOrBytecode(ctx, call.output, global, core.JSValue.undefinedValue(), reject_value, &.{reason}, null, null);
+        settle.free(rt);
+    }
+    return core.JSValue.undefinedValue();
+}
+
+/// Rejection reason for a failed dynamic import: the pending JS exception
+/// verbatim when one exists (js_dynamic_import_job quickjs.c:31063
+/// JS_GetException → reject), otherwise the loader's ReferenceError shape
+/// (js_module_loader quickjs-libc.c:699) or a generic mapped error.
+fn dynamicImportRejectionValue(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    err: anyerror,
+    specifier: []const u8,
+) !core.JSValue {
+    if (ctx.hasException()) return ctx.takeException();
+    switch (err) {
+        error.OperationUnsupported => return exec.exception_ops.createNamedError(ctx, global, "TypeError", "dynamic import is not supported"),
+        error.ModuleNotFound, error.FileNotFound => {
+            var msg_buf = std.ArrayList(u8).empty;
+            defer msg_buf.deinit(ctx.runtime.memory.allocator);
+            try msg_buf.print(ctx.runtime.memory.allocator, "could not load module filename '{s}'", .{specifier});
+            return exec.exception_ops.createNamedError(ctx, global, "ReferenceError", msg_buf.items);
+        },
+        else => {
+            const info = exec.exception_ops.promiseErrorInfo(err);
+            return exec.exception_ops.createNamedError(ctx, global, info.name, info.message);
+        },
+    }
+}
+
+/// Install the file-loader dynamic import callback on the state's context.
+/// The state must outlive every job drain that may run an import job (the
+/// CLI keeps one alive for the whole process; the module-graph runners
+/// install a scoped one and drain before restoring).
+pub fn installDynamicImport(state: *DynamicImportState) void {
+    state.context.dynamic_import_callback = DynamicImportState.load;
+    state.context.dynamic_import_userdata = state;
+}
 
 fn runJobs(runtime: *core.JSRuntime, context: *core.JSContext, output: ?*std.Io.Writer) !void {
     runtime.job_queue.runAll();
@@ -155,7 +323,10 @@ pub fn evalFileModuleGraphWithOutput(
     const root_module_name = try runtime.internAtom(normalized_filename);
     defer runtime.atoms.free(root_module_name);
     if (runtime.modules.find(root_module_name)) |record| record.import_meta_main = true;
-    runtime.modules.linkModule(runtime, root_module_name) catch |err| return moduleResolutionError(err);
+    runtime.modules.linkModule(runtime, root_module_name) catch |err| {
+        try throwModuleLinkError(runtime, context, normalized_filename, err);
+        return moduleResolutionError(err);
+    };
     try initializeSyntheticFileModules(runtime, context, io, allocator, max_source_size);
     try initializePreloadedModuleFunctionDeclarations(runtime, context, source_text, normalized_filename, io, allocator, max_source_size, module_postorder.items);
     var dynamic_import_state = DynamicImportState{
@@ -178,18 +349,39 @@ pub fn evalFileModuleGraphWithOutput(
     defer freeModuleContinuations(runtime, allocator, &continuations);
     for (module_postorder.items) |path| {
         if (std.mem.eql(u8, path, normalized_filename)) continue;
+        if (!preloadedModuleNeedsEvaluation(runtime, path)) continue;
         try drainModuleContinuationsForDependencies(runtime, context, output, allocator, &continuations, path);
         const dep_source = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_source_size));
         defer allocator.free(dep_source);
-        const dep_step = try evalPreloadedFileModuleStep(runtime, context, dep_source, output, path, null, null, false);
-        try handleModuleEvalStep(runtime, allocator, &continuations, dep_step, dep_source, path, false, false);
+        const dep_step = try evalPreloadedFileModuleStep(runtime, context, dep_source, output, path, null, null, true);
+        try handleModuleEvalStep(runtime, allocator, &continuations, dep_step, dep_source, path, false, true);
         try runJobs(runtime, context, output);
         if (context.hasUnhandledRejection() or context.hasException()) return error.UnhandledPromiseRejection;
     }
     try drainModuleContinuationsForDependencies(runtime, context, output, allocator, &continuations, normalized_filename);
-    const root_step = try evalPreloadedFileModuleStep(runtime, context, source_text, output, normalized_filename, null, null, false);
-    try handleModuleEvalStep(runtime, allocator, &continuations, root_step, source_text, normalized_filename, true, false);
-    return try drainModuleContinuations(runtime, context, output, allocator, &continuations);
+    var result = core.JSValue.undefinedValue();
+    if (preloadedModuleNeedsEvaluation(runtime, normalized_filename)) {
+        const root_step = try evalPreloadedFileModuleStep(runtime, context, source_text, output, normalized_filename, null, null, true);
+        try handleModuleEvalStep(runtime, allocator, &continuations, root_step, source_text, normalized_filename, true, true);
+        result = try drainModuleContinuations(runtime, context, output, allocator, &continuations);
+    }
+    // Drain jobs enqueued by a synchronously-completing root (dynamic-import
+    // jobs in particular) while this runner's dynamic-import state is still
+    // installed and alive.
+    errdefer result.free(runtime);
+    try runJobs(runtime, context, output);
+    return result;
+}
+
+/// Status gate shared by the postorder evaluation loops: modules already
+/// evaluated (e.g. by a dynamic import job that ran between steps) or
+/// currently evaluating are never re-run (mirrors js_inner_module_evaluation
+/// quickjs.c:31441).
+fn preloadedModuleNeedsEvaluation(runtime: *core.JSRuntime, path: []const u8) bool {
+    const module_name = runtime.internAtom(path) catch return true;
+    defer runtime.atoms.free(module_name);
+    const record = runtime.modules.find(module_name) orelse return true;
+    return moduleNeedsEvaluation(record);
 }
 
 pub fn evalFileModuleGraphWithHostHooks(
@@ -211,7 +403,10 @@ pub fn evalFileModuleGraphWithHostHooks(
     const root_module_name = try runtime.internAtom(filename);
     defer runtime.atoms.free(root_module_name);
     if (runtime.modules.find(root_module_name)) |record| record.import_meta_main = true;
-    runtime.modules.linkModule(runtime, root_module_name) catch |err| return moduleResolutionError(err);
+    runtime.modules.linkModule(runtime, root_module_name) catch |err| {
+        try throwModuleLinkError(runtime, context, filename, err);
+        return moduleResolutionError(err);
+    };
     const global_object = try exec.zjs_vm.contextGlobal(context);
     for (module_postorder.items) |path| {
         var raw_module_source: []const u8 = undefined;
@@ -244,7 +439,7 @@ pub fn evalFileModuleGraphWithHostHooks(
             const exception_ops = exec.exception_ops;
             var msg_buf = std.ArrayList(u8).empty;
             defer msg_buf.deinit(runtime.memory.allocator);
-            try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in evalFileModuleGraphWithHostHooks {s}:{d}:{d} - {s}", .{ path, err.position.line, err.position.column, err.message });
+            try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in {s}:{d}:{d} - {s}", .{ path, err.position.line, err.position.column, err.message });
             const error_val = try exception_ops.createNamedError(context, global_object, "SyntaxError", msg_buf.items);
             _ = context.throwValue(error_val);
             return error.SyntaxError;
@@ -275,6 +470,7 @@ pub fn evalFileModuleGraphWithHostHooks(
 
     for (module_postorder.items) |path| {
         if (std.mem.eql(u8, path, filename)) continue;
+        if (!preloadedModuleNeedsEvaluation(runtime, path)) continue;
         try drainModuleContinuationsForDependencies(runtime, context, output, allocator, &continuations, path);
 
         const resolved = try host_hooks.resolveModule(host_hooks.ptr, path, null, allocator);
@@ -296,9 +492,18 @@ pub fn evalFileModuleGraphWithHostHooks(
     }
 
     try drainModuleContinuationsForDependencies(runtime, context, output, allocator, &continuations, filename);
-    const root_step = try evalPreloadedFileModuleStep(runtime, context, source_text, output, filename, null, null, true);
-    try handleModuleEvalStep(runtime, allocator, &continuations, root_step, source_text, filename, true, true);
-    return try drainModuleContinuations(runtime, context, output, allocator, &continuations);
+    var result = core.JSValue.undefinedValue();
+    if (preloadedModuleNeedsEvaluation(runtime, filename)) {
+        const root_step = try evalPreloadedFileModuleStep(runtime, context, source_text, output, filename, null, null, true);
+        try handleModuleEvalStep(runtime, allocator, &continuations, root_step, source_text, filename, true, true);
+        result = try drainModuleContinuations(runtime, context, output, allocator, &continuations);
+    }
+    // Drain jobs enqueued by a synchronously-completing root (dynamic-import
+    // jobs in particular) while this runner's dynamic-import state is still
+    // installed and alive.
+    errdefer result.free(runtime);
+    try runJobs(runtime, context, output);
+    return result;
 }
 
 fn initializeSyntheticFileModules(
@@ -368,7 +573,7 @@ fn evalPreloadedFileModuleStep(
         const global_object = try exec.zjs_vm.contextGlobal(context);
         var msg_buf = std.ArrayList(u8).empty;
         defer msg_buf.deinit(runtime.memory.allocator);
-        try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in evalPreloadedFileModuleStep {s}:{d}:{d} - {s}", .{ filename, err.position.line, err.position.column, err.message });
+        try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in {s}:{d}:{d} - {s}", .{ filename, err.position.line, err.position.column, err.message });
         const error_val = try exception_ops.createNamedError(context, global_object, "SyntaxError", msg_buf.items);
         _ = context.throwValue(error_val);
         return error.SyntaxError;
@@ -378,13 +583,7 @@ fn evalPreloadedFileModuleStep(
     defer runtime.atoms.free(module_name);
     if (runtime.modules.find(module_name) == null) return error.ModuleNotFound;
     runtime.modules.linkModule(runtime, module_name) catch |err| {
-        const exception_ops = exec.exception_ops;
-        const global_object = try exec.zjs_vm.contextGlobal(context);
-        var msg_buf = std.ArrayList(u8).empty;
-        defer msg_buf.deinit(runtime.memory.allocator);
-        try msg_buf.print(runtime.memory.allocator, "LINK ERROR in evalPreloadedFileModuleStep for module {s}: {s}", .{ filename, @errorName(err) });
-        const error_val = try exception_ops.createNamedError(context, global_object, "SyntaxError", msg_buf.items);
-        _ = context.throwValue(error_val);
+        try throwModuleLinkError(runtime, context, filename, err);
         return moduleResolutionError(err);
     };
     if (track_module_status) {
@@ -395,7 +594,16 @@ fn evalPreloadedFileModuleStep(
     errdefer {
         if (track_module_status) {
             if (runtime.modules.find(module_name)) |record| {
-                if (record.status == .evaluating) record.status = .errored;
+                if (record.status == .evaluating) {
+                    // Cache the evaluation exception on the record so later
+                    // imports rethrow it instead of re-running the body
+                    // (mirrors qjs setting m->eval_exception,
+                    // quickjs.c:31279/31563).
+                    record.status = .errored;
+                    if (context.hasException()) {
+                        record.setEvalException(runtime, context.exception_slot.value.dup());
+                    }
+                }
             }
         }
     }
@@ -640,33 +848,185 @@ fn evalDynamicImportModule(
     allocator: std.mem.Allocator,
     max_source_size: usize,
 ) !core.JSValue {
-    if (referrer_path.len == 0) return error.ModuleNotFound;
-    const target_path = try exec.module.resolveModuleSpecifier(allocator, referrer_path, specifier);
-    defer allocator.free(target_path);
-    const resolved_atom = try runtime.internAtom(target_path);
-    defer runtime.atoms.free(resolved_atom);
-    if (runtime.modules.find(resolved_atom) == null) {
-        const source = try std.Io.Dir.cwd().readFileAlloc(io, target_path, allocator, .limited(max_source_size));
-        defer allocator.free(source);
-        var postorder = std.ArrayList([]const u8).empty;
-        defer {
-            for (postorder.items) |item| allocator.free(item);
-            postorder.deinit(allocator);
-        }
-        _ = try exec.module.preloadFileModuleGraphWithOrder(io, allocator, runtime, context, source, target_path, max_source_size, &postorder);
-        try initializeSyntheticFileModules(runtime, context, io, allocator, max_source_size);
+    if (referrer_path.len == 0) {
+        try exec.module.throwCouldNotLoadModule(context, specifier);
+        return error.JSException;
     }
+    // An unresolvable specifier rejects the import() promise with the
+    // loader's ReferenceError (mirrors js_module_loader quickjs-libc.c:699)
+    // instead of aborting the evaluation with a host error.
+    const target_path_base = exec.module.resolveModuleSpecifier(allocator, referrer_path, specifier) catch |err| switch (err) {
+        error.ModuleNotFound => {
+            try exec.module.throwCouldNotLoadModule(context, specifier);
+            return error.JSException;
+        },
+        else => |e| return e,
+    };
+    defer allocator.free(target_path_base);
+
+    // A `.json` target loads as a JSON module even without import
+    // attributes, mirroring js_module_loader's extension check
+    // (`has_suffix(module_name, ".json") || res > 0`, quickjs-libc.c:704).
+    // The synthetic registry name is shared with attribute-tagged static
+    // imports so both resolve to one module record.
+    const is_json = std.mem.endsWith(u8, target_path_base, ".json");
+    const target_path = if (is_json)
+        try exec.module.syntheticModuleRegistryName(allocator, target_path_base, .json)
+    else
+        try allocator.dupe(u8, target_path_base);
+    defer allocator.free(target_path);
+
     const module_name = try runtime.internAtom(target_path);
     defer runtime.atoms.free(module_name);
-    runtime.modules.linkModule(runtime, module_name) catch |err| return moduleResolutionError(err);
-    const source = try std.Io.Dir.cwd().readFileAlloc(io, target_path, allocator, .limited(max_source_size));
-    defer allocator.free(source);
+
+    var did_preload_graph = false;
+    if (runtime.modules.find(module_name) == null) {
+        if (!is_json) {
+            const source = std.Io.Dir.cwd().readFileAlloc(io, target_path, allocator, .limited(max_source_size)) catch |err| switch (err) {
+                error.FileNotFound => {
+                    try exec.module.throwCouldNotLoadModule(context, target_path);
+                    return error.JSException;
+                },
+                else => |e| return e,
+            };
+            defer allocator.free(source);
+            var preload_postorder = std.ArrayList([]const u8).empty;
+            defer {
+                for (preload_postorder.items) |item| allocator.free(item);
+                preload_postorder.deinit(allocator);
+            }
+            // skip-existing preload: records already in the registry keep
+            // their live bindings and status (re-instantiating them would
+            // reset already-evaluated modules).
+            try exec.module.preloadMissingFileModuleGraphWithOrder(io, allocator, runtime, context, source, target_path, max_source_size, &preload_postorder);
+            did_preload_graph = true;
+        } else {
+            _ = try exec.module.preloadSyntheticFileModule(runtime, target_path, .json);
+        }
+    }
+
+    // Evaluate-once via the module status machine (mirrors
+    // js_inner_module_evaluation quickjs.c:31441): an errored module
+    // rethrows its cached exception (before relinking — linking artifacts of
+    // an errored record must stay untouched); evaluating/evaluated modules
+    // never re-run their body.
+    if (runtime.modules.find(module_name)) |record| {
+        if (record.status == .errored) return throwCachedModuleEvalException(runtime, context, record);
+    } else return error.ModuleNotFound;
+
+    runtime.modules.linkModule(runtime, module_name) catch |err| {
+        try throwModuleLinkError(runtime, context, target_path_base, err);
+        return error.JSException;
+    };
+
+    // Synthetic bindings are installed after linking: linkModule resets a
+    // fresh record's link artifacts (clearLinkArtifacts), so initializing
+    // before it would drop the binding cells (same order as the static
+    // graph runner: link first, then initializeSyntheticFileModules).
+    if (is_json) {
+        const source_path = exec.module.syntheticModuleFilePath(target_path);
+        const module_source = std.Io.Dir.cwd().readFileAlloc(io, source_path, allocator, .limited(max_source_size)) catch |err| switch (err) {
+            error.FileNotFound => {
+                try exec.module.throwCouldNotLoadModule(context, target_path_base);
+                return error.JSException;
+            },
+            else => |e| return e,
+        };
+        defer allocator.free(module_source);
+        const global_object = try exec.zjs_vm.contextGlobal(context);
+        _ = try exec.module.initializeSyntheticFileModule(context, global_object, module_name, module_source);
+    } else if (did_preload_graph) {
+        try initializeSyntheticFileModules(runtime, context, io, allocator, max_source_size);
+    }
+
+    var postorder = std.ArrayList([]const u8).empty;
+    defer {
+        for (postorder.items) |path| allocator.free(path);
+        postorder.deinit(allocator);
+    }
+    var seen = std.ArrayList(core.Atom).empty;
+    defer seen.deinit(allocator);
+    try appendPendingModuleEvalPostorder(runtime, allocator, module_name, &seen, &postorder);
+
     var continuations = std.ArrayList(ModuleContinuation).empty;
     defer freeModuleContinuations(runtime, allocator, &continuations);
-    const step = try evalPreloadedFileModuleStep(runtime, context, source, output, target_path, null, null, false);
-    try handleModuleEvalStep(runtime, allocator, &continuations, step, source, target_path, false, false);
+
+    for (postorder.items) |path| {
+        const module_atom = try runtime.internAtom(path);
+        defer runtime.atoms.free(module_atom);
+        const record = runtime.modules.find(module_atom) orelse return error.ModuleNotFound;
+        if (record.synthetic_kind != .none) {
+            // Synthetic (JSON) module records carry no code; their default
+            // binding was initialized at preload.
+            record.status = .evaluated;
+            continue;
+        }
+        if (!moduleNeedsEvaluation(record)) continue;
+
+        try drainModuleContinuationsForDependencies(runtime, context, output, allocator, &continuations, path);
+
+        const dep_source = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_source_size)) catch |err| switch (err) {
+            error.FileNotFound => {
+                try exec.module.throwCouldNotLoadModule(context, path);
+                return error.JSException;
+            },
+            else => |e| return e,
+        };
+        defer allocator.free(dep_source);
+        const step = try evalPreloadedFileModuleStep(runtime, context, dep_source, output, path, null, null, true);
+        try handleModuleEvalStep(runtime, allocator, &continuations, step, dep_source, path, false, true);
+        try runJobs(runtime, context, output);
+        if (context.hasException()) return error.JSException;
+    }
+
     _ = try drainModuleContinuations(runtime, context, output, allocator, &continuations);
+
+    if (runtime.modules.find(module_name)) |record| {
+        if (record.status == .errored) return throwCachedModuleEvalException(runtime, context, record);
+    }
     return exec.module.moduleNamespaceValue(context, module_name);
+}
+
+/// Rethrow a module's cached evaluation exception (mirrors
+/// js_inner_module_evaluation quickjs.c:31442: `JS_DupValue(ctx,
+/// m->eval_exception)` for an evaluated module with eval_has_exception).
+fn throwCachedModuleEvalException(
+    runtime: *core.JSRuntime,
+    context: *core.JSContext,
+    record: *core.module.ModuleRecord,
+) error{JSException} {
+    _ = runtime;
+    if (record.eval_exception) |exception| {
+        _ = context.throwValue(exception.dup());
+    }
+    return error.JSException;
+}
+
+/// Throw the qjs-shaped SyntaxError for a module link failure (mirrors
+/// js_resolve_export_throw_error quickjs.c:30232).
+pub fn throwModuleLinkError(
+    runtime: *core.JSRuntime,
+    context: *core.JSContext,
+    filename: []const u8,
+    err: anyerror,
+) !void {
+    const exception_ops = exec.exception_ops;
+    const global_object = try exec.zjs_vm.contextGlobal(context);
+    var msg_buf = std.ArrayList(u8).empty;
+    defer msg_buf.deinit(runtime.memory.allocator);
+    if (runtime.modules.link_error) |info| {
+        const export_name = runtime.atoms.name(info.export_name) orelse "";
+        const in_module = runtime.atoms.name(info.module_name) orelse "";
+        switch (info.kind) {
+            .missing_export => try msg_buf.print(runtime.memory.allocator, "Could not find export '{s}' in module '{s}'", .{ export_name, in_module }),
+            .ambiguous_export => try msg_buf.print(runtime.memory.allocator, "export '{s}' in module '{s}' is ambiguous", .{ export_name, in_module }),
+        }
+        runtime.modules.clearLinkError();
+    } else {
+        try msg_buf.print(runtime.memory.allocator, "could not link module '{s}': {s}", .{ filename, @errorName(err) });
+    }
+    const error_val = try exception_ops.createNamedError(context, global_object, "SyntaxError", msg_buf.items);
+    _ = context.throwValue(error_val);
 }
 
 fn evalDynamicImportModuleWithHostHooks(
@@ -857,7 +1217,7 @@ fn preloadFileModuleGraphWithHostHooksInner(
         const global_object = try exec.zjs_vm.contextGlobal(context);
         var msg_buf = std.ArrayList(u8).empty;
         defer msg_buf.deinit(runtime.memory.allocator);
-        try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in preloadFileModuleGraphWithHostHooksInner {s}:{d}:{d} - {s}", .{ path, err.position.line, err.position.column, err.message });
+        try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in {s}:{d}:{d} - {s}", .{ path, err.position.line, err.position.column, err.message });
         const error_val = try exception_ops.createNamedError(context, global_object, "SyntaxError", msg_buf.items);
         _ = context.throwValue(error_val);
         return error.SyntaxError;

@@ -6,6 +6,7 @@ const parser = @import("../parser.zig");
 const call = @import("call.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const module_exec = @import("module.zig");
+const module_graph = @import("module_graph.zig");
 const property_ops = @import("property_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const string_ops = @import("string_ops.zig");
@@ -71,12 +72,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         _ = try module_exec.instantiateParsedRecordWithReferrer(rt, module_name, &compiled.function, referrer_path);
         if (rt.modules.find(module_name)) |record| record.import_meta_main = true;
         rt.modules.linkModule(rt, module_name) catch |err| {
-            const global = try zjs_vm.contextGlobal(ctx);
-            var msg_buf = std.ArrayList(u8).empty;
-            defer msg_buf.deinit(rt.memory.allocator);
-            try msg_buf.print(rt.memory.allocator, "LINK ERROR for module {s}: {s}", .{ options.filename, @errorName(err) });
-            const error_val = try exception_ops.createNamedError(ctx, global, "SyntaxError", msg_buf.items);
-            _ = ctx.throwValue(error_val);
+            try module_graph.throwModuleLinkError(rt, ctx, options.filename, err);
             return moduleResolutionError(err);
         };
     }
@@ -91,9 +87,24 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         return core.JSValue.undefinedValue();
     }
 
-    const result = if (has_module_record)
-        try runEvalModuleWithVarRefs(ctx, &compiled.function, options.output, module_var_refs, options.timing)
-    else blk: {
+    const result = if (has_module_record) blk: {
+        // Track the record through the evaluation status machine (mirrors
+        // js_evaluate_module quickjs.c: EVALUATING → EVALUATED, with the
+        // thrown value cached as eval_exception on failure) so a later
+        // dynamic import of the same module never re-runs its body.
+        if (rt.modules.find(module_name)) |record| record.status = .evaluating;
+        errdefer if (rt.modules.find(module_name)) |record| {
+            if (record.status == .evaluating) {
+                record.status = .errored;
+                if (ctx.hasException()) record.setEvalException(rt, ctx.exception_slot.value.dup());
+            }
+        };
+        const value = try runEvalModuleWithVarRefs(ctx, &compiled.function, options.output, module_var_refs, options.timing);
+        if (rt.modules.find(module_name)) |record| {
+            if (record.status == .evaluating) record.status = .evaluated;
+        }
+        break :blk value;
+    } else blk: {
         const vm_start = monotonicNanos();
         var stack = stack_mod.Stack.init(&rt.memory, ctx.stack_limit);
         defer stack.deinit(rt);
