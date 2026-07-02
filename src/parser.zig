@@ -17097,6 +17097,12 @@ pub const parser_core = struct {
                                     try parseAssignExpr(s);
                                 }
                                 try patchForwardJump(s, keep_value);
+                                // Member/computed targets store from value_tmp
+                                // below; thread the post-default value back so
+                                // the store sees it (qjs keeps the value on top
+                                // of the lvalue ref and put_lvalue stores the
+                                // defaulted TOS, quickjs.c:26621-26640).
+                                if (value_tmp) |tmp| try s.emitOpU16(opcode.op.put_loc, tmp);
                             } else {
                                 try parseAssignExpr(s);
                                 try s.emitOp(opcode.op.drop);
