@@ -89,6 +89,23 @@ const qjsObjectEnumerableOwnPropertiesCall = object_ops.qjsObjectEnumerableOwnPr
 const readInt = call_runtime.readInt;
 const sameObjectIdentity = object_ops.sameObjectIdentity;
 const setValueProperty = object_ops.setValueProperty;
+
+/// Receiver element/length write for the array mutator builtins with the qjs
+/// JS_PROP_THROW discipline (spec Set(O, P, V, true)): failures throw even for
+/// sloppy callers, mirroring qjs JS_SetPropertyInt64 at the js_array_* sites.
+fn setValuePropertyOrThrow(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    object_value: core.JSValue,
+    atom_id: core.Atom,
+    value: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const result = try object_ops.setValuePropertyWithThrow(ctx, output, global, object_value, atom_id, value, caller_function, caller_frame, true);
+    result.free(ctx.runtime);
+}
 const slotValueBorrow = slot_ops.slotValueBorrow;
 const stringSliceValue = string_ops.stringSliceValue;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
@@ -2741,8 +2758,7 @@ pub fn qjsArraySpliceCall(
             if (try hasValueProperty(ctx, output, global, receiver_object_value, object, from_key.atom, null, null)) {
                 const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, null, null);
                 defer item.free(ctx.runtime);
-                const set_result = try setValueProperty(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
-                set_result.free(ctx.runtime);
+                try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
             } else {
                 try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, to_key.atom);
             }
@@ -2766,8 +2782,7 @@ pub fn qjsArraySpliceCall(
             if (try hasValueProperty(ctx, output, global, receiver_object_value, object, from_key.atom, null, null)) {
                 const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, null, null);
                 defer item.free(ctx.runtime);
-                const set_result = try setValueProperty(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
-                set_result.free(ctx.runtime);
+                try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
             } else {
                 try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, to_key.atom);
             }
@@ -2778,13 +2793,11 @@ pub fn qjsArraySpliceCall(
         for (args[2..], 0..) |item, offset| {
             const key = try propertyAtomFromLengthIndex(ctx.runtime, actual_start + offset);
             defer key.deinit(ctx.runtime);
-            const set_result = try setValueProperty(ctx, output, global, receiver_object_value, key.atom, item, null, null);
-            set_result.free(ctx.runtime);
+            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, item, null, null);
         }
     }
     try ensureLengthWritableForArrayBuiltin(ctx, object);
-    const set_result = try setValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(new_length), null, null);
-    set_result.free(ctx.runtime);
+    try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(new_length), null, null);
     if (verify_own_length_write) {
         const final_length = object.getProperty(core.atom.ids.length);
         defer final_length.free(ctx.runtime);
@@ -2899,8 +2912,7 @@ pub fn qjsArrayCopyWithinCall(
         if (try hasValueProperty(ctx, output, global, receiver_object_value, object, from_key.atom, null, null)) {
             const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, null, null);
             defer item.free(ctx.runtime);
-            const set_result = try setValueProperty(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
-            set_result.free(ctx.runtime);
+            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
         } else {
             try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, to_key.atom);
         }
@@ -3012,8 +3024,7 @@ pub fn qjsArrayFillCall(
             while (index < final) : (index += 1) {
                 const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
                 defer key.deinit(ctx.runtime);
-                const set_result = try setValueProperty(ctx, output, global, receiver_object_value, key.atom, value, null, null);
-                set_result.free(ctx.runtime);
+                try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, value, null, null);
             }
             return receiver_object_value.dup();
         }
@@ -3023,8 +3034,7 @@ pub fn qjsArrayFillCall(
     while (index < final) : (index += 1) {
         const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
         defer key.deinit(ctx.runtime);
-        const set_result = try setValueProperty(ctx, output, global, receiver_object_value, key.atom, value, null, null);
-        set_result.free(ctx.runtime);
+        try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, value, null, null);
     }
     return receiver_object_value.dup();
 }
@@ -3096,14 +3106,11 @@ fn qjsArrayPushCallImpl(
         const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
         defer key.deinit(ctx.runtime);
         try ensureSettableForArrayBuiltin(ctx, object, key.atom);
-        const set_result = try setValueProperty(ctx, output, global, receiver_object_value, key.atom, item, caller_function, caller_frame);
-        set_result.free(ctx.runtime);
+        try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, item, caller_function, caller_frame);
         index += 1;
     }
     try ensureLengthWritableForArrayBuiltin(ctx, object);
-    const set_length = try setValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(index), caller_function, caller_frame);
-    set_length.free(ctx.runtime);
-    try verifyArrayLikeLengthSet(ctx, output, global, receiver_object_value, index);
+    try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(index), caller_function, caller_frame);
     return lengthIndexValue(index);
 }
 
@@ -3145,9 +3152,7 @@ fn qjsArrayPopCallImpl(
 
     if (length == 0) {
         try ensureLengthWritableForArrayBuiltin(ctx, object);
-        const set_length = try setValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, core.JSValue.int32(0), caller_function, caller_frame);
-        set_length.free(ctx.runtime);
-        try verifyArrayLikeLengthSet(ctx, output, global, receiver_object_value, 0);
+        try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, core.atom.ids.length, core.JSValue.int32(0), caller_function, caller_frame);
         return core.JSValue.undefinedValue();
     }
 
@@ -3157,9 +3162,7 @@ fn qjsArrayPopCallImpl(
     const value = try getValueProperty(ctx, output, global, receiver_object_value, key.atom, caller_function, caller_frame);
     errdefer value.free(ctx.runtime);
     try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, key.atom);
-    const set_length = try setValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(index), caller_function, caller_frame);
-    set_length.free(ctx.runtime);
-    try verifyArrayLikeLengthSet(ctx, output, global, receiver_object_value, index);
+    try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(index), caller_function, caller_frame);
     return value;
 }
 
@@ -3210,9 +3213,7 @@ pub fn qjsArrayShiftCall(
 
     if (length == 0) {
         try ensureLengthWritableForArrayBuiltin(ctx, object);
-        const set_length = try setValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, core.JSValue.int32(0), null, null);
-        set_length.free(ctx.runtime);
-        try verifyArrayLikeLengthSet(ctx, output, global, receiver_object_value, 0);
+        try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, core.atom.ids.length, core.JSValue.int32(0), null, null);
         return core.JSValue.undefinedValue();
     }
 
@@ -3225,23 +3226,20 @@ pub fn qjsArrayShiftCall(
         defer from_key.deinit(ctx.runtime);
         const to_key = try propertyAtomFromLengthIndex(ctx.runtime, index - 1);
         defer to_key.deinit(ctx.runtime);
-        if (object.hasProperty(from_key.atom)) {
+        if (try hasValueProperty(ctx, output, global, receiver_object_value, object, from_key.atom, null, null)) {
             const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, null, null);
             defer item.free(ctx.runtime);
-            const set_result = try setValueProperty(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
-            set_result.free(ctx.runtime);
+            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
         } else {
-            if (!object.deleteProperty(ctx.runtime, to_key.atom)) return error.TypeError;
+            try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, to_key.atom);
         }
     }
 
     const tail_key = try propertyAtomFromLengthIndex(ctx.runtime, length - 1);
     defer tail_key.deinit(ctx.runtime);
-    if (!object.deleteProperty(ctx.runtime, tail_key.atom)) return error.TypeError;
+    try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, tail_key.atom);
     try ensureLengthWritableForArrayBuiltin(ctx, object);
-    const set_length = try setValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(length - 1), null, null);
-    set_length.free(ctx.runtime);
-    try verifyArrayLikeLengthSet(ctx, output, global, receiver_object_value, length - 1);
+    try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(length - 1), null, null);
     return first;
 }
 
@@ -3374,15 +3372,12 @@ pub fn qjsArrayUnshiftCall(
             const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
             defer key.deinit(ctx.runtime);
             try ensureSettableForArrayBuiltin(ctx, object, key.atom);
-            const set_result = try setValueProperty(ctx, output, global, receiver_object_value, key.atom, item, null, null);
-            set_result.free(ctx.runtime);
+            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, item, null, null);
         }
     }
 
     try ensureLengthWritableForArrayBuiltin(ctx, object);
-    const set_length = try setValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(new_length), null, null);
-    set_length.free(ctx.runtime);
-    try verifyArrayLikeLengthSet(ctx, output, global, receiver_object_value, new_length);
+    try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(new_length), null, null);
     return lengthIndexValue(new_length);
 }
 
@@ -3441,7 +3436,7 @@ pub fn qjsArrayReverseCall(
     // pointer-swap loop, a pure JSValue permutation with no dup/free (matches
     // qjs's set_value-free swap). count32 == len rejects tail holes; non-fast /
     // sparse / proxy / array-like fall through to the generic loop below.
-    if (object.isFastArray() and object.fastArrayCount() == length) {
+    if (object.flags.extensible and object.isFastArray() and object.fastArrayCount() == length) {
         if (length > 1) {
             const arrp = object.fastArrayValuesMut();
             var ll: usize = 0;
@@ -3485,18 +3480,14 @@ pub fn qjsArrayReverseCall(
         }
 
         if (lower_exists and upper_exists) {
-            const set_lower = try setValueProperty(ctx, output, global, receiver_object_value, lower_key.atom, upper_value, caller_function, caller_frame);
-            set_lower.free(ctx.runtime);
-            const set_upper = try setValueProperty(ctx, output, global, receiver_object_value, upper_key.atom, lower_value, caller_function, caller_frame);
-            set_upper.free(ctx.runtime);
+            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, lower_key.atom, upper_value, caller_function, caller_frame);
+            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, upper_key.atom, lower_value, caller_function, caller_frame);
         } else if (!lower_exists and upper_exists) {
-            const set_lower = try setValueProperty(ctx, output, global, receiver_object_value, lower_key.atom, upper_value, caller_function, caller_frame);
-            set_lower.free(ctx.runtime);
+            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, lower_key.atom, upper_value, caller_function, caller_frame);
             try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, upper_key.atom);
         } else if (lower_exists and !upper_exists) {
             try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, lower_key.atom);
-            const set_upper = try setValueProperty(ctx, output, global, receiver_object_value, upper_key.atom, lower_value, caller_function, caller_frame);
-            set_upper.free(ctx.runtime);
+            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, upper_key.atom, lower_value, caller_function, caller_frame);
         }
     }
 
@@ -3549,14 +3540,13 @@ pub fn unshiftMoveIndex(
     defer from_key.deinit(ctx.runtime);
     const to_key = try propertyAtomFromLengthIndex(ctx.runtime, from_index + insert_count);
     defer to_key.deinit(ctx.runtime);
-    if (object.hasProperty(from_key.atom)) {
+    if (try hasValueProperty(ctx, output, global, receiver, object, from_key.atom, null, null)) {
         const item = try getValueProperty(ctx, output, global, receiver, from_key.atom, null, null);
         defer item.free(ctx.runtime);
         try ensureSettableForArrayBuiltin(ctx, object, to_key.atom);
-        const set_result = try setValueProperty(ctx, output, global, receiver, to_key.atom, item, null, null);
-        set_result.free(ctx.runtime);
+        try setValuePropertyOrThrow(ctx, output, global, receiver, to_key.atom, item, null, null);
     } else {
-        if (!object.deleteProperty(ctx.runtime, to_key.atom)) return error.TypeError;
+        try deleteValuePropertyOrThrow(ctx, output, global, receiver, object, to_key.atom);
     }
 }
 
@@ -4376,16 +4366,14 @@ pub fn qjsArraySortCall(
         if (entry.order != sorted_index) {
             const key = try propertyAtomFromLengthIndex(ctx.runtime, sorted_index);
             defer key.deinit(ctx.runtime);
-            const result = try setValueProperty(ctx, output, global, receiver_object_value, key.atom, entry.value, caller_function, caller_frame);
-            result.free(ctx.runtime);
+            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, entry.value, caller_function, caller_frame);
         }
         index += 1;
     }
     while (index < entries.items.len + undefined_count) : (index += 1) {
         const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
         defer key.deinit(ctx.runtime);
-        const result = try setValueProperty(ctx, output, global, receiver_object_value, key.atom, core.JSValue.undefinedValue(), caller_function, caller_frame);
-        result.free(ctx.runtime);
+        try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, core.JSValue.undefinedValue(), caller_function, caller_frame);
     }
     while (index < length) : (index += 1) {
         const key = try propertyAtomFromLengthIndex(ctx.runtime, index);

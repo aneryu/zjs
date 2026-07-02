@@ -3168,7 +3168,26 @@ pub fn setValueProperty(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
-    const throw_on_set_failure = setFailureShouldThrow(caller_function);
+    return setValuePropertyWithThrow(ctx, output, global, object_value, atom_id, value, caller_function, caller_frame, false);
+}
+
+/// `setValueProperty` with an explicit throw override: `force_throw = true` is
+/// the qjs `JS_PROP_THROW` discipline (spec `Set(O, P, V, true)`) used by the
+/// array mutator builtins, which must surface element/length write failures
+/// regardless of the calling code's strictness (qjs `JS_SetPropertyInt64` at
+/// the js_array_* sites always throws on failure).
+pub fn setValuePropertyWithThrow(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    object_value: core.JSValue,
+    atom_id: core.Atom,
+    value: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+    force_throw: bool,
+) HostError!core.JSValue {
+    const throw_on_set_failure = force_throw or setFailureShouldThrow(caller_function);
     if (ctx.runtime.atoms.kind(atom_id) == .private) {
         if (!object_value.isObject()) return error.TypeError;
         const object = try property_ops.expectObject(object_value);
