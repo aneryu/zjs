@@ -117,17 +117,27 @@ pub fn backtraceFunctionNameEql(ctx: *core.JSContext, entry: core.BacktraceFrame
     return std.mem.eql(u8, callSiteFunctionName(ctx, entry), expected);
 }
 
+/// Display name for a backtrace frame. Mirrors qjs build_backtrace
+/// (quickjs.c:7580-7586): an empty name renders "<anonymous>", a top-level
+/// script/eval frame renders "<eval>". qjs gets the latter for free because
+/// the compiler names every top-level function def JS_ATOM__eval_
+/// (quickjs.c:37252); zjs's top-level bytecode instead carries name ==
+/// filename (the name-equality is also its eval-frame detection convention,
+/// e.g. vm_call.zig / eval_ops.zig), so the "<eval>" mapping is applied at
+/// this rendering seam.
 pub fn callSiteFunctionName(ctx: *core.JSContext, entry: core.BacktraceFrame) []const u8 {
     const name = ctx.runtime.atoms.name(entry.function_name) orelse "";
     const file = ctx.runtime.atoms.name(entry.filename) orelse "";
-    if (name.len == 0 or std.mem.eql(u8, name, file)) return "<anonymous>";
+    if (name.len == 0) return "<anonymous>";
+    if (std.mem.eql(u8, name, file)) return "<eval>";
     return name;
 }
 
 pub fn callSiteFunctionNameValue(ctx: *core.JSContext, entry: core.BacktraceFrame) !core.JSValue {
     const name = ctx.runtime.atoms.name(entry.function_name) orelse "";
     const file = ctx.runtime.atoms.name(entry.filename) orelse "";
-    if (name.len == 0 or std.mem.eql(u8, name, file)) return core.JSValue.nullValue();
+    if (name.len == 0) return core.JSValue.nullValue();
+    if (std.mem.eql(u8, name, file)) return value_ops.createStringValue(ctx.runtime, "<eval>");
     return value_ops.createStringValue(ctx.runtime, name);
 }
 
@@ -157,8 +167,11 @@ pub fn appendBacktraceFunctionName(
 ) !void {
     const name = ctx.runtime.atoms.name(function_name) orelse "";
     const file = ctx.runtime.atoms.name(filename) orelse "";
-    if (name.len == 0 or std.mem.eql(u8, name, file)) {
+    if (name.len == 0) {
         try bytes.appendSlice(ctx.runtime.memory.allocator, "<anonymous>");
+    } else if (std.mem.eql(u8, name, file)) {
+        // Top-level script/eval frame (see callSiteFunctionName).
+        try bytes.appendSlice(ctx.runtime.memory.allocator, "<eval>");
     } else {
         try bytes.appendSlice(ctx.runtime.memory.allocator, name);
     }
