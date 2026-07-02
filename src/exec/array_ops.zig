@@ -4430,7 +4430,13 @@ pub fn stableArraySortEntries(
             var right = mid;
             var out_index = start;
             while (left < mid and right < end) : (out_index += 1) {
-                if (try arrayByCopySortCompare(ctx, output, global, typed_numeric_default, comparator, &entries[right], &entries[left], caller_function, caller_frame) < 0) {
+                // Faithful to js_array_cmp_generic (quickjs.c:43362) /
+                // js_TA_cmp_generic (quickjs.c:58759): the user comparator
+                // receives (earlier, later) — argv[0] is the element from the
+                // lower original run. Take the right run only on a strictly
+                // positive result so equal elements keep the left-first
+                // (stable) order, matching qjs's a_idx<b_idx tie-break.
+                if (try arrayByCopySortCompare(ctx, output, global, typed_numeric_default, comparator, &entries[left], &entries[right], caller_function, caller_frame) > 0) {
                     temp[out_index] = entries[right];
                     right += 1;
                 } else {
