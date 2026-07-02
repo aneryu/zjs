@@ -3916,6 +3916,10 @@ pub const parser_core = struct {
         destructuring_binding_is_lexical: bool = false,
         destructuring_binding_is_const: bool = false,
         destructuring_predeclare_only: bool = false,
+        // True while parsing the parameter list of a class/object-literal
+        // method. Mirrors qjs func_type == JS_PARSE_FUNC_METHOD in the
+        // duplicate-argument check gate (quickjs.c:36443-36448).
+        parsing_method_params: bool = false,
         destructuring_assignment_target_mode: bool = false,
         suppress_destructuring_capture_retrofit: bool = false,
         collect_module_export_bindings: bool = false,
@@ -10147,12 +10151,14 @@ pub const parser_core = struct {
         const saved_in_generator = s.in_generator;
         const saved_in_async = s.in_async;
         const saved_allow_super = s.allow_super;
+        const saved_parsing_method_params = s.parsing_method_params;
         s.pending_function_name = name;
         s.pending_function_is_decl = false;
         s.top_level_functions_as_children = true;
         s.in_generator = func_kind == .generator or func_kind == .async_generator;
         s.in_async = func_kind == .async or func_kind == .async_generator;
         s.allow_super = true;
+        s.parsing_method_params = true;
         defer {
             s.pending_function_name = saved_name;
             s.pending_function_is_decl = saved_decl;
@@ -10160,6 +10166,7 @@ pub const parser_core = struct {
             s.in_generator = saved_in_generator;
             s.in_async = saved_in_async;
             s.allow_super = saved_allow_super;
+            s.parsing_method_params = saved_parsing_method_params;
         }
         try parseFunctionParamsAndBody(s, func_kind, source_start);
         // Object literal methods are named by OP_define_method. Do not let
@@ -14992,6 +14999,12 @@ pub const parser_core = struct {
         s.last_function_child_index = null;
         const parent_fd = s.cur_func();
         const capture_child = s.cur_func_stack.len > 0 or s.top_level_functions_as_children;
+        // Consume the method-context marker set by emitObjectMethodFunction /
+        // parseClassElementFunction so nested functions parsed inside this
+        // function's parameters or body do not inherit it. Mirrors qjs
+        // fd->func_type == JS_PARSE_FUNC_METHOD (quickjs.c:36443-36448).
+        const is_method_params = s.parsing_method_params;
+        s.parsing_method_params = false;
         const saved_emit_to_function_def = s.emit_to_function_def;
         const saved_last_opcode_source_offset = s.last_opcode_source_offset;
         const saved_scope_level = s.scope_level;
@@ -15315,6 +15328,12 @@ pub const parser_core = struct {
         var param_count: u32 = 0;
         var simple_param_names = std.ArrayList(Atom).empty;
         defer simple_param_names.deinit(s.function.memory.allocator);
+        // Names bound inside destructuring parameter patterns. Any collision
+        // between these and any other parameter name is a SyntaxError
+        // regardless of strictness, mirroring js_parse_check_duplicate_parameter
+        // (quickjs.c:26276) and the post-parse arg-vs-var scan (quickjs.c:36455).
+        var pattern_param_names = std.ArrayList(Atom).empty;
+        defer pattern_param_names.deinit(s.function.memory.allocator);
         var has_duplicate_simple_params = false;
         var has_simple_parameter_list = true;
         var first_default_param: ?u32 = null;
@@ -15358,6 +15377,13 @@ pub const parser_core = struct {
                             if (strict_params) return Error.UnexpectedToken;
                             break;
                         }
+                    }
+                    // An argument that duplicates a name bound by an earlier
+                    // destructuring parameter is always an error (the pattern
+                    // makes the list non-simple). Mirrors the arg-vs-var scan
+                    // in js_parse_function_check_names (quickjs.c:36455-36462).
+                    for (pattern_param_names.items) |existing| {
+                        if (existing == param_atom) return Error.UnexpectedToken;
                     }
                     try simple_param_names.append(s.function.memory.allocator, param_atom);
                     if (capture_child) {
@@ -15405,6 +15431,7 @@ pub const parser_core = struct {
                     // Object destructuring parameter: {a, b}
                     has_simple_parameter_list = false;
                     const arg_index = param_count;
+                    try collectParamPatternDupNames(s, .object, &simple_param_names, &pattern_param_names);
                     if (capture_child) try ensureDestructuringArgSlot(s, arg_index);
                     try parseDestructuringParam(s, .object, if (capture_child) arg_index else null);
                     param_count += 1;
@@ -15412,6 +15439,7 @@ pub const parser_core = struct {
                     // Array destructuring parameter: [a, b]
                     has_simple_parameter_list = false;
                     const arg_index = param_count;
+                    try collectParamPatternDupNames(s, .array, &simple_param_names, &pattern_param_names);
                     if (capture_child) try ensureDestructuringArgSlot(s, arg_index);
                     try parseDestructuringParam(s, .array, if (capture_child) arg_index else null);
                     param_count += 1;
@@ -15426,6 +15454,9 @@ pub const parser_core = struct {
                         if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
                         const rest_atom = identifierLikeAtom(s);
                         for (simple_param_names.items) |existing| {
+                            if (existing == rest_atom) return Error.UnexpectedToken;
+                        }
+                        for (pattern_param_names.items) |existing| {
                             if (existing == rest_atom) return Error.UnexpectedToken;
                         }
                         try simple_param_names.append(s.function.memory.allocator, rest_atom);
@@ -15445,6 +15476,7 @@ pub const parser_core = struct {
                         }
                         try s.advance();
                     } else if (s.peekKind() == '[') {
+                        try collectParamPatternDupNames(s, .array, &simple_param_names, &pattern_param_names);
                         if (capture_child) {
                             try ensureDestructuringArgSlot(s, arg_index);
                             try s.emitOpU16(opcode.op.rest, @intCast(arg_index));
@@ -15454,6 +15486,7 @@ pub const parser_core = struct {
                         }
                         try parseDestructuringParam(s, .array, if (capture_child) arg_index else null);
                     } else if (s.peekKind() == '{') {
+                        try collectParamPatternDupNames(s, .object, &simple_param_names, &pattern_param_names);
                         if (capture_child) {
                             try ensureDestructuringArgSlot(s, arg_index);
                             try s.emitOpU16(opcode.op.rest, @intCast(arg_index));
@@ -15520,7 +15553,18 @@ pub const parser_core = struct {
                 if (isInvalidStrictFunctionBindingName(s, param_name)) return Error.UnexpectedToken;
             }
         }
-        if (has_duplicate_simple_params and (func_kind != .normal or !has_simple_parameter_list or s.is_strict or s.cur_func().is_strict_mode)) return Error.UnexpectedToken;
+        // Mirrors the duplicate-argument gate in js_parse_function_check_names
+        // (quickjs.c:36443-36448): strict mode, a non-simple parameter list,
+        // methods (incl. getters/setters/class elements) and arrows reject
+        // duplicates; plain sloppy function/generator/async declarations and
+        // expressions with a simple list keep them legal.
+        if (has_duplicate_simple_params and
+            (is_method_params or
+                func_kind == .method or func_kind == .get or func_kind == .set or
+                func_kind == .arrow or
+                func_kind == .class_constructor or func_kind == .derived_class_constructor or
+                !has_simple_parameter_list or s.is_strict or s.cur_func().is_strict_mode))
+            return Error.UnexpectedToken;
         s.leaveControlBoundary(saved_control_frames);
         control_boundary_active = false;
         if (capture_child) {
@@ -16080,6 +16124,30 @@ pub const parser_core = struct {
         const snapshot = takeParserSnapshot(s);
         defer restoreParserLexerSnapshot(s, snapshot);
         try collectArrowPatternBindingNames(s, kind, names);
+    }
+
+    /// Pre-scan a destructuring parameter pattern of an ordinary function or
+    /// method and reject any bound name that duplicates a previous argument or
+    /// a name bound by an earlier destructuring parameter. Mirrors
+    /// js_parse_check_duplicate_parameter (quickjs.c:26276), which qjs runs for
+    /// every binding added during destructuring parameter parsing
+    /// (quickjs.c:26325 identifiers, 26574 object shorthand props); duplicates
+    /// inside a single pattern are also caught here, matching the same check.
+    fn collectParamPatternDupNames(
+        s: *State,
+        kind: DestructuringKind,
+        simple_param_names: *const std.ArrayList(Atom),
+        pattern_param_names: *std.ArrayList(Atom),
+    ) Error!void {
+        var collected = std.ArrayList(Atom).empty;
+        defer collected.deinit(s.function.memory.allocator);
+        try collectArrowPatternBindingNamesSnapshot(s, kind, &collected);
+        for (collected.items) |name| {
+            for (simple_param_names.items) |existing| {
+                if (existing == name) return Error.UnexpectedToken;
+            }
+            try appendArrowParamBindingName(s, pattern_param_names, name);
+        }
     }
 
     fn collectArrowArrayBindingNames(s: *State, names: *std.ArrayList(Atom)) Error!void {
@@ -18584,6 +18652,7 @@ pub const parser_core = struct {
         const saved_is_strict = s.is_strict;
         const saved_allow_super = s.allow_super;
         const saved_top_level_children = s.top_level_functions_as_children;
+        const saved_parsing_method_params = s.parsing_method_params;
         s.pending_function_name = null;
         s.pending_function_is_decl = false;
         s.in_async = kind == .async or kind == .async_generator;
@@ -18591,6 +18660,7 @@ pub const parser_core = struct {
         s.is_strict = true;
         s.allow_super = true;
         s.top_level_functions_as_children = true;
+        s.parsing_method_params = true;
         defer {
             s.pending_function_name = saved_pending_name;
             s.pending_function_is_decl = saved_pending_decl;
@@ -18599,6 +18669,7 @@ pub const parser_core = struct {
             s.is_strict = saved_is_strict;
             s.allow_super = saved_allow_super;
             s.top_level_functions_as_children = saved_top_level_children;
+            s.parsing_method_params = saved_parsing_method_params;
         }
         try parseFunctionParamsAndBody(s, kind, source_start);
         try attachClassPrivateBoundNamesToLastFunction(s);
