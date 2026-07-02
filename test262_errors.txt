@@ -1,4 +1,3 @@
-# Known test262 failures (accepted, not regressions).
 test262/test/built-ins/Array/fromAsync/async-iterable-async-mapped-awaits-once.js
 test262/test/built-ins/Array/fromAsync/async-iterable-input-does-not-await-input.js
 test262/test/built-ins/Array/fromAsync/async-iterable-input-iteration-err.js
@@ -128,22 +127,14 @@ test262/test/built-ins/Promise/any/invoke-resolve-on-promises-every-iteration-of
 test262/test/built-ins/Promise/any/invoke-resolve-on-values-every-iteration-of-custom.js
 test262/test/built-ins/Promise/exception-after-resolve-in-executor.js
 test262/test/built-ins/Promise/prototype/finally/rejected-observable-then-calls.js
-test262/test/built-ins/Promise/prototype/then/resolve-pending-fulfilled-prms-cstm-then.js
-test262/test/built-ins/Promise/prototype/then/resolve-pending-rejected-prms-cstm-then.js
-test262/test/built-ins/Promise/prototype/then/resolve-settled-fulfilled-prms-cstm-then.js
-test262/test/built-ins/Promise/prototype/then/resolve-settled-rejected-prms-cstm-then.js
 test262/test/built-ins/Promise/race/invoke-resolve-on-promises-every-iteration-of-custom.js
 test262/test/built-ins/Promise/reject-ignored-via-abrupt.js
-test262/test/built-ins/Promise/resolve-prms-cstm-then-deferred.js
-test262/test/built-ins/Promise/resolve-prms-cstm-then-immed.js
 test262/test/harness/asyncHelpers-asyncTest-returns-undefined.js
 test262/test/harness/asyncHelpers-asyncTest-then-rejects.js
 test262/test/harness/asyncHelpers-asyncTest-then-resolves.js
 test262/test/language/expressions/async-generator/named-yield-star-sync-throw.js
 test262/test/language/expressions/async-generator/yield-star-sync-throw.js
 test262/test/language/expressions/await/async-generator-interleaved.js
-test262/test/language/expressions/await/await-monkey-patched-promise.js
-test262/test/language/expressions/await/await-non-promise-thenable.js
 test262/test/language/expressions/await/for-await-of-interleaved.js
 test262/test/language/expressions/await/syntax-await-has-UnaryExpression-with-MultiplicativeExpression.js
 test262/test/language/expressions/await/syntax-await-in-ConditionalExpression.js
@@ -226,19 +217,7 @@ test262/test/language/expressions/dynamic-import/catch/top-level-import-catch-ev
 test262/test/language/expressions/dynamic-import/catch/top-level-import-catch-instn-iee-err-ambiguous-import.js
 test262/test/language/expressions/dynamic-import/catch/top-level-import-catch-instn-iee-err-circular.js
 test262/test/language/expressions/dynamic-import/custom-primitive.js
-test262/test/language/expressions/dynamic-import/eval-export-dflt-cls-anon.js
-test262/test/language/expressions/dynamic-import/eval-export-dflt-cls-name-meth.js
-test262/test/language/expressions/dynamic-import/eval-export-dflt-cls-named.js
-test262/test/language/expressions/dynamic-import/eval-export-dflt-expr-cls-anon.js
-test262/test/language/expressions/dynamic-import/eval-export-dflt-expr-cls-name-meth.js
-test262/test/language/expressions/dynamic-import/eval-export-dflt-expr-cls-named.js
-test262/test/language/expressions/dynamic-import/eval-export-dflt-expr-fn-anon.js
-test262/test/language/expressions/dynamic-import/eval-export-dflt-expr-fn-named.js
-test262/test/language/expressions/dynamic-import/eval-export-dflt-expr-gen-anon.js
-test262/test/language/expressions/dynamic-import/eval-export-dflt-expr-gen-named.js
-test262/test/language/expressions/dynamic-import/eval-export-dflt-expr-in.js
 test262/test/language/expressions/dynamic-import/eval-rqstd-once.js
-test262/test/language/expressions/dynamic-import/eval-self-once-module.js
 test262/test/language/expressions/dynamic-import/eval-self-once-script.js
 test262/test/language/expressions/dynamic-import/for-await-resolution-and-error-agen-yield.js
 test262/test/language/expressions/dynamic-import/for-await-resolution-and-error-agen.js
@@ -257,7 +236,6 @@ test262/test/language/expressions/dynamic-import/import-attributes/2nd-param-yie
 test262/test/language/expressions/dynamic-import/import-attributes/2nd-param-yield-ident-valid.js
 test262/test/language/expressions/dynamic-import/import-attributes/trailing-comma-fulfill.js
 test262/test/language/expressions/dynamic-import/import-errored-module.js
-test262/test/language/expressions/dynamic-import/imported-self-update.js
 test262/test/language/expressions/dynamic-import/indirect-resolution.js
 test262/test/language/expressions/dynamic-import/namespace/await-ns-Symbol-toStringTag.js
 test262/test/language/expressions/dynamic-import/namespace/await-ns-define-own-property.js
@@ -267,7 +245,6 @@ test262/test/language/expressions/dynamic-import/namespace/await-ns-delete-non-e
 test262/test/language/expressions/dynamic-import/namespace/await-ns-delete-non-exported-strict.js
 test262/test/language/expressions/dynamic-import/namespace/await-ns-extensible.js
 test262/test/language/expressions/dynamic-import/namespace/await-ns-get-nested-namespace-dflt-direct.js
-test262/test/language/expressions/dynamic-import/namespace/await-ns-get-nested-namespace-dflt-indirect.js
 test262/test/language/expressions/dynamic-import/namespace/await-ns-get-nested-namespace-props-nrml.js
 test262/test/language/expressions/dynamic-import/namespace/await-ns-get-own-property-str-found-init.js
 test262/test/language/expressions/dynamic-import/namespace/await-ns-get-own-property-str-not-found.js
@@ -301,7 +278,6 @@ test262/test/language/expressions/dynamic-import/namespace/promise-then-ns-delet
 test262/test/language/expressions/dynamic-import/namespace/promise-then-ns-delete-non-exported-strict.js
 test262/test/language/expressions/dynamic-import/namespace/promise-then-ns-extensible.js
 test262/test/language/expressions/dynamic-import/namespace/promise-then-ns-get-nested-namespace-dflt-direct.js
-test262/test/language/expressions/dynamic-import/namespace/promise-then-ns-get-nested-namespace-dflt-indirect.js
 test262/test/language/expressions/dynamic-import/namespace/promise-then-ns-get-nested-namespace-props-nrml.js
 test262/test/language/expressions/dynamic-import/namespace/promise-then-ns-get-own-property-str-found-init.js
 test262/test/language/expressions/dynamic-import/namespace/promise-then-ns-get-own-property-str-not-found.js
@@ -439,7 +415,6 @@ test262/test/language/expressions/dynamic-import/usage/top-level-import-then-is-
 test262/test/language/expressions/dynamic-import/usage/top-level-import-then-returns-thenable.js
 test262/test/language/expressions/dynamic-import/usage/top-level-import-then-specifier-tostring.js
 test262/test/language/expressions/object/method-definition/async-gen-yield-star-sync-throw.js
-test262/test/language/import/import-attributes/json-idempotency.js
 test262/test/language/module-code/top-level-await/dynamic-import-of-waiting-module.js
 test262/test/language/module-code/top-level-await/fulfillment-order.js
 test262/test/language/module-code/top-level-await/rejection-order.js
@@ -462,7 +437,4 @@ test262/test/language/statements/class/elements/async-gen-private-method/yield-s
 test262/test/language/statements/for-await-of/async-func-decl-dstr-obj-id-init-simple-no-strict.js
 test262/test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-iter-rtrn-close-null.js
 test262/test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-simple-no-strict.js
-test262/test/language/statements/for-await-of/ticks-with-async-iter-resolved-promise-and-constructor-lookup-two.js
-test262/test/language/statements/for-await-of/ticks-with-async-iter-resolved-promise-and-constructor-lookup.js
-test262/test/language/statements/for-await-of/ticks-with-sync-iter-resolved-promise-and-constructor-lookup.js
 test262/test/language/statements/using/initializer-disposed-at-end-of-asyncgeneratorbody.js
