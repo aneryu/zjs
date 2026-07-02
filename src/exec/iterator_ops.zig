@@ -772,8 +772,9 @@ fn fastGeneratorForOfNext(
 
     const receiver = stack.values[iterator_index].dup();
     defer receiver.free(ctx.runtime);
-    // class_id == generator above guarantees a non-null step (null is returned only for
-    // non-sync-generator receivers, all checked BEFORE the resume runs any user code).
+    // null is returned only for non-sync-generator receivers or a generator carrying a
+    // pending return completion, all checked BEFORE the resume runs any user code, so
+    // falling back to the generic path never double-advances.
     const step = (try call_runtime.qjsSyncGeneratorStep(ctx, output, global, receiver, &.{})) orelse return false;
     const value = step.value;
     errdefer value.free(ctx.runtime);

@@ -5400,6 +5400,17 @@ pub fn qjsGeneratorNext(
         }
         return done_result.dup();
     }
+    if (takeGeneratorPendingReturn(object)) |pending| {
+        // Suspended at a yield inside a finally block entered via .return(v): finish
+        // the finally range, then complete with the pending return value (qjs
+        // js_generator_next GEN_MAGIC_RETURN, quickjs.c:21077).
+        const step = try resumeGeneratorPendingReturnStep(ctx, output, generator_global, receiver, object, pending, args);
+        if (!step.done and (object.generatorYieldStarIterator() != null or generatorYieldStarSuspended(ctx.runtime, object))) {
+            return step.value;
+        }
+        defer step.value.free(ctx.runtime);
+        return try createIteratorResult(ctx.runtime, generator_global, step.value, step.done);
+    }
     const function_value = object.functionBytecodeSlot().* orelse return error.TypeError;
     const stored_current_function = if (object.generatorCurrentFunction()) |value| value.dup() else null;
     defer if (stored_current_function) |value| value.free(ctx.runtime);
@@ -5494,6 +5505,10 @@ pub fn qjsSyncGeneratorStep(
     if (object.generatorExecuting()) return error.TypeError;
     const generator_global = object_ops.objectRealmGlobal(object) orelse global;
     if (object.generatorDone()) return .{ .value = core.JSValue.undefinedValue(), .done = true };
+    // Pending return completion stashed by .return(v) suspended in a finally block:
+    // fall back to the generic protocol, whose .next() call lands in qjsGeneratorNext
+    // and threads the completion through the finally.
+    if (object.generatorResumeCompletionType() == 1) return null;
     const function_value = object.functionBytecodeSlot().* orelse return error.TypeError;
     const stored_current_function = if (object.generatorCurrentFunction()) |value| value.dup() else null;
     defer if (stored_current_function) |value| value.free(ctx.runtime);
@@ -5621,6 +5636,122 @@ pub fn resumeGeneratorYieldStarCompletion(
     return try createIteratorResult(ctx.runtime, global, result, done);
 }
 
+/// Pending return completion stash. When `.return(v)` enters a finally block and the
+/// finally itself yields, the pending return completion must survive the suspension so
+/// the following `.next()` can complete `{value: v, done: true}`. Mirror qjs
+/// js_generator_next GEN_MAGIC_RETURN (quickjs.c:21109: `sf->cur_sp[-1] = ret;
+/// sf->cur_sp[0] = JS_NewInt32(ctx, magic)` — the completion value and its magic live
+/// on the generator's own saved stack): the value plus an int32 stop-pc marker are
+/// pushed onto the generator's saved operand stack (GC-traced and freed with the
+/// generator payload) and `resume_completion_type` is set to 1 = GEN_MAGIC_RETURN.
+/// Every resume entry point must consume the stash first (`takeGeneratorPendingReturn`)
+/// so the saved stack regains the exact shape the suspended bytecode expects.
+pub fn stashGeneratorPendingReturn(
+    rt: *core.JSRuntime,
+    generator: *core.Object,
+    pending_value: core.JSValue,
+    stop_pc: usize,
+) !void {
+    const values = generator.generatorStack();
+    const capacity = generator.generatorStackCapacity();
+    if (values.len + 2 > capacity) {
+        var next_capacity: usize = if (capacity == 0) 8 else capacity;
+        while (next_capacity < values.len + 2) next_capacity *= 2;
+        const next = try rt.memory.alloc(core.JSValue, next_capacity);
+        @memcpy(next[0..values.len], values);
+        generator.generatorStackSlot().* = next[0..values.len];
+        generator.generatorStackCapacitySlot().* = next_capacity;
+        if (capacity != 0) {
+            rt.memory.free(core.JSValue, values.ptr[0..capacity]);
+        } else if (values.len != 0) {
+            rt.memory.free(core.JSValue, values);
+        }
+    }
+    const stack = generator.generatorStack();
+    stack.ptr[stack.len] = pending_value.dup();
+    stack.ptr[stack.len + 1] = core.JSValue.int32(@intCast(stop_pc));
+    generator.generatorStackSlot().* = stack.ptr[0 .. stack.len + 2];
+    generator.generatorResumeCompletionTypeSlot().* = 1; // GEN_MAGIC_RETURN
+}
+
+pub const GeneratorPendingReturn = struct {
+    /// Owned by the caller.
+    value: core.JSValue,
+    stop_pc: usize,
+};
+
+/// Pop the pending return completion stashed by `stashGeneratorPendingReturn`, if any.
+/// Outside an active resume, `resume_completion_type == 1` only ever means a stashed
+/// pending return (the transient yield-star magic is consumed within the same resume,
+/// guarded by the executing flag).
+pub fn takeGeneratorPendingReturn(generator: *core.Object) ?GeneratorPendingReturn {
+    if (generator.generatorResumeCompletionType() != 1) return null;
+    generator.generatorResumeCompletionTypeSlot().* = 0;
+    const values = generator.generatorStack();
+    std.debug.assert(values.len >= 2);
+    const marker = values[values.len - 1];
+    const value = values[values.len - 2];
+    generator.generatorStackSlot().* = values.ptr[0 .. values.len - 2];
+    return .{ .value = value, .stop_pc = @intCast(marker.asInt32() orelse 0) };
+}
+
+/// Resume a generator suspended at a yield INSIDE a finally block that was entered via
+/// `.return(v)`: run the rest of the finally range and complete with the pending return
+/// value once the range finishes (qjs threads this natively through OP_return / OP_ret
+/// with the completion on the generator stack, js_generator_next quickjs.c:21077).
+/// Takes ownership of `pending.value`; the returned value is owned by the caller.
+fn resumeGeneratorPendingReturnStep(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    generator_global: *core.Object,
+    receiver: core.JSValue,
+    object: *core.Object,
+    pending: GeneratorPendingReturn,
+    args: []const core.JSValue,
+) !GeneratorValueDone {
+    const pending_value = pending.value;
+    defer pending_value.free(ctx.runtime);
+    const function_value = object.functionBytecodeSlot().* orelse return error.TypeError;
+    const stored_current_function = if (object.generatorCurrentFunction()) |value| value.dup() else null;
+    defer if (stored_current_function) |value| value.free(ctx.runtime);
+    const current_function_value = stored_current_function orelse receiver;
+    const resume_value = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
+    object.generatorExecutingSlot().* = true;
+    defer object.generatorExecutingSlot().* = false;
+    const result = callFunctionBytecodeModeState(
+        ctx,
+        function_value,
+        current_function_value,
+        object.generatorThis() orelse core.JSValue.undefinedValue(),
+        object.generatorArgs(),
+        object.functionCapturesSlot().*,
+        output,
+        generator_global,
+        object.functionEvalLocalNames(),
+        object.functionEvalLocalRefs(),
+        false,
+        object,
+        resume_value,
+        pending.stop_pc,
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+    ) catch |err| {
+        object.generatorDoneSlot().* = true;
+        return err;
+    };
+    defer result.free(ctx.runtime);
+    if (object.generatorJustYielded()) {
+        // Suspended again inside the finally (plain yield or yield* delegation):
+        // keep the pending return completion stashed. This is safe because every
+        // resume entry point pops the stash before restoring the saved stack.
+        try stashGeneratorPendingReturn(ctx.runtime, object, pending_value, pending.stop_pc);
+        return .{ .value = result.dup(), .done = false };
+    }
+    object.generatorDoneSlot().* = true;
+    const value = if (result.isUndefined()) pending_value.dup() else result.dup();
+    return .{ .value = value, .done = true };
+}
+
 pub fn qjsGeneratorReturn(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -5633,6 +5764,10 @@ pub fn qjsGeneratorReturn(
     if (object.class_id != core.class.ids.generator and object.class_id != core.class.ids.async_generator) return null;
     if (object.generatorExecuting()) return error.TypeError;
     const generator_global = object_ops.objectRealmGlobal(object) orelse global;
+    // A fresh .return(v) replaces any pending return completion stashed by an earlier
+    // return that suspended inside a finally block (qjs: the new completion resumes at
+    // the yield and the old stack slots unwind with the frame).
+    if (takeGeneratorPendingReturn(object)) |pending| pending.value.free(ctx.runtime);
     try closeGeneratorDestructuringIterators(ctx, output, generator_global, object);
     var return_value = if (args.len > 0) args[0].dup() else core.JSValue.undefinedValue();
     defer return_value.free(ctx.runtime);
@@ -5689,6 +5824,16 @@ pub fn qjsGeneratorReturn(
             defer result.free(ctx.runtime);
             const done = !object.generatorJustYielded();
             if (done) object.generatorDoneSlot().* = true;
+            if (!done and object.class_id == core.class.ids.generator) {
+                // The finally block itself yielded: preserve the pending return
+                // completion across the suspension (qjs js_generator_next
+                // GEN_MAGIC_RETURN, quickjs.c:21109).
+                try stashGeneratorPendingReturn(ctx.runtime, object, return_value, finally_range.stop);
+                if (object.generatorYieldStarIterator() != null or generatorYieldStarSuspended(ctx.runtime, object)) {
+                    // yield* passthrough: `result` is already an iterator-result object.
+                    return result.dup();
+                }
+            }
             const iterator_value = if (done and result.isUndefined()) return_value else result;
             if (object.class_id == core.class.ids.async_generator) {
                 const promise = try promise_ops.asyncGeneratorFulfilledIteratorResult(ctx, generator_global, iterator_value, done);
@@ -5893,6 +6038,10 @@ pub fn qjsGeneratorThrow(
     if (object.generatorExecuting()) return error.TypeError;
     const generator_global = object_ops.objectRealmGlobal(object) orelse global;
     const thrown = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
+    // A throw injected at a yield inside a finally block discards any pending return
+    // completion stashed there (qjs: the exception unwinds the frame and the stacked
+    // completion slots are freed with it).
+    if (takeGeneratorPendingReturn(object)) |pending| pending.value.free(ctx.runtime);
 
     if (generatorYieldStarSuspended(ctx.runtime, object)) {
         return try resumeGeneratorYieldStarCompletion(ctx, output, generator_global, receiver, object, thrown, 2);
