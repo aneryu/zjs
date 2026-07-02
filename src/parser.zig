@@ -8414,6 +8414,12 @@ pub const parser_core = struct {
         }
         if (s.peekKind() == tok.TOK_NEW) {
             try parseNewExpr(s, flags);
+            // The member tail following the inner NewExpression binds to the
+            // inner `new`'s result: `new new F().m` is `new ((new F()).m)`.
+            // qjs gets this from the recursive `js_parse_postfix_expr(s, 0)`
+            // (`quickjs.c:27016`) whose postfix loop consumes `.x`/`[x]`
+            // before the outer `new` applies.
+            try parseNewCalleeMemberAccess(s, flags);
         } else if (s.peekKind() == tok.TOK_IMPORT) {
             if (s.peekNextKind() != @as(tok.TokenKind, @intCast('.'))) return Error.UnexpectedToken;
             try parsePrimary(s, flags);
