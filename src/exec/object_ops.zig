@@ -2166,7 +2166,7 @@ pub fn objectRestOwnKeys(
         if (atomListContains(out, atom_id)) return error.TypeError;
         try appendOwnedAtom(ctx.runtime, &out, atom_id);
     }
-    try validateProxyOwnKeysResult(ctx, output, global, target_value, out);
+    try validateProxyOwnKeysResult(ctx, output, global, source, target_value, out);
     return out;
 }
 
@@ -4060,7 +4060,7 @@ pub fn hasPropertyForWith(
     defer key_value.free(ctx.runtime);
     const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
     defer result.free(ctx.runtime);
-    return try validateProxyHasResult(ctx.runtime, target, atom_id, valueTruthy(result));
+    return try validateProxyHasResult(ctx, output, global, target, atom_id, valueTruthy(result), caller_function, caller_frame);
 }
 
 pub fn hasValueProperty(
@@ -4088,7 +4088,7 @@ pub fn hasValueProperty(
     defer key_value.free(ctx.runtime);
     const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
     defer result.free(ctx.runtime);
-    return try validateProxyHasResult(ctx.runtime, target, atom_id, valueTruthy(result));
+    return try validateProxyHasResult(ctx, output, global, target, atom_id, valueTruthy(result), caller_function, caller_frame);
 }
 
 pub fn ordinaryHasValueProperty(
@@ -4168,10 +4168,15 @@ pub fn deleteValueProperty(
     const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
     defer result.free(ctx.runtime);
     if (!valueTruthy(result)) return false;
-    if (target.getOwnProperty(ctx.runtime, atom_id)) |desc| {
+    // js_proxy_delete_property (quickjs.c:51157): the target desc is read via
+    // JS_GetOwnPropertyInternal (exotic — a nested-proxy target fires its own
+    // gopd trap); a non-configurable desc throws, then extensibility is
+    // consulted via JS_IsExtensible (exotic — the target's isExtensible trap
+    // DOES fire here, unlike js_proxy_has).
+    if (try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, atom_id, caller_function, caller_frame)) |desc| {
         defer desc.destroy(ctx.runtime);
         if (desc.configurable == false) return error.TypeError;
-        if (!target.isExtensible()) return error.TypeError;
+        if (!try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) return error.TypeError;
     }
     return true;
 }
@@ -4959,25 +4964,45 @@ pub fn validateProxyOwnKeysResult(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
+    source: *core.Object,
     target_value: core.JSValue,
     result_keys: []const core.Atom,
 ) HostError!void {
     const rt = ctx.runtime;
     const target = try property_ops.expectObject(target_value);
+    // js_proxy_get_own_property_names (quickjs.c:51219) invariant walk:
+    // JS_IsExtensible on the target FIRST (exotic — a nested-proxy target
+    // fires its isExtensible trap), then a revoked re-check (the ownKeys trap
+    // may have revoked its own proxy, quickjs.c:51285), then the target's own
+    // keys via JS_GetOwnPropertyNamesInternal (exotic ownKeys) and a per-key
+    // revoked re-check (quickjs.c:51293) + JS_GetOwnPropertyInternal (exotic
+    // gopd — inner invariant violations surface as TypeErrors here).
+    const target_extensible = try proxyAwareIsExtensible(ctx, output, global, target, null, null);
+    if (source.proxyHandler() == null) return error.TypeError; // revoked proxy
     const target_keys = try objectRestOwnKeys(ctx, output, global, target);
     defer core.Object.freeKeys(rt, target_keys);
-    const target_extensible = target.isExtensible();
+
+    // Mirrors qjs's tab[idx].is_enumerable found-marking: a trap-result key on
+    // a non-extensible target must correspond to a target key whose gopd walk
+    // actually found a descriptor.
+    const found = try rt.memory.allocator.alloc(bool, result_keys.len);
+    defer rt.memory.allocator.free(found);
+    @memset(found, false);
 
     for (target_keys) |target_key| {
-        const desc = target.getOwnProperty(rt, target_key) orelse continue;
+        if (source.proxyHandler() == null) return error.TypeError; // revoked proxy
+        const desc = (try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, target_key, null, null)) orelse continue;
         defer desc.destroy(rt);
         if (desc.configurable == false or !target_extensible) {
-            if (!atomListContains(result_keys, target_key)) return error.TypeError;
+            const idx = for (result_keys, 0..) |result_key, i| {
+                if (result_key == target_key) break i;
+            } else return error.TypeError;
+            if (!target_extensible) found[idx] = true;
         }
     }
     if (!target_extensible) {
-        for (result_keys) |result_key| {
-            if (!atomListContains(target_keys, result_key)) return error.TypeError;
+        for (found) |marked| {
+            if (!marked) return error.TypeError;
         }
     }
 }
@@ -5500,7 +5525,10 @@ pub fn proxyDefineOwnProperty(
     if (!valueTruthy(result)) return false;
     const target_desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, atom_id, caller_function, caller_frame);
     defer if (target_desc) |item| item.destroy(ctx.runtime);
-    const target_extensible = try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame);
+    // js_proxy_define_own_property (quickjs.c:51060) reads the raw
+    // p->extensible flag of the target (no JS_IsExtensible call — a
+    // nested-proxy target does NOT fire its isExtensible trap here).
+    const target_extensible = target.isExtensible();
     if (!try isCompatibleProxyDescriptor(target_extensible, target_desc, desc)) return error.TypeError;
     const setting_config_false = desc.configurable == false;
     if (setting_config_false) {
@@ -5516,10 +5544,24 @@ pub fn proxyDefineOwnProperty(
     return true;
 }
 
-pub fn validateProxyHasResult(rt: *core.JSRuntime, target: *core.Object, atom_id: core.Atom, result: bool) !bool {
+pub fn validateProxyHasResult(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    target: *core.Object,
+    atom_id: core.Atom,
+    result: bool,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !bool {
     if (result) return true;
-    if (target.getOwnProperty(rt, atom_id)) |desc| {
-        defer desc.destroy(rt);
+    // js_proxy_has (quickjs.c:50765): the target desc is read via
+    // JS_GetOwnPropertyInternal (exotic-dispatching — a nested-proxy target
+    // fires its own getOwnPropertyDescriptor trap and its invariant checks),
+    // while extensibility is the raw p->extensible flag (NOT JS_IsExtensible:
+    // no isExtensible trap fires here).
+    if (try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, atom_id, caller_function, caller_frame)) |desc| {
+        defer desc.destroy(ctx.runtime);
         if (desc.configurable == false) return error.TypeError;
         if (!target.isExtensible()) return error.TypeError;
     }

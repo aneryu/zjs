@@ -396,7 +396,18 @@ fn proxyReflectHasProperty(
     defer key_value.free(ctx.runtime);
     const result = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, handler_value, trap, &.{ target_value, key_value });
     defer result.free(ctx.runtime);
-    return try object_ops.validateProxyHasResult(ctx.runtime, target, atom_id, value_ops.isTruthy(result));
+    const trap_result = value_ops.isTruthy(result);
+    const global_object = global orelse {
+        // Bare-runtime fallback (no realm global): keep the raw target reads;
+        // the VM path below mirrors js_proxy_has's exotic-dispatching reads.
+        if (trap_result) return true;
+        if (target.getOwnProperty(ctx.runtime, atom_id)) |desc| {
+            defer desc.destroy(ctx.runtime);
+            if (desc.configurable == false or !target.isExtensible()) return error.TypeError;
+        }
+        return false;
+    };
+    return try object_ops.validateProxyHasResult(ctx, output, global_object, target, atom_id, trap_result, null, null);
 }
 
 fn typedArrayReflectHas(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?bool {
