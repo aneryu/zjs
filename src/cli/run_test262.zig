@@ -1686,10 +1686,11 @@ fn runOneTest(
 
     var stderr: []const u8 = "";
     const can_block = metadata.hasFlag("CanBlockIsTrue");
+    const is_async = metadata.hasFlag("async");
     const exited_zero = if (use_external_engine)
-        try runExternalEngine(allocator, io, engine_path, source, test_path, test_index, run_as_module, can_block, timeout_ms, stderr_storage, &stderr)
+        try runExternalEngine(allocator, io, engine_path, source, test_path, test_index, run_as_module, can_block, is_async, timeout_ms, stderr_storage, &stderr)
     else
-        try runEmbeddedEngine(allocator, io, source, test_path, run_as_module, can_block, stderr_storage, &stderr);
+        try runEmbeddedEngine(allocator, io, source, test_path, run_as_module, can_block, is_async, stderr_storage, &stderr);
     const elapsed_ms: i64 = started.durationTo(std.Io.Clock.Timestamp.now(io, .awake)).raw.toMilliseconds();
     const passed = if (metadata.negative) |negative|
         negativeResultMatches(negative, exited_zero, stderr)
@@ -1714,6 +1715,7 @@ fn runEmbeddedEngine(
     path: []const u8,
     run_as_module: bool,
     can_block: bool,
+    is_async: bool,
     stderr_storage: *[stderr_storage_len]u8,
     stderr_out: *[]const u8,
 ) !bool {
@@ -1761,8 +1763,32 @@ fn runEmbeddedEngine(
             async_exception.free(rt);
             return false;
         }
+        if (is_async and !asyncHarnessCompleted(output.buffered())) {
+            stderr_out.* = "TypeError: $DONE() not called";
+            return false;
+        }
     }
     return !value.isException();
+}
+
+/// Mirrors the reference runner's async-test oracle: run-test262.c js_print
+/// (quickjs run-test262.c:541-545) counts prints of the exact string
+/// "Test262:AsyncTestComplete" and forces an error on any print starting with
+/// "Test262:AsyncTestFailure"; eval_buf (run-test262.c:1418-1423) then throws
+/// TypeError "$DONE() not called" unless the counter is exactly 1 after all
+/// pending jobs drained. zjs captures print output per line ("<args>\n"), so
+/// the per-print check becomes a per-line check over the captured output.
+fn asyncHarnessCompleted(output_bytes: []const u8) bool {
+    var async_done: u32 = 0;
+    var lines = std.mem.splitScalar(u8, output_bytes, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.eql(u8, line, "Test262:AsyncTestComplete")) {
+            async_done += 1;
+        } else if (std.mem.startsWith(u8, line, "Test262:AsyncTestFailure")) {
+            async_done = 2; // force an error, mirroring run-test262.c:544
+        }
+    }
+    return async_done == 1;
 }
 
 fn formatPendingExceptionName(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, storage: *[stderr_storage_len]u8) !?[]const u8 {
@@ -1838,6 +1864,7 @@ fn runExternalEngine(
     test_index: usize,
     run_as_module: bool,
     can_block: bool,
+    is_async: bool,
     timeout_ms: ?u32,
     stderr_storage: *[stderr_storage_len]u8,
     stderr_out: *[]const u8,
@@ -1904,10 +1931,15 @@ fn runExternalEngine(
     defer allocator.free(result.stderr);
 
     stderr_out.* = copyStderr(stderr_storage, result.stderr);
-    return switch (result.term) {
+    const exited_zero = switch (result.term) {
         .exited => |code| code == 0,
         else => false,
     };
+    if (exited_zero and is_async and !asyncHarnessCompleted(result.stdout)) {
+        stderr_out.* = copyStderr(stderr_storage, "TypeError: $DONE() not called");
+        return false;
+    }
+    return exited_zero;
 }
 
 fn prepareModuleTempTree(io: std.Io, temp_path: []const u8, test_path: []const u8) !void {
@@ -3876,12 +3908,68 @@ test "embedded runner reports thrown proxy constructors as test failures" {
         "proxy-constructor-throw.js",
         false,
         false,
+        false,
         &stderr_storage,
         &stderr,
     );
 
     try std.testing.expect(!passed);
     try std.testing.expect(stderr.len != 0);
+}
+
+test "async harness oracle mirrors run-test262.c $DONE accounting" {
+    // Exactly one completion sentinel: pass.
+    try std.testing.expect(asyncHarnessCompleted("Test262:AsyncTestComplete\n"));
+    try std.testing.expect(asyncHarnessCompleted("some output\nTest262:AsyncTestComplete\n"));
+    // No sentinel at all ($DONE never called): fail.
+    try std.testing.expect(!asyncHarnessCompleted(""));
+    try std.testing.expect(!asyncHarnessCompleted("unrelated output\n"));
+    // Failure sentinel forces an error even if completion also printed.
+    try std.testing.expect(!asyncHarnessCompleted("Test262:AsyncTestFailure:Test262Error: boom\n"));
+    try std.testing.expect(!asyncHarnessCompleted("Test262:AsyncTestFailure:TypeError: x\nTest262:AsyncTestComplete\n"));
+    // $DONE called twice: fail (counter must be exactly 1).
+    try std.testing.expect(!asyncHarnessCompleted("Test262:AsyncTestComplete\nTest262:AsyncTestComplete\n"));
+    // Sentinel must match the whole printed line, not a substring.
+    try std.testing.expect(!asyncHarnessCompleted("Test262:AsyncTestComplete extra\n"));
+}
+
+test "embedded runner fails async test whose $DONE reports an error" {
+    var stderr_storage: [stderr_storage_len]u8 = undefined;
+    var stderr: []const u8 = "";
+    const passed = try runEmbeddedEngine(
+        std.testing.allocator,
+        std.testing.io,
+        "function $DONE(error){ print(error ? 'Test262:AsyncTestFailure:Test262Error: ' + String(error) : 'Test262:AsyncTestComplete'); }" ++
+            "Promise.resolve().then(function(){ $DONE(new Error('boom')); });",
+        "async-done-failure.js",
+        false,
+        false,
+        true,
+        &stderr_storage,
+        &stderr,
+    );
+
+    try std.testing.expect(!passed);
+    try std.testing.expectEqualStrings("TypeError: $DONE() not called", stderr);
+}
+
+test "embedded runner passes async test that completes via $DONE" {
+    var stderr_storage: [stderr_storage_len]u8 = undefined;
+    var stderr: []const u8 = "";
+    const passed = try runEmbeddedEngine(
+        std.testing.allocator,
+        std.testing.io,
+        "function $DONE(error){ print(error ? 'Test262:AsyncTestFailure:Test262Error: ' + String(error) : 'Test262:AsyncTestComplete'); }" ++
+            "Promise.resolve().then(function(){ $DONE(); });",
+        "async-done-pass.js",
+        false,
+        false,
+        true,
+        &stderr_storage,
+        &stderr,
+    );
+
+    try std.testing.expect(passed);
 }
 
 test "test262 metadata parses includes in order plus features flags and negative data" {
