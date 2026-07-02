@@ -1605,6 +1605,43 @@ const array_prototype = [_]Method{
     .{ .name = "entries", .length = 0 },
 };
 
+/// %TypedArray%.prototype method surface — mirrors
+/// js_typed_array_base_proto_funcs (quickjs.c:59765). Unlike Array.prototype
+/// there is no push/pop/shift/unshift/splice/concat/flat/flatMap/toSpliced:
+/// neither the spec nor qjs installs the Array-only length-mutating and
+/// nesting methods on the %TypedArray% prototype.
+const typed_array_prototype = [_]Method{
+    .{ .name = "toString", .length = 0 },
+    .{ .name = "toLocaleString", .length = 0 },
+    .{ .name = "map", .length = 1 },
+    .{ .name = "filter", .length = 1 },
+    .{ .name = "reduce", .length = 1 },
+    .{ .name = "reduceRight", .length = 1 },
+    .{ .name = "forEach", .length = 1 },
+    .{ .name = "some", .length = 1 },
+    .{ .name = "every", .length = 1 },
+    .{ .name = "find", .length = 1 },
+    .{ .name = "findIndex", .length = 1 },
+    .{ .name = "findLast", .length = 1 },
+    .{ .name = "findLastIndex", .length = 1 },
+    .{ .name = "includes", .length = 1 },
+    .{ .name = "indexOf", .length = 1 },
+    .{ .name = "lastIndexOf", .length = 1 },
+    .{ .name = "at", .length = 1 },
+    .{ .name = "copyWithin", .length = 2 },
+    .{ .name = "fill", .length = 1 },
+    .{ .name = "slice", .length = 2 },
+    .{ .name = "join", .length = 1 },
+    .{ .name = "reverse", .length = 0 },
+    .{ .name = "sort", .length = 1 },
+    .{ .name = "toReversed", .length = 0 },
+    .{ .name = "toSorted", .length = 1 },
+    .{ .name = "with", .length = 2 },
+    .{ .name = "keys", .length = 0 },
+    .{ .name = "values", .length = 0 },
+    .{ .name = "entries", .length = 0 },
+};
+
 const string_static = [_]Method{
     .{ .name = "fromCharCode", .length = 1 },
     .{ .name = "fromCodePoint", .length = 1 },
@@ -1996,7 +2033,7 @@ const constructor_specs = [_]ConstructorSpec{
     .{ .name = "FinalizationRegistry", .kind = .finalization_registry, .length = 1, .prototype_methods = &finalization_registry_prototype },
     .{ .name = "ArrayBuffer", .kind = .array_buffer, .length = 1, .static_methods = &array_buffer_static, .prototype_methods = &buffer_prototype },
     .{ .name = "SharedArrayBuffer", .kind = .shared_array_buffer, .length = 1, .prototype_methods = &shared_buffer_prototype },
-    .{ .name = "TypedArray", .kind = .typed_array, .length = 0, .static_methods = &typed_array_static, .prototype_methods = &array_prototype },
+    .{ .name = "TypedArray", .kind = .typed_array, .length = 0, .static_methods = &typed_array_static, .prototype_methods = &typed_array_prototype },
     .{ .name = "Int8Array", .kind = .int8_array, .length = 3, .prototype_methods = &no_methods },
     .{ .name = "Uint8Array", .kind = .uint8_array, .length = 3, .prototype_methods = &no_methods },
     .{ .name = "Uint8ClampedArray", .kind = .uint8_clamped_array, .length = 3, .prototype_methods = &no_methods },
