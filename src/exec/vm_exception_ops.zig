@@ -493,6 +493,10 @@ pub fn runtimeErrorInfo(err: anytype) ?ErrorInfo {
         error.RangeError => .{ .name = "RangeError", .message = "" },
         // qjs js_bigint_new single throw site (quickjs.c:11593-11594).
         error.BigIntTooLarge => .{ .name = "RangeError", .message = "BigInt is too large to allocate" },
+        // qjs js_bigint_divrem division-by-zero guard (quickjs.c:11888).
+        error.DivisionByZero => .{ .name = "RangeError", .message = "BigInt division by zero" },
+        // qjs js_bigint_pow negative-exponent guard (quickjs.c:12113).
+        error.NegativeExponent => .{ .name = "RangeError", .message = "BigInt negative exponent" },
         error.ReferenceError => .{ .name = "ReferenceError", .message = "not defined" },
         else => null,
     };
@@ -508,6 +512,10 @@ pub fn promiseErrorInfo(err: anytype) ErrorInfo {
         error.RangeError => .{ .name = "RangeError", .message = "" },
         // qjs js_bigint_new single throw site (quickjs.c:11593-11594).
         error.BigIntTooLarge => .{ .name = "RangeError", .message = "BigInt is too large to allocate" },
+        // qjs js_bigint_divrem division-by-zero guard (quickjs.c:11888).
+        error.DivisionByZero => .{ .name = "RangeError", .message = "BigInt division by zero" },
+        // qjs js_bigint_pow negative-exponent guard (quickjs.c:12113).
+        error.NegativeExponent => .{ .name = "RangeError", .message = "BigInt negative exponent" },
         error.ReferenceError => .{ .name = "ReferenceError", .message = "not defined" },
         else => .{ .name = "Error", .message = "" },
     };
@@ -521,7 +529,7 @@ fn errorNameForRuntimeError(err: anytype) ?[]const u8 {
         error.TypeError => "TypeError",
         error.InvalidCharacterError => "InvalidCharacterError",
         error.SyntaxError => "SyntaxError",
-        error.RangeError, error.BigIntTooLarge => "RangeError",
+        error.RangeError, error.BigIntTooLarge, error.DivisionByZero, error.NegativeExponent => "RangeError",
         error.ReferenceError => "ReferenceError",
         else => null,
     };
