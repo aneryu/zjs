@@ -1657,6 +1657,18 @@ pub const Object = struct {
 
     pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) void {
         const self: *Object = @alignCast(@fieldParentPtr("header", header));
+        // qjs marks an object "about to be freed" before its zero-refcount free
+        // runs (`js_rc(p)->mark = 1`, __JS_FreeValueRT quickjs.c:6479), and
+        // js_weakref_free tests that mark (quickjs.c:51728-51735) so releasing
+        // the LAST weak reference to an object whose own teardown is in
+        // progress (a FinalizationRegistry registered as its own target /
+        // unregister token, or two dead registries weakly cross-registered)
+        // does NOT free the struct out from under free_object. The husk branch
+        // below resets the mark (mirror of quickjs.c:6389) so a later weak
+        // release can reclaim the kept struct. Without setting the mark here,
+        // `releaseWeakIdentity` could reentrantly `destroyDeadWeakHusk` this
+        // object mid-teardown — a double free corrupting the slab free list.
+        header.meta().flags.mark = true;
         const inline_layout = inlineClassPayloadLayout(rt.classes.record(self.class_id));
         rt.unregisterObject(self);
         clearBorrowedReferencesForDestroyedObject(rt, self);
