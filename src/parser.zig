@@ -15213,24 +15213,38 @@ pub const parser_core = struct {
                     !s.annex_b_if_function_decl_clause and
                     s.findFunctionScopeVar(name) == null)
                 {
-                    if (!s.lex.is_module and s.cur_func_stack.len == 0 and (!s.is_eval or s.eval_global_var_bindings)) {
+                    const is_script_global_fn = !s.lex.is_module and s.cur_func_stack.len == 0 and (!s.is_eval or s.eval_global_var_bindings);
+                    if (is_script_global_fn) {
+                        // Script / indirect-eval global code: a top-level function
+                        // declaration is a *global var* (qjs is_global_var →
+                        // add_global_var, quickjs.c:36980). It is installed as a plain
+                        // global-object property from the global_vars hoist table (like
+                        // a top-level `var`); its references resolve to a dynamic
+                        // OP_get_var global lookup (resolve_scope_var, quickjs.c:33272),
+                        // so `globalThis.f = x` is observable. Do NOT create a closure
+                        // var_ref cell (that becomes a lexical binding get_var reads,
+                        // shadowing the property, and caused a captured-cell staleness).
                         try s.addGlobalAnnexBFunctionVar(name, s.eval_global_var_bindings);
+                        child_fd.child_decl_emit_global_inline = true;
+                    } else {
+                        // Module (and direct-eval) top-level function decls are lexical
+                        // closure var_refs (qjs JS_CLOSURE_MODULE_DECL).
+                        const parent_ref_idx: u16 = if (State.findClosureVarIndex(parent_fd, name)) |idx| blk: {
+                            parent_fd.closure_var[idx].var_kind = .function_decl;
+                            parent_fd.closure_var[idx].is_lexical = true;
+                            break :blk idx;
+                        } else @intCast(try parent_fd.addClosureVar(.{
+                            .closure_type = .module_decl,
+                            .is_lexical = true,
+                            .is_const = false,
+                            .var_kind = .function_decl,
+                            .var_idx = @intCast(parent_fd.closure_var.len),
+                            .var_name = name,
+                        }));
+                        try s.retrofitForwardTopLevelFunctionCapture(parent_fd, name, parent_ref_idx);
+                        child_fd.emit_top_level_closure_init = true;
+                        child_fd.top_level_closure_var_idx = parent_ref_idx;
                     }
-                    const parent_ref_idx: u16 = if (State.findClosureVarIndex(parent_fd, name)) |idx| blk: {
-                        parent_fd.closure_var[idx].var_kind = .function_decl;
-                        parent_fd.closure_var[idx].is_lexical = true;
-                        break :blk idx;
-                    } else @intCast(try parent_fd.addClosureVar(.{
-                        .closure_type = .module_decl,
-                        .is_lexical = true,
-                        .is_const = false,
-                        .var_kind = .function_decl,
-                        .var_idx = @intCast(parent_fd.closure_var.len),
-                        .var_name = name,
-                    }));
-                    try s.retrofitForwardTopLevelFunctionCapture(parent_fd, name, parent_ref_idx);
-                    child_fd.emit_top_level_closure_init = true;
-                    child_fd.top_level_closure_var_idx = parent_ref_idx;
                 } else {
                     _ = parent_code_len_before_child;
                     child_fd.child_decl_init_keep_value = false;

@@ -3882,6 +3882,10 @@ pub const pipeline_resolve_variables = struct {
                     top_level_closure_init_size += try fclosureEncodingSize(child.parent_cpool_idx) + selectVarRefForm(ctx, opcode.op.put_var_ref, @intCast(child.top_level_closure_var_idx)).size;
                     continue;
                 }
+                // Script global function decl: installed from the global_vars hoist
+                // table (parser emits the fclosure→global put inline); the child-init
+                // pass must not also emit a local put_loc (there is no local slot).
+                if (child.child_decl_emit_global_inline and !child.child_decl_emit_inline) continue;
                 if (child.child_decl_emit_inline) continue;
                 if (child.func_type != .statement) continue;
                 const arg_idx_i = if (child.child_decl_force_local_init) -1 else fd.findArg(child.func_name);
@@ -4356,6 +4360,10 @@ pub const pipeline_resolve_variables = struct {
                     out_idx += form.size;
                     continue;
                 }
+                // Script global function decl: installed from the global_vars hoist
+                // table (parser emits the fclosure→global put inline); the child-init
+                // pass must not also emit a local put_loc (there is no local slot).
+                if (child.child_decl_emit_global_inline and !child.child_decl_emit_inline) continue;
                 if (child.child_decl_emit_inline) continue;
                 if (child.func_type != .statement) continue;
                 if (child.parent_cpool_idx < 0) return error.InvalidBytecode;
