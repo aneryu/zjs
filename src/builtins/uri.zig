@@ -4,6 +4,7 @@ const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 const builtin_dispatch = @import("../exec/builtin_dispatch.zig");
 const exceptions = @import("../exec/exceptions.zig");
+const exception_ops = @import("../exec/vm_exception_ops.zig");
 const string_ops = @import("../exec/string_ops.zig");
 
 const HostError = exceptions.HostError;
@@ -25,6 +26,20 @@ const AppendStringError = error{
     InvalidRadix,
     NoSpaceLeft,
 };
+
+/// Throw a `URIError` with `message` (mirrors qjs `js_throw_URIError`,
+/// quickjs.c:54734): construct the error value, set the context exception, and
+/// return the `error.URIError` sentinel. The exception value is preserved by the
+/// host-call boundary's `hasException()` check, so the specific message survives
+/// rather than being replaced by the coarse "expecting hex digit" fallback. On
+/// the bare-runtime path (no realm global) there is no error prototype to build
+/// against, so the bare `error.URIError` sentinel is returned unchanged.
+fn throwUriErrorMessage(ctx: *core.JSContext, global: ?*core.Object, message: []const u8) HostError {
+    const active_global = global orelse return error.URIError;
+    const error_value = exception_ops.createNamedError(ctx, active_global, "URIError", message) catch |err| return err;
+    _ = ctx.throwValue(error_value);
+    return error.URIError;
+}
 
 /// Declaration table: one entry per global URI builtin plus the legacy
 /// `escape`/`unescape` globals. `id` is the `methodId` mode selector (1..4)
@@ -60,7 +75,7 @@ fn uriCall(host_call: InternalCall) HostError!core.JSValue {
         // Realm path: coerce the argument through the user-visible ToString
         // (Annex B) before the body, except an already-string input which the
         // body consumes directly (matching the retired exec coercion glue).
-        if (input.isString()) return uriBody(ctx.runtime, mode, input);
+        if (input.isString()) return uriBody(ctx, global, mode, input);
         const string_value = try string_ops.toStringForAnnexB(
             ctx,
             host_call.output,
@@ -70,21 +85,21 @@ fn uriCall(host_call: InternalCall) HostError!core.JSValue {
             builtin_dispatch.callerFrame(host_call),
         );
         defer string_value.free(ctx.runtime);
-        return uriBody(ctx.runtime, mode, string_value);
+        return uriBody(ctx, global, mode, string_value);
     }
-    // Bare-runtime primitive path.
-    return uriBody(ctx.runtime, mode, input);
+    // Bare-runtime primitive path (no realm global for specific URIError text).
+    return uriBody(ctx, null, mode, input);
 }
 
-/// Dispatch a `.uri` record id to its primitive method body.
-fn uriBody(rt: *core.JSRuntime, mode: u32, input: core.JSValue) HostError!core.JSValue {
+/// Dispatch a `.uri` record id to its primitive method body. `global` is the
+/// realm global used to build specific `URIError` messages, or null on bare
+/// runtimes.
+fn uriBody(ctx: *core.JSContext, global: ?*core.Object, mode: u32, input: core.JSValue) HostError!core.JSValue {
+    const rt = ctx.runtime;
     return switch (mode) {
         escape_id => escape(rt, input),
         unescape_id => unescape(rt, input),
-        else => call(rt, mode, input),
-    } catch |err| switch (err) {
-        error.TypeError, error.URIError => err,
-        else => err,
+        else => call(ctx, global, mode, input),
     };
 }
 
@@ -111,12 +126,14 @@ fn uriHexDigitValue(unit: u32) ?u8 {
     };
 }
 
-/// qjs `hex_decode` (quickjs.c:54741): `k` points at '%'; two hex digits must
-/// follow within the string, else URIError "expecting hex digit".
-fn uriHexDecodeAt(comptime T: type, units: []const T, k: usize) !u8 {
-    if (k + 3 > units.len) return error.URIError;
-    const hi = uriHexDigitValue(units[k + 1]) orelse return error.URIError;
-    const lo = uriHexDigitValue(units[k + 2]) orelse return error.URIError;
+/// qjs `hex_decode` (quickjs.c:54744): `k` must point at '%' (else URIError
+/// "expecting %"); two hex digits must follow within the string, else URIError
+/// "expecting hex digit".
+fn uriHexDecodeAt(comptime T: type, ctx: *core.JSContext, global: ?*core.Object, units: []const T, k: usize) HostError!u8 {
+    if (k >= units.len or units[k] != '%') return throwUriErrorMessage(ctx, global, "expecting %");
+    if (k + 3 > units.len) return throwUriErrorMessage(ctx, global, "expecting hex digit");
+    const hi = uriHexDigitValue(units[k + 1]) orelse return throwUriErrorMessage(ctx, global, "expecting hex digit");
+    const lo = uriHexDigitValue(units[k + 2]) orelse return throwUriErrorMessage(ctx, global, "expecting hex digit");
     return (hi << 4) | lo;
 }
 
@@ -129,10 +146,11 @@ fn isUriReservedChar(c: u32) bool {
 /// Faithful port of qjs `js_global_decodeURI` (quickjs.c:54755): walk the
 /// source string's code units; '%' starts a hex escape; a lead byte >= 0x80
 /// assembles a %XX-encoded UTF-8 sequence, validated (c_min / 0x10FFFF /
-/// surrogates -> URIError "malformed UTF-8", surfaced via error.InvalidUtf8)
+/// surrogates -> URIError "malformed UTF-8", thrown via `throwUriErrorMessage`)
 /// and emitted as a code point (surrogate pair when > 0xFFFF, the qjs
 /// string_buffer_putc); non-component keeps URI-reserved ASCII escaped.
-fn decodeUriUnits(comptime T: type, rt: *core.JSRuntime, units: []const T, component: bool) !core.JSValue {
+fn decodeUriUnits(comptime T: type, ctx: *core.JSContext, global: ?*core.Object, units: []const T, component: bool) HostError!core.JSValue {
+    const rt = ctx.runtime;
     var out = std.ArrayList(u16).empty;
     defer out.deinit(rt.memory.allocator);
     try out.ensureTotalCapacity(rt.memory.allocator, units.len);
@@ -140,7 +158,7 @@ fn decodeUriUnits(comptime T: type, rt: *core.JSRuntime, units: []const T, compo
     while (k < units.len) {
         var c: u32 = units[k];
         if (c == '%') {
-            const lead = try uriHexDecodeAt(T, units, k);
+            const lead = try uriHexDecodeAt(T, ctx, global, units, k);
             k += 3;
             c = lead;
             if (lead < 0x80) {
@@ -169,7 +187,7 @@ fn decodeUriUnits(comptime T: type, rt: *core.JSRuntime, units: []const T, compo
                     c = 0;
                 }
                 while (n > 0) : (n -= 1) {
-                    const c1 = try uriHexDecodeAt(T, units, k);
+                    const c1 = try uriHexDecodeAt(T, ctx, global, units, k);
                     k += 3;
                     if ((c1 & 0xc0) != 0x80) {
                         c = 0;
@@ -177,8 +195,10 @@ fn decodeUriUnits(comptime T: type, rt: *core.JSRuntime, units: []const T, compo
                     }
                     c = (c << 6) | (c1 & 0x3f);
                 }
+                // js_global_decodeURI (quickjs.c:54812): overlong / out-of-range
+                // / surrogate code point -> URIError "malformed UTF-8".
                 if (c < c_min or c > 0x10FFFF or (c >= 0xD800 and c <= 0xDFFF)) {
-                    return error.InvalidUtf8;
+                    return throwUriErrorMessage(ctx, global, "malformed UTF-8");
                 }
             }
         } else {
@@ -197,7 +217,11 @@ fn decodeUriUnits(comptime T: type, rt: *core.JSRuntime, units: []const T, compo
 
 /// QuickJS source map: global URI encode/decode functions in quickjs.c. This
 /// is the current narrow URI subset used by transitional `uri_call` bytecode.
-pub fn call(rt: *core.JSRuntime, mode: u32, input: core.JSValue) !core.JSValue {
+/// `global` is the realm global used to build specific `URIError` messages
+/// (`js_throw_URIError`); on bare runtimes it is null and the bare
+/// `error.URIError` sentinel is surfaced instead.
+pub fn call(ctx: *core.JSContext, global: ?*core.Object, mode: u32, input: core.JSValue) HostError!core.JSValue {
+    const rt = ctx.runtime;
     if (mode == 3 or mode == 4) {
         // Fast path: string inputs (the common case in real-world callers
         // and in tight 4-byte-UTF-8 URI sweeps) avoid the
@@ -218,26 +242,25 @@ pub fn call(rt: *core.JSRuntime, mode: u32, input: core.JSValue) !core.JSValue {
                     // (previously non-ASCII was mangled byte-wise).
                     .latin1 => |bytes| {
                         for (bytes) |byte| {
-                            if (byte >= 0x80) return decodeUriUnits(u8, rt, bytes, mode == 4);
+                            if (byte >= 0x80) return decodeUriUnits(u8, ctx, global, bytes, mode == 4);
                         }
                     },
                     .utf16 => |units| {
                         for (units) |unit| {
-                            if (unit >= 0x80) return decodeUriUnits(u16, rt, units, mode == 4);
+                            if (unit >= 0x80) return decodeUriUnits(u16, ctx, global, units, mode == 4);
                         }
                     },
                 }
-                if (try decodeStringDataFast(rt, string_data, mode == 4)) |result| {
+                if (try decodeStringDataFast(ctx, global, string_data, mode == 4)) |result| {
                     return result;
                 }
             }
         }
     } else if (mode == 1 or mode == 2) {
         if (try stringInputValue(input)) |string_value| {
-            if (stringHasUnpairedSurrogate(string_value)) return error.URIError;
             var out = std.ArrayList(u8).empty;
             defer out.deinit(rt.memory.allocator);
-            try encodeStringValue(rt, &out, string_value, mode == 2);
+            try encodeStringValue(ctx, global, &out, string_value, mode == 2);
             const str = try core.string.String.createUtf8(rt, out.items);
             return str.value();
         }
@@ -254,8 +277,8 @@ pub fn call(rt: *core.JSRuntime, mode: u32, input: core.JSValue) !core.JSValue {
         defer coerced.value().free(rt);
         try coerced.ensureFlat(rt);
         return switch (coerced.resolveData()) {
-            .latin1 => |latin1| decodeUriUnits(u8, rt, latin1, mode == 4),
-            .utf16 => |units| decodeUriUnits(u16, rt, units, mode == 4),
+            .latin1 => |latin1| decodeUriUnits(u8, ctx, global, latin1, mode == 4),
+            .utf16 => |units| decodeUriUnits(u16, ctx, global, units, mode == 4),
         };
     }
 
@@ -280,10 +303,11 @@ pub fn call(rt: *core.JSRuntime, mode: u32, input: core.JSValue) !core.JSValue {
 /// The stack buffer is sized so that 4-byte-UTF-8 URI sweeps
 /// (`decodeURI("%F0%9F%98%80")` and similar) never spills to the heap.
 /// Larger strings spill to an `ArrayList`.
-fn decodeStringDataFast(rt: *core.JSRuntime, string_value: *core.string.String, component: bool) !?core.JSValue {
+fn decodeStringDataFast(ctx: *core.JSContext, global: ?*core.Object, string_value: *core.string.String, component: bool) HostError!?core.JSValue {
+    const rt = ctx.runtime;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
-        .latin1 => |bytes| return try decodeAsciiBytes(rt, bytes, component),
+        .latin1 => |bytes| return try decodeAsciiBytes(ctx, global, bytes, component),
         .utf16 => |units| {
             for (units) |unit| if (unit > 0x7f) return null;
             var stack_buf: [128]u8 = undefined;
@@ -292,10 +316,10 @@ fn decodeStringDataFast(rt: *core.JSRuntime, string_value: *core.string.String, 
                 defer bytes.deinit(rt.memory.allocator);
                 try bytes.ensureTotalCapacity(rt.memory.allocator, units.len);
                 for (units) |unit| bytes.appendAssumeCapacity(@intCast(unit));
-                return try decodeAsciiBytes(rt, bytes.items, component);
+                return try decodeAsciiBytes(ctx, global, bytes.items, component);
             }
             for (units, 0..) |unit, idx| stack_buf[idx] = @intCast(unit);
-            return try decodeAsciiBytes(rt, stack_buf[0..units.len], component);
+            return try decodeAsciiBytes(ctx, global, stack_buf[0..units.len], component);
         },
     }
 }
@@ -303,7 +327,8 @@ fn decodeStringDataFast(rt: *core.JSRuntime, string_value: *core.string.String, 
 /// Decode `%XX` escapes from an ASCII byte slice. The decoded form lives on
 /// a 128-byte stack buffer for the common short-input case; longer outputs
 /// (or unusually large inputs) spill to a heap `ArrayList`.
-fn decodeAsciiBytes(rt: *core.JSRuntime, bytes: []const u8, component: bool) !core.JSValue {
+fn decodeAsciiBytes(ctx: *core.JSContext, global: ?*core.Object, bytes: []const u8, component: bool) HostError!core.JSValue {
+    const rt = ctx.runtime;
     if (try decodeSingleFourByteEscape(rt, bytes)) |result| return result;
 
     // Worst case after decoding is `bytes.len` bytes (each `%XX` triplet
@@ -312,13 +337,13 @@ fn decodeAsciiBytes(rt: *core.JSRuntime, bytes: []const u8, component: bool) !co
     var stack_buf: [128]u8 = undefined;
     if (bytes.len <= stack_buf.len) {
         var len: usize = 0;
-        try decodeBytesInto(stack_buf[0..], bytes, component, &len);
+        try decodeBytesInto(ctx, global, stack_buf[0..], bytes, component, &len);
         const str = try core.string.String.createUtf8(rt, stack_buf[0..len]);
         return str.value();
     }
     var out = std.ArrayList(u8).empty;
     defer out.deinit(rt.memory.allocator);
-    try decodeBytes(rt, &out, bytes, component);
+    try decodeBytes(ctx, global, &out, bytes, component);
     const str = try core.string.String.createUtf8(rt, out.items);
     return str.value();
 }
@@ -412,15 +437,9 @@ fn stringDataFromValue(value: core.JSValue) ?*core.string.String {
     return value.asStringBody();
 }
 
-fn stringHasUnpairedSurrogate(value: core.JSValue) bool {
-    const string_value = value.asStringBody() orelse return false;
-    return switch (string_value.resolveData()) {
-        .latin1 => false,
-        .utf16 => |units| hasUnpairedSurrogate(units),
-    };
-}
 
-fn encodeStringValue(rt: *core.JSRuntime, out: *std.ArrayList(u8), value: core.JSValue, component: bool) !void {
+fn encodeStringValue(ctx: *core.JSContext, global: ?*core.Object, out: *std.ArrayList(u8), value: core.JSValue, component: bool) HostError!void {
+    const rt = ctx.runtime;
     const string_value = value.asStringBody() orelse return;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
@@ -428,11 +447,22 @@ fn encodeStringValue(rt: *core.JSRuntime, out: *std.ArrayList(u8), value: core.J
             for (bytes) |byte| try encodeCodepoint(rt, out, byte, component);
         },
         .utf16 => |units| {
+            // js_global_encodeURI (quickjs.c:54887): a lone low surrogate throws
+            // URIError "invalid character"; a high surrogate not followed by a
+            // low surrogate throws URIError "expecting surrogate pair".
             var index: usize = 0;
             while (index < units.len) : (index += 1) {
                 const unit = units[index];
-                if (unicode.isHighSurrogateUnit(unit)) {
+                if (unicode.isLowSurrogateUnit(unit)) {
+                    return throwUriErrorMessage(ctx, global, "invalid character");
+                } else if (unicode.isHighSurrogateUnit(unit)) {
+                    if (index + 1 >= units.len) {
+                        return throwUriErrorMessage(ctx, global, "expecting surrogate pair");
+                    }
                     const next = units[index + 1];
+                    if (!unicode.isLowSurrogateUnit(next)) {
+                        return throwUriErrorMessage(ctx, global, "expecting surrogate pair");
+                    }
                     try encodeCodepoint(rt, out, unicode.codePointFromSurrogatePair(unit, next), component);
                     index += 1;
                 } else {
@@ -459,22 +489,6 @@ fn encodeCodepoint(rt: *core.JSRuntime, out: *std.ArrayList(u8), codepoint: u21,
 fn appendPercentByte(rt: *core.JSRuntime, out: *std.ArrayList(u8), byte: u8) !void {
     const encoded = percentEncodedByte(byte);
     try out.appendSlice(rt.memory.allocator, &encoded);
-}
-
-fn hasUnpairedSurrogate(units: []const u16) bool {
-    var index: usize = 0;
-    while (index < units.len) : (index += 1) {
-        const unit = units[index];
-        if (unicode.isHighSurrogateUnit(unit)) {
-            if (index + 1 >= units.len) return true;
-            const next = units[index + 1];
-            if (!unicode.isLowSurrogateUnit(next)) return true;
-            index += 1;
-        } else if (unicode.isLowSurrogateUnit(unit)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 fn stringDataContainsPercent(string_value: *core.string.String) bool {
@@ -510,7 +524,8 @@ fn percentEncodedUnit(unit: u16) [6]u8 {
     };
 }
 
-fn decodeBytes(rt: *core.JSRuntime, out: *std.ArrayList(u8), bytes: []const u8, component: bool) !void {
+fn decodeBytes(ctx: *core.JSContext, global: ?*core.Object, out: *std.ArrayList(u8), bytes: []const u8, component: bool) HostError!void {
+    const rt = ctx.runtime;
     var index: usize = 0;
     while (index < bytes.len) {
         if (bytes[index] != '%') {
@@ -518,10 +533,11 @@ fn decodeBytes(rt: *core.JSRuntime, out: *std.ArrayList(u8), bytes: []const u8, 
             index += 1;
             continue;
         }
+        // hex_decode (quickjs.c:54744): missing hex digits -> "expecting hex digit".
         if (index + 2 >= bytes.len) {
-            return error.URIError;
+            return throwUriErrorMessage(ctx, global, "expecting hex digit");
         }
-        const decoded = fastHexPair(bytes[index + 1], bytes[index + 2]) orelse return error.URIError;
+        const decoded = fastHexPair(bytes[index + 1], bytes[index + 2]) orelse return throwUriErrorMessage(ctx, global, "expecting hex digit");
         index += 3;
         if (!component and isReserved(decoded)) {
             try out.append(rt.memory.allocator, '%');
@@ -546,19 +562,31 @@ fn decodeBytes(rt: *core.JSRuntime, out: *std.ArrayList(u8), bytes: []const u8, 
 
             var remaining = decoded_utf8.count;
             while (remaining > 0) : (remaining -= 1) {
-                if (index + 2 >= bytes.len or bytes[index] != '%') {
-                    return error.URIError;
+                // hex_decode on a continuation byte (quickjs.c:54747): a
+                // non-'%' byte -> "expecting %"; missing hex -> "expecting hex digit".
+                if (index >= bytes.len or bytes[index] != '%') {
+                    return throwUriErrorMessage(ctx, global, "expecting %");
                 }
-                const continuation = fastHexPair(bytes[index + 1], bytes[index + 2]) orelse return error.URIError;
+                if (index + 2 >= bytes.len) {
+                    return throwUriErrorMessage(ctx, global, "expecting hex digit");
+                }
+                const continuation = fastHexPair(bytes[index + 1], bytes[index + 2]) orelse return throwUriErrorMessage(ctx, global, "expecting hex digit");
                 index += 3;
-                if ((continuation & 0xc0) != 0x80) return error.URIError;
+                // js_global_decodeURI (quickjs.c:54806): a non-continuation byte
+                // resets the code point to 0, which fails the range check below.
+                if ((continuation & 0xc0) != 0x80) {
+                    decoded_utf8.codepoint = 0;
+                    break;
+                }
                 decoded_utf8.codepoint = (decoded_utf8.codepoint << 6) | (continuation & 0x3f);
             }
+            // js_global_decodeURI (quickjs.c:54812): overlong / out-of-range /
+            // surrogate -> "malformed UTF-8".
             if (decoded_utf8.codepoint < decoded_utf8.min or decoded_utf8.codepoint > 0x10ffff or isSurrogate(decoded_utf8.codepoint)) {
-                return error.URIError;
+                return throwUriErrorMessage(ctx, global, "malformed UTF-8");
             }
             var encoded: [4]u8 = undefined;
-            const len = std.unicode.utf8Encode(decoded_utf8.codepoint, &encoded) catch return error.URIError;
+            const len = std.unicode.utf8Encode(decoded_utf8.codepoint, &encoded) catch return throwUriErrorMessage(ctx, global, "malformed UTF-8");
             try out.appendSlice(rt.memory.allocator, encoded[0..len]);
         }
     }
@@ -568,7 +596,7 @@ fn decodeBytes(rt: *core.JSRuntime, out: *std.ArrayList(u8), bytes: []const u8, 
 /// fixed-size buffer; `out_len` tracks how many bytes have been written.
 /// Caller guarantees `dest.len >= bytes.len` (the worst case after URI
 /// decoding never exceeds the input length).
-fn decodeBytesInto(dest: []u8, bytes: []const u8, component: bool, out_len: *usize) !void {
+fn decodeBytesInto(ctx: *core.JSContext, global: ?*core.Object, dest: []u8, bytes: []const u8, component: bool, out_len: *usize) HostError!void {
     var index: usize = 0;
     var len: usize = 0;
     while (index < bytes.len) {
@@ -578,10 +606,11 @@ fn decodeBytesInto(dest: []u8, bytes: []const u8, component: bool, out_len: *usi
             index += 1;
             continue;
         }
+        // hex_decode (quickjs.c:54744): missing hex digits -> "expecting hex digit".
         if (index + 2 >= bytes.len) {
-            return error.URIError;
+            return throwUriErrorMessage(ctx, global, "expecting hex digit");
         }
-        const decoded = fastHexPair(bytes[index + 1], bytes[index + 2]) orelse return error.URIError;
+        const decoded = fastHexPair(bytes[index + 1], bytes[index + 2]) orelse return throwUriErrorMessage(ctx, global, "expecting hex digit");
         index += 3;
         if (!component and isReserved(decoded)) {
             dest[len] = '%';
@@ -608,18 +637,30 @@ fn decodeBytesInto(dest: []u8, bytes: []const u8, component: bool, out_len: *usi
 
             var remaining = decoded_utf8.count;
             while (remaining > 0) : (remaining -= 1) {
-                if (index + 2 >= bytes.len or bytes[index] != '%') {
-                    return error.URIError;
+                // hex_decode on a continuation byte (quickjs.c:54747): a
+                // non-'%' byte -> "expecting %"; missing hex -> "expecting hex digit".
+                if (index >= bytes.len or bytes[index] != '%') {
+                    return throwUriErrorMessage(ctx, global, "expecting %");
                 }
-                const continuation = fastHexPair(bytes[index + 1], bytes[index + 2]) orelse return error.URIError;
+                if (index + 2 >= bytes.len) {
+                    return throwUriErrorMessage(ctx, global, "expecting hex digit");
+                }
+                const continuation = fastHexPair(bytes[index + 1], bytes[index + 2]) orelse return throwUriErrorMessage(ctx, global, "expecting hex digit");
                 index += 3;
-                if ((continuation & 0xc0) != 0x80) return error.URIError;
+                // js_global_decodeURI (quickjs.c:54806): a non-continuation byte
+                // resets the code point to 0, which fails the range check below.
+                if ((continuation & 0xc0) != 0x80) {
+                    decoded_utf8.codepoint = 0;
+                    break;
+                }
                 decoded_utf8.codepoint = (decoded_utf8.codepoint << 6) | (continuation & 0x3f);
             }
+            // js_global_decodeURI (quickjs.c:54812): overlong / out-of-range /
+            // surrogate -> "malformed UTF-8".
             if (decoded_utf8.codepoint < decoded_utf8.min or decoded_utf8.codepoint > 0x10ffff or isSurrogate(decoded_utf8.codepoint)) {
-                return error.URIError;
+                return throwUriErrorMessage(ctx, global, "malformed UTF-8");
             }
-            const encoded_len = std.unicode.utf8Encode(decoded_utf8.codepoint, dest[len..]) catch return error.URIError;
+            const encoded_len = std.unicode.utf8Encode(decoded_utf8.codepoint, dest[len..]) catch return throwUriErrorMessage(ctx, global, "malformed UTF-8");
             len += encoded_len;
         }
     }
