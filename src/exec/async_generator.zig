@@ -565,7 +565,30 @@ pub fn resumeNext(
                     // zjs adaptation of emit_return's OP_await of the return
                     // argument (quickjs.c:28402-28404): await driver-side,
                     // then walk the finally range.
-                    try call_runtime.closeGeneratorDestructuringIterators(ctx, output, global, gen);
+                    //
+                    // The driver-side for-await IteratorClose (return() on the
+                    // inner iterator) can throw — e.g. `return` returning a
+                    // non-Object raises a TypeError (IteratorClose step 8). In
+                    // qjs this close runs INSIDE the resumed body (OP_for_of
+                    // unwinding) so the exception surfaces at the body's yield
+                    // site; mirror that by throwing it into the body, which
+                    // walks any enclosing try/finally and settles the request
+                    // as a rejection instead of escaping resume_next
+                    // synchronously (AsyncGenerator.prototype.return never
+                    // throws synchronously, quickjs.c:21757).
+                    call_runtime.closeGeneratorDestructuringIterators(ctx, output, global, gen) catch |err| {
+                        switch (err) {
+                            error.OutOfMemory, error.ProcessExit => return err,
+                            else => {},
+                        }
+                        const reason = if (ctx.hasException()) ctx.takeException() else try exception_ops.qjsPromiseErrorValue(ctx, global, err);
+                        defer reason.free(ctx.runtime);
+                        setState(gen, .executing);
+                        switch (try execBody(ctx, output, global, gen, .{ .throw_ = reason })) {
+                            .parked => return,
+                            .settled => continue,
+                        }
+                    };
                     setState(gen, .executing);
                     asyncGeneratorAwait(ctx, output, global, gen, head_result, .return_arg) catch |err| {
                         switch (err) {
