@@ -2,6 +2,8 @@ const std = @import("std");
 const core = @import("../core/root.zig");
 const parser = @import("../parser.zig");
 const exec = @import("root.zig");
+const bytecode = @import("../bytecode.zig");
+const frame_mod = @import("frame.zig");
 
 pub const HostHooks = struct {
     ptr: *anyopaque,
@@ -56,6 +58,32 @@ pub const ModuleContinuation = struct {
     }
 };
 
+/// The subset of import attributes that influences how the module loader
+/// interprets the source, mirroring qjs js_module_test_json /
+/// js_module_loader's `type` handling (quickjs-libc.c:656/703): only "json"
+/// changes the load kind. Unknown/absent types load as ordinary ES modules
+/// (qjs "XXX: raise an error if unknown type ?" — it does not).
+pub const ImportLoaderType = enum { none, json };
+
+/// Extract the load-relevant `type` attribute from a validated attributes
+/// object (JS_UNDEFINED or a null-prototype object whose values are all
+/// strings). Mirrors js_module_test_json (quickjs-libc.c:656): read the
+/// "type" string; "json" selects the JSON loader, anything else is ignored.
+fn importLoaderTypeFromAttributes(ctx: *core.JSContext, attributes: core.JSValue) ImportLoaderType {
+    if (!attributes.isObject()) return .none;
+    const type_atom = ctx.runtime.internAtom("type") catch return .none;
+    defer ctx.runtime.atoms.free(type_atom);
+    const object = exec.property_ops.expectObject(attributes) catch return .none;
+    const type_value = object.getProperty(type_atom);
+    defer type_value.free(ctx.runtime);
+    if (!type_value.isString()) return .none;
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(ctx.runtime.memory.allocator);
+    exec.value_ops.appendRawString(ctx.runtime, &buf, type_value) catch return .none;
+    if (std.mem.eql(u8, buf.items, "json")) return .json;
+    return .none;
+}
+
 pub const DynamicImportState = struct {
     runtime: *core.JSRuntime,
     context: *core.JSContext,
@@ -63,6 +91,12 @@ pub const DynamicImportState = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     max_source_size: usize,
+    /// Load-relevant import attribute (`type`) for the job currently being
+    /// dispatched, set by dynamicImportJobCall before invoking the callback
+    /// (jobs run one at a time on this thread, so a single slot suffices —
+    /// mirrors qjs threading `attributes` through js_dynamic_import_job to
+    /// js_module_loader, quickjs.c:31059 / quickjs-libc.c:703).
+    pending_import_type: ImportLoaderType = .none,
 
     fn load(
         userdata: ?*anyopaque,
@@ -84,6 +118,7 @@ pub const DynamicImportState = struct {
             state.io,
             state.allocator,
             state.max_source_size,
+            state.pending_import_type,
         ) catch |err| {
             // Any pending JS exception must reach the import() promise as-is
             // (js_dynamic_import_job quickjs.c:31063: exception → reject).
@@ -141,13 +176,147 @@ fn dynamicImportJobExternalId(rt: *core.JSRuntime) !u32 {
     return rt.registerExternalHostFunction(.{ .ptr = marker, .call = dynamicImportJobCall });
 }
 
-/// Mirror of qjs js_dynamic_import (quickjs.c:31073): build a promise
-/// capability, bind [resolve, reject, basename, specifier] onto a job
-/// callable, and enqueue it on the promise-job queue (JS_EnqueueJob
-/// quickjs.c:31155 — "cannot run JS_LoadModuleInternal synchronously because
-/// it would cause an unexpected recursion in js_evaluate_module()"). The
-/// returned pending promise is the value of the import() expression; the
-/// module loads and evaluates only when the job runs.
+/// Mirror of qjs js_dynamic_import (quickjs.c:31073): the runtime semantics
+/// of the `import(specifier, options)` expression. `specifier` has already
+/// been ToString-coerced by the caller (the "string conversion must occur
+/// here", quickjs.c:31096). This validates `options` and its `with`
+/// attributes bag synchronously (quickjs.c:31100-31145), building a
+/// null-prototype attributes object whose values are all strings, then
+/// enqueues the load/evaluate job (JS_EnqueueJob quickjs.c:31155) bound to
+/// that attributes object. Any validation failure rejects the returned
+/// promise capability (quickjs.c:31163 `exception:`) instead of throwing.
+pub fn evaluateImportCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    prototype: ?*core.Object,
+    referrer_path: []const u8,
+    specifier: core.JSValue,
+    options: core.JSValue,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+) exec.exceptions.HostError!core.JSValue {
+    const rt = ctx.runtime;
+
+    // quickjs.c:31100 — `if (!JS_IsUndefined(options))`.
+    var attributes = core.JSValue.undefinedValue();
+    errdefer attributes.free(rt);
+    if (!options.isUndefined()) {
+        // quickjs.c:31101 — options must be an object.
+        if (!options.isObject()) {
+            return rejectedImportTypeError(ctx, global, prototype, "options must be an object");
+        }
+        const with_atom = try rt.internAtom("with");
+        defer rt.atoms.free(with_atom);
+        // quickjs.c:31105 — `attributes_obj = JS_GetProperty(options, "with")`.
+        const attributes_obj = exec.object_ops.getValueProperty(ctx, output, global, options, with_atom, function, frame) catch |err|
+            return rejectedImportRuntimeError(ctx, global, prototype, err);
+        defer attributes_obj.free(rt);
+        // quickjs.c:31108 — `if (!JS_IsUndefined(attributes_obj))`.
+        if (!attributes_obj.isUndefined()) {
+            // quickjs.c:31113 — options.with must be an object.
+            if (!attributes_obj.isObject()) {
+                return rejectedImportTypeError(ctx, global, prototype, "options.with must be an object");
+            }
+            attributes = buildImportAttributes(ctx, output, global, attributes_obj, function, frame) catch |err|
+                return rejectedImportRuntimeError(ctx, global, prototype, err);
+        }
+    }
+
+    return enqueueDynamicImportJobWithAttributes(ctx, global, prototype, referrer_path, specifier, attributes);
+}
+
+/// Mirror of qjs js_dynamic_import's attributes loop (quickjs.c:31117-31138):
+/// create a null-prototype attributes object; enumerate the source's own
+/// enumerable string keys (JS_GetOwnPropertyNamesInternal with
+/// JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY); Get each value; reject with a
+/// TypeError if any value is not a String (quickjs.c:31126); otherwise copy
+/// it onto the attributes object (JS_PROP_C_W_E). Returns the built
+/// attributes object; the caller owns it. A thrown Get (or the proxy ownKeys
+/// trap) propagates as a runtime error so the caller can reject.
+fn buildImportAttributes(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    attributes_obj: core.JSValue,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+) exec.exceptions.HostError!core.JSValue {
+    const rt = ctx.runtime;
+    const source = try exec.property_ops.expectObject(attributes_obj);
+
+    // quickjs.c:31117 — `attributes = JS_NewObjectProto(ctx, JS_NULL)`.
+    const attributes_object = try core.Object.create(rt, core.class.ids.object, null);
+    var attributes = attributes_object.value();
+    errdefer attributes.free(rt);
+
+    // quickjs.c:31118 — JS_GetOwnPropertyNamesInternal(STRING_MASK|ENUM_ONLY).
+    // The proxy ownKeys trap runs here; a throwing trap propagates (mirrors
+    // IfAbruptRejectPromise on the keys list).
+    const keys = try exec.object_ops.objectRestOwnKeys(ctx, output, global, source);
+    defer core.Object.freeKeys(rt, keys);
+
+    for (keys) |key| {
+        // JS_GPN_STRING_MASK: only string keys (Symbols excluded).
+        if (rt.atoms.kind(key) != .string) continue;
+        // JS_GPN_ENUM_ONLY: only enumerable own properties.
+        const desc = (try exec.object_ops.proxyAwareOwnPropertyDescriptor(ctx, output, global, source, key, function, frame)) orelse continue;
+        const enumerable = desc.enumerable orelse false;
+        desc.destroy(rt);
+        if (!enumerable) continue;
+
+        // quickjs.c:31123 — `val = JS_GetProperty(attributes_obj, key)`.
+        const val = try exec.object_ops.getValueProperty(ctx, output, global, attributes_obj, key, function, frame);
+        var val_owned = true;
+        defer if (val_owned) val.free(rt);
+        // quickjs.c:31126 — module attribute values must be strings.
+        if (!val.isString()) {
+            return exec.exception_ops.throwTypeErrorMessage(ctx, global, "module attribute values must be strings");
+        }
+        // quickjs.c:31131 — `JS_DefinePropertyValue(attributes, key, val, C_W_E)`.
+        try attributes_object.defineOwnProperty(rt, key, core.Descriptor.data(val, true, true, true));
+        val_owned = false;
+    }
+
+    return attributes;
+}
+
+/// Reject the import() capability with a freshly-built TypeError (mirrors
+/// js_dynamic_import's `exception:` label after JS_ThrowTypeError,
+/// quickjs.c:31163). Returns the pending-then-rejected promise value.
+fn rejectedImportTypeError(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    prototype: ?*core.Object,
+    message: []const u8,
+) exec.exceptions.HostError!core.JSValue {
+    const error_value = try exec.exception_ops.createNamedError(ctx, global, "TypeError", message);
+    defer error_value.free(ctx.runtime);
+    return core.promise.rejectedWithPrototype(ctx.runtime, error_value, prototype);
+}
+
+/// Reject the import() capability with the current pending JS exception (or a
+/// mapped runtime error), mirroring js_dynamic_import's `exception:` label
+/// (JS_GetException → JS_Call(reject), quickjs.c:31164-31169).
+fn rejectedImportRuntimeError(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    prototype: ?*core.Object,
+    err: exec.exceptions.HostError,
+) exec.exceptions.HostError!core.JSValue {
+    if (err == error.OutOfMemory or err == error.ProcessExit or err == error.StackOverflow) return err;
+    return exec.exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
+}
+
+/// Mirror of qjs js_dynamic_import's job-enqueue tail (quickjs.c:31147): build
+/// a promise capability, bind [resolve, reject, basename, specifier,
+/// attributes] onto a job callable, and enqueue it on the promise-job queue
+/// (JS_EnqueueJob quickjs.c:31155 — "cannot run JS_LoadModuleInternal
+/// synchronously because it would cause an unexpected recursion in
+/// js_evaluate_module()"). The returned pending promise is the value of the
+/// import() expression; the module loads and evaluates only when the job
+/// runs. Takes ownership of `attributes` (JS_UNDEFINED or a null-prototype
+/// object of string values).
 pub fn enqueueDynamicImportJob(
     ctx: *core.JSContext,
     global: *core.Object,
@@ -155,7 +324,21 @@ pub fn enqueueDynamicImportJob(
     referrer_path: []const u8,
     specifier: core.JSValue,
 ) !core.JSValue {
+    return enqueueDynamicImportJobWithAttributes(ctx, global, prototype, referrer_path, specifier, core.JSValue.undefinedValue());
+}
+
+fn enqueueDynamicImportJobWithAttributes(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    prototype: ?*core.Object,
+    referrer_path: []const u8,
+    specifier: core.JSValue,
+    attributes: core.JSValue,
+) exec.exceptions.HostError!core.JSValue {
     const rt = ctx.runtime;
+    // This function owns the incoming `attributes` reference; defineOwnProperty
+    // below dups it into the job slot, so free the original on return.
+    defer attributes.free(rt);
     const resolvers_value = try core.promise.withResolvers(rt, prototype);
     defer resolvers_value.free(rt);
     const resolvers = try exec.property_ops.expectObject(resolvers_value);
@@ -170,6 +353,8 @@ pub fn enqueueDynamicImportJob(
     defer rt.atoms.free(basename_atom);
     const specifier_atom = try rt.internAtom("specifier");
     defer rt.atoms.free(specifier_atom);
+    const attributes_atom = try rt.internAtom("attributes");
+    defer rt.atoms.free(attributes_atom);
 
     const promise_value = resolvers.getProperty(promise_atom);
     errdefer promise_value.free(rt);
@@ -193,6 +378,12 @@ pub fn enqueueDynamicImportJob(
     try job_object.defineOwnProperty(rt, reject_atom, core.Descriptor.data(reject_value, false, false, false));
     try job_object.defineOwnProperty(rt, basename_atom, core.Descriptor.data(basename_value, false, false, false));
     try job_object.defineOwnProperty(rt, specifier_atom, core.Descriptor.data(specifier, false, false, false));
+    // quickjs.c:31151 — `args[4] = attributes`; the job holds it (GC-traced).
+    // defineOwnProperty dups the value into the job slot (slotFromDescriptor →
+    // dupPropertyDataValue), so this function still owns its incoming reference
+    // and the `defer attributes.free` above releases it — same discipline as
+    // the resolve/reject/basename values.
+    try job_object.defineOwnProperty(rt, attributes_atom, core.Descriptor.data(attributes, false, false, false));
 
     try exec.promise_ops.enqueuePendingPromiseJob(ctx, job_value);
     return promise_value;
@@ -215,6 +406,8 @@ fn dynamicImportJobCall(_: *anyopaque, call: core.host_function.ExternalCall) an
     defer rt.atoms.free(basename_atom);
     const specifier_atom = try rt.internAtom("specifier");
     defer rt.atoms.free(specifier_atom);
+    const attributes_atom = try rt.internAtom("attributes");
+    defer rt.atoms.free(attributes_atom);
 
     const resolve_value = job_object.getProperty(resolve_atom);
     defer resolve_value.free(rt);
@@ -224,6 +417,8 @@ fn dynamicImportJobCall(_: *anyopaque, call: core.host_function.ExternalCall) an
     defer basename_value.free(rt);
     const specifier_value = job_object.getProperty(specifier_atom);
     defer specifier_value.free(rt);
+    const attributes_value = job_object.getProperty(attributes_atom);
+    defer attributes_value.free(rt);
 
     var basename_bytes = std.ArrayList(u8).empty;
     defer basename_bytes.deinit(rt.memory.allocator);
@@ -231,6 +426,25 @@ fn dynamicImportJobCall(_: *anyopaque, call: core.host_function.ExternalCall) an
     var specifier_bytes = std.ArrayList(u8).empty;
     defer specifier_bytes.deinit(rt.memory.allocator);
     try exec.value_ops.appendRawString(rt, &specifier_bytes, specifier_value);
+
+    // Thread the load-relevant `type` attribute to the file loader through the
+    // installed DynamicImportState (mirrors qjs passing `attributes` into
+    // js_dynamic_import_job → js_module_loader, quickjs.c:31059 /
+    // quickjs-libc.c:703). Host-hook loaders resolve their own module kind and
+    // ignore this. Jobs run one at a time on this thread, so restoring the
+    // previous value keeps re-entrant graph drains correct.
+    const import_type = importLoaderTypeFromAttributes(ctx, attributes_value);
+    var restore_import_type: ?struct { state: *DynamicImportState, prev: ImportLoaderType } = null;
+    if (ctx.dynamic_import_callback == DynamicImportState.load) {
+        if (ctx.dynamic_import_userdata) |userdata| {
+            const state: *DynamicImportState = @ptrCast(@alignCast(userdata));
+            restore_import_type = .{ .state = state, .prev = state.pending_import_type };
+            state.pending_import_type = import_type;
+        }
+    }
+    defer if (restore_import_type) |r| {
+        r.state.pending_import_type = r.prev;
+    };
 
     const load_result: core.context.DynamicImportError!core.JSValue = blk: {
         const callback = ctx.dynamic_import_callback orelse break :blk error.OperationUnsupported;
@@ -847,6 +1061,7 @@ fn evalDynamicImportModule(
     io: std.Io,
     allocator: std.mem.Allocator,
     max_source_size: usize,
+    import_type: ImportLoaderType,
 ) !core.JSValue {
     if (referrer_path.len == 0) {
         try exec.module.throwCouldNotLoadModule(context, specifier);
@@ -864,12 +1079,13 @@ fn evalDynamicImportModule(
     };
     defer allocator.free(target_path_base);
 
-    // A `.json` target loads as a JSON module even without import
-    // attributes, mirroring js_module_loader's extension check
-    // (`has_suffix(module_name, ".json") || res > 0`, quickjs-libc.c:704).
-    // The synthetic registry name is shared with attribute-tagged static
-    // imports so both resolve to one module record.
-    const is_json = std.mem.endsWith(u8, target_path_base, ".json");
+    // A `.json` target — or one tagged `with { type: 'json' }` — loads as a
+    // JSON module, mirroring js_module_loader's extension/attribute check
+    // (`has_suffix(module_name, ".json") || res > 0`, quickjs-libc.c:704,
+    // where `res = js_module_test_json(attributes)`). The synthetic registry
+    // name is shared with attribute-tagged static imports so both resolve to
+    // one module record.
+    const is_json = std.mem.endsWith(u8, target_path_base, ".json") or import_type == .json;
     const target_path = if (is_json)
         try exec.module.syntheticModuleRegistryName(allocator, target_path_base, .json)
     else

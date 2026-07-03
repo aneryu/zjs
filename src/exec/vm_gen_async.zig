@@ -21,13 +21,12 @@ pub const ResumeState = struct {
 
 const AwaitSuspendMode = enum {
     none,
-    /// Async generators drain promise jobs for internal await points, then keep
-    /// executing until the next generator yield.
-    drain,
     /// Top-level module await currently resumes with the already-settled value.
     settled,
-    /// Async functions yield the raw awaited value; the caller wires it through
-    /// Promise.resolve(...).then(resume, reject), matching QuickJS.
+    /// Async functions and async generators yield the raw awaited value; the
+    /// caller wires it through Promise.resolve(...).then(resume, reject),
+    /// matching QuickJS OP_await (quickjs.c:20592: save frame, return
+    /// FUNC_RET_AWAIT with the operand at cur_sp[-1]).
     raw,
 };
 
@@ -242,6 +241,7 @@ pub fn stopBeforePc(
     if (frame.pc != stop_pc) return null;
     if (generator) |generator_object| {
         try saveGeneratorExecutionState(ctx, stack, frame, generator_object, stop_pc);
+        generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.none);
     }
     return core.JSValue.undefinedValue();
 }
@@ -256,6 +256,7 @@ pub fn initialYield(
     if (stop_on_yield) {
         if (generator) |generator_object| {
             try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc);
+            generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.none);
             generator_object.generatorStartedSlot().* = true;
             generator_object.generatorJustYieldedSlot().* = true;
         }
@@ -278,6 +279,7 @@ pub noinline fn yieldValue(
     if (stop_on_yield) {
         if (generator) |generator_object| {
             try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc);
+            generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.yield);
             generator_object.generatorStartedSlot().* = true;
             generator_object.generatorJustYieldedSlot().* = true;
         }
@@ -329,6 +331,7 @@ fn yieldStarRaw(
         if (stop_on_yield) {
             if (generator) |generator_object| {
                 try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc);
+                generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.yield_star);
                 try call_runtime.setGeneratorYieldStarSuspended(ctx.runtime, generator_object, true);
                 generator_object.generatorStartedSlot().* = true;
                 generator_object.generatorJustYieldedSlot().* = true;
@@ -390,6 +393,7 @@ fn yieldStarRaw(
         if (generator) |generator_object| {
             if (!using_stored_iterator) try generator_object.setOptionalValueSlot(ctx.runtime, generator_object.generatorYieldStarIteratorSlot(), iterator_value.dup());
             try saveGeneratorExecutionState(ctx, stack, frame, generator_object, opcode_pc);
+            generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.yield_star);
             generator_object.generatorStartedSlot().* = true;
             generator_object.generatorJustYieldedSlot().* = true;
         }
@@ -462,7 +466,7 @@ fn awaitValueRaw(
         return .continue_loop;
     }
     try promise_ops.settlePendingPromiseReaction(ctx, output, global, promise);
-    if ((suspend_mode == .settled or suspend_mode == .drain) and promise.promiseResult() == null) try promise_ops.drainPendingPromiseJobs(ctx, output, global);
+    if (suspend_mode == .settled and promise.promiseResult() == null) try promise_ops.drainPendingPromiseJobs(ctx, output, global);
     if (promise.promiseResult() == null) try promise_ops.awaitPendingPromise(ctx, output, global, promise);
     const result = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
     defer result.free(ctx.runtime);
@@ -486,6 +490,7 @@ fn suspendAwaitValue(
     if (!suspend_on_await) return null;
     const generator_object = generator orelse return null;
     try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc);
+    generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.await_op);
     generator_object.generatorStartedSlot().* = true;
     generator_object.generatorJustYieldedSlot().* = true;
     return .{ .return_value = value.dup() };
@@ -494,7 +499,11 @@ fn suspendAwaitValue(
 fn awaitSuspendMode(function: *const bytecode.Bytecode, suspend_on_module_await: bool, stop_on_yield: bool) AwaitSuspendMode {
     if (suspend_on_module_await and function.flags.is_module) return .settled;
     if (suspend_on_module_await and function.flags.is_async) return .raw;
-    if (stop_on_yield and function.flags.is_async) return .drain;
+    // Async-generator bodies genuinely suspend at every await; the queue
+    // machine (exec/async_generator.zig) resumes them via promise-reaction
+    // jobs (mirrors js_async_generator_await + resume trampolines,
+    // quickjs.c:21446/21670).
+    if (stop_on_yield and function.flags.is_async) return .raw;
     return .none;
 }
 
@@ -526,10 +535,15 @@ fn closeIteratorForPendingError(
     frame: *frame_mod.Frame,
 ) !void {
     if (frame.pc < function.code.len and function.code[frame.pc] == bytecode.opcode.op.iterator_get_value_done) {
-        try promise_ops.closeForAwaitIteratorForPendingError(ctx, output, global, stack);
-    } else {
-        try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
+        // for-await-of: qjs js_for_await_of_next DISABLES the catch offset for
+        // the await between OP_for_await_of_next and
+        // OP_iterator_get_value_done (quickjs.c:16713-16726) — a rejection
+        // while awaiting the step result must NOT close the iterator from the
+        // unwind path; the AsyncFromSyncIterator close-wrap reaction
+        // (quickjs.c:54468) is the only closer.
+        return;
     }
+    try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
 }
 
 fn objectFromValue(value: core.JSValue) ?*core.Object {
@@ -547,7 +561,7 @@ fn freeValueSliceValuesOnly(rt: *core.JSRuntime, values: []core.JSValue) void {
     for (values) |value| value.free(rt);
 }
 
-fn freeGeneratorFrameStorage(
+pub fn freeGeneratorFrameStorage(
     rt: *core.JSRuntime,
     storage: []core.JSValue,
     locals: []core.JSValue,

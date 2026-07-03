@@ -787,18 +787,16 @@ fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !
     const allocator = rt.memory.allocator;
     const out = switch (op) {
         bytecode.opcode.op.mul => try bignum.mulAlloc(allocator, lhs, rhs),
-        bytecode.opcode.op.div => lhs.div(rhs) catch |err| switch (err) {
-            error.DivisionByZero => return error.RangeError,
-            else => return err,
-        },
-        bytecode.opcode.op.mod => lhs.rem(rhs) catch |err| switch (err) {
-            error.DivisionByZero => return error.RangeError,
-            else => return err,
-        },
+        // Propagate error.DivisionByZero / error.NegativeExponent unchanged so
+        // the exception mapping (runtimeErrorInfo) renders qjs's specific
+        // RangeError text ("BigInt division by zero" / the negative-exponent
+        // message) instead of a bare empty-message RangeError.
+        bytecode.opcode.op.div => try lhs.div(rhs),
+        bytecode.opcode.op.mod => try lhs.rem(rhs),
         bytecode.opcode.op.add => try bignum.addAlloc(allocator, lhs, rhs),
         bytecode.opcode.op.sub => try bignum.subAlloc(allocator, lhs, rhs),
         bytecode.opcode.op.pow => lhs.pow(rhs, allocator) catch |err| switch (err) {
-            error.NegativeExponent => return error.RangeError,
+            error.NegativeExponent => return err,
             // error.BigIntTooLarge propagates: the exception mapping renders it
             // as RangeError "BigInt is too large to allocate" (js_bigint_new
             // quickjs.c:11593-11594).

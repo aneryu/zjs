@@ -47,6 +47,7 @@ pub const ConstructorMethod = core.host_function.builtin_method_ids.array.Constr
 
 pub fn staticMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "from")) return @intFromEnum(StaticMethod.from);
+    if (std.mem.eql(u8, name, "fromAsync")) return @intFromEnum(StaticMethod.from_async);
     if (std.mem.eql(u8, name, "isArray")) return @intFromEnum(StaticMethod.is_array);
     if (std.mem.eql(u8, name, "of")) return @intFromEnum(StaticMethod.of);
     return null;
@@ -156,6 +157,7 @@ pub const internal_entries = arrayEntries: {
         arrayConstructorEntry("Array", 1, @intFromEnum(ConstructorMethod.construct)),
         // Array static methods.
         arrayEntry("from", 1, @intFromEnum(StaticMethod.from)),
+        arrayEntry("fromAsync", 1, @intFromEnum(StaticMethod.from_async)),
         arrayEntry("isArray", 1, @intFromEnum(StaticMethod.is_array)),
         arrayEntry("of", 0, @intFromEnum(StaticMethod.of)),
         // Array.prototype methods.

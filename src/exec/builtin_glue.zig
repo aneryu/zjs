@@ -255,6 +255,7 @@ pub fn qjsArrayNativeRecord(
     return switch (id) {
         @intFromEnum(method_ids.array.StaticMethod.is_array) => core.JSValue.boolean(args.len >= 1 and try core.array.isArrayValue(args[0])),
         @intFromEnum(method_ids.array.StaticMethod.from) => collection_vm.qjsArrayFromCall(ctx, output, global, this_value, (function_object orelse return error.TypeError).value(), args, caller_function, caller_frame),
+        @intFromEnum(method_ids.array.StaticMethod.from_async) => collection_vm.qjsArrayFromAsyncCall(ctx, output, global, this_value, (function_object orelse return error.TypeError).value(), args, caller_function, caller_frame),
         @intFromEnum(method_ids.array.StaticMethod.of) => collection_vm.qjsArrayOfCall(ctx, output, global, this_value, (function_object orelse return error.TypeError).value(), args, caller_function, caller_frame),
         else => collection_vm.qjsArrayPrototypeNativeRecord(ctx, output, global, this_value, function_object, id, args, caller_function, caller_frame),
     };
@@ -432,7 +433,9 @@ pub fn qjsFinalizationRegistryRegister(ctx: *core.JSContext, receiver: core.JSVa
     if (!qjsCanBeHeldWeakly(ctx.runtime, target)) return error.TypeError;
     if (target.sameValue(held_value)) return error.TypeError;
     if (!unregister_token.isUndefined() and !qjsCanBeHeldWeakly(ctx.runtime, unregister_token)) return error.TypeError;
-    if (target.sameValue(receiver)) return core.JSValue.undefinedValue();
+    // No self-target exclusion: qjs js_finrec_register (quickjs.c:61318) appends
+    // the entry unconditionally after the three checks above — a registry may
+    // register itself as target (the cell holds only a weak ref to it).
     try qjsFinalizationRegistryAppendCell(ctx.runtime, object, target, held_value, unregister_token);
     return core.JSValue.undefinedValue();
 }

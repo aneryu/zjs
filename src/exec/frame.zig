@@ -255,6 +255,17 @@ pub const Frame = struct {
         eval_var_ref_names: []const Atom = &.{},
         eval_var_refs: []JSValue = &.{},
         eval_var_refs_republished: bool = false,
+        /// Set only on a direct-eval frame: the live frame of the scope the
+        /// eval was called from (an enclosing direct-eval frame or the
+        /// function frame owning the variable environment). Mirrors qjs's
+        /// eval closure containing all enclosing variables — every nested
+        /// direct eval reaches the function's `_var_` variable object
+        /// transitively (resolve_scope_var `_var_`/`_arg_var_` forwarding,
+        /// quickjs.c:33216-33235). Valid for the frame's lifetime: the caller
+        /// frame sits below this eval's runWithArgsState invocation on the
+        /// native stack (direct eval executes synchronously and cannot
+        /// suspend), so the pointer never outlives its target.
+        eval_caller_frame: ?*Frame = null,
         constructor_this_value: JSValue = JSValue.undefinedValue(),
         constructor_this_value_owned: bool = false,
         arguments_object: ?JSValue = null,
@@ -320,6 +331,9 @@ pub const Frame = struct {
     }
     pub inline fn evalVarRefsRepublished(self: *const Frame) bool {
         return if (self.cold) |c| c.eval_var_refs_republished else false;
+    }
+    pub inline fn evalCallerFrame(self: *const Frame) ?*Frame {
+        return if (self.cold) |c| c.eval_caller_frame else null;
     }
     pub inline fn constructorThisValue(self: *const Frame) JSValue {
         return if (self.cold) |c| c.constructor_this_value else JSValue.undefinedValue();

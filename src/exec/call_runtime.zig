@@ -38,6 +38,8 @@ const array_ops = @import("array_ops.zig");
 
 const promise_ops = @import("promise_ops.zig");
 
+const async_generator = @import("async_generator.zig");
+
 const object_ops = @import("object_ops.zig");
 
 // --- for-in/for-of iterator helpers moved to forof_ops.zig ---
@@ -514,8 +516,11 @@ fn callInternalCallableByTag(
         .promise_combinator_element => try promise_ops.qjsPromiseCombinatorElementCall(ctx, output, global, function_object, args, caller_function, caller_frame),
         .promise_finally_callback => try promise_ops.qjsPromiseFinallyCallbackCall(ctx, output, global, function_object, args, caller_function, caller_frame),
         .async_function_resume => try promise_ops.qjsAsyncFunctionResumeCallbackCall(ctx, output, global, function_object, args, caller_function, caller_frame),
+        .async_generator_resolve => try async_generator.qjsAsyncGeneratorResolveFunctionCall(ctx, output, global, function_object, args),
+        .async_from_sync_iterator_close_wrap => try promise_ops.qjsAsyncFromSyncIteratorCloseWrapCall(ctx, output, global, function_object, args),
         .async_from_sync_iterator_unwrap => try promise_ops.qjsAsyncFromSyncIteratorUnwrapCall(ctx, global, function_object, args),
         .async_disposable_stack_continuation => try promise_ops.qjsAsyncDisposableStackContinuationCall(ctx, output, global, function_object, args, caller_function, caller_frame),
+        .array_from_async_continuation => try array_ops.qjsArrayFromAsyncContinuationCall(ctx, output, global, function_object, args, caller_function, caller_frame),
         .throw_type_error_intrinsic => @as(?core.JSValue, try qjsThrowTypeErrorIntrinsic(ctx, global, function_object)),
     };
 }
@@ -750,6 +755,7 @@ fn callValueOrBytecodeClassModeDispatch(
             if (try array_ops.qjsArrayIteratorNext(ctx, output, global, this_value, function_object)) |value| return value;
         }
         if (std.mem.eql(u8, name, "throw")) {
+            if (try promise_ops.qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
             if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object) and !promise_ops.isAsyncGeneratorReceiver(this_value)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
             if (try qjsGeneratorThrow(ctx, output, global, this_value, args)) |value| return value;
             if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
@@ -845,6 +851,7 @@ fn callValueOrBytecodeClassModeDispatch(
             if (try string_ops.qjsArrayToLocaleStringCall(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
         }
         if (try array_ops.qjsArrayFromCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+        if (try array_ops.qjsArrayFromAsyncCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
         if (try array_ops.qjsArrayOfCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
         if (try array_ops.qjsArrayIterationCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
         if (try array_ops.qjsArrayAtCall(ctx, output, global, this_value, func, args)) |value| return value;
@@ -4374,25 +4381,67 @@ pub fn createDirectEvalVarRefCells(
         ctx.runtime.memory.free(core.JSValue, refs);
     }
     while (initialized < names.len) : (initialized += 1) {
-        if (caller_function) |function| {
-            if (caller_frame) |frame| {
-                if (callerArgIndex(ctx.runtime, function, names[initialized])) |arg_idx| {
+        if (caller_function != null and caller_frame != null) {
+            // qjs: a hoisted eval var whose name matches an existing closure
+            // var binds to that variable instead of creating a fresh `_var_`
+            // property (instantiate_hoisted_definitions name match before the
+            // `_var_` branch, quickjs.c:34059-34066), and the eval closure
+            // contains the enclosing scopes TRANSITIVELY (resolve_scope_var
+            // forwarding, quickjs.c:33216-33235). Walk the live direct-eval
+            // caller chain to the frame owning the variable environment and
+            // reuse its arg/local binding. Direct-eval frames themselves are
+            // skipped for the arg/local probe: their non-lexical vardefs are
+            // the eval's OWN hoisted vars, which live as published cells in
+            // the eval tables — not in that frame's `locals` storage.
+            var chain_frame: ?*frame_mod.Frame = caller_frame;
+            var chain_function: *const bytecode.Bytecode = caller_function.?;
+            var reused = false;
+            while (chain_frame) |frame| {
+                // Nearest scope first: an eval var already bound in this
+                // frame's eval tables (a cell published — or pre-created by an
+                // enclosing eval whose body is still running) IS the existing
+                // binding; qjs reaches it as the same `_var_` object property.
+                if (directEvalNamedVarRefCell(ctx.runtime, frame, names[initialized])) |existing| {
+                    // An eval-CREATED binding (deletable cell) is re-declared
+                    // through qjs's `_var_` branch, which force-initializes the
+                    // property to undefined at eval entry (OP_undefined +
+                    // OP_define_field, force_init quickjs.c:34067-34096). A
+                    // reused function arg/local (name-match branch) is NOT
+                    // reinitialized.
+                    if (slot_ops.varRefCellFromValue(existing)) |existing_cell| {
+                        if (existing_cell.varRefIsDeletableSlot().*) {
+                            try existing_cell.setVarRefValue(ctx.runtime, core.JSValue.undefinedValue());
+                        }
+                    }
+                    refs[initialized] = existing;
+                    rooted_refs = refs[0 .. initialized + 1];
+                    reused = true;
+                    break;
+                }
+                if (frame.evalCallerFrame()) |next| {
+                    chain_frame = next;
+                    chain_function = next.function;
+                    continue;
+                }
+                if (callerArgIndex(ctx.runtime, chain_function, names[initialized])) |arg_idx| {
                     if (arg_idx < frame.args.len) {
                         refs[initialized] = try slot_ops.ensureFrameVarRefCell(ctx, frame, &frame.args[arg_idx]);
                         rooted_refs = refs[0 .. initialized + 1];
-                        continue;
+                        reused = true;
                     }
                 }
-                if (!eval_in_parameter_initializer) {
-                    if (callerLocalIndex(ctx.runtime, function, names[initialized])) |local_idx| {
+                if (!reused and !eval_in_parameter_initializer) {
+                    if (callerLocalIndex(ctx.runtime, chain_function, names[initialized])) |local_idx| {
                         if (local_idx < frame.locals.len) {
                             refs[initialized] = try slot_ops.ensureFrameVarRefCell(ctx, frame, &frame.locals[local_idx]);
                             rooted_refs = refs[0 .. initialized + 1];
-                            continue;
+                            reused = true;
                         }
                     }
                 }
+                break;
             }
+            if (reused) continue;
         }
         const cell = try core.VarRef.createClosed(ctx.runtime, core.JSValue.undefinedValue());
         cell.varRefIsDeletableSlot().* = true;
@@ -4400,6 +4449,32 @@ pub fn createDirectEvalVarRefCells(
         rooted_refs = refs[0 .. initialized + 1];
     }
     return refs;
+}
+
+/// Finds an existing binding CELL for `atom_id` in `frame`'s eval-LOCAL
+/// table (visible caller locals exposed to the eval plus the frame's own
+/// hoisted eval vars), returning a dup'd reference or null. Used by
+/// `createDirectEvalVarRefCells` to bind a hoisted eval var to the binding
+/// the variable environment already holds — qjs's closure-var name match
+/// ahead of the `_var_` property creation (instantiate_hoisted_definitions,
+/// quickjs.c:34059-34066). The frame's eval VAR-REF table is deliberately NOT
+/// searched: it also carries the function's closure CAPTURES, which sit
+/// beyond `_var_` in qjs's closure order and are therefore shadowed by a new
+/// var-object property, never rebound (the redeclaration first pass stops at
+/// `_var_`, quickjs.c:34229-34231).
+fn directEvalNamedVarRefCell(rt: *core.JSRuntime, frame: *const frame_mod.Frame, atom_id: core.Atom) ?core.JSValue {
+    return namedCellInTables(rt, frame.evalLocalNames(), frame.evalLocalSlots(), atom_id);
+}
+
+fn namedCellInTables(rt: *core.JSRuntime, table_names: []const core.Atom, table_refs: []const core.JSValue, atom_id: core.Atom) ?core.JSValue {
+    const n = @min(table_names.len, table_refs.len);
+    var idx: usize = 0;
+    while (idx < n) : (idx += 1) {
+        if (!atomIdOrNameEql(rt, table_names[idx], atom_id)) continue;
+        if (slot_ops.varRefCellFromValue(table_refs[idx]) == null) continue;
+        return table_refs[idx].dup();
+    }
+    return null;
 }
 
 pub const DirectEvalVisibleLocalBindings = struct {
@@ -4829,14 +4904,32 @@ pub fn publishDirectEvalVarRefs(
                 var index: usize = 0;
                 while (index < count) : (index += 1) {
                     try eval_ops.appendFunctionEvalLocal(ctx, function_object, names[index], refs[index]);
-                    if (!eval_in_parameter_initializer) {
-                        string_ops.replaceFrameVarRefBinding(ctx.runtime, frame, names[index], refs[index]);
-                    }
                 }
-                const frame_cold = try frame.ensureCold(&ctx.runtime.memory);
-                frame_cold.eval_var_ref_names = function_object.functionEvalLocalNames();
-                frame_cold.eval_var_refs = function_object.functionEvalLocalRefs();
-                frame_cold.eval_var_refs_republished = true;
+                // The new bindings belong to the enclosing FUNCTION's variable
+                // environment: qjs materializes each hoisted eval var as a
+                // property of that function's `_var_` object, which every
+                // enclosing direct-eval scope shares transitively through its
+                // closure (instantiate_hoisted_definitions quickjs.c:34049-34096;
+                // resolve_scope_var `_var_` forwarding quickjs.c:33216-33235), so
+                // the binding is immediately visible in ALL of those scopes.
+                // zjs's frame model keeps per-frame snapshot tables instead of a
+                // shared object, so refresh every live frame of that variable
+                // environment: the immediate caller plus each enclosing
+                // direct-eval frame up to the function frame itself.
+                var target: ?*frame_mod.Frame = frame;
+                while (target) |target_frame| {
+                    if (!eval_in_parameter_initializer) {
+                        index = 0;
+                        while (index < count) : (index += 1) {
+                            string_ops.replaceFrameVarRefBinding(ctx.runtime, target_frame, names[index], refs[index]);
+                        }
+                    }
+                    const frame_cold = try target_frame.ensureCold(&ctx.runtime.memory);
+                    frame_cold.eval_var_ref_names = function_object.functionEvalLocalNames();
+                    frame_cold.eval_var_refs = function_object.functionEvalLocalRefs();
+                    frame_cold.eval_var_refs_republished = true;
+                    target = target_frame.evalCallerFrame();
+                }
             }
         }
         return;
@@ -4939,7 +5032,7 @@ pub fn indirectEval(
         }
         var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
         defer nested_stack.deinit(ctx.runtime);
-        break :blk runWithArgsState(ctx, &nested_stack, &compiled.function, eval_global.value(), &.{}, &.{}, output, eval_global, true, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), true, true, core.JSValue.undefinedValue(), false) catch |err| exception_ops.normalizeEvalRuntimeError(err);
+        break :blk runWithArgsState(ctx, &nested_stack, &compiled.function, eval_global.value(), &.{}, &.{}, output, eval_global, true, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), true, true, core.JSValue.undefinedValue(), null, false) catch |err| exception_ops.normalizeEvalRuntimeError(err);
     };
 
     if (use_global_lexicals) {
@@ -5357,18 +5450,11 @@ pub fn callFunctionBytecodeModeState(
     else
         stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
-    const dispatch_result = runWithArgsState(ctx, &nested_stack, nested, effective_this, args, combined_var_refs, output, global, false, fb_runtime_strict, stop_on_yield, &.{}, &.{}, eval_var_ref_names, eval_var_refs, &.{}, &.{}, &.{}, &.{}, generator_state, resume_value, stop_before_pc, current_function_value, new_target_value, constructor_this_value, false, false, core.JSValue.undefinedValue(), false);
-    const result = dispatch_result catch |err| {
-        if (fb.flags.func_kind == .async_generator) {
-            return exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, global));
-        }
-        return err;
-    };
-    if (fb.flags.func_kind == .async_generator) {
-        defer result.free(ctx.runtime);
-        return core.promise.fulfilledWithPrototype(ctx.runtime, result, promise_ops.promisePrototypeFromGlobal(ctx.runtime, global));
-    }
-    return result;
+    // Async-generator bodies return their raw suspension/completion value to
+    // the queue machine (exec/async_generator.zig execBody) — no promise
+    // wrapping here (qjs async_func_resume returns the raw value/ret code,
+    // quickjs.c:20951).
+    return runWithArgsState(ctx, &nested_stack, nested, effective_this, args, combined_var_refs, output, global, false, fb_runtime_strict, stop_on_yield, &.{}, &.{}, eval_var_ref_names, eval_var_refs, &.{}, &.{}, &.{}, &.{}, generator_state, resume_value, stop_before_pc, current_function_value, new_target_value, constructor_this_value, false, false, core.JSValue.undefinedValue(), null, false);
 }
 
 pub fn runGeneratorParameterInit(
@@ -5435,7 +5521,7 @@ pub fn runGeneratorParameterInit(
 
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
-    return runWithArgsState(ctx, &nested_stack, &nested, this_value, args, var_refs, output, global, false, true, false, &.{}, &.{}, object.functionEvalLocalNames(), object.functionEvalLocalRefs(), &.{}, &.{}, &.{}, &.{}, object, null, fb.generatorBodyPc(), current_function_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), false);
+    return runWithArgsState(ctx, &nested_stack, &nested, this_value, args, var_refs, output, global, false, true, false, &.{}, &.{}, object.functionEvalLocalNames(), object.functionEvalLocalRefs(), &.{}, &.{}, &.{}, &.{}, object, null, fb.generatorBodyPc(), current_function_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), null, false);
 }
 
 pub fn qjsGeneratorNext(
@@ -5448,23 +5534,23 @@ pub fn qjsGeneratorNext(
     if (!receiver.isObject()) return null;
     const object = property_ops.expectObject(receiver) catch return null;
     if (object.class_id != core.class.ids.generator and object.class_id != core.class.ids.async_generator) return null;
+    if (object.class_id == core.class.ids.async_generator) {
+        // Async generators enqueue a request and return its promise (mirrors
+        // js_async_generator_next GEN_MAGIC_NEXT, quickjs.c:21706); a call
+        // arriving while EXECUTING only appends — never a TypeError.
+        return try async_generator.asyncGeneratorEnqueue(ctx, output, global, object, args, 0);
+    }
     if (object.generatorExecuting()) return error.TypeError;
     const generator_global = object_ops.objectRealmGlobal(object) orelse global;
     if (object.generatorDone()) {
         const done_result = try createIteratorResult(ctx.runtime, generator_global, core.JSValue.undefinedValue(), true);
         defer done_result.free(ctx.runtime);
-        if (object.class_id == core.class.ids.async_generator) {
-            return try core.promise.fulfilledWithPrototype(ctx.runtime, done_result, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
-        }
         return done_result.dup();
     }
     if (takeGeneratorPendingReturn(object)) |pending| {
         // Suspended at a yield inside a finally block entered via .return(v): finish
         // the finally range, then complete with the pending return value (qjs
         // js_generator_next GEN_MAGIC_RETURN, quickjs.c:21077).
-        if (object.class_id == core.class.ids.async_generator) {
-            return try resumeAsyncGeneratorPendingReturn(ctx, output, generator_global, receiver, object, pending, args);
-        }
         const step = try resumeGeneratorPendingReturnStep(ctx, output, generator_global, receiver, object, pending, args);
         if (!step.done and (object.generatorYieldStarIterator() != null or generatorYieldStarSuspended(ctx.runtime, object))) {
             return step.value;
@@ -5498,14 +5584,8 @@ pub fn qjsGeneratorNext(
         core.JSValue.undefinedValue(),
     ) catch |err| {
         object.generatorDoneSlot().* = true;
-        if (object.class_id == core.class.ids.async_generator) {
-            return try exception_ops.rejectedPromiseForRuntimeError(ctx, generator_global, err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
-        }
         return err;
     };
-    if (object.class_id == core.class.ids.async_generator) {
-        return try finishAsyncGeneratorStep(ctx, output, generator_global, receiver, object, result, null);
-    }
     defer result.free(ctx.runtime);
     if (object.generatorJustYielded() and
         (object.generatorYieldStarIterator() != null or generatorYieldStarSuspended(ctx.runtime, object)))
@@ -5513,151 +5593,6 @@ pub fn qjsGeneratorNext(
         return result.dup();
     }
     return try createIteratorResult(ctx.runtime, generator_global, result, !object.generatorJustYielded());
-}
-
-/// Await an async-generator operand with the drain model used for the body's internal
-/// await points. Mirrors the compiler-emitted OP_await qjs places before OP_yield
-/// (quickjs.c:28134-28136) and before OP_return (emit_return quickjs.c:28404): the
-/// settled value is returned, a rejection surfaces as error.JSException with the
-/// reason pending on ctx.
-fn awaitAsyncGeneratorOperand(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    value: core.JSValue,
-) !core.JSValue {
-    if (object_ops.objectFromValue(value)) |awaited| {
-        if (awaited.class_id == core.class.ids.promise) {
-            try promise_ops.settlePendingPromiseReaction(ctx, output, global, awaited);
-            if (awaited.promiseResult() == null) try promise_ops.drainPendingPromiseJobs(ctx, output, global);
-            if (awaited.promiseResult() == null) try promise_ops.awaitPendingPromise(ctx, output, global, awaited);
-            const settled = if (awaited.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
-            if (awaited.promiseIsRejected()) {
-                // The await consumes the rejection (qjs attaches a reaction, which
-                // marks the promise handled).
-                core.promise.markHandled(ctx, awaited);
-                _ = ctx.throwValue(settled);
-                return error.JSException;
-            }
-            return settled;
-        }
-        if (try promise_ops.awaitThenableValue(ctx, output, global, value, null, null)) |settled| {
-            return settled;
-        }
-    }
-    return value.dup();
-}
-
-/// Deliver one async-generator body step. `body_result` (owned here) is the promise the
-/// body run wrapped its yielded/returned value into. Mirrors the qjs async-generator
-/// yield protocol: the yield operand is awaited before the request settles (the
-/// compiler-emitted OP_await before OP_yield, quickjs.c:28134-28136), and a rejected
-/// operand is thrown INTO the generator body at the yield site (the await reaction
-/// resuming with a throw completion, js_async_generator_resume_next
-/// quickjs.c:21596/21640); the body may catch it and keep yielding, so loop.
-///
-/// `pending_return` (owned here, value already awaited) is the pending .return()
-/// completion when the step runs inside a finally block entered via .return(v): it is
-/// re-stashed if the finally suspends at another yield, delivered as the completion
-/// value once the finally range finishes, and discarded when a throw unwinds the frame
-/// (qjs js_generator_next GEN_MAGIC_RETURN protocol, quickjs.c:21109).
-fn finishAsyncGeneratorStep(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    generator_global: *core.Object,
-    receiver: core.JSValue,
-    object: *core.Object,
-    body_result: core.JSValue,
-    pending_return: ?GeneratorPendingReturn,
-) !core.JSValue {
-    var result = body_result;
-    defer result.free(ctx.runtime);
-    var pending_state = pending_return;
-    defer if (pending_state) |p| p.value.free(ctx.runtime);
-    while (true) {
-        const promise = object_ops.objectFromValue(result) orelse return error.TypeError;
-        if (promise.class_id != core.class.ids.promise) return error.TypeError;
-        if (promise.promiseIsRejected()) {
-            object.generatorDoneSlot().* = true;
-            return result.dup();
-        }
-        const done = !object.generatorJustYielded();
-        if (promise.promiseResult() == null) {
-            if (!done) {
-                if (pending_state) |p| {
-                    try stashGeneratorPendingReturn(ctx.runtime, object, p.value, p.stop_pc);
-                    p.value.free(ctx.runtime);
-                    pending_state = null;
-                }
-            }
-            return try promise_ops.asyncGeneratorIteratorResultFromPromise(ctx, output, generator_global, result, done);
-        }
-        const value = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
-        defer value.free(ctx.runtime);
-        const awaited = awaitAsyncGeneratorOperand(ctx, output, generator_global, value) catch |err| {
-            if (err != error.JSException or done) {
-                object.generatorDoneSlot().* = true;
-                return try exception_ops.rejectedPromiseForRuntimeError(ctx, generator_global, err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
-            }
-            // Rejected yield operand: resume the body with a throw completion at the
-            // yield site so the rejection is catchable there (qjs: the await reaction
-            // rejects and js_async_generator_resume_next re-enters with
-            // GEN_MAGIC_THROW semantics). A pending return completion is discarded
-            // (qjs: the stacked completion slots unwind with the frame).
-            const stop_pc: ?usize = if (pending_state) |p| p.stop_pc else null;
-            if (pending_state) |p| {
-                p.value.free(ctx.runtime);
-                pending_state = null;
-            }
-            const reason = if (ctx.hasException()) ctx.takeException() else core.JSValue.undefinedValue();
-            defer reason.free(ctx.runtime);
-            try setGeneratorResumeCompletionType(ctx.runtime, object, 2);
-            const function_value = object.functionBytecodeSlot().* orelse return error.TypeError;
-            const stored_current_function = if (object.generatorCurrentFunction()) |stored| stored.dup() else null;
-            defer if (stored_current_function) |stored| stored.free(ctx.runtime);
-            const resumed = callFunctionBytecodeModeState(
-                ctx,
-                function_value,
-                stored_current_function orelse receiver,
-                object.generatorThis() orelse core.JSValue.undefinedValue(),
-                object.generatorArgs(),
-                object.functionCapturesSlot().*,
-                output,
-                generator_global,
-                object.functionEvalLocalNames(),
-                object.functionEvalLocalRefs(),
-                false,
-                object,
-                reason,
-                stop_pc,
-                core.JSValue.undefinedValue(),
-                core.JSValue.undefinedValue(),
-            ) catch |resume_err| {
-                object.generatorDoneSlot().* = true;
-                return try exception_ops.rejectedPromiseForRuntimeError(ctx, generator_global, resume_err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
-            };
-            result.free(ctx.runtime);
-            result = resumed;
-            continue;
-        };
-        defer awaited.free(ctx.runtime);
-        if (!done) {
-            if (pending_state) |p| {
-                try stashGeneratorPendingReturn(ctx.runtime, object, p.value, p.stop_pc);
-                p.value.free(ctx.runtime);
-                pending_state = null;
-            }
-            return try promise_ops.asyncGeneratorFulfilledIteratorResult(ctx, generator_global, awaited, false);
-        }
-        if (pending_state) |p| {
-            // The finally range finished: complete with the pending return value
-            // unless the finally overrode it with its own completion.
-            object.generatorDoneSlot().* = true;
-            const deliver = if (value.isUndefined()) p.value else awaited;
-            return try promise_ops.asyncGeneratorFulfilledIteratorResult(ctx, generator_global, deliver, true);
-        }
-        return try promise_ops.asyncGeneratorFulfilledIteratorResult(ctx, generator_global, awaited, true);
-    }
 }
 
 /// A raw generator step result: the yielded/returned value + done flag, with no
@@ -5791,29 +5726,9 @@ pub fn resumeGeneratorYieldStarCompletion(
         core.JSValue.undefinedValue(),
     ) catch |err| {
         object.generatorDoneSlot().* = true;
-        if (object.class_id == core.class.ids.async_generator) {
-            return try exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, global));
-        }
         return err;
     };
     defer result.free(ctx.runtime);
-    if (object.class_id == core.class.ids.async_generator) {
-        const promise = object_ops.objectFromValue(result) orelse return error.TypeError;
-        if (promise.class_id != core.class.ids.promise) return error.TypeError;
-        if (promise.promiseIsRejected()) {
-            object.generatorDoneSlot().* = true;
-            return result.dup();
-        }
-        const done = !object.generatorJustYielded();
-        if (promise.promiseResult() == null) {
-            if (done) object.generatorDoneSlot().* = true;
-            return try promise_ops.asyncGeneratorIteratorResultFromPromise(ctx, output, global, result, done);
-        }
-        const value = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
-        defer value.free(ctx.runtime);
-        if (done) object.generatorDoneSlot().* = true;
-        return try promise_ops.asyncGeneratorFulfilledIteratorResult(ctx, global, value, done);
-    }
     const done = !object.generatorJustYielded();
     if (done) object.generatorDoneSlot().* = true;
     if (object.generatorJustYielded() and generatorYieldStarSuspended(ctx.runtime, object)) return result.dup();
@@ -5936,53 +5851,6 @@ fn resumeGeneratorPendingReturnStep(
     return .{ .value = value, .done = true };
 }
 
-/// Async twin of `resumeGeneratorPendingReturnStep`: resume the finally range with the
-/// pending .return() completion and route the resulting body promise through
-/// `finishAsyncGeneratorStep`, which re-stashes / delivers / discards the pending
-/// completion. Takes ownership of `pending.value`.
-fn resumeAsyncGeneratorPendingReturn(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    generator_global: *core.Object,
-    receiver: core.JSValue,
-    object: *core.Object,
-    pending: GeneratorPendingReturn,
-    args: []const core.JSValue,
-) !core.JSValue {
-    const function_value = object.functionBytecodeSlot().* orelse {
-        pending.value.free(ctx.runtime);
-        return error.TypeError;
-    };
-    const stored_current_function = if (object.generatorCurrentFunction()) |value| value.dup() else null;
-    defer if (stored_current_function) |value| value.free(ctx.runtime);
-    const resume_value = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
-    object.generatorExecutingSlot().* = true;
-    defer object.generatorExecutingSlot().* = false;
-    const result = callFunctionBytecodeModeState(
-        ctx,
-        function_value,
-        stored_current_function orelse receiver,
-        object.generatorThis() orelse core.JSValue.undefinedValue(),
-        object.generatorArgs(),
-        object.functionCapturesSlot().*,
-        output,
-        generator_global,
-        object.functionEvalLocalNames(),
-        object.functionEvalLocalRefs(),
-        false,
-        object,
-        resume_value,
-        pending.stop_pc,
-        core.JSValue.undefinedValue(),
-        core.JSValue.undefinedValue(),
-    ) catch |err| {
-        pending.value.free(ctx.runtime);
-        object.generatorDoneSlot().* = true;
-        return try exception_ops.rejectedPromiseForRuntimeError(ctx, generator_global, err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
-    };
-    return try finishAsyncGeneratorStep(ctx, output, generator_global, receiver, object, result, pending);
-}
-
 pub fn qjsGeneratorReturn(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -5993,6 +5861,12 @@ pub fn qjsGeneratorReturn(
     if (!receiver.isObject()) return null;
     const object = property_ops.expectObject(receiver) catch return null;
     if (object.class_id != core.class.ids.generator and object.class_id != core.class.ids.async_generator) return null;
+    if (object.class_id == core.class.ids.async_generator) {
+        // Mirrors js_async_generator_next GEN_MAGIC_RETURN (quickjs.c:21706):
+        // enqueue and return the request promise; the argument is awaited by
+        // the queue machine before the finally range runs / the request settles.
+        return try async_generator.asyncGeneratorEnqueue(ctx, output, global, object, args, 1);
+    }
     if (object.generatorExecuting()) return error.TypeError;
     const generator_global = object_ops.objectRealmGlobal(object) orelse global;
     // A fresh .return(v) replaces any pending return completion stashed by an earlier
@@ -6002,54 +5876,6 @@ pub fn qjsGeneratorReturn(
     try closeGeneratorDestructuringIterators(ctx, output, generator_global, object);
     var return_value = if (args.len > 0) args[0].dup() else core.JSValue.undefinedValue();
     defer return_value.free(ctx.runtime);
-    if (object.class_id == core.class.ids.async_generator) {
-        // qjs awaits the .return() argument in every state: at a suspension the
-        // compiled return path awaits it before running finally blocks (emit_return
-        // OP_await, quickjs.c:28404 "the await must be done before handling the
-        // finally"); on a completed generator js_async_generator_completed_return
-        // resolves it via JS_PromiseResolve + reaction (quickjs.c:21530). A rejection
-        // is raised inside the body when it can still run (catchable at the yield),
-        // otherwise it rejects the request promise (js_async_generator_resolve_function
-        // magic>=2 is_reject, quickjs.c:21686).
-        const awaited = awaitAsyncGeneratorOperand(ctx, output, generator_global, return_value) catch |err| {
-            if (err != error.JSException) return err;
-            const reason = if (ctx.hasException()) ctx.takeException() else core.JSValue.undefinedValue();
-            defer reason.free(ctx.runtime);
-            if (!object.generatorDone() and object.generatorPc() != 0 and object.generatorStarted()) {
-                if (generatorYieldStarSuspended(ctx.runtime, object)) {
-                    return try resumeGeneratorYieldStarCompletion(ctx, output, generator_global, receiver, object, reason, 2);
-                }
-                try setGeneratorResumeCompletionType(ctx.runtime, object, 2);
-                const function_value = object.functionBytecodeSlot().* orelse return error.TypeError;
-                const resumed = callFunctionBytecodeModeState(
-                    ctx,
-                    function_value,
-                    receiver,
-                    object.generatorThis() orelse core.JSValue.undefinedValue(),
-                    object.generatorArgs(),
-                    object.functionCapturesSlot().*,
-                    output,
-                    generator_global,
-                    object.functionEvalLocalNames(),
-                    object.functionEvalLocalRefs(),
-                    false,
-                    object,
-                    reason,
-                    null,
-                    core.JSValue.undefinedValue(),
-                    core.JSValue.undefinedValue(),
-                ) catch |resume_err| {
-                    object.generatorDoneSlot().* = true;
-                    return try exception_ops.rejectedPromiseForRuntimeError(ctx, generator_global, resume_err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
-                };
-                return try finishAsyncGeneratorStep(ctx, output, generator_global, receiver, object, resumed, null);
-            }
-            object.generatorDoneSlot().* = true;
-            return try core.promise.rejectedWithPrototype(ctx.runtime, reason, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
-        };
-        return_value.free(ctx.runtime);
-        return_value = awaited;
-    }
     if (generatorYieldStarSuspended(ctx.runtime, object)) {
         return try resumeGeneratorYieldStarCompletion(ctx, output, generator_global, receiver, object, return_value, 1);
     }
@@ -6060,11 +5886,6 @@ pub fn qjsGeneratorReturn(
         };
         switch (step) {
             .yield_result => |result| {
-                if (object.class_id == core.class.ids.async_generator) {
-                    defer result.free(ctx.runtime);
-                    const promise = try core.promise.fulfilledWithPrototype(ctx.runtime, result, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
-                    return promise;
-                }
                 return result;
             },
             .complete => |value| {
@@ -6098,21 +5919,8 @@ pub fn qjsGeneratorReturn(
                 core.JSValue.undefinedValue(),
             ) catch |err| {
                 object.generatorDoneSlot().* = true;
-                if (object.class_id == core.class.ids.async_generator) {
-                    return try exception_ops.rejectedPromiseForRuntimeError(ctx, generator_global, err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
-                }
                 return err;
             };
-            if (object.class_id == core.class.ids.async_generator) {
-                // The body result is a promise; finishAsyncGeneratorStep unwraps it,
-                // stashes the pending return completion if the finally suspended at a
-                // yield, and delivers {value: return_value, done: true} once the
-                // finally range finishes.
-                return try finishAsyncGeneratorStep(ctx, output, generator_global, receiver, object, result, .{
-                    .value = return_value.dup(),
-                    .stop_pc = finally_range.stop,
-                });
-            }
             defer result.free(ctx.runtime);
             const done = !object.generatorJustYielded();
             if (done) object.generatorDoneSlot().* = true;
@@ -6131,10 +5939,6 @@ pub fn qjsGeneratorReturn(
         }
     }
     object.generatorDoneSlot().* = true;
-    if (object.class_id == core.class.ids.async_generator) {
-        const promise = try promise_ops.asyncGeneratorFulfilledIteratorResult(ctx, generator_global, return_value, true);
-        return promise;
-    }
     return try createIteratorResult(ctx.runtime, generator_global, return_value, true);
 }
 
@@ -6323,6 +6127,10 @@ pub fn qjsGeneratorThrow(
 ) !?core.JSValue {
     const object = property_ops.expectObject(receiver) catch return null;
     if (object.class_id != core.class.ids.generator and object.class_id != core.class.ids.async_generator) return null;
+    if (object.class_id == core.class.ids.async_generator) {
+        // Mirrors js_async_generator_next GEN_MAGIC_THROW (quickjs.c:21706).
+        return try async_generator.asyncGeneratorEnqueue(ctx, output, global, object, args, 2);
+    }
     if (object.generatorExecuting()) return error.TypeError;
     const generator_global = object_ops.objectRealmGlobal(object) orelse global;
     const thrown = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
@@ -6333,11 +6141,6 @@ pub fn qjsGeneratorThrow(
 
     if (generatorYieldStarSuspended(ctx.runtime, object)) {
         return try resumeGeneratorYieldStarCompletion(ctx, output, generator_global, receiver, object, thrown, 2);
-    }
-
-    if (object.class_id == core.class.ids.async_generator) {
-        object.generatorDoneSlot().* = true;
-        return try core.promise.rejectedWithPrototype(ctx.runtime, thrown, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
     }
 
     if (object.generatorYieldStarIterator() != null) {

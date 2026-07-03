@@ -334,7 +334,7 @@ pub fn runModuleWithOutputAndVarRefsState(
     resume_value: ?core.JSValue,
 ) !core.JSValue {
     const global_object = try contextGlobal(ctx);
-    return runWithArgsState(ctx, stack, function, core.JSValue.undefinedValue(), &.{}, var_refs, output, global_object, false, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, module_state, resume_value, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), true);
+    return runWithArgsState(ctx, stack, function, core.JSValue.undefinedValue(), &.{}, var_refs, output, global_object, false, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, module_state, resume_value, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), null, true);
 }
 
 /// Lazily build and cache the per-context global object. Subsequent
@@ -397,7 +397,7 @@ pub fn runWithArgs(
     eval_var_ref_names: []const core.Atom,
     input_eval_var_refs: []const core.JSValue,
 ) !core.JSValue {
-    return runWithArgsState(ctx, stack, function, initial_this_value, args, var_refs, output, global, break_var_ref_cycles_on_exit, strict_unresolved_get_var, stop_on_yield, eval_local_names, eval_local_slots, eval_var_ref_names, input_eval_var_refs, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), false) catch |err| {
+    return runWithArgsState(ctx, stack, function, initial_this_value, args, var_refs, output, global, break_var_ref_cycles_on_exit, strict_unresolved_get_var, stop_on_yield, eval_local_names, eval_local_slots, eval_var_ref_names, input_eval_var_refs, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), null, false) catch |err| {
         if (!ctx.preserve_uncaught_exception and err != error.JSException and ctx.hasException()) ctx.clearException();
         return err;
     };
@@ -436,6 +436,7 @@ pub const CallEnv = struct {
     eval_global_var_bindings: bool = false,
     is_eval_code: bool = false,
     eval_with_object: core.JSValue = core.JSValue.undefinedValue(),
+    eval_caller_frame: ?*frame_mod.Frame = null,
     suspend_on_module_await: bool = false,
 };
 
@@ -469,6 +470,7 @@ pub fn runWithCallEnv(env: CallEnv) HostError!core.JSValue {
         env.eval_global_var_bindings,
         env.is_eval_code,
         env.eval_with_object,
+        env.eval_caller_frame,
         env.suspend_on_module_await,
     );
 }
@@ -502,6 +504,7 @@ pub fn runWithArgsState(
     entry_eval_global_var_bindings: bool,
     entry_is_eval_code: bool,
     entry_eval_with_object: core.JSValue,
+    entry_eval_caller_frame: ?*frame_mod.Frame,
     entry_suspend_on_module_await: bool,
 ) HostError!core.JSValue {
     const call_depth_guard = try call_vm.enterCallDepth(ctx, global);
@@ -546,6 +549,15 @@ pub fn runWithArgsState(
         .inherited_eval_var_refs = inherited_eval_var_refs,
     });
     defer frame_eval_var_refs.deinit(ctx.runtime);
+    // Direct-eval frames record the caller's live frame so publication can
+    // walk enclosing direct-eval scopes up to the function frame owning the
+    // variable environment — the zjs adaptation of qjs's eval closure
+    // containing all enclosing variables (`_var_` forwarded transitively,
+    // resolve_scope_var quickjs.c:33216-33235).
+    if (entry_eval_caller_frame) |eval_caller| {
+        const frame_cold = try frame_storage.ensureCold(&ctx.runtime.memory);
+        frame_cold.eval_caller_frame = eval_caller;
+    }
 
     const use_inline_frame_storage = entry_generator_state == null and !entry_function.flags.is_generator and !entry_function.flags.is_async;
     const frame_arena: ?*core.VmStackArena = if (use_inline_frame_storage) &ctx.runtime.vm_stack else null;

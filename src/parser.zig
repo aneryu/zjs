@@ -7339,6 +7339,9 @@ pub const parser_core = struct {
     /// `parseCondExpr`), folding a trailing call into a tail call when the
     /// branch ends in one. Mirrors the `TOK_RETURN` rewrite conditions.
     fn emitReturnExprBranch(s: *State) Error!void {
+        // Async generator explicit return awaits the branch value (qjs
+        // emit_return OP_await, quickjs.c:28401-28404) before OP_return_async.
+        if (s.in_async and s.in_generator) try s.emitOp(opcode.op.await);
         const tail_rewrite = if (!s.in_constructor and !s.in_async and !hasActiveIteratorCloses(s))
             rewriteTrailingCallAsTailCall(s)
         else
@@ -7790,8 +7793,12 @@ pub const parser_core = struct {
             }
             if (top_level_module_await) s.function.ensureModule().has_top_level_await = true;
             try s.advance();
-            // Parse the awaited expression
-            try parseAssignExpr(s);
+            // `await`'s operand is a UnaryExpression (spec AwaitExpression:
+            // `await UnaryExpression`; qjs js_parse_unary TOK_AWAIT parses a
+            // unary operand), NOT an AssignmentExpression — so
+            // `await Promise.resolve(2) * x` is `(await …) * x`, not
+            // `await (… * x)`.
+            try parseUnary(s, flags);
             try s.emitOp(opcode.op.await);
             return;
         }
@@ -11859,6 +11866,12 @@ pub const parser_core = struct {
                     s.return_expr_mode = saved_return_expr_mode;
                     s.return_expr_emitted_return = saved_return_expr_emitted;
                     if (!emitted_return) {
+                        // Async generator `return value;`: qjs awaits the value
+                        // before completing (emit_return OP_await for
+                        // JS_FUNC_ASYNC_GENERATOR hasval, quickjs.c:28401-28404).
+                        // Emit the await on the return value (now on the stack)
+                        // before the iterator-close / finally unwinding.
+                        if (s.in_async and s.in_generator) try s.emitOp(opcode.op.await);
                         if (hasActiveIteratorCloses(s) or (!dropped_markers_early and s.active_catch_marker_depth > 0 and s.return_finally_frames.items.len == 0)) {
                             const return_tmp = try appendTempLocal(s);
                             try s.emitOpU16(opcode.op.put_loc, return_tmp);
@@ -13067,6 +13080,10 @@ pub const parser_core = struct {
         const frame_index = nearestReturnFinallyFrameForReturn(s, null) orelse return false;
         if (has_expr) {
             try parseExpr(s);
+            // Async generator explicit `return value;` awaits the value (qjs
+            // emit_return OP_await, quickjs.c:28401-28404) before the finally
+            // unwinding. An implicit return (no expr, `undefined` above) does not.
+            if (s.in_async and s.in_generator) try s.emitOp(opcode.op.await);
         } else {
             try s.emitOp(opcode.op.undefined);
         }
@@ -15209,24 +15226,38 @@ pub const parser_core = struct {
                     !s.annex_b_if_function_decl_clause and
                     s.findFunctionScopeVar(name) == null)
                 {
-                    if (!s.lex.is_module and s.cur_func_stack.len == 0 and (!s.is_eval or s.eval_global_var_bindings)) {
+                    const is_script_global_fn = !s.lex.is_module and s.cur_func_stack.len == 0 and (!s.is_eval or s.eval_global_var_bindings);
+                    if (is_script_global_fn) {
+                        // Script / indirect-eval global code: a top-level function
+                        // declaration is a *global var* (qjs is_global_var →
+                        // add_global_var, quickjs.c:36980). It is installed as a plain
+                        // global-object property from the global_vars hoist table (like
+                        // a top-level `var`); its references resolve to a dynamic
+                        // OP_get_var global lookup (resolve_scope_var, quickjs.c:33272),
+                        // so `globalThis.f = x` is observable. Do NOT create a closure
+                        // var_ref cell (that becomes a lexical binding get_var reads,
+                        // shadowing the property, and caused a captured-cell staleness).
                         try s.addGlobalAnnexBFunctionVar(name, s.eval_global_var_bindings);
+                        child_fd.child_decl_emit_global_inline = true;
+                    } else {
+                        // Module (and direct-eval) top-level function decls are lexical
+                        // closure var_refs (qjs JS_CLOSURE_MODULE_DECL).
+                        const parent_ref_idx: u16 = if (State.findClosureVarIndex(parent_fd, name)) |idx| blk: {
+                            parent_fd.closure_var[idx].var_kind = .function_decl;
+                            parent_fd.closure_var[idx].is_lexical = true;
+                            break :blk idx;
+                        } else @intCast(try parent_fd.addClosureVar(.{
+                            .closure_type = .module_decl,
+                            .is_lexical = true,
+                            .is_const = false,
+                            .var_kind = .function_decl,
+                            .var_idx = @intCast(parent_fd.closure_var.len),
+                            .var_name = name,
+                        }));
+                        try s.retrofitForwardTopLevelFunctionCapture(parent_fd, name, parent_ref_idx);
+                        child_fd.emit_top_level_closure_init = true;
+                        child_fd.top_level_closure_var_idx = parent_ref_idx;
                     }
-                    const parent_ref_idx: u16 = if (State.findClosureVarIndex(parent_fd, name)) |idx| blk: {
-                        parent_fd.closure_var[idx].var_kind = .function_decl;
-                        parent_fd.closure_var[idx].is_lexical = true;
-                        break :blk idx;
-                    } else @intCast(try parent_fd.addClosureVar(.{
-                        .closure_type = .module_decl,
-                        .is_lexical = true,
-                        .is_const = false,
-                        .var_kind = .function_decl,
-                        .var_idx = @intCast(parent_fd.closure_var.len),
-                        .var_name = name,
-                    }));
-                    try s.retrofitForwardTopLevelFunctionCapture(parent_fd, name, parent_ref_idx);
-                    child_fd.emit_top_level_closure_init = true;
-                    child_fd.top_level_closure_var_idx = parent_ref_idx;
                 } else {
                     _ = parent_code_len_before_child;
                     child_fd.child_decl_init_keep_value = false;
