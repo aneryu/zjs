@@ -116,7 +116,23 @@ pub noinline fn dynamicImport(
     // statement after import() runs before any module side effect. All
     // options validation, attribute-string enforcement, and attribute
     // threading live in module_graph.evaluateImportCall.
-    const referrer_path = ctx.runtime.atoms.name(function.filename) orelse "";
+    // Referrer = the active script/module's name (spec GetActiveScriptOrModule,
+    // qjs JS_GetScriptOrModuleName quickjs.c:30854). Eval code is NOT its own
+    // script/module: its body compiles with filename "<eval>" (eval_ops.zig), so
+    // walk the direct-eval caller chain to the enclosing real script/module and
+    // resolve a relative import() specifier against IT, not the runner cwd.
+    var referrer_path = ctx.runtime.atoms.name(function.filename) orelse "";
+    if (std.mem.eql(u8, referrer_path, "<eval>") or referrer_path.len == 0) {
+        var caller = frame.evalCallerFrame();
+        while (caller) |cf| {
+            const caller_name = ctx.runtime.atoms.name(cf.function.filename) orelse "";
+            if (caller_name.len != 0 and !std.mem.eql(u8, caller_name, "<eval>")) {
+                referrer_path = caller_name;
+                break;
+            }
+            caller = cf.evalCallerFrame();
+        }
+    }
     const promise = module_graph.evaluateImportCall(ctx, output, global, prototype, referrer_path, specifier_string, options, function, frame) catch |err| {
         const rejected = try exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
         errdefer rejected.free(ctx.runtime);
