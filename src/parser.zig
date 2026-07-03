@@ -7790,8 +7790,12 @@ pub const parser_core = struct {
             }
             if (top_level_module_await) s.function.ensureModule().has_top_level_await = true;
             try s.advance();
-            // Parse the awaited expression
-            try parseAssignExpr(s);
+            // `await`'s operand is a UnaryExpression (spec AwaitExpression:
+            // `await UnaryExpression`; qjs js_parse_unary TOK_AWAIT parses a
+            // unary operand), NOT an AssignmentExpression — so
+            // `await Promise.resolve(2) * x` is `(await …) * x`, not
+            // `await (… * x)`.
+            try parseUnary(s, flags);
             try s.emitOp(opcode.op.await);
             return;
         }
