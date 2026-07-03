@@ -3,12 +3,10 @@ const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
-const property_ops = @import("property_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const eval_ops = @import("eval_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const module_graph = @import("module_graph.zig");
-const object_ops = @import("object_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const string_ops = @import("string_ops.zig");
 const stack_mod = @import("stack.zig");
@@ -111,94 +109,20 @@ pub noinline fn dynamicImport(
     };
     defer specifier_string.free(ctx.runtime);
 
-    if (!options.isUndefined() and !options.isObject()) {
-        try pushRejectedTypeError(ctx, global, stack, prototype, "options must be an object");
-        return;
-    }
-
-    if (options.isObject()) {
-        const with_atom = try ctx.runtime.internAtom("with");
-        defer ctx.runtime.atoms.free(with_atom);
-        const attributes = object_ops.getValueProperty(ctx, output, global, options, with_atom, function, frame) catch |err| {
-            const rejected = try exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
-            errdefer rejected.free(ctx.runtime);
-            try stack.pushOwned(rejected);
-            return;
-        };
-        defer attributes.free(ctx.runtime);
-        if (!attributes.isUndefined() and !attributes.isObject()) {
-            try pushRejectedTypeError(ctx, global, stack, prototype, "options.with must be an object");
-            return;
-        }
-        if (attributes.isObject()) {
-            try enumerateImportAttributes(ctx, output, global, attributes, function, frame, prototype, stack);
-        }
-    }
-
-    // Mirror qjs js_dynamic_import (quickjs.c:31073): only the specifier
-    // ToString and options validation run synchronously; the load/link/
-    // evaluate work is deferred to an enqueued job (JS_EnqueueJob
+    // Mirror qjs js_dynamic_import (quickjs.c:31073): the specifier ToString
+    // (above) plus options/with-attribute validation run synchronously; the
+    // load/link/evaluate work is deferred to an enqueued job (JS_EnqueueJob
     // quickjs.c:31155) that settles the returned pending promise, so the
-    // statement after import() runs before any module side effect.
+    // statement after import() runs before any module side effect. All
+    // options validation, attribute-string enforcement, and attribute
+    // threading live in module_graph.evaluateImportCall.
     const referrer_path = ctx.runtime.atoms.name(function.filename) orelse "";
-    const promise = module_graph.enqueueDynamicImportJob(ctx, global, prototype, referrer_path, specifier_string) catch |err| {
+    const promise = module_graph.evaluateImportCall(ctx, output, global, prototype, referrer_path, specifier_string, options, function, frame) catch |err| {
         const rejected = try exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
         errdefer rejected.free(ctx.runtime);
         try stack.pushOwned(rejected);
         return;
     };
-    errdefer promise.free(ctx.runtime);
-    try stack.pushOwned(promise);
-}
-
-fn enumerateImportAttributes(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    attributes: core.JSValue,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    prototype: ?*core.Object,
-    stack: *stack_mod.Stack,
-) !void {
-    const object = property_ops.expectObject(attributes) catch return;
-    const keys = object_ops.objectRestOwnKeys(ctx, output, global, object) catch |err| {
-        const rejected = try exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
-        errdefer rejected.free(ctx.runtime);
-        try stack.pushOwned(rejected);
-        return;
-    };
-    defer core.Object.freeKeys(ctx.runtime, keys);
-    for (keys) |key| {
-        if (ctx.runtime.atoms.kind(key) != .string) continue;
-        const desc = (object_ops.proxyAwareOwnPropertyDescriptor(ctx, output, global, object, key, function, frame) catch |err| {
-            const rejected = try exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
-            errdefer rejected.free(ctx.runtime);
-            try stack.pushOwned(rejected);
-            return;
-        }) orelse continue;
-        defer desc.destroy(ctx.runtime);
-        if (!(desc.enumerable orelse false)) continue;
-        const value = object_ops.getValueProperty(ctx, output, global, attributes, key, function, frame) catch |err| {
-            const rejected = try exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
-            errdefer rejected.free(ctx.runtime);
-            try stack.pushOwned(rejected);
-            return;
-        };
-        value.free(ctx.runtime);
-    }
-}
-
-fn pushRejectedTypeError(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    prototype: ?*core.Object,
-    message: []const u8,
-) !void {
-    const error_value = try exception_ops.createNamedError(ctx, global, "TypeError", message);
-    defer error_value.free(ctx.runtime);
-    const promise = try core.promise.rejectedWithPrototype(ctx.runtime, error_value, prototype);
     errdefer promise.free(ctx.runtime);
     try stack.pushOwned(promise);
 }

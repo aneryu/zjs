@@ -18,10 +18,7 @@ test262/test/harness/asyncHelpers-asyncTest-then-resolves.js
 test262/test/language/expressions/await/syntax-await-has-UnaryExpression-with-MultiplicativeExpression.js
 test262/test/language/expressions/await/syntax-await-in-ConditionalExpression.js
 test262/test/language/expressions/dynamic-import/assignment-expression/arrow-function.js
-test262/test/language/expressions/dynamic-import/import-attributes/2nd-param-with-enumeration-abrupt.js
 test262/test/language/expressions/dynamic-import/import-attributes/2nd-param-with-type-text.js
-test262/test/language/expressions/dynamic-import/import-attributes/2nd-param-with-value-abrupt.js
-test262/test/language/expressions/dynamic-import/import-attributes/2nd-param-with-value-non-string.js
 test262/test/language/expressions/dynamic-import/usage-from-eval.js
 test262/test/language/module-code/top-level-await/dynamic-import-of-waiting-module.js
 test262/test/language/module-code/top-level-await/fulfillment-order.js
