@@ -3577,8 +3577,13 @@ pub fn qjsPromiseThen(
     const is_catch = std.mem.eql(u8, method_name, "catch");
     const is_finally = std.mem.eql(u8, method_name, "finally");
     if (is_finally) return try qjsPromiseFinally(ctx, output, global, receiver, args, caller_function, caller_frame);
+    // Promise.prototype.catch is ALWAYS Invoke(this, "then", [undefined, arg])
+    // (qjs js_promise_catch = JS_Invoke(this_val, JS_ATOM_then, ...),
+    // quickjs.c:54275-54282) — it observes a user-overridden/patched `then`
+    // and never takes the builtin then-capability fast path, so route every
+    // catch (incl. on a genuine promise) through the generic this.then path.
+    if (is_catch) return try qjsPromiseCatchGeneric(ctx, output, global, receiver, args);
     if (!receiver.isObject()) {
-        if (is_catch) return try qjsPromiseCatchGeneric(ctx, output, global, receiver, args);
         return error.TypeError;
     }
     const object = property_ops.expectObject(receiver) catch {
