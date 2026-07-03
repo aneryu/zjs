@@ -1610,7 +1610,12 @@ fn callPromiseStaticNativeFunctionRecord(
     }
     const receiver = thisObject(this_value) orelse return error.TypeError;
     if (!call_runtime.isCallableValue(this_value)) return error.TypeError;
-    if (!try constructorNameEql(ctx.runtime, receiver, "Promise")) return error.TypeError;
+    // The Promise resolve/reject/withResolvers/try statics use `this` as the
+    // constructor C (spec NewPromiseCapability(C)); accept any constructor-like
+    // receiver, not only %Promise% by name — a subclass `this`
+    // (Promise.resolve.call(C)) must work even when Promise.resolve was
+    // reassigned (qjs js_promise_resolve etc. use this_val as the constructor).
+    if (!(try call_runtime.isConstructorLike(ctx, this_value))) return error.TypeError;
     if (id == @intFromEnum(method_ids.promise.LegacyStaticMethod.try_)) {
         const promise_proto = constructorPrototype(ctx.runtime, receiver);
         const callback = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();

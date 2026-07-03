@@ -676,10 +676,15 @@ pub fn qjsPromiseConstructWithPrototype(
     const reject = resolving.reject;
     defer reject.free(ctx.runtime);
     const result = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), executor, &.{ resolve, reject }, caller_function, caller_frame) catch |err| {
-        const promise_object = objectFromValue(promise) orelse return err;
+        _ = objectFromValue(promise) orelse return err;
         var reason = promiseRejectionReason(ctx, global, err);
         defer reason.deinit(ctx.runtime);
-        try qjsPromiseSettleValue(ctx, global, promise_object, reason.value, true);
+        // Abrupt executor completion must invoke the REJECT resolving function
+        // (qjs js_promise_constructor: JS_Call(resolving_funcs[1], ...)), which
+        // honors the [[AlreadyResolved]] once-guard, instead of settling the
+        // promise directly (which would override a prior resolve()).
+        const rejected = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), reject, &.{reason.value}, caller_function, caller_frame);
+        rejected.free(ctx.runtime);
         reason.commit(ctx);
         return promise;
     };
@@ -2162,7 +2167,11 @@ pub fn qjsPromiseCombinatorCall(
     const done_key = core.atom.predefinedId("done", .string).?;
     const value_key = core.atom.predefinedId("value", .string).?;
 
-    const values = if (mode != .race) try core.Object.createArray(ctx.runtime, null) else null;
+    // The combinator result array (Promise.all/allSettled) and the Promise.any
+    // errors array (reuses this `values`) must carry %Array.prototype% so
+    // `result instanceof Array` holds — qjs js_promise_all uses JS_NewArray
+    // (quickjs.c:54012), not a null-proto object.
+    const values = if (mode != .race) try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global)) else null;
     const values_value = if (values) |array| array.value() else null;
     defer if (values_value) |value| value.free(ctx.runtime);
     const state = if (values) |array| try qjsPromiseCombinatorState(ctx.runtime, capability.resolve, capability.reject, array) else null;
