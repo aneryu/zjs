@@ -341,14 +341,16 @@ pub fn toStringForAnnexB(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (value.isSymbol()) return error.TypeError;
+    // qjs `JS_ToString` on a symbol throws TypeError "cannot convert symbol to
+    // string" (JS_ToStringInternal quickjs.c:13632).
+    if (value.isSymbol()) return throwTypeErrorMessage(ctx, global, "cannot convert symbol to string");
     if (value.isString()) return value.dup();
     const primitive = if (value.isObject())
         try toPrimitiveForString(ctx, output, global, value, caller_function, caller_frame)
     else
         value.dup();
     defer primitive.free(ctx.runtime);
-    if (primitive.isSymbol()) return error.TypeError;
+    if (primitive.isSymbol()) return throwTypeErrorMessage(ctx, global, "cannot convert symbol to string");
     if (primitive.isString()) return primitive.dup();
     return value_ops.toStringValue(ctx.runtime, primitive);
 }
@@ -367,13 +369,16 @@ pub fn toPrimitiveForString(
     const method = try getValueProperty(ctx, output, global, value, symbol_to_primitive, caller_function, caller_frame);
     defer method.free(ctx.runtime);
     if (!method.isUndefined() and !method.isNull()) {
-        if (!isCallableValue(method)) return error.TypeError;
+        // JS_ToPrimitiveInternal (quickjs.c:11096 JS_CallFree): a non-callable
+        // Symbol.toPrimitive is still called and reports "not a function"; an
+        // object return value throws "toPrimitive" (quickjs.c:11104).
+        if (!isCallableValue(method)) return throwTypeErrorMessage(ctx, global, "not a function");
         const hint = try value_ops.createStringValue(ctx.runtime, "string");
         defer hint.free(ctx.runtime);
         const primitive = try callValueOrBytecode(ctx, output, global, value, method, &.{hint}, caller_function, caller_frame);
         if (primitive.isObject()) {
             primitive.free(ctx.runtime);
-            return error.TypeError;
+            return throwTypeErrorMessage(ctx, global, "toPrimitive");
         }
         return primitive;
     }
@@ -390,7 +395,8 @@ pub fn toOrdinaryPrimitiveString(
 ) !core.JSValue {
     if (try callObjectToPrimitiveMethod(ctx, output, global, value, "toString", caller_function, caller_frame)) |primitive| return primitive;
     if (try callObjectToPrimitiveMethod(ctx, output, global, value, "valueOf", caller_function, caller_frame)) |primitive| return primitive;
-    return error.TypeError;
+    // JS_ToPrimitiveInternal (quickjs.c:11131): no primitive from toString/valueOf.
+    return throwTypeErrorMessage(ctx, global, "toPrimitive");
 }
 
 pub fn qjsStringFunctionCall(
@@ -476,8 +482,9 @@ pub fn qjsStringReplace(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
+    // js_string_replace (quickjs.c:46021): nullish receiver -> "cannot convert to object".
     if (this_value.isNull() or this_value.isUndefined()) {
-        return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+        return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     }
     const search_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const replacement_input = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
@@ -640,8 +647,10 @@ pub fn qjsStringFromCodePoint(
         const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
         defer number_value.free(ctx.runtime);
         const number = value_ops.numberValue(number_value) orelse std.math.nan(f64);
+        // js_string_fromCodePoint (quickjs.c:45361): out-of-range/non-integer
+        // code point -> RangeError "invalid code point".
         if (std.math.isNan(number) or !std.math.isFinite(number) or number < 0 or number > 0x10ffff or @trunc(number) != number) {
-            return error.RangeError;
+            return throwRangeErrorMessage(ctx, global, "invalid code point");
         }
         const code_point: u32 = @intFromFloat(number);
         try appendUtf16CodePoint(ctx.runtime, &units, code_point);
@@ -695,7 +704,9 @@ pub fn qjsStringRaw(
 }
 
 pub fn toObjectForStringRaw(ctx: *core.JSContext, global: *core.Object, value: core.JSValue) !core.JSValue {
-    if (value.isNull() or value.isUndefined()) return error.TypeError;
+    // JS_ToObject on undefined/null (js_string_raw -> quickjs.c:39916) throws
+    // TypeError "cannot convert to object".
+    if (value.isNull() or value.isUndefined()) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     if (objectFromValue(value)) |_| return value.dup();
     return primitiveObjectForAccess(ctx.runtime, global, value);
 }
@@ -708,7 +719,12 @@ pub fn qjsStringFromCodePointArray(
 ) !core.JSValue {
     const array = try property_ops.expectObject(array_value);
     if (!array.flags.is_array) return error.TypeError;
-    if (try qjsStringFromCodePointDenseArray(ctx.runtime, array)) |value| return value;
+    // The dense fast path only carries `rt`, so surface its bare RangeError as
+    // the qjs "invalid code point" message here (quickjs.c:45361).
+    if (qjsStringFromCodePointDenseArray(ctx.runtime, array) catch |err| switch (err) {
+        error.RangeError => return throwRangeErrorMessage(ctx, global, "invalid code point"),
+        else => return err,
+    }) |value| return value;
     var units = std.ArrayList(u16).empty;
     defer units.deinit(ctx.runtime.memory.allocator);
     var index: u32 = 0;
@@ -720,8 +736,10 @@ pub fn qjsStringFromCodePointArray(
         const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
         defer number_value.free(ctx.runtime);
         const number = value_ops.numberValue(number_value) orelse std.math.nan(f64);
+        // js_string_fromCodePoint (quickjs.c:45361): out-of-range/non-integer
+        // code point -> RangeError "invalid code point".
         if (std.math.isNan(number) or !std.math.isFinite(number) or number < 0 or number > 0x10ffff or @trunc(number) != number) {
-            return error.RangeError;
+            return throwRangeErrorMessage(ctx, global, "invalid code point");
         }
         const code_point: u32 = @intFromFloat(number);
         try appendUtf16CodePoint(ctx.runtime, &units, code_point);
@@ -1012,7 +1030,8 @@ pub fn qjsStringMatchAll(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    // js_string_match (quickjs.c:45846): nullish receiver -> "cannot convert to object".
+    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
 
@@ -1022,13 +1041,17 @@ pub fn qjsStringMatchAll(
         const matcher = try getValueProperty(ctx, output, global, regexp, match_all_atom, caller_function, caller_frame);
         defer matcher.free(ctx.runtime);
         if (try isRegExpObservable(ctx, output, global, regexp, caller_function, caller_frame)) {
+            // check_regexp_g_flag (quickjs.c:45819/45829): undefined/null flags
+            // -> "cannot convert to object"; missing 'g' -> "regexp must have the 'g' flag".
             const flags_atom = core.atom.predefinedId("flags", .string) orelse return error.TypeError;
             const flags_value = try getValueProperty(ctx, output, global, regexp, flags_atom, caller_function, caller_frame);
             defer flags_value.free(ctx.runtime);
-            if (flags_value.isUndefined() or flags_value.isNull()) return error.TypeError;
+            if (flags_value.isUndefined() or flags_value.isNull())
+                return throwTypeErrorMessage(ctx, global, "cannot convert to object");
             const flags_string = try toStringForAnnexB(ctx, output, global, flags_value, caller_function, caller_frame);
             defer flags_string.free(ctx.runtime);
-            if (!try qjsStringValueContainsByte(ctx.runtime, flags_string, 'g')) return error.TypeError;
+            if (!try qjsStringValueContainsByte(ctx.runtime, flags_string, 'g'))
+                return throwTypeErrorMessage(ctx, global, "regexp must have the 'g' flag");
         }
         if (!matcher.isUndefined() and !matcher.isNull()) {
             return callValueOrBytecode(ctx, output, global, regexp, matcher, &.{string_value}, caller_function, caller_frame);
@@ -2154,10 +2177,12 @@ pub fn qjsStringPrototypeMethod(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
-    if (method_id == 10) {
-        return qjsStringConcat(ctx, output, global, this_value, args, caller_function, caller_frame);
-    }
+    // The RegExp-coupled methods (search/match/split/replaceAll/matchAll) start
+    // with `JS_ThrowTypeError(ctx, "cannot convert to object")` on a nullish
+    // receiver (quickjs.c:45846/46021/46133/45846), not the
+    // `JS_ToStringCheckObject` "null or undefined are forbidden" used by the
+    // remaining bodies. They therefore run their own nullish check below and are
+    // dispatched before the coarse check.
     if (method_id == string_id_lookup.legacy_split_method_id) {
         return qjsStringSplit(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
@@ -2172,6 +2197,10 @@ pub fn qjsStringPrototypeMethod(
     }
     if (method_id == string_id_lookup.legacy_match_all_method_id) {
         return qjsStringMatchAll(ctx, output, global, this_value, args, caller_function, caller_frame);
+    }
+    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    if (method_id == 10) {
+        return qjsStringConcat(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
     // Pad / Html / Normalize / LocaleCompare / NumericArgs bodies live in this
     // file (Phase 6b-3 STEP 3B moved them back from `builtins/string.zig`): they
@@ -2244,7 +2273,10 @@ pub fn qjsStringSearchPositionMethod(
 
     const search_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     if (method_id == 5 or method_id == 6 or method_id == 7) {
-        if (try isRegExpForStringSearch(ctx, output, global, search_input, caller_function, caller_frame)) return error.TypeError;
+        // js_string_includes (quickjs.c:45757): a regexp search argument to
+        // includes/startsWith/endsWith throws TypeError "regexp not supported".
+        if (try isRegExpForStringSearch(ctx, output, global, search_input, caller_function, caller_frame))
+            return throwTypeErrorMessage(ctx, global, "regexp not supported");
     }
     const search_value = try toStringForAnnexB(ctx, output, global, search_input, caller_function, caller_frame);
     defer search_value.free(ctx.runtime);
@@ -2288,22 +2320,28 @@ pub fn qjsStringReplaceAll(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
+    // js_string_replace (quickjs.c:46021): nullish receiver -> "cannot convert to object".
+    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     const search_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const replace_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     if (!search_value.isUndefined() and !search_value.isNull() and
         try isRegExpObservable(ctx, output, global, search_value, caller_function, caller_frame))
     {
+        // check_regexp_g_flag (quickjs.c:45807): undefined/null flags throw
+        // TypeError "cannot convert to object"; a flags string without 'g'
+        // throws TypeError "regexp must have the 'g' flag".
         const flags_atom = core.atom.predefinedId("flags", .string) orelse return error.TypeError;
         const flags = try getValueProperty(ctx, output, global, search_value, flags_atom, caller_function, caller_frame);
         defer flags.free(ctx.runtime);
-        if (flags.isNull() or flags.isUndefined()) return error.TypeError;
+        if (flags.isNull() or flags.isUndefined())
+            return throwTypeErrorMessage(ctx, global, "cannot convert to object");
         const flags_string = try toStringForAnnexB(ctx, output, global, flags, caller_function, caller_frame);
         defer flags_string.free(ctx.runtime);
         var bytes = std.ArrayList(u8).empty;
         defer bytes.deinit(ctx.runtime.memory.allocator);
         try value_ops.appendRawString(ctx.runtime, &bytes, flags_string);
-        if (std.mem.indexOfScalar(u8, bytes.items, 'g') == null) return error.TypeError;
+        if (std.mem.indexOfScalar(u8, bytes.items, 'g') == null)
+            return throwTypeErrorMessage(ctx, global, "regexp must have the 'g' flag");
     }
     if (try callStringReplaceMethod(ctx, output, global, this_value, search_value, replace_value, caller_function, caller_frame)) |value| return value;
 
@@ -2457,6 +2495,8 @@ pub fn qjsStringSearch(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
+    // js_string_match (quickjs.c:45846): nullish receiver -> "cannot convert to object".
+    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     const regexp = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
@@ -2519,6 +2559,8 @@ pub fn qjsStringMatch(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
+    // js_string_match (quickjs.c:45846): nullish receiver -> "cannot convert to object".
+    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     const regexp = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
@@ -2580,6 +2622,8 @@ pub fn qjsStringSplit(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
+    // js_string_split (quickjs.c:46133): nullish receiver -> "cannot convert to object".
+    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     const separator = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     if (separator.isObject()) {
         const split_atom = core.atom.predefinedId("Symbol.split", .symbol) orelse return error.TypeError;
@@ -4573,7 +4617,9 @@ pub fn qjsStringNormalize(
         if (std.mem.eql(u8, form_bytes.items, "NFD")) break :blk unicode_lib.NormalizationForm.nfd;
         if (std.mem.eql(u8, form_bytes.items, "NFKC")) break :blk unicode_lib.NormalizationForm.nfkc;
         if (std.mem.eql(u8, form_bytes.items, "NFKD")) break :blk unicode_lib.NormalizationForm.nfkd;
-        return error.RangeError;
+        // js_string_normalize (quickjs.c:46635): unknown form -> RangeError
+        // "bad normalization form".
+        return throwRangeErrorMessage(ctx, global, "bad normalization form");
     };
 
     var input = std.ArrayList(u32).empty;
