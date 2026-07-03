@@ -7339,6 +7339,9 @@ pub const parser_core = struct {
     /// `parseCondExpr`), folding a trailing call into a tail call when the
     /// branch ends in one. Mirrors the `TOK_RETURN` rewrite conditions.
     fn emitReturnExprBranch(s: *State) Error!void {
+        // Async generator explicit return awaits the branch value (qjs
+        // emit_return OP_await, quickjs.c:28401-28404) before OP_return_async.
+        if (s.in_async and s.in_generator) try s.emitOp(opcode.op.await);
         const tail_rewrite = if (!s.in_constructor and !s.in_async and !hasActiveIteratorCloses(s))
             rewriteTrailingCallAsTailCall(s)
         else
@@ -11863,6 +11866,12 @@ pub const parser_core = struct {
                     s.return_expr_mode = saved_return_expr_mode;
                     s.return_expr_emitted_return = saved_return_expr_emitted;
                     if (!emitted_return) {
+                        // Async generator `return value;`: qjs awaits the value
+                        // before completing (emit_return OP_await for
+                        // JS_FUNC_ASYNC_GENERATOR hasval, quickjs.c:28401-28404).
+                        // Emit the await on the return value (now on the stack)
+                        // before the iterator-close / finally unwinding.
+                        if (s.in_async and s.in_generator) try s.emitOp(opcode.op.await);
                         if (hasActiveIteratorCloses(s) or (!dropped_markers_early and s.active_catch_marker_depth > 0 and s.return_finally_frames.items.len == 0)) {
                             const return_tmp = try appendTempLocal(s);
                             try s.emitOpU16(opcode.op.put_loc, return_tmp);
@@ -13071,6 +13080,10 @@ pub const parser_core = struct {
         const frame_index = nearestReturnFinallyFrameForReturn(s, null) orelse return false;
         if (has_expr) {
             try parseExpr(s);
+            // Async generator explicit `return value;` awaits the value (qjs
+            // emit_return OP_await, quickjs.c:28401-28404) before the finally
+            // unwinding. An implicit return (no expr, `undefined` above) does not.
+            if (s.in_async and s.in_generator) try s.emitOp(opcode.op.await);
         } else {
             try s.emitOp(opcode.op.undefined);
         }

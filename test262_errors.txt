@@ -8,8 +8,6 @@ test262/test/language/module-code/top-level-await/top-level-ticks-2.js
 test262/test/language/module-code/top-level-await/top-level-ticks.js
 test262/test/language/module-code/top-level-await/unobservable-global-async-evaluation-count-reset.js
 test262/test/language/module-code/verify-dfs.js
-test262/test/language/statements/async-generator/return-undefined-implicit-and-explicit.js
-test262/test/language/statements/async-generator/yield-star-return-then-getter-ticks.js
 test262/test/language/statements/await-using/await-using-does-not-imply-await-if-not-evaluated.js
 test262/test/language/statements/for-await-of/async-func-decl-dstr-obj-id-init-simple-no-strict.js
 test262/test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-simple-no-strict.js

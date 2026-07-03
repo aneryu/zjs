@@ -397,24 +397,13 @@ fn execBody(
     if (!suspended) {
         // End of function, or the pending-return finally range finished at its
         // stop pc: deliver the pending return value unless the range overrode
-        // the completion with its own value.
-        if (pending == null and !result.isUndefined()) {
-            // Explicit `return value`: qjs awaits the value before completing
-            // (emit_return OP_await, quickjs.c:28402). Park EXECUTING; the
-            // `.complete_result` trampoline completes and settles.
-            asyncGeneratorAwait(ctx, output, global, gen, result, .complete_result) catch |err| {
-                switch (err) {
-                    error.OutOfMemory, error.ProcessExit => return err,
-                    else => {},
-                }
-                const reason = if (ctx.hasException()) ctx.takeException() else try exception_ops.qjsPromiseErrorValue(ctx, global, err);
-                defer reason.free(rt);
-                complete(ctx, gen);
-                try settleHead(ctx, output, global, gen, reason, true);
-                return .settled;
-            };
-            return .parked;
-        }
+        // the completion with its own value. The await of an explicit
+        // `return value` is now done COMPILE-TIME in the body bytecode (an
+        // OP_await emitted before OP_return_async for async generators, mirroring
+        // emit_return quickjs.c:28401-28404), keyed on syntactic `hasval` — NOT
+        // driver-side keyed on the runtime value being non-undefined. That fixes
+        // both `return undefined` (explicit, hasval → awaits) under-awaiting and
+        // yield-star return (already has a compiled OP_await) double-awaiting.
         const deliver = if (pending != null and result.isUndefined()) pending.?.value else result;
         complete(ctx, gen);
         try resolveHead(ctx, output, global, gen, deliver, true);
