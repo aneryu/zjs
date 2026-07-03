@@ -678,6 +678,28 @@ pub const PromisePayload = struct {
     }
 };
 
+/// One queued async-generator request (mirrors qjs JSAsyncGeneratorRequest,
+/// quickjs.c:21354): completion type (GEN_MAGIC next=0 / return=1 / throw=2),
+/// the completion argument, and the request's promise capability.
+pub const AsyncGeneratorRequest = struct {
+    completion_type: i32,
+    result: JSValue,
+    promise: JSValue,
+    resolve: JSValue,
+    reject: JSValue,
+};
+
+/// How a generator/async frame last suspended (zjs adaptation of qjs
+/// FUNC_RET_YIELD / FUNC_RET_YIELD_STAR / FUNC_RET_AWAIT return codes,
+/// quickjs.c:17735-17738): written by the save sites in vm_gen_async.zig,
+/// read by the async-generator driver to discriminate the suspension.
+pub const GeneratorSuspendKind = enum(u8) {
+    none = 0,
+    yield = 1,
+    yield_star = 2,
+    await_op = 3,
+};
+
 pub const GeneratorPayload = struct {
     bytecode: ?JSValue = null,
     captures: []JSValue = &.{},
@@ -696,8 +718,17 @@ pub const GeneratorPayload = struct {
     current_function: ?JSValue = null,
     yield_star_iterator: ?JSValue = null,
     async_promise: ?JSValue = null,
+    /// Async-generator request queue (mirrors JSAsyncGeneratorData.queue,
+    /// quickjs.c:21362): FIFO of pending next/return/throw requests.
+    async_queue: []AsyncGeneratorRequest = &.{},
+    async_queue_capacity: usize = 0,
     pc: usize = 0,
     resume_completion_type: i32 = 0,
+    /// Async-generator state machine (mirrors JSAsyncGeneratorStateEnum,
+    /// quickjs.c:21345). Only meaningful for JS_CLASS_ASYNC_GENERATOR objects.
+    async_state: u8 = 0,
+    /// GeneratorSuspendKind of the last suspension.
+    suspend_kind: u8 = 0,
     done: bool = false,
     executing: bool = false,
     started: bool = false,
@@ -727,6 +758,17 @@ pub const GeneratorPayload = struct {
         destroyOptionalValue(rt, &self.current_function);
         destroyOptionalValue(rt, &self.yield_star_iterator);
         destroyOptionalValue(rt, &self.async_promise);
+        for (self.async_queue) |*req| {
+            req.result.free(rt);
+            req.promise.free(rt);
+            req.resolve.free(rt);
+            req.reject.free(rt);
+        }
+        if (self.async_queue_capacity != 0) {
+            rt.memory.free(AsyncGeneratorRequest, self.async_queue.ptr[0..self.async_queue_capacity]);
+        }
+        self.async_queue = &.{};
+        self.async_queue_capacity = 0;
         self.* = .{};
     }
 };
@@ -825,6 +867,11 @@ pub const FunctionRarePayload = struct {
     async_dispose_rejected: bool = false,
     async_function_continuation: ?JSValue = null,
     async_function_rejected: bool = false,
+    /// Action discriminator for `.async_generator_resolve` trampolines (zjs
+    /// adaptation of the js_async_generator_resolve_function magic,
+    /// quickjs.c:21670; extra actions carry the awaits qjs compiles into the
+    /// body bytecode — see exec/async_generator.zig ResolveAction).
+    async_generator_action: u8 = 0,
     realm_type_error_constructor: ?JSValue = null,
     regexp_legacy_statics: ?*RegExpLegacyStatics = null,
 
@@ -3834,6 +3881,40 @@ pub const Object = struct {
         return false;
     }
 
+    pub fn generatorSuspendKindSlot(self: *Object) *u8 {
+        if (self.generatorPayload()) |payload| return &payload.suspend_kind;
+        std.debug.assert(self.class_payload_kind == .generator);
+        unreachable;
+    }
+
+    pub fn generatorSuspendKind(self: *const Object) GeneratorSuspendKind {
+        if (self.generatorPayloadConst()) |payload| return @enumFromInt(payload.suspend_kind);
+        return .none;
+    }
+
+    pub fn asyncGeneratorStateSlot(self: *Object) *u8 {
+        if (self.generatorPayload()) |payload| return &payload.async_state;
+        std.debug.assert(self.class_payload_kind == .generator);
+        unreachable;
+    }
+
+    pub fn asyncGeneratorQueueSlot(self: *Object) *[]AsyncGeneratorRequest {
+        if (self.generatorPayload()) |payload| return &payload.async_queue;
+        std.debug.assert(self.class_payload_kind == .generator);
+        unreachable;
+    }
+
+    pub fn asyncGeneratorQueue(self: *const Object) []AsyncGeneratorRequest {
+        if (self.generatorPayloadConst()) |payload| return payload.async_queue;
+        return &.{};
+    }
+
+    pub fn asyncGeneratorQueueCapacitySlot(self: *Object) *usize {
+        if (self.generatorPayload()) |payload| return &payload.async_queue_capacity;
+        std.debug.assert(self.class_payload_kind == .generator);
+        unreachable;
+    }
+
     pub fn functionSourceSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
         return &(try self.ensureFunctionRarePayload(rt)).source;
     }
@@ -4386,6 +4467,15 @@ pub const Object = struct {
     pub fn functionAsyncContinuationRejected(self: *const Object) bool {
         if (self.functionRarePayloadConst()) |payload| return payload.async_function_rejected;
         return false;
+    }
+
+    pub fn functionAsyncGeneratorActionSlot(self: *Object, rt: *JSRuntime) !*u8 {
+        return &(try self.ensureFunctionRarePayload(rt)).async_generator_action;
+    }
+
+    pub fn functionAsyncGeneratorAction(self: *const Object) u8 {
+        if (self.functionRarePayloadConst()) |payload| return payload.async_generator_action;
+        return 0;
     }
 
     pub fn functionAsyncFromSyncUnwrapDoneSlot(self: *Object, rt: *JSRuntime) !*u8 {
@@ -6255,6 +6345,14 @@ pub const Object = struct {
             try Helper.traceOptValue(visitor, &payload.current_function);
             try Helper.traceOptValue(visitor, &payload.yield_star_iterator);
             try Helper.traceOptValue(visitor, &payload.async_promise);
+            // Async-generator request queue values (mirrors
+            // js_async_generator_mark, quickjs.c:21400-21418).
+            for (payload.async_queue) |*req| {
+                try Helper.callVisitValue(visitor, &req.result);
+                try Helper.callVisitValue(visitor, &req.promise);
+                try Helper.callVisitValue(visitor, &req.resolve);
+                try Helper.callVisitValue(visitor, &req.reject);
+            }
             try Helper.callVisitObject(visitor, &payload.home_object);
         }
         if (self.varRefPayload()) |payload| {

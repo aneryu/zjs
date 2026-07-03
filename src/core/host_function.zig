@@ -24,6 +24,8 @@ pub const InternalCallableTag = enum(u8) {
     async_from_sync_iterator_unwrap = 8,
     async_disposable_stack_continuation = 9,
     throw_type_error_intrinsic = 10,
+    async_generator_resolve = 11,
+    async_from_sync_iterator_close_wrap = 12,
 };
 
 pub const ExternalCall = struct {
