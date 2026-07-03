@@ -524,7 +524,20 @@ pub fn directEval(
             }
         }
         if (!caller_strict) if (simpleVarDeclarationName(source.items)) |name| {
-            if (!eval_in_parameter_initializer and callerFunctionHasLexicalLocal(ctx.runtime, outer_function, name)) return error.SyntaxError;
+            if (!eval_in_parameter_initializer) {
+                if (callerFunctionHasLexicalLocal(ctx.runtime, outer_function, name)) return error.SyntaxError;
+                // A nested direct eval sees the enclosing lexicals TRANSITIVELY:
+                // qjs's redeclaration first pass scans the eval's closure vars,
+                // which forward every enclosing scope's bindings up to the
+                // function's `_var_` (resolve_variables quickjs.c:34203-34235).
+                // Walk the live direct-eval caller chain and apply the same
+                // lexical-collision check against each enclosing bytecode.
+                var enclosing = if (caller_frame) |outer_frame| outer_frame.evalCallerFrame() else null;
+                while (enclosing) |enclosing_frame| {
+                    if (callerFunctionHasLexicalLocal(ctx.runtime, enclosing_frame.function, name)) return error.SyntaxError;
+                    enclosing = enclosing_frame.evalCallerFrame();
+                }
+            }
         };
     }
     const eval_global_var_bindings = if (caller_frame) |outer_frame|
@@ -692,7 +705,7 @@ pub fn directEval(
     };
     const eval_with_object = directEvalWithObject(ctx.runtime, caller_function, caller_frame);
     defer eval_with_object.free(ctx.runtime);
-    const result = try runWithArgsState(ctx, &nested_stack, &compiled.function, eval_this, &.{}, direct_eval_frame_var_refs, output, global, false, eval_strict, false, run_eval_local_names, run_eval_local_slots, outer_var_refs.names, outer_var_refs.refs, inherited_local_names, inherited_locals, inherited_ref_names, inherited_refs, null, null, null, eval_current_function, eval_new_target, core.JSValue.undefinedValue(), eval_global_var_bindings, true, eval_with_object, false);
+    const result = try runWithArgsState(ctx, &nested_stack, &compiled.function, eval_this, &.{}, direct_eval_frame_var_refs, output, global, false, eval_strict, false, run_eval_local_names, run_eval_local_slots, outer_var_refs.names, outer_var_refs.refs, inherited_local_names, inherited_locals, inherited_ref_names, inherited_refs, null, null, null, eval_current_function, eval_new_target, core.JSValue.undefinedValue(), eval_global_var_bindings, true, eval_with_object, caller_frame, false);
     errdefer result.free(ctx.runtime);
     try publishDirectEvalVarRefs(ctx, global, caller_frame, eval_var_names, eval_var_refs, eval_in_parameter_initializer, eval_global_var_bindings);
     return result;

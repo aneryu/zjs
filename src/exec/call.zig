@@ -3392,7 +3392,7 @@ pub fn qjsEvalGlobalScriptSource(
         }
         var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
         defer nested_stack.deinit(ctx.runtime);
-        break :blk zjs_vm.runWithArgsState(ctx, &nested_stack, &compiled.function, global.value(), &.{}, &.{}, output, global, true, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), false) catch |err| exception_ops.normalizeEvalRuntimeError(err);
+        break :blk zjs_vm.runWithArgsState(ctx, &nested_stack, &compiled.function, global.value(), &.{}, &.{}, output, global, true, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), null, false) catch |err| exception_ops.normalizeEvalRuntimeError(err);
     };
 
     if (use_global_lexicals) {

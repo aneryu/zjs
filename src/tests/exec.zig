@@ -792,6 +792,7 @@ test "VM roots frame this symbol before derived constructor var-ref allocation" 
         false,
         false,
         core.JSValue.undefinedValue(),
+        null,
         false,
     );
     defer result.free(rt);

@@ -4374,25 +4374,67 @@ pub fn createDirectEvalVarRefCells(
         ctx.runtime.memory.free(core.JSValue, refs);
     }
     while (initialized < names.len) : (initialized += 1) {
-        if (caller_function) |function| {
-            if (caller_frame) |frame| {
-                if (callerArgIndex(ctx.runtime, function, names[initialized])) |arg_idx| {
+        if (caller_function != null and caller_frame != null) {
+            // qjs: a hoisted eval var whose name matches an existing closure
+            // var binds to that variable instead of creating a fresh `_var_`
+            // property (instantiate_hoisted_definitions name match before the
+            // `_var_` branch, quickjs.c:34059-34066), and the eval closure
+            // contains the enclosing scopes TRANSITIVELY (resolve_scope_var
+            // forwarding, quickjs.c:33216-33235). Walk the live direct-eval
+            // caller chain to the frame owning the variable environment and
+            // reuse its arg/local binding. Direct-eval frames themselves are
+            // skipped for the arg/local probe: their non-lexical vardefs are
+            // the eval's OWN hoisted vars, which live as published cells in
+            // the eval tables — not in that frame's `locals` storage.
+            var chain_frame: ?*frame_mod.Frame = caller_frame;
+            var chain_function: *const bytecode.Bytecode = caller_function.?;
+            var reused = false;
+            while (chain_frame) |frame| {
+                // Nearest scope first: an eval var already bound in this
+                // frame's eval tables (a cell published — or pre-created by an
+                // enclosing eval whose body is still running) IS the existing
+                // binding; qjs reaches it as the same `_var_` object property.
+                if (directEvalNamedVarRefCell(ctx.runtime, frame, names[initialized])) |existing| {
+                    // An eval-CREATED binding (deletable cell) is re-declared
+                    // through qjs's `_var_` branch, which force-initializes the
+                    // property to undefined at eval entry (OP_undefined +
+                    // OP_define_field, force_init quickjs.c:34067-34096). A
+                    // reused function arg/local (name-match branch) is NOT
+                    // reinitialized.
+                    if (slot_ops.varRefCellFromValue(existing)) |existing_cell| {
+                        if (existing_cell.varRefIsDeletableSlot().*) {
+                            try existing_cell.setVarRefValue(ctx.runtime, core.JSValue.undefinedValue());
+                        }
+                    }
+                    refs[initialized] = existing;
+                    rooted_refs = refs[0 .. initialized + 1];
+                    reused = true;
+                    break;
+                }
+                if (frame.evalCallerFrame()) |next| {
+                    chain_frame = next;
+                    chain_function = next.function;
+                    continue;
+                }
+                if (callerArgIndex(ctx.runtime, chain_function, names[initialized])) |arg_idx| {
                     if (arg_idx < frame.args.len) {
                         refs[initialized] = try slot_ops.ensureFrameVarRefCell(ctx, frame, &frame.args[arg_idx]);
                         rooted_refs = refs[0 .. initialized + 1];
-                        continue;
+                        reused = true;
                     }
                 }
-                if (!eval_in_parameter_initializer) {
-                    if (callerLocalIndex(ctx.runtime, function, names[initialized])) |local_idx| {
+                if (!reused and !eval_in_parameter_initializer) {
+                    if (callerLocalIndex(ctx.runtime, chain_function, names[initialized])) |local_idx| {
                         if (local_idx < frame.locals.len) {
                             refs[initialized] = try slot_ops.ensureFrameVarRefCell(ctx, frame, &frame.locals[local_idx]);
                             rooted_refs = refs[0 .. initialized + 1];
-                            continue;
+                            reused = true;
                         }
                     }
                 }
+                break;
             }
+            if (reused) continue;
         }
         const cell = try core.VarRef.createClosed(ctx.runtime, core.JSValue.undefinedValue());
         cell.varRefIsDeletableSlot().* = true;
@@ -4400,6 +4442,32 @@ pub fn createDirectEvalVarRefCells(
         rooted_refs = refs[0 .. initialized + 1];
     }
     return refs;
+}
+
+/// Finds an existing binding CELL for `atom_id` in `frame`'s eval-LOCAL
+/// table (visible caller locals exposed to the eval plus the frame's own
+/// hoisted eval vars), returning a dup'd reference or null. Used by
+/// `createDirectEvalVarRefCells` to bind a hoisted eval var to the binding
+/// the variable environment already holds — qjs's closure-var name match
+/// ahead of the `_var_` property creation (instantiate_hoisted_definitions,
+/// quickjs.c:34059-34066). The frame's eval VAR-REF table is deliberately NOT
+/// searched: it also carries the function's closure CAPTURES, which sit
+/// beyond `_var_` in qjs's closure order and are therefore shadowed by a new
+/// var-object property, never rebound (the redeclaration first pass stops at
+/// `_var_`, quickjs.c:34229-34231).
+fn directEvalNamedVarRefCell(rt: *core.JSRuntime, frame: *const frame_mod.Frame, atom_id: core.Atom) ?core.JSValue {
+    return namedCellInTables(rt, frame.evalLocalNames(), frame.evalLocalSlots(), atom_id);
+}
+
+fn namedCellInTables(rt: *core.JSRuntime, table_names: []const core.Atom, table_refs: []const core.JSValue, atom_id: core.Atom) ?core.JSValue {
+    const n = @min(table_names.len, table_refs.len);
+    var idx: usize = 0;
+    while (idx < n) : (idx += 1) {
+        if (!atomIdOrNameEql(rt, table_names[idx], atom_id)) continue;
+        if (slot_ops.varRefCellFromValue(table_refs[idx]) == null) continue;
+        return table_refs[idx].dup();
+    }
+    return null;
 }
 
 pub const DirectEvalVisibleLocalBindings = struct {
@@ -4829,14 +4897,32 @@ pub fn publishDirectEvalVarRefs(
                 var index: usize = 0;
                 while (index < count) : (index += 1) {
                     try eval_ops.appendFunctionEvalLocal(ctx, function_object, names[index], refs[index]);
-                    if (!eval_in_parameter_initializer) {
-                        string_ops.replaceFrameVarRefBinding(ctx.runtime, frame, names[index], refs[index]);
-                    }
                 }
-                const frame_cold = try frame.ensureCold(&ctx.runtime.memory);
-                frame_cold.eval_var_ref_names = function_object.functionEvalLocalNames();
-                frame_cold.eval_var_refs = function_object.functionEvalLocalRefs();
-                frame_cold.eval_var_refs_republished = true;
+                // The new bindings belong to the enclosing FUNCTION's variable
+                // environment: qjs materializes each hoisted eval var as a
+                // property of that function's `_var_` object, which every
+                // enclosing direct-eval scope shares transitively through its
+                // closure (instantiate_hoisted_definitions quickjs.c:34049-34096;
+                // resolve_scope_var `_var_` forwarding quickjs.c:33216-33235), so
+                // the binding is immediately visible in ALL of those scopes.
+                // zjs's frame model keeps per-frame snapshot tables instead of a
+                // shared object, so refresh every live frame of that variable
+                // environment: the immediate caller plus each enclosing
+                // direct-eval frame up to the function frame itself.
+                var target: ?*frame_mod.Frame = frame;
+                while (target) |target_frame| {
+                    if (!eval_in_parameter_initializer) {
+                        index = 0;
+                        while (index < count) : (index += 1) {
+                            string_ops.replaceFrameVarRefBinding(ctx.runtime, target_frame, names[index], refs[index]);
+                        }
+                    }
+                    const frame_cold = try target_frame.ensureCold(&ctx.runtime.memory);
+                    frame_cold.eval_var_ref_names = function_object.functionEvalLocalNames();
+                    frame_cold.eval_var_refs = function_object.functionEvalLocalRefs();
+                    frame_cold.eval_var_refs_republished = true;
+                    target = target_frame.evalCallerFrame();
+                }
             }
         }
         return;
@@ -4939,7 +5025,7 @@ pub fn indirectEval(
         }
         var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
         defer nested_stack.deinit(ctx.runtime);
-        break :blk runWithArgsState(ctx, &nested_stack, &compiled.function, eval_global.value(), &.{}, &.{}, output, eval_global, true, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), true, true, core.JSValue.undefinedValue(), false) catch |err| exception_ops.normalizeEvalRuntimeError(err);
+        break :blk runWithArgsState(ctx, &nested_stack, &compiled.function, eval_global.value(), &.{}, &.{}, output, eval_global, true, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), true, true, core.JSValue.undefinedValue(), null, false) catch |err| exception_ops.normalizeEvalRuntimeError(err);
     };
 
     if (use_global_lexicals) {
@@ -5357,7 +5443,7 @@ pub fn callFunctionBytecodeModeState(
     else
         stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
-    const dispatch_result = runWithArgsState(ctx, &nested_stack, nested, effective_this, args, combined_var_refs, output, global, false, fb_runtime_strict, stop_on_yield, &.{}, &.{}, eval_var_ref_names, eval_var_refs, &.{}, &.{}, &.{}, &.{}, generator_state, resume_value, stop_before_pc, current_function_value, new_target_value, constructor_this_value, false, false, core.JSValue.undefinedValue(), false);
+    const dispatch_result = runWithArgsState(ctx, &nested_stack, nested, effective_this, args, combined_var_refs, output, global, false, fb_runtime_strict, stop_on_yield, &.{}, &.{}, eval_var_ref_names, eval_var_refs, &.{}, &.{}, &.{}, &.{}, generator_state, resume_value, stop_before_pc, current_function_value, new_target_value, constructor_this_value, false, false, core.JSValue.undefinedValue(), null, false);
     const result = dispatch_result catch |err| {
         if (fb.flags.func_kind == .async_generator) {
             return exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, global));
@@ -5435,7 +5521,7 @@ pub fn runGeneratorParameterInit(
 
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
-    return runWithArgsState(ctx, &nested_stack, &nested, this_value, args, var_refs, output, global, false, true, false, &.{}, &.{}, object.functionEvalLocalNames(), object.functionEvalLocalRefs(), &.{}, &.{}, &.{}, &.{}, object, null, fb.generatorBodyPc(), current_function_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), false);
+    return runWithArgsState(ctx, &nested_stack, &nested, this_value, args, var_refs, output, global, false, true, false, &.{}, &.{}, object.functionEvalLocalNames(), object.functionEvalLocalRefs(), &.{}, &.{}, &.{}, &.{}, object, null, fb.generatorBodyPc(), current_function_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), null, false);
 }
 
 pub fn qjsGeneratorNext(
