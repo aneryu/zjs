@@ -1745,6 +1745,19 @@ fn runEmbeddedEngine(
         rt.destroy();
     }
     rt.setCanBlock(can_block);
+    // Install the file-loader dynamic import (mirrors the CLI src/cli/zjs.zig
+    // and qjs's run-test262 providing the module loader): [async] dynamic-import
+    // tests are SCRIPTS, so import() must work in script mode. The state must
+    // outlive eval + the job drain below (the import job resolves in runJobs).
+    var dynamic_import_state = test262_root.exec.module_graph.DynamicImportState{
+        .runtime = ctx.runtimePtr(),
+        .context = &ctx.core,
+        .output = &output,
+        .io = io,
+        .allocator = allocator,
+        .max_source_size = 16 * 1024 * 1024,
+    };
+    test262_root.exec.module_graph.installDynamicImport(&dynamic_import_state);
     var value = (if (run_as_module)
         runtime_layer.evalFileModuleGraphWithOutput(ctx, source, &output, path, io, allocator, 16 * 1024 * 1024)
     else
@@ -1752,6 +1765,12 @@ fn runEmbeddedEngine(
             .mode = .script,
             .output = &output,
             .discard_script_result = true,
+            // Pass the test file path as the script's filename so the dynamic
+            // import referrer (vm_eval_module.zig:143 = function.filename) is the
+            // test file and `import('./fixture.js')` resolves relative to the
+            // test directory, not the runner's cwd. Without this the referrer is
+            // "<eval>" and every relative import rejects.
+            .filename = path,
         })) catch |err| failed: {
         if (try formatPendingExceptionName(rt, ctx, stderr_storage)) |name| {
             stderr_out.* = name;
