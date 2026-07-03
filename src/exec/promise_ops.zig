@@ -86,25 +86,6 @@ const toInt32BitsForAtomics = call_runtime.toInt32BitsForAtomics;
 const toNumberForAtomics = call_runtime.toNumberForAtomics;
 const valueTruthy = coercion_ops.valueTruthy;
 
-pub fn closeForAwaitIteratorForPendingError(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *const stack_mod.Stack,
-) !void {
-    const index = findForOfIteratorIndex(ctx.runtime, stack) catch return;
-    const iterator_value = stack.values[index].dup();
-    defer iterator_value.free(ctx.runtime);
-    const iterator = property_ops.expectObject(iterator_value) catch return;
-    if (iterator.class_id != core.class.ids.async_from_sync_iterator) return;
-
-    const pending_exception = if (ctx.hasException()) ctx.takeException() else null;
-    defer if (pending_exception) |value| value.free(ctx.runtime);
-    closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
-    if (ctx.hasException()) ctx.clearException();
-    if (pending_exception) |value| _ = ctx.throwValue(value.dup());
-}
-
 pub fn promisePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
     if (global.cachedPromiseProto()) |prototype| return prototype;
     const promise_atom = rt.internAtom("Promise") catch return null;
@@ -3073,40 +3054,18 @@ pub fn qjsAsyncIteratorAsyncDispose(
         return try rejectedPromiseForRuntimeError(ctx, global, error.TypeError, promisePrototypeFromGlobal(ctx.runtime, global));
     };
     if (result_object.class_id == core.class.ids.promise) {
-        try settlePendingPromiseReaction(ctx, output, global, result_object);
-        if (result_object.promiseResult() == null) try awaitPendingPromise(ctx, output, global, result_object);
-        if (result_object.promiseIsRejected()) {
-            const reason = if (result_object.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
-            defer reason.free(ctx.runtime);
-            return try core.promise.rejectedWithPrototype(ctx.runtime, reason, promisePrototypeFromGlobal(ctx.runtime, global));
-        }
+        // Adopt the (possibly pending) inner promise through a real reaction —
+        // the dispose promise settles only when `.return()`'s promise does
+        // (no in-VM draining/sleeping; jobs are host-pumped).
+        const promise = try core.promise.constructWithPrototype(ctx.runtime, promisePrototypeFromGlobal(ctx.runtime, global));
+        errdefer promise.free(ctx.runtime);
+        const resolving = try createPromiseResolvingPair(ctx.runtime, global, promise);
+        defer resolving.resolve.free(ctx.runtime);
+        defer resolving.reject.free(ctx.runtime);
+        try qjsPerformPromiseThen(ctx, output, global, result, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), resolving.resolve, resolving.reject);
+        return promise;
     }
     return try core.promise.fulfilledWithPrototype(ctx.runtime, core.JSValue.undefinedValue(), promisePrototypeFromGlobal(ctx.runtime, global));
-}
-
-pub fn asyncGeneratorFulfilledIteratorResult(ctx: *core.JSContext, global: *core.Object, value: core.JSValue, done: bool) !core.JSValue {
-    const iterator_result = try createIteratorResult(ctx.runtime, global, value, done);
-    defer iterator_result.free(ctx.runtime);
-    return core.promise.fulfilledWithPrototype(ctx.runtime, iterator_result, promisePrototypeFromGlobal(ctx.runtime, global));
-}
-
-pub fn asyncGeneratorIteratorResultFromPromise(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    promise_value: core.JSValue,
-    done: bool,
-) !core.JSValue {
-    const promise = try core.promise.constructWithPrototype(ctx.runtime, promisePrototypeFromGlobal(ctx.runtime, global));
-    errdefer promise.free(ctx.runtime);
-    const resolving = try createPromiseResolvingPair(ctx.runtime, global, promise);
-    defer resolving.resolve.free(ctx.runtime);
-    defer resolving.reject.free(ctx.runtime);
-
-    const unwrap = try qjsAsyncFromSyncIteratorUnwrap(ctx.runtime, global, done);
-    defer unwrap.free(ctx.runtime);
-    try qjsPerformPromiseThen(ctx, output, global, promise_value, unwrap, core.JSValue.undefinedValue(), resolving.resolve, resolving.reject);
-    return promise;
 }
 
 pub fn qjsAsyncFromSyncIteratorMethodCall(
@@ -3127,8 +3086,91 @@ pub fn qjsAsyncFromSyncIteratorMethodCall(
     return switch (method_id) {
         1 => try qjsAsyncFromSyncIteratorNext(ctx, output, global, receiver, wrapper, sync_iterator, args, caller_function, caller_frame),
         2 => try qjsAsyncFromSyncIteratorReturn(ctx, output, global, wrapper, sync_iterator, args, caller_function, caller_frame),
+        3 => try qjsAsyncFromSyncIteratorThrow(ctx, output, global, wrapper, sync_iterator, args, caller_function, caller_frame),
         else => null,
     };
+}
+
+/// Mirrors the GEN_MAGIC_THROW arm of js_async_from_sync_iterator_next
+/// (quickjs.c:54503-54520): `.throw` is re-read per call; absent throw closes
+/// the sync iterator and rejects TypeError "throw is not a method".
+pub fn qjsAsyncFromSyncIteratorThrow(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    wrapper: *core.Object,
+    sync_iterator: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    _ = wrapper;
+    const throw_key = try ctx.runtime.internAtom("throw");
+    defer ctx.runtime.atoms.free(throw_key);
+    const throw_method = getValueProperty(ctx, output, global, sync_iterator, throw_key, caller_function, caller_frame) catch |err| {
+        return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
+    };
+    defer throw_method.free(ctx.runtime);
+    if (throw_method.isUndefined() or throw_method.isNull()) {
+        // IteratorClose(sync_iter) with no pending exception; a close failure
+        // rejects with that error, otherwise reject the TypeError
+        // (quickjs.c:54515-54519).
+        call_runtime.qjsIteratorClose(ctx, output, global, sync_iterator, caller_function, caller_frame) catch |err| {
+            return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
+        };
+        const reason = try exception_ops.createNamedError(ctx, global, "TypeError", "throw is not a method");
+        defer reason.free(ctx.runtime);
+        return core.promise.rejectedWithPrototype(ctx.runtime, reason, promisePrototypeFromGlobal(ctx.runtime, global));
+    }
+    if (!isCallableValue(throw_method)) {
+        const reason = try exception_ops.createNamedError(ctx, global, "TypeError", "throw is not a method");
+        defer reason.free(ctx.runtime);
+        return core.promise.rejectedWithPrototype(ctx.runtime, reason, promisePrototypeFromGlobal(ctx.runtime, global));
+    }
+    const result = if (args.len > 0)
+        callValueOrBytecode(ctx, output, global, sync_iterator, throw_method, args[0..1], caller_function, caller_frame)
+    else
+        callValueOrBytecode(ctx, output, global, sync_iterator, throw_method, &.{}, caller_function, caller_frame);
+    const throw_result = result catch |err| {
+        return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
+    };
+    defer throw_result.free(ctx.runtime);
+    return qjsAsyncFromSyncIteratorContinuation(ctx, output, global, throw_result, sync_iterator, true, caller_function, caller_frame);
+}
+
+/// The onRejected close-wrap reaction (js_async_from_sync_iterator_close_wrap,
+/// quickjs.c:54468-54476): re-throw the reason, close the sync iterator with
+/// the exception pending (close errors swallowed), and propagate the rejection.
+pub fn qjsAsyncFromSyncIteratorCloseWrap(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    sync_iterator: core.JSValue,
+) !core.JSValue {
+    const callback = try qjsCreateBuiltinFunction(rt, global, "", 1);
+    errdefer callback.free(rt);
+    const callback_object = objectFromValue(callback) orelse return error.TypeError;
+    try callback_object.setInternalCallableTag(rt, .async_from_sync_iterator_close_wrap);
+    try callback_object.setOptionalValueSlot(rt, try callback_object.functionAsyncContinuationSlot(rt), sync_iterator.dup());
+    return callback;
+}
+
+pub fn qjsAsyncFromSyncIteratorCloseWrapCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    function_object: *core.Object,
+    args: []const core.JSValue,
+) HostError!?core.JSValue {
+    const sync_iterator = function_object.functionAsyncContinuation() orelse return null;
+    const reason = if (args.len >= 1) args[0].dup() else core.JSValue.undefinedValue();
+    defer reason.free(ctx.runtime);
+    // JS_IteratorClose(…, TRUE): the close runs with the exception logically
+    // pending — its own result and failures are discarded.
+    call_runtime.qjsIteratorClose(ctx, output, global, sync_iterator, null, null) catch {
+        if (ctx.hasException()) ctx.clearException();
+    };
+    _ = ctx.throwValue(reason.dup());
+    return error.JSException;
 }
 
 pub fn qjsAsyncFromSyncIteratorNext(
@@ -3160,7 +3202,7 @@ pub fn qjsAsyncFromSyncIteratorNext(
     };
     defer next_result.free(ctx.runtime);
     _ = receiver;
-    return qjsAsyncFromSyncIteratorContinuation(ctx, output, global, next_result, caller_function, caller_frame);
+    return qjsAsyncFromSyncIteratorContinuation(ctx, output, global, next_result, sync_iterator, true, caller_function, caller_frame);
 }
 
 pub fn qjsAsyncFromSyncIteratorReturn(
@@ -3192,7 +3234,7 @@ pub fn qjsAsyncFromSyncIteratorReturn(
         return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
     };
     defer return_result.free(ctx.runtime);
-    return qjsAsyncFromSyncIteratorContinuation(ctx, output, global, return_result, caller_function, caller_frame);
+    return qjsAsyncFromSyncIteratorContinuation(ctx, output, global, return_result, sync_iterator, false, caller_function, caller_frame);
 }
 
 pub fn qjsAsyncFromSyncIteratorContinuation(
@@ -3200,6 +3242,8 @@ pub fn qjsAsyncFromSyncIteratorContinuation(
     output: ?*std.Io.Writer,
     global: *core.Object,
     result: core.JSValue,
+    sync_iterator: core.JSValue,
+    close_on_rejection: bool,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
@@ -3228,6 +3272,13 @@ pub fn qjsAsyncFromSyncIteratorContinuation(
     const promise_constructor = try qjsPromiseDefaultConstructor(ctx, global);
     defer promise_constructor.free(ctx.runtime);
     const value_wrapper_promise = qjsPromiseStaticCall(ctx, output, global, promise_constructor, &.{value}, .resolve, caller_function, caller_frame) catch |err| {
+        // PromiseResolve threw: close the sync iterator with the exception
+        // pending, then reject (quickjs.c:54544-54549).
+        if (close_on_rejection and !done) {
+            call_runtime.qjsIteratorClose(ctx, output, global, sync_iterator, caller_function, caller_frame) catch {
+                if (ctx.hasException()) ctx.clearException();
+            };
+        }
         try qjsPromiseRejectCapabilityForError(ctx, output, global, capability.reject, err, caller_function, caller_frame);
         return capability.releaseCallbacks(ctx.runtime);
     };
@@ -3236,13 +3287,21 @@ pub fn qjsAsyncFromSyncIteratorContinuation(
     const unwrap = try qjsAsyncFromSyncIteratorUnwrap(ctx.runtime, global, done);
     defer unwrap.free(ctx.runtime);
 
+    // onRejected close-wrap only when `!done && magic != GEN_MAGIC_RETURN`
+    // (quickjs.c:54570-54579).
+    const close_wrap: core.JSValue = if (close_on_rejection and !done)
+        try qjsAsyncFromSyncIteratorCloseWrap(ctx.runtime, global, sync_iterator)
+    else
+        core.JSValue.undefinedValue();
+    defer close_wrap.free(ctx.runtime);
+
     qjsPerformPromiseThen(
         ctx,
         output,
         global,
         value_wrapper_promise,
         unwrap,
-        core.JSValue.undefinedValue(),
+        close_wrap,
         capability.resolve,
         capability.reject,
     ) catch |err| {

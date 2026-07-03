@@ -248,6 +248,10 @@ fn createAsyncFromSyncIterator(
     const return_fn = try asyncFromSyncMethod(rt, "return", 2);
     defer return_fn.free(rt);
     try defineValueProperty(rt, wrapper, "return", return_fn);
+
+    const throw_fn = try asyncFromSyncMethod(rt, "throw", 3);
+    defer throw_fn.free(rt);
+    try defineValueProperty(rt, wrapper, "throw", throw_fn);
     return wrapper.value();
 }
 
@@ -342,7 +346,7 @@ fn asyncFromSyncMethod(rt: *core.JSRuntime, name: []const u8, method_id: i32) !c
     const method = try core.function.nativeFunction(rt, name, 0);
     errdefer method.free(rt);
     const object = try property_ops.expectObject(method);
-    if (method_id < 1 or method_id > 2) return error.TypeError;
+    if (method_id < 1 or method_id > 3) return error.TypeError;
     if (!object.addAsyncFromSyncIteratorMethod(rt, @intCast(method_id))) return error.TypeError;
     return method;
 }

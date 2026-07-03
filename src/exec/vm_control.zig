@@ -4,6 +4,7 @@ const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const call_runtime = @import("call_runtime.zig");
+const exception_ops = @import("vm_exception_ops.zig");
 const forof_ops = @import("forof_ops.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
@@ -150,6 +151,16 @@ pub noinline fn throwErrorVm(
     catch_target: *?usize,
     global: *core.Object,
 ) !ThrowResult {
+    const error_type = function.code[frame.pc + 4];
+    if (error_type == 4) {
+        // JS_THROW_ERROR_ITERATOR_THROW (quickjs.c:18356): the yield*
+        // missing-throw path carries a typed message.
+        frame.pc += 5;
+        const err_value = try exception_ops.createNamedError(ctx, global, "TypeError", "iterator does not have a throw method");
+        _ = ctx.throwValue(err_value);
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.JSException)) return .handled;
+        return error.JSException;
+    }
     const err = throwError(function, frame);
     if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .handled;
     return err;
