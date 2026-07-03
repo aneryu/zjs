@@ -432,7 +432,9 @@ pub fn qjsFinalizationRegistryRegister(ctx: *core.JSContext, receiver: core.JSVa
     if (!qjsCanBeHeldWeakly(ctx.runtime, target)) return error.TypeError;
     if (target.sameValue(held_value)) return error.TypeError;
     if (!unregister_token.isUndefined() and !qjsCanBeHeldWeakly(ctx.runtime, unregister_token)) return error.TypeError;
-    if (target.sameValue(receiver)) return core.JSValue.undefinedValue();
+    // No self-target exclusion: qjs js_finrec_register (quickjs.c:61318) appends
+    // the entry unconditionally after the three checks above — a registry may
+    // register itself as target (the cell holds only a weak ref to it).
     try qjsFinalizationRegistryAppendCell(ctx.runtime, object, target, held_value, unregister_token);
     return core.JSValue.undefinedValue();
 }
