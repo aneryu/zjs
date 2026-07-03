@@ -7913,9 +7913,9 @@ pub const Object = struct {
         std.debug.assert(self.flags.is_array);
         std.debug.assert(self.flags.extensible);
 
-        const index_atom = atom.predefinedId("index", .string).?;
-        const input_atom = atom.predefinedId("input", .string).?;
-        const groups_atom = atom.predefinedId("groups", .string).?;
+        const index_atom = comptime atom.predefinedId("index", .string).?;
+        const input_atom = comptime atom.predefinedId("input", .string).?;
+        const groups_atom = comptime atom.predefinedId("groups", .string).?;
         const enumerable_flags = property.Flags.data(true, true, true);
         try self.appendPreparedPropertyEntry(rt, index_atom, enumerable_flags, .{ .data = JSValue.int32(match_index) });
         try self.appendPreparedPropertyEntry(rt, input_atom, enumerable_flags, .{ .data = input_value.dup() });

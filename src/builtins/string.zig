@@ -74,8 +74,8 @@ pub const internal_entries = stringEntries: {
         // Prototype methods that carry a `(.string, id)` native record id
         // (the subset `prototypeMethodId` maps and `decodePrototypeMethodId`
         // decodes). The remaining String.prototype methods (toString, valueOf,
-        // concat, replace, the AnnexB html helpers, …) are installed as plain
-        // name-dispatched native functions and never reach record dispatch.
+        // the AnnexB html helpers, …) are installed as plain name-dispatched
+        // native functions and never reach record dispatch.
         stringEntry("charAt", 1, @intFromEnum(PrototypeMethod.char_at), false),
         stringEntry("substring", 2, @intFromEnum(PrototypeMethod.substring), true),
         stringEntry("toUpperCase", 0, @intFromEnum(PrototypeMethod.to_upper_case), false),
@@ -103,6 +103,7 @@ pub const internal_entries = stringEntries: {
         stringEntry("toWellFormed", 0, @intFromEnum(PrototypeMethod.to_well_formed), false),
         stringEntry("search", 1, @intFromEnum(PrototypeMethod.search), false),
         stringEntry("match", 1, @intFromEnum(PrototypeMethod.match), false),
+        stringEntry("replace", 2, @intFromEnum(PrototypeMethod.replace), false),
         stringEntry("replaceAll", 2, @intFromEnum(PrototypeMethod.replace_all), false),
         stringEntry("matchAll", 1, @intFromEnum(PrototypeMethod.match_all), false),
         // The String Iterator's `next` method.

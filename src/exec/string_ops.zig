@@ -364,7 +364,7 @@ pub fn toPrimitiveForString(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (!value.isObject()) return value.dup();
-    const symbol_to_primitive = core.atom.predefinedId("Symbol.toPrimitive", .symbol) orelse
+    const symbol_to_primitive = (comptime core.atom.predefinedId("Symbol.toPrimitive", .symbol)) orelse
         return toOrdinaryPrimitiveString(ctx, output, global, value, caller_function, caller_frame);
     const method = try getValueProperty(ctx, output, global, value, symbol_to_primitive, caller_function, caller_frame);
     defer method.free(ctx.runtime);
@@ -482,27 +482,62 @@ pub fn qjsStringReplace(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
+    return qjsStringReplaceCore(ctx, output, global, this_value, args, false, caller_function, caller_frame);
+}
+
+/// js_string_replace (quickjs.c:46012, magic: 0 = replace / 1 = replaceAll).
+/// After the @@replace delegation, works directly on the flat string
+/// representations: string_indexof over the source, the narrow-first
+/// StringBuffer accumulator, and the string-search GetSubstitution shape.
+/// A first-round search miss returns the source string unchanged.
+/// `noinline`: the body is large; letting it inline through the thin
+/// replace/replaceAll wrappers into the prototype-method dispatcher evicts
+/// the hot NumericArgs bodies from the dispatcher's inline budget
+/// (measured +4.6% on charCodeAt).
+noinline fn qjsStringReplaceCore(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    is_replace_all: bool,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
     // js_string_replace (quickjs.c:46021): nullish receiver -> "cannot convert to object".
     if (this_value.isNull() or this_value.isUndefined()) {
         return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     }
     const search_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const replacement_input = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    if (try callStringReplaceMethod(ctx, output, global, this_value, search_input, replacement_input, caller_function, caller_frame)) |value| return value;
+
+    if (search_input.isObject()) {
+        if (is_replace_all) {
+            // check_regexp_g_flag (quickjs.c:45807): undefined/null flags throw
+            // TypeError "cannot convert to object"; a flags string without 'g'
+            // throws TypeError "regexp must have the 'g' flag".
+            if (try isRegExpObservable(ctx, output, global, search_input, caller_function, caller_frame)) {
+                const flags_atom = (comptime core.atom.predefinedId("flags", .string)) orelse return error.TypeError;
+                const flags = try getValueProperty(ctx, output, global, search_input, flags_atom, caller_function, caller_frame);
+                defer flags.free(ctx.runtime);
+                if (flags.isNull() or flags.isUndefined())
+                    return throwTypeErrorMessage(ctx, global, "cannot convert to object");
+                const flags_string = try toStringForAnnexB(ctx, output, global, flags, caller_function, caller_frame);
+                defer flags_string.free(ctx.runtime);
+                var bytes = std.ArrayList(u8).empty;
+                defer bytes.deinit(ctx.runtime.memory.allocator);
+                try value_ops.appendRawString(ctx.runtime, &bytes, flags_string);
+                if (std.mem.indexOfScalar(u8, bytes.items, 'g') == null)
+                    return throwTypeErrorMessage(ctx, global, "regexp must have the 'g' flag");
+            }
+        }
+        if (try callStringReplaceMethod(ctx, output, global, this_value, search_input, replacement_input, caller_function, caller_frame)) |value| return value;
+    }
 
     const source_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     defer source_value.free(ctx.runtime);
     const search_value = try toStringForAnnexB(ctx, output, global, search_input, caller_function, caller_frame);
     defer search_value.free(ctx.runtime);
-
-    var source_units = std.ArrayList(u16).empty;
-    defer source_units.deinit(ctx.runtime.memory.allocator);
-    try appendStringValueUnits(ctx.runtime, &source_units, source_value);
-
-    var search_units = std.ArrayList(u16).empty;
-    defer search_units.deinit(ctx.runtime.memory.allocator);
-    try appendStringValueUnits(ctx.runtime, &search_units, search_value);
-
     const functional_replace = isCallableValue(replacement_input);
     const replacement_text = if (functional_replace)
         core.JSValue.undefinedValue()
@@ -510,34 +545,137 @@ pub fn qjsStringReplace(
         try toStringForAnnexB(ctx, output, global, replacement_input, caller_function, caller_frame);
     defer if (!functional_replace) replacement_text.free(ctx.runtime);
 
-    const match_index = std.mem.indexOf(u16, source_units.items, search_units.items) orelse
-        return source_value.dup();
-    const replacement_value = if (functional_replace) blk: {
-        break :blk try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), replacement_input, &.{ search_value, core.JSValue.int32(@intCast(match_index)), source_value }, caller_function, caller_frame);
-    } else replacement_text;
-    defer if (functional_replace) replacement_value.free(ctx.runtime);
-
-    const replacement_string = try toStringForAnnexB(ctx, output, global, replacement_value, caller_function, caller_frame);
-    defer replacement_string.free(ctx.runtime);
-
-    const replacement = if (functional_replace) replacement_string else blk: {
-        const match = ReplaceMatch{
-            .result = core.JSValue.undefinedValue(),
-            .matched = search_value,
-            .index = match_index,
-            .captures = &.{},
-            .groups = core.JSValue.undefinedValue(),
-        };
-        break :blk try getSubstitutionString(ctx, output, global, match, source_value, replacement_string, caller_function, caller_frame);
+    const sp = source_value.asStringBody() orelse return error.TypeError;
+    try sp.ensureFlat(ctx.runtime);
+    const sp_data = sp.resolveData();
+    const searchp = search_value.asStringBody() orelse return error.TypeError;
+    try searchp.ensureFlat(ctx.runtime);
+    const search_data = searchp.resolveData();
+    const search_len = search_data.len();
+    const rep_data: ?core.string.String.ResolvedData = if (functional_replace) null else blk: {
+        const rp = replacement_text.asStringBody() orelse return error.TypeError;
+        try rp.ensureFlat(ctx.runtime);
+        break :blk rp.resolveData();
     };
-    defer if (!functional_replace) replacement.free(ctx.runtime);
 
-    var out = std.ArrayList(u16).empty;
-    defer out.deinit(ctx.runtime.memory.allocator);
-    try out.appendSlice(ctx.runtime.memory.allocator, source_units.items[0..match_index]);
-    try appendStringValueUnits(ctx.runtime, &out, replacement);
-    try out.appendSlice(ctx.runtime.memory.allocator, source_units.items[match_index + search_units.items.len ..]);
-    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
+    var b = StringBuffer{ .allocator = ctx.runtime.memory.allocator };
+    defer b.deinit();
+
+    var end_of_last_match: usize = 0;
+    var is_first = true;
+    while (true) {
+        const maybe_pos: ?usize = if (search_len == 0) blk: {
+            if (is_first) break :blk 0;
+            if (end_of_last_match >= sp_data.len()) break :blk null;
+            break :blk end_of_last_match + 1;
+        } else stringIndexOfData(sp_data, search_data, end_of_last_match);
+        const pos = maybe_pos orelse {
+            if (is_first) return source_value.dup();
+            break;
+        };
+
+        try b.appendUnits(sp_data, end_of_last_match, pos - end_of_last_match);
+
+        if (functional_replace) {
+            const call_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), replacement_input, &.{ search_value, core.JSValue.int32(@intCast(pos)), source_value }, caller_function, caller_frame);
+            defer call_result.free(ctx.runtime);
+            const repl_str = try toStringForAnnexB(ctx, output, global, call_result, caller_function, caller_frame);
+            defer repl_str.free(ctx.runtime);
+            try b.appendStringValue(ctx.runtime, repl_str);
+        } else {
+            try appendSubstitutionStringSearch(&b, ctx.runtime, search_value, sp_data, pos, search_len, rep_data.?);
+        }
+
+        end_of_last_match = pos + search_len;
+        is_first = false;
+        if (!is_replace_all) break;
+    }
+    try b.appendUnits(sp_data, end_of_last_match, sp_data.len() - end_of_last_match);
+    return b.finish(ctx.runtime);
+}
+
+fn resolvedCodeUnitAt(data: core.string.String.ResolvedData, index: usize) u16 {
+    return switch (data) {
+        .latin1 => |bytes| bytes[index],
+        .utf16 => |units| units[index],
+    };
+}
+
+/// string_indexof_char (quickjs.c:45553): first index of code unit `c` at or
+/// after `from`; a narrow string can never contain a unit > 0xFF.
+fn stringIndexOfCharData(data: core.string.String.ResolvedData, c: u16, from: usize) ?usize {
+    return switch (data) {
+        .latin1 => |bytes| blk: {
+            if (c > 0xff) break :blk null;
+            break :blk std.mem.indexOfScalarPos(u8, bytes, from, @intCast(c));
+        },
+        .utf16 => |units| std.mem.indexOfScalarPos(u16, units, from, c),
+    };
+}
+
+/// string_indexof (quickjs.c:45573): naive first-char scan plus tail compare.
+fn stringIndexOfData(
+    haystack: core.string.String.ResolvedData,
+    needle: core.string.String.ResolvedData,
+    from: usize,
+) ?usize {
+    const len1 = haystack.len();
+    const len2 = needle.len();
+    if (len2 == 0) return from;
+    const c = resolvedCodeUnitAt(needle, 0);
+    var i = from;
+    while (i + len2 <= len1) {
+        const j = stringIndexOfCharData(haystack, c, i) orelse return null;
+        if (j + len2 > len1) return null;
+        var k: usize = 1;
+        const matched = while (k < len2) : (k += 1) {
+            if (resolvedCodeUnitAt(haystack, j + k) != resolvedCodeUnitAt(needle, k)) break false;
+        } else true;
+        if (matched) return j;
+        i = j + 1;
+    }
+    return null;
+}
+
+/// js_string_GetSubstitution (quickjs.c:45888) in its string-search shape:
+/// captures == NULL, captures_val/namedCaptures == undefined, so `$N` and
+/// `$<name>` take the norep path verbatim and only $$ $& $` $' substitute.
+fn appendSubstitutionStringSearch(
+    b: *StringBuffer,
+    rt: *core.JSRuntime,
+    matched_value: core.JSValue,
+    sp_data: core.string.String.ResolvedData,
+    position: usize,
+    matched_len: usize,
+    rep_data: core.string.String.ResolvedData,
+) !void {
+    const len = rep_data.len();
+    var i: usize = 0;
+    while (true) {
+        const j = stringIndexOfCharData(rep_data, '$', i) orelse break;
+        if (j + 1 >= len) break;
+        try b.appendUnits(rep_data, i, j - i);
+        const j0 = j;
+        var scan = j + 1;
+        const c = resolvedCodeUnitAt(rep_data, scan);
+        scan += 1;
+        if (c == '$') {
+            try b.putc8('$');
+        } else if (c == '&') {
+            try b.appendStringValue(rt, matched_value);
+        } else if (c == '`') {
+            try b.appendUnits(sp_data, 0, position);
+        } else if (c == '\'') {
+            const tail_start = position + matched_len;
+            try b.appendUnits(sp_data, tail_start, sp_data.len() - tail_start);
+        } else {
+            // norep: captures_len == 0 rejects $0-$99 and namedCaptures is
+            // undefined, so `$c` is copied through verbatim.
+            try b.appendUnits(rep_data, j0, scan - j0);
+        }
+        i = scan;
+    }
+    try b.appendUnits(rep_data, i, len - i);
 }
 
 pub fn callStringReplaceMethod(
@@ -551,7 +689,7 @@ pub fn callStringReplaceMethod(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (!search_value.isObject()) return null;
-    const replace_atom = core.atom.predefinedId("Symbol.replace", .symbol) orelse return error.TypeError;
+    const replace_atom = (comptime core.atom.predefinedId("Symbol.replace", .symbol)) orelse return error.TypeError;
     const replacer = try getValueProperty(ctx, output, global, search_value, replace_atom, caller_function, caller_frame);
     defer replacer.free(ctx.runtime);
     if (replacer.isUndefined() or replacer.isNull()) return null;
@@ -988,7 +1126,7 @@ pub fn qjsRegExpSymbolMatchAll(
     const constructor_value = try qjsRegExpSpeciesConstructor(ctx, output, global, this_value, caller_function, caller_frame);
     defer constructor_value.free(ctx.runtime);
 
-    const flags_atom = core.atom.predefinedId("flags", .string) orelse return error.TypeError;
+    const flags_atom = (comptime core.atom.predefinedId("flags", .string)) orelse return error.TypeError;
     const flags_value = try getValueProperty(ctx, output, global, this_value, flags_atom, caller_function, caller_frame);
     defer flags_value.free(ctx.runtime);
     const flags_string = try toStringForAnnexB(ctx, output, global, flags_value, caller_function, caller_frame);
@@ -1036,14 +1174,14 @@ pub fn qjsStringMatchAll(
     defer string_value.free(ctx.runtime);
 
     const regexp = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const match_all_atom = core.atom.predefinedId("Symbol.matchAll", .symbol) orelse return error.TypeError;
+    const match_all_atom = (comptime core.atom.predefinedId("Symbol.matchAll", .symbol)) orelse return error.TypeError;
     if (!regexp.isUndefined() and !regexp.isNull() and regexp.isObject()) {
         const matcher = try getValueProperty(ctx, output, global, regexp, match_all_atom, caller_function, caller_frame);
         defer matcher.free(ctx.runtime);
         if (try isRegExpObservable(ctx, output, global, regexp, caller_function, caller_frame)) {
             // check_regexp_g_flag (quickjs.c:45819/45829): undefined/null flags
             // -> "cannot convert to object"; missing 'g' -> "regexp must have the 'g' flag".
-            const flags_atom = core.atom.predefinedId("flags", .string) orelse return error.TypeError;
+            const flags_atom = (comptime core.atom.predefinedId("flags", .string)) orelse return error.TypeError;
             const flags_value = try getValueProperty(ctx, output, global, regexp, flags_atom, caller_function, caller_frame);
             defer flags_value.free(ctx.runtime);
             if (flags_value.isUndefined() or flags_value.isNull())
@@ -1074,7 +1212,7 @@ pub fn qjsRegExpStringIteratorPrototype(rt: *core.JSRuntime, global: *core.Objec
     errdefer core.Object.destroyFromHeader(rt, &proto.header);
     const next = try core.function.nativeFunction(rt, "next", 0);
     defer next.free(rt);
-    try proto.defineOwnProperty(rt, core.atom.predefinedId("next", .string).?, core.Descriptor.data(next, true, false, true));
+    try proto.defineOwnProperty(rt, (comptime core.atom.predefinedId("next", .string)).?, core.Descriptor.data(next, true, false, true));
     return proto;
 }
 
@@ -1287,7 +1425,7 @@ pub fn qjsRegExpSymbolSearchGeneric(
 
     if (result.isNull()) return core.JSValue.int32(-1);
     if (!result.isObject()) return error.TypeError;
-    const index_atom = core.atom.predefinedId("index", .string) orelse return error.TypeError;
+    const index_atom = (comptime core.atom.predefinedId("index", .string)) orelse return error.TypeError;
     return getValueProperty(ctx, output, global, result, index_atom, caller_function, caller_frame);
 }
 
@@ -1483,12 +1621,15 @@ pub fn qjsRegExpReplaceFast(
     // QuickJS resets lastIndex to 0 up front for global regexps.
     if (is_global) try setRegExpLastIndexZero(ctx.runtime, rx_object);
 
-    var source = std.ArrayList(u16).empty;
-    defer source.deinit(ctx.runtime.memory.allocator);
-    try appendStringValueUnits(ctx.runtime, &source, string_value);
-    var replacement = std.ArrayList(u16).empty;
-    defer replacement.deinit(ctx.runtime.memory.allocator);
-    try appendStringValueUnits(ctx.runtime, &replacement, replacement_string);
+    // js_regexp_replace works directly on the flat string bodies (str->u.str8/
+    // str16 + string_buffer); no per-call UTF-16 copies of source/replacement.
+    const sp = string_value.asStringBody() orelse return null;
+    try sp.ensureFlat(ctx.runtime);
+    const sp_data = sp.resolveData();
+    const source_len = sp_data.len();
+    const rp = replacement_string.asStringBody() orelse return null;
+    try rp.ensureFlat(ctx.runtime);
+    const rep_data = rp.resolveData();
 
     const alloc_count = compiled.allocCount();
     const capture_count = compiled.captureCount();
@@ -1502,8 +1643,8 @@ pub fn qjsRegExpReplaceFast(
         break :capture heap_capture_slots;
     };
 
-    var out = std.ArrayList(u16).empty;
-    defer out.deinit(ctx.runtime.memory.allocator);
+    var b = StringBuffer{ .allocator = ctx.runtime.memory.allocator };
+    defer b.deinit();
 
     // lastIndex: the caller already reset it to 0 for global regexps. Sticky
     // (non-global) reads it; otherwise matching starts at 0 (qjs js_regexp_replace).
@@ -1513,7 +1654,7 @@ pub fn qjsRegExpReplaceFast(
     }
     var next_src: usize = 0;
     while (true) {
-        if (last_index > source.items.len) {
+        if (last_index > source_len) {
             if (is_global or is_sticky) try setRegExpLastIndexZero(ctx.runtime, rx_object);
             break;
         }
@@ -1527,9 +1668,9 @@ pub fn qjsRegExpReplaceFast(
         }
         const match_start = regexp_adapter.captureSlotValue(capture[0]) orelse 0;
         const match_end = regexp_adapter.captureSlotValue(capture[1]) orelse match_start;
-        if (next_src < match_start) try out.appendSlice(ctx.runtime.memory.allocator, source.items[next_src..match_start]);
-        if (replacement.items.len != 0) {
-            try appendRegExpSubstitutionFromSlots(ctx.runtime, &out, source.items, match_start, match_end, capture, capture_count, replacement.items);
+        if (next_src < match_start) try b.appendUnits(sp_data, next_src, match_start - next_src);
+        if (rep_data.len() != 0) {
+            try appendRegExpSubstitutionFromSlots(&b, sp_data, match_start, match_end, capture, capture_count, rep_data);
         }
         next_src = match_end;
         if (!is_global) {
@@ -1543,12 +1684,21 @@ pub fn qjsRegExpReplaceFast(
             break;
         }
         last_index = if (match_end == match_start)
-            advanceStringIndexUnits(source.items, match_end, full_unicode)
+            advanceStringIndexData(sp_data, match_end, full_unicode)
         else
             match_end;
     }
-    if (next_src < source.items.len) try out.appendSlice(ctx.runtime.memory.allocator, source.items[next_src..]);
-    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
+    if (next_src < source_len) try b.appendUnits(sp_data, next_src, source_len - next_src);
+    return try b.finish(ctx.runtime);
+}
+
+/// string_advance_index (quickjs.c:45589) over a resolved flat body: a narrow
+/// string can hold no surrogate pair, so only wide data consults the pair.
+fn advanceStringIndexData(data: core.string.String.ResolvedData, index: usize, unicode: bool) usize {
+    return switch (data) {
+        .latin1 => index + 1,
+        .utf16 => |units| advanceStringIndexUnits(units, index, unicode),
+    };
 }
 
 const ReplaceLiteralMatch = struct {
@@ -1638,7 +1788,7 @@ pub fn captureReplaceLiteralMatch(
     matched_value.free(ctx.runtime);
     errdefer matched.free(ctx.runtime);
 
-    const index_atom = core.atom.predefinedId("index", .string) orelse return error.TypeError;
+    const index_atom = (comptime core.atom.predefinedId("index", .string)) orelse return error.TypeError;
     const index_value = try getValueProperty(ctx, output, global, result, index_atom, caller_function, caller_frame);
     defer index_value.free(ctx.runtime);
     const string_len = try stringLengthIndex(ctx.runtime, string_value);
@@ -1730,7 +1880,7 @@ pub fn captureReplaceMatch(
     matched_value.free(ctx.runtime);
     errdefer matched.free(ctx.runtime);
 
-    const index_atom = core.atom.predefinedId("index", .string) orelse return error.TypeError;
+    const index_atom = (comptime core.atom.predefinedId("index", .string)) orelse return error.TypeError;
     const index_value = try getValueProperty(ctx, output, global, result, index_atom, caller_function, caller_frame);
     defer index_value.free(ctx.runtime);
     const string_len = try stringLengthIndex(ctx.runtime, string_value);
@@ -1770,7 +1920,7 @@ pub fn captureReplaceMatch(
         }
     }
 
-    const groups_atom = core.atom.predefinedId("groups", .string) orelse return error.TypeError;
+    const groups_atom = (comptime core.atom.predefinedId("groups", .string)) orelse return error.TypeError;
     const groups = try getValueProperty(ctx, output, global, result, groups_atom, caller_function, caller_frame);
     errdefer groups.free(ctx.runtime);
     return .{ .result = result, .matched = matched, .index = index, .captures = captures, .groups = groups };
@@ -1914,25 +2064,31 @@ pub fn replacementCaptureUnits(match: ReplaceMatch, replacement: []const u16, in
 // digit count instead of a materialized JSValue. `null` => not a valid
 // reference (emit a literal `$`).
 const SlotCaptureRef = struct { group: usize, consumed: usize };
-fn parseSlotCaptureRef(replacement: []const u16, index: usize, capture_count: usize) ?SlotCaptureRef {
+fn parseSlotCaptureRefData(rep_data: core.string.String.ResolvedData, index: usize, capture_count: usize) ?SlotCaptureRef {
     if (capture_count == 0) return null;
     const max_group = capture_count - 1; // valid groups are 1..max_group
     if (max_group == 0) return null;
-    const first = replacement[index + 1];
+    const rep_len = rep_data.len();
+    const first = resolvedCodeUnitAt(rep_data, index + 1);
     if (!isAsciiDigitUnit(first)) return null;
     if (first == '0') {
-        if (index + 2 >= replacement.len or !isAsciiDigitUnit(replacement[index + 2])) return null;
-        const two: usize = @intCast(replacement[index + 2] - '0');
+        if (index + 2 >= rep_len) return null;
+        const second = resolvedCodeUnitAt(rep_data, index + 2);
+        if (!isAsciiDigitUnit(second)) return null;
+        const two: usize = @intCast(second - '0');
         if (two == 0 or two > max_group) return null;
         return .{ .group = two, .consumed = 2 };
     }
     var group: usize = @intCast(first - '0');
     var consumed: usize = 1;
-    if (index + 2 < replacement.len and isAsciiDigitUnit(replacement[index + 2])) {
-        const two = group * 10 + @as(usize, @intCast(replacement[index + 2] - '0'));
-        if (two >= 1 and two <= max_group) {
-            group = two;
-            consumed = 2;
+    if (index + 2 < rep_len) {
+        const second = resolvedCodeUnitAt(rep_data, index + 2);
+        if (isAsciiDigitUnit(second)) {
+            const two = group * 10 + @as(usize, @intCast(second - '0'));
+            if (two >= 1 and two <= max_group) {
+                group = two;
+                consumed = 2;
+            }
         }
     }
     if (group == 0 or group > max_group) return null;
@@ -1945,53 +2101,56 @@ fn parseSlotCaptureRef(replacement: []const u16, index: usize, capture_count: us
 // to empty. Group-name (`$<name>`) substitution is intentionally NOT handled
 // here -- the fast path bails to the generic driver when the pattern has named
 // groups, exactly as QuickJS does.
+/// js_string_GetSubstitution (quickjs.c:45888) in its raw-capture shape
+/// (`captures != NULL`): `$&`/`$\``/`$'`/`$N` substitute directly from the
+/// source body slices held by the reused capture-slot buffer; no per-capture
+/// string materialization.
 fn appendRegExpSubstitutionFromSlots(
-    rt: *core.JSRuntime,
-    out: *std.ArrayList(u16),
-    source: []const u16,
+    b: *StringBuffer,
+    sp_data: core.string.String.ResolvedData,
     match_start: usize,
     match_end: usize,
     capture: []const usize,
     capture_count: usize,
-    replacement: []const u16,
+    rep_data: core.string.String.ResolvedData,
 ) !void {
-    const alloc = rt.memory.allocator;
+    const rep_len = rep_data.len();
     var index: usize = 0;
-    while (index < replacement.len) : (index += 1) {
-        const unit = replacement[index];
-        if (unit != '$' or index + 1 >= replacement.len) {
-            try out.append(alloc, unit);
+    while (index < rep_len) : (index += 1) {
+        const unit = resolvedCodeUnitAt(rep_data, index);
+        if (unit != '$' or index + 1 >= rep_len) {
+            try b.appendUnits(rep_data, index, 1);
             continue;
         }
-        switch (replacement[index + 1]) {
+        switch (resolvedCodeUnitAt(rep_data, index + 1)) {
             '$' => {
-                try out.append(alloc, '$');
+                try b.putc8('$');
                 index += 1;
             },
             '&' => {
-                try out.appendSlice(alloc, source[match_start..match_end]);
+                try b.appendUnits(sp_data, match_start, match_end - match_start);
                 index += 1;
             },
             '`' => {
-                try out.appendSlice(alloc, source[0..match_start]);
+                try b.appendUnits(sp_data, 0, match_start);
                 index += 1;
             },
             '\'' => {
-                try out.appendSlice(alloc, source[match_end..]);
+                try b.appendUnits(sp_data, match_end, sp_data.len() - match_end);
                 index += 1;
             },
             '0'...'9' => {
-                if (parseSlotCaptureRef(replacement, index, capture_count)) |ref| {
+                if (parseSlotCaptureRefData(rep_data, index, capture_count)) |ref| {
                     index += ref.consumed;
                     if (regexp_adapter.captureSlotValue(capture[2 * ref.group])) |cstart| {
                         const cend = regexp_adapter.captureSlotValue(capture[2 * ref.group + 1]) orelse cstart;
-                        try out.appendSlice(alloc, source[cstart..cend]);
+                        try b.appendUnits(sp_data, cstart, cend - cstart);
                     }
                 } else {
-                    try out.append(alloc, '$');
+                    try b.putc8('$');
                 }
             },
-            else => try out.append(alloc, '$'),
+            else => try b.putc8('$'),
         }
     }
 }
@@ -2192,6 +2351,9 @@ pub fn qjsStringPrototypeMethod(
     if (method_id == string_id_lookup.legacy_match_method_id) {
         return qjsStringMatch(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
+    if (method_id == string_id_lookup.legacy_replace_method_id) {
+        return qjsStringReplace(ctx, output, global, this_value, args, caller_function, caller_frame);
+    }
     if (method_id == string_id_lookup.legacy_replace_all_method_id) {
         return qjsStringReplaceAll(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
@@ -2320,170 +2482,7 @@ pub fn qjsStringReplaceAll(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    // js_string_replace (quickjs.c:46021): nullish receiver -> "cannot convert to object".
-    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
-    const search_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const replace_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    if (!search_value.isUndefined() and !search_value.isNull() and
-        try isRegExpObservable(ctx, output, global, search_value, caller_function, caller_frame))
-    {
-        // check_regexp_g_flag (quickjs.c:45807): undefined/null flags throw
-        // TypeError "cannot convert to object"; a flags string without 'g'
-        // throws TypeError "regexp must have the 'g' flag".
-        const flags_atom = core.atom.predefinedId("flags", .string) orelse return error.TypeError;
-        const flags = try getValueProperty(ctx, output, global, search_value, flags_atom, caller_function, caller_frame);
-        defer flags.free(ctx.runtime);
-        if (flags.isNull() or flags.isUndefined())
-            return throwTypeErrorMessage(ctx, global, "cannot convert to object");
-        const flags_string = try toStringForAnnexB(ctx, output, global, flags, caller_function, caller_frame);
-        defer flags_string.free(ctx.runtime);
-        var bytes = std.ArrayList(u8).empty;
-        defer bytes.deinit(ctx.runtime.memory.allocator);
-        try value_ops.appendRawString(ctx.runtime, &bytes, flags_string);
-        if (std.mem.indexOfScalar(u8, bytes.items, 'g') == null)
-            return throwTypeErrorMessage(ctx, global, "regexp must have the 'g' flag");
-    }
-    if (try callStringReplaceMethod(ctx, output, global, this_value, search_value, replace_value, caller_function, caller_frame)) |value| return value;
-
-    const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
-    const search_string = try toStringForAnnexB(ctx, output, global, search_value, caller_function, caller_frame);
-    defer search_string.free(ctx.runtime);
-    const functional_replace = isCallableValue(replace_value);
-    const replacement_string = if (functional_replace)
-        core.JSValue.undefinedValue()
-    else
-        try toStringForAnnexB(ctx, output, global, replace_value, caller_function, caller_frame);
-    defer if (!functional_replace) replacement_string.free(ctx.runtime);
-
-    return qjsStringReplaceAllStringSearch(ctx, output, global, string_value, search_string, replace_value, replacement_string, functional_replace, caller_function, caller_frame);
-}
-
-pub fn qjsStringReplaceAllStringSearch(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    string_value: core.JSValue,
-    search_string: core.JSValue,
-    replace_value: core.JSValue,
-    replacement_string: core.JSValue,
-    functional_replace: bool,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    var source_units = std.ArrayList(u16).empty;
-    defer source_units.deinit(ctx.runtime.memory.allocator);
-    try appendStringValueUnits(ctx.runtime, &source_units, string_value);
-
-    var search_units = std.ArrayList(u16).empty;
-    defer search_units.deinit(ctx.runtime.memory.allocator);
-    try appendStringValueUnits(ctx.runtime, &search_units, search_string);
-
-    var replacement_units = std.ArrayList(u16).empty;
-    defer replacement_units.deinit(ctx.runtime.memory.allocator);
-    if (!functional_replace) try appendStringValueUnits(ctx.runtime, &replacement_units, replacement_string);
-
-    var out = std.ArrayList(u16).empty;
-    defer out.deinit(ctx.runtime.memory.allocator);
-
-    var end_of_last_match: usize = 0;
-    var first = true;
-    while (true) {
-        const maybe_position = if (search_units.items.len == 0) blk: {
-            if (first) break :blk @as(?usize, 0);
-            if (end_of_last_match >= source_units.items.len) break :blk null;
-            break :blk end_of_last_match + 1;
-        } else stringIndexOfUnits(source_units.items, search_units.items, end_of_last_match);
-
-        const position = maybe_position orelse {
-            if (first) return string_value.dup();
-            break;
-        };
-
-        try out.appendSlice(ctx.runtime.memory.allocator, source_units.items[end_of_last_match..position]);
-        if (functional_replace) {
-            const replacement = try callValueOrBytecode(
-                ctx,
-                output,
-                global,
-                core.JSValue.undefinedValue(),
-                replace_value,
-                &.{ search_string, core.JSValue.int32(@intCast(position)), string_value },
-                caller_function,
-                caller_frame,
-            );
-            defer replacement.free(ctx.runtime);
-            const replacement_text = try toStringForAnnexB(ctx, output, global, replacement, caller_function, caller_frame);
-            defer replacement_text.free(ctx.runtime);
-            try appendStringValueUnits(ctx.runtime, &out, replacement_text);
-        } else {
-            try appendStringReplaceAllSubstitution(ctx.runtime, &out, replacement_units.items, source_units.items, search_units.items, position);
-        }
-
-        end_of_last_match = position + search_units.items.len;
-        first = false;
-    }
-
-    try out.appendSlice(ctx.runtime.memory.allocator, source_units.items[end_of_last_match..]);
-    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
-}
-
-pub fn stringIndexOfUnits(source: []const u16, needle: []const u16, from_index: usize) ?usize {
-    if (needle.len == 0) return if (from_index <= source.len) from_index else null;
-    if (from_index > source.len or needle.len > source.len - from_index) return null;
-    var index = from_index;
-    while (index <= source.len - needle.len) : (index += 1) {
-        if (std.mem.eql(u16, source[index .. index + needle.len], needle)) return index;
-    }
-    return null;
-}
-
-pub fn appendStringReplaceAllSubstitution(
-    rt: *core.JSRuntime,
-    out: *std.ArrayList(u16),
-    replacement: []const u16,
-    source: []const u16,
-    matched: []const u16,
-    position: usize,
-) !void {
-    var index: usize = 0;
-    while (index < replacement.len) {
-        if (replacement[index] != '$' or index + 1 >= replacement.len) {
-            try out.append(rt.memory.allocator, replacement[index]);
-            index += 1;
-            continue;
-        }
-
-        const next = replacement[index + 1];
-        switch (next) {
-            '$' => {
-                try out.append(rt.memory.allocator, '$');
-                index += 2;
-            },
-            '&' => {
-                try out.appendSlice(rt.memory.allocator, matched);
-                index += 2;
-            },
-            '`' => {
-                try out.appendSlice(rt.memory.allocator, source[0..@min(position, source.len)]);
-                index += 2;
-            },
-            '\'' => {
-                const tail_start = @min(source.len, position + matched.len);
-                try out.appendSlice(rt.memory.allocator, source[tail_start..]);
-                index += 2;
-            },
-            '0'...'9', '<' => {
-                try out.append(rt.memory.allocator, '$');
-                try out.append(rt.memory.allocator, next);
-                index += 2;
-            },
-            else => {
-                try out.append(rt.memory.allocator, '$');
-                index += 1;
-            },
-        }
-    }
+    return qjsStringReplaceCore(ctx, output, global, this_value, args, true, caller_function, caller_frame);
 }
 
 pub fn qjsStringSearch(
@@ -2539,7 +2538,7 @@ pub fn stringIteratorPrototypeFromContext(ctx: *core.JSContext, global: *core.Ob
     defer iterator_method.free(ctx.runtime);
     const iterator_function = property_ops.expectObject(iterator_method) catch return error.TypeError;
     if (!iterator_function.addIteratorIdentityFunction(ctx.runtime)) return error.TypeError;
-    const iterator_atom = core.atom.predefinedId("Symbol.iterator", .symbol) orelse return error.TypeError;
+    const iterator_atom = (comptime core.atom.predefinedId("Symbol.iterator", .symbol)) orelse return error.TypeError;
     try object.defineOwnProperty(ctx.runtime, iterator_atom, core.Descriptor.data(iterator_method, true, false, true));
 
     if (slot < ctx.class_prototypes.len) {
@@ -2626,7 +2625,7 @@ pub fn qjsStringSplit(
     if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     const separator = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     if (separator.isObject()) {
-        const split_atom = core.atom.predefinedId("Symbol.split", .symbol) orelse return error.TypeError;
+        const split_atom = (comptime core.atom.predefinedId("Symbol.split", .symbol)) orelse return error.TypeError;
         const splitter = try getValueProperty(ctx, output, global, separator, split_atom, caller_function, caller_frame);
         defer splitter.free(ctx.runtime);
         if (!splitter.isUndefined() and !splitter.isNull()) {
@@ -3131,14 +3130,14 @@ pub fn createRegExpMatchArray(rt: *core.JSRuntime, global: *core.Object, input_b
     if (!has_indices and !regExpMatchHasNamedCaptures(found)) {
         try out.defineRegExpMatchMetadataPropertiesAssumingNew(rt, @intCast(found.index), input, core.JSValue.undefinedValue());
     } else {
-        try defineFreshNonIndexDataProperty(rt, out, core.atom.predefinedId("index", .string).?, core.JSValue.int32(@intCast(found.index)), true, true, true);
-        try defineFreshNonIndexDataProperty(rt, out, core.atom.predefinedId("input", .string).?, input, true, true, true);
+        try defineFreshNonIndexDataProperty(rt, out, (comptime core.atom.predefinedId("index", .string)).?, core.JSValue.int32(@intCast(found.index)), true, true, true);
+        try defineFreshNonIndexDataProperty(rt, out, (comptime core.atom.predefinedId("input", .string)).?, input, true, true, true);
         try defineRegExpGroupsProperty(rt, out, input_bytes, found);
     }
     if (has_indices) {
         const indices = try createRegExpIndicesArray(rt, global, input_bytes, found);
         defer indices.free(rt);
-        const indices_atom = core.atom.predefinedId("indices", .string) orelse return error.TypeError;
+        const indices_atom = (comptime core.atom.predefinedId("indices", .string)) orelse return error.TypeError;
         try defineFreshNonIndexDataProperty(rt, out, indices_atom, indices, true, true, true);
     }
     return out.value();
@@ -3181,14 +3180,14 @@ pub fn createRegExpMatchArrayFromValue(rt: *core.JSRuntime, global: *core.Object
     if (!has_indices and !regExpMatchHasNamedCaptures(found)) {
         try out.defineRegExpMatchMetadataPropertiesAssumingNew(rt, @intCast(found.index), input_value, core.JSValue.undefinedValue());
     } else {
-        try defineFreshNonIndexDataProperty(rt, out, core.atom.predefinedId("index", .string).?, core.JSValue.int32(@intCast(found.index)), true, true, true);
-        try defineFreshNonIndexDataProperty(rt, out, core.atom.predefinedId("input", .string).?, input_value, true, true, true);
+        try defineFreshNonIndexDataProperty(rt, out, (comptime core.atom.predefinedId("index", .string)).?, core.JSValue.int32(@intCast(found.index)), true, true, true);
+        try defineFreshNonIndexDataProperty(rt, out, (comptime core.atom.predefinedId("input", .string)).?, input_value, true, true, true);
         try defineRegExpGroupsPropertyFromValue(rt, out, input_value, found);
     }
     if (has_indices) {
         const indices = try createRegExpIndicesArray(rt, global, &.{}, found);
         defer indices.free(rt);
-        const indices_atom = core.atom.predefinedId("indices", .string) orelse return error.TypeError;
+        const indices_atom = (comptime core.atom.predefinedId("indices", .string)) orelse return error.TypeError;
         try defineFreshNonIndexDataProperty(rt, out, indices_atom, indices, true, true, true);
     }
     return out.value();
@@ -3252,15 +3251,15 @@ pub fn createRegExpMatchArrayNoCapturesFromValue(rt: *core.JSRuntime, global: *c
     if (!has_indices) {
         try out.defineRegExpMatchMetadataPropertiesAssumingNew(rt, @intCast(found.index), input_value, core.JSValue.undefinedValue());
     } else {
-        try defineFreshNonIndexDataProperty(rt, out, core.atom.predefinedId("index", .string).?, core.JSValue.int32(@intCast(found.index)), true, true, true);
-        try defineFreshNonIndexDataProperty(rt, out, core.atom.predefinedId("input", .string).?, input_value, true, true, true);
-        const groups_atom = core.atom.predefinedId("groups", .string) orelse return error.TypeError;
+        try defineFreshNonIndexDataProperty(rt, out, (comptime core.atom.predefinedId("index", .string)).?, core.JSValue.int32(@intCast(found.index)), true, true, true);
+        try defineFreshNonIndexDataProperty(rt, out, (comptime core.atom.predefinedId("input", .string)).?, input_value, true, true, true);
+        const groups_atom = (comptime core.atom.predefinedId("groups", .string)) orelse return error.TypeError;
         try defineFreshNonIndexDataProperty(rt, out, groups_atom, core.JSValue.undefinedValue(), true, true, true);
     }
     if (has_indices) {
         const indices = try createRegExpIndicesArray(rt, global, &.{}, found);
         defer indices.free(rt);
-        const indices_atom = core.atom.predefinedId("indices", .string) orelse return error.TypeError;
+        const indices_atom = (comptime core.atom.predefinedId("indices", .string)) orelse return error.TypeError;
         try defineFreshNonIndexDataProperty(rt, out, indices_atom, indices, true, true, true);
     }
     return out.value();
@@ -3403,9 +3402,9 @@ pub fn createStartOfLineUnicodeMatchArray(rt: *core.JSRuntime, global: *core.Obj
     const capture = try value_ops.createStringValue(rt, "f");
     defer capture.free(rt);
     try defineSplitValueElement(rt, out, 1, capture);
-    try out.defineOwnProperty(rt, core.atom.predefinedId("index", .string).?, core.Descriptor.data(core.JSValue.int32(0), true, true, true));
-    try out.defineOwnProperty(rt, core.atom.predefinedId("input", .string).?, core.Descriptor.data(input_value, true, true, true));
-    const groups_atom = core.atom.predefinedId("groups", .string) orelse return error.TypeError;
+    try out.defineOwnProperty(rt, (comptime core.atom.predefinedId("index", .string)).?, core.Descriptor.data(core.JSValue.int32(0), true, true, true));
+    try out.defineOwnProperty(rt, (comptime core.atom.predefinedId("input", .string)).?, core.Descriptor.data(input_value, true, true, true));
+    const groups_atom = (comptime core.atom.predefinedId("groups", .string)) orelse return error.TypeError;
     try out.defineOwnProperty(rt, groups_atom, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
     return out.value();
 }
@@ -3430,8 +3429,8 @@ pub fn createRegExpMatchArrayFromStringValue(rt: *core.JSRuntime, input_value: c
     const out = try core.Object.createArray(rt, null);
     errdefer core.Object.destroyFromHeader(rt, &out.header);
     try defineSplitValueElement(rt, out, 0, input_value);
-    try out.defineOwnProperty(rt, core.atom.predefinedId("index", .string).?, core.Descriptor.data(core.JSValue.int32(@intCast(found.index)), true, true, true));
-    try out.defineOwnProperty(rt, core.atom.predefinedId("input", .string).?, core.Descriptor.data(input_value, true, true, true));
+    try out.defineOwnProperty(rt, (comptime core.atom.predefinedId("index", .string)).?, core.Descriptor.data(core.JSValue.int32(@intCast(found.index)), true, true, true));
+    try out.defineOwnProperty(rt, (comptime core.atom.predefinedId("input", .string)).?, core.Descriptor.data(input_value, true, true, true));
     return out.value();
 }
 
@@ -3441,8 +3440,8 @@ pub fn createRegExpMatchArrayFromStringSliceValue(rt: *core.JSRuntime, input_val
     const match_value = try stringSliceValue(rt, input_value, start, len);
     defer match_value.free(rt);
     try defineSplitValueElement(rt, out, 0, match_value);
-    try out.defineOwnProperty(rt, core.atom.predefinedId("index", .string).?, core.Descriptor.data(core.JSValue.int32(@intCast(start)), true, true, true));
-    try out.defineOwnProperty(rt, core.atom.predefinedId("input", .string).?, core.Descriptor.data(input_value, true, true, true));
+    try out.defineOwnProperty(rt, (comptime core.atom.predefinedId("index", .string)).?, core.Descriptor.data(core.JSValue.int32(@intCast(start)), true, true, true));
+    try out.defineOwnProperty(rt, (comptime core.atom.predefinedId("input", .string)).?, core.Descriptor.data(input_value, true, true, true));
     return out.value();
 }
 
@@ -3608,7 +3607,7 @@ pub fn qjsErrorToStringCall(
         try toStringForAnnexB(ctx, output, global, name_value, caller_function, caller_frame);
     defer name_string.free(ctx.runtime);
 
-    const message_atom = core.atom.predefinedId("message", .string).?;
+    const message_atom = (comptime core.atom.predefinedId("message", .string)).?;
     const message_value = try getValueProperty(ctx, output, global, this_value, message_atom, caller_function, caller_frame);
     defer message_value.free(ctx.runtime);
     const message_string = if (message_value.isUndefined())
@@ -3954,7 +3953,7 @@ pub fn isConcatSpreadable(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
-    const spreadable_atom = core.atom.predefinedId("Symbol.isConcatSpreadable", .symbol) orelse return arraySpeciesOriginalIsArray(object);
+    const spreadable_atom = (comptime core.atom.predefinedId("Symbol.isConcatSpreadable", .symbol)) orelse return arraySpeciesOriginalIsArray(object);
     const spreadable = try getValueProperty(ctx, output, global, value, spreadable_atom, caller_function, caller_frame);
     defer spreadable.free(ctx.runtime);
     if (!spreadable.isUndefined()) return valueTruthy(spreadable);
@@ -4128,7 +4127,7 @@ pub fn getFastStringPrimitiveDataProperty(
     // EVERY `s.method()` resolution (the internString hot spot) before walking
     // `global.String -> .prototype`. "String" is a predefined atom, so resolve it
     // at comptime and walk with the cached id — no per-call atom allocation.
-    const string_ctor_atom = comptime core.atom.predefinedId("String", .string).?;
+    const string_ctor_atom = comptime (core.atom.predefinedId("String", .string)).?;
     const proto = object_ops.constructorPrototypeFromGlobalAtom(ctx.runtime, global, string_ctor_atom) orelse return null;
     return ownDataOrAutoInitPropertyValue(proto, atom_id);
 }
@@ -4316,7 +4315,7 @@ pub fn qjsObjectToStringIntrinsic(
 ) !core.JSValue {
     const object = try property_ops.expectObject(object_value);
     const builtin_tag = try defaultObjectToStringTag(object);
-    const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return try qjsObjectTagString(ctx.runtime, "Object");
+    const tag_atom = (comptime core.atom.predefinedId("Symbol.toStringTag", .symbol)) orelse return try qjsObjectTagString(ctx.runtime, "Object");
     const tag_value = try getValueProperty(ctx, output, global, object_value, tag_atom, caller_function, caller_frame);
     defer tag_value.free(ctx.runtime);
     if (tag_value.isString()) {
@@ -4455,31 +4454,47 @@ pub fn isLowSurrogateUnit(unit: u16) bool {
 // requested length exceeds it (quickjs.c:46331).
 const js_string_len_max: usize = core.string.max_length;
 
-/// A narrow-first pad accumulator mirroring qjs's StringBuffer (js_string_pad,
-/// quickjs.c:46304-46356): source/fill code units are copied into a latin1 (u8)
-/// buffer and only widened to UTF-16 when a unit exceeds 0xFF, so an all-latin1
-/// pad never materializes a UTF-16 result. It operates on code UNITS (surrogate
-/// halves are copied verbatim, matching string_buffer_concat) and tiles the fill
-/// by repetition+remainder rather than per character.
-const PadBuffer = struct {
+/// A narrow-first accumulator mirroring qjs's StringBuffer (string_buffer_init,
+/// quickjs.c): code units are copied into a latin1 (u8) buffer and only widened
+/// to UTF-16 when a unit exceeds 0xFF, so an all-latin1 build never
+/// materializes a UTF-16 result. It operates on code UNITS (surrogate halves
+/// are copied verbatim, matching string_buffer_concat). Consumed by the
+/// js_string_pad and js_string_replace mirrors.
+const StringBuffer = struct {
     allocator: std.mem.Allocator,
     latin1: std.ArrayList(u8) = .empty,
     wide: std.ArrayList(u16) = .empty,
     is_wide: bool = false,
 
-    fn deinit(self: *PadBuffer) void {
+    fn deinit(self: *StringBuffer) void {
         self.latin1.deinit(self.allocator);
         self.wide.deinit(self.allocator);
     }
 
-    fn widen(self: *PadBuffer) !void {
+    /// string_buffer_putc8: append one latin1 code unit.
+    fn putc8(self: *StringBuffer, byte: u8) !void {
+        if (self.is_wide)
+            try self.wide.append(self.allocator, byte)
+        else
+            try self.latin1.append(self.allocator, byte);
+    }
+
+    /// string_buffer_concat_value: append every code unit of a string value.
+    fn appendStringValue(self: *StringBuffer, rt: *core.JSRuntime, value: core.JSValue) !void {
+        const body = value.asStringBody() orelse return error.TypeError;
+        try body.ensureFlat(rt);
+        const data = body.resolveData();
+        try self.appendUnits(data, 0, data.len());
+    }
+
+    fn widen(self: *StringBuffer) !void {
         self.is_wide = true;
         try self.wide.ensureTotalCapacity(self.allocator, self.latin1.items.len);
         for (self.latin1.items) |byte| self.wide.appendAssumeCapacity(byte);
         self.latin1.clearRetainingCapacity();
     }
 
-    fn ensureCapacity(self: *PadBuffer, additional: usize) !void {
+    fn ensureCapacity(self: *StringBuffer, additional: usize) !void {
         if (self.is_wide)
             try self.wide.ensureUnusedCapacity(self.allocator, additional)
         else
@@ -4488,7 +4503,7 @@ const PadBuffer = struct {
 
     /// Appends `count` code units of `data` starting at `start`, widening on the
     /// first >0xFF unit encountered (mirrors string_buffer_concat's widen path).
-    fn appendUnits(self: *PadBuffer, data: core.string.String.ResolvedData, start: usize, count: usize) !void {
+    fn appendUnits(self: *StringBuffer, data: core.string.String.ResolvedData, start: usize, count: usize) !void {
         switch (data) {
             // latin1 units are all <= 0xFF: copy flat, no widen check needed.
             .latin1 => |bytes| {
@@ -4522,7 +4537,7 @@ const PadBuffer = struct {
         }
     }
 
-    fn finish(self: *PadBuffer, rt: *core.JSRuntime) !core.JSValue {
+    fn finish(self: *StringBuffer, rt: *core.JSRuntime) !core.JSValue {
         const string = if (self.is_wide)
             try core.string.String.createUtf16(rt, self.wide.items)
         else
@@ -4574,7 +4589,7 @@ pub fn qjsStringPad(
     if (target_length > js_string_len_max) return throwRangeErrorMessage(ctx, global, "invalid string length");
     const pad_count = target_length - source_len;
 
-    var buffer = PadBuffer{ .allocator = ctx.runtime.memory.allocator };
+    var buffer = StringBuffer{ .allocator = ctx.runtime.memory.allocator };
     defer buffer.deinit();
     try buffer.ensureCapacity(target_length);
 

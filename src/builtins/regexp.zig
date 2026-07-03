@@ -7,6 +7,12 @@ const builtin_dispatch = @import("../exec/builtin_dispatch.zig");
 const regexp_fastpath = @import("../exec/regexp_fastpath.zig");
 const string_ops = @import("../exec/string_ops.zig");
 const exceptions = @import("../exec/exceptions.zig");
+const bytecode_mod = @import("../bytecode.zig");
+const frame_mod = @import("../exec/frame.zig");
+const object_ops = @import("../exec/object_ops.zig");
+const coercion_ops = @import("../exec/coercion_ops.zig");
+const array_ops = @import("../exec/array_ops.zig");
+const exception_ops = @import("../exec/vm_exception_ops.zig");
 
 const HostError = exceptions.HostError;
 const InternalCall = core.host_function.InternalCall;
@@ -211,13 +217,9 @@ fn regexpCall(host_call: InternalCall) HostError!core.JSValue {
         const active_global = host_call.global orelse return error.TypeError;
         return regexp_fastpath.qjsRegExpLegacyAccessor(ctx, output, active_global, this_value, function_object, method, args, caller_function, caller_frame);
     }
-    if (accessorNameFromId(id)) |accessor_name| {
+    if (accessorNameFromId(id) != null) {
         const active_global = host_call.global orelse return error.TypeError;
-        if (try regexp_fastpath.qjsRegExpAccessor(ctx, output, active_global, this_value, function_object.value(), accessor_name, caller_function, caller_frame)) |value| return value;
-        return accessor(ctx.runtime, this_value, accessor_name) catch |err| switch (err) {
-            error.TypeError => error.TypeError,
-            else => err,
-        };
+        return accessorCallById(ctx, output, active_global, this_value, function_object, id, caller_function, caller_frame);
     }
     const method_id = decodePrototypeMethodId(id) orelse return error.TypeError;
     // `compile` resolves the global through the function object's realm first
@@ -1253,6 +1255,99 @@ pub fn methodCall(rt: *core.JSRuntime, object_value: core.JSValue, method: u32, 
         2 => core.JSValue.boolean(true),
         3 => core.JSValue.nullValue(),
         else => error.TypeError,
+    };
+}
+
+/// RegExp.prototype accessor bodies dispatched by the record id (the qjs
+/// magic int): js_regexp_get_flag (quickjs.c:47921) for the eight flag
+/// getters, js_regexp_get_flags (quickjs.c:47943) for `flags`, and the
+/// source getter. The receiver's compiled bytecode is read directly; a
+/// non-RegExp receiver resolves only when it is the realm's
+/// RegExp.prototype (undefined / "(?:)"), else TypeError — no name-string
+/// derivation and no per-call atom interning.
+fn accessorCallById(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    function_object: *core.Object,
+    id: u32,
+    caller_function: ?*const bytecode_mod.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    const rt = ctx.runtime;
+    // JS_ThrowTypeErrorNotAnObject (js_regexp_get_flag / js_regexp_get_flags).
+    if (!this_value.isObject()) return exception_ops.throwTypeErrorMessage(ctx, global, "not an object");
+
+    if (id == @intFromEnum(AccessorMethod.flags)) {
+        // js_regexp_get_flags (quickjs.c:47943): generic receiver; observe
+        // the eight flag properties through ordinary [[Get]] in canonical
+        // order (compile-time atoms, qjs flag_atom[] analogue).
+        const flag_atoms = comptime [_]core.Atom{
+            core.atom.predefinedId("hasIndices", .string).?,
+            core.atom.predefinedId("global", .string).?,
+            core.atom.predefinedId("ignoreCase", .string).?,
+            core.atom.predefinedId("multiline", .string).?,
+            core.atom.predefinedId("dotAll", .string).?,
+            core.atom.predefinedId("unicode", .string).?,
+            core.atom.predefinedId("unicodeSets", .string).?,
+            core.atom.predefinedId("sticky", .string).?,
+        };
+        const flag_chars = [_]u8{ 'd', 'g', 'i', 'm', 's', 'u', 'v', 'y' };
+        var str: [flag_chars.len]u8 = undefined;
+        var count: usize = 0;
+        for (flag_atoms, flag_chars) |flag_atom, flag_char| {
+            const value = try object_ops.getValueProperty(ctx, output, global, this_value, flag_atom, caller_function, caller_frame);
+            defer value.free(rt);
+            if (coercion_ops.valueTruthy(value)) {
+                str[count] = flag_char;
+                count += 1;
+            }
+        }
+        return createStringValue(rt, str[0..count]);
+    }
+
+    const header = this_value.refHeader() orelse return error.TypeError;
+    const receiver: *core.Object = @fieldParentPtr("header", header);
+    const maybe_bits: ?u16 = if (receiver.class_id == core.class.ids.regexp)
+        (regexpFlagBits(receiver) catch null)
+    else
+        null;
+    if (maybe_bits) |bits| {
+        // js_get_regexp success: read the bit straight off the compiled
+        // bytecode (lre_get_flags), or escape the internal source.
+        if (id == @intFromEnum(AccessorMethod.source)) {
+            return accessor(rt, this_value, "source") catch |err| switch (err) {
+                error.TypeError => error.TypeError,
+                else => err,
+            };
+        }
+        const mask = flagMaskFromAccessorId(id) orelse return error.TypeError;
+        return core.JSValue.boolean((bits & mask) != 0);
+    }
+    // js_regexp_get_flag !re branch: the realm's RegExp.prototype reads
+    // undefined (source: "(?:)"); any other receiver is invalid.
+    if (object_ops.regExpPrototypeFromGlobal(rt, global)) |proto| {
+        if (receiver == proto) {
+            if (id == @intFromEnum(AccessorMethod.source)) return createStringValue(rt, "(?:)");
+            return core.JSValue.undefinedValue();
+        }
+    }
+    _ = try array_ops.throwRegExpAccessorTypeError(ctx, global, function_object.value());
+    return error.TypeError;
+}
+
+fn flagMaskFromAccessorId(id: u32) ?u16 {
+    return switch (id) {
+        @intFromEnum(AccessorMethod.global) => regexp_adapter.flag_bits.global,
+        @intFromEnum(AccessorMethod.ignore_case) => regexp_adapter.flag_bits.ignore_case,
+        @intFromEnum(AccessorMethod.multiline) => regexp_adapter.flag_bits.multiline,
+        @intFromEnum(AccessorMethod.dot_all) => regexp_adapter.flag_bits.dot_all,
+        @intFromEnum(AccessorMethod.unicode) => regexp_adapter.flag_bits.unicode,
+        @intFromEnum(AccessorMethod.sticky) => regexp_adapter.flag_bits.sticky,
+        @intFromEnum(AccessorMethod.has_indices) => regexp_adapter.flag_bits.indices,
+        @intFromEnum(AccessorMethod.unicode_sets) => regexp_adapter.flag_bits.unicode_sets,
+        else => null,
     };
 }
 

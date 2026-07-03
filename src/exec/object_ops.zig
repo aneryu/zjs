@@ -15,9 +15,9 @@ const value_vm = @import("vm_value.zig");
 const stack_mod = @import("stack.zig");
 const HostError = exceptions.HostError;
 const op = bytecode.opcode.op;
-const atom_buffer = core.atom.predefinedId("buffer", .string).?;
-const atom_byte_length = core.atom.predefinedId("byteLength", .string).?;
-const atom_byte_offset = core.atom.predefinedId("byteOffset", .string).?;
+const atom_buffer = (core.atom.predefinedId("buffer", .string)).?;
+const atom_byte_length = (core.atom.predefinedId("byteLength", .string)).?;
+const atom_byte_offset = (core.atom.predefinedId("byteOffset", .string)).?;
 const exceptions = @import("exceptions.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const call_runtime = @import("call_runtime.zig");
@@ -220,7 +220,7 @@ pub fn installGeneratorPrototypeProperties(rt: *core.JSRuntime, object: *core.Ob
     // NOTE: the for-of fast-path marker lives on each generator instance's OWN `next`
     // (createGeneratorObject), which shadows this prototype `next`, so no flag is set here.
 
-    const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
+    const tag_atom = (comptime core.atom.predefinedId("Symbol.toStringTag", .symbol)) orelse return error.TypeError;
     const tag = try value_ops.createStringValue(rt, "Generator");
     defer tag.free(rt);
     try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag, false, false, true));
@@ -1132,18 +1132,17 @@ pub fn qjsRegExpPrototypeMethodIsDefault(rt: *core.JSRuntime, object: *core.Obje
     if (object.hasOwnProperty(atom_id)) return false;
     const proto = object.getPrototype() orelse return false;
     if (proto.hasExoticMethods()) return false;
-    for (proto.shapeProps(), 0..) |prop, property_index| {
-        const prop_flags = core.property.Flags.fromBits(prop.flags);
-        if (prop_flags.deleted or prop.atom_id != atom_id) continue;
-        if (prop_flags.isAccessor()) return false;
-        const entry = proto.prop_values[property_index];
-        return switch (proto.propKindAt(property_index)) {
-            .data => qjsRegExpNativeBuiltinMatches(entry.slot.data, expected_id),
-            .auto_init => qjsRegExpAutoInitBuiltinMatches(core.property.autoInitAt(rt, entry.slot.auto_init).*, expected_id),
-            .var_ref, .accessor => false,
-        };
-    }
-    return false;
+    // Shape-hash probe of the prototype, mirroring qjs js_is_standard_regexp's
+    // find_property_regexp (not a linear property walk).
+    const property_index = proto.findProperty(atom_id) orelse return false;
+    const prop_flags = core.property.Flags.fromBits(proto.shapeProps()[property_index].flags);
+    if (prop_flags.isAccessor()) return false;
+    const entry = proto.prop_values[property_index];
+    return switch (proto.propKindAt(property_index)) {
+        .data => qjsRegExpNativeBuiltinMatches(entry.slot.data, expected_id),
+        .auto_init => qjsRegExpAutoInitBuiltinMatches(core.property.autoInitAt(rt, entry.slot.auto_init).*, expected_id),
+        .var_ref, .accessor => false,
+    };
 }
 
 /// Side-effect-free check that a RegExp flag getter (`flags`/`global`/`unicode`/
@@ -1158,17 +1157,15 @@ pub fn qjsRegExpPrototypeGetterIsDefault(rt: *core.JSRuntime, object: *core.Obje
     if (object.hasOwnProperty(atom_id)) return false;
     const proto = object.getPrototype() orelse return false;
     if (proto.hasExoticMethods()) return false;
-    for (proto.shapeProps(), 0..) |prop, property_index| {
-        const prop_flags = core.property.Flags.fromBits(prop.flags);
-        if (prop_flags.deleted or prop.atom_id != atom_id) continue;
-        const entry = proto.prop_values[property_index];
-        return switch (proto.propKindAt(property_index)) {
-            .accessor => qjsRegExpNativeBuiltinMatches(entry.slot.accessor.getterValue(), expected_id),
-            .auto_init => qjsRegExpAutoInitAccessorBuiltinMatches(core.property.autoInitAt(rt, entry.slot.auto_init).*, expected_id),
-            .data, .var_ref => false,
-        };
-    }
-    return false;
+    // Shape-hash probe of the prototype, mirroring qjs check_regexp_getter's
+    // find_property_regexp (not a linear property walk).
+    const property_index = proto.findProperty(atom_id) orelse return false;
+    const entry = proto.prop_values[property_index];
+    return switch (proto.propKindAt(property_index)) {
+        .accessor => qjsRegExpNativeBuiltinMatches(entry.slot.accessor.getterValue(), expected_id),
+        .auto_init => qjsRegExpAutoInitAccessorBuiltinMatches(core.property.autoInitAt(rt, entry.slot.auto_init).*, expected_id),
+        .data, .var_ref => false,
+    };
 }
 
 /// Side-effect-free `js_is_standard_regexp` (quickjs.c): the receiver is a
@@ -1184,13 +1181,13 @@ pub fn regExpIsStandard(rt: *core.JSRuntime, object: *core.Object) bool {
     if (object.regexpLastIndex()) |last_index| {
         if (!last_index.isNumber()) return false;
     } else return false;
-    const exec_atom = core.atom.predefinedId("exec", .string) orelse return false;
+    const exec_atom = (comptime core.atom.predefinedId("exec", .string)) orelse return false;
     if (!qjsRegExpPrototypeMethodIsDefault(rt, object, exec_atom, @intFromEnum(method_ids.regexp.PrototypeMethod.exec))) return false;
-    const flags_atom = core.atom.predefinedId("flags", .string) orelse return false;
+    const flags_atom = (comptime core.atom.predefinedId("flags", .string)) orelse return false;
     if (!qjsRegExpPrototypeGetterIsDefault(rt, object, flags_atom, @intFromEnum(method_ids.regexp.AccessorMethod.flags))) return false;
-    const global_atom = core.atom.predefinedId("global", .string) orelse return false;
+    const global_atom = (comptime core.atom.predefinedId("global", .string)) orelse return false;
     if (!qjsRegExpPrototypeGetterIsDefault(rt, object, global_atom, @intFromEnum(method_ids.regexp.AccessorMethod.global))) return false;
-    const unicode_atom = core.atom.predefinedId("unicode", .string) orelse return false;
+    const unicode_atom = (comptime core.atom.predefinedId("unicode", .string)) orelse return false;
     if (!qjsRegExpPrototypeGetterIsDefault(rt, object, unicode_atom, @intFromEnum(method_ids.regexp.AccessorMethod.unicode))) return false;
     return true;
 }
@@ -1203,7 +1200,7 @@ pub fn regExpExecPropertyIsDefault(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
-    const exec_atom = core.atom.predefinedId("exec", .string) orelse return false;
+    const exec_atom = (comptime core.atom.predefinedId("exec", .string)) orelse return false;
     const exec_value = try getValueProperty(ctx, output, global, rx, exec_atom, caller_function, caller_frame);
     defer exec_value.free(ctx.runtime);
     const exec_object = objectFromValue(exec_value) orelse return false;
@@ -1391,7 +1388,7 @@ pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Obje
             break;
         }
     }
-    const groups_atom = core.atom.predefinedId("groups", .string) orelse return error.TypeError;
+    const groups_atom = (comptime core.atom.predefinedId("groups", .string)) orelse return error.TypeError;
     if (!has_named) {
         try defineFreshNonIndexDataProperty(rt, out, groups_atom, core.JSValue.undefinedValue(), true, true, true);
         return;
@@ -1432,7 +1429,7 @@ pub fn defineRegExpGroupsProperty(rt: *core.JSRuntime, out: *core.Object, input_
             break;
         }
     }
-    const groups_atom = core.atom.predefinedId("groups", .string) orelse return error.TypeError;
+    const groups_atom = (comptime core.atom.predefinedId("groups", .string)) orelse return error.TypeError;
     if (!has_named) {
         try defineFreshNonIndexDataProperty(rt, out, groups_atom, core.JSValue.undefinedValue(), true, true, true);
         return;
@@ -1476,7 +1473,7 @@ pub fn defineRegExpGroupsPropertyFromValue(rt: *core.JSRuntime, out: *core.Objec
             break;
         }
     }
-    const groups_atom = core.atom.predefinedId("groups", .string) orelse return error.TypeError;
+    const groups_atom = (comptime core.atom.predefinedId("groups", .string)) orelse return error.TypeError;
     if (!has_named) {
         try defineFreshNonIndexDataProperty(rt, out, groups_atom, core.JSValue.undefinedValue(), true, true, true);
         return;
@@ -2502,7 +2499,7 @@ pub fn qjsIteratorPrototypeAccessorSet(ctx: *core.JSContext, global: *core.Objec
     if (atom_id == core.atom.ids.constructor) {
         if (!value.isObject()) return throwTypeErrorMessage(ctx, global, "not an object");
         if (!receiver.isObject()) return throwTypeErrorMessage(ctx, global, "not an object");
-    } else if (atom_id == (core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError)) {
+    } else if (atom_id == ((comptime core.atom.predefinedId("Symbol.toStringTag", .symbol)) orelse return error.TypeError)) {
         const receiver_object = property_ops.expectObject(receiver) catch return throwTypeErrorMessage(ctx, global, "not an object");
         if (iteratorPrototypeFromGlobal(ctx.runtime, global)) |home| {
             if (receiver_object == home) return throwTypeErrorMessage(ctx, global, "Cannot assign to read only property");
@@ -2597,7 +2594,7 @@ pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: 
     try object.defineOwnProperty(ctx.runtime, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(@intCast(args.len)), true, false, true));
     if (try arrayPrototypeValuesFromGlobal(ctx.runtime, global)) |values| {
         defer values.free(ctx.runtime);
-        const iterator_key = core.atom.predefinedId("Symbol.iterator", .symbol) orelse return error.TypeError;
+        const iterator_key = (comptime core.atom.predefinedId("Symbol.iterator", .symbol)) orelse return error.TypeError;
         try object.defineOwnProperty(ctx.runtime, iterator_key, core.Descriptor.data(values, true, false, true));
     }
     const callee_key = try ctx.runtime.internAtom("callee");
@@ -2643,7 +2640,7 @@ pub fn installFunctionPrototypeThrowTypeErrorAccessors(rt: *core.JSRuntime, glob
     const function_prototype = functionPrototypeFromGlobal(rt, global) orelse return;
     const arguments_key = core.atom.ids.arguments;
     try function_prototype.defineOwnProperty(rt, arguments_key, core.Descriptor.accessor(thrower, thrower, false, true));
-    const caller_key = core.atom.predefinedId("caller", .string).?;
+    const caller_key = (comptime core.atom.predefinedId("caller", .string)).?;
     try function_prototype.defineOwnProperty(rt, caller_key, core.Descriptor.accessor(thrower, thrower, false, true));
 }
 
