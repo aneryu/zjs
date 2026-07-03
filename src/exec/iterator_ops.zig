@@ -207,7 +207,7 @@ fn pushForAwaitRecord(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_va
     try stack.pushOwned(core.JSValue.int32(for_await_record_marker));
 }
 
-fn createAsyncFromSyncIterator(
+pub fn createAsyncFromSyncIterator(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,

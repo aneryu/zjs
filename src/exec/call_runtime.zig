@@ -520,6 +520,7 @@ fn callInternalCallableByTag(
         .async_from_sync_iterator_close_wrap => try promise_ops.qjsAsyncFromSyncIteratorCloseWrapCall(ctx, output, global, function_object, args),
         .async_from_sync_iterator_unwrap => try promise_ops.qjsAsyncFromSyncIteratorUnwrapCall(ctx, global, function_object, args),
         .async_disposable_stack_continuation => try promise_ops.qjsAsyncDisposableStackContinuationCall(ctx, output, global, function_object, args, caller_function, caller_frame),
+        .array_from_async_continuation => try array_ops.qjsArrayFromAsyncContinuationCall(ctx, output, global, function_object, args, caller_function, caller_frame),
         .throw_type_error_intrinsic => @as(?core.JSValue, try qjsThrowTypeErrorIntrinsic(ctx, global, function_object)),
     };
 }
@@ -850,6 +851,7 @@ fn callValueOrBytecodeClassModeDispatch(
             if (try string_ops.qjsArrayToLocaleStringCall(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
         }
         if (try array_ops.qjsArrayFromCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+        if (try array_ops.qjsArrayFromAsyncCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
         if (try array_ops.qjsArrayOfCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
         if (try array_ops.qjsArrayIterationCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
         if (try array_ops.qjsArrayAtCall(ctx, output, global, this_value, func, args)) |value| return value;

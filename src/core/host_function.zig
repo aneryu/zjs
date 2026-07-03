@@ -26,6 +26,10 @@ pub const InternalCallableTag = enum(u8) {
     throw_type_error_intrinsic = 10,
     async_generator_resolve = 11,
     async_from_sync_iterator_close_wrap = 12,
+    // Await continuation of the Array.fromAsync state machine (same
+    // await-shaped internal reaction model as
+    // `async_disposable_stack_continuation`).
+    array_from_async_continuation = 13,
 };
 
 pub const ExternalCall = struct {
@@ -270,6 +274,10 @@ pub const builtin_method_ids = struct {
             from = 1,
             is_array = 2,
             of = 3,
+            // Array.fromAsync (proposal-array-from-async / ES2026). No qjs
+            // 04be246 counterpart; appended after the existing ids because the
+            // enum values are load-bearing (baked into record tables).
+            from_async = 4,
         };
 
         pub const ConstructorMethod = enum(u32) {

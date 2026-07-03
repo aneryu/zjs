@@ -25,6 +25,7 @@ const coercion_ops = @import("coercion_ops.zig");
 const error_stack_ops = @import("error_stack_ops.zig");
 const forof_ops = @import("forof_ops.zig");
 const object_ops = @import("object_ops.zig");
+const promise_ops = @import("promise_ops.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
 const slot_ops = @import("slot_ops.zig");
 const string_ops = @import("string_ops.zig");
@@ -3886,6 +3887,596 @@ pub fn qjsArrayFromCall(
         set_result.free(ctx.runtime);
     }
     return out_value;
+}
+
+// ---------------------------------------------------------------------------
+// Array.fromAsync — proposal-array-from-async (ES2026, sec-array.fromasync).
+// qjs 04be246 has no fromAsync, so unlike its neighbors this block mirrors the
+// spec algorithm directly. The async closure (spec step 3) is a state machine
+// driven by promise reactions: every spec `Await(v)` becomes
+// PromiseResolve(%Promise%, v) + an internal PerformPromiseThen attach with a
+// pair of `.array_from_async_continuation`-tagged native callbacks (the same
+// await-shaped reaction model as the AsyncDisposableStack machinery in
+// promise_ops.zig; nothing here drains the job queue synchronously). Closure
+// state lives on an internal plain object that never escapes to user code.
+// ---------------------------------------------------------------------------
+
+/// Await resume points of the fromAsync closure ("phase" state slot).
+const from_async_phase_iter_next: i32 = 1; // iterator loop: Await(nextResult)
+const from_async_phase_iter_mapped: i32 = 2; // iterator loop: Await(mappedValue)
+const from_async_phase_array_value: i32 = 3; // array-like loop: Await(kValue)
+const from_async_phase_array_mapped: i32 = 4; // array-like loop: Await(mappedValue)
+const from_async_phase_closing: i32 = 5; // AsyncIteratorClose: Await(return() result)
+
+fn fromAsyncStateSet(rt: *core.JSRuntime, state: *core.Object, comptime name: []const u8, value: core.JSValue) !void {
+    const key = try rt.internAtom(name);
+    defer rt.atoms.free(key);
+    try state.defineOwnProperty(rt, key, core.Descriptor.data(value, true, true, true));
+}
+
+/// Returns an owned ref (caller frees).
+fn fromAsyncStateGet(rt: *core.JSRuntime, state: *core.Object, comptime name: []const u8) core.JSValue {
+    const key = rt.internAtom(name) catch return core.JSValue.undefinedValue();
+    defer rt.atoms.free(key);
+    return state.getProperty(key);
+}
+
+fn fromAsyncStateNumber(rt: *core.JSRuntime, state: *core.Object, comptime name: []const u8) f64 {
+    const value = fromAsyncStateGet(rt, state, name);
+    defer value.free(rt);
+    return value_ops.numberValue(value) orelse 0;
+}
+
+/// Spec GetMethod(V, P): undefined/null -> null; non-callable -> TypeError.
+fn fromAsyncGetMethod(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: core.JSValue,
+    key: core.Atom,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    const method = try getValueProperty(ctx, output, global, receiver, key, caller_function, caller_frame);
+    if (method.isUndefined() or method.isNull()) {
+        method.free(ctx.runtime);
+        return null;
+    }
+    errdefer method.free(ctx.runtime);
+    if (!isCallableValue(method)) {
+        _ = try throwTypeErrorMessage(ctx, global, "not a function");
+    }
+    return method;
+}
+
+/// `Array.fromAsync(asyncItems [, mapfn [, thisArg]])` entry. Gated like
+/// `qjsArrayFromCall`: record id when installed with one, name fallback for
+/// the lazily materialized static. Returns the result promise; only
+/// NewPromiseCapability failures surface synchronously — every abrupt
+/// completion of the closure body rejects the promise (spec step 3/steps e-k
+/// run inside the async closure).
+pub fn qjsArrayFromAsyncCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    constructor_value: core.JSValue,
+    func: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    const function_object = callableObjectFromValue(func) orelse return null;
+    if (!isArrayStaticRecord(function_object, @intFromEnum(method_ids.array.StaticMethod.from_async))) {
+        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
+        defer ctx.runtime.memory.allocator.free(name);
+        if (!std.mem.eql(u8, name, "fromAsync")) return null;
+    }
+    var capability = try promise_ops.qjsDefaultPromiseCapability(ctx, output, global, caller_function, caller_frame);
+    errdefer capability.deinit(ctx.runtime);
+    fromAsyncStart(ctx, output, global, constructor_value, args, capability.resolve, capability.reject, caller_function, caller_frame) catch |err| {
+        try promise_ops.qjsPromiseRejectCapabilityForError(ctx, output, global, capability.reject, err, caller_function, caller_frame);
+    };
+    return capability.releaseCallbacks(ctx.runtime);
+}
+
+/// Synchronous prologue of the fromAsync closure: mapping check, iterator
+/// acquisition (@@asyncIterator, else @@iterator wrapped
+/// AsyncFromSyncIterator-style, else array-like), target construction, and the
+/// first step of whichever loop applies. Runs inside the current job; the
+/// caller routes any error into the result promise's reject.
+fn fromAsyncStart(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    constructor_value: core.JSValue,
+    args: []const core.JSValue,
+    resolve: core.JSValue,
+    reject: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const rt = ctx.runtime;
+    const items = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const mapfn = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    const this_arg = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
+
+    // 3.a-c: mapping check happens before any access to asyncItems.
+    if (!mapfn.isUndefined() and !isCallableValue(mapfn)) {
+        _ = try throwTypeErrorMessage(ctx, global, "not a function");
+    }
+
+    const state = try core.Object.create(rt, core.class.ids.object, null);
+    var state_val = state.value();
+    var root_values = [_]core.runtime.ValueRootValue{.{ .value = &state_val }};
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = &root_values,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
+    defer state_val.free(rt);
+
+    try fromAsyncStateSet(rt, state, "resolve", resolve);
+    try fromAsyncStateSet(rt, state, "reject", reject);
+    try fromAsyncStateSet(rt, state, "mapfn", mapfn);
+    try fromAsyncStateSet(rt, state, "this_arg", this_arg);
+    try fromAsyncStateSet(rt, state, "k", core.JSValue.number(0));
+
+    // 3.e-f: usingAsyncIterator = GetMethod(asyncItems, @@asyncIterator);
+    // fallback usingSyncIterator = GetMethod(asyncItems, @@iterator). Both use
+    // the intrinsic well-known symbols (never a Symbol.* global read), and
+    // GetMethod on null/undefined asyncItems throws here (GetV -> ToObject).
+    const async_iterator_atom = core.atom.predefinedId("Symbol.asyncIterator", .symbol) orelse return error.TypeError;
+    const sync_iterator_atom = core.atom.predefinedId("Symbol.iterator", .symbol) orelse return error.TypeError;
+    var used_async = true;
+    var used_method = try fromAsyncGetMethod(ctx, output, global, items, async_iterator_atom, caller_function, caller_frame);
+    if (used_method == null) {
+        used_async = false;
+        used_method = try fromAsyncGetMethod(ctx, output, global, items, sync_iterator_atom, caller_function, caller_frame);
+    }
+
+    if (used_method) |method| {
+        defer method.free(rt);
+        // GetIterator: iterator = Call(method, asyncItems); must be an object;
+        // then nextMethod = Get(iterator, "next"). The sync branch wraps the
+        // sync iterator CreateAsyncFromSyncIterator-style so each value is
+        // awaited/unwrapped by the shared machinery.
+        const iterator = try callValueOrBytecode(ctx, output, global, items, method, &.{}, caller_function, caller_frame);
+        {
+            var iterator_owned = true;
+            defer if (iterator_owned) iterator.free(rt);
+            if (!iterator.isObject()) {
+                _ = try throwTypeErrorMessage(ctx, global, "not an object");
+            }
+            if (used_async) {
+                try fromAsyncStateSet(rt, state, "iter", iterator);
+            } else {
+                const wrapper = try iter_vm.createAsyncFromSyncIterator(ctx, output, global, iterator, caller_function, caller_frame, object_ops.getValueProperty, call_runtime.isCallableValue);
+                defer wrapper.free(rt);
+                try fromAsyncStateSet(rt, state, "iter", wrapper);
+            }
+            iterator.free(rt);
+            iterator_owned = false;
+        }
+        {
+            const stored_iterator = fromAsyncStateGet(rt, state, "iter");
+            defer stored_iterator.free(rt);
+            const next_key = try rt.internAtom("next");
+            defer rt.atoms.free(next_key);
+            const next_method = try getValueProperty(ctx, output, global, stored_iterator, next_key, caller_function, caller_frame);
+            defer next_method.free(rt);
+            try fromAsyncStateSet(rt, state, "next", next_method);
+        }
+
+        // 3.j.i: A = IsConstructor(C) ? Construct(C) : ArrayCreate(0).
+        const target = if (try isConstructorForArrayOf(rt, constructor_value))
+            try constructValueOrBytecode(ctx, output, global, constructor_value, &.{}, caller_function, caller_frame)
+        else blk: {
+            const out = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
+            break :blk out.value();
+        };
+        {
+            defer target.free(rt);
+            try fromAsyncStateSet(rt, state, "target", target);
+        }
+        try fromAsyncIterStep(ctx, output, global, state, caller_function, caller_frame);
+        return;
+    }
+
+    // 3.k: array-like fallback. len = LengthOfArrayLike(arrayLike); the
+    // ToObject boxing of a primitive asyncItems is unobservable, so element
+    // reads go through getValueProperty on the raw value.
+    const len = blk: {
+        const len_value = try getValueProperty(ctx, output, global, items, core.atom.ids.length, caller_function, caller_frame);
+        defer len_value.free(rt);
+        break :blk try coercion_ops.toLengthNumber(ctx, output, global, len_value);
+    };
+    try fromAsyncStateSet(rt, state, "items", items);
+    try fromAsyncStateSet(rt, state, "len", core.JSValue.number(len));
+
+    // 3.k.iv-v: A = IsConstructor(C) ? Construct(C, «𝔽(len)») : ArrayCreate(len).
+    const target = if (try isConstructorForArrayOf(rt, constructor_value))
+        try constructValueOrBytecode(ctx, output, global, constructor_value, &.{core.JSValue.number(len)}, caller_function, caller_frame)
+    else blk: {
+        // ArrayCreate step 1: len > 2^32-1 -> RangeError.
+        if (len > 4294967295.0) {
+            _ = try exception_ops.throwRangeErrorMessage(ctx, global, "invalid array length");
+        }
+        const out = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
+        out.setArrayLength(@intFromFloat(len));
+        break :blk out.value();
+    };
+    {
+        defer target.free(rt);
+        try fromAsyncStateSet(rt, state, "target", target);
+    }
+    try fromAsyncArrayLikeStep(ctx, output, global, state, caller_function, caller_frame);
+}
+
+/// One spec Await: PromiseResolve(%Promise%, value) + internal
+/// PerformPromiseThen attach (never a user-visible `.then` read), with the
+/// resume point recorded in the state's "phase" slot.
+fn fromAsyncAwait(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    state: *core.Object,
+    value: core.JSValue,
+    phase: i32,
+) !void {
+    const rt = ctx.runtime;
+    try fromAsyncStateSet(rt, state, "phase", core.JSValue.int32(phase));
+    const promise_constructor = try promise_ops.qjsPromiseDefaultConstructor(ctx, global);
+    defer promise_constructor.free(rt);
+    const awaited = try promise_ops.qjsPromiseStaticCall(ctx, output, global, promise_constructor, &.{value}, .resolve, null, null);
+    defer awaited.free(rt);
+    const on_fulfilled = try fromAsyncContinuation(rt, global, state, false);
+    defer on_fulfilled.free(rt);
+    const on_rejected = try fromAsyncContinuation(rt, global, state, true);
+    defer on_rejected.free(rt);
+    try promise_ops.qjsPerformPromiseThen(ctx, output, global, awaited, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
+}
+
+fn fromAsyncContinuation(rt: *core.JSRuntime, global: *core.Object, state: *core.Object, rejected: bool) !core.JSValue {
+    const callback = try builtin_glue.qjsCreateBuiltinFunction(rt, global, "", 1);
+    errdefer callback.free(rt);
+    const callback_object = objectFromValue(callback) orelse return error.TypeError;
+    try callback_object.setInternalCallableTag(rt, .array_from_async_continuation);
+    try fromAsyncStateSet(rt, callback_object, "state", state.value());
+    try fromAsyncStateSet(rt, callback_object, "rejected", core.JSValue.boolean(rejected));
+    return callback;
+}
+
+/// Reaction entry for `.array_from_async_continuation` callbacks (routed by
+/// `call_runtime.callInternalCallableByTag`). Any error escaping the resume
+/// body rejects the result promise; the settled promise's own
+/// already-resolved latch makes late double-settles no-ops.
+pub fn qjsArrayFromAsyncContinuationCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    function_object: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    const rt = ctx.runtime;
+    var state_val = fromAsyncStateGet(rt, function_object, "state");
+    var root_values = [_]core.runtime.ValueRootValue{.{ .value = &state_val }};
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = &root_values,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
+    defer state_val.free(rt);
+    const state = objectFromValue(state_val) orelse return error.TypeError;
+    const rejected = blk: {
+        const rejected_val = fromAsyncStateGet(rt, function_object, "rejected");
+        defer rejected_val.free(rt);
+        break :blk valueTruthy(rejected_val);
+    };
+    const settled = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    fromAsyncResume(ctx, output, global, state, rejected, settled, caller_function, caller_frame) catch |err| {
+        const reject = fromAsyncStateGet(rt, state, "reject");
+        defer reject.free(rt);
+        try promise_ops.qjsPromiseRejectCapabilityForError(ctx, output, global, reject, err, caller_function, caller_frame);
+    };
+    return core.JSValue.undefinedValue();
+}
+
+fn fromAsyncResume(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    state: *core.Object,
+    rejected: bool,
+    settled: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const rt = ctx.runtime;
+    const phase = blk: {
+        const phase_val = fromAsyncStateGet(rt, state, "phase");
+        defer phase_val.free(rt);
+        break :blk phase_val.asInt32() orelse return error.TypeError;
+    };
+    switch (phase) {
+        from_async_phase_iter_next => {
+            // Await(nextResult) settled. A rejection propagates out of the
+            // closure without closing the iterator (spec uses `?`, not
+            // IfAbruptCloseAsyncIterator, on this Await).
+            if (rejected) return fromAsyncReject(ctx, output, global, state, settled, caller_function, caller_frame);
+            try fromAsyncOnNextResult(ctx, output, global, state, settled, caller_function, caller_frame);
+        },
+        from_async_phase_iter_mapped => {
+            // Await(mappedValue) settled: IfAbruptCloseAsyncIterator on
+            // rejection, then CreateDataPropertyOrThrow (abrupt -> close).
+            if (rejected) return fromAsyncCloseWithValue(ctx, output, global, state, settled, caller_function, caller_frame);
+            fromAsyncDefineElement(ctx, output, global, state, settled, caller_function, caller_frame) catch |err| {
+                return fromAsyncCloseWithError(ctx, output, global, state, err, caller_function, caller_frame);
+            };
+            try fromAsyncAdvanceIterIndex(ctx, output, global, state, caller_function, caller_frame);
+        },
+        from_async_phase_array_value => {
+            // Await(kValue) settled. The array-like loop never closes an
+            // iterator: every abrupt completion rejects directly.
+            if (rejected) return fromAsyncReject(ctx, output, global, state, settled, caller_function, caller_frame);
+            const mapfn = fromAsyncStateGet(rt, state, "mapfn");
+            defer mapfn.free(rt);
+            if (!mapfn.isUndefined()) {
+                const this_arg = fromAsyncStateGet(rt, state, "this_arg");
+                defer this_arg.free(rt);
+                const k = fromAsyncStateNumber(rt, state, "k");
+                const mapped = try callValueOrBytecode(ctx, output, global, this_arg, mapfn, &.{ settled, core.JSValue.number(k) }, caller_function, caller_frame);
+                defer mapped.free(rt);
+                try fromAsyncAwait(ctx, output, global, state, mapped, from_async_phase_array_mapped);
+                return;
+            }
+            try fromAsyncDefineElement(ctx, output, global, state, settled, caller_function, caller_frame);
+            try fromAsyncStateSet(rt, state, "k", core.JSValue.number(fromAsyncStateNumber(rt, state, "k") + 1));
+            try fromAsyncArrayLikeStep(ctx, output, global, state, caller_function, caller_frame);
+        },
+        from_async_phase_array_mapped => {
+            if (rejected) return fromAsyncReject(ctx, output, global, state, settled, caller_function, caller_frame);
+            try fromAsyncDefineElement(ctx, output, global, state, settled, caller_function, caller_frame);
+            try fromAsyncStateSet(rt, state, "k", core.JSValue.number(fromAsyncStateNumber(rt, state, "k") + 1));
+            try fromAsyncArrayLikeStep(ctx, output, global, state, caller_function, caller_frame);
+        },
+        from_async_phase_closing => {
+            // AsyncIteratorClose steps 4-7 with a throw completion: however
+            // the awaited return() result settled, the original error wins.
+            const pending = fromAsyncStateGet(rt, state, "pending");
+            defer pending.free(rt);
+            try fromAsyncReject(ctx, output, global, state, pending, caller_function, caller_frame);
+        },
+        else => return error.TypeError,
+    }
+}
+
+/// Iterator loop body after Await(nextResult) fulfilled (spec 3.j.ii.iv-x):
+/// object check, done/value reads, then either finish, map+await, or
+/// define+next.
+fn fromAsyncOnNextResult(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    state: *core.Object,
+    next_result: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const rt = ctx.runtime;
+    if (!next_result.isObject()) {
+        _ = try throwTypeErrorMessage(ctx, global, "iterator must return an object");
+    }
+    const done = blk: {
+        const done_key = core.atom.predefinedId("done", .string) orelse return error.TypeError;
+        const done_value = try getValueProperty(ctx, output, global, next_result, done_key, caller_function, caller_frame);
+        defer done_value.free(rt);
+        break :blk valueTruthy(done_value);
+    };
+    if (done) {
+        try fromAsyncFinish(ctx, output, global, state, fromAsyncStateNumber(rt, state, "k"), caller_function, caller_frame);
+        return;
+    }
+    const value_key = core.atom.predefinedId("value", .string) orelse return error.TypeError;
+    const next_value = try getValueProperty(ctx, output, global, next_result, value_key, caller_function, caller_frame);
+    defer next_value.free(rt);
+
+    const mapfn = fromAsyncStateGet(rt, state, "mapfn");
+    defer mapfn.free(rt);
+    if (!mapfn.isUndefined()) {
+        // 3.j.ii.vi: mappedValue = Call(mapfn, thisArg, «nextValue, 𝔽(k)»);
+        // IfAbruptCloseAsyncIterator; then Await (phase 2).
+        const this_arg = fromAsyncStateGet(rt, state, "this_arg");
+        defer this_arg.free(rt);
+        const k = fromAsyncStateNumber(rt, state, "k");
+        const mapped = callValueOrBytecode(ctx, output, global, this_arg, mapfn, &.{ next_value, core.JSValue.number(k) }, caller_function, caller_frame) catch |err| {
+            return fromAsyncCloseWithError(ctx, output, global, state, err, caller_function, caller_frame);
+        };
+        defer mapped.free(rt);
+        try fromAsyncAwait(ctx, output, global, state, mapped, from_async_phase_iter_mapped);
+        return;
+    }
+    // 3.j.ii.viii-ix: CreateDataPropertyOrThrow(A, Pk, nextValue); abrupt ->
+    // AsyncIteratorClose(error).
+    fromAsyncDefineElement(ctx, output, global, state, next_value, caller_function, caller_frame) catch |err| {
+        return fromAsyncCloseWithError(ctx, output, global, state, err, caller_function, caller_frame);
+    };
+    try fromAsyncAdvanceIterIndex(ctx, output, global, state, caller_function, caller_frame);
+}
+
+/// k += 1 plus the spec's 2^53-1 guard (3.j.ii.2: TypeError ->
+/// AsyncIteratorClose), then the next iteration's next() call + Await.
+fn fromAsyncAdvanceIterIndex(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    state: *core.Object,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const rt = ctx.runtime;
+    const k = fromAsyncStateNumber(rt, state, "k") + 1;
+    if (k >= 9007199254740991.0) {
+        _ = throwTypeErrorMessage(ctx, global, "too many elements") catch |err| {
+            return fromAsyncCloseWithError(ctx, output, global, state, err, caller_function, caller_frame);
+        };
+        return;
+    }
+    try fromAsyncStateSet(rt, state, "k", core.JSValue.number(k));
+    try fromAsyncIterStep(ctx, output, global, state, caller_function, caller_frame);
+}
+
+/// Iterator loop head (spec 3.j.ii.ii-iii): nextResult = ? Call(next,
+/// iterator) — abrupt rejects WITHOUT closing — then Await(nextResult).
+fn fromAsyncIterStep(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    state: *core.Object,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const rt = ctx.runtime;
+    const iterator = fromAsyncStateGet(rt, state, "iter");
+    defer iterator.free(rt);
+    const next_method = fromAsyncStateGet(rt, state, "next");
+    defer next_method.free(rt);
+    const next_result = try callValueOrBytecode(ctx, output, global, iterator, next_method, &.{}, caller_function, caller_frame);
+    defer next_result.free(rt);
+    try fromAsyncAwait(ctx, output, global, state, next_result, from_async_phase_iter_next);
+}
+
+/// Array-like loop head (spec 3.k.vii): finished -> Set length + resolve;
+/// else kValue = ? Get(arrayLike, Pk) then Await(kValue).
+fn fromAsyncArrayLikeStep(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    state: *core.Object,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const rt = ctx.runtime;
+    const k = fromAsyncStateNumber(rt, state, "k");
+    const len = fromAsyncStateNumber(rt, state, "len");
+    if (k >= len) {
+        try fromAsyncFinish(ctx, output, global, state, len, caller_function, caller_frame);
+        return;
+    }
+    const items = fromAsyncStateGet(rt, state, "items");
+    defer items.free(rt);
+    const index_atom = try propertyAtomFromLengthIndex(rt, @intFromFloat(k));
+    defer if (index_atom.owned) rt.atoms.free(index_atom.atom);
+    const k_value = try getValueProperty(ctx, output, global, items, index_atom.atom, caller_function, caller_frame);
+    defer k_value.free(rt);
+    try fromAsyncAwait(ctx, output, global, state, k_value, from_async_phase_array_value);
+}
+
+/// CreateDataPropertyOrThrow(A, ToString(𝔽(k)), value).
+fn fromAsyncDefineElement(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    state: *core.Object,
+    value: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const rt = ctx.runtime;
+    const target = fromAsyncStateGet(rt, state, "target");
+    defer target.free(rt);
+    const target_object = objectFromValue(target) orelse return error.TypeError;
+    const index_atom = try propertyAtomFromLengthIndex(rt, @intFromFloat(fromAsyncStateNumber(rt, state, "k")));
+    defer if (index_atom.owned) rt.atoms.free(index_atom.atom);
+    try createDataPropertyOrThrow(ctx, output, global, target, target_object, index_atom.atom, value, caller_function, caller_frame);
+}
+
+/// Loop epilogue: Set(A, "length", 𝔽(length), true) — throw discipline like
+/// the array mutators — then resolve the result promise with A.
+fn fromAsyncFinish(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    state: *core.Object,
+    length: f64,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const rt = ctx.runtime;
+    const target = fromAsyncStateGet(rt, state, "target");
+    defer target.free(rt);
+    try setValuePropertyOrThrow(ctx, output, global, target, core.atom.ids.length, core.JSValue.number(length), caller_function, caller_frame);
+    const resolve = fromAsyncStateGet(rt, state, "resolve");
+    defer resolve.free(rt);
+    try promise_ops.qjsPromiseResolveCapability(ctx, output, global, resolve, target, caller_function, caller_frame);
+}
+
+fn fromAsyncReject(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    state: *core.Object,
+    reason: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const reject = fromAsyncStateGet(ctx.runtime, state, "reject");
+    defer reject.free(ctx.runtime);
+    try promise_ops.qjsPromiseRejectCapability(ctx, output, global, reject, reason, caller_function, caller_frame);
+}
+
+/// Materialize the pending Zig error (or its thrown JS value) and run
+/// AsyncIteratorClose with it as a throw completion.
+fn fromAsyncCloseWithError(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    state: *core.Object,
+    err: anyerror,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const reason = try exception_ops.qjsPromiseErrorValue(ctx, global, err);
+    defer reason.free(ctx.runtime);
+    try fromAsyncCloseWithValue(ctx, output, global, state, reason, caller_function, caller_frame);
+}
+
+/// AsyncIteratorClose(iteratorRecord, ThrowCompletion(reason)): every abrupt
+/// completion inside the close is superseded by the original error, and a
+/// successfully awaited return() result still rejects with the original error
+/// (phase 5).
+fn fromAsyncCloseWithValue(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    state: *core.Object,
+    reason: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const rt = ctx.runtime;
+    const iterator = fromAsyncStateGet(rt, state, "iter");
+    defer iterator.free(rt);
+    const return_key = try rt.internAtom("return");
+    defer rt.atoms.free(return_key);
+    const return_method = getValueProperty(ctx, output, global, iterator, return_key, caller_function, caller_frame) catch {
+        if (ctx.hasException()) ctx.clearException();
+        return fromAsyncReject(ctx, output, global, state, reason, caller_function, caller_frame);
+    };
+    defer return_method.free(rt);
+    if (return_method.isUndefined() or return_method.isNull() or !isCallableValue(return_method)) {
+        return fromAsyncReject(ctx, output, global, state, reason, caller_function, caller_frame);
+    }
+    const inner = callValueOrBytecode(ctx, output, global, iterator, return_method, &.{}, caller_function, caller_frame) catch {
+        if (ctx.hasException()) ctx.clearException();
+        return fromAsyncReject(ctx, output, global, state, reason, caller_function, caller_frame);
+    };
+    defer inner.free(rt);
+    try fromAsyncStateSet(rt, state, "pending", reason);
+    try fromAsyncAwait(ctx, output, global, state, inner, from_async_phase_closing);
 }
 
 pub fn qjsTypedArrayFromStaticCall(
