@@ -1,6 +1,4 @@
 test262/test/built-ins/AsyncGeneratorPrototype/return/return-suspendedYield-try-finally-throw.js
-test262/test/built-ins/Atomics/waitAsync/implicit-infinity-for-timeout.js
-test262/test/built-ins/Atomics/waitAsync/returns-result-object-value-is-promise-resolves-to-ok.js
 test262/test/language/expressions/dynamic-import/assignment-expression/arrow-function.js
 test262/test/language/expressions/dynamic-import/import-attributes/2nd-param-with-type-text.js
 test262/test/language/expressions/dynamic-import/usage-from-eval.js

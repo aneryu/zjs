@@ -2638,11 +2638,23 @@ pub fn atomicsSettleAsyncWaiter(waiter: *AtomicsWaiter, promise: core.JSValue, r
 
     try enqueuePendingPromiseJob(ctx, promise);
 
-    const old_result = result_slot.*;
-    result_slot.* = result_value;
-    result_value_owned = false;
-    promise_object.promiseIsRejectedSlot().* = false;
-    if (old_result) |stored| stored.free(ctx.runtime);
+    if (promise_object.promiseReactionCallback() != null) {
+        // A .then/await already installed the lazy single reaction callback.
+        // Leave the promise result unset: settlePendingPromiseReaction runs that
+        // callback and then fires this promise's reaction list (which settles the
+        // chained .then promise). Pre-setting the result here would make that
+        // drain early-return (promiseResult != null) and drop the chain after the
+        // first reaction. The callback receives the settle value via the reaction
+        // arg below; free the now-unused result_value.
+        result_value.free(ctx.runtime);
+        result_value_owned = false;
+    } else {
+        const old_result = result_slot.*;
+        result_slot.* = result_value;
+        result_value_owned = false;
+        promise_object.promiseIsRejectedSlot().* = false;
+        if (old_result) |stored| stored.free(ctx.runtime);
+    }
     if (reaction_arg_value) |value| {
         const old_reaction_arg = reaction_arg_slot.*;
         reaction_arg_slot.* = value;
@@ -3606,6 +3618,16 @@ pub fn qjsPromiseThen(
         if (!object.promiseIsRejected() and qjsAtomicsWaitAsyncPromise(ctx.runtime, object) and isCallableValue(on_fulfilled)) {
             try object.setPromiseReactionCallback(ctx.runtime, on_fulfilled.dup());
             try object.setPromiseReactionArg(ctx.runtime, null);
+            // The single reaction callback runs `on_fulfilled` when the
+            // waitAsync promise settles; settlePendingPromiseReaction then fires
+            // this promise's reaction list with the callback's result. Append a
+            // pass-through reaction (undefined handlers) tied to the chained
+            // `.then` capability so the returned promise settles with that
+            // result — otherwise `waitAsync(...).value.then(a).then(b)` drops the
+            // chain after the first reaction (b never runs).
+            const chain_reaction = try qjsPromiseReactionRecord(ctx.runtime, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), capability.resolve, capability.reject);
+            defer chain_reaction.free(ctx.runtime);
+            try qjsAppendPromiseReaction(ctx.runtime, object, chain_reaction);
             return capability.releaseCallbacks(ctx.runtime);
         }
         const reaction = try qjsPromiseReactionRecord(ctx.runtime, on_fulfilled, on_rejected, capability.resolve, capability.reject);
