@@ -15,6 +15,13 @@ const iter_vm = @import("iterator_ops.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
 
+const qjs_concat_direct_part_limit = 32;
+
+const QjsConcatPart = struct {
+    value: core.JSValue,
+    latin1: []const u8 = &.{},
+};
+
 const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
 const builtin_glue = @import("builtin_glue.zig");
@@ -458,6 +465,68 @@ pub fn qjsStringConcat(
         return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
     }
 
+    const part_count = try std.math.add(usize, args.len, 1);
+    if (part_count <= qjs_concat_direct_part_limit) {
+        var parts: [qjs_concat_direct_part_limit]QjsConcatPart = undefined;
+        var initialized_parts: usize = 0;
+        defer {
+            for (parts[0..initialized_parts]) |part| part.value.free(ctx.runtime);
+        }
+
+        var direct_latin1 = true;
+        var total_len: usize = 0;
+
+        const receiver_string = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
+        parts[0] = .{ .value = receiver_string };
+        initialized_parts = 1;
+        if (qjsConcatLatin1Part(receiver_string)) |bytes| {
+            parts[0].latin1 = bytes;
+            total_len = try qjsConcatAddLength(total_len, bytes.len);
+        } else {
+            direct_latin1 = false;
+        }
+
+        for (args, 0..) |arg, index| {
+            const arg_string = try toStringForAnnexB(ctx, output, global, arg, caller_function, caller_frame);
+            const part_index = index + 1;
+            parts[part_index] = .{ .value = arg_string };
+            initialized_parts = part_index + 1;
+            if (direct_latin1) {
+                if (qjsConcatLatin1Part(arg_string)) |bytes| {
+                    parts[part_index].latin1 = bytes;
+                    total_len = try qjsConcatAddLength(total_len, bytes.len);
+                } else {
+                    direct_latin1 = false;
+                }
+            }
+        }
+
+        if (direct_latin1) {
+            if (total_len == 0) return (try ctx.runtime.emptyString()).value().dup();
+
+            var byte_parts: [qjs_concat_direct_part_limit][]const u8 = undefined;
+            for (parts[0..part_count], 0..) |part, index| byte_parts[index] = part.latin1;
+            // qjs `JS_ConcatString` -> `JS_ConcatString1` (quickjs.c:5042,
+            // 4646): ToString first, measure, allocate one result, memcpy
+            // each flat latin1 part directly into that result.
+            return (try core.string.String.createLatin1Parts(ctx.runtime, byte_parts[0..part_count], total_len)).value();
+        }
+
+        return qjsStringConcatFromConverted(ctx, parts[0..part_count]);
+    }
+
+    return qjsStringConcatSlow(ctx, output, global, this_value, args, caller_function, caller_frame);
+}
+
+fn qjsStringConcatSlow(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(ctx.runtime.memory.allocator);
 
@@ -472,6 +541,29 @@ pub fn qjsStringConcat(
     }
 
     return value_ops.createStringValue(ctx.runtime, bytes.items);
+}
+
+fn qjsStringConcatFromConverted(ctx: *core.JSContext, parts: []const QjsConcatPart) !core.JSValue {
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(ctx.runtime.memory.allocator);
+
+    for (parts) |part| {
+        try value_ops.appendRawString(ctx.runtime, &bytes, part.value);
+    }
+
+    return value_ops.createStringValue(ctx.runtime, bytes.items);
+}
+
+fn qjsConcatLatin1Part(value: core.JSValue) ?[]const u8 {
+    if (value.ropeBody() != null) return null;
+    const string_value = value.asStringBodyRaw() orelse return null;
+    return string_value.borrowLatin1();
+}
+
+fn qjsConcatAddLength(total: usize, addend: usize) !usize {
+    const next = std.math.add(usize, total, addend) catch return error.StringTooLong;
+    if (next > core.string.max_length) return error.StringTooLong;
+    return next;
 }
 
 pub fn qjsStringReplace(

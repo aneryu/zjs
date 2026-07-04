@@ -72,7 +72,7 @@ pub const StringRope = struct {
     /// node (`ropePtr - 4`), mirroring `String.header()`. The rc word is the
     /// shared identity a `Tag.string_rope` JSValue carries in its payload.
     pub inline fn header(self: *const StringRope) *gc.StringHeader {
-        const base: [*]u8 = @constCast(@ptrCast(self));
+        const base: [*]u8 = @ptrCast(@constCast(self));
         return @ptrCast(@alignCast(base - gc.string_rc_prefix_size));
     }
 
@@ -211,7 +211,7 @@ pub const String = struct {
     /// so a `Tag.string`/`Tag.string_rope`/`Tag.symbol` JSValue's payload is the
     /// prefix pointer and reaches the rc uniformly through `header()`.
     pub inline fn header(self: *const String) *gc.StringHeader {
-        const base: [*]u8 = @constCast(@ptrCast(self));
+        const base: [*]u8 = @ptrCast(@constCast(self));
         return @ptrCast(@alignCast(base - gc.string_rc_prefix_size));
     }
 
@@ -367,6 +367,24 @@ pub const String = struct {
         const out = self.latin1Mut();
         @memcpy(out[0..a.len], a);
         @memcpy(out[a.len..], b);
+        writeLatin1Terminator(out);
+        return self;
+    }
+
+    /// Concatenate already-measured latin1 pieces into one freshly allocated
+    /// latin1 string. Mirrors qjs `JS_ConcatString1` (quickjs.c:4646): one
+    /// `js_alloc_string`, then each source memcpy lands in the result payload.
+    pub fn createLatin1Parts(rt: *JSRuntime, parts: []const []const u8, total: usize) !*String {
+        const self = try createUninitialized(rt, .latin1, total);
+        errdefer destroyFlat(rt, self);
+        const out = self.latin1Mut();
+        var offset: usize = 0;
+        for (parts) |part| {
+            std.debug.assert(offset + part.len <= total);
+            @memcpy(out[offset..][0..part.len], part);
+            offset += part.len;
+        }
+        std.debug.assert(offset == total);
         writeLatin1Terminator(out);
         return self;
     }
