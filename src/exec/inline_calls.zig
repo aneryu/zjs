@@ -88,16 +88,34 @@ pub inline fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, re
     const fb = call_runtime.functionBytecodeFromValue(function_value) orelse return null;
     if (fb.flags.func_kind != .normal) return null;
     if (fb.flags.is_class_constructor or fb.flags.is_derived_class_constructor) return null;
-    const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
+    // Realm gate. qjs's callee prologue reads the realm as ONE unconditional
+    // load off the hot function struct (`ctx = b->realm`, quickjs.c:17871);
+    // zjs's single-global inline machinery COMPARES instead of adopting, but
+    // the read must keep qjs's shape: the payload-resident pointer, inline
+    // (`bytecodeFunctionRealmGlobalPtr` — class_id is proven, so
+    // `objectRealmGlobal`'s bound-function recursion is dead and the old
+    // out-of-line `bl` + caller-saved shuffle around it are gone). A null
+    // pointer falls back to the rare JSValue-slot resolution out of line,
+    // which re-runs the same null ptr check and then the rare-payload leg —
+    // bit-identical to the old `objectRealmGlobal(function_object)` result.
+    const function_global = function_object.bytecodeFunctionRealmGlobalPtr() orelse
+        (object_ops.objectRealmGlobal(function_object) orelse global);
     if (function_global != global) return null;
-    const this_value = if (fb.flags.is_arrow_function)
-        (function_object.functionLexicalThis() orelse core.JSValue.undefinedValue())
-    else
-        receiver;
-    const new_target = if (fb.flags.is_arrow_function)
-        (function_object.functionArrowNewTarget() orelse core.JSValue.undefinedValue())
-    else
-        core.JSValue.undefinedValue();
+    // Arrow bindings are resolved OUT OF LINE: qjs's callee prologue has no
+    // arrow branch at all (an arrow's this/new.target are ordinary closure
+    // vars bound at closure creation, js_closure2 quickjs.c:17297); zjs's
+    // frame model keeps them on the function object, so the lookup exists —
+    // but keeping it inline made LLVM hoist the `class_payload_kind` load +
+    // spill above the arrow test onto every plain call, and merge
+    // this/new_target through stack temp slots. The non-arrow hot path now
+    // carries plain register values.
+    var this_value = receiver;
+    var new_target = core.JSValue.undefinedValue();
+    if (fb.flags.is_arrow_function) {
+        const bindings = resolveArrowBindings(function_object);
+        this_value = bindings.this_value;
+        new_target = bindings.new_target;
+    }
     const rt = ctx.runtime;
     // Point at the per-FB cached execution view (built once, pointer-stable).
     // An FB with no cache slot (fixture/synthetic, no debug box) stays
@@ -112,6 +130,23 @@ pub inline fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, re
         .view = bytecode.cachedBytecodeView(fb, &rt.memory, &rt.atoms),
         .this_value = this_value,
         .new_target = new_target,
+    };
+}
+
+const ArrowBindings = struct {
+    this_value: core.JSValue,
+    new_target: core.JSValue,
+};
+
+/// Cold arrow leg of `resolveInlineTarget`: the lexical `this` / `new.target`
+/// captured on an arrow's function object (both borrowed; see the
+/// `InlineTarget` field docs). `noinline` is load-bearing — inline, the rare
+/// payload lookups leaked a `class_payload_kind` load + spill onto the
+/// non-arrow hot path (see the call-site comment).
+noinline fn resolveArrowBindings(function_object: *core.Object) ArrowBindings {
+    return .{
+        .this_value = function_object.functionLexicalThis() orelse core.JSValue.undefinedValue(),
+        .new_target = function_object.functionArrowNewTarget() orelse core.JSValue.undefinedValue(),
     };
 }
 

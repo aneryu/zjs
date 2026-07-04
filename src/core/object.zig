@@ -5029,6 +5029,27 @@ pub const Object = struct {
         }
     }
 
+    /// Realm-global pointer for a PROVEN bytecode-function object (the caller
+    /// already matched `class_id == bytecode_function`): that class maps to
+    /// payload kind `.function` deterministically (`standardPayloadKind`; the
+    /// `.generator` payload belongs to generator-INSTANCE class ids, and
+    /// generator functions use class `generator_function`), so the generic
+    /// `functionRealmGlobalPtr` 18-way payload dispatch collapses to one
+    /// unconditional payload load — no `class_payload_kind` load at all. qjs's
+    /// callee prologue reads the realm as ONE unconditional load off the hot
+    /// function struct (`ctx = b->realm`, quickjs.c:17871); zjs keeps the
+    /// realm on the function object's payload (the 128B FB carries no realm
+    /// field), so this is the analogous single payload-resident load —
+    /// `resolveInlineTarget` previously routed it through the out-of-line
+    /// recursive `objectRealmGlobal` call whose bound-function leg is dead for
+    /// this class. Same assert-unreachable shape as `functionBytecodeSlot`,
+    /// which already stakes every call on this class→payload invariant.
+    pub fn bytecodeFunctionRealmGlobalPtr(self: *const Object) ?*Object {
+        if (self.functionPayloadConst()) |payload| return payload.realm_global_ptr;
+        std.debug.assert(self.class_payload_kind == .function);
+        unreachable;
+    }
+
     pub fn functionRealmGlobalPtr(self: *const Object) ?*Object {
         // Function/generator payloads are checked FIRST: this accessor is on the
         // per-call inline-target resolution hot path (resolveInlineTarget), where

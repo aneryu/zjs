@@ -7691,9 +7691,23 @@ const function_mod = struct {
     /// Behaviour-identical to `makeBytecodeView`: the returned view is copied by
     /// value into the per-call `InlineTarget`/`Entry.view_storage`, so any later
     /// eval-overlay mutation lands on the copy, never the shared cache.
-    pub fn cachedBytecodeView(fb: *const FunctionBytecode, mem: *memory.MemoryAccount, atoms: *atom.AtomTable) ?*BytecodeImpl {
+    ///
+    /// `inline` + the out-of-line build leg keep the per-call cost at the two
+    /// cache-hit loads (`fb.debug` -> `dbg.cached_view`): the resolve path in
+    /// `op_call` previously paid a `bl` call boundary here on EVERY call
+    /// because the cold alloc+build leg made LLVM keep the whole function
+    /// out of line. qjs's callee prologue has no per-call call boundary at
+    /// all — `b` IS the execution structure (`b = p->u.func.function_bytecode`,
+    /// quickjs.c:17825) — so the hit leg must ride inline.
+    pub inline fn cachedBytecodeView(fb: *const FunctionBytecode, mem: *memory.MemoryAccount, atoms: *atom.AtomTable) ?*BytecodeImpl {
         const dbg = fb.debug orelse return null;
-        if (dbg.cached_view) |view| return view;
+        return dbg.cached_view orelse buildCachedBytecodeView(dbg, fb, mem, atoms);
+    }
+
+    /// Cold once-per-FB build leg of `cachedBytecodeView` (see above).
+    /// `noinline` is load-bearing: keeping the alloc/build out of the caller
+    /// is the whole point of the split.
+    noinline fn buildCachedBytecodeView(dbg: *function_bytecode_mod.DebugInfo, fb: *const FunctionBytecode, mem: *memory.MemoryAccount, atoms: *atom.AtomTable) ?*BytecodeImpl {
         const slot = mem.alloc(BytecodeImpl, 1) catch return null;
         slot[0] = function_mod.makeBytecodeView(fb, mem, atoms);
         dbg.cached_view = &slot[0];
