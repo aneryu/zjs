@@ -172,7 +172,7 @@ pub fn execGetVarRef(
     frame.pc += consume;
     _ = opc;
     if (idx >= frame.var_refs.len) try ensureVarRefsCapacity(ctx, frame, idx);
-    try pushSlotValue(stack, frame.var_refs[idx]);
+    try pushSlotValue(stack, varRefSlot(frame, idx));
 }
 
 pub fn execGetVarRefMaybeTdz(
@@ -217,7 +217,7 @@ pub fn execGetVarRefMaybeTdz(
             return false;
         }
     }
-    const slot = frame.var_refs[idx];
+    const slot = varRefSlot(frame, idx);
     if (varRefCellFromValue(slot)) |cell| {
         const value = slotValueBorrow(slot);
         if (value.isUninitialized()) {
@@ -265,7 +265,7 @@ pub fn execPutVarRef(
     frame.pc += consume;
     if (idx >= frame.var_refs.len) try ensureVarRefsCapacity(ctx, frame, idx);
     const value = try stack.pop();
-    const slot = frame.var_refs[idx];
+    const slot = varRefSlot(frame, idx);
     if (varRefCellFromValue(slot)) |cell| {
         if (opc == op.put_var_ref_check_init) {
             const current = cell.varRefValue();
@@ -332,7 +332,7 @@ pub fn execPutVarRef(
         return error.TypeError;
     }
     try publishTopLevelFunctionVarRef(ctx.runtime, function, global, frame, idx, value, eval_global_var_bindings, is_eval_code);
-    try setSlotValue(ctx, &frame.var_refs[idx], value);
+    try setVarRefSlotValue(ctx, frame, idx, value);
 }
 
 pub fn isVarRefInitOpcode(opc: u8) bool {
@@ -424,7 +424,7 @@ pub fn execSetVarRef(
     _ = opc;
     const value = stack.peek() orelse return error.StackUnderflow;
     defer value.free(ctx.runtime);
-    try setSlotValue(ctx, &frame.var_refs[idx], value.dup());
+    try setVarRefSlotValue(ctx, frame, idx, value.dup());
 }
 
 pub fn slotValueDup(slot: core.JSValue) core.JSValue {
@@ -534,6 +534,68 @@ pub fn ensureLocalVarRefCell(ctx: *core.JSContext, frame: *frame_mod.Frame, idx:
 
 pub fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
     return core.VarRef.fromValue(value);
+}
+
+// ---- frame.var_refs slot accessors (VARREFS-SLOT-TYPING-BLUEPRINT, phase A) ----
+//
+// Single funnel for every ELEMENT access of `frame.var_refs`, so the slot
+// typing flip `[]JSValue` -> `[]*core.VarRef` (qjs `JSVarRef **var_refs`:
+// JSObject.u.func.var_refs alloc, quickjs.c:17277; JS_CallInternal prologue
+// `var_refs = p->u.func.var_refs`, 17844) becomes a single-point change with
+// all call sites already routed here. Length reads (`frame.var_refs.len`) and
+// whole-slice moves (initFrameVarRefs / generator payload / captures borrow)
+// stay bare — they are either type-flip invariant or phase-D compiler-driven.
+// Every accessor is `inline`: codegen is byte-identical to the bare access it
+// replaces (hot handlers audited via objdump, see blueprint §5 stage A).
+
+/// Bounds-checked element read: `frame.var_refs[idx]`.
+pub inline fn varRefSlot(frame: *const frame_mod.Frame, idx: usize) core.JSValue {
+    return frame.var_refs[idx];
+}
+
+/// Unchecked element read: `frame.var_refs.ptr[idx]`, for hot handlers that
+/// already tested `idx < frame.var_refs.len` (qjs OP_get_var_ref reads
+/// `var_refs[idx]` with no bounds check at all, quickjs.c:18627).
+pub inline fn varRefSlotUnchecked(frame: *const frame_mod.Frame, idx: usize) core.JSValue {
+    return frame.var_refs.ptr[idx];
+}
+
+/// Bounds-checked slot -> cell probe (guard #4 of GET-VAR-FIB-RECON §2.3;
+/// deleted by the type flip, phase E).
+pub inline fn varRefSlotCell(frame: *const frame_mod.Frame, idx: usize) ?*core.VarRef {
+    return varRefCellFromValue(varRefSlot(frame, idx));
+}
+
+/// Unchecked slot -> cell probe for the hot get/put_var(_ref) fast paths.
+pub inline fn varRefSlotCellUnchecked(frame: *const frame_mod.Frame, idx: usize) ?*core.VarRef {
+    return varRefCellFromValue(varRefSlotUnchecked(frame, idx));
+}
+
+/// Element address for in-place cellify/write-through. Private: external
+/// mutation funnels through the named accessors below.
+inline fn varRefSlotPtr(frame: *frame_mod.Frame, idx: usize) *core.JSValue {
+    return &frame.var_refs[idx];
+}
+
+/// Raw element store — slot REBIND, not value write-through. The only users
+/// are the element-level replacement points (eval republish
+/// `replaceFrameVarRefBinding`, global-decl PASS2 cell surgery
+/// `defineGlobalDecl*Cell`, module prologue fill): the caller owns the
+/// refcount choreography for both the incoming slot and the displaced one.
+pub inline fn storeVarRefSlot(frame: *frame_mod.Frame, idx: usize, slot: core.JSValue) void {
+    frame.var_refs[idx] = slot;
+}
+
+/// Write-through store: `setSlotValue` on the element (writes into the cell
+/// when the slot is a cell, replaces the raw element otherwise).
+pub inline fn setVarRefSlotValue(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: usize, value: core.JSValue) !void {
+    return setSlotValue(ctx, varRefSlotPtr(frame, idx), value);
+}
+
+/// `ensureVarRefCell` on the element: cellify in place, return an owned ref
+/// to the cell value.
+pub inline fn ensureVarRefSlotCell(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: usize) !core.JSValue {
+    return ensureVarRefCell(ctx, varRefSlotPtr(frame, idx));
 }
 
 fn frameSlotCanOpenAlias(frame: *const frame_mod.Frame, slot: *const core.JSValue) bool {

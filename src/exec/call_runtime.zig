@@ -2278,7 +2278,7 @@ pub fn collectCallerEvalRefs(
         while (idx < var_ref_count) : (idx += 1) {
             const atom_id = caller.varRefName(idx);
             names[initialized] = atom_id;
-            refs[initialized] = frame.var_refs[idx].dup();
+            refs[initialized] = slot_ops.varRefSlot(frame, idx).dup();
             initialized += 1;
             rooted_refs = refs[0..initialized];
         }
@@ -3899,8 +3899,8 @@ pub fn defineGlobalDeclVarCell(
         if (idx >= frame.var_refs.len) {
             try frame_mod.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
         }
-        const old_slot = frame.var_refs[idx];
-        frame.var_refs[idx] = cell_value.dup();
+        const old_slot = slot_ops.varRefSlot(frame, idx);
+        slot_ops.storeVarRefSlot(frame, idx, cell_value.dup());
         old_slot.free(ctx.runtime);
         rebound = true;
     }
@@ -3999,8 +3999,8 @@ pub fn defineGlobalDeclLexicalCell(
         if (idx >= frame.var_refs.len) {
             try frame_mod.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
         }
-        const old_slot = frame.var_refs[idx];
-        frame.var_refs[idx] = cell_value;
+        const old_slot = slot_ops.varRefSlot(frame, idx);
+        slot_ops.storeVarRefSlot(frame, idx, cell_value);
         old_slot.free(ctx.runtime);
         return true;
     }
@@ -5290,7 +5290,7 @@ pub fn functionHasFrameBinding(
     var idx: usize = 0;
     while (idx < ref_count) : (idx += 1) {
         const binding = function.varRefName(idx);
-        if (slot_ops.varRefSlotIsUninitialized(frame.var_refs[idx]) and closureVarIsNonLexicalGlobalSentinel(function, idx)) continue;
+        if (slot_ops.varRefSlotIsUninitialized(slot_ops.varRefSlot(frame, idx)) and closureVarIsNonLexicalGlobalSentinel(function, idx)) continue;
         if (binding == atom_id or atomNamesEqual(rt, binding, atom_id)) return true;
     }
     return false;
@@ -8042,7 +8042,7 @@ pub fn lookupFrameVarRef(ctx: *core.JSContext, global: *core.Object, function: *
         }
         // A deleted binding's cell is parked at UNINITIALIZED (qjs
         // remove_global_object_property), so slotValueDup reports it naturally.
-        const value = slot_ops.slotValueDup(frame.var_refs[idx]);
+        const value = slot_ops.slotValueDup(slot_ops.varRefSlot(frame, idx));
         return value;
     }
     return null;
@@ -8305,10 +8305,10 @@ pub fn setFrameVarRefValue(
         const name = function.varRefName(idx);
         if (name != atom_id) continue;
         if (idx >= frame.var_refs.len) try frame_mod.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
-        if (closureVarIsNonLexicalGlobalSentinel(function, idx) and slot_ops.varRefSlotIsUninitialized(frame.var_refs[idx])) {
+        if (closureVarIsNonLexicalGlobalSentinel(function, idx) and slot_ops.varRefSlotIsUninitialized(slot_ops.varRefSlot(frame, idx))) {
             return false;
         }
-        try slot_ops.setSlotValue(ctx, &frame.var_refs[idx], value);
+        try slot_ops.setVarRefSlotValue(ctx, frame, idx, value);
         return true;
     }
     return false;

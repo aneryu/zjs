@@ -200,7 +200,7 @@ pub noinline fn getVar(
     frame.pc += 2;
     if (!hasDynamicGlobalOverlay(frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
         if (ref_idx < frame.var_refs.len) {
-            if (varRefCellFromValue(frame.var_refs[ref_idx])) |cell| {
+            if (slot_ops.varRefSlotCell(frame, ref_idx)) |cell| {
                 const value = cell.pvalue.*;
                 const parent_eval_shadow = property_vm.frameClosureHasEvalParent(frame) and
                     property_vm.parentFunctionEvalBindingShadowsGlobal(ctx.runtime, frame, atom_id);
@@ -732,7 +732,7 @@ pub noinline fn putVar(
     const value = try stack.pop();
     if (!hasDynamicGlobalOverlay(frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
         if (ref_idx < frame.var_refs.len) {
-            if (varRefCellFromValue(frame.var_refs[ref_idx])) |cell| {
+            if (slot_ops.varRefSlotCell(frame, ref_idx)) |cell| {
                 const current = cell.pvalue.*;
                 const parent_eval_shadow = property_vm.frameClosureHasEvalParent(frame) and
                     property_vm.parentFunctionEvalBindingShadowsGlobal(ctx.runtime, frame, atom_id);

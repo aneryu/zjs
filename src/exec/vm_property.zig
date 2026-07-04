@@ -318,7 +318,7 @@ pub fn bindingStoreWritableForFastPath(
 ) bool {
     if (binding.is_var_ref) {
         if (binding.idx >= frame.var_refs.len) return false;
-        const slot = frame.var_refs[binding.idx];
+        const slot = slot_ops.varRefSlot(frame, binding.idx);
         if (varRefCellFromValue(slot)) |cell| {
             if (cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return false;
             // Deleted binding = cell parked at UNINITIALIZED; covered below.
@@ -345,7 +345,7 @@ pub fn storeBindingOwnedValue(
     value: core.JSValue,
 ) !void {
     if (binding.is_var_ref) {
-        try slot_ops.setSlotValue(ctx, &frame.var_refs[binding.idx], value);
+        try slot_ops.setVarRefSlotValue(ctx, frame, binding.idx, value);
     } else {
         try slot_ops.setSlotValue(ctx, &frame.locals[binding.idx], value);
     }
@@ -472,7 +472,7 @@ pub fn decodeLocalPut(code: []const u8, pc: usize) ?LocalPut {
 
 pub fn varRefReadableBorrowed(frame: *const frame_mod.Frame, idx: u16) ?core.JSValue {
     if (idx >= frame.var_refs.len) return null;
-    const slot = frame.var_refs[idx];
+    const slot = slot_ops.varRefSlot(frame, idx);
     if (varRefCellFromValue(slot) != null) {
         // Deleted binding = cell parked at UNINITIALIZED; the check below covers it.
         const value = slotValueBorrowed(slot);
@@ -496,7 +496,7 @@ pub fn varRefStoreWritableForFastPath(
     store: VarRefPut,
 ) bool {
     if (store.idx >= frame.var_refs.len) return false;
-    const slot = frame.var_refs[store.idx];
+    const slot = slot_ops.varRefSlot(frame, store.idx);
     if (varRefCellFromValue(slot)) |cell| {
         if (cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return false;
         // Deleted binding = cell parked at UNINITIALIZED; covered below.

@@ -22,6 +22,7 @@ const coercion_ops = @import("coercion_ops.zig");
 const error_stack_ops = @import("error_stack_ops.zig");
 const object_ops = @import("object_ops.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
+const slot_ops = @import("slot_ops.zig");
 const RegExpCapture = call_runtime.RegExpCapture;
 const ValueSliceRoot = array_ops.ValueSliceRoot;
 const anchoredBinaryPropertyName = object_ops.anchoredBinaryPropertyName;
@@ -3986,8 +3987,8 @@ pub fn replaceFrameVarRefBinding(rt: *core.JSRuntime, frame: *frame_mod.Frame, a
         const name = frame.function.varRefName(idx);
         if (!atomIdOrNameEql(rt, name, atom_id)) continue;
         const next = value.dup();
-        const old_value = frame.var_refs[idx];
-        frame.var_refs[idx] = next;
+        const old_value = slot_ops.varRefSlot(frame, idx);
+        slot_ops.storeVarRefSlot(frame, idx, next);
         old_value.free(rt);
         return;
     }

@@ -1109,7 +1109,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 if (comptime thread_dispatch) get_var_ref_fast: {
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     if (idx >= frame.var_refs.len) break :get_var_ref_fast;
-                    const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :get_var_ref_fast;
+                    const cell = slot_ops.varRefSlotCellUnchecked(frame, idx) orelse break :get_var_ref_fast;
                     const v = cell.pvalue.*;
                     if (v.isUninitialized()) break :get_var_ref_fast;
                     // Imported module bindings wrap the exporting module's cell
@@ -1134,7 +1134,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 if (comptime thread_dispatch) get_var_ref_short_fast: {
                     const idx: u16 = opc - op.get_var_ref0;
                     if (idx >= frame.var_refs.len) break :get_var_ref_short_fast;
-                    const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :get_var_ref_short_fast;
+                    const cell = slot_ops.varRefSlotCellUnchecked(frame, idx) orelse break :get_var_ref_short_fast;
                     const v = cell.pvalue.*;
                     if (v.isUninitialized()) break :get_var_ref_short_fast;
                     // See get_var_ref above: an imported binding's cell wraps the
@@ -1158,7 +1158,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 if (comptime thread_dispatch) put_var_ref_fast: {
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     if (idx >= frame.var_refs.len) break :put_var_ref_fast;
-                    const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :put_var_ref_fast;
+                    const cell = slot_ops.varRefSlotCellUnchecked(frame, idx) orelse break :put_var_ref_fast;
                     if (cell.is_const or cell.is_function_name) break :put_var_ref_fast;
                     // A top-level function declaration stores its closure through
                     // put_var_ref and must also be published as a global object
@@ -1191,7 +1191,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 if (comptime thread_dispatch) put_var_ref_short_fast: {
                     const idx: u16 = opc - op.put_var_ref0;
                     if (idx >= frame.var_refs.len) break :put_var_ref_short_fast;
-                    const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :put_var_ref_short_fast;
+                    const cell = slot_ops.varRefSlotCellUnchecked(frame, idx) orelse break :put_var_ref_short_fast;
                     if (cell.is_const or cell.is_function_name) break :put_var_ref_short_fast;
                     // Top-level function declarations store their closure here and
                     // must also be published as a global property (see put_var_ref
@@ -1710,7 +1710,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     if (vm_property_globals.hasDynamicGlobalOverlay(frame, (if (machine.depth == 0) entry_eval_local_names else &.{}), frame.evalVarRefNames(), (if (machine.depth == 0) entry_eval_with_object else core.JSValue.undefinedValue()))) break :get_var_fast;
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     if (idx >= frame.var_refs.len) break :get_var_fast;
-                    const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :get_var_fast;
+                    const cell = slot_ops.varRefSlotCellUnchecked(frame, idx) orelse break :get_var_fast;
                     const v = cell.pvalue.*;
                     if (v.isUninitialized()) break :get_var_fast;
                     if (core.VarRef.fromValue(v) != null) break :get_var_fast;
@@ -1763,7 +1763,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     if (vm_property_globals.hasDynamicGlobalOverlay(frame, (if (machine.depth == 0) entry_eval_local_names else &.{}), frame.evalVarRefNames(), (if (machine.depth == 0) entry_eval_with_object else core.JSValue.undefinedValue()))) break :put_var_fast;
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     if (idx >= frame.var_refs.len) break :put_var_fast;
-                    const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :put_var_fast;
+                    const cell = slot_ops.varRefSlotCellUnchecked(frame, idx) orelse break :put_var_fast;
                     if (cell.is_const or cell.is_function_name) break :put_var_fast;
                     const cur = cell.pvalue.*;
                     if (cur.isUninitialized()) break :put_var_fast;

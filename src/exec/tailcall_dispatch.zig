@@ -748,7 +748,7 @@ pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
                 .half => 3,
             };
             if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-            const cell = slot_ops.varRefCellFromValue(vm.frame.var_refs.ptr[idx]) orelse return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx) orelse return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             const v = cell.pvalue.*;
             if (v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             if (core.VarRef.fromValue(v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
@@ -1236,7 +1236,7 @@ pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
     if (vm_property_globals.hasDynamicGlobalOverlay(vm.frame, evLocalNames(vm), vm.frame.evalVarRefNames(), evWithObject(vm))) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
     if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    const cell = slot_ops.varRefCellFromValue(vm.frame.var_refs.ptr[idx]) orelse return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx) orelse return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const v = cell.pvalue.*;
     if (v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     if (core.VarRef.fromValue(v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });

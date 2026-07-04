@@ -143,7 +143,7 @@ pub noinline fn makeSlotRef(
         },
         op.make_var_ref_ref => blk: {
             try frame_mod.ensureVarRefsCapacity(ctx, frame, idx);
-            break :blk try slot_ops.ensureVarRefCell(ctx, &frame.var_refs[idx]);
+            break :blk try slot_ops.ensureVarRefSlotCell(ctx, frame, idx);
         },
         else => unreachable,
     };

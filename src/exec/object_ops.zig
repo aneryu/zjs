@@ -78,7 +78,9 @@ const derivedConstructorThisLocalSlot = slot_ops.derivedConstructorThisLocalSlot
 const ensureFrameVarRefCell = slot_ops.ensureFrameVarRefCell;
 const ensureLocalVarRefCell = slot_ops.ensureLocalVarRefCell;
 const ensureVarRefCell = slot_ops.ensureVarRefCell;
+const ensureVarRefSlotCell = slot_ops.ensureVarRefSlotCell;
 const ensureVarRefsCapacity = frame_mod.ensureVarRefsCapacity;
+const varRefSlot = slot_ops.varRefSlot;
 const evalBytecodeHasVarDeclarations = eval_ops.evalBytecodeHasVarDeclarations;
 const evalLocalSlotIsEvalVarCell = slot_ops.evalLocalSlotIsEvalVarCell;
 const findPropertyEscapeMatch = string_ops.findPropertyEscapeMatch;
@@ -447,14 +449,14 @@ pub fn createBytecodeFunctionObject(
                         break :blk captured;
                     }
                     try ensureVarRefsCapacity(ctx, frame, cv.var_idx);
-                    break :blk try ensureVarRefCell(ctx, &frame.var_refs[cv.var_idx]);
+                    break :blk try ensureVarRefSlotCell(ctx, frame, cv.var_idx);
                 },
                 .global_ref => blk: {
                     if (try directEvalClosureBindingCapture(ctx, caller_function, cv.var_name, eval_local_names, eval_local_slots, capture_eval_var_ref_names, eval_var_refs)) |captured| {
                         break :blk captured;
                     }
                     if (cv.var_idx >= frame.var_refs.len) return error.InvalidBytecode;
-                    break :blk frame.var_refs[cv.var_idx].dup();
+                    break :blk varRefSlot(frame, cv.var_idx).dup();
                 },
                 .global, .global_decl => blk: {
                     if (try directEvalClosureBindingCapture(ctx, caller_function, cv.var_name, eval_local_names, eval_local_slots, capture_eval_var_ref_names, eval_var_refs)) |captured| {
@@ -464,7 +466,7 @@ pub fn createBytecodeFunctionObject(
                 },
                 .module_decl, .module_import => blk: {
                     try ensureVarRefsCapacity(ctx, frame, cv.var_idx);
-                    break :blk try ensureVarRefCell(ctx, &frame.var_refs[cv.var_idx]);
+                    break :blk try ensureVarRefSlotCell(ctx, frame, cv.var_idx);
                 },
             };
             if (varRefCellFromValue(captures[idx])) |cell| {
@@ -611,7 +613,7 @@ pub fn createBytecodeFunctionObject(
                     if (closureVarIsNonLexicalGlobalSentinel(caller_function, idx)) continue;
                     names[initialized] = ctx.runtime.atoms.dup(atom_id);
                     initialized_names += 1;
-                    refs[initialized] = try ensureVarRefCell(ctx, &frame.var_refs[idx]);
+                    refs[initialized] = try ensureVarRefSlotCell(ctx, frame, idx);
                     initialized += 1;
                     rooted_refs = refs[0..initialized];
                 }

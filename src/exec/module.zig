@@ -283,7 +283,7 @@ pub fn initializeModuleFunctionDeclarations(
     if (module_var_refs.len != 0) {
         frame.var_refs = try ctx.runtime.memory.alloc(core.JSValue, module_var_refs.len);
         frame.installOwnedStorage(frame.var_refs);
-        for (module_var_refs, 0..) |value, idx| frame.var_refs[idx] = value.dup();
+        for (module_var_refs, 0..) |value, idx| slot_ops.storeVarRefSlot(&frame, idx, value.dup());
         rooted_frame_var_refs = frame.var_refs;
     }
 
@@ -325,7 +325,7 @@ pub fn initializeModuleFunctionDeclarations(
         const value = function.constants.get(constant_index) orelse return error.InvalidBytecode;
         defer value.free(ctx.runtime);
         const function_value = try object_ops.createBytecodeFunctionObject(ctx, &frame, function, global, value, function.name, op.fclosure8, true, &.{}, &.{}, &.{}, &.{}, &.{});
-        try slot_ops.setSlotValue(ctx, &frame.var_refs[ref_idx], function_value);
+        try slot_ops.setVarRefSlotValue(ctx, &frame, ref_idx, function_value);
     }
 }
 

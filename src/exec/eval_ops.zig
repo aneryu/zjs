@@ -150,7 +150,7 @@ fn createDirectEvalOuterVarRefs(
             if (closureVarIsNonLexicalGlobalSentinel(function, idx) and global.hasOwnProperty(atom_id)) continue;
             names[initialized_names] = ctx.runtime.atoms.dup(atom_id);
             initialized_names += 1;
-            refs[initialized_refs] = frame.var_refs[idx].dup();
+            refs[initialized_refs] = slot_ops.varRefSlot(frame, idx).dup();
             initialized_refs += 1;
             rooted_refs = refs[0..initialized_refs];
         }
