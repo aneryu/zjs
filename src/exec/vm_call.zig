@@ -258,11 +258,16 @@ pub inline fn initFrameVarRefs(
 fn initialClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode.function_def.ClosureVar) !core.JSValue {
     switch (cv.closure_type) {
         .global, .global_ref, .global_decl => {
-            if (cv.is_lexical) {
-                if (call_runtime.globalLexicalCell(ctx, cv.var_name)) |cell_value| return cell_value;
-            } else if (call_runtime.globalObjectVarRefCell(global, cv.var_name)) |cell_value| {
-                return cell_value;
+            // qjs js_closure_global_var (quickjs.c:17228-17260): lexical env
+            // VARREF -> global object VARREF property -> shared side-table
+            // uninitialized cell, regardless of the cv's own lexical bit.
+            if (call_runtime.globalLexicalCell(ctx, cv.var_name)) |cell_value| return cell_value;
+            if (call_runtime.globalObjectVarRefCell(global, cv.var_name)) |cell_value| return cell_value;
+            const cell_value = try call_runtime.globalObjectGetUninitializedVar(ctx, global, cv.var_name);
+            if (cv.var_kind == .function_name) {
+                if (core.VarRef.fromValue(cell_value)) |cell| cell.varRefIsFunctionNameSlot().* = true;
             }
+            return cell_value;
         },
         else => {},
     }

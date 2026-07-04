@@ -250,17 +250,22 @@ pub fn generatorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.O
     return object;
 }
 
+// qjs js_closure_global_var (quickjs.c:17228-17260): the capture waterfall for a
+// global reference is [global_var_obj lexical VARREF] -> [global_obj VARREF
+// property] -> [shared uninitialized_vars side-table cell], REGARDLESS of the
+// closure var's own lexical bit — a plain reference captures a pre-existing
+// global lexical's cell directly, and an undeclared name shares the parked cell
+// that a later declaration (js_closure_define_global_var) will reuse. The shared
+// table cell carries no per-capture flags; is_lexical/is_const are stamped only
+// at definition time (add_var_ref, 17210-17223).
 fn createGlobalClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode.function_def.ClosureVar) !core.JSValue {
-    if (cv.is_lexical) {
-        if (call_runtime.globalLexicalCell(ctx, cv.var_name)) |cell_value| return cell_value;
-    } else if (call_runtime.globalObjectVarRefCell(global, cv.var_name)) |cell_value| {
-        return cell_value;
+    if (call_runtime.globalLexicalCell(ctx, cv.var_name)) |cell_value| return cell_value;
+    if (call_runtime.globalObjectVarRefCell(global, cv.var_name)) |cell_value| return cell_value;
+    const cell_value = try call_runtime.globalObjectGetUninitializedVar(ctx, global, cv.var_name);
+    if (cv.var_kind == .function_name) {
+        if (core.VarRef.fromValue(cell_value)) |cell| cell.varRefIsFunctionNameSlot().* = true;
     }
-    const cell = try core.VarRef.createClosed(ctx.runtime, core.JSValue.uninitialized());
-    cell.varRefIsConstSlot().* = cv.is_const;
-    cell.is_lexical = cv.is_lexical;
-    cell.varRefIsFunctionNameSlot().* = cv.var_kind == .function_name;
-    return cell.valueRef();
+    return cell_value;
 }
 
 fn directEvalClosureBindingCapture(

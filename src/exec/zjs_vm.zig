@@ -1714,7 +1714,10 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     const v = cell.pvalue.*;
                     if (v.isUninitialized()) break :get_var_fast;
                     if (core.VarRef.fromValue(v) != null) break :get_var_fast;
-                    if (vm_property_globals.globalLexicalShadowsGlobalForIdx(ctx, global, function, idx)) break :get_var_fast;
+                    // No global-lexical shadow check: definition-time cell surgery /
+                    // parked-cell reuse (qjs js_closure_define_global_var,
+                    // quickjs.c:17148-17205) makes an initialized cell authoritative
+                    // (qjs OP_get_var, 18461-18488).
                     if (vm_property_globals.parentEvalShadowsGlobalForIdx(ctx.runtime, frame, function, idx)) break :get_var_fast;
                     reg_ip += 2;
                     reg_sp[0] = v.dup();
@@ -1765,7 +1768,8 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     const cur = cell.pvalue.*;
                     if (cur.isUninitialized()) break :put_var_fast;
                     if (core.VarRef.fromValue(cur) != null) break :put_var_fast;
-                    if (vm_property_globals.globalLexicalShadowsGlobalForIdx(ctx, global, function, idx)) break :put_var_fast;
+                    // No global-lexical shadow check (see get_var above; qjs
+                    // OP_put_var, quickjs.c:18490-18525).
                     if (vm_property_globals.parentEvalShadowsGlobalForIdx(ctx.runtime, frame, function, idx)) break :put_var_fast;
                     reg_ip += 2;
                     reg_sp -= 1;

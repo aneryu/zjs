@@ -3779,6 +3779,55 @@ pub fn globalObjectVarRefCell(global: *core.Object, atom_id: core.Atom) ?core.JS
     return cell.valueRef().dup();
 }
 
+/// qjs u.global_object.uninitialized_vars, create-on-demand: the side table
+/// object hangs off the global object (quickjs.c js_global_object_get/
+/// find_uninitialized_var operate on it, 17069-17123).
+fn globalUninitializedVarsEnv(ctx: *core.JSContext, global: *core.Object) !*core.Object {
+    if (global.globalUninitializedVars()) |env| return env;
+    const env = try core.Object.create(ctx.runtime, core.class.ids.object, null);
+    errdefer env.value().free(ctx.runtime);
+    try global.setGlobalUninitializedVars(ctx.runtime, env);
+    return env;
+}
+
+/// qjs js_global_object_get_uninitialized_var (quickjs.c:17069-17096): return
+/// the shared UNINITIALIZED cell for `atom_id`, creating and filing it in the
+/// side table when absent. The caller owns the returned ref; the table slot
+/// holds its own ref. The fresh cell's value carries the UNINITIALIZED
+/// sentinel (js_create_var_ref(ctx, TRUE)); is_lexical/is_const stay false.
+pub fn globalObjectGetUninitializedVar(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom) !core.JSValue {
+    const rt = ctx.runtime;
+    const env = try globalUninitializedVarsEnv(ctx, global);
+    if (env.findProperty(atom_id)) |index| {
+        if (env.asVarRefAt(index)) |cell| return cell.valueRef().dup();
+    }
+    const cell = try core.VarRef.createClosed(rt, core.JSValue.uninitialized());
+    errdefer cell.valueRef().free(rt);
+    // qjs JS_PROP_C_W_E | JS_PROP_VARREF (17088).
+    try env.appendPreparedPropertyEntry(rt, atom_id, core.property.Flags.varRef(true, true, true), .{ .var_ref = cell });
+    return cell.valueRef().dup();
+}
+
+/// qjs js_global_object_find_uninitialized_var (quickjs.c:17098-17123): if a
+/// parked cell exists for `atom_id`, remove it from the side table and hand it
+/// to the new declaration so every earlier capture aliases the new binding
+/// (non-lexical reuse resets the value to undefined). Returns a fresh owned
+/// ref, or null when no parked cell exists (caller creates a fresh cell).
+pub fn globalObjectFindUninitializedVar(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom, is_lexical: bool) ?core.JSValue {
+    const rt = ctx.runtime;
+    const env = global.globalUninitializedVars() orelse return null;
+    const index = env.findProperty(atom_id) orelse return null;
+    const cell = env.asVarRefAt(index) orelse return null;
+    const cell_value = cell.valueRef().dup();
+    _ = env.deleteProperty(rt, atom_id);
+    if (!is_lexical) {
+        const old_value = cell.varRefValueSlot().*;
+        cell.varRefValueSlot().* = core.JSValue.undefinedValue();
+        old_value.free(rt);
+    }
+    return cell_value;
+}
+
 /// Create the JS_PROP_VARREF slot backing a FRESH top-level `var`/function global.
 /// An already-existing global property is left entirely untouched (see below): we
 /// only materialize a cell when the binding is new, so closures can alias it.
@@ -3808,8 +3857,16 @@ pub fn ensureGlobalObjectVarRefCell(
         return null;
     }
 
-    const cell = try core.VarRef.createClosed(rt, core.JSValue.undefinedValue());
-    errdefer cell.valueRef().free(rt);
+    // qjs js_closure_define_global_var tail (quickjs.c:17186-17193): "if there
+    // is a corresponding uninitialized variable, use it" — a capture parked in
+    // the side table before this declaration is reused (value reset to
+    // undefined), so every earlier capture aliases the new property cell.
+    const cell_value = globalObjectFindUninitializedVar(ctx, global, atom_id, false) orelse blk: {
+        const fresh = try core.VarRef.createClosed(rt, core.JSValue.undefinedValue());
+        break :blk fresh.valueRef();
+    };
+    const cell = core.VarRef.fromValue(cell_value) orelse unreachable;
+    errdefer cell_value.free(rt);
     try global.appendPreparedPropertyEntry(
         rt,
         atom_id,
@@ -3851,17 +3908,52 @@ pub fn defineGlobalDeclVarCell(
 }
 
 /// Create-or-fetch the VarRef cell for a top-level lexical in ctx.lexicals,
-/// stored as a JS_PROP_VARREF slot (qjs js_closure_define_global_var). Returns
-/// a fresh ref the caller owns (for frame.var_refs[idx]). The slot holds its
-/// own ref; the cell starts uninitialized (TDZ) like qjs js_create_var_ref.
-pub fn ensureGlobalLexicalCell(ctx: *core.JSContext, atom_id: core.Atom, is_const: bool) !core.JSValue {
+/// stored as a JS_PROP_VARREF slot (qjs js_closure_define_global_var, lexical
+/// arm, quickjs.c:17134-17162). Returns a fresh ref the caller owns (for
+/// frame.var_refs[idx]). The slot holds its own ref; the cell starts
+/// uninitialized (TDZ) like qjs js_create_var_ref.
+pub fn ensureGlobalLexicalCell(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom, is_const: bool) !core.JSValue {
     const env = try globalLexicalEnv(ctx);
     if (env.findProperty(atom_id)) |index| {
         if (env.asVarRefAt(index)) |cell| return cell.valueRef().dup();
     }
     const rt = ctx.runtime;
-    const cell = try core.VarRef.createClosed(rt, core.JSValue.uninitialized());
-    errdefer cell.valueRef().free(rt);
+    // qjs quickjs.c:17148-17162: "if there is a corresponding global variable,
+    // reuse its reference and create a new one for the global variable" — the
+    // definition-time cell surgery. The OLD property cell (which every earlier
+    // capture aliases) becomes the lexical cell (value parked at UNINITIALIZED
+    // for the TDZ window); a NEW cell holding the old value takes its place as
+    // the global-object property, so globalThis.<name> keeps the var value.
+    if (global.findProperty(atom_id)) |gidx| {
+        if (global.asVarRefAt(gidx)) |old_cell| {
+            const new_cell = new_cell: {
+                // var_ref1->value = var_ref->value; var_ref->value = JS_UNINITIALIZED
+                // — the value MOVES (no dup/free), qjs 17155-17156.
+                const moved_value = old_cell.varRefValueSlot().*;
+                old_cell.varRefValueSlot().* = core.JSValue.uninitialized();
+                break :new_cell try core.VarRef.createClosed(rt, moved_value);
+            };
+            // pr->u.var_ref = var_ref1 (17157): the property slot's ref on the
+            // old cell transfers to us; the new cell's creation ref transfers
+            // to the property slot. Kind stays .var_ref — no shape change.
+            global.prop_values[gidx].slot.var_ref = new_cell;
+            const old_cell_value = old_cell.valueRef();
+            errdefer old_cell_value.free(rt);
+            // add_var_ref (17210-17223): the old cell becomes the lexical cell.
+            old_cell.is_lexical = true;
+            old_cell.varRefIsConstSlot().* = is_const;
+            try env.appendPreparedPropertyEntry(rt, atom_id, core.property.Flags.varRef(!is_const, false, false), .{ .var_ref = old_cell });
+            return old_cell.valueRef().dup();
+        }
+    }
+    // qjs 17193: reuse a parked uninitialized capture cell if one exists (the
+    // value stays UNINITIALIZED for the lexical TDZ window), else fresh.
+    const cell_value = globalObjectFindUninitializedVar(ctx, global, atom_id, true) orelse blk: {
+        const fresh = try core.VarRef.createClosed(rt, core.JSValue.uninitialized());
+        break :blk fresh.valueRef();
+    };
+    const cell = core.VarRef.fromValue(cell_value) orelse unreachable;
+    errdefer cell_value.free(rt);
     cell.varRefIsConstSlot().* = is_const;
     cell.is_lexical = true;
     try env.appendPreparedPropertyEntry(rt, atom_id, core.property.Flags.varRef(!is_const, false, false), .{ .var_ref = cell });
@@ -3892,6 +3984,7 @@ pub fn defineGlobalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom, value:
 /// falls back to defineGlobalLexicalValue for module/eval data-property paths).
 pub fn defineGlobalDeclLexicalCell(
     ctx: *core.JSContext,
+    global: *core.Object,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     atom_id: core.Atom,
@@ -3902,7 +3995,7 @@ pub fn defineGlobalDeclLexicalCell(
         const name = function.varRefName(idx);
         if (name != atom_id) continue;
         if (!function.varRefIsGlobalDeclAt(idx)) return false;
-        const cell_value = try ensureGlobalLexicalCell(ctx, atom_id, is_const);
+        const cell_value = try ensureGlobalLexicalCell(ctx, global, atom_id, is_const);
         if (idx >= frame.var_refs.len) {
             try frame_mod.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
         }

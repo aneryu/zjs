@@ -128,23 +128,6 @@ pub inline fn parentEvalShadowsGlobalForIdx(
     return property_vm.parentFunctionEvalBindingShadowsGlobal(rt, frame, atom_id);
 }
 
-/// A global lexical (let/const) shadows the global `var`/object binding of the
-/// same name (qjs's separate global_var_obj lexical environment takes precedence
-/// over global_obj). The bound var_ref cell is therefore NOT authoritative when a
-/// like-named global lexical exists, so the fast lane must defer to the slow path
-/// (which consults the lexical env first). Cheap when there are no global lexicals
-/// (`ctx.lexicals == null`): a single null check, before any atom resolution.
-pub inline fn globalLexicalShadowsGlobalForIdx(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    function: *const bytecode.Bytecode,
-    idx: u16,
-) bool {
-    if (ctx.lexicals == null) return false;
-    const atom_id = globalVarAtom(function, idx) orelse return false;
-    return call_runtime.globalLexicalHasForGlobal(ctx, global, atom_id);
-}
-
 fn throwGlobalTdz(
     ctx: *core.JSContext,
     global: *core.Object,
@@ -155,6 +138,45 @@ fn throwGlobalTdz(
     const err = exception_ops.throwTdzReference(ctx);
     if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
     return err;
+}
+
+/// qjs OP_get_var slow arm (quickjs.c:18474-18480): an uninitialized cell for a
+/// non-lexical closure var resolves via JS_GetPropertyInternal on the global
+/// OBJECT — proto chain and getters included, the lexical env never consulted.
+/// `op.get_var` throws ReferenceError when no binding exists; `op.get_var_undef`
+/// (typeof) yields undefined (qjs `opcode - OP_get_var_undef` throw flag).
+fn getVarFromGlobalObject(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    opc: u8,
+    atom_id: core.Atom,
+) !Step {
+    const value = value: {
+        if (global.getOwnDataPropertyValue(atom_id)) |global_data_value| {
+            break :value global_data_value;
+        }
+        const global_value = global.value().dup();
+        defer global_value.free(ctx.runtime);
+        if (opc == op.get_var) {
+            const has_global_binding = hasObjectBinding(ctx, output, global, global_value, global, atom_id, function, frame) catch |err| {
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                return err;
+            };
+            if (!has_global_binding) {
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                return error.ReferenceError;
+            }
+        }
+        break :value try object_ops.getValueProperty(ctx, output, global, global_value, atom_id, function, frame);
+    };
+    errdefer value.free(ctx.runtime);
+    try stack.pushOwned(value);
+    return .done;
 }
 
 pub noinline fn getVar(
@@ -179,23 +201,48 @@ pub noinline fn getVar(
     if (!hasDynamicGlobalOverlay(frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
         if (ref_idx < frame.var_refs.len) {
             if (varRefCellFromValue(frame.var_refs[ref_idx])) |cell| {
-                // A deleted binding's cell is parked at UNINITIALIZED with
-                // is_lexical cleared (qjs remove_global_object_property), so it
-                // falls past the TDZ arms into the generic global lookup below
-                // (qjs OP_get_var uninit -> JS_GetPropertyInternal, 18469-18480).
                 const value = cell.pvalue.*;
+                const parent_eval_shadow = property_vm.frameClosureHasEvalParent(frame) and
+                    property_vm.parentFunctionEvalBindingShadowsGlobal(ctx.runtime, frame, atom_id);
                 if (!value.isUninitialized()) {
-                    if (core.VarRef.fromValue(value) == null and
-                        !call_runtime.globalLexicalHasForGlobal(ctx, global, atom_id) and
-                        !(property_vm.frameClosureHasEvalParent(frame) and property_vm.parentFunctionEvalBindingShadowsGlobal(ctx.runtime, frame, atom_id)))
-                    {
+                    // The bound cell is authoritative: a global lexical shadowing
+                    // this name would have performed definition-time cell surgery /
+                    // parked-cell reuse (qjs js_closure_define_global_var,
+                    // quickjs.c:17148-17162 + 17186-17205), so no per-read lexical
+                    // check is needed (qjs OP_get_var has none, 18461-18488).
+                    if (core.VarRef.fromValue(value) == null and !parent_eval_shadow) {
                         try stack.push(value);
                         return .done;
                     }
-                } else if (closureVarAt(function, ref_idx)) |cv| {
-                    if (cv.is_lexical) return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
-                } else if (cell.is_lexical) {
-                    return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
+                } else if (!parent_eval_shadow) {
+                    // qjs OP_get_var uninitialized arm (quickjs.c:18469-18483):
+                    // a lexical closure var in its TDZ window throws; everything
+                    // else — undeclared global, deleted binding parked at
+                    // UNINITIALIZED (remove_global_object_property, 9289-9309),
+                    // or a lexical-shadow TDZ window reached through an old
+                    // non-lexical capture — resolves through the plain global
+                    // OBJECT (JS_GetPropertyInternal(ctx->global_obj, ...)),
+                    // never the lexical env.
+                    const cv_is_lexical = if (closureVarAt(function, ref_idx)) |cv| cv.is_lexical else false;
+                    if (cv_is_lexical) return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
+                    // zjs frame-model adaptation: qjs resolves an in-function
+                    // `arguments` read to the arguments pseudo-var at parse
+                    // resolution (resolve_scope_var, quickjs.c:32970-32974), so
+                    // its OP_get_var never carries that name. zjs's parser
+                    // routes some implicit-`arguments` reads through get_var
+                    // (cover-grammar shorthand `{arguments}`, reads after an
+                    // annexB-skipped block-level `function arguments(){}`) and
+                    // materializes the frame's arguments object at runtime —
+                    // the same rescue the generic waterfall below applies
+                    // (frameArgumentsObject), hoisted here because this arm
+                    // returns before reaching it.
+                    if (atom_id == core.atom.ids.arguments and eval_ops.directEvalShouldExposeImplicitArguments(frame)) {
+                        const args_value = try object_ops.frameArgumentsObject(ctx, global, frame);
+                        errdefer args_value.free(ctx.runtime);
+                        try stack.pushOwned(args_value);
+                        return .done;
+                    }
+                    return try getVarFromGlobalObject(ctx, output, global, stack, function, frame, catch_target, opc, atom_id);
                 }
             }
         } else if (closureVarAt(function, ref_idx)) |cv| {
@@ -686,36 +733,38 @@ pub noinline fn putVar(
     if (!hasDynamicGlobalOverlay(frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
         if (ref_idx < frame.var_refs.len) {
             if (varRefCellFromValue(frame.var_refs[ref_idx])) |cell| {
-                // Deleted binding: cell parked at UNINITIALIZED, is_lexical
-                // cleared — falls past the TDZ arms to the named waterfall /
-                // global object set below (qjs OP_put_var uninit non-lexical ->
-                // JS_SetPropertyInternal on global_obj, quickjs.c:18499-18520).
                 const current = cell.pvalue.*;
-                if (!current.isUninitialized()) {
-                    if (core.VarRef.fromValue(current) == null and !cell.varRefIsFunctionNameSlot().* and
-                        !call_runtime.globalLexicalHasForGlobal(ctx, global, atom_id) and
-                        !(property_vm.frameClosureHasEvalParent(frame) and property_vm.parentFunctionEvalBindingShadowsGlobal(ctx.runtime, frame, atom_id)))
-                    {
-                        if (cell.varRefIsConstSlot().*) {
+                const parent_eval_shadow = property_vm.frameClosureHasEvalParent(frame) and
+                    property_vm.parentFunctionEvalBindingShadowsGlobal(ctx.runtime, frame, atom_id);
+                // qjs OP_put_var (quickjs.c:18490-18525): the exceptional arm is
+                // keyed on `uninitialized || is_const`, and inside it on the
+                // CELL's is_lexical (unlike OP_get_var's cv-keyed check) — a
+                // lexical cell throws (TDZ ReferenceError while uninitialized,
+                // read-only TypeError for const), a non-lexical cell (deleted
+                // binding / undeclared global) falls to the global-object set
+                // below (JS_HasProperty strict check + JS_SetPropertyInternal).
+                // The write-through arm needs no per-write lexical check: a
+                // shadowing global lexical performed definition-time cell
+                // surgery, so the bound cell IS the lexical binding.
+                if (!parent_eval_shadow) {
+                    if (current.isUninitialized() or cell.varRefIsConstSlot().*) {
+                        if (cell.is_lexical and core.VarRef.fromValue(current) == null) {
                             value.free(ctx.runtime);
-                            _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| {
-                                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
-                                return err;
-                            };
+                            if (current.isUninitialized()) {
+                                return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
+                            }
+                            // qjs JS_ThrowTypeErrorReadOnly (18507); zjs reports
+                            // the const violation through the same catchable
+                            // TypeError channel the lexical-env write used.
+                            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                             return error.TypeError;
                         }
+                        // Non-lexical cell: fall to the global-object set below.
+                    } else if (core.VarRef.fromValue(current) == null and !cell.varRefIsFunctionNameSlot().*) {
                         errdefer value.free(ctx.runtime);
                         try cell.setVarRefValue(ctx.runtime, value);
                         return .done;
                     }
-                } else if (closureVarAt(function, ref_idx)) |cv| {
-                    if (cv.is_lexical) {
-                        value.free(ctx.runtime);
-                        return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
-                    }
-                } else if (cell.is_lexical) {
-                    value.free(ctx.runtime);
-                    return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
                 }
             }
         } else if (closureVarAt(function, ref_idx)) |cv| {
@@ -1030,13 +1079,10 @@ fn defineGlobalVarDeclaration(
     if (shouldSkipRuntimeStrictGlobalFunctionVar(function, is_eval_code, gv)) return;
 
     if (gv.is_lexical) {
-        // qjs js_closure_define_global_var PASS2: create the shared ctx.lexicals
-        // VARREF cell and alias it into frame.var_refs for a top-level script
-        // let/const (.global_decl var-ref). Falls back to a plain lexical data
-        // property for module/eval paths.
-        if (!try call_runtime.defineGlobalDeclLexicalCell(ctx, function, frame, atom_id, gv.is_const)) {
-            try call_runtime.defineGlobalLexicalValue(ctx, atom_id, core.JSValue.uninitialized(), gv.is_const);
-        }
+        // Lexical cells are created in the dedicated cells pass of
+        // instantiateGlobalVarDeclarations (qjs js_closure2 PASS2 order:
+        // every global cell exists before any function value is assigned).
+        return;
     } else if (!global.hasOwnProperty(atom_id)) {
         const desc = core.Descriptor.data(core.JSValue.undefinedValue(), true, true, gv.is_configurable);
         const define_result = if (!global.hasExoticMethods() and !global.flags.is_array and global.isExtensible())
@@ -1070,6 +1116,23 @@ pub fn instantiateGlobalVarDeclarations(
             if (gv.is_lexical) continue;
             if (shouldSkipRuntimeStrictGlobalFunctionVar(function, is_eval_code, gv)) continue;
             _ = try call_runtime.defineGlobalDeclVarCell(ctx, global, function, frame, gv.var_name, gv.is_configurable);
+        }
+    }
+    // qjs js_closure2 PASS2 (quickjs.c:17307-17334): every JS_CLOSURE_GLOBAL_DECL
+    // cell — var and lexical alike — is materialized before ANY function value is
+    // assigned (qjs creates function objects only later, via the bytecode
+    // fclosure prologue), so a closure created during value definition always
+    // captures the real cell, never a to-be-replaced TDZ placeholder.
+    for (function.global_vars) |gv| {
+        if (!gv.is_lexical) continue;
+        if (shouldSkipRuntimeStrictGlobalFunctionVar(function, is_eval_code, gv)) continue;
+        // qjs js_closure_define_global_var lexical arm (17134-17162): create or
+        // reuse (surgery / parked-capture) the shared ctx.lexicals VARREF cell
+        // and alias it into frame.var_refs for a top-level script let/const
+        // (.global_decl var-ref). Falls back to a plain lexical data property
+        // for module/eval paths.
+        if (!try call_runtime.defineGlobalDeclLexicalCell(ctx, global, function, frame, gv.var_name, gv.is_const)) {
+            try call_runtime.defineGlobalLexicalValue(ctx, gv.var_name, core.JSValue.uninitialized(), gv.is_const);
         }
     }
     for (function.global_vars) |gv| {

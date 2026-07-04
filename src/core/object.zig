@@ -633,6 +633,13 @@ pub const RealmPayload = struct {
     cached_promise_proto: ?*Object = null,
     cached_values: [realm_value_slot_count]?JSValue = @splat(null),
     global_lexicals: ?*Object = null,
+    // qjs JSGlobalObject.uninitialized_vars (quickjs.c js_global_object_get_-
+    // uninitialized_var, 17069-17096): side table of shared UNINITIALIZED
+    // var-ref cells for globals captured before any declaration exists. A later
+    // global var/let/const declaration of the same name reuses the parked cell
+    // (js_global_object_find_uninitialized_var, 17098-17123) so every earlier
+    // capture aliases the new binding.
+    uninitialized_vars: ?*Object = null,
     shared_lazy_native_functions: ?*[runtime_mod.shared_lazy_native_function_slots]?JSValue = null,
 
     pub fn destroy(self: *RealmPayload, rt: *JSRuntime) void {
@@ -642,6 +649,11 @@ pub const RealmPayload = struct {
         const global_lexicals = self.global_lexicals;
         self.global_lexicals = null;
         if (global_lexicals) |env| {
+            if (rt.gc.phase != .deinit) env.value().free(rt);
+        }
+        const uninitialized_vars = self.uninitialized_vars;
+        self.uninitialized_vars = null;
+        if (uninitialized_vars) |env| {
             if (rt.gc.phase != .deinit) env.value().free(rt);
         }
         const shared_lazy_native_functions = self.shared_lazy_native_functions;
@@ -1554,6 +1566,15 @@ pub const Object = struct {
 
     pub fn setGlobalLexicals(self: *Object, rt: *JSRuntime, v: ?*Object) !void {
         (try self.ensureRealmPayload(rt)).global_lexicals = v;
+    }
+
+    // qjs u.global_object.uninitialized_vars accessors (quickjs.c:17069).
+    pub fn globalUninitializedVars(self: *const Object) ?*Object {
+        return if (self.realmPayloadConst()) |payload| payload.uninitialized_vars else null;
+    }
+
+    pub fn setGlobalUninitializedVars(self: *Object, rt: *JSRuntime, v: ?*Object) !void {
+        (try self.ensureRealmPayload(rt)).uninitialized_vars = v;
     }
 
     pub fn ensureRealmPayload(self: *Object, rt: *JSRuntime) !*RealmPayload {
@@ -6150,6 +6171,8 @@ pub const Object = struct {
         try Helper.callVisitShape(visitor, self.shape_ref);
         if (self.realmPayload()) |payload| {
             try Helper.callVisitObject(visitor, &payload.global_lexicals);
+            // qjs js_global_object_mark (quickjs.c:17062-17067).
+            try Helper.callVisitObject(visitor, &payload.uninitialized_vars);
             if (payload.shared_lazy_native_functions) |cache| {
                 for (cache) |*maybe_cached| {
                     try Helper.traceOptValue(visitor, maybe_cached);

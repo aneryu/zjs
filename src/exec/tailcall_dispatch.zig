@@ -1240,7 +1240,10 @@ pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
     const v = cell.pvalue.*;
     if (v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     if (core.VarRef.fromValue(v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    if (vm_property_globals.globalLexicalShadowsGlobalForIdx(vm.ctx, vm.global, vm.function, idx)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // No global-lexical shadow check: a shadowing top-level let/const performs
+    // definition-time cell surgery / parked-cell reuse (qjs
+    // js_closure_define_global_var, quickjs.c:17148-17205), so an initialized
+    // cell is always the authoritative binding (qjs OP_get_var, 18461-18488).
     if (vm_property_globals.parentEvalShadowsGlobalForIdx(vm.ctx.runtime, vm.frame, vm.function, idx)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     sp[0] = v.dup();
     return cont(pc + 3, sp + 1, var_buf, vm);
