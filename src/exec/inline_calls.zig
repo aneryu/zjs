@@ -160,6 +160,13 @@ pub const Entry = struct {
     /// (no eval) while still owning its `this` box, a var_refs copy, or a
     /// rebuilt view — those need the full teardown.
     fast_teardown: bool,
+    /// Caller's Entry, or null when the caller is the L0 frame — qjs
+    /// `JSStackFrame.prev_frame` (quickjs.c:408, "NULL if first stack
+    /// frame"). Together with `Machine.top` (≅ rt->current_stack_frame)
+    /// this is the frame-navigation mechanism: qjs never derives a frame
+    /// address from an index, it follows this pointer pair (set at
+    /// quickjs.c:17869-17870, restored at the done: epilogue 20709).
+    prev: ?*Entry,
 };
 
 const entries_per_chunk: usize = 16;
@@ -208,6 +215,13 @@ pub const Machine = struct {
     chunks: []*[entries_per_chunk]Entry = &.{},
     chunk_count: usize = 0,
     depth: usize = 0,
+    /// Current (innermost) live Entry, or null at depth 0 — qjs
+    /// `rt->current_stack_frame` (quickjs.c:358). All frame ADDRESSES come
+    /// from this pointer and the `Entry.prev` chain; `depth` stays purely
+    /// for accounting (L0 boundary tests, backtrace length, slot reuse).
+    /// Maintained in lockstep with `depth` by pushFrame/popTeardown (and
+    /// the dispatch loop's fused popAndResume).
+    top: ?*Entry = null,
     /// Set whenever the current execution level changed (push, pop, unwind);
     /// tells the dispatch loop to refresh its cached per-level locals.
     switched: bool = false,
@@ -244,9 +258,13 @@ pub const Machine = struct {
         }
     }
 
+    /// The current Entry — the cached `top` pointer (qjs reads
+    /// `rt->current_stack_frame` directly, quickjs.c:2864), NOT re-derived
+    /// from the depth index: `entryAt`'s chunk math costs a umaddl chain on
+    /// every use, and qjs never computes a frame address from an index.
     pub fn topEntry(self: *Machine) *Entry {
         std.debug.assert(self.depth > 0);
-        return self.entryAt(self.depth - 1);
+        return self.top.?;
     }
 
     pub fn entryAt(self: *Machine, index: usize) *Entry {
@@ -314,6 +332,11 @@ pub const Machine = struct {
             try setupSimpleInlineEntry(self.ctx, global, entry, target, source)
         else
             try setupInlineEntry(self.ctx, global, entry, target, source);
+        // Link the new frame into the chain — qjs `sf->prev_frame =
+        // rt->current_stack_frame; rt->current_stack_frame = sf;`
+        // (quickjs.c:17869-17870).
+        entry.prev = self.top;
+        self.top = entry;
         self.depth += 1;
         self.switched = true;
         return entry;
@@ -946,9 +969,13 @@ pub const Machine = struct {
     /// path (eval snapshot, frame, operand stack, arena watermark,
     /// backtrace, profile scope, call depth).
     inline fn popTeardown(self: *Machine) void {
-        teardownInlineEntry(self.ctx, self.topEntry());
+        const dying = self.topEntry();
+        teardownInlineEntry(self.ctx, dying);
         self.ctx.call_depth -= 1;
         self.depth -= 1;
+        // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
+        // done: epilogue (quickjs.c:20709).
+        self.top = dying.prev;
         self.switched = true;
     }
 

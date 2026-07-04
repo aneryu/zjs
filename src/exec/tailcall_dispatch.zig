@@ -367,12 +367,12 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
     if (vm.poller.active) {
         vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
     }
-    // Enter the entry pushCall handed back instead of reloadTop's
-    // `machine.topEntry()` — Entry is 344B (non-power-of-two), so re-deriving
-    // the slot from the depth index costs a multiply (umaddl) on every call.
-    // qjs enters the callee via the alloca result pointer already in a
-    // register (quickjs.c:17846); this is the equivalent pointer pass-through.
-    // The manual expansion below is reloadTop's depth>0 arm verbatim.
+    // Enter the entry pushCall handed back instead of reloading
+    // `machine.top` — qjs enters the callee via the alloca result pointer
+    // already in a register (quickjs.c:17846); this is the equivalent
+    // pointer pass-through (pushFrame just stored the same pointer into
+    // `machine.top`, quickjs.c:17870). The manual expansion below is
+    // reloadTop's depth>0 arm verbatim.
     vm.function = entry.function;
     vm.frame = &entry.frame;
     vm.stack = &entry.stack;
@@ -391,11 +391,10 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
 
 /// Fused popReturn + reload for an in-handler return to an inline caller —
 /// qjs OP_return + the done: epilogue (quickjs.c:18266, 20698-20710):
-/// teardown, deliver the result into the caller's operand stack, resume the
-/// caller — all in the handler, with ONE topEntry address computation for the
-/// dying frame and one inside reloadTop (Machine.popReturn + a driver
-/// round-trip would redo each). Expanded inline into the Handler-signature
-/// caller so the tail call is legal.
+/// teardown, unlink the frame (`rt->current_stack_frame = sf->prev_frame`,
+/// quickjs.c:20709), deliver the result into the caller's operand stack,
+/// resume the caller — all in the handler. Expanded inline into the
+/// Handler-signature caller so the tail call is legal.
 inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
     const machine = vm.machine;
     const dying = machine.topEntry();
@@ -411,6 +410,10 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
     }
     vm.ctx.call_depth -= 1;
     machine.depth -= 1;
+    // qjs done: `rt->current_stack_frame = sf->prev_frame;` (quickjs.c:20709)
+    // — the caller's Entry address comes from the chain, not from re-deriving
+    // entryAt(depth-1) chunk arithmetic; reloadTop below reads it back.
+    machine.top = dying.prev;
     machine.switched = true;
     var pc2: [*]const u8 = undefined;
     var sp2: [*]JSValue = undefined;
