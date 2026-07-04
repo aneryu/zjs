@@ -330,17 +330,96 @@ const eval_parameter_initializer_flag: u16 = 0x4000;
 
 // ---- SPECIAL handlers (call / return / tail / drop / throw / eval / generator) ----
 
+/// op.call's `catch |err|` recovery, shared by the in-handler push (below)
+/// and kept verbatim from the driver's old `.tail` arm: close a pending
+/// for-of iterator, then try to convert the setup failure (OOM-class) into a
+/// JS-catchable error in the CALLER frame. Returns true when the caller frame
+/// caught it (frame.pc is at the handler — re-dispatch via coldNext); false
+/// when it must propagate (vm.pending_error is set). Kept OUT of the handler
+/// (noinline) so the cold recovery never touches the hot path's registers.
+noinline fn callSetupRecover(vm: *Vm, err: HostError) bool {
+    forof_ops.closeStackTopForOfIteratorForPendingError(vm.ctx, vm.output, vm.global, vm.stack) catch |e2| {
+        vm.pending_error = e2;
+        return false;
+    };
+    const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| {
+        vm.pending_error = e2;
+        return false;
+    };
+    if (!caught) {
+        vm.pending_error = err;
+        return false;
+    }
+    return true;
+}
+
+/// Complete an inline call INSIDE the handler — qjs's CASE(OP_call) shape
+/// (quickjs.c:18182-18202): push the callee frame, poll interrupts at call
+/// entry (17787), reload the per-frame registers, and tail-dispatch straight
+/// into the callee's first opcode. No driver round-trip: no Outcome encode,
+/// no tail_request staging, no driver-side spill/reload detour. Expanded
+/// inline into the (Handler-signature) caller so the tail calls are legal.
+inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.InlineTarget, region_base: usize, argc: u16, layout: inline_calls.RegionLayout) Outcome {
+    vm.machine.pushCall(vm.global, vm.stack, target, region_base, argc, layout) catch |err| {
+        if (!callSetupRecover(vm, err)) return .threw;
+        return coldNext(vb, vm);
+    };
+    if (vm.poller.active) {
+        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
+    }
+    var pc2: [*]const u8 = undefined;
+    var sp2: [*]JSValue = undefined;
+    var vb2: [*]JSValue = undefined;
+    reloadTop(vm, &pc2, &sp2, &vb2);
+    return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
+}
+
+/// Fused popReturn + reload for an in-handler return to an inline caller —
+/// qjs OP_return + the done: epilogue (quickjs.c:18266, 20698-20710):
+/// teardown, deliver the result into the caller's operand stack, resume the
+/// caller — all in the handler, with ONE topEntry address computation for the
+/// dying frame and one inside reloadTop (Machine.popReturn + a driver
+/// round-trip would redo each). Expanded inline into the Handler-signature
+/// caller so the tail call is legal.
+inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
+    const machine = vm.machine;
+    inline_calls.Machine.teardownInlineEntry(vm.ctx, machine.topEntry());
+    vm.ctx.call_depth -= 1;
+    machine.depth -= 1;
+    machine.switched = true;
+    var pc2: [*]const u8 = undefined;
+    var sp2: [*]JSValue = undefined;
+    var vb2: [*]JSValue = undefined;
+    reloadTop(vm, &pc2, &sp2, &vb2);
+    // Deliver the result on the (now-current) caller stack. AssumeCapacity
+    // never reallocs, so the stack_base reloadTop captured stays valid; sp
+    // just advances past the pushed slot.
+    vm.stack.pushOwnedAssumeCapacity(value);
+    sp2 += 1;
+    return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
+}
+
 fn op_return(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     _ = vb;
     vm.publish(pc, sp);
-    vm.return_value = control_vm.returnTop(vm.ctx, vm.stack, vm.frame, if (vm.machine.depth == 0) vm.l0.generator_state else null) catch |e| return vm.fail(e);
-    return .returned;
+    const depth0 = vm.machine.depth == 0;
+    const value = control_vm.returnTop(vm.ctx, vm.stack, vm.frame, if (depth0) vm.l0.generator_state else null) catch |e| return vm.fail(e);
+    if (depth0) {
+        vm.return_value = value;
+        return .returned; // L0 exit stays on the driver
+    }
+    return popAndResume(vm, value);
 }
 fn op_return_undef(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     _ = vb;
     vm.publish(pc, sp);
-    vm.return_value = control_vm.returnUndefined(vm.ctx, vm.frame, if (vm.machine.depth == 0) vm.l0.generator_state else null) catch |e| return vm.fail(e);
-    return .returned;
+    const depth0 = vm.machine.depth == 0;
+    const value = control_vm.returnUndefined(vm.ctx, vm.frame, if (depth0) vm.l0.generator_state else null) catch |e| return vm.fail(e);
+    if (depth0) {
+        vm.return_value = value;
+        return .returned;
+    }
+    return popAndResume(vm, value);
 }
 
 fn op_call(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
@@ -361,17 +440,15 @@ fn op_call(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c
     // Inline the common bytecode-to-bytecode resolution here instead of paying
     // execCall's 10-argument call boundary every iteration: resolveInlineTarget
     // (an inline fn) reads the callable off the operand region exactly as
-    // execCall's inline leg does and, on a hit, hands the dispatch driver a
-    // pushCall request directly. A miss (host fn / ctor / cross-realm / underflow)
-    // falls to execCall with allow_inline=false so the inline check isn't redone.
+    // execCall's inline leg does and, on a hit, completes the call in the
+    // handler (qjs CASE(OP_call)). A miss (host fn / ctor / cross-realm /
+    // underflow) falls to execCall with allow_inline=false.
     const total = @as(usize, argc) + 1;
     if (vm.stack.values.len >= total) {
         const region_base = vm.stack.values.len - total;
         const func = vm.stack.values[region_base];
         if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, JSValue.undefinedValue(), func)) |target| {
-            vm.tail_request = .{ .target = target, .region_base = region_base, .argc = argc };
-            vm.tail_is_reuse = false;
-            return .tail;
+            return pushAndEnter(vb, vm, &target, region_base, argc, .plain);
         }
     }
     switch (call_runtime.execCall(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, argc, vm.output, vm.global, false, &vm.tail_request) catch |e| return vm.fail(e)) {
@@ -399,9 +476,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) call
         const method = vm.stack.values[region_base + 1];
         if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, receiver, method)) |target| {
             vm.frame.pc += 2;
-            vm.tail_request = .{ .target = target, .region_base = region_base, .argc = argc, .layout = .method };
-            vm.tail_is_reuse = false;
-            return .tail;
+            return pushAndEnter(vb, vm, &target, region_base, argc, .method);
         }
     }
     switch (call_vm.callMethod(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, false, &vm.tail_request) catch |e| return vm.fail(e)) {
