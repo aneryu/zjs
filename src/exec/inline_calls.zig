@@ -154,6 +154,12 @@ pub const Entry = struct {
     /// non-inlined call paid on every plain call. Mirrors qjs's `done:` epilogue
     /// (quickjs.c:20698) freeing only what the frame actually allocated.
     simple_frame: bool,
+    /// True ONLY for a `setupSimpleInlineEntry` frame (borrowed this/args/
+    /// var_refs, no owned view): the STATIC half of the `teardownSimpleEntry`
+    /// eligibility. A general-path frame may share `simple_frame == true`
+    /// (no eval) while still owning its `this` box, a var_refs copy, or a
+    /// rebuilt view — those need the full teardown.
+    fast_teardown: bool,
 };
 
 const entries_per_chunk: usize = 16;
@@ -367,6 +373,7 @@ pub const Machine = struct {
         entry.merged_var_ref_names = &.{};
         entry.merged_var_refs = &.{};
         entry.simple_frame = true;
+        entry.fast_teardown = true;
         entry.eval_snapshot = .{};
         entry.profile_guard = vm_call.enterCallProfile(rt);
         errdefer entry.profile_guard.deinit();
@@ -478,6 +485,7 @@ pub const Machine = struct {
         entry.merged_var_ref_names = &.{};
         entry.merged_var_refs = &.{};
         entry.simple_frame = true;
+        entry.fast_teardown = false;
         entry.profile_guard = vm_call.enterCallProfile(rt);
         errdefer entry.profile_guard.deinit();
         errdefer freeEvalResources(rt, entry);
@@ -932,6 +940,27 @@ pub const Machine = struct {
         self.ctx.call_depth -= 1;
         self.depth -= 1;
         self.switched = true;
+    }
+
+    /// Straight-line teardown for the common simple frame — qjs's `done:`
+    /// epilogue (quickjs.c:20698-20710): free the operand-stack residue,
+    /// close the frame's own open var refs, free locals + args, release the
+    /// callable, restore the arena watermark. Every simple-frame gate is
+    /// pre-resolved; the CALLER must have checked the dynamic escapes
+    /// (`simple_frame`, `frame.cold == null`, `!frame.storage_on_heap`,
+    /// `stack.arena_window`) — execution can grow the stack to the heap or
+    /// materialize the cold box (arguments object), which needs the general
+    /// teardown below.
+    pub fn teardownSimpleEntry(ctx: *core.JSContext, entry: *Entry) void {
+        const rt = ctx.runtime;
+        for (entry.stack.values) |v| v.free(rt);
+        const frame = &entry.frame;
+        frame.current_function.free(rt);
+        if (frame.open_var_refs.len != 0) frame.closeOpenVarRefs(rt);
+        for (frame.locals) |v| v.free(rt);
+        for (frame.args) |v| v.free(rt);
+        rt.vm_stack.restore(entry.arena_mark);
+        entry.profile_guard.deinit();
     }
 
     /// Release every resource `setupInlineEntry` acquired for `entry` (eval

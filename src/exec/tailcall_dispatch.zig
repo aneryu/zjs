@@ -383,7 +383,17 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
 /// caller so the tail call is legal.
 inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
     const machine = vm.machine;
-    inline_calls.Machine.teardownInlineEntry(vm.ctx, machine.topEntry());
+    const dying = machine.topEntry();
+    // Straight-line teardown (qjs done: epilogue) unless execution escaped
+    // the simple shape: grew the operand stack to the heap, materialized the
+    // cold box (arguments object), or moved frame storage to the heap.
+    if (dying.fast_teardown and dying.frame.cold == null and
+        !dying.frame.storage_on_heap and dying.stack.arena_window)
+    {
+        inline_calls.Machine.teardownSimpleEntry(vm.ctx, dying);
+    } else {
+        inline_calls.Machine.teardownInlineEntry(vm.ctx, dying);
+    }
     vm.ctx.call_depth -= 1;
     machine.depth -= 1;
     machine.switched = true;
