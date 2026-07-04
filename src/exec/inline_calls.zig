@@ -391,9 +391,26 @@ pub const Machine = struct {
         };
         const callable_slot = &region.stack.values[region.region_base];
         const args = region.stack.values[region.region_base + 1 ..][0..region.argc];
-        // On failure below nothing has been bound yet: pop + free the untouched
-        // caller region, matching the general path's `.full` cleanup.
-        errdefer cleanupStackSource(rt, source);
+        // Retreat the caller's operand region NOW, before the slab carve — qjs
+        // borrows the caller slots equally early (`arg_buf = argv`, 17841) and
+        // the caller sp is dead from here on. Doing it at the tail put the
+        // store at the end of the whole setup dependency chain (measured 18%
+        // of this function); only the slice len shrinks, so `callable_slot`
+        // and `args` still point at live capacity-region memory (the arena
+        // watermark is untouched — the new slab below cannot overlap them),
+        // and the values keep their refcounts (the cycle collector roots by
+        // rc, it never scans operand-stack slices).
+        region.stack.values = region.stack.values.ptr[0..region.region_base];
+        // On failure below nothing has been bound yet (`takeSourceSlot` runs
+        // in the frame literal, after the last failable point): restore the
+        // pre-truncation len — the region layout pins it at
+        // `region_base + callable(1) + argc` — so popOwnedStackRegion sees
+        // and frees the callable + args, matching the general path's `.full`
+        // cleanup.
+        errdefer {
+            region.stack.values = region.stack.values.ptr[0 .. region.region_base + 1 + region.argc];
+            cleanupStackSource(rt, source);
+        }
 
         // alloca_size (quickjs.c:17834-17836): locals | operand stack | open
         // var-ref slots. Args are borrowed in place (`arg_buf = argv`, 17841)
@@ -454,11 +471,6 @@ pub const Machine = struct {
             .storage_on_heap = storage_on_heap,
         };
         entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.stack_size, stack_window);
-
-        // Everything is bound: retreat the caller's operand region past the
-        // borrowed args (the callable slot was nulled by takeSourceSlot) —
-        // the old `.non_args` cleanup minus its two no-op frees.
-        region.stack.values = region.stack.values.ptr[0..region.region_base];
     }
 
     /// Optimized inline-call frame setup, factored out of `pushFrame` so the
