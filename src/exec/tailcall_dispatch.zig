@@ -360,17 +360,32 @@ noinline fn callSetupRecover(vm: *Vm, err: HostError) bool {
 /// no tail_request staging, no driver-side spill/reload detour. Expanded
 /// inline into the (Handler-signature) caller so the tail calls are legal.
 inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.InlineTarget, region_base: usize, argc: u16, layout: inline_calls.RegionLayout) Outcome {
-    vm.machine.pushCall(vm.global, vm.stack, target, region_base, argc, layout) catch |err| {
+    const entry = vm.machine.pushCall(vm.global, vm.stack, target, region_base, argc, layout) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
     if (vm.poller.active) {
         vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
     }
-    var pc2: [*]const u8 = undefined;
-    var sp2: [*]JSValue = undefined;
-    var vb2: [*]JSValue = undefined;
-    reloadTop(vm, &pc2, &sp2, &vb2);
+    // Enter the entry pushCall handed back instead of reloadTop's
+    // `machine.topEntry()` — Entry is 344B (non-power-of-two), so re-deriving
+    // the slot from the depth index costs a multiply (umaddl) on every call.
+    // qjs enters the callee via the alloca result pointer already in a
+    // register (quickjs.c:17846); this is the equivalent pointer pass-through.
+    // The manual expansion below is reloadTop's depth>0 arm verbatim.
+    vm.function = entry.function;
+    vm.frame = &entry.frame;
+    vm.stack = &entry.stack;
+    vm.catch_target = &entry.catch_target;
+    vm.code_base = vm.function.code.ptr;
+    vm.code_end = vm.function.code.ptr + vm.function.code.len;
+    vm.stack_base = vm.stack.values.ptr;
+    vm.arg_buf = vm.frame.args.ptr;
+    // Just pushed, so depth > 0; the generator stop-boundary guard is L0-only.
+    vm.local_fast_blocked = false;
+    const pc2: [*]const u8 = vm.code_base; // fresh frame: frame.pc == 0
+    const sp2: [*]JSValue = vm.stack.values.ptr + vm.stack.values.len;
+    const vb2: [*]JSValue = vm.frame.locals.ptr;
     return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
 }
 
@@ -1308,9 +1323,9 @@ pub fn run(vm: *Vm) HostError!JSValue {
                 // Read the request in place — no by-value copy of the target.
                 const req = &vm.tail_request;
                 if (vm.tail_is_reuse) {
-                    try vm.machine.tailCallReuse(vm.global, vm.stack, &req.target, req.region_base, req.argc, req.layout);
+                    _ = try vm.machine.tailCallReuse(vm.global, vm.stack, &req.target, req.region_base, req.argc, req.layout);
                 } else {
-                    vm.machine.pushCall(vm.global, vm.stack, &req.target, req.region_base, req.argc, req.layout) catch |err| {
+                    _ = vm.machine.pushCall(vm.global, vm.stack, &req.target, req.region_base, req.argc, req.layout) catch |err| {
                         // op.call's `catch |err|` leg (the old dispatchLoop's
                         // push-failure path): close a pending for-of iterator,
                         // then convert a setup failure (OOM-class) into a

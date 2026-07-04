@@ -302,7 +302,11 @@ pub const Machine = struct {
     /// calls (`pushCall`) and tail-call frame reuse (`tailCallReuse`).
     /// `target` rides by pointer end-to-end (qjs OP_call passes only the 16B
     /// func_obj; nothing struct-sized is copied per call).
-    fn pushFrame(self: *Machine, global: *core.Object, target: *const InlineTarget, source: ArgsSource) HostError!void {
+    /// Returns the new top entry so the caller can enter it directly — qjs's
+    /// callee frame address is the `alloca` result already in a register
+    /// (quickjs.c:17846); re-deriving it from the depth index (`topEntry()`)
+    /// would redo the chunk multiply for nothing.
+    fn pushFrame(self: *Machine, global: *core.Object, target: *const InlineTarget, source: ArgsSource) HostError!*Entry {
         try vm_call.enterInlineCallDepth(self.ctx, global);
         errdefer self.ctx.call_depth -= 1;
         const entry = try self.acquireSlot(global);
@@ -312,6 +316,7 @@ pub const Machine = struct {
             try setupInlineEntry(self.ctx, global, entry, target, source);
         self.depth += 1;
         self.switched = true;
+        return entry;
     }
 
     /// True when the frame takes the straight-line `setupSimpleInlineEntry` path:
@@ -871,7 +876,8 @@ pub const Machine = struct {
     /// Push an inline call frame for `target` whose operand region starts at
     /// `region_base` on `caller_stack`, shaped by `layout` (see `RegionLayout`).
     /// On success the region has been popped from the caller stack and the
-    /// machine's top entry is the new current execution level.
+    /// machine's top entry — returned, so hot callers skip the `topEntry()`
+    /// index arithmetic — is the new current execution level.
     pub fn pushCall(
         self: *Machine,
         global: *core.Object,
@@ -880,7 +886,7 @@ pub const Machine = struct {
         region_base: usize,
         argc: u16,
         layout: RegionLayout,
-    ) HostError!void {
+    ) HostError!*Entry {
         return self.pushFrame(global, target, switch (layout) {
             .plain, .method => .{ .stack_region = .{
                 .stack = caller_stack,
@@ -909,7 +915,7 @@ pub const Machine = struct {
         region_base: usize,
         argc: u16,
         layout: RegionLayout,
-    ) HostError!void {
+    ) HostError!*Entry {
         std.debug.assert(self.depth > 0);
         const has_receiver = layout == .method;
         const rt = self.ctx.runtime;
@@ -928,7 +934,7 @@ pub const Machine = struct {
         defer for (moved) |value| value.free(rt);
 
         self.popTeardown();
-        try self.pushFrame(global, target, .{ .moved = .{ .values = moved, .has_receiver = has_receiver } });
+        return self.pushFrame(global, target, .{ .moved = .{ .values = moved, .has_receiver = has_receiver } });
     }
 
     /// Tear down the top inline frame. Mirrors the defer chain of the
