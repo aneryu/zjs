@@ -951,7 +951,7 @@ pub const Machine = struct {
     /// `stack.arena_window`) — execution can grow the stack to the heap or
     /// materialize the cold box (arguments object), which needs the general
     /// teardown below.
-    pub fn teardownSimpleEntry(ctx: *core.JSContext, entry: *Entry) void {
+    pub inline fn teardownSimpleEntry(ctx: *core.JSContext, entry: *Entry) void {
         const rt = ctx.runtime;
         for (entry.stack.values) |v| v.free(rt);
         const frame = &entry.frame;
