@@ -1113,13 +1113,12 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     const cell = slot_ops.varRefSlotCellUnchecked(frame, idx);
                     const v = cell.pvalue.*;
                     if (v.isUninitialized()) break :get_var_ref_fast;
-                    // Import slots alias the exporting module's cell directly
-                    // (qjs js_inner_module_linking, quickjs.c:30765-30777), so
-                    // module reads no longer nest. A chained cell can still
-                    // enter a frame through the direct-eval name table's const
-                    // wrapper view (eval_ops.directEvalOuterVarRefView); the
-                    // slow path chases it (slotValueBorrow), route there.
-                    if (core.VarRef.fromValue(v) != null) break :get_var_ref_fast;
+                    // Guard #7 retired: cell values are never cells — import
+                    // slots alias the exporting module's cell directly (qjs
+                    // js_inner_module_linking, quickjs.c:30765-30777) and the
+                    // direct-eval const view now pvalue-aliases its target
+                    // (eval_ops.directEvalOuterVarRefView), so this is qjs's
+                    // bare *var_refs[idx]->pvalue (18627).
                     reg_ip += 2;
                     reg_sp[0] = v.dup();
                     reg_sp += 1;
@@ -1141,9 +1140,8 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     const cell = slot_ops.varRefSlotCellUnchecked(frame, idx);
                     const v = cell.pvalue.*;
                     if (v.isUninitialized()) break :get_var_ref_short_fast;
-                    // See get_var_ref above: a chained cell (direct-eval const
-                    // wrapper view) must be chased on the slow path.
-                    if (core.VarRef.fromValue(v) != null) break :get_var_ref_short_fast;
+                    // Guard #7 retired (see get_var_ref above): cell values
+                    // are never cells, bare *pvalue deref (qjs 18627).
                     reg_sp[0] = v.dup();
                     reg_sp += 1;
                     opc = reg_ip[0];
@@ -1175,9 +1173,10 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     if ((reg_sp - 1)[0].isObject()) break :put_var_ref_fast;
                     const cur = cell.pvalue.*;
                     if (opc == op.put_var_ref_check and cur.isUninitialized()) break :put_var_ref_fast;
-                    // A chained cell (direct-eval const wrapper view) must store through the
-                    // final cell, not clobber the inner cell pointer; defer to slow.
-                    if (core.VarRef.fromValue(cur) != null) break :put_var_ref_fast;
+                    // Guard #7 retired: cell values are never cells (the only
+                    // producer, the direct-eval const view, now pvalue-aliases
+                    // its target and is is_const-rejected above anyway) — bare
+                    // set_value(var_refs[idx]->pvalue, ...) like qjs 18638.
                     reg_ip += 2;
                     reg_sp -= 1;
                     cell.pvalue.* = reg_sp[0];
@@ -1205,9 +1204,8 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     // publishTopLevelFunctionVarRef runs; primitives stay inline.
                     if ((reg_sp - 1)[0].isObject()) break :put_var_ref_short_fast;
                     const cur = cell.pvalue.*;
-                    // A chained cell (direct-eval const wrapper view) must store through the
-                    // final cell, not clobber the inner cell pointer; defer to slow.
-                    if (core.VarRef.fromValue(cur) != null) break :put_var_ref_short_fast;
+                    // Guard #7 retired (see put_var_ref above): cell values
+                    // are never cells, bare set_value store (qjs 18638).
                     reg_sp -= 1;
                     cell.pvalue.* = reg_sp[0];
                     cur.free(ctx.runtime);
@@ -1720,7 +1718,9 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     const cell = slot_ops.varRefSlotCellUnchecked(frame, idx);
                     const v = cell.pvalue.*;
                     if (v.isUninitialized()) break :get_var_fast;
-                    if (core.VarRef.fromValue(v) != null) break :get_var_fast;
+                    // Guard #7 retired: cell values are never cells (direct-eval
+                    // const view pvalue-aliases its target) — bare *pvalue like
+                    // qjs OP_get_var (18461-18488).
                     // No global-lexical shadow check: definition-time cell surgery /
                     // parked-cell reuse (qjs js_closure_define_global_var,
                     // quickjs.c:17148-17205) makes an initialized cell authoritative
@@ -1775,7 +1775,8 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     if (cell.is_const or cell.is_function_name) break :put_var_fast;
                     const cur = cell.pvalue.*;
                     if (cur.isUninitialized()) break :put_var_fast;
-                    if (core.VarRef.fromValue(cur) != null) break :put_var_fast;
+                    // Guard #7 retired: cell values are never cells (see
+                    // get_var above; the const view is is_const-rejected).
                     // No global-lexical shadow check (see get_var above; qjs
                     // OP_put_var, quickjs.c:18490-18525).
                     if (vm_property_globals.parentEvalShadowsGlobalForIdx(ctx.runtime, frame, function, idx)) break :put_var_fast;

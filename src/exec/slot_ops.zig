@@ -394,13 +394,16 @@ pub fn slotValueDup(slot: core.JSValue) core.JSValue {
 }
 
 pub fn slotValueBorrow(slot: core.JSValue) callconv(.c) core.JSValue {
-    var current = slot;
-    var depth: usize = 0;
-    while (depth < 16) : (depth += 1) {
-        const cell = varRefCellFromValue(current) orelse return current;
-        current = cell.varRefValue();
+    // Terminal-state invariant: a cell's VALUE is never itself a cell — the
+    // last nesting producer (the direct-eval const view) now pvalue-aliases
+    // its target (eval_ops.directEvalOuterVarRefView) — so ONE unwrap reaches
+    // the plain value (qjs bare `*var_ref->pvalue`, quickjs.c:18627).
+    const cell = varRefCellFromValue(slot) orelse return slot;
+    const value = cell.varRefValue();
+    if (comptime builtin.mode == .Debug) {
+        std.debug.assert(varRefCellFromValue(value) == null);
     }
-    return current;
+    return value;
 }
 
 pub fn varRefSlotIsUninitialized(slot: core.JSValue) bool {

@@ -470,8 +470,9 @@ pub fn decodeLocalPut(code: []const u8, pc: usize) ?LocalPut {
 
 pub fn varRefReadableBorrowed(frame: *const frame_mod.Frame, idx: u16) ?core.JSValue {
     if (idx >= frame.var_refs.len) return null;
-    // Slot is a cell by type (phase D); slotValueBorrowed chases the
-    // direct-eval const-wrapper nesting (guard #7's remaining source).
+    // Slot is a cell by type (phase D); its value is plain by the terminal
+    // invariant (guard #7 retired — the direct-eval const view pvalue-aliases
+    // its target instead of nesting).
     const cell = slot_ops.varRefSlotCell(frame, idx);
     // Deleted binding = cell parked at UNINITIALIZED; the check below covers it.
     const value = slotValueBorrowed(cell.valueRef());
@@ -504,13 +505,9 @@ pub fn varRefStoreWritableForFastPath(
 }
 
 pub fn slotValueBorrowed(slot: core.JSValue) core.JSValue {
-    var current = slot;
-    var depth: usize = 0;
-    while (depth < 16) : (depth += 1) {
-        const cell = varRefCellFromValue(current) orelse return current;
-        current = cell.varRefValue();
-    }
-    return current;
+    // Terminal-state invariant: a cell's VALUE is never itself a cell (see
+    // slot_ops.slotValueBorrow) — one unwrap reaches the plain value.
+    return slot_ops.slotValueBorrow(slot);
 }
 
 pub const DecodedImmediateInt32 = struct {

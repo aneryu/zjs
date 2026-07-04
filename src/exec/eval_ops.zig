@@ -164,15 +164,20 @@ fn createDirectEvalOuterVarRefs(
 /// carries no const flag — a module import slot directly aliases the
 /// EXPORTING module's live cell (qjs js_inner_module_linking form,
 /// quickjs.c:30765-30777) and must not have importer-side const-ness stamped
-/// onto it — the eval table gets a const wrapper cell instead, so the runtime
+/// onto it — the eval table gets a const VIEW cell instead, so the runtime
 /// named-overlay write path (setNamedVarRefValue) still rejects
-/// `eval("imported = v")` with TypeError while reads chase through the
-/// wrapper (the eval name table stays JSValue-typed and chase-tolerant,
-/// VARREFS-SLOT-TYPING-BLUEPRINT §1.4 #42). qjs needs no runtime analog: its
-/// direct eval compiles against the enclosing closure vars, so such writes
-/// are rejected at eval-compile time (resolve_scope_var has_idx,
-/// quickjs.c:33301-33306) — zjs's name-table eval (Step 4 domain) enforces at
-/// the table boundary instead.
+/// `eval("imported = v")` with TypeError. The view is pvalue-ALIASING, not
+/// nesting: `value` retains the target cell (ownership + GC tracing) while
+/// `pvalue` aliases the target's live `pvalue` — the same aliasing mechanism
+/// qjs itself uses for cells that share a binding (module import cells alias
+/// the exporter's live cell, js_inner_module_linking quickjs.c:30765-30777),
+/// so a cell's VALUE is never itself a cell and every reader reaches the
+/// plain value with a bare `*pvalue` deref (qjs OP_get_var_ref,
+/// quickjs.c:18627). qjs needs no runtime analog of the view: its direct
+/// eval compiles against the enclosing closure vars, so such writes are
+/// rejected at eval-compile time (resolve_scope_var has_idx,
+/// quickjs.c:33301-33306) — zjs's name-table eval (Step 4 domain) enforces
+/// at the table boundary instead.
 fn directEvalOuterVarRefView(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
@@ -196,7 +201,16 @@ fn directEvalOuterVarRefView(
     if (!needs_const_view) return slot.dup();
     const target = slot.dup();
     errdefer target.free(ctx.runtime);
+    const inner = varRefCellFromValue(target) orelse unreachable; // needs_const_view proved the slot is a cell
+    // A const cv is lexical by construction (parser: const => is_lexical),
+    // and lexical captures always materialize CLOSED cells
+    // (ensureLocalVarRefCell is_lexical arm) — so `inner.pvalue` is stable
+    // for the cell's lifetime (never re-pointed by VarRef.close) and the
+    // alias below cannot dangle. The wrapper's `value` ref keeps `inner`
+    // (and thus the aliased storage) alive.
+    std.debug.assert(!inner.is_open);
     const wrapper = try core.VarRef.createClosed(ctx.runtime, target);
+    wrapper.pvalue = inner.pvalue;
     wrapper.varRefIsConstSlot().* = true;
     return wrapper.valueRef();
 }

@@ -5484,7 +5484,19 @@ pub const Object = struct {
             },
             .var_ref => {
                 const ref: *var_ref_mod.VarRef = @alignCast(@fieldParentPtr("header", header));
-                visitor.visitValue(ref.varRefValueSlot());
+                // Closed cell: the owned edge is `value` (qjs gc marks a
+                // detached var_ref's *pvalue, which IS &value there —
+                // gc_decref/mark var-ref arm). Not `pvalue.*` here: the
+                // direct-eval const VIEW (eval_ops.directEvalOuterVarRefView)
+                // aliases pvalue into its TARGET cell's storage while owning
+                // the target cell through `value` — tracing pvalue.* would
+                // count an edge the view holds no ref on (the target's plain
+                // value) and miss the owned target-cell ref.
+                if (ref.is_open) {
+                    visitor.visitValue(ref.varRefValueSlot());
+                } else {
+                    visitor.visitValue(&ref.value);
+                }
             },
             .shape => {
                 const shape_ref: *shape.Shape = @alignCast(@fieldParentPtr("header", header));

@@ -114,12 +114,13 @@ pub const VarRef = struct {
 
     pub fn setVarRefValue(self: *VarRef, rt: anytype, next_value: JSValue) !void {
         // Terminal-state invariant (VARREFS-SLOT-TYPING-BLUEPRINT risk 3): a
-        // cell's VALUE written through this API is never itself a cell — every
-        // write path unwraps an incoming cell value first (setSlotValueRefCounted
-        // / execPutVarRef / publishDirectEvalVarRefs). The only sanctioned
-        // nested cell is the direct-eval const-wrapper VIEW, which nests at
-        // CREATION (createClosed) and never through here. Debug-resident so a
-        // regression that would silently corrupt the read fast path traps.
+        // cell's VALUE is NEVER itself a cell — every write path unwraps an
+        // incoming cell value first (setSlotValueRefCounted / execPutVarRef /
+        // publishDirectEvalVarRefs), and the former nesting producer (the
+        // direct-eval const view) now pvalue-ALIASES its target cell instead
+        // (eval_ops.directEvalOuterVarRefView), so readers do qjs's bare
+        // `*var_ref->pvalue` (quickjs.c:18627) with no chase. Debug-resident
+        // so a regression that would silently corrupt the read fast path traps.
         if (comptime builtin.mode == .Debug) {
             std.debug.assert(fromValue(next_value) == null);
         }

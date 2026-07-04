@@ -770,7 +770,7 @@ pub fn opLoc(comptime kind: LocKind, comptime idx_src: LocIdx) Handler {
 /// Closure/global var-ref read (qjs OP_get_var_ref0..3 distinct labels). The `fib`
 /// recursive self-reference is get_var_ref0 — fib's per-call hottest non-call op.
 /// Uninitialized (TDZ or deleted binding parked at UNINITIALIZED, qjs
-/// remove_global_object_property) / chained-import-cell route to the cold resolver.
+/// remove_global_object_property) routes to the cold resolver.
 const VarRefIdx = enum { c0, c1, c2, c3, half };
 pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
     return struct {
@@ -797,12 +797,11 @@ pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
             const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
             const v = cell.pvalue.*;
             if (v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-            // Nested-cell check (guard #7) stays: the direct-eval const-wrapper
-            // view (eval_ops.directEvalOuterVarRefView) still parks a cell
-            // INSIDE a cell for eval-visible read-only captures; the cold
-            // resolver chases it (slotValueBorrow). qjs has no analog because
-            // its direct eval compiles against real closure vars (33301-33306).
-            if (core.VarRef.fromValue(v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            // Guard #7 (nested-cell check) retired: a cell's VALUE is never
+            // itself a cell — the direct-eval const view now pvalue-ALIASES
+            // its target (eval_ops.directEvalOuterVarRefView) instead of
+            // nesting it, so `*var_refs[idx]->pvalue` is the plain value,
+            // exactly qjs OP_get_var_ref (quickjs.c:18627-18636).
             sp[0] = v.dup();
             return cont(pc + advance, sp + 1, var_buf, vm);
         }
@@ -1280,8 +1279,7 @@ pub fn op_add_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
 // Global var read (2-byte var-ref index). qjs OP_get_var_ref-backed global cell read
 // — the per-call `fib` lookup in recursive code. Any dynamic-overlay / shadow /
 // uninitialized (TDZ or deleted binding parked at UNINITIALIZED, qjs
-// remove_global_object_property) / nested-var-ref condition falls back to the
-// cold getVar resolver.
+// remove_global_object_property) condition falls back to the cold getVar resolver.
 pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     if (vm_property_globals.hasDynamicGlobalOverlay(vm.frame, evLocalNames(vm), vm.frame.evalVarRefNames(), evWithObject(vm))) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
@@ -1295,9 +1293,9 @@ pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
     const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
     const v = cell.pvalue.*;
     if (v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    // Guard #7 stays: eval const-wrapper views still nest a cell inside a
-    // cell (see opGetVarRef).
-    if (core.VarRef.fromValue(v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // Guard #7 (nested-cell check) retired: cell values are never cells (the
+    // direct-eval const view pvalue-aliases its target, see opGetVarRef) —
+    // bare `*var_refs[idx]->pvalue` like qjs OP_get_var (18461-18488).
     // No global-lexical shadow check: a shadowing top-level let/const performs
     // definition-time cell surgery / parked-cell reuse (qjs
     // js_closure_define_global_var, quickjs.c:17148-17205), so an initialized

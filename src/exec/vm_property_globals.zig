@@ -212,7 +212,10 @@ pub noinline fn getVar(
                     // parked-cell reuse (qjs js_closure_define_global_var,
                     // quickjs.c:17148-17162 + 17186-17205), so no per-read lexical
                     // check is needed (qjs OP_get_var has none, 18461-18488).
-                    if (core.VarRef.fromValue(value) == null and !parent_eval_shadow) {
+                    // Guard #7 retired: cell values are never cells (the
+                    // direct-eval const view pvalue-aliases its target), so
+                    // `value` is the plain value already.
+                    if (!parent_eval_shadow) {
                         try stack.push(value);
                         return .done;
                     }
