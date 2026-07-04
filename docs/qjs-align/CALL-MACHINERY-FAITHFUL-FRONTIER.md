@@ -65,11 +65,32 @@
   var_refs slot contract: qjs's typed `JSVarRef **var_refs` folds delete / top-level-let
   shadowing / eval bindings / undeclared-global into cell state at closure-creation /
   mutation time, leaving ONE read-side check; zjs's untyped `[]JSValue` slots re-verify
-  all four per read (8 guards, 28 vs 4 cycles, 10.9% of fib). Fix path: 4 exec-layer
-  steps (delete→sentinel 9288; let-shadow cell surgery 17134; slot typing to []*VarRef
-  mirroring js_closure2 17262; eval-overlay→compile-time closure vars 33610 — the last
-  folds into the REMAINING-KNOWN direct-eval rework). ~1 agent-week, fib upside ~9%
-  (~15% of the remaining gap). get_var_ref/put_var/put_var_ref share the same cure.
+  all four per read (8 guards, 28 vs 4 cycles, 10.9% of fib).
+- **Slot contract — EXECUTED (workflows `wf_a735f162` + `wf_6595def0`, 6 commits):**
+  Step1 delete→UNINITIALIZED sentinel, is_deleted retired (`90dd5f3`, qjs 9288; also
+  structurally fixed a pre-existing revival-asymmetry bug). Step2 top-level-lexical
+  shadowing folds into the global cell at definition time, shadows guard retired
+  (`4cfeeb3`, qjs 17148 dual-channel: VARREF cell surgery + uninitialized_vars side
+  table; first version was gate-rejected 2/49775 — root cause was NOT the mechanism but
+  zjs's parser globalizing `arguments` in two corner shapes where qjs resolves it at
+  parse time (32970), fixed by restoring the frame-model rescue in the new uninit arm;
+  also fixed pre-existing fn-before-let permanent-TDZ bug via cells-before-values
+  ordering). Slot typing via blueprint (`f3c4821`) in 4 gated phases: A accessor funnel
+  (`52badfc`, 39 raw accesses → 7 inline accessors, objdump-verified zero codegen
+  change), B every slot source produces a real cell (`9eac2a6`, backfill/global_ref/
+  eval-boundary cellified + Debug asserts, 2930-file canary sweep), C module import
+  slots alias the exporter's cell directly (`71d6574`, qjs 30765, const wrapper
+  de-nested to cv.is_const), D atomic type flip `[]JSValue → []*VarRef` across the
+  whole coupling network — Frame/captures/generator payload/module/merged/FrameSlab
+  8B windows/GC visitor/teardown, 22 files in one commit (`2b360fb`); read-side
+  cell-kind + bounds + nested-cell guards retired (qjs OP_get_var_ref 18627 zero-check
+  deref is the landed end state). Remaining guards (dynamic-overlay + parentEvalShadows)
+  are Step-4 domain: eval-overlay→compile-time closure vars, folds into the
+  REMAINING-KNOWN direct-eval rework.
+  **Numbers: fib 902.5 → 866-870 insn/call, 356.7 → 350.4 ms = 2.45×; funcall tax
+  682 → 664, wall 1.88× — first time under 2×.** Every phase passed the full gate
+  (test262 0/49775 known 13 exact, force-GC smokes, parity suites three-way vs qjs,
+  unit-suite sequential FAIL-set identity).
 - **Gates:** test262 full 0/49775 (known 13, == main); force-GC build smoke green
   (closure/recursion/PTC/exception mix byte-identical to qjs); unit suite compared
   segment-by-segment against the unpatched-HEAD binary — identical failure sets. NOTE: the
