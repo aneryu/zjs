@@ -674,38 +674,112 @@ inline fn decodeLocalOperand(opc: u8, operand: [*]const u8) LocalOperand {
     };
 }
 
-/// Register-resident int32 binary (mirrors zjs_vm.dispatchFastBinaryInt32). `null`
-/// → not int32-representable / unsupported op → caller falls to the cold helper.
-inline fn fastBinaryInt32(binop: u8, a: i32, b: i32) ?JSValue {
-    return switch (binop) {
-        op.add => blk: {
-            const r = @addWithOverflow(a, b);
-            break :blk if (r[1] == 0) JSValue.int32(r[0]) else value_ops.numberToValue(@as(f64, @floatFromInt(a)) + @as(f64, @floatFromInt(b)));
-        },
-        op.sub => blk: {
-            const r = @subWithOverflow(a, b);
-            break :blk if (r[1] == 0) JSValue.int32(r[0]) else value_ops.numberToValue(@as(f64, @floatFromInt(a)) - @as(f64, @floatFromInt(b)));
-        },
-        op.mul => blk: {
-            if ((a == 0 and b < 0) or (b == 0 and a < 0)) break :blk JSValue.float64(-0.0);
-            const r = @mulWithOverflow(a, b);
-            break :blk if (r[1] == 0) JSValue.int32(r[0]) else value_ops.numberToValue(@as(f64, @floatFromInt(a)) * @as(f64, @floatFromInt(b)));
-        },
-        op.div => value_ops.numberToValue(@as(f64, @floatFromInt(a)) / @as(f64, @floatFromInt(b))),
-        op.mod => blk: {
-            if (b == 0) break :blk JSValue.float64(std.math.nan(f64));
-            if (b == -1) break :blk if (a < 0) JSValue.float64(-0.0) else JSValue.int32(0);
-            const r = @rem(a, b);
-            break :blk if (r == 0 and a < 0) JSValue.float64(-0.0) else JSValue.int32(r);
-        },
-        op.shl => JSValue.int32(a << @intCast(b & 31)),
-        op.sar => JSValue.int32(a >> @intCast(b & 31)),
-        op.shr => value_ops.numberToValue(@floatFromInt(@as(u32, @bitCast(a)) >> @intCast(b & 31))),
-        op.@"and" => JSValue.int32(a & b),
-        op.@"or" => JSValue.int32(a | b),
-        op.xor => JSValue.int32(a ^ b),
-        else => null,
-    };
+/// Per-op binary-arithmetic handlers — qjs gives every binary op its own CASE
+/// label with its own JS_VALUE_IS_BOTH_INT fast leg (quickjs.c:19696 OP_add,
+/// 19792 OP_sub, 19830 OP_mul, 19879 OP_div, 19895 OP_mod, 20113 OP_shl, 20133
+/// OP_shr, 20154 OP_sar, 20174 OP_and, 20192 OP_or, 20210 OP_xor); OP_pow has
+/// NO fast leg (19916 falls straight to js_binary_arith_slow — its table entry
+/// stays the cold h_binary). The previous single op_binary handler fused all
+/// eleven ops through one runtime `switch` returning `?JSValue`: LLVM gave each
+/// arm's optional result a distinct stack slot (0x1e0 frame, non-coalescing) and
+/// merged them through memory (`ldr q0/str q0` round-trip), and the float-mod
+/// arm's `bl fmod` forced lr + 4 callee-saved pairs onto every int add — 44
+/// insn/op against qjs's 22. Splitting per op (same knife as opLoc vs the fused
+/// op_loc) leaves each handler a pure-register straight line: both-int tag fold
+/// → int op (+overflow check) → 16-byte scalar store into sp[-2] → tail dispatch.
+///
+/// Guard misses take the INDIRECT `cold_table[pc[0]]` hop (op_if_false8 pattern:
+/// the runtime index defeats devirtualization so the cold publish+helper is not
+/// inlined back). Everything the qjs int leg does not fully resolve inline is
+/// routed there rather than re-implemented: int overflow on add/sub/mul and
+/// mul's -0 (qjs handles those in-CASE via __JS_NewFloat64, 19704/19800/19842/
+/// 19847 — the cold path's vm_arith.fastInt32Add/Sub/Mul computes bit-identical
+/// results), mod's `v1 < 0 || v2 <= 0` (qjs 19906 also goes slow), and every
+/// non-(both-int) pairing. qjs OP_add/sub/mul additionally inline a float leg
+/// (19710-19728) and OP_add a string leg (19729): those stay cold here — this
+/// knife is int-only (the reverted op_add_loc float-inline precedent), and the
+/// cold h_binary already carries the full float/string/object/BigInt protocol.
+const BinOp = enum { add, sub, mul, div, mod, shl, sar, shr, band, bor, bxor };
+
+pub fn opBinary(comptime kind: BinOp) Handler {
+    return struct {
+        fn hnd(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+            // qjs JS_VALUE_IS_BOTH_INT — one fused (tag1|tag2)==0 test.
+            const ints = JSValue.asInt32Pair((sp - 2)[0], (sp - 1)[0]) orelse
+                return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            const a = ints.lhs;
+            const b = ints.rhs;
+            // Each arm stores its own result into sp[-2] (qjs: every CASE writes
+            // sp[-2] then BREAKs) — a shared `result` merge point would make LLVM
+            // spill the 16-byte JSValue phi to a stack slot and reload it as a q
+            // register (the old fused handler's ldr q0/str q0 round-trip).
+            switch (kind) {
+                // qjs OP_add int leg (19701-19709): `r = (int64_t)v1 + v2; if
+                // ((int)r != r)` — the int64-widen + truncation check, NOT
+                // @addWithOverflow (whose result tuple makes LLVM materialize
+                // the overflow flag into a stack byte — a dead cset+strb and a
+                // 16B frame; same finding as vm_arith.fastInt32Add). The
+                // overflow (double) result comes from the cold side instead of
+                // an in-line scvtf so the hot line stays integer-register only.
+                .add => {
+                    const r: i64 = @as(i64, a) + b;
+                    const r32: i32 = @truncate(r);
+                    if (r32 != r) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    (sp - 2)[0] = JSValue.int32(r32);
+                },
+                // qjs OP_sub int leg (19797-19805), same int64-widen form.
+                .sub => {
+                    const r: i64 = @as(i64, a) - b;
+                    const r32: i32 = @truncate(r);
+                    if (r32 != r) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    (sp - 2)[0] = JSValue.int32(r32);
+                },
+                // qjs OP_mul int leg (19836-19852): 64-bit product truncation
+                // check, then the `r == 0 && (v1|v2) < 0` -0 test — both special
+                // cases route cold (fastInt32Mul reproduces qjs's mul_fp_res).
+                .mul => {
+                    const r: i64 = @as(i64, a) * b;
+                    const r32: i32 = @truncate(r);
+                    if (r32 != r) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    if (r == 0 and (a | b) < 0) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    (sp - 2)[0] = JSValue.int32(r32);
+                },
+                // qjs OP_div int leg (19884-19889): always the double quotient,
+                // through the canonicalizing JS_NewFloat64 (= numberToValue).
+                .div => (sp - 2)[0] = value_ops.numberToValue(@as(f64, @floatFromInt(a)) / @as(f64, @floatFromInt(b))),
+                // qjs OP_mod int leg (19900-19910): `v1 < 0 || v2 <= 0` goes
+                // slow (avoids v2==0, INT32_MIN%-1 and -0 results); the hot
+                // remainder is nonnegative % positive — plain int32.
+                .mod => {
+                    if (a < 0 or b <= 0) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    (sp - 2)[0] = JSValue.int32(@rem(a, b));
+                },
+                // qjs OP_shl int leg (20118-20124).
+                .shl => (sp - 2)[0] = JSValue.int32(a << @intCast(b & 31)),
+                // qjs OP_sar int leg (20159-20164).
+                .sar => (sp - 2)[0] = JSValue.int32(a >> @intCast(b & 31)),
+                // qjs OP_shr int leg (20138-20145): JS_NewUint32 — result keeps
+                // the int tag while it fits int32, else the exact double (bare
+                // __JS_NewFloat64; >INT32_MAX is never int32-canonicalizable, so
+                // this equals the old numberToValue bits without its scan). The
+                // legs store separately: an if/else JSValue *value* merge would
+                // reintroduce the stack-slot + q-register round-trip.
+                .shr => {
+                    const r = @as(u32, @bitCast(a)) >> @intCast(b & 31);
+                    if (r <= std.math.maxInt(i32)) {
+                        (sp - 2)[0] = JSValue.int32(@intCast(r));
+                    } else {
+                        (sp - 2)[0] = JSValue.float64(@floatFromInt(r));
+                    }
+                },
+                // qjs OP_and/OP_or/OP_xor int legs (20179-20182/20197-20200/20215-20218).
+                .band => (sp - 2)[0] = JSValue.int32(a & b),
+                .bor => (sp - 2)[0] = JSValue.int32(a | b),
+                .bxor => (sp - 2)[0] = JSValue.int32(a ^ b),
+            }
+            return cont(pc + 1, sp - 1, var_buf, vm);
+        }
+    }.hnd;
 }
 
 /// Direct dispatch to the handler for the opcode at `npc[0]`, SKIPPING `next`'s
@@ -977,40 +1051,6 @@ pub fn op_get_length(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
         value.free(vm.ctx.runtime);
         (sp - 1)[0] = len_val;
         return cont(pc + 1, sp, var_buf, vm);
-    }
-    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-}
-
-pub fn op_binary(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    const opc = pc[0];
-    if (opc != op.pow) {
-        if ((sp - 2)[0].asInt32()) |a| {
-            if ((sp - 1)[0].asInt32()) |b| {
-                if (fastBinaryInt32(opc, a, b)) |result| {
-                    (sp - 2)[0] = result;
-                    return cont(pc + 1, sp - 1, var_buf, vm);
-                }
-            }
-        }
-    }
-    switch (opc) {
-        op.add, op.sub, op.mul, op.div, op.mod => {
-            if ((sp - 2)[0].asNumber()) |fa| {
-                if ((sp - 1)[0].asNumber()) |fb| {
-                    const fout = switch (opc) {
-                        op.add => fa + fb,
-                        op.sub => fa - fb,
-                        op.mul => fa * fb,
-                        op.div => fa / fb,
-                        op.mod => @rem(fa, fb),
-                        else => unreachable,
-                    };
-                    (sp - 2)[0] = value_ops.numberToValue(fout);
-                    return cont(pc + 1, sp - 1, var_buf, vm);
-                }
-            }
-        },
-        else => {},
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }

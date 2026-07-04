@@ -806,7 +806,22 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
         .{ .o = op.set_loc, .h = td.opLoc(.set, .half) },
     }) |e| t[e.o] = e.h;
     inline for ([_]u8{ op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3 }) |o| t[o] = td.op_get_arg_short;
-    inline for ([_]u8{ op.add, op.sub, op.mul, op.div, op.mod, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor }) |o| t[o] = td.op_binary;
+    // Per-op binary handlers (qjs CASE(OP_add)/…/CASE(OP_xor) are distinct labels,
+    // quickjs.c:19696-20227; op.pow keeps the cold h_binary — qjs OP_pow:19916 has
+    // no fast leg and falls straight to js_binary_arith_slow).
+    inline for ([_]struct { o: u8, h: Handler }{
+        .{ .o = op.add, .h = td.opBinary(.add) },
+        .{ .o = op.sub, .h = td.opBinary(.sub) },
+        .{ .o = op.mul, .h = td.opBinary(.mul) },
+        .{ .o = op.div, .h = td.opBinary(.div) },
+        .{ .o = op.mod, .h = td.opBinary(.mod) },
+        .{ .o = op.shl, .h = td.opBinary(.shl) },
+        .{ .o = op.sar, .h = td.opBinary(.sar) },
+        .{ .o = op.shr, .h = td.opBinary(.shr) },
+        .{ .o = op.@"and", .h = td.opBinary(.band) },
+        .{ .o = op.@"or", .h = td.opBinary(.bor) },
+        .{ .o = op.xor, .h = td.opBinary(.bxor) },
+    }) |e| t[e.o] = e.h;
     inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = td.op_compare;
     inline for ([_]u8{ op.inc, op.dec }) |o| t[o] = td.op_inc_dec;
     t[op.dup] = td.op_dup;
