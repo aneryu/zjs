@@ -367,14 +367,21 @@ fn moduleImportCell(ctx: *core.JSContext, record: *const core.module.ModuleRecor
         if (entry.local_name != local_name) continue;
         if (entry.module_index >= ctx.runtime.modules.modules.len) return error.ModuleNotFound;
         const dep = &ctx.runtime.modules.modules[entry.module_index];
-        const target = if (entry.binding_name == atom_star)
+        // qjs js_inner_module_linking (quickjs.c:30765-30777): the import slot
+        // is a direct alias of the exporting module's cell (`var_ref =
+        // res_me->u.local.var_ref` / `p1->u.func.var_refs[var_idx]`, then
+        // `ref_count++`), never a wrapper cell. Read-only enforcement is the
+        // compile-time `cv.is_const` throw (imports register is_const at
+        // parse, add_import quickjs.c:31882; resolve emits OP_throw_error
+        // JS_THROW_VAR_RO, quickjs.c:33301-33306), so no per-slot const
+        // wrapper exists and the cell-in-cell chase this wrapper forced on
+        // every read is gone (VARREFS-SLOT-TYPING-BLUEPRINT phase C).
+        return if (entry.binding_name == atom_star)
             try moduleNamespaceCell(ctx, dep)
         else if (explicitStarNamespaceTarget(dep, entry.binding_name) != null)
             try moduleExplicitNamespaceExportCell(ctx, dep, entry.binding_name)
         else
             try moduleLocalCell(ctx, dep, entry.binding_name, true, false);
-        errdefer target.free(ctx.runtime);
-        return createConstVarRefCell(ctx, target);
     }
     return error.MissingExport;
 }
@@ -422,10 +429,6 @@ fn moduleNamespaceCell(ctx: *core.JSContext, record: *core.module.ModuleRecord) 
 
 fn createVarRefCell(ctx: *core.JSContext, value: core.JSValue) !core.JSValue {
     return createVarRefCellWithConst(ctx, value, false);
-}
-
-fn createConstVarRefCell(ctx: *core.JSContext, value: core.JSValue) !core.JSValue {
-    return createVarRefCellWithConst(ctx, value, true);
 }
 
 fn createVarRefCellWithConst(ctx: *core.JSContext, value: core.JSValue, is_const: bool) !core.JSValue {

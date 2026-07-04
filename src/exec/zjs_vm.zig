@@ -1112,10 +1112,12 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     const cell = slot_ops.varRefSlotCellUnchecked(frame, idx) orelse break :get_var_ref_fast;
                     const v = cell.pvalue.*;
                     if (v.isUninitialized()) break :get_var_ref_fast;
-                    // Imported module bindings wrap the exporting module's cell
-                    // in a const cell (createConstVarRefCell), so a single deref
-                    // yields another var_ref cell, not the value. The slow path
-                    // chases the chain (slotValueBorrow); route there.
+                    // Import slots alias the exporting module's cell directly
+                    // (qjs js_inner_module_linking, quickjs.c:30765-30777), so
+                    // module reads no longer nest. A chained cell can still
+                    // enter a frame through the direct-eval name table's const
+                    // wrapper view (eval_ops.directEvalOuterVarRefView); the
+                    // slow path chases it (slotValueBorrow), route there.
                     if (core.VarRef.fromValue(v) != null) break :get_var_ref_fast;
                     reg_ip += 2;
                     reg_sp[0] = v.dup();
@@ -1137,8 +1139,8 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     const cell = slot_ops.varRefSlotCellUnchecked(frame, idx) orelse break :get_var_ref_short_fast;
                     const v = cell.pvalue.*;
                     if (v.isUninitialized()) break :get_var_ref_short_fast;
-                    // See get_var_ref above: an imported binding's cell wraps the
-                    // exporting module's cell; route the chained deref to the slow path.
+                    // See get_var_ref above: a chained cell (direct-eval const
+                    // wrapper view) must be chased on the slow path.
                     if (core.VarRef.fromValue(v) != null) break :get_var_ref_short_fast;
                     reg_sp[0] = v.dup();
                     reg_sp += 1;
@@ -1170,7 +1172,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     if ((reg_sp - 1)[0].isObject()) break :put_var_ref_fast;
                     const cur = cell.pvalue.*;
                     if (opc == op.put_var_ref_check and cur.isUninitialized()) break :put_var_ref_fast;
-                    // A chained cell (imported binding) must store through the
+                    // A chained cell (direct-eval const wrapper view) must store through the
                     // final cell, not clobber the inner cell pointer; defer to slow.
                     if (core.VarRef.fromValue(cur) != null) break :put_var_ref_fast;
                     reg_ip += 2;
@@ -1199,7 +1201,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     // publishTopLevelFunctionVarRef runs; primitives stay inline.
                     if ((reg_sp - 1)[0].isObject()) break :put_var_ref_short_fast;
                     const cur = cell.pvalue.*;
-                    // A chained cell (imported binding) must store through the
+                    // A chained cell (direct-eval const wrapper view) must store through the
                     // final cell, not clobber the inner cell pointer; defer to slow.
                     if (core.VarRef.fromValue(cur) != null) break :put_var_ref_short_fast;
                     reg_sp -= 1;

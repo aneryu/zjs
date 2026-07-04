@@ -484,13 +484,25 @@ pub fn createBytecodeFunctionObject(
                 },
             };
             if (varRefCellFromValue(captures[idx])) |cell| {
-                const captured_const = cv.is_const or switch (cv.closure_type) {
-                    .local => cv.var_idx < caller_function.vardefs.len and caller_function.vardefs[cv.var_idx].is_const,
-                    .ref, .global_ref, .module_decl, .module_import => caller_function.varRefIsConstAt(cv.var_idx),
-                    else => false,
-                };
-                cell.varRefIsConstSlot().* = cell.varRefIsConstSlot().* or captured_const or cv.var_kind == .function_name;
-                cell.varRefIsFunctionNameSlot().* = cell.varRefIsFunctionNameSlot().* or cv.var_kind == .function_name;
+                // qjs js_closure2 mutates no flags on aliased cells: the
+                // REF/GLOBAL_REF arm is a pure pointer copy + rc++
+                // (quickjs.c:17322-17324) and the module arms alias link-time
+                // cells (quickjs.c:17301/17305) — a cell's const/function-name
+                // flags are fixed at its owning creation site (local capture
+                // here, frame build, module record, global define). Re-deriving
+                // them from the capturing side's cv would poison cells the
+                // capture merely borrows: a module import slot is the EXPORTING
+                // module's live cell (phase C de-nesting), and marking it const
+                // would make the exporter's own writes throw.
+                switch (cv.closure_type) {
+                    .ref, .global_ref, .module_decl, .module_import => {},
+                    .local, .arg, .global, .global_decl => {
+                        const captured_const = cv.is_const or (cv.closure_type == .local and
+                            cv.var_idx < caller_function.vardefs.len and caller_function.vardefs[cv.var_idx].is_const);
+                        cell.varRefIsConstSlot().* = cell.varRefIsConstSlot().* or captured_const or cv.var_kind == .function_name;
+                        cell.varRefIsFunctionNameSlot().* = cell.varRefIsFunctionNameSlot().* or cv.var_kind == .function_name;
+                    },
+                }
             }
             initialized += 1;
             rooted_captures = captures[0..initialized];
