@@ -840,10 +840,22 @@ pub const Machine = struct {
         entry: *Entry,
         captures: []const core.JSValue,
         eval_names: []const core.Atom,
-        eval_refs: []const core.JSValue,
+        eval_refs: []core.JSValue,
     ) HostError!void {
         const add_len = @min(eval_names.len, eval_refs.len);
         const old_len = entry.function.varRefNamesLen();
+        // Boundary cellify (VARREFS-SLOT-TYPING-BLUEPRINT §3 aux source): the
+        // merged view lands in frame.var_refs (initFrameVarRefs path-1 dup),
+        // so every element must be a live cell (qjs js_closure2 slots are
+        // always JSVarRef*, quickjs.c:17297-17331). In place: the function
+        // object's eval-local table keeps ownership — the raw value's ref
+        // moves into the fresh closed cell, the table slot now holds the cell.
+        for (eval_refs[0..add_len]) |*slot| {
+            if (core.VarRef.fromValue(slot.*) == null) {
+                const cell = try core.VarRef.createClosed(rt, slot.*);
+                slot.* = cell.valueRef();
+            }
+        }
         const names = try rt.memory.alloc(core.Atom, old_len + add_len);
         errdefer rt.memory.free(core.Atom, names);
         var i: usize = 0;

@@ -277,7 +277,7 @@ fn directEvalClosureBindingCapture(
     eval_local_names: []const core.Atom,
     eval_local_slots: []core.JSValue,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
+    eval_var_refs: []core.JSValue,
 ) !?core.JSValue {
     for (eval_local_names, 0..) |name, idx| {
         if (!atomIdOrNameEql(ctx.runtime, name, atom_id) or idx >= eval_local_slots.len) continue;
@@ -286,7 +286,15 @@ fn directEvalClosureBindingCapture(
     }
     for (eval_var_ref_names, 0..) |name, idx| {
         if (!atomIdOrNameEql(ctx.runtime, name, atom_id) or idx >= eval_var_refs.len) continue;
-        return eval_var_refs[idx].dup();
+        // Boundary cellify (VARREFS-SLOT-TYPING-BLUEPRINT §3 source ④): the
+        // eval name table may hold raw snapshots (e.g. appendFunctionEvalLocal
+        // `arguments`); the capture must hand the closure a real cell — qjs
+        // js_closure2 slots are always JSVarRef* (quickjs.c:17297-17331).
+        // `eval_var_refs` here is the rooted per-call copy
+        // (eval_var_refs_buffer.values), so the in-place rebind shares one
+        // cell across every capture of this createBytecodeFunctionObject
+        // call; the table itself stays []JSValue (Step 4 domain).
+        return try ensureVarRefCell(ctx, &eval_var_refs[idx]);
     }
     return null;
 }
@@ -456,7 +464,13 @@ pub fn createBytecodeFunctionObject(
                         break :blk captured;
                     }
                     if (cv.var_idx >= frame.var_refs.len) return error.InvalidBytecode;
-                    break :blk varRefSlot(frame, cv.var_idx).dup();
+                    // qjs JS_CLOSURE_GLOBAL_REF (quickjs.c:17322-17324): pure
+                    // pointer copy + rc++ of the parent slot's cell — never a
+                    // raw value passthrough (VARREFS-SLOT-TYPING-BLUEPRINT §3
+                    // source ③). Bridge cellify for a still-raw parent slot;
+                    // once the slot is typed (phase D) this collapses to
+                    // `cur_var_refs[cv->var_idx]` + ref_count++.
+                    break :blk try ensureVarRefSlotCell(ctx, frame, cv.var_idx);
                 },
                 .global, .global_decl => blk: {
                     if (try directEvalClosureBindingCapture(ctx, caller_function, cv.var_name, eval_local_names, eval_local_slots, capture_eval_var_ref_names, eval_var_refs)) |captured| {

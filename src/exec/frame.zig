@@ -837,8 +837,19 @@ pub fn ensureVarRefsCapacity(ctx: *core.JSContext, frame: *Frame, idx: usize) !v
     const next_len = idx + 1;
     const next = try ctx.runtime.memory.alloc(core.JSValue, next_len);
     errdefer ctx.runtime.memory.free(core.JSValue, next);
+    // Backfill slots are fresh closed cells holding undefined, not raw
+    // JSValues: the var_refs slot contract is "every slot is a live JSVarRef*"
+    // (qjs js_closure2 fills every slot with a real cell, quickjs.c:17297-17331;
+    // VARREFS-SLOT-TYPING-BLUEPRINT §3 source ①). This growth path is the
+    // zjs-only dynamic-eval remainder; qjs sizes var_refs once at 17277.
+    const old_len = frame.var_refs.len;
+    var filled: usize = old_len;
+    errdefer for (next[old_len..filled]) |value| value.free(ctx.runtime);
+    while (filled < next_len) : (filled += 1) {
+        const cell = try core.VarRef.createClosed(ctx.runtime, core.JSValue.undefinedValue());
+        next[filled] = cell.valueRef();
+    }
     for (frame.var_refs, 0..) |value, i| next[i] = value;
-    @memset(next[frame.var_refs.len..next_len], core.JSValue.undefinedValue());
     const old_storage = frame.storage_values;
     const old_storage_on_heap = frame.storage_on_heap;
     frame.var_refs = next;

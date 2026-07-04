@@ -1,5 +1,7 @@
 //! Local, argument, var-ref and global-lexical slot operations shared between the VM and call runtime.
 
+const std = @import("std");
+const builtin = @import("builtin");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
@@ -548,16 +550,31 @@ pub fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
 // Every accessor is `inline`: codegen is byte-identical to the bare access it
 // replaces (hot handlers audited via objdump, see blueprint §5 stage A).
 
+/// Phase-B slot-contract canary (VARREFS-SLOT-TYPING-BLUEPRINT §5 stage B):
+/// after the non-cell sources ①③④⑤+merge are gone, every var_refs slot is a
+/// live cell (qjs `JSVarRef **var_refs` contract, js_closure2
+/// quickjs.c:17297-17331). Debug builds trap any escaped raw slot; ReleaseFast
+/// compiles to nothing. Removed by the phase-D type flip.
+inline fn debugAssertSlotIsCell(slot: core.JSValue) void {
+    if (comptime builtin.mode == .Debug) {
+        std.debug.assert(varRefCellFromValue(slot) != null);
+    }
+}
+
 /// Bounds-checked element read: `frame.var_refs[idx]`.
 pub inline fn varRefSlot(frame: *const frame_mod.Frame, idx: usize) core.JSValue {
-    return frame.var_refs[idx];
+    const slot = frame.var_refs[idx];
+    debugAssertSlotIsCell(slot);
+    return slot;
 }
 
 /// Unchecked element read: `frame.var_refs.ptr[idx]`, for hot handlers that
 /// already tested `idx < frame.var_refs.len` (qjs OP_get_var_ref reads
 /// `var_refs[idx]` with no bounds check at all, quickjs.c:18627).
 pub inline fn varRefSlotUnchecked(frame: *const frame_mod.Frame, idx: usize) core.JSValue {
-    return frame.var_refs.ptr[idx];
+    const slot = frame.var_refs.ptr[idx];
+    debugAssertSlotIsCell(slot);
+    return slot;
 }
 
 /// Bounds-checked slot -> cell probe (guard #4 of GET-VAR-FIB-RECON §2.3;
@@ -583,12 +600,14 @@ inline fn varRefSlotPtr(frame: *frame_mod.Frame, idx: usize) *core.JSValue {
 /// `defineGlobalDecl*Cell`, module prologue fill): the caller owns the
 /// refcount choreography for both the incoming slot and the displaced one.
 pub inline fn storeVarRefSlot(frame: *frame_mod.Frame, idx: usize, slot: core.JSValue) void {
+    debugAssertSlotIsCell(slot);
     frame.var_refs[idx] = slot;
 }
 
 /// Write-through store: `setSlotValue` on the element (writes into the cell
 /// when the slot is a cell, replaces the raw element otherwise).
 pub inline fn setVarRefSlotValue(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: usize, value: core.JSValue) !void {
+    debugAssertSlotIsCell(frame.var_refs[idx]);
     return setSlotValue(ctx, varRefSlotPtr(frame, idx), value);
 }
 
