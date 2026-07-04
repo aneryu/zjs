@@ -425,6 +425,33 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
 }
 
 fn op_return(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    // qjs OP_return (quickjs.c:18266) is check-free and infallible: `ret_val =
+    // *--sp; goto done;` — ret_val is a plain local carried in registers to the
+    // done: epilogue. Derived-ctor return legality is a SEPARATE opcode there
+    // (OP_check_ctor_return, quickjs.c:18273, emitted at parse time 28459) and
+    // the depth-0/generator hand-off lives at the JS_CallInternal boundary —
+    // neither is ever inline in OP_return's value dataflow. zjs's compiler does
+    // not emit a check-ctor op, so the flag test must remain, but only as a
+    // branch off to the cold sibling handler below: the hot leg carries the
+    // value as a plain JSValue (no `!JSValue` error union, no memory phi)
+    // straight into popAndResume.
+    if (vm.frame.function.flags.is_derived_class_constructor or vm.machine.depth == 0)
+        return @call(.always_tail, op_return_cold, .{ pc, sp, vb, vm });
+    vm.publish(pc, sp);
+    // returnTop's value grab minus the generator/ctor legs: dup the stack top
+    // (the raw slot is freed by the frame teardown inside popAndResume).
+    const value = vm.stack.peek() orelse JSValue.undefinedValue();
+    return popAndResume(vm, value);
+}
+/// Cold sibling of op_return — the depth-0 exit (generator done-slot + driver
+/// hand-off) and the derived-ctor return-legality machinery (qjs
+/// OP_check_ctor_return, quickjs.c:18273; a flag-guarded cold handler here
+/// because zjs has no separate opcode). Reached by tail call. (No `noinline`
+/// keyword — it would change the fn type and break the always_tail match.
+/// LLVM inlines it back as the flag-taken branch, which is fine: disassembly
+/// shows the error-union spill slots confined to the cold branch while the
+/// hot leg's value rides x8/x9 into the teardown with no strh/q0 round-trip.)
+fn op_return_cold(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     _ = vb;
     vm.publish(pc, sp);
     const depth0 = vm.machine.depth == 0;
@@ -436,6 +463,15 @@ fn op_return(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(
     return popAndResume(vm, value);
 }
 fn op_return_undef(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    // Same split as op_return — qjs OP_return_undef (quickjs.c:18270) is
+    // `ret_val = JS_UNDEFINED; goto done;`, check-free and infallible.
+    if (vm.frame.function.flags.is_derived_class_constructor or vm.machine.depth == 0)
+        return @call(.always_tail, op_return_undef_cold, .{ pc, sp, vb, vm });
+    vm.publish(pc, sp);
+    return popAndResume(vm, JSValue.undefinedValue());
+}
+/// Cold sibling of op_return_undef (see op_return_cold).
+fn op_return_undef_cold(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     _ = vb;
     vm.publish(pc, sp);
     const depth0 = vm.machine.depth == 0;
