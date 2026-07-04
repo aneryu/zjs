@@ -305,19 +305,24 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.add_loc] = td.op_add_loc_cold;
 
     // --- control ---
+    // qjs polls interrupts on every OP_goto/goto16/goto8 (quickjs.c:18822-18836)
+    // — the loop back edge; a pure loop otherwise never reaches a poll point.
     t[op.goto] = h(struct {
         fn b(vm: *Vm) HostError!void {
             control_vm.jump32(vm.function, vm.frame);
+            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
         }
     }.b);
     t[op.goto16] = h(struct {
         fn b(vm: *Vm) HostError!void {
             control_vm.jump16(vm.function, vm.frame);
+            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
         }
     }.b);
     t[op.goto8] = h(struct {
         fn b(vm: *Vm) HostError!void {
             control_vm.jump8(vm.function, vm.frame);
+            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
         }
     }.b);
     t[op.if_false] = h(struct {

@@ -114,6 +114,12 @@ pub const Vm = struct {
     /// catch handler set in one frame doesn't leak into another.
     catch_target: *?usize,
 
+    /// Interrupt poll state — qjs polls on every OP_goto (quickjs.c:18822,
+    /// `js_poll_interrupts`) and at JS_CallInternal entry (17787). Gated on an
+    /// installed handler (`poller.active`) like the old dispatchLoop leg: with
+    /// none installed the jump handlers stay poll-free.
+    poller: control_vm.InterruptPoller,
+
     /// The L0 (depth-0) frame, captured at entry. When a return pops the last inline
     /// frame (depth back to 0), reloadTop restores THESE (topEntry() is invalid at
     /// depth 0 — the L0 frame is loop_state.frame_storage, not a Machine Entry).
@@ -972,6 +978,14 @@ inline fn jump8Target(pc: [*]const u8, vm: *Vm) [*]const u8 {
     return vm.code_base + @as(usize, @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff)));
 }
 pub fn op_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    // qjs CASE(OP_goto) polls interrupts on every unconditional jump — the
+    // loop back edge (quickjs.c:18822-18826). Without this, a pure loop never
+    // reaches a poll point and an installed interrupt handler can't abort it.
+    if (vm.poller.active) {
+        @branchHint(.unlikely);
+        vm.publish(pc, sp);
+        vm.poller.poll(vm.ctx.runtime) catch |e| return vm.fail(e);
+    }
     return @call(.always_tail, next, .{ jump8Target(pc, vm), sp, var_buf, vm });
 }
 // The boolean fast path (a comparison result — the hot loop condition) inlines; a
@@ -1211,11 +1225,24 @@ pub fn run(vm: *Vm) HostError!JSValue {
                 if (vm.tail_is_reuse) {
                     try vm.machine.tailCallReuse(vm.global, vm.stack, &req.target, req.region_base, req.argc, req.layout);
                 } else {
-                    // TODO(debug-phase): pushCall-setup failure must run
-                    // closeStackTopForOfIteratorForPendingError + handleCatchableRuntimeError
-                    // (op.call's `catch |err|` leg) before re-dispatching.
-                    try vm.machine.pushCall(vm.global, vm.stack, &req.target, req.region_base, req.argc, req.layout);
+                    vm.machine.pushCall(vm.global, vm.stack, &req.target, req.region_base, req.argc, req.layout) catch |err| {
+                        // op.call's `catch |err|` leg (the old dispatchLoop's
+                        // push-failure path): close a pending for-of iterator,
+                        // then convert a setup failure (OOM-class) into a
+                        // JS-catchable error in the CALLER frame — qjs delivers
+                        // the preallocated InternalError to the frame's catch.
+                        // Only an uncaught error propagates out of the loop.
+                        try forof_ops.closeStackTopForOfIteratorForPendingError(vm.ctx, vm.output, vm.global, vm.stack);
+                        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err)) {
+                            reloadTop(vm, &pc, &sp, &var_buf);
+                            continue;
+                        }
+                        return err;
+                    };
                 }
+                // qjs polls at call entry (js_poll_interrupts, quickjs.c:17787),
+                // so unbounded recursion is also abortable.
+                if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
                 reloadTop(vm, &pc, &sp, &var_buf);
             },
             .suspended => return vm.return_value,

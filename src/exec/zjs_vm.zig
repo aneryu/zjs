@@ -710,6 +710,7 @@ fn runTC(loop_state: *LoopState) HostError!core.JSValue {
         .l0_frame = loop_state.frame_storage,
         .l0_stack = loop_state.entry_stack,
         .l0_catch_target = loop_state.catch_target_storage,
+        .poller = .init(loop_state.ctx.runtime),
         .l0 = .{
             .is_eval_code = loop_state.entry_is_eval_code,
             .eval_local_names = loop_state.entry_eval_local_names,
