@@ -117,6 +117,24 @@
   precomputable per-FB like simple_inline_eligible), op_binary's 0x1e0
   frame-open/close (the frame=sum-of-arm-spills problem, instance-level),
   and get_var's remaining spill prologue (Step-4 direct-eval domain).
+- **Fifth tranche (workflow `wf_4bc6919f`, ledger-targeted 5 knives, 3 landed):
+  fib 840 → 727 insn/call, 330 → 289 ms = 2.02×; funcall tax 638 → 521,
+  215 → 195 ms = 1.62×.** (K3, `c4ee2cd`) resolveInlineTarget tightened to
+  qjs prologue form: recursive `bl objectRealmGlobal` → single
+  `ldr [payload,#48]` (`ctx = b->realm`, 17871), cachedBytecodeView split
+  inline-hot/noinline-cold, arrow legs outlined — −56/call, the round's
+  biggest. (K4, `2d47467`) op_binary de-framed into per-op `opBinary(kind)`
+  generators: int leg is int64-widen+truncate (19701, NOT @addWithOverflow),
+  each arm writes sp[-2] directly (no 16B phi spill), float/overflow fall
+  indirect to cold — killed the 0x1e0 frame + fmod bl + double-dispatch,
+  −36.5/call. (K5, `eab00dd`) op_compare split into per-op `opCompare(opc)`:
+  comptime predicate folds the cmp+cset+csel select chain to one cmp+cset
+  (qjs OP_CMP 20230), −13/call fib, −30 funcall tax. **DEFERRED (faithful but
+  flat on fib/funcall — not on these benchmarks' hot path, kept for
+  native-entry/eval-heavy code): K1 frameOpenVarRefStorageCount per-FB
+  precompute (setup-path flag already cheap here), K2 native depth-check
+  shape (`max_native_call_depth` field — the recompute was on the VM-entry
+  path, not the inline path fib/funcall exercise).**
 - **Gates:** test262 full 0/49775 (known 13, == main); force-GC build smoke green
   (closure/recursion/PTC/exception mix byte-identical to qjs); unit suite compared
   segment-by-segment against the unpatched-HEAD binary — identical failure sets. NOTE: the
