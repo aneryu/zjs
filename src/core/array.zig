@@ -13,13 +13,18 @@ pub fn isArrayIndexName(bytes: []const u8) bool {
 }
 
 pub fn arrayIndexFromAtom(atoms: anytype, atom_id: atom.Atom) ?u32 {
+    // Mirrors QuickJS JS_AtomIsArrayIndex (quickjs.c:3634): tagged integer
+    // atoms are array indexes directly. zjs internString tags every
+    // array-index-form decimal string <= atom.max_int_atom, so a non-tagged
+    // atom shorter than the 10-digit high-index window cannot be an array index.
     if (atom.isTaggedInt(atom_id)) {
         const index = atom.atomToUInt32(atom_id);
         if (index <= max_array_index) return index;
         return null;
     }
-    if (atoms.kind(atom_id) != .string) return null;
     const name = atoms.name(atom_id) orelse return null;
+    if (name.len < 10) return null;
+    if (atoms.kind(atom_id) != .string) return null;
     return arrayIndexFromName(name);
 }
 
