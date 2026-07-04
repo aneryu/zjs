@@ -32,6 +32,21 @@
   eval instead of delivering the preallocated InternalError to the caller's catch.
 - **Numbers (fib(30)×3, X925 pinned):** 1390 → **988 insn/call**, 4.15× → **3.02×** qjs wall.
   funcall pure per-call tax (differential vs inlined body): 1169 → **774** insn (qjs 249).
+- **Second tranche (same day, `ea1760e` + `a6c25bb` + `4ae9a79`) — in-handler call/return:**
+  op_call/op_call_method fast hits complete the whole call inside the handler
+  (pushAndEnter: push + poll + reload + tail-dispatch into the callee, qjs CASE(OP_call)
+  18182-18202) and op_return/op_return_undef at depth>0 run a fused teardown + result
+  delivery + caller resume (popAndResume) — the driver round-trip (Outcome encode, 88B
+  tail_request staging, Vm spill/reload; `runWithArgsState` 19% self) is gone from the hot
+  path. The dying simple frame tears down via straight-line `teardownSimpleEntry` (qjs done:
+  epilogue 20698-20710; `Entry.fast_teardown` static gate + dynamic escapes for cold-box /
+  heap-storage / heap-stack, any escape → full teardown), inlined so the return value stays
+  in a register. **fib 988 → 920 insn/call, 3.02× → 2.64× wall — past the 2.66× pre-
+  struct-align best. funcall tax 774 → 704 (wall 2.06×).** Disproven en route: manually
+  inlining pushCall/pushFrame and a depth>0-specialized reloadTop are both no-ops (LLVM
+  already has them; the vm-field stores are the irreducible tail-call-architecture cost —
+  the next structural lever there is widening the handler signature to carry
+  code_base/arg_buf in registers, a ~250-handler mechanical rewrite, unproven).
 - **Gates:** test262 full 0/49775 (known 13, == main); force-GC build smoke green
   (closure/recursion/PTC/exception mix byte-identical to qjs); unit suite compared
   segment-by-segment against the unpatched-HEAD binary — identical failure sets. NOTE: the
