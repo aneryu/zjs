@@ -3924,6 +3924,16 @@ pub fn getPrototypePropertyValue(
         if (prototype.proxyTarget() != null) {
             return try getProxyProperty(ctx, output, global, receiver, prototype, atom_id, caller_function, caller_frame);
         }
+        // qjs JS_GetPropertyInternal proto walk: a JS_PROP_NORMAL hit answers
+        // with a plain dup — no Descriptor materialization. The synthesized
+        // own properties (module-namespace bindings, array length, regexp
+        // lastIndex, dense elements) never live in the shape table, so a
+        // shape data hit here cannot shadow getOwnProperty's synthesis
+        // branches; accessor/auto-init/miss fall through to the descriptor
+        // path below unchanged.
+        if (!prototype.hasExoticMethods()) {
+            if (prototype.getOwnDataPropertyValue(atom_id)) |own_data| return own_data;
+        }
         if (prototype.getOwnProperty(ctx.runtime, atom_id)) |desc| {
             defer desc.destroy(ctx.runtime);
             switch (desc.kind) {
