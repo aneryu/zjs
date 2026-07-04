@@ -163,38 +163,40 @@ pub inline fn initFrameVarRefs(
     global: *core.Object,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
-    var_refs: []const core.JSValue,
+    var_refs: []const *core.VarRef,
     use_inline_storage: bool,
     windows: frame_mod.FrameStorageWindows,
 ) !void {
     if (var_refs.len > 0) {
-        const owned_refs = if (windows.var_refs) |values| blk: {
-            std.debug.assert(values.len == var_refs.len);
-            break :blk values;
+        const owned_refs = if (windows.var_refs) |cells| blk: {
+            std.debug.assert(cells.len == var_refs.len);
+            break :blk cells;
         } else blk: {
             if (use_inline_storage) {
-                if (ctx.runtime.vm_stack.carve(&ctx.runtime.memory, var_refs.len)) |window| break :blk window;
+                if (ctx.runtime.vm_stack.carveTyped(&ctx.runtime.memory, *core.VarRef, var_refs.len)) |window| break :blk window;
             }
-            break :blk try frame.allocOwnedStorage(&ctx.runtime.memory, var_refs.len);
+            break :blk try allocFrameVarRefWindow(ctx, frame, var_refs.len);
         };
-        for (var_refs, 0..) |value, idx| owned_refs[idx] = value.dup();
+        // Inherit: pointer copy + rc++ per slot (qjs JS_CLOSURE_REF form,
+        // quickjs.c:17322-17324).
+        for (var_refs, 0..) |cell, idx| owned_refs[idx] = cell.dupCell();
         frame.var_refs = owned_refs;
         return;
     }
 
     if (function.closure_var.len > 0) {
-        const owned_refs = if (windows.var_refs) |values| blk: {
-            std.debug.assert(values.len == function.closure_var.len);
-            break :blk values;
+        const owned_refs = if (windows.var_refs) |cells| blk: {
+            std.debug.assert(cells.len == function.closure_var.len);
+            break :blk cells;
         } else blk: {
             if (use_inline_storage) {
-                if (ctx.runtime.vm_stack.carve(&ctx.runtime.memory, function.closure_var.len)) |window| break :blk window;
+                if (ctx.runtime.vm_stack.carveTyped(&ctx.runtime.memory, *core.VarRef, function.closure_var.len)) |window| break :blk window;
             }
-            break :blk try frame.allocOwnedStorage(&ctx.runtime.memory, function.closure_var.len);
+            break :blk try allocFrameVarRefWindow(ctx, frame, function.closure_var.len);
         };
         var initialized: usize = 0;
         errdefer {
-            for (owned_refs[0..initialized]) |*val| val.free(ctx.runtime);
+            for (owned_refs[0..initialized]) |cell| cell.freeCell(ctx.runtime);
         }
         for (function.closure_var, 0..) |cv, idx| {
             owned_refs[idx] = try initialClosureVarRef(ctx, global, cv);
@@ -205,18 +207,18 @@ pub inline fn initFrameVarRefs(
     }
 
     if (function.varRefNamesLen() == 0) return;
-    const owned_refs = if (windows.var_refs) |values| blk: {
-        std.debug.assert(values.len == function.varRefNamesLen());
-        break :blk values;
+    const owned_refs = if (windows.var_refs) |cells| blk: {
+        std.debug.assert(cells.len == function.varRefNamesLen());
+        break :blk cells;
     } else blk: {
         if (use_inline_storage) {
-            if (ctx.runtime.vm_stack.carve(&ctx.runtime.memory, function.varRefNamesLen())) |window| break :blk window;
+            if (ctx.runtime.vm_stack.carveTyped(&ctx.runtime.memory, *core.VarRef, function.varRefNamesLen())) |window| break :blk window;
         }
-        break :blk try frame.allocOwnedStorage(&ctx.runtime.memory, function.varRefNamesLen());
+        break :blk try allocFrameVarRefWindow(ctx, frame, function.varRefNamesLen());
     };
     var initialized: usize = 0;
     errdefer {
-        for (owned_refs[0..initialized]) |*val| val.free(ctx.runtime);
+        for (owned_refs[0..initialized]) |cell| cell.freeCell(ctx.runtime);
     }
     var idx: usize = 0;
     while (idx < function.varRefNamesLen()) : (idx += 1) {
@@ -242,32 +244,49 @@ pub inline fn initFrameVarRefs(
             const cell = try core.VarRef.createClosed(ctx.runtime, core.JSValue.uninitialized());
             cell.varRefIsConstSlot().* = is_const;
             cell.is_lexical = true;
-            owned_refs[idx] = cell.valueRef();
+            owned_refs[idx] = cell;
         } else if (call_runtime.globalLexicalCell(ctx, var_name)) |cell_value| {
-            owned_refs[idx] = cell_value;
+            // Owned ref to the shared ctx.lexicals cell (already a cell by
+            // construction; the JSValue handle transfers its refcount).
+            owned_refs[idx] = core.VarRef.fromValue(cell_value) orelse unreachable;
         } else {
             const val = call_runtime.globalLexicalValueForGlobal(ctx, global, var_name) orelse global.getProperty(var_name);
-            const cell = try core.VarRef.createClosed(ctx.runtime, val);
-            owned_refs[idx] = cell.valueRef();
+            owned_refs[idx] = try core.VarRef.createClosed(ctx.runtime, val);
         }
         initialized += 1;
     }
     frame.var_refs = owned_refs;
 }
 
-fn initialClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode.function_def.ClosureVar) !core.JSValue {
+/// Heap fallback for an owned frame var_refs array: a []JSValue storage
+/// allocation windowed as pointer slots, so the uniform storage_values
+/// teardown owns the memory (same layout the FrameSlab carve produces).
+fn allocFrameVarRefWindow(ctx: *core.JSContext, frame: *frame_mod.Frame, count: usize) ![]*core.VarRef {
+    const ptr_bytes = try std.math.mul(usize, @sizeOf(*core.VarRef), count);
+    const value_slots = try std.math.divCeil(usize, ptr_bytes, @sizeOf(core.JSValue));
+    const values = try frame.allocOwnedStorage(&ctx.runtime.memory, value_slots);
+    return std.mem.bytesAsSlice(*core.VarRef, std.mem.sliceAsBytes(values)[0..ptr_bytes]);
+}
+
+fn initialClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode.function_def.ClosureVar) !*core.VarRef {
     switch (cv.closure_type) {
         .global, .global_ref, .global_decl => {
             // qjs js_closure_global_var (quickjs.c:17228-17260): lexical env
             // VARREF -> global object VARREF property -> shared side-table
             // uninitialized cell, regardless of the cv's own lexical bit.
-            if (call_runtime.globalLexicalCell(ctx, cv.var_name)) |cell_value| return cell_value;
-            if (call_runtime.globalObjectVarRefCell(global, cv.var_name)) |cell_value| return cell_value;
-            const cell_value = try call_runtime.globalObjectGetUninitializedVar(ctx, global, cv.var_name);
-            if (cv.var_kind == .function_name) {
-                if (core.VarRef.fromValue(cell_value)) |cell| cell.varRefIsFunctionNameSlot().* = true;
+            // The helpers hand back owned refs to cells by construction.
+            if (call_runtime.globalLexicalCell(ctx, cv.var_name)) |cell_value| {
+                return core.VarRef.fromValue(cell_value) orelse unreachable;
             }
-            return cell_value;
+            if (call_runtime.globalObjectVarRefCell(global, cv.var_name)) |cell_value| {
+                return core.VarRef.fromValue(cell_value) orelse unreachable;
+            }
+            const cell_value = try call_runtime.globalObjectGetUninitializedVar(ctx, global, cv.var_name);
+            const cell = core.VarRef.fromValue(cell_value) orelse unreachable;
+            if (cv.var_kind == .function_name) {
+                cell.varRefIsFunctionNameSlot().* = true;
+            }
+            return cell;
         },
         else => {},
     }
@@ -280,7 +299,7 @@ fn initialClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode
     cell.varRefIsConstSlot().* = cv.is_const;
     cell.is_lexical = cv.is_lexical;
     cell.varRefIsFunctionNameSlot().* = cv.var_kind == .function_name;
-    return cell.valueRef();
+    return cell;
 }
 
 pub noinline fn closure(

@@ -747,10 +747,22 @@ pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
                 .c0, .c1, .c2, .c3 => 1,
                 .half => 3,
             };
+            // Bounds check stays: zjs still grows var_refs dynamically for
+            // eval-introduced refs (ensureVarRefsCapacity; qjs sizes once at
+            // 17277 and reads unchecked, 18627) — deletion is phase-E gated
+            // on construction-fixed length.
             if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-            const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx) orelse return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            // Slot is a cell by type (`[]*core.VarRef`): the pre-typed
+            // "is this slot a cell" header load (guard #4) is deleted —
+            // qjs OP_get_var_ref is a bare `*var_refs[idx]->pvalue` (18627).
+            const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
             const v = cell.pvalue.*;
             if (v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            // Nested-cell check (guard #7) stays: the direct-eval const-wrapper
+            // view (eval_ops.directEvalOuterVarRefView) still parks a cell
+            // INSIDE a cell for eval-visible read-only captures; the cold
+            // resolver chases it (slotValueBorrow). qjs has no analog because
+            // its direct eval compiles against real closure vars (33301-33306).
             if (core.VarRef.fromValue(v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             sp[0] = v.dup();
             return cont(pc + advance, sp + 1, var_buf, vm);
@@ -1235,10 +1247,17 @@ pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     if (vm_property_globals.hasDynamicGlobalOverlay(vm.frame, evLocalNames(vm), vm.frame.evalVarRefNames(), evWithObject(vm))) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
+    // Bounds check stays (dynamic eval growth; phase-E deletion is gated on
+    // construction-fixed length — qjs reads unchecked, 18461).
     if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx) orelse return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // Slot is a cell by type: guard #4 (slot header load) deleted — qjs
+    // OP_get_var is `*var_refs[idx]->pvalue` + one uninitialized check
+    // (18461-18488).
+    const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
     const v = cell.pvalue.*;
     if (v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // Guard #7 stays: eval const-wrapper views still nest a cell inside a
+    // cell (see opGetVarRef).
     if (core.VarRef.fromValue(v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     // No global-lexical shadow check: a shadowing top-level let/const performs
     // definition-time cell surgery / parked-cell reuse (qjs

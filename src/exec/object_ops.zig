@@ -42,6 +42,7 @@ const IntegrityLevel = call_runtime.IntegrityLevel;
 const LengthIndexAtom = array_ops.LengthIndexAtom;
 const RegExpMatch = string_ops.RegExpMatch;
 const ValueSliceRoot = array_ops.ValueSliceRoot;
+const CellSliceRoot = array_ops.CellSliceRoot;
 const addCollectionEntriesFromArray = array_ops.addCollectionEntriesFromArray;
 const addCollectionEntriesFromIterator = builtin_glue.addCollectionEntriesFromIterator;
 const aggregateErrorsIterableToArray = array_ops.aggregateErrorsIterableToArray;
@@ -427,23 +428,26 @@ pub fn createBytecodeFunctionObject(
         try object.defineOwnProperty(ctx.runtime, core.atom.ids.name, core.Descriptor.data(name_value, false, false, true));
     }
     if (fb.closureVar().len > 0) {
-        const captures = try ctx.runtime.memory.alloc(core.JSValue, fb.closureVar().len);
+        // js_closure2 capture loop (quickjs.c:17297-17331): every arm yields a
+        // live JSVarRef* — the slot-typed captures array is the qjs
+        // `JSVarRef **var_refs` alloc (17277). The helper arms hand back owned
+        // cell refs in JSValue form (the boundary type of the locals / eval
+        // tables / global machinery); the conversion is a type assertion, not
+        // a refcount event.
+        const captures = try ctx.runtime.memory.alloc(*core.VarRef, fb.closureVar().len);
         var captures_transferred = false;
-        errdefer if (!captures_transferred) ctx.runtime.memory.free(core.JSValue, captures);
-        var rooted_captures: []core.JSValue = captures[0..0];
-        var captures_root = ValueSliceRoot{};
+        errdefer if (!captures_transferred) ctx.runtime.memory.free(*core.VarRef, captures);
+        var rooted_captures: []*core.VarRef = captures[0..0];
+        var captures_root = CellSliceRoot{};
         captures_root.init(ctx.runtime, &rooted_captures);
         defer captures_root.deinit();
         var initialized: usize = 0;
         errdefer if (!captures_transferred) {
-            for (captures[0..initialized]) |*stored| {
-                stored.free(ctx.runtime);
-                stored.* = core.JSValue.undefinedValue();
-            }
+            for (captures[0..initialized]) |cell| cell.freeCell(ctx.runtime);
             rooted_captures = &.{};
         };
         for (fb.closureVar(), 0..) |cv, idx| {
-            captures[idx] = switch (cv.closure_type) {
+            const captured_value: core.JSValue = switch (cv.closure_type) {
                 .local => blk: {
                     if (cv.var_idx >= frame.locals.len) return error.InvalidBytecode;
                     break :blk try ensureLocalVarRefCell(ctx, frame, cv.var_idx, cv.is_lexical);
@@ -457,6 +461,8 @@ pub fn createBytecodeFunctionObject(
                         break :blk captured;
                     }
                     try ensureVarRefsCapacity(ctx, frame, cv.var_idx);
+                    // qjs JS_CLOSURE_REF (quickjs.c:17322-17324): pure pointer
+                    // copy + rc++ of the parent slot's cell (type-guaranteed).
                     break :blk try ensureVarRefSlotCell(ctx, frame, cv.var_idx);
                 },
                 .global_ref => blk: {
@@ -465,11 +471,8 @@ pub fn createBytecodeFunctionObject(
                     }
                     if (cv.var_idx >= frame.var_refs.len) return error.InvalidBytecode;
                     // qjs JS_CLOSURE_GLOBAL_REF (quickjs.c:17322-17324): pure
-                    // pointer copy + rc++ of the parent slot's cell — never a
-                    // raw value passthrough (VARREFS-SLOT-TYPING-BLUEPRINT §3
-                    // source ③). Bridge cellify for a still-raw parent slot;
-                    // once the slot is typed (phase D) this collapses to
-                    // `cur_var_refs[cv->var_idx]` + ref_count++.
+                    // pointer copy + rc++ — the slot type guarantees the cell,
+                    // the pre-typed bridge cellify is gone (phase D).
                     break :blk try ensureVarRefSlotCell(ctx, frame, cv.var_idx);
                 },
                 .global, .global_decl => blk: {
@@ -483,7 +486,9 @@ pub fn createBytecodeFunctionObject(
                     break :blk try ensureVarRefSlotCell(ctx, frame, cv.var_idx);
                 },
             };
-            if (varRefCellFromValue(captures[idx])) |cell| {
+            const cell = varRefCellFromValue(captured_value) orelse unreachable;
+            captures[idx] = cell;
+            {
                 // qjs js_closure2 mutates no flags on aliased cells: the
                 // REF/GLOBAL_REF arm is a pure pointer copy + rc++
                 // (quickjs.c:17322-17324) and the module arms alias link-time
@@ -508,7 +513,7 @@ pub fn createBytecodeFunctionObject(
             rooted_captures = captures[0..initialized];
         }
         captures_transferred = true;
-        try object.setValueSlice(ctx.runtime, object.functionCapturesSlot(), captures);
+        object.setFunctionCaptures(ctx.runtime, captures);
     }
     const function_has_direct_eval = functionBytecodeHasDirectEval(fb, ctx.runtime);
     const captures_eval_var_scope =
@@ -2329,7 +2334,7 @@ pub fn createGeneratorObject(
     current_function_value: core.JSValue,
     this_value: core.JSValue,
     input_args: []const core.JSValue,
-    input_var_refs: []const core.JSValue,
+    input_var_refs: []const *core.VarRef,
     output: ?*std.Io.Writer,
     global: *core.Object,
     eval_var_ref_names: []const core.Atom,
@@ -2351,9 +2356,9 @@ pub fn createGeneratorObject(
     var args_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, input_args);
     defer args_buffer.deinit(ctx.runtime);
     const args = args_buffer.values;
-    var var_refs_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, input_var_refs);
+    var var_refs_buffer = try core.runtime.CellRootBuffer.initCopy(ctx.runtime, input_var_refs);
     defer var_refs_buffer.deinit(ctx.runtime);
-    const var_refs = var_refs_buffer.values;
+    const var_refs = var_refs_buffer.cells;
     var eval_var_refs_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, input_eval_var_refs);
     defer eval_var_refs_buffer.deinit(ctx.runtime);
     const eval_var_refs = eval_var_refs_buffer.values;
@@ -2392,28 +2397,13 @@ pub fn createGeneratorObject(
     } else rooted_this;
     try object.setOptionalValueSlot(ctx.runtime, object.generatorThisSlot(), effective_this.dup());
     if (var_refs.len > 0) {
-        const captures = try ctx.runtime.memory.alloc(core.JSValue, var_refs.len);
-        var rooted_captures: []core.JSValue = captures[0..0];
-        var captures_root = ValueSliceRoot{};
-        captures_root.init(ctx.runtime, &rooted_captures);
-        defer captures_root.deinit();
-        var initialized: usize = 0;
-        var captures_owned = true;
-        errdefer if (captures_owned) {
-            for (captures[0..initialized]) |*stored| {
-                stored.free(ctx.runtime);
-                stored.* = core.JSValue.undefinedValue();
-            }
-            rooted_captures = &.{};
-            ctx.runtime.memory.free(core.JSValue, captures);
-        };
-        for (var_refs, 0..) |value, idx| {
-            captures[idx] = value.dup();
-            initialized += 1;
-            rooted_captures = captures[0..initialized];
-        }
-        captures_owned = false;
-        try object.setValueSlice(ctx.runtime, object.functionCapturesSlot(), captures);
+        // Cell-typed captures: pointer copy + rc++ per slot (qjs generator
+        // creation shares the caller's JSVarRef* array). The CellRootBuffer
+        // above keeps the source cells rooted; the fresh slice's refs are its
+        // own, and dupCell cannot fail, so no mid-build rooting is needed.
+        const captures = try ctx.runtime.memory.alloc(*core.VarRef, var_refs.len);
+        for (var_refs, 0..) |cell, idx| captures[idx] = cell.dupCell();
+        object.setFunctionCaptures(ctx.runtime, captures);
     }
 
     if (args.len > 0) {

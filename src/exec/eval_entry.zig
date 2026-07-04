@@ -78,7 +78,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         };
     }
 
-    var module_var_refs: []core.JSValue = &.{};
+    var module_var_refs: []*core.VarRef = &.{};
     if (has_module_record) {
         module_var_refs = try module_exec.buildModuleVarRefs(ctx, module_name, &compiled.function);
     }
@@ -163,7 +163,7 @@ fn runEvalModuleWithVarRefs(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     output: ?*std.Io.Writer,
-    module_var_refs: []const core.JSValue,
+    module_var_refs: []const *core.VarRef,
     timing: ?*core.context.ContextEvalTiming,
 ) !core.JSValue {
     const rt = ctx.runtime;

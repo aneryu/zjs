@@ -349,10 +349,12 @@ pub fn activeDestructuringStateTargetsIterator(
     frame: *const frame_mod.Frame,
     iterator_value: core.JSValue,
 ) bool {
+    // frame.var_refs is excluded: typed cell slots are never iterator-state
+    // Objects (the pre-typed slot scan was a provable no-op — expectObject
+    // rejects the var_ref GC kind).
     return destructuringStateTargetsIteratorInValues(stack_values, iterator_value) or
         destructuringStateTargetsIteratorInValues(frame.locals, iterator_value) or
-        destructuringStateTargetsIteratorInValues(frame.args, iterator_value) or
-        destructuringStateTargetsIteratorInValues(frame.var_refs, iterator_value);
+        destructuringStateTargetsIteratorInValues(frame.args, iterator_value);
 }
 
 pub fn destructuringStateTargetsIteratorInValues(values: []const core.JSValue, iterator_value: core.JSValue) bool {

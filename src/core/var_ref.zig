@@ -5,6 +5,7 @@
 //! a closed ref owns `value` and points `pvalue` at it.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const gc = @import("gc.zig");
 const JSValue = @import("value.zig").JSValue;
@@ -85,6 +86,23 @@ pub const VarRef = struct {
         return @alignCast(@fieldParentPtr("header", header));
     }
 
+    /// Slot-typed retain: rc++ on the cell and return it — the qjs
+    /// `JSVarRef*` copy `js_rc(var_ref)->ref_count++` (js_closure2,
+    /// quickjs.c:17322-17324). Routed through `valueRef().dup()` so the
+    /// refcount/profiling behavior is bit-identical to the pre-typed
+    /// `slot.dup()` on the cell's JSValue form.
+    pub inline fn dupCell(self: *VarRef) *VarRef {
+        _ = self.valueRef().dup();
+        return self;
+    }
+
+    /// Slot-typed release — qjs `free_var_ref` (quickjs.c:16199): rc--,
+    /// destroy at 0. Routed through `valueRef().free(rt)` so the deinit-phase
+    /// and cycle-removal gates of the JSValue path apply unchanged.
+    pub inline fn freeCell(self: *VarRef, rt: anytype) void {
+        self.valueRef().free(rt);
+    }
+
     pub fn close(self: *VarRef, rt: anytype) void {
         if (!self.is_open) return;
         const closed_value = self.pvalue.*.dup();
@@ -95,6 +113,16 @@ pub const VarRef = struct {
     }
 
     pub fn setVarRefValue(self: *VarRef, rt: anytype, next_value: JSValue) !void {
+        // Terminal-state invariant (VARREFS-SLOT-TYPING-BLUEPRINT risk 3): a
+        // cell's VALUE written through this API is never itself a cell — every
+        // write path unwraps an incoming cell value first (setSlotValueRefCounted
+        // / execPutVarRef / publishDirectEvalVarRefs). The only sanctioned
+        // nested cell is the direct-eval const-wrapper VIEW, which nests at
+        // CREATION (createClosed) and never through here. Debug-resident so a
+        // regression that would silently corrupt the read fast path traps.
+        if (comptime builtin.mode == .Debug) {
+            std.debug.assert(fromValue(next_value) == null);
+        }
         errdefer next_value.free(rt);
         const old_value = self.pvalue.*;
         self.pvalue.* = next_value;

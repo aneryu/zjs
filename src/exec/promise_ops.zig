@@ -2801,7 +2801,7 @@ pub fn qjsAsyncFunctionStart(
     current_function_value: core.JSValue,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    var_refs: []const core.JSValue,
+    var_refs: []const *core.VarRef,
     output: ?*std.Io.Writer,
     global: *core.Object,
     eval_var_ref_names: []const core.Atom,

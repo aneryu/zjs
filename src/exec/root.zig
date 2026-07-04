@@ -82,7 +82,7 @@ pub const Vm = struct {
         return zjs_vm.runWithOutput(self.ctx, &self.stack, function, self.output);
     }
 
-    pub fn runWithVarRefs(self: *Vm, function: *const bytecode.Bytecode, var_refs: []const core.JSValue) !core.JSValue {
+    pub fn runWithVarRefs(self: *Vm, function: *const bytecode.Bytecode, var_refs: []const *core.VarRef) !core.JSValue {
         try self.stack.reserveAdditional(function.stack_size);
         return zjs_vm.runWithOutputAndVarRefs(self.ctx, &self.stack, function, self.output, var_refs);
     }

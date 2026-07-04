@@ -25,6 +25,7 @@ const string_ops = @import("string_ops.zig");
 // cluster).
 const InlineCallRequest = call_runtime.InlineCallRequest;
 const ValueSliceRoot = array_ops.ValueSliceRoot;
+const CellSliceRoot = array_ops.CellSliceRoot;
 const appendPrivateBoundName = call_runtime.appendPrivateBoundName;
 const appendPrivateBoundNamesFromObject = object_ops.appendPrivateBoundNamesFromObject;
 const appendPrivateBoundNamesFromValue = call_runtime.appendPrivateBoundNamesFromValue;
@@ -243,37 +244,43 @@ fn createDirectEvalFrameVarRefs(
     eval_var_names: []const core.Atom,
     eval_var_refs: []const core.JSValue,
     outer_var_refs: DirectEvalOuterVarRefs,
-) ![]core.JSValue {
+) ![]*core.VarRef {
     const count = @max(function.closure_var.len, function.varRefNamesLen());
     if (count == 0) return &.{};
 
-    const refs = try ctx.runtime.memory.alloc(core.JSValue, count);
-    var rooted_refs: []core.JSValue = refs[0..0];
-    var refs_root = ValueSliceRoot{};
+    // Slot-typed direct-eval frame refs: every source hands back an owned
+    // cell (eval-table cells, outer const-wrapper views, fresh cells) —
+    // converted at this boundary from their JSValue handles.
+    const refs = try ctx.runtime.memory.alloc(*core.VarRef, count);
+    var rooted_refs: []*core.VarRef = refs[0..0];
+    var refs_root = CellSliceRoot{};
     refs_root.init(ctx.runtime, &rooted_refs);
     defer refs_root.deinit();
 
     var initialized: usize = 0;
     errdefer {
-        for (refs[0..initialized]) |*value| {
-            value.free(ctx.runtime);
-            value.* = core.JSValue.undefinedValue();
-        }
+        for (refs[0..initialized]) |cell| cell.freeCell(ctx.runtime);
         rooted_refs = &.{};
-        ctx.runtime.memory.free(core.JSValue, refs);
+        ctx.runtime.memory.free(*core.VarRef, refs);
     }
 
     while (initialized < count) : (initialized += 1) {
         const atom_id = directEvalFrameVarRefName(function, initialized);
-        refs[initialized] = if (atom_id) |name|
+        const cell_value = if (atom_id) |name|
             namedRefValue(ctx.runtime, eval_var_names, eval_var_refs, name) orelse
                 namedRefValue(ctx.runtime, outer_var_refs.names, outer_var_refs.refs, name) orelse
                 try initialDirectEvalFrameVarRef(ctx, global, function, initialized)
         else
             try initialDirectEvalFrameVarRef(ctx, global, function, initialized);
+        refs[initialized] = core.VarRef.fromValue(cell_value) orelse unreachable;
         rooted_refs = refs[0 .. initialized + 1];
     }
     return refs;
+}
+
+fn freeDirectEvalFrameVarRefs(rt: *core.JSRuntime, refs: []*core.VarRef) void {
+    for (refs) |cell| cell.freeCell(rt);
+    if (refs.len != 0) rt.memory.free(*core.VarRef, refs);
 }
 
 pub fn evalBytecodeHasVarDeclarations(rt: *core.JSRuntime, function: *const bytecode.Bytecode) bool {
@@ -678,8 +685,8 @@ pub fn directEval(
         try initializeDirectEvalGlobalVarRefs(ctx, global, eval_var_names, eval_var_refs);
     }
     var direct_eval_frame_var_refs = try createDirectEvalFrameVarRefs(ctx, global, &compiled.function, eval_var_names, eval_var_refs, outer_var_refs);
-    defer freeValueSlice(ctx.runtime, direct_eval_frame_var_refs);
-    var direct_eval_frame_var_refs_root = ValueSliceRoot{};
+    defer freeDirectEvalFrameVarRefs(ctx.runtime, direct_eval_frame_var_refs);
+    var direct_eval_frame_var_refs_root = CellSliceRoot{};
     direct_eval_frame_var_refs_root.init(ctx.runtime, &direct_eval_frame_var_refs);
     defer direct_eval_frame_var_refs_root.deinit();
     var combined_eval_local_names: []core.Atom = &.{};

@@ -5403,11 +5403,11 @@ pub fn callFunctionBytecode(
     current_function_value: core.JSValue,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    var_refs: []const core.JSValue,
+    var_refs: []const *core.VarRef,
     output: ?*std.Io.Writer,
     global: *core.Object,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
+    eval_var_refs: []core.JSValue,
 ) !core.JSValue {
     return callFunctionBytecodeMode(ctx, func, current_function_value, this_value, args, var_refs, output, global, eval_var_ref_names, eval_var_refs, true);
 }
@@ -5418,11 +5418,11 @@ pub fn callFunctionBytecodeConstruct(
     current_function_value: core.JSValue,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    var_refs: []const core.JSValue,
+    var_refs: []const *core.VarRef,
     output: ?*std.Io.Writer,
     global: *core.Object,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
+    eval_var_refs: []core.JSValue,
     new_target_value: core.JSValue,
     constructor_this_value: core.JSValue,
 ) !core.JSValue {
@@ -5435,11 +5435,11 @@ pub fn callFunctionBytecodeMode(
     current_function_value: core.JSValue,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    var_refs: []const core.JSValue,
+    var_refs: []const *core.VarRef,
     output: ?*std.Io.Writer,
     global: *core.Object,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
+    eval_var_refs: []core.JSValue,
     defer_generators: bool,
 ) !core.JSValue {
     return callFunctionBytecodeModeState(ctx, func, current_function_value, this_value, args, var_refs, output, global, eval_var_ref_names, eval_var_refs, defer_generators, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
@@ -5451,11 +5451,11 @@ pub fn callFunctionBytecodeModeState(
     current_function_value: core.JSValue,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    var_refs: []const core.JSValue,
+    var_refs: []const *core.VarRef,
     output: ?*std.Io.Writer,
     global: *core.Object,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
+    eval_var_refs: []core.JSValue,
     defer_generators: bool,
     generator_state: ?*core.Object,
     resume_value: ?core.JSValue,
@@ -5472,9 +5472,9 @@ pub fn callFunctionBytecodeModeState(
     var nested_base = bytecode.makeBytecodeView(fb, &ctx.runtime.memory, &ctx.runtime.atoms);
     var nested: *const bytecode.Bytecode = &nested_base;
 
-    var combined_var_refs: []const core.JSValue = var_refs;
-    var allocated_combined_refs: []core.JSValue = &.{};
-    defer if (allocated_combined_refs.len != 0) ctx.runtime.memory.free(core.JSValue, allocated_combined_refs);
+    var combined_var_refs: []const *core.VarRef = var_refs;
+    var allocated_combined_refs: []*core.VarRef = &.{};
+    defer if (allocated_combined_refs.len != 0) ctx.runtime.memory.free(*core.VarRef, allocated_combined_refs);
     var allocated_var_ref_names: []core.Atom = &.{};
     defer {
         for (allocated_var_ref_names) |atom_id| ctx.runtime.atoms.free(atom_id);
@@ -5500,13 +5500,24 @@ pub fn callFunctionBytecodeModeState(
         for (eval_var_ref_names[0..add_len], 0..) |atom_id, idx| names[old_name_len + idx] = ctx.runtime.atoms.dup(atom_id);
         initialized_names += add_len;
 
-        const refs = try ctx.runtime.memory.alloc(core.JSValue, var_refs.len + add_len);
+        const refs = try ctx.runtime.memory.alloc(*core.VarRef, var_refs.len + add_len);
         var refs_transferred = false;
         errdefer if (!refs_transferred) {
-            ctx.runtime.memory.free(core.JSValue, refs);
+            ctx.runtime.memory.free(*core.VarRef, refs);
         };
-        for (var_refs, 0..) |value, idx| refs[idx] = value;
-        for (eval_var_refs[0..add_len], 0..) |value, idx| refs[var_refs.len + idx] = value;
+        for (var_refs, 0..) |cell, idx| refs[idx] = cell;
+        // Boundary cellify (mirror of the inline path's mergeEvalBindings):
+        // the eval-local table may hold raw snapshots; rebind them in place to
+        // fresh closed cells (the table keeps ownership, the combined slice
+        // borrows) so the frame slots are cells by construction (qjs
+        // js_closure2 slots are always JSVarRef*, quickjs.c:17297-17331).
+        for (eval_var_refs[0..add_len], 0..) |*slot, idx| {
+            if (core.VarRef.fromValue(slot.*) == null) {
+                const cell = try core.VarRef.createClosed(ctx.runtime, slot.*);
+                slot.* = cell.valueRef();
+            }
+            refs[var_refs.len + idx] = core.VarRef.fromValue(slot.*) orelse unreachable;
+        }
 
         nested_overlay = nested.*;
         nested_overlay.var_ref_names = names;
@@ -5557,7 +5568,7 @@ pub fn runGeneratorParameterInit(
     current_function_value: core.JSValue,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    var_refs: []const core.JSValue,
+    var_refs: []const *core.VarRef,
     output: ?*std.Io.Writer,
     global: *core.Object,
 ) !core.JSValue {
@@ -6456,7 +6467,10 @@ pub fn closeGeneratorDestructuringIterators(
     try closeDestructuringIteratorsInValues(ctx, output, global, generator.generatorStack());
     try closeDestructuringIteratorsInValues(ctx, output, global, generator.generatorFrameLocals());
     try closeDestructuringIteratorsInValues(ctx, output, global, generator.generatorFrameArgs());
-    try closeDestructuringIteratorsInValues(ctx, output, global, generator.generatorFrameVarRefs());
+    // frame_var_refs: every element is a VarRef cell (typed slots), never a
+    // destructuring-iterator-state Object — the pre-typed scan over the slots
+    // was a provable no-op (expectObject rejects the var_ref GC kind), so the
+    // typed slice is simply skipped.
 }
 
 pub fn closeDestructuringIteratorsInValues(
@@ -6512,7 +6526,8 @@ pub fn closeFrameDestructuringIteratorsForAbruptCompletion(
     closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, stack.values);
     closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, frame.locals);
     closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, frame.args);
-    closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, frame.var_refs);
+    // frame.var_refs: typed cell slots are never iterator-state Objects (the
+    // pre-typed slot scan was a provable no-op) — skipped.
 }
 
 pub fn qjsIteratorCallForNativeRecord(

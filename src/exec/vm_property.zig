@@ -316,19 +316,17 @@ pub fn bindingStoreWritableForFastPath(
     frame: *frame_mod.Frame,
     binding: BindingPut,
 ) bool {
+    _ = ctx;
+    _ = global;
     if (binding.is_var_ref) {
         if (binding.idx >= frame.var_refs.len) return false;
-        const slot = slot_ops.varRefSlot(frame, binding.idx);
-        if (varRefCellFromValue(slot)) |cell| {
-            if (cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return false;
-            // Deleted binding = cell parked at UNINITIALIZED; covered below.
-            const stored = cell.varRefValue();
-            return !stored.isUninitialized();
-        }
-        if (slot.isUninitialized()) return false;
-        if (function.varRefIsConstAt(binding.idx)) return false;
-        if (binding.opc == op.put_var_ref_check and binding.idx < function.varRefNamesLen() and call_runtime.globalLexicalHasForGlobal(ctx, global, function.varRefName(binding.idx))) return false;
-        return true;
+        // Slot is a cell by type (phase D); the raw-slot arm — const/lexical
+        // checks that only a raw slot could reach — is gone.
+        const cell = slot_ops.varRefSlotCell(frame, binding.idx);
+        if (cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return false;
+        // Deleted binding = cell parked at UNINITIALIZED; covered below.
+        const stored = cell.varRefValue();
+        return !stored.isUninitialized();
     }
     if (binding.idx >= frame.locals.len) return false;
     if (binding.checked) {
@@ -472,15 +470,13 @@ pub fn decodeLocalPut(code: []const u8, pc: usize) ?LocalPut {
 
 pub fn varRefReadableBorrowed(frame: *const frame_mod.Frame, idx: u16) ?core.JSValue {
     if (idx >= frame.var_refs.len) return null;
-    const slot = slot_ops.varRefSlot(frame, idx);
-    if (varRefCellFromValue(slot) != null) {
-        // Deleted binding = cell parked at UNINITIALIZED; the check below covers it.
-        const value = slotValueBorrowed(slot);
-        if (value.isUninitialized()) return null;
-        return value;
-    }
-    if (slot.isUninitialized()) return null;
-    return slot;
+    // Slot is a cell by type (phase D); slotValueBorrowed chases the
+    // direct-eval const-wrapper nesting (guard #7's remaining source).
+    const cell = slot_ops.varRefSlotCell(frame, idx);
+    // Deleted binding = cell parked at UNINITIALIZED; the check below covers it.
+    const value = slotValueBorrowed(cell.valueRef());
+    if (value.isUninitialized()) return null;
+    return value;
 }
 
 pub fn varRefReadableBorrowedForFastPath(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, idx: u16) ?core.JSValue {
@@ -495,20 +491,16 @@ pub fn varRefStoreWritableForFastPath(
     frame: *frame_mod.Frame,
     store: VarRefPut,
 ) bool {
+    _ = ctx;
+    _ = function;
+    _ = global;
     if (store.idx >= frame.var_refs.len) return false;
-    const slot = slot_ops.varRefSlot(frame, store.idx);
-    if (varRefCellFromValue(slot)) |cell| {
-        if (cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return false;
-        // Deleted binding = cell parked at UNINITIALIZED; covered below.
-        const stored = cell.varRefValue();
-        return !stored.isUninitialized();
-    }
-    if (slot.isUninitialized()) return false;
-    if (store.opc == op.put_var_ref_check) {
-        if (store.idx < function.varRefNamesLen() and call_runtime.globalLexicalHasForGlobal(ctx, global, function.varRefName(store.idx))) return false;
-        if (function.varRefIsConstAt(store.idx)) return false;
-    }
-    return true;
+    // Slot is a cell by type (phase D); the raw-slot arm is gone.
+    const cell = slot_ops.varRefSlotCell(frame, store.idx);
+    if (cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return false;
+    // Deleted binding = cell parked at UNINITIALIZED; covered below.
+    const stored = cell.varRefValue();
+    return !stored.isUninitialized();
 }
 
 pub fn slotValueBorrowed(slot: core.JSValue) core.JSValue {

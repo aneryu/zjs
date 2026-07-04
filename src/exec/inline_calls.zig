@@ -146,7 +146,7 @@ pub const Entry = struct {
     /// function object's eval-binding slots stay alive via the frame's
     /// `current_function` reference); only the slice storage is owned.
     merged_var_ref_names: []core.Atom,
-    merged_var_refs: []core.JSValue,
+    merged_var_refs: []*core.VarRef,
     /// True when the callee carries no direct-eval bindings: `eval_snapshot`
     /// stays the empty default, `merged_*` stay empty, and `eval_function_view`
     /// stays null. Teardown then skips `eval_snapshot.deinit` / `freeEvalResources`
@@ -345,8 +345,10 @@ pub const Machine = struct {
         }
         if (!target.this_value.isUndefined()) return false;
         if (!canBorrowSourceArgs(function, source)) return false;
-        const captures = target.function_object.functionCapturesSlot().*;
-        if (captures.len > 0 and !allCapturesAreCellsCached(target.function_object, captures)) return false;
+        // No captures check: `[]*core.VarRef` makes "every capture is a cell"
+        // a type invariant (qjs js_closure2 slots are always JSVarRef*,
+        // quickjs.c:17297-17331) — the allCapturesAreCellsCached memo and its
+        // per-closure header-load loop are deleted by the phase-D flip.
         return true;
     }
 
@@ -515,7 +517,7 @@ pub const Machine = struct {
         // recursive path. Contents are borrowed; storage is entry-owned.
         const eval_names = target.function_object.functionEvalLocalNames();
         const eval_refs = target.function_object.functionEvalLocalRefs();
-        var frame_var_refs: []const core.JSValue = target.function_object.functionCapturesSlot().*;
+        var frame_var_refs: []const *core.VarRef = target.function_object.functionCapturesSlot().*;
         if (eval_names.len > 0 and eval_refs.len > 0) {
             const eval_view = try rt.memory.create(bytecode.Bytecode);
             eval_view.* = entry.function.*;
@@ -608,16 +610,16 @@ pub const Machine = struct {
         //   !has_eval_call      — no `replaceFrameVarRefBinding` direct element write,
         //                         no eval-introduced refs growing the array
         //   global_vars.len==0  — no `defineGlobalDecl{Var,Lexical}Cell` rebind
-        //   all captures cells  — `setSlotValue` always writes into the cell, never
-        //                         `frame.var_refs[idx] = v` (no non-cell element)
+        // "All captures are cells" is now the `[]*core.VarRef` type invariant
+        // (phase-D flip; qjs js_closure2, quickjs.c:17297-17331), so writes
+        // always go through the cell — the former allVarRefCells scan is gone.
         // Captures.len == closure_var.len ≥ every bytecode var_ref idx, so
         // `ensureVarRefsCapacity` never fires either. Teardown skips the per-element
         // free (the still-live function object owns the cells).
         const borrow_var_refs = entry.simple_frame and
             !entry.function.flags.has_eval_call and
             entry.function.global_vars.len == 0 and
-            frame_var_refs.len > 0 and
-            allVarRefCells(frame_var_refs);
+            frame_var_refs.len > 0;
         const var_ref_storage_count: usize = if (borrow_var_refs) 0 else frame_mod.frameVarRefStorageCount(entry.function, frame_var_refs);
         const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(entry.function, frame_arg_count);
         const slab = frame_mod.FrameSlab.carve(
@@ -758,32 +760,6 @@ pub const Machine = struct {
         };
     }
 
-    /// Every capture is a VarRef cell — the precondition for borrowing the
-    /// closure captures array as `frame.var_refs`: with all-cells, every
-    /// `setSlotValue(&frame.var_refs[idx], ...)` writes through the cell and
-    /// never overwrites the array element, so the shared array is never mutated.
-    /// Cheaper than the dup loop it replaces (a tag test vs tag test + retain).
-    fn allVarRefCells(captures: []const core.JSValue) bool {
-        for (captures) |cap| {
-            if (core.VarRef.fromValue(cap) == null) return false;
-        }
-        return true;
-    }
-
-    /// `allVarRefCells` memoized on the function object — captures are fixed at
-    /// closure creation, so the cold header-load loop runs once per closure.
-    fn allCapturesAreCellsCached(function_object: *core.Object, captures: []const core.JSValue) bool {
-        return switch (function_object.functionCapturesCellState()) {
-            1 => true,
-            2 => false,
-            else => blk: {
-                const all = allVarRefCells(captures);
-                function_object.setFunctionCapturesCellState(if (all) 1 else 2);
-                break :blk all;
-            },
-        };
-    }
-
     fn canBorrowSourceArgs(function: *const bytecode.Bytecode, source: ArgsSource) bool {
         const argc = sourceArgCount(source);
         if (argc == 0) return false;
@@ -838,7 +814,7 @@ pub const Machine = struct {
     fn mergeEvalBindings(
         rt: *core.JSRuntime,
         entry: *Entry,
-        captures: []const core.JSValue,
+        captures: []const *core.VarRef,
         eval_names: []const core.Atom,
         eval_refs: []core.JSValue,
     ) HostError!void {
@@ -861,9 +837,13 @@ pub const Machine = struct {
         var i: usize = 0;
         while (i < old_len) : (i += 1) names[i] = entry.function.varRefName(i);
         @memcpy(names[old_len..], eval_names[0..add_len]);
-        const refs = try rt.memory.alloc(core.JSValue, captures.len + add_len);
+        // Contents stay borrowed (captures pointers + eval-table cells); only
+        // the slice storage is entry-owned, exactly as pre-flip.
+        const refs = try rt.memory.alloc(*core.VarRef, captures.len + add_len);
         @memcpy(refs[0..captures.len], captures);
-        @memcpy(refs[captures.len..], eval_refs[0..add_len]);
+        for (eval_refs[0..add_len], 0..) |slot, idx| {
+            refs[captures.len + idx] = core.VarRef.fromValue(slot) orelse unreachable;
+        }
         entry.merged_var_ref_names = names;
         entry.merged_var_refs = refs;
         entry.eval_function_view.?.var_ref_names = names;
@@ -871,7 +851,7 @@ pub const Machine = struct {
 
     fn freeMergedSlices(rt: *core.JSRuntime, entry: *Entry) void {
         if (entry.merged_var_ref_names.len != 0) rt.memory.free(core.Atom, entry.merged_var_ref_names);
-        if (entry.merged_var_refs.len != 0) rt.memory.free(core.JSValue, entry.merged_var_refs);
+        if (entry.merged_var_refs.len != 0) rt.memory.free(*core.VarRef, entry.merged_var_refs);
         entry.merged_var_ref_names = &.{};
         entry.merged_var_refs = &.{};
     }

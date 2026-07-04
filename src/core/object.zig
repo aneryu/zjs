@@ -135,6 +135,23 @@ fn destroyValueSliceValuesOnly(rt: *JSRuntime, slot: *[]JSValue) void {
     for (values) |stored| stored.free(rt);
 }
 
+/// `destroyValueSlice` for a slot-typed var-ref cell slice (`[]*VarRef`):
+/// release each cell (qjs free_var_ref, quickjs.c:16199) and the slice memory.
+fn destroyVarRefCellSlice(rt: *JSRuntime, slot: *[]*var_ref_mod.VarRef) void {
+    const cells = slot.*;
+    slot.* = &.{};
+    for (cells) |cell| cell.freeCell(rt);
+    if (cells.len != 0) rt.memory.free(*var_ref_mod.VarRef, cells);
+}
+
+/// Cell releases only — for a var-ref window whose backing memory belongs to
+/// a surrounding storage slab.
+fn destroyVarRefCellSliceValuesOnly(rt: *JSRuntime, slot: *[]*var_ref_mod.VarRef) void {
+    const cells = slot.*;
+    slot.* = &.{};
+    for (cells) |cell| cell.freeCell(rt);
+}
+
 fn destroyValueSliceWithCapacity(rt: *JSRuntime, slot: *[]JSValue, capacity: *usize) void {
     const values = slot.*;
     const old_capacity = capacity.*;
@@ -713,7 +730,9 @@ pub const GeneratorSuspendKind = enum(u8) {
 
 pub const GeneratorPayload = struct {
     bytecode: ?JSValue = null,
-    captures: []JSValue = &.{},
+    // Slot-typed closure captures (`JSVarRef **`, qjs JSObject.u.func.var_refs
+    // quickjs.c:17277; VARREFS-SLOT-TYPING-BLUEPRINT phase D).
+    captures: []*var_ref_mod.VarRef = &.{},
     eval_local_names: []atom.Atom = &.{},
     eval_local_refs: []JSValue = &.{},
     home_object: ?*Object = null,
@@ -725,7 +744,10 @@ pub const GeneratorPayload = struct {
     frame_storage: []JSValue = &.{},
     frame_locals: []JSValue = &.{},
     frame_args: []JSValue = &.{},
-    frame_var_refs: []JSValue = &.{},
+    // The suspended frame's var_refs slice, migrated through save/resume
+    // (vm_gen_async.zig). Same slot typing as Frame.var_refs; the cell
+    // pointers keep their frame-held refcounts while parked here.
+    frame_var_refs: []*var_ref_mod.VarRef = &.{},
     current_function: ?JSValue = null,
     yield_star_iterator: ?JSValue = null,
     async_promise: ?JSValue = null,
@@ -748,7 +770,7 @@ pub const GeneratorPayload = struct {
 
     pub fn destroy(self: *GeneratorPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.bytecode);
-        destroyValueSlice(rt, &self.captures);
+        destroyVarRefCellSlice(rt, &self.captures);
         destroyAtomSlice(rt, &self.eval_local_names);
         destroyValueSlice(rt, &self.eval_local_refs);
         destroyOptionalObjectRef(rt, &self.home_object);
@@ -758,13 +780,20 @@ pub const GeneratorPayload = struct {
         if (self.frame_storage.len != 0) {
             destroyValueSliceValuesOnly(rt, &self.frame_locals);
             destroyValueSliceValuesOnly(rt, &self.frame_args);
-            destroyValueSliceValuesOnly(rt, &self.frame_var_refs);
+            // frame_var_refs is a window inside frame_storage (qjs free_var_ref
+            // per cell, quickjs.c:16199; the window memory dies with storage).
+            destroyVarRefCellSliceValuesOnly(rt, &self.frame_var_refs);
             rt.memory.free(JSValue, self.frame_storage);
             self.frame_storage = &.{};
         } else {
             destroyValueSlice(rt, &self.frame_locals);
             destroyValueSlice(rt, &self.frame_args);
-            destroyValueSlice(rt, &self.frame_var_refs);
+            // Owned frame var_refs are always windows inside frame_storage
+            // (slab carve / heap fallback / capacity growth all back them with
+            // []JSValue storage), so a storage-less payload can only hold an
+            // empty slice here — release cell refs only, never a typed free
+            // of window memory.
+            destroyVarRefCellSliceValuesOnly(rt, &self.frame_var_refs);
         }
         destroyOptionalValue(rt, &self.current_function);
         destroyOptionalValue(rt, &self.yield_star_iterator);
@@ -934,13 +963,13 @@ pub const FunctionPayload = struct {
     native_dispatch_name: atom.Atom = atom.null_atom,
     typed_array_element_size: u32 = 0,
     typed_array_kind: u8 = 0,
-    /// Cached "are all closure captures VarRef cells" (0 = not computed, 1 = all
-    /// cells, 2 = some non-cell). Captures are fixed at closure creation, so the
-    /// inline-call simple-frame gate computes this once instead of a cold per-call
-    /// header-load loop over the cells.
-    captures_cell_state: u8 = 0,
     bytecode: ?JSValue = null,
-    captures: []JSValue = &.{},
+    // Slot-typed closure captures — qjs `JSVarRef **var_refs`
+    // (JSObject.u.func.var_refs, quickjs.c:17277). Every element is a live
+    // cell by construction (js_closure2, 17297-17331), so the former
+    // captures_cell_state memo ("are all captures cells") is deleted: the
+    // type answers it.
+    captures: []*var_ref_mod.VarRef = &.{},
     home_object: ?*Object = null,
     realm_global_ptr: ?*Object = null,
     rare: ?*FunctionRarePayload = null,
@@ -950,7 +979,7 @@ pub const FunctionPayload = struct {
         const native_dispatch_name = self.native_dispatch_name;
         self.native_dispatch_name = atom.null_atom;
         rt.atoms.free(native_dispatch_name);
-        destroyValueSlice(rt, &self.captures);
+        destroyVarRefCellSlice(rt, &self.captures);
         destroyOptionalObjectRef(rt, &self.home_object);
         if (self.rare) |rare| {
             self.rare = null;
@@ -3771,13 +3800,13 @@ pub const Object = struct {
         return &.{};
     }
 
-    pub fn generatorFrameVarRefsSlot(self: *Object) *[]JSValue {
+    pub fn generatorFrameVarRefsSlot(self: *Object) *[]*var_ref_mod.VarRef {
         if (self.generatorPayload()) |payload| return &payload.frame_var_refs;
         std.debug.assert(self.class_payload_kind == .generator);
         unreachable;
     }
 
-    pub fn generatorFrameVarRefs(self: *const Object) []JSValue {
+    pub fn generatorFrameVarRefs(self: *const Object) []*var_ref_mod.VarRef {
         if (self.generatorPayloadConst()) |payload| return payload.frame_var_refs;
         return &.{};
     }
@@ -4536,28 +4565,25 @@ pub const Object = struct {
         return null;
     }
 
-    pub fn functionCapturesSlot(self: *Object) *[]JSValue {
+    pub fn functionCapturesSlot(self: *Object) *[]*var_ref_mod.VarRef {
         if (self.functionPayload()) |payload| return &payload.captures;
         if (self.generatorPayload()) |payload| return &payload.captures;
         std.debug.assert(self.class_payload_kind == .function or self.class_payload_kind == .generator);
         unreachable;
     }
 
-    pub fn functionCaptures(self: *const Object) []JSValue {
+    pub fn functionCaptures(self: *const Object) []*var_ref_mod.VarRef {
         if (self.functionPayloadConst()) |payload| return payload.captures;
         if (self.generatorPayloadConst()) |payload| return payload.captures;
         return &.{};
     }
 
-    /// Cached "all captures are VarRef cells" tri-state (FunctionPayload):
-    /// 0 = not computed, 1 = all cells, 2 = some non-cell. Normal-function only
-    /// (the inline simple-frame gate is normal-only).
-    pub fn functionCapturesCellState(self: *Object) u8 {
-        if (self.functionPayload()) |payload| return payload.captures_cell_state;
-        return 0;
-    }
-    pub fn setFunctionCapturesCellState(self: *Object, state: u8) void {
-        if (self.functionPayload()) |payload| payload.captures_cell_state = state;
+    /// Replace the closure-captures slice, releasing the previous cells —
+    /// the cell-typed `setValueSlice` (ownership of `next_cells` transfers).
+    pub fn setFunctionCaptures(self: *Object, rt: *JSRuntime, next_cells: []*var_ref_mod.VarRef) void {
+        const slot = self.functionCapturesSlot();
+        destroyVarRefCellSlice(rt, slot);
+        slot.* = next_cells;
     }
 
     pub fn functionEvalLocalNamesSlot(self: *Object, rt: *JSRuntime) !*[]atom.Atom {
@@ -6263,7 +6289,14 @@ pub const Object = struct {
         }
         if (self.functionPayload()) |payload| {
             try Helper.traceOptValue(visitor, &payload.bytecode);
-            for (payload.captures) |*stored| try Helper.callVisitValue(visitor, stored);
+            // Slot-typed captures: visit each cell through its JSValue view —
+            // same header edge as qjs `mark_func(rt, &var_refs[i]->header)`
+            // (js_bytecode_function_mark, quickjs.c:16211) and bit-identical
+            // to the pre-typed slot visit (the slot WAS the cell's JSValue).
+            for (payload.captures) |cell| {
+                var cell_value = cell.valueRef();
+                try Helper.callVisitValue(visitor, &cell_value);
+            }
             try Helper.callVisitObject(visitor, &payload.home_object);
             if (payload.rare) |rare| {
                 try Helper.traceOptValue(visitor, &rare.source);
@@ -6349,14 +6382,25 @@ pub const Object = struct {
         }
         if (self.generatorPayload()) |payload| {
             try Helper.traceOptValue(visitor, &payload.bytecode);
-            for (payload.captures) |*stored| try Helper.callVisitValue(visitor, stored);
+            // Cell-typed captures / suspended-frame var_refs: header edge per
+            // cell (qjs mark_func on var_refs[i]->header, quickjs.c:16211 and
+            // the suspended async_func_state mark walking the frame's
+            // var_refs). A missed edge here would let the cycle collector
+            // free a live cell under a suspended generator (blueprint risk 1).
+            for (payload.captures) |cell| {
+                var cell_value = cell.valueRef();
+                try Helper.callVisitValue(visitor, &cell_value);
+            }
             for (payload.eval_local_refs) |*stored| try Helper.callVisitValue(visitor, stored);
             try Helper.traceOptValue(visitor, &payload.this_value);
             for (payload.args) |*stored| try Helper.callVisitValue(visitor, stored);
             for (payload.stack) |*stored| try Helper.callVisitValue(visitor, stored);
             for (payload.frame_locals) |*stored| try Helper.callVisitValue(visitor, stored);
             for (payload.frame_args) |*stored| try Helper.callVisitValue(visitor, stored);
-            for (payload.frame_var_refs) |*stored| try Helper.callVisitValue(visitor, stored);
+            for (payload.frame_var_refs) |cell| {
+                var cell_value = cell.valueRef();
+                try Helper.callVisitValue(visitor, &cell_value);
+            }
             try Helper.traceOptValue(visitor, &payload.current_function);
             try Helper.traceOptValue(visitor, &payload.yield_star_iterator);
             try Helper.traceOptValue(visitor, &payload.async_promise);
@@ -6816,7 +6860,7 @@ pub const Object = struct {
         count += countOptionalFunctionBytecodeRef(self.iteratorZipKeys(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionBytecode(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionClassFieldsInit(), function_bytecode);
-        for (self.functionCaptures()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
+        for (self.functionCaptures()) |cell| count += countFunctionBytecodeValueRef(cell.valueRef(), function_bytecode);
         for (self.functionEvalLocalRefs()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionEvalParentFunction(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionImportMeta(), function_bytecode);
@@ -6857,7 +6901,7 @@ pub const Object = struct {
         for (self.generatorStack()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
         for (self.generatorFrameLocals()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
         for (self.generatorFrameArgs()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
-        for (self.generatorFrameVarRefs()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
+        for (self.generatorFrameVarRefs()) |cell| count += countFunctionBytecodeValueRef(cell.valueRef(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.generatorCurrentFunction(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.generatorYieldStarIterator(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.generatorAsyncPromise(), function_bytecode);

@@ -32,6 +32,8 @@ const ModuleNamespaceError = error{
     StringTooLong,
 };
 
+const CellSliceRoot = array_ops.CellSliceRoot;
+
 const ValueSliceRoot = struct {
     rt: ?*core.JSRuntime = null,
     slices: [1]core.runtime.ValueRootSlice = undefined,
@@ -180,7 +182,7 @@ pub fn buildModuleVarRefs(
     ctx: *core.JSContext,
     module_name: core.Atom,
     function: *const bytecode.Bytecode,
-) ![]core.JSValue {
+) ![]*core.VarRef {
     if (function.varRefNamesLen() == 0) return &.{};
     const record = ctx.runtime.modules.find(module_name) orelse return error.ModuleNotFound;
     if (function.closure_var.len == 0) {
@@ -200,25 +202,26 @@ pub fn buildModuleVarRefs(
             cell.free(ctx.runtime);
         }
     }
-    const refs = try ctx.runtime.memory.alloc(core.JSValue, function.varRefNamesLen());
-    errdefer ctx.runtime.memory.free(core.JSValue, refs);
-    var rooted_refs: []core.JSValue = refs[0..0];
-    var refs_root = ValueSliceRoot{};
+    // Slot-typed module var_refs (qjs js_inner_module_linking fills the
+    // JSVarRef** array, quickjs.c:30715-30791). The record-side cells stay
+    // JSValue-typed; each helper hands back an owned ref to a cell by
+    // construction, converted at this boundary.
+    const refs = try ctx.runtime.memory.alloc(*core.VarRef, function.varRefNamesLen());
+    errdefer ctx.runtime.memory.free(*core.VarRef, refs);
+    var rooted_refs: []*core.VarRef = refs[0..0];
+    var refs_root = CellSliceRoot{};
     refs_root.init(ctx.runtime, &rooted_refs);
     defer refs_root.deinit();
     var initialized: usize = 0;
     errdefer {
-        for (refs[0..initialized]) |*value| {
-            value.free(ctx.runtime);
-            value.* = core.JSValue.undefinedValue();
-        }
+        for (refs[0..initialized]) |cell| cell.freeCell(ctx.runtime);
         rooted_refs = &.{};
     }
 
     var idx: usize = 0;
     while (idx < function.varRefNamesLen()) : (idx += 1) {
         const name = function.varRefName(idx);
-        refs[idx] = if (idx < function.closure_var.len) switch (function.closure_var[idx].closure_type) {
+        const cell_value = if (idx < function.closure_var.len) switch (function.closure_var[idx].closure_type) {
             .module_import => try moduleImportCell(ctx, record, name),
             .module_decl => try moduleLocalCell(ctx, record, name, moduleVarRefIsLexical(function, idx), moduleVarRefIsConst(function, idx)),
             .global, .global_ref, .global_decl => try createGlobalModuleVarRef(ctx, function.closure_var[idx]),
@@ -227,6 +230,7 @@ pub fn buildModuleVarRefs(
             try moduleImportCell(ctx, record, name)
         else
             try moduleLocalCell(ctx, record, name, moduleVarRefIsLexical(function, idx), moduleVarRefIsConst(function, idx));
+        refs[idx] = varRefCellFromValue(cell_value) orelse unreachable;
         initialized += 1;
         rooted_refs = refs[0..initialized];
     }
@@ -248,9 +252,9 @@ fn moduleVarRefIsConst(function: *const bytecode.Bytecode, index: usize) bool {
     return function.varRefIsConstAt(index);
 }
 
-pub fn freeModuleVarRefs(runtime: *core.JSRuntime, refs: []core.JSValue) void {
-    for (refs) |value| value.free(runtime);
-    if (refs.len != 0) runtime.memory.free(core.JSValue, refs);
+pub fn freeModuleVarRefs(runtime: *core.JSRuntime, refs: []*core.VarRef) void {
+    for (refs) |cell| cell.freeCell(runtime);
+    if (refs.len != 0) runtime.memory.free(*core.VarRef, refs);
 }
 
 pub fn moduleNamespaceValue(ctx: *core.JSContext, module_name: core.Atom) !core.JSValue {
@@ -270,20 +274,26 @@ pub fn initializeModuleFunctionDeclarations(
 
     var module_var_refs = try buildModuleVarRefs(ctx, module_name, function);
     defer freeModuleVarRefs(ctx.runtime, module_var_refs);
-    var module_var_refs_root = ValueSliceRoot{};
+    var module_var_refs_root = CellSliceRoot{};
     module_var_refs_root.init(ctx.runtime, &module_var_refs);
     defer module_var_refs_root.deinit();
 
     var frame = frame_mod.Frame.init(function);
     defer frame.deinit(&ctx.runtime.memory, ctx.runtime);
-    var rooted_frame_var_refs: []core.JSValue = &.{};
-    var frame_var_refs_root = ValueSliceRoot{};
+    var rooted_frame_var_refs: []*core.VarRef = &.{};
+    var frame_var_refs_root = CellSliceRoot{};
     frame_var_refs_root.init(ctx.runtime, &rooted_frame_var_refs);
     defer frame_var_refs_root.deinit();
     if (module_var_refs.len != 0) {
-        frame.var_refs = try ctx.runtime.memory.alloc(core.JSValue, module_var_refs.len);
-        frame.installOwnedStorage(frame.var_refs);
-        for (module_var_refs, 0..) |value, idx| slot_ops.storeVarRefSlot(&frame, idx, value.dup());
+        // Typed window inside a []JSValue storage allocation, so the frame's
+        // uniform storage teardown owns the memory (same layout as the
+        // FrameSlab carve).
+        const ptr_bytes = try std.math.mul(usize, @sizeOf(*core.VarRef), module_var_refs.len);
+        const value_slots = try std.math.divCeil(usize, ptr_bytes, @sizeOf(core.JSValue));
+        const storage = try ctx.runtime.memory.alloc(core.JSValue, value_slots);
+        frame.var_refs = std.mem.bytesAsSlice(*core.VarRef, std.mem.sliceAsBytes(storage)[0..ptr_bytes]);
+        frame.installOwnedStorage(storage);
+        for (module_var_refs, 0..) |cell, idx| frame.var_refs[idx] = cell.dupCell();
         rooted_frame_var_refs = frame.var_refs;
     }
 

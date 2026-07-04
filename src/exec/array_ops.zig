@@ -6010,6 +6010,30 @@ pub const ValueSliceRoot = struct {
     }
 };
 
+/// `ValueSliceRoot` for a slot-typed var-ref cell slice under construction
+/// (`[]*VarRef`, VARREFS-SLOT-TYPING-BLUEPRINT phase D).
+pub const CellSliceRoot = struct {
+    rt: ?*core.JSRuntime = null,
+    slices: [1]core.runtime.ValueRootSlice = undefined,
+    frame: core.runtime.ValueRootFrame = .{},
+
+    pub fn init(self: *CellSliceRoot, rt: *core.JSRuntime, cells: *[]*core.VarRef) void {
+        self.rt = rt;
+        self.slices[0] = .{ .cells = cells };
+        self.frame = .{
+            .previous = rt.active_value_roots,
+            .slices = &self.slices,
+        };
+        rt.active_value_roots = &self.frame;
+    }
+
+    pub fn deinit(self: *CellSliceRoot) void {
+        const rt = self.rt orelse return;
+        rt.active_value_roots = self.frame.previous;
+        self.rt = null;
+    }
+};
+
 pub fn argsFromArrayLike(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
