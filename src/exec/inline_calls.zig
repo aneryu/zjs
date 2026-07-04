@@ -1025,11 +1025,12 @@ pub const Machine = struct {
     /// teardown below.
     pub inline fn teardownSimpleEntry(ctx: *core.JSContext, entry: *Entry) void {
         const rt = ctx.runtime;
-        for (entry.stack.values) |v| v.free(rt);
         const frame = &entry.frame;
         frame.current_function.free(rt);
         if (frame.open_var_refs.len != 0) frame.closeOpenVarRefs(rt);
-        for (frame.locals) |v| v.free(rt);
+        // qjs done: close var refs first, then free local_buf..sp (quickjs.c:20701-20706).
+        const live_values = frame.locals.ptr[0 .. frame.locals.len + entry.stack.values.len];
+        for (live_values) |v| v.free(rt);
         for (frame.args) |v| v.free(rt);
         rt.vm_stack.restore(entry.arena_mark);
         entry.profile_guard.deinit();
