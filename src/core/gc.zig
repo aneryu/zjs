@@ -275,7 +275,9 @@ pub const SpaceAccount = struct {
     }
 
     fn sweepSomePages(self: *SpaceAccount, max_pages: usize, fragmentation_trigger_per_mille: usize) usize {
-        if (max_pages == 0 or self.needs_sweep_page_count == 0) return 0;
+        if (max_pages == 0) return 0;
+        self.refreshPageState(fragmentation_trigger_per_mille);
+        if (self.needs_sweep_page_count == 0) return 0;
         const swept = @min(max_pages, self.needs_sweep_page_count);
         self.needs_sweep_page_count -= swept;
         self.sweep_cursor_page +|= swept;
@@ -993,70 +995,72 @@ pub const Registry = struct {
     }
 
     pub fn statsSnapshot(self: Registry) Stats {
+        var snapshot = self;
+        snapshot.refreshSpacePageState();
         return .{
-            .total_allocated_bytes = self.stats.allocated_bytes,
-            .peak_allocated_bytes = self.stats.peak_allocated_bytes,
-            .heap_live_bytes = self.stats.heap_live_bytes,
-            .old_live_bytes = self.stats.old_live_bytes,
-            .large_object_bytes = self.stats.large_object_bytes,
-            .heap_committed_bytes = self.old_space.committed_bytes +| self.large_space.committed_bytes,
-            .old_committed_bytes = self.old_space.committed_bytes,
-            .old_empty_page_bytes = self.old_space.free_bytes,
-            .large_committed_bytes = self.large_space.committed_bytes,
-            .large_empty_page_bytes = self.large_space.free_bytes,
-            .empty_page_bytes = self.old_space.free_bytes +| self.large_space.free_bytes,
-            .decommitted_bytes = self.old_space.decommitted_bytes +| self.large_space.decommitted_bytes,
-            .old_fragmentation_ratio = self.old_space.fragmentationPerMille(),
-            .old_page_count = self.old_space.committedPageCount(),
-            .old_allocating_page_count = self.old_space.allocating_page_count,
-            .old_full_page_count = self.old_space.full_page_count,
-            .old_empty_page_count = self.old_space.empty_page_count,
-            .old_decommitted_page_count = self.old_space.decommitted_page_count,
-            .old_needs_sweep_page_count = self.old_space.needs_sweep_page_count,
-            .old_sweep_cursor_page = self.old_space.sweep_cursor_page,
-            .old_evacuation_candidate_page_count = self.old_space.evacuation_candidate_page_count,
-            .large_page_count = self.large_space.committedPageCount(),
-            .large_empty_page_count = self.large_space.empty_page_count,
-            .large_decommitted_page_count = self.large_space.decommitted_page_count,
-            .large_needs_sweep_page_count = self.large_space.needs_sweep_page_count,
-            .old_allocated_bytes = self.stats.old_allocated_bytes,
-            .old_alloc_count = self.stats.old_alloc_count,
-            .large_allocated_bytes = self.stats.large_allocated_bytes,
-            .large_alloc_count = self.stats.large_alloc_count,
-            .external_bytes = self.stats.external_bytes,
-            .external_untracked_bytes = self.stats.external_untracked_bytes,
-            .peak_external_bytes = self.stats.peak_external_bytes,
-            .external_alloc_count = self.stats.external_alloc_count,
-            .external_free_count = self.stats.external_free_count,
-            .external_token_count = self.external_tokens.len,
-            .external_token_bytes = self.externalTokenBytes(),
-            .external_invalid_release_count = self.stats.external_invalid_release_count,
-            .allocation_debt = self.stats.allocation_debt,
-            .major_gc_count = self.stats.cycle_gc_count,
-            .major_gc_time_ns = self.stats.cycle_gc_time_ns,
-            .major_phase = self.major_phase,
-            .major_slice_count = self.stats.major_slice_count,
-            .last_incremental_slice_ns = self.stats.last_incremental_slice_ns,
-            .major_pause_ns_p50 = self.stats.major_pause_samples.percentile(500),
-            .major_pause_ns_p95 = self.stats.major_pause_samples.percentile(950),
-            .major_pause_ns_p99 = self.stats.major_pause_samples.percentile(990),
-            .incremental_slice_ns_p50 = self.stats.incremental_slice_samples.percentile(500),
-            .incremental_slice_ns_p95 = self.stats.incremental_slice_samples.percentile(950),
-            .incremental_slice_ns_p99 = self.stats.incremental_slice_samples.percentile(990),
-            .concurrent_mark_time_ns = self.stats.concurrent_mark_time_ns,
-            .sweep_time_ns = self.stats.sweep_time_ns,
-            .swept_page_count = self.stats.swept_page_count,
-            .last_swept_page_count = self.stats.last_swept_page_count,
-            .mark_stack_peak = self.stats.mark_stack_peak,
-            .failed_collections = self.stats.failed_collections,
-            .last_failure = self.stats.last_failure,
-            .freed_objects = self.stats.freed_objects,
-            .pinned_cell_count = self.pin_entries.len,
-            .gc_request_count = self.stats.gc_request_count,
-            .pending_major = self.major_request.pending,
-            .pending_request_reason = if (self.major_request.pending) self.major_request.reason else null,
-            .pending_request_urgency = if (self.major_request.pending) self.major_request.urgency else null,
-            .last_request_reason = self.stats.last_request_reason,
+            .total_allocated_bytes = snapshot.stats.allocated_bytes,
+            .peak_allocated_bytes = snapshot.stats.peak_allocated_bytes,
+            .heap_live_bytes = snapshot.stats.heap_live_bytes,
+            .old_live_bytes = snapshot.stats.old_live_bytes,
+            .large_object_bytes = snapshot.stats.large_object_bytes,
+            .heap_committed_bytes = snapshot.old_space.committed_bytes +| snapshot.large_space.committed_bytes,
+            .old_committed_bytes = snapshot.old_space.committed_bytes,
+            .old_empty_page_bytes = snapshot.old_space.free_bytes,
+            .large_committed_bytes = snapshot.large_space.committed_bytes,
+            .large_empty_page_bytes = snapshot.large_space.free_bytes,
+            .empty_page_bytes = snapshot.old_space.free_bytes +| snapshot.large_space.free_bytes,
+            .decommitted_bytes = snapshot.old_space.decommitted_bytes +| snapshot.large_space.decommitted_bytes,
+            .old_fragmentation_ratio = snapshot.old_space.fragmentationPerMille(),
+            .old_page_count = snapshot.old_space.committedPageCount(),
+            .old_allocating_page_count = snapshot.old_space.allocating_page_count,
+            .old_full_page_count = snapshot.old_space.full_page_count,
+            .old_empty_page_count = snapshot.old_space.empty_page_count,
+            .old_decommitted_page_count = snapshot.old_space.decommitted_page_count,
+            .old_needs_sweep_page_count = snapshot.old_space.needs_sweep_page_count,
+            .old_sweep_cursor_page = snapshot.old_space.sweep_cursor_page,
+            .old_evacuation_candidate_page_count = snapshot.old_space.evacuation_candidate_page_count,
+            .large_page_count = snapshot.large_space.committedPageCount(),
+            .large_empty_page_count = snapshot.large_space.empty_page_count,
+            .large_decommitted_page_count = snapshot.large_space.decommitted_page_count,
+            .large_needs_sweep_page_count = snapshot.large_space.needs_sweep_page_count,
+            .old_allocated_bytes = snapshot.stats.old_allocated_bytes,
+            .old_alloc_count = snapshot.stats.old_alloc_count,
+            .large_allocated_bytes = snapshot.stats.large_allocated_bytes,
+            .large_alloc_count = snapshot.stats.large_alloc_count,
+            .external_bytes = snapshot.stats.external_bytes,
+            .external_untracked_bytes = snapshot.stats.external_untracked_bytes,
+            .peak_external_bytes = snapshot.stats.peak_external_bytes,
+            .external_alloc_count = snapshot.stats.external_alloc_count,
+            .external_free_count = snapshot.stats.external_free_count,
+            .external_token_count = snapshot.external_tokens.len,
+            .external_token_bytes = snapshot.externalTokenBytes(),
+            .external_invalid_release_count = snapshot.stats.external_invalid_release_count,
+            .allocation_debt = snapshot.stats.allocation_debt,
+            .major_gc_count = snapshot.stats.cycle_gc_count,
+            .major_gc_time_ns = snapshot.stats.cycle_gc_time_ns,
+            .major_phase = snapshot.major_phase,
+            .major_slice_count = snapshot.stats.major_slice_count,
+            .last_incremental_slice_ns = snapshot.stats.last_incremental_slice_ns,
+            .major_pause_ns_p50 = snapshot.stats.major_pause_samples.percentile(500),
+            .major_pause_ns_p95 = snapshot.stats.major_pause_samples.percentile(950),
+            .major_pause_ns_p99 = snapshot.stats.major_pause_samples.percentile(990),
+            .incremental_slice_ns_p50 = snapshot.stats.incremental_slice_samples.percentile(500),
+            .incremental_slice_ns_p95 = snapshot.stats.incremental_slice_samples.percentile(950),
+            .incremental_slice_ns_p99 = snapshot.stats.incremental_slice_samples.percentile(990),
+            .concurrent_mark_time_ns = snapshot.stats.concurrent_mark_time_ns,
+            .sweep_time_ns = snapshot.stats.sweep_time_ns,
+            .swept_page_count = snapshot.stats.swept_page_count,
+            .last_swept_page_count = snapshot.stats.last_swept_page_count,
+            .mark_stack_peak = snapshot.stats.mark_stack_peak,
+            .failed_collections = snapshot.stats.failed_collections,
+            .last_failure = snapshot.stats.last_failure,
+            .freed_objects = snapshot.stats.freed_objects,
+            .pinned_cell_count = snapshot.pin_entries.len,
+            .gc_request_count = snapshot.stats.gc_request_count,
+            .pending_major = snapshot.major_request.pending,
+            .pending_request_reason = if (snapshot.major_request.pending) snapshot.major_request.reason else null,
+            .pending_request_urgency = if (snapshot.major_request.pending) snapshot.major_request.urgency else null,
+            .last_request_reason = snapshot.stats.last_request_reason,
         };
     }
 
@@ -1207,13 +1211,16 @@ pub const Registry = struct {
         }
     }
 
+    // Keep alloc/free hot paths scalar: QuickJS js_def_malloc updates
+    // malloc_count/malloc_size (quickjs.c:2160), add_gc_object only links the
+    // object (quickjs.c:6540), and js_trigger_gc gates on one threshold
+    // (quickjs.c:1780). Page state is derived by consumers.
     fn recordSpaceAlloc(self: *Registry, is_large: bool, bytes: usize) void {
         if (is_large) {
             self.large_space.recordAlloc(bytes);
         } else {
             self.old_space.recordAlloc(bytes);
         }
-        self.refreshSpacePageState();
     }
 
     fn recordSpaceFree(self: *Registry, is_large: bool, bytes: usize) void {
@@ -1222,7 +1229,6 @@ pub const Registry = struct {
         } else {
             self.old_space.recordFree(bytes, self.policy.retain_hot_empty_pages, self.policy.decommit_empty_pages);
         }
-        self.refreshSpacePageState();
     }
 
     fn externalTokenIndex(self: Registry, id: u64) ?usize {
@@ -1474,15 +1480,18 @@ pub const Registry = struct {
     }
 
     fn spacePageStateMatches(self: Registry, space: SpaceAccount) bool {
-        var expected = space;
-        expected.refreshPageState(self.fragmentationTriggerPerMille());
-        return expected.allocating_page_count == space.allocating_page_count and
-            expected.full_page_count == space.full_page_count and
-            expected.empty_page_count == space.empty_page_count and
-            expected.decommitted_page_count == space.decommitted_page_count and
-            expected.needs_sweep_page_count == space.needs_sweep_page_count and
-            expected.sweep_cursor_page == space.sweep_cursor_page and
-            expected.evacuation_candidate_page_count == space.evacuation_candidate_page_count;
+        const trigger = self.fragmentationTriggerPerMille();
+        var current = space;
+        current.refreshPageState(trigger);
+        var expected = current;
+        expected.refreshPageState(trigger);
+        return expected.allocating_page_count == current.allocating_page_count and
+            expected.full_page_count == current.full_page_count and
+            expected.empty_page_count == current.empty_page_count and
+            expected.decommitted_page_count == current.decommitted_page_count and
+            expected.needs_sweep_page_count == current.needs_sweep_page_count and
+            expected.sweep_cursor_page == current.sweep_cursor_page and
+            expected.evacuation_candidate_page_count == current.evacuation_candidate_page_count;
     }
 
     pub fn liveCount(self: Registry) usize {
