@@ -135,6 +135,30 @@
   precompute (setup-path flag already cheap here), K2 native depth-check
   shape (`max_native_call_depth` field — the recompute was on the VM-entry
   path, not the inline path fib/funcall exercise).**
+- **Sixth round (workflow `wf_99b8c92e`, orchestrating the `codex` CLI to
+  implement in isolated worktrees): NULL RESULT — all 3 micro-targets
+  rejected, base unchanged.** The three "safe" remaining hotspots were handed
+  to codex (a Claude wrapper drove `codex exec`, then authoritatively
+  built/smoked/faithfulness-reviewed each diff). All landed clean and
+  faithful but none is a demonstrated win on deterministic insn count:
+  C1 op_get_arg_short early-out for non-refcounted args = **+4 insn/call
+  (regression** — JSValue.dup() already tag-checks internally, so the
+  explicit branch is redundant work, not a save); C2 setupSimpleInlineEntry
+  errdefer calling popOwnedStackRegion directly instead of cleanupStackSource
+  = cold-error-path-only, +3 insn/call layout perturbation, hot path
+  untouched; C3 op_get_var guard reorder = 0 insn change (LLVM already
+  scheduled it). **Lesson: these three hotspots (get_arg 13.6% / setup 10.5%
+  / get_var 9.0% self) are already at qjs-form — no micro-optimization is
+  accessible. Their residual cost is STRUCTURAL: get_var's is the two Step-4
+  direct-eval guards (deferred), setup/get_arg's is irreducible per-call
+  work already matching qjs. Future effort must go to the big handlers
+  (op_call 17-24% / op_return 20% — restructuring, not micro-tightening) or
+  Step-4, NOT back to these three.** Codex mechanics for the record: `codex
+  exec --dangerously-bypass-approvals-and-sandbox -C <worktree>` works
+  headless under ChatGPT auth; `-o <file>` did NOT reliably capture the last
+  message (read the stdout tail instead); the wrapper's independent
+  build+smoke+diff-review is the source of truth (codex's self-report is
+  not).
 - **Gates:** test262 full 0/49775 (known 13, == main); force-GC build smoke green
   (closure/recursion/PTC/exception mix byte-identical to qjs); unit suite compared
   segment-by-segment against the unpatched-HEAD binary — identical failure sets. NOTE: the
