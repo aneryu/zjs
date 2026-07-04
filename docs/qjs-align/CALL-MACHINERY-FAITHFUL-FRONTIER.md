@@ -1,13 +1,48 @@
 # Call-machinery faithful frontier — current state & conclusion
 
 > **Single source of truth** for where zjs's call/dispatch alignment to QuickJS stands.
-> Updated 2026-06-29 after the route-2 de-risk experiment. This doc consolidates and replaces a
+> Updated 2026-07-04: method-A first tranche LANDED (`952592f` + `f3a517d`) — see §0. Previous
+> update 2026-06-29 after the route-2 de-risk experiment. This doc consolidates and replaces a
 > cluster of now-historical plan/investigation/handover docs (DISPATCH-TAX-FINDINGS,
 > TAILCALL-DISPATCH-ONESHOT-BLUEPRINT, FRAME-MODEL-ONESHOT-BLUEPRINT, FRAME-RAW-SP-BLUEPRINT,
 > FRAME-STRUCTURAL-ALIGN, COLLAPSE-CALL-MACHINERY-BLUEPRINT, HANDOVER-call-dispatch-align,
 > HANDOVER-frame-incremental, PHASE3-leaves-and-levers) — deleted; their durable conclusions,
 > invariants, and disproven claims are folded in below. qjs-side mechanism reference is kept in
 > `CALL-MACHINERY-QJS.md`.
+
+## 0. 2026-07-04 method-A first tranche — LANDED (`952592f`, fix `f3a517d`)
+
+- **Knife 1 — InlineTarget is scalars-only and rides by pointer.** The old target embedded a
+  by-value `bytecode.Bytecode` (~450B) and was copied 4-5× per call through
+  `op_call -> vm.tail_request -> driver -> pushCall -> pushFrame` — memcpy was the #1 fib
+  profile line (16.96%). Now `view: ?*const Bytecode` (the per-FB cached view; null for a
+  cache-less fixture FB, which gets an Entry-owned heap-boxed rebuild — old per-call-rebuild
+  semantics preserved). `Entry.view_storage` is deleted. qjs anchor: OP_call passes only the
+  16B func_obj; the callee prologue dereferences `p->u.func.function_bytecode` (17800).
+- **Knife 2 — `setupSimpleInlineEntry` is a straight-line mirror of qjs's prologue
+  (17828-17871):** one size computation, ONE arena carve, pointer-arithmetic partition, every
+  frame field bound exactly once. The `Frame.init` default-then-overwrite pass, the 7-slice
+  by-value `FrameSlab` round-trip, `FrameStorageWindows`, and the double open_var_refs memset
+  are gone from the simple path. Ownership flags unchanged (verified under force-GC).
+- **Fix — two dispatcher semantics lost when tail-call threading landed** (pre-existing on
+  HEAD, exposed by the gate): (a) interrupt polling — qjs polls on every OP_goto (18822) and
+  at call entry (17787); the tail-call path had NO poll point, so pure loops hung the
+  interrupt tests (suite idx 38/56) and the whole unit suite never completed. (b) op.call's
+  push-failure catch leg (`handleCatchableRuntimeError`) — a bare `try` leaked OOM out of
+  eval instead of delivering the preallocated InternalError to the caller's catch.
+- **Numbers (fib(30)×3, X925 pinned):** 1390 → **988 insn/call**, 4.15× → **3.02×** qjs wall.
+  funcall pure per-call tax (differential vs inlined body): 1169 → **774** insn (qjs 249).
+- **Gates:** test262 full 0/49775 (known 13, == main); force-GC build smoke green
+  (closure/recursion/PTC/exception mix byte-identical to qjs); unit suite compared
+  segment-by-segment against the unpatched-HEAD binary — identical failure sets. NOTE: the
+  unit suite itself is **pre-broken on HEAD** (idx-58 NativeBinding crash stops a sequential
+  run; ForbiddenCoreRuntimeDependency + oom_cap FAILs; crashes past idx 900) and has
+  process-global order coupling (isolated/range runs differ from sequential runs).
+- **Next in §2.1, by current profile:** driver round-trip collapse for call/return (the
+  `.tail`/`.returned` detour through the driver — push/pop + reload + tail-jump directly in
+  the handler, qjs's "the whole call happens inside CASE(OP_call)" shape;
+  `runWithArgsState`(driver) is 19% self), then teardown straight-lining (6.5%), then
+  `op_call` resolve+stage (9.4%).
 
 ## TL;DR — the current verdict
 
