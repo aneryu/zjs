@@ -44,9 +44,32 @@
   in a register. **fib 988 → 920 insn/call, 3.02× → 2.64× wall — past the 2.66× pre-
   struct-align best. funcall tax 774 → 704 (wall 2.06×).** Disproven en route: manually
   inlining pushCall/pushFrame and a depth>0-specialized reloadTop are both no-ops (LLVM
-  already has them; the vm-field stores are the irreducible tail-call-architecture cost —
-  the next structural lever there is widening the handler signature to carry
-  code_base/arg_buf in registers, a ~250-handler mechanical rewrite, unproven).
+  already has them; the vm-field stores are the irreducible tail-call-architecture cost).
+- **Third tranche (workflow `wf_972da3d7`, 4 experiments A/B-measured on isolated
+  worktrees, TIME as the yardstick): E2+E5 landed (`17bb4b7` + `f14c3f0`) — fib
+  925.4 → 909.4 insn/call, 378 → 358.6 ms = 2.51×; funcall tax 709 → 689.**
+  E2: pushFrame/pushCall return the acquired `*Entry`; pushAndEnter reloads from it
+  directly (qjs never re-derives the frame address — it IS the alloca pointer, 17846);
+  kills the 344B-stride umaddl on the push edge (−9 insn, −3.8% time). E5: caller
+  operand-region retreat moved to the top of the simple prologue (qjs borrows argv at
+  17841 before the alloca; the length retreat was the setup chain's hottest tail store),
+  errdefer restores the length before cleanup (−7 insn, −0.3% time).
+  **DISPROVEN (do not re-attempt without new evidence): E1 handler 5th-register-arg for
+  code_base — −5 insn but +0.9% TIME (register-pressure/layout backfire at ~45-handler
+  scale); E3 Entry stride 512 — −3 insn but +2.0% TIME (cache-footprint loss beats the
+  multiply→shift win). Both prove insn-count alone is not the yardstick.**
+- **get_var recon (docs/qjs-align/GET-VAR-FIB-RECON.md): the presumed "lever ② parser
+  divergence" is REFUTED** — both engines compile fib's self-reference to isomorphic
+  bytecode (get_var u16-idx / get_var_ref0) and zjs's hot op_get_var already reads the
+  cell directly (no name lookup, no IC on the hot path). The REAL divergence is the
+  var_refs slot contract: qjs's typed `JSVarRef **var_refs` folds delete / top-level-let
+  shadowing / eval bindings / undeclared-global into cell state at closure-creation /
+  mutation time, leaving ONE read-side check; zjs's untyped `[]JSValue` slots re-verify
+  all four per read (8 guards, 28 vs 4 cycles, 10.9% of fib). Fix path: 4 exec-layer
+  steps (delete→sentinel 9288; let-shadow cell surgery 17134; slot typing to []*VarRef
+  mirroring js_closure2 17262; eval-overlay→compile-time closure vars 33610 — the last
+  folds into the REMAINING-KNOWN direct-eval rework). ~1 agent-week, fib upside ~9%
+  (~15% of the remaining gap). get_var_ref/put_var/put_var_ref share the same cure.
 - **Gates:** test262 full 0/49775 (known 13, == main); force-GC build smoke green
   (closure/recursion/PTC/exception mix byte-identical to qjs); unit suite compared
   segment-by-segment against the unpatched-HEAD binary — identical failure sets. NOTE: the
