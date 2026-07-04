@@ -540,7 +540,7 @@ pub const Machine = struct {
     /// The caller owns depth accounting (enterInlineCallDepth / enterCallDepth)
     /// and any push/pop bookkeeping; on error every partially-initialized
     /// resource is released via the errdefers below.
-    pub fn setupInlineEntry(ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
+    pub noinline fn setupInlineEntry(ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
         const rt = ctx.runtime;
         // Point at the pointer-stable per-FB cached view (no copy); a
         // cache-less FB (fixture/synthetic, no debug box) gets a fresh
