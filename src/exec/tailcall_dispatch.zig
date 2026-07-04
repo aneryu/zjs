@@ -1055,53 +1055,70 @@ pub fn op_get_length(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
-pub fn op_compare(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    const opc = pc[0];
-    if ((sp - 2)[0].asInt32()) |a| {
-        if ((sp - 1)[0].asInt32()) |b| {
-            const r = switch (opc) {
-                op.lt => a < b,
-                op.lte => a <= b,
-                op.gt => a > b,
-                op.gte => a >= b,
-                op.eq, op.strict_eq => a == b,
-                op.neq, op.strict_neq => a != b,
-                else => unreachable,
-            };
-            (sp - 2)[0] = JSValue.boolean(r);
-            return cont(pc + 1, sp - 1, var_buf, vm);
-        }
-    }
-    // qjs OP_CMP inlines the float64/int relational compare too (FLOAT64(a)||FLOAT64(b)
-    // → convert both to double, compare) before falling to js_relational_slow. Both
-    // operands are non-refcounted numbers here, so nothing to free. This is what makes
-    // a float-counter `x < n` not pay the cold hop every iteration.
-    switch (opc) {
-        op.lt, op.lte, op.gt, op.gte => {
-            if ((sp - 2)[0].asNumber()) |fa| {
-                if ((sp - 1)[0].asNumber()) |fb| {
+/// Per-op comparison handler generator (qjs OP_CMP / OP_CMP_EQ / OP_CMP_STRICT_EQ
+/// each expand to an INDEPENDENT CASE label per opcode — quickjs.c:20230-20271
+/// (OP_CMP → OP_lt/OP_lte/OP_gt/OP_gte), 20273-20341 (OP_CMP_EQ → OP_eq/OP_neq),
+/// 20343-20398 (OP_CMP_STRICT_EQ → OP_strict_eq/OP_strict_neq) — so OP_lt's
+/// both-int fast path is a single cmp+cset with no runtime predicate select).
+/// The former shared op_compare handler decoded pc[0] into the predicate through
+/// a cmp+cset+csel selection chain (~30 insn/compare measured vs qjs's 17). With
+/// `opc` comptime the switches below fold away and each handler compiles to:
+/// two tag checks + one cmp + one cset + write sp[-2] + tail-jump next —
+/// qjs's exact int fast-path shape. Non-number operands fall INDIRECTLY to
+/// cold_table[pc[0]] (op_compare_cold → full js_relational_slow/js_eq_slow
+/// semantics), the same routing discipline the shared handler used.
+pub fn opCompare(comptime opc: u8) Handler {
+    return struct {
+        fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+            if ((sp - 2)[0].asInt32()) |a| {
+                if ((sp - 1)[0].asInt32()) |b| {
                     const r = switch (opc) {
-                        op.lt => fa < fb,
-                        op.lte => fa <= fb,
-                        op.gt => fa > fb,
-                        op.gte => fa >= fb,
+                        op.lt => a < b,
+                        op.lte => a <= b,
+                        op.gt => a > b,
+                        op.gte => a >= b,
+                        op.eq, op.strict_eq => a == b,
+                        op.neq, op.strict_neq => a != b,
                         else => unreachable,
                     };
                     (sp - 2)[0] = JSValue.boolean(r);
                     return cont(pc + 1, sp - 1, var_buf, vm);
                 }
             }
-        },
-        else => {},
-    }
-    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            // qjs OP_CMP inlines the float64/int relational compare too (FLOAT64(a)||FLOAT64(b)
+            // → convert both to double, compare) before falling to js_relational_slow. Both
+            // operands are non-refcounted numbers here, so nothing to free. This is what makes
+            // a float-counter `x < n` not pay the cold hop every iteration. (Relational ops
+            // only — same coverage the shared handler had; the eq family keeps its existing
+            // int-int fast arm and falls cold otherwise.)
+            switch (opc) {
+                op.lt, op.lte, op.gt, op.gte => {
+                    if ((sp - 2)[0].asNumber()) |fa| {
+                        if ((sp - 1)[0].asNumber()) |fb| {
+                            const r = switch (opc) {
+                                op.lt => fa < fb,
+                                op.lte => fa <= fb,
+                                op.gt => fa > fb,
+                                op.gte => fa >= fb,
+                                else => unreachable,
+                            };
+                            (sp - 2)[0] = JSValue.boolean(r);
+                            return cont(pc + 1, sp - 1, var_buf, vm);
+                        }
+                    }
+                },
+                else => {},
+            }
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        }
+    }.h;
 }
 
 /// Dedicated cold handler for OP_lt/OP_le/…/OP_eq's non-(both-int32) operands — the
 /// float-vs-int / float / object / loose-eq cases (qjs js_relational_slow /
-/// js_eq_slow). Installed as the cold_table entry for the compare ops, so op_compare
-/// reaches it through the same indirect `cold_table[pc[0]]` dispatch it always used
-/// (a DIRECT tail-call here would perturb op_compare's int32 fast-path codegen — the
+/// js_eq_slow). Installed as the cold_table entry for the compare ops, so the
+/// opCompare handlers reach it through the same indirect `cold_table[pc[0]]` dispatch
+/// (a DIRECT tail-call here would perturb the int32 fast-path codegen — the
 /// canonical `s=s+i` loop regressed +37 insn/iter when routed directly).
 ///
 /// `compareAt` runs register-resident (no publish round-trip) and the handler writes
@@ -1183,7 +1200,7 @@ pub fn op_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) c
 // That routing is INDIRECT, which LLVM cannot inline back — so the hot handler stays
 // prologue-free (a direct tail-call to a local slow shell got re-inlined, dragging in
 // its 64B frame + callee-saved spills, which pressured the store buffer and stalled
-// the boolean's store→load forward from op_compare). Booleans need no free / no call.
+// the boolean's store→load forward from opCompare). Booleans need no free / no call.
 pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if ((sp - 1)[0].asBool()) |b| {
         if (!b) return @call(.always_tail, next, .{ jump8Target(pc, vm), sp - 1, var_buf, vm });

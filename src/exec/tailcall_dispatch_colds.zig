@@ -261,8 +261,8 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     inline for ([_]u8{ op.add, op.sub, op.mul, op.div, op.mod, op.pow, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor }) |o| t[o] = h_binary;
     // Register-resident cold compare (no publish round-trip) — falls back to the
     // publishing h_compare path internally at a generator stop boundary. Reached via
-    // the same indirect cold_table dispatch op_compare always used (direct routing
-    // would perturb the int32 fast-path codegen).
+    // the same indirect cold_table dispatch the compare fast handlers always used
+    // (direct routing would perturb the int32 fast-path codegen).
     inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = td.op_compare_cold;
     inline for ([_]u8{ op.neg, op.plus, op.inc, op.dec }) |o| t[o] = h_unary;
     t[op.in] = h(struct {
@@ -822,7 +822,10 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
         .{ .o = op.@"or", .h = td.opBinary(.bor) },
         .{ .o = op.xor, .h = td.opBinary(.bxor) },
     }) |e| t[e.o] = e.h;
-    inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = td.op_compare;
+    // Per-op compare handlers (qjs OP_CMP/OP_CMP_EQ/OP_CMP_STRICT_EQ expand one
+    // independent CASE per opcode, quickjs.c:20268-20271/20340-20341/20397-20398 —
+    // no runtime predicate select on the int fast path).
+    inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = td.opCompare(o);
     inline for ([_]u8{ op.inc, op.dec }) |o| t[o] = td.op_inc_dec;
     t[op.dup] = td.op_dup;
     t[op.swap] = td.op_swap;
