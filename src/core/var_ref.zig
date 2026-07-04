@@ -19,8 +19,11 @@ pub const VarRef = struct {
     // top-level global lexical bindings; gates TDZ-throw on read.
     is_lexical: bool = false,
     is_function_name: bool = false,
+    // qjs has no per-cell deleted flag: deleting a captured binding parks the
+    // cell's value at UNINITIALIZED (remove_global_object_property,
+    // quickjs.c:9289-9309); deletable-ness itself is a zjs bookkeeping bit for
+    // eval-created bindings (qjs encodes it as the property's CONFIGURABLE flag).
     is_deletable: bool = false,
-    is_deleted: bool = false,
     is_open: bool = false,
 
     comptime {
@@ -116,9 +119,5 @@ pub const VarRef = struct {
 
     pub fn varRefIsDeletableSlot(self: *VarRef) *bool {
         return &self.is_deletable;
-    }
-
-    pub fn varRefIsDeletedSlot(self: *VarRef) *bool {
-        return &self.is_deleted;
     }
 };

@@ -1103,13 +1103,13 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
 
             // qjs OP_get_var_ref(_check) inline (quickjs.c:18627): val=*var_refs[idx]->pvalue;
-            // push dup. Uninitialized(TDZ)/deleted/non-cell fall through to the noinline handler.
+            // push dup. Uninitialized (TDZ or deleted binding parked at UNINITIALIZED)
+            // and non-cell fall through to the noinline handler.
             op.get_var_ref, op.get_var_ref_check => {
                 if (comptime thread_dispatch) get_var_ref_fast: {
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     if (idx >= frame.var_refs.len) break :get_var_ref_fast;
                     const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :get_var_ref_fast;
-                    if (cell.is_deleted) break :get_var_ref_fast;
                     const v = cell.pvalue.*;
                     if (v.isUninitialized()) break :get_var_ref_fast;
                     // Imported module bindings wrap the exporting module's cell
@@ -1135,7 +1135,6 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     const idx: u16 = opc - op.get_var_ref0;
                     if (idx >= frame.var_refs.len) break :get_var_ref_short_fast;
                     const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :get_var_ref_short_fast;
-                    if (cell.is_deleted) break :get_var_ref_short_fast;
                     const v = cell.pvalue.*;
                     if (v.isUninitialized()) break :get_var_ref_short_fast;
                     // See get_var_ref above: an imported binding's cell wraps the
@@ -1154,13 +1153,13 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 }
             },
             // qjs OP_put_var_ref(_check) inline (quickjs.c:18638): set_value(var_ref->pvalue, sp[-1]).
-            // const / deleted / function-name / (check:)uninitialized fall through to the handler.
+            // const / function-name / (check:)uninitialized fall through to the handler.
             op.put_var_ref, op.put_var_ref_check => {
                 if (comptime thread_dispatch) put_var_ref_fast: {
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     if (idx >= frame.var_refs.len) break :put_var_ref_fast;
                     const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :put_var_ref_fast;
-                    if (cell.is_deleted or cell.is_const or cell.is_function_name) break :put_var_ref_fast;
+                    if (cell.is_const or cell.is_function_name) break :put_var_ref_fast;
                     // A top-level function declaration stores its closure through
                     // put_var_ref and must also be published as a global object
                     // property (qjs js_closure_define_global_var non-lexical: the
@@ -1193,7 +1192,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     const idx: u16 = opc - op.put_var_ref0;
                     if (idx >= frame.var_refs.len) break :put_var_ref_short_fast;
                     const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :put_var_ref_short_fast;
-                    if (cell.is_deleted or cell.is_const or cell.is_function_name) break :put_var_ref_short_fast;
+                    if (cell.is_const or cell.is_function_name) break :put_var_ref_short_fast;
                     // Top-level function declarations store their closure here and
                     // must also be published as a global property (see put_var_ref
                     // above). Defer object stores to the slow handler so
@@ -1712,7 +1711,6 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     if (idx >= frame.var_refs.len) break :get_var_fast;
                     const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :get_var_fast;
-                    if (cell.is_deleted) break :get_var_fast;
                     const v = cell.pvalue.*;
                     if (v.isUninitialized()) break :get_var_fast;
                     if (core.VarRef.fromValue(v) != null) break :get_var_fast;
@@ -1763,7 +1761,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     if (idx >= frame.var_refs.len) break :put_var_fast;
                     const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :put_var_fast;
-                    if (cell.is_deleted or cell.is_const or cell.is_function_name) break :put_var_fast;
+                    if (cell.is_const or cell.is_function_name) break :put_var_fast;
                     const cur = cell.pvalue.*;
                     if (cur.isUninitialized()) break :put_var_fast;
                     if (core.VarRef.fromValue(cur) != null) break :put_var_fast;

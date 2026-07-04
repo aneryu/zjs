@@ -730,7 +730,8 @@ pub fn opLoc(comptime kind: LocKind, comptime idx_src: LocIdx) Handler {
 
 /// Closure/global var-ref read (qjs OP_get_var_ref0..3 distinct labels). The `fib`
 /// recursive self-reference is get_var_ref0 — fib's per-call hottest non-call op.
-/// Deleted / TDZ-uninitialized / chained-import-cell route to the cold resolver.
+/// Uninitialized (TDZ or deleted binding parked at UNINITIALIZED, qjs
+/// remove_global_object_property) / chained-import-cell route to the cold resolver.
 const VarRefIdx = enum { c0, c1, c2, c3, half };
 pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
     return struct {
@@ -748,7 +749,6 @@ pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
             };
             if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             const cell = slot_ops.varRefCellFromValue(vm.frame.var_refs.ptr[idx]) orelse return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-            if (cell.is_deleted) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             const v = cell.pvalue.*;
             if (v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             if (core.VarRef.fromValue(v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
@@ -1227,15 +1227,16 @@ pub fn op_add_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
 }
 
 // Global var read (2-byte var-ref index). qjs OP_get_var_ref-backed global cell read
-// — the per-call `fib` lookup in recursive code. Any dynamic-overlay / shadow / TDZ /
-// deleted / nested-var-ref condition falls back to the cold getVar resolver.
+// — the per-call `fib` lookup in recursive code. Any dynamic-overlay / shadow /
+// uninitialized (TDZ or deleted binding parked at UNINITIALIZED, qjs
+// remove_global_object_property) / nested-var-ref condition falls back to the
+// cold getVar resolver.
 pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     if (vm_property_globals.hasDynamicGlobalOverlay(vm.frame, evLocalNames(vm), vm.frame.evalVarRefNames(), evWithObject(vm))) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
     if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const cell = slot_ops.varRefCellFromValue(vm.frame.var_refs.ptr[idx]) orelse return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    if (cell.is_deleted) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const v = cell.pvalue.*;
     if (v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     if (core.VarRef.fromValue(v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });

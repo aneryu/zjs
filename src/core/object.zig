@@ -493,7 +493,6 @@ pub const VarRefPayload = struct {
     is_const: bool = false,
     is_function_name: bool = false,
     is_deletable: bool = false,
-    is_deleted: bool = false,
     realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *VarRefPayload, rt: *JSRuntime) void {
@@ -2790,9 +2789,8 @@ pub const Object = struct {
     }
 
     pub fn initVarRefPayload(self: *Object, rt: *JSRuntime, initial_value: JSValue) !void {
-        const payload = try self.ensureVarRefPayload(rt);
+        _ = try self.ensureVarRefPayload(rt);
         try self.setVarRefValue(rt, initial_value);
-        payload.is_deleted = false;
     }
 
     pub fn setVarRefValue(self: *Object, rt: *JSRuntime, next_value: JSValue) !void {
@@ -2939,12 +2937,6 @@ pub const Object = struct {
 
     pub fn varRefIsDeletableSlot(self: *Object) *bool {
         if (self.varRefPayload()) |payload| return &payload.is_deletable;
-        std.debug.assert(self.class_payload_kind == .var_ref);
-        unreachable;
-    }
-
-    pub fn varRefIsDeletedSlot(self: *Object) *bool {
-        if (self.varRefPayload()) |payload| return &payload.is_deleted;
         std.debug.assert(self.class_payload_kind == .var_ref);
         unreachable;
     }
@@ -8839,7 +8831,6 @@ pub const Object = struct {
                 const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
                 errdefer next_value.free(rt);
                 try cell.setVarRefValue(rt, next_value);
-                cell.varRefIsDeletedSlot().* = false;
                 return;
             }
             // Data or data-destined auto_init placeholder: overwrite with the
@@ -8908,7 +8899,6 @@ pub const Object = struct {
                         const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
                         errdefer next_value.free(rt);
                         try cell.setVarRefValue(rt, next_value);
-                        cell.varRefIsDeletedSlot().* = false;
                         return true;
                     },
                     // Data-destined auto_init placeholder: overwrite with the new
@@ -9093,6 +9083,23 @@ pub const Object = struct {
             if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |mapped_index| {
                 if (mapped_index < self.argumentsVarRefs().len) self.deleteMappedArgumentsBinding(rt, mapped_index);
             }
+        }
+        // qjs remove_global_object_property (quickjs.c:9289-9309): deleting a
+        // global-object VARREF property parks the shared cell at UNINITIALIZED
+        // (clearing is_lexical/is_const) so every capturing frame's reader
+        // routes through the uninitialized slow path (OP_get_var's generic
+        // global lookup / OP_put_var's global set). qjs additionally files the
+        // cell in the uninitialized_vars side table so a later re-declaration
+        // reuses it; zjs has no side table — re-declaration creates a fresh
+        // property and parked captures reach it through the same name-based
+        // slow path, so the observable semantics match.
+        if (self.flags.is_global and old_flags.kind == .var_ref and !old_flags.deleted) {
+            const cell = old_slot.var_ref;
+            const old_value = cell.varRefValueSlot().*;
+            cell.varRefValueSlot().* = JSValue.uninitialized();
+            cell.is_lexical = false;
+            cell.is_const = false;
+            old_value.free(rt);
         }
         destroyPropertySlot(rt, atom_id, old_flags, old_slot);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
@@ -9552,7 +9559,6 @@ pub const Object = struct {
             errdefer next_value.free(rt);
             try self.ensureUniqueShapeForMutation(rt);
             try cell.setVarRefValue(rt, next_value);
-            cell.varRefIsDeletedSlot().* = false;
             rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.withKind(.var_ref).bits());
             return;
         }

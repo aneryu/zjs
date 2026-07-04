@@ -179,21 +179,23 @@ pub noinline fn getVar(
     if (!hasDynamicGlobalOverlay(frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
         if (ref_idx < frame.var_refs.len) {
             if (varRefCellFromValue(frame.var_refs[ref_idx])) |cell| {
-                if (!cell.varRefIsDeletedSlot().*) {
-                    const value = cell.pvalue.*;
-                    if (!value.isUninitialized()) {
-                        if (core.VarRef.fromValue(value) == null and
-                            !call_runtime.globalLexicalHasForGlobal(ctx, global, atom_id) and
-                            !(property_vm.frameClosureHasEvalParent(frame) and property_vm.parentFunctionEvalBindingShadowsGlobal(ctx.runtime, frame, atom_id)))
-                        {
-                            try stack.push(value);
-                            return .done;
-                        }
-                    } else if (closureVarAt(function, ref_idx)) |cv| {
-                        if (cv.is_lexical) return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
-                    } else if (cell.is_lexical) {
-                        return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
+                // A deleted binding's cell is parked at UNINITIALIZED with
+                // is_lexical cleared (qjs remove_global_object_property), so it
+                // falls past the TDZ arms into the generic global lookup below
+                // (qjs OP_get_var uninit -> JS_GetPropertyInternal, 18469-18480).
+                const value = cell.pvalue.*;
+                if (!value.isUninitialized()) {
+                    if (core.VarRef.fromValue(value) == null and
+                        !call_runtime.globalLexicalHasForGlobal(ctx, global, atom_id) and
+                        !(property_vm.frameClosureHasEvalParent(frame) and property_vm.parentFunctionEvalBindingShadowsGlobal(ctx.runtime, frame, atom_id)))
+                    {
+                        try stack.push(value);
+                        return .done;
                     }
+                } else if (closureVarAt(function, ref_idx)) |cv| {
+                    if (cv.is_lexical) return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
+                } else if (cell.is_lexical) {
+                    return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
                 }
             }
         } else if (closureVarAt(function, ref_idx)) |cv| {
@@ -684,34 +686,36 @@ pub noinline fn putVar(
     if (!hasDynamicGlobalOverlay(frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
         if (ref_idx < frame.var_refs.len) {
             if (varRefCellFromValue(frame.var_refs[ref_idx])) |cell| {
-                if (!cell.varRefIsDeletedSlot().*) {
-                    const current = cell.pvalue.*;
-                    if (!current.isUninitialized()) {
-                        if (core.VarRef.fromValue(current) == null and !cell.varRefIsFunctionNameSlot().* and
-                            !call_runtime.globalLexicalHasForGlobal(ctx, global, atom_id) and
-                            !(property_vm.frameClosureHasEvalParent(frame) and property_vm.parentFunctionEvalBindingShadowsGlobal(ctx.runtime, frame, atom_id)))
-                        {
-                            if (cell.varRefIsConstSlot().*) {
-                                value.free(ctx.runtime);
-                                _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| {
-                                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
-                                    return err;
-                                };
-                                return error.TypeError;
-                            }
-                            errdefer value.free(ctx.runtime);
-                            try cell.setVarRefValue(ctx.runtime, value);
-                            return .done;
-                        }
-                    } else if (closureVarAt(function, ref_idx)) |cv| {
-                        if (cv.is_lexical) {
+                // Deleted binding: cell parked at UNINITIALIZED, is_lexical
+                // cleared — falls past the TDZ arms to the named waterfall /
+                // global object set below (qjs OP_put_var uninit non-lexical ->
+                // JS_SetPropertyInternal on global_obj, quickjs.c:18499-18520).
+                const current = cell.pvalue.*;
+                if (!current.isUninitialized()) {
+                    if (core.VarRef.fromValue(current) == null and !cell.varRefIsFunctionNameSlot().* and
+                        !call_runtime.globalLexicalHasForGlobal(ctx, global, atom_id) and
+                        !(property_vm.frameClosureHasEvalParent(frame) and property_vm.parentFunctionEvalBindingShadowsGlobal(ctx.runtime, frame, atom_id)))
+                    {
+                        if (cell.varRefIsConstSlot().*) {
                             value.free(ctx.runtime);
-                            return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
+                            _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| {
+                                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                                return err;
+                            };
+                            return error.TypeError;
                         }
-                    } else if (cell.is_lexical) {
+                        errdefer value.free(ctx.runtime);
+                        try cell.setVarRefValue(ctx.runtime, value);
+                        return .done;
+                    }
+                } else if (closureVarAt(function, ref_idx)) |cv| {
+                    if (cv.is_lexical) {
                         value.free(ctx.runtime);
                         return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
                     }
+                } else if (cell.is_lexical) {
+                    value.free(ctx.runtime);
+                    return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
                 }
             }
         } else if (closureVarAt(function, ref_idx)) |cv| {

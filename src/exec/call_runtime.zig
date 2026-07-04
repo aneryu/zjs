@@ -7947,7 +7947,8 @@ pub fn lookupFrameVarRef(ctx: *core.JSContext, global: *core.Object, function: *
             if (globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| return lexical_value;
             continue;
         }
-        if (slot_ops.varRefSlotIsDeleted(frame.var_refs[idx])) return core.JSValue.uninitialized();
+        // A deleted binding's cell is parked at UNINITIALIZED (qjs
+        // remove_global_object_property), so slotValueDup reports it naturally.
         const value = slot_ops.slotValueDup(frame.var_refs[idx]);
         return value;
     }
@@ -8030,7 +8031,8 @@ pub fn atomIdOrNameEql(rt: *core.JSRuntime, left: core.Atom, right: core.Atom) b
 pub fn lookupNamedVarRef(rt: *core.JSRuntime, names: []const core.Atom, refs: []const core.JSValue, atom_id: core.Atom) ?core.JSValue {
     for (names, 0..) |name, idx| {
         if (!atomIdOrNameEql(rt, name, atom_id) or idx >= refs.len) continue;
-        if (slot_ops.varRefSlotIsDeleted(refs[idx])) return core.JSValue.uninitialized();
+        // Deleted binding = cell parked at UNINITIALIZED; slotValueDup
+        // surfaces the sentinel directly (qjs OP_get_var uninit route).
         return slot_ops.slotValueDup(refs[idx]);
     }
     return null;
@@ -8109,11 +8111,18 @@ pub fn deleteNamedVarRefBinding(rt: *core.JSRuntime, names: []const core.Atom, r
 
 pub fn deleteVarRefSlot(rt: *core.JSRuntime, slot: core.JSValue) ?bool {
     const cell = slot_ops.varRefCellFromValue(slot) orelse return false;
-    if (cell.varRefIsDeletedSlot().*) return null;
     if (!cell.varRefIsDeletableSlot().*) return false;
+    // qjs remove_global_object_property (quickjs.c:9289-9309): deleting a
+    // captured binding parks the shared cell at UNINITIALIZED (clearing
+    // is_lexical/is_const) instead of flagging it — every reader routes
+    // through the existing uninitialized slow path. A cell that is already
+    // parked means the binding is gone; report "not found" (null) so the
+    // caller keeps searching outer scopes / the global object.
+    if (cell.varRefValueSlot().*.isUninitialized()) return null;
     const old_value = cell.varRefValueSlot().*;
-    cell.varRefValueSlot().* = core.JSValue.undefinedValue();
-    cell.varRefIsDeletedSlot().* = true;
+    cell.varRefValueSlot().* = core.JSValue.uninitialized();
+    cell.is_lexical = false;
+    cell.varRefIsConstSlot().* = false;
     old_value.free(rt);
     return true;
 }
@@ -8121,7 +8130,8 @@ pub fn deleteVarRefSlot(rt: *core.JSRuntime, slot: core.JSValue) ?bool {
 pub fn lookupNamedSlotValue(rt: *core.JSRuntime, names: []const core.Atom, slots: []const core.JSValue, atom_id: core.Atom) ?core.JSValue {
     for (names, 0..) |name, idx| {
         if (!atomIdOrNameEql(rt, name, atom_id) or idx >= slots.len) continue;
-        if (slot_ops.varRefSlotIsDeleted(slots[idx])) return core.JSValue.uninitialized();
+        // Deleted binding = cell parked at UNINITIALIZED; slotValueDup
+        // surfaces the sentinel directly (qjs OP_get_var uninit route).
         return slot_ops.slotValueDup(slots[idx]);
     }
     return null;
@@ -8130,7 +8140,11 @@ pub fn lookupNamedSlotValue(rt: *core.JSRuntime, names: []const core.Atom, slots
 pub fn lookupNamedRawSlotValue(rt: *core.JSRuntime, names: []const core.Atom, slots: []const core.JSValue, atom_id: core.Atom) ?core.JSValue {
     for (names, 0..) |name, idx| {
         if (!atomIdOrNameEql(rt, name, atom_id) or idx >= slots.len) continue;
-        if (slot_ops.varRefSlotIsDeleted(slots[idx])) continue;
+        // Skip a deleted eval-created binding: its deletable cell is parked at
+        // UNINITIALIZED (qjs remove_global_object_property) and must not be
+        // re-aliased into a fresh eval frame. A non-deletable uninitialized
+        // cell is a live TDZ binding and IS returned, as before.
+        if (slot_ops.varRefSlotIsDeletedEvalBinding(slots[idx])) continue;
         return slots[idx].dup();
     }
     return null;

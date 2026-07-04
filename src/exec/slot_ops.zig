@@ -219,14 +219,17 @@ pub fn execGetVarRefMaybeTdz(
     }
     const slot = frame.var_refs[idx];
     if (varRefCellFromValue(slot)) |cell| {
-        if (cell.varRefIsDeletedSlot().*) {
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) {
-                return true;
-            }
-            return error.ReferenceError;
-        }
         const value = slotValueBorrow(slot);
         if (value.isUninitialized()) {
+            // A deletable cell parked at UNINITIALIZED is a deleted
+            // eval-created binding (qjs remove_global_object_property):
+            // plain ReferenceError, not the TDZ message.
+            if (cell.varRefIsDeletableSlot().*) {
+                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) {
+                    return true;
+                }
+                return error.ReferenceError;
+            }
             const err = throwTdzReference(ctx);
             if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
                 return true;
@@ -294,7 +297,6 @@ pub fn execPutVarRef(
             assigned = slotValueDup(value);
             value.free(ctx.runtime);
         }
-        cell.varRefIsDeletedSlot().* = false;
         errdefer assigned.free(ctx.runtime);
         try cell.setVarRefValue(ctx.runtime, assigned);
         return;
@@ -386,7 +388,6 @@ pub fn defineGlobalFunctionBindingValue(
         if (!flags.deleted and !flags.isAccessor()) {
             if (global.asVarRefAt(index)) |cell| {
                 try cell.setVarRefValue(rt, value.dup());
-                cell.varRefIsDeletedSlot().* = false;
                 return;
             }
         }
@@ -444,9 +445,14 @@ pub fn varRefSlotIsUninitialized(slot: core.JSValue) bool {
     return slotValueBorrow(slot).isUninitialized();
 }
 
-pub fn varRefSlotIsDeleted(slot: core.JSValue) bool {
+/// A deleted eval-created binding: its deletable cell was parked at
+/// UNINITIALIZED by deleteVarRefSlot (qjs remove_global_object_property,
+/// quickjs.c:9289-9309). Distinct from a TDZ cell, which is uninitialized
+/// but NOT deletable.
+pub fn varRefSlotIsDeletedEvalBinding(slot: core.JSValue) bool {
     const cell = varRefCellFromValue(slot) orelse return false;
-    return cell.varRefIsDeletedSlot().*;
+    if (!cell.varRefIsDeletableSlot().*) return false;
+    return cell.varRefValue().isUninitialized();
 }
 
 pub fn evalLocalSlotIsEvalVarCell(slot: core.JSValue) bool {
@@ -474,7 +480,6 @@ noinline fn setSlotValueRefCounted(ctx: *core.JSContext, slot: *core.JSValue, va
         value.free(ctx.runtime);
     }
     if (varRefCellFromValue(slot.*)) |cell| {
-        cell.varRefIsDeletedSlot().* = false;
         try cell.setVarRefValue(ctx.runtime, assigned);
         return;
     }
