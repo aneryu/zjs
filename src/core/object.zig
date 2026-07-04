@@ -9805,18 +9805,13 @@ pub const Object = struct {
         return .{ .value = .{ .index = lookup.index, .flags = flags, .value = self.prop_values[lookup.index].slot.data } };
     }
 
-    pub const OwnDataValueResult = union(enum) {
-        value: JSValue,
-        missing,
-        slow,
-    };
-
     /// Lean own-data-property lookup for the hot get_field path: returns just the
-    /// BORROWED slot value (16B) instead of materializing the {index, flags, value}
-    /// probe struct, so the decoded flags/index stay in registers rather than
-    /// spilling to the stack. Mirrors qjs find_own_property + the data-kind guard;
-    /// folds the chain walk, deleted skip, and kind check into one pass.
-    pub inline fn findOwnDataValueFast(self: *const Object, atom_id: atom.Atom) OwnDataValueResult {
+    /// BORROWED slot value instead of materializing a 3-way result union. Mirrors
+    /// qjs find_own_property plus the data-kind guard; qjs then feeds the borrowed
+    /// value directly to JS_DupValue (quickjs.c:19131, quickjs.h:707).
+    /// `slow` is written only for the non-data-property case; the caller initializes
+    /// it to false so missing can continue the prototype walk without another tag.
+    pub inline fn findOwnDataValueFast(self: *const Object, atom_id: atom.Atom, slow: *bool) ?JSValue {
         const props = self.shape_ref.props().ptr;
         var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
         while (shape_index != shape.no_property_index) {
@@ -9825,11 +9820,14 @@ pub const Object = struct {
             shape_index = prop.hash_next;
             const flags = property.Flags.fromBits(prop.flags);
             if (prop.atom_id == atom_id and !flags.deleted) {
-                if (flags.kind != .data) return .slow;
-                return .{ .value = self.prop_values[index].slot.data };
+                if (flags.kind != .data) {
+                    slow.* = true;
+                    return null;
+                }
+                return self.prop_values[index].slot.data;
             }
         }
-        return .missing;
+        return null;
     }
 
     pub fn findWritableOwnDataPropertyFast(self: *Object, atom_id: atom.Atom) ?WritableOwnDataPropertyFastLookup {

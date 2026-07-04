@@ -931,7 +931,8 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     // from the holder slot, so dup onto the stack (which owns its entries) and free
     // the receiver. Exotic/private/non-object/prototype-fallback falls to cold field().
     if (vm_property_field.qjsGetFieldFast(vm.ctx.runtime, receiver, atom_id)) |value| {
-        (sp - 1)[0] = if (value.requiresRefCount()) value.dup() else value;
+        const stack_value = if (value.requiresRefCount()) value.dup() else value;
+        (sp - 1)[0] = stack_value;
         receiver.free(vm.ctx.runtime);
         return cont(pc + 5, sp, var_buf, vm);
     }
@@ -954,7 +955,8 @@ pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     // BORROWED from its holder slot, so dup it onto the stack exactly as the cold
     // path's `pushAssumeCapacity` does; the receiver stays beneath as `this`.
     if (vm_property_field.qjsGetFieldFast(vm.ctx.runtime, receiver, atom_id)) |value| {
-        sp[0] = if (value.requiresRefCount()) value.dup() else value;
+        const stack_value = if (value.requiresRefCount()) value.dup() else value;
+        sp[0] = stack_value;
         return cont(pc + 5, sp + 1, var_buf, vm);
     }
     // Primitive string receiver: standard String.prototype method (and every
