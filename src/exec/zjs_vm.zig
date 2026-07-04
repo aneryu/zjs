@@ -1936,7 +1936,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     .done => {},
                     .continue_loop => continue,
                     .inline_call => {
-                        machine.pushCall(global, stack, inline_call_req.target, inline_call_req.region_base, inline_call_req.argc, inline_call_req.layout) catch |err| {
+                        machine.pushCall(global, stack, &inline_call_req.target, inline_call_req.region_base, inline_call_req.argc, inline_call_req.layout) catch |err| {
                             try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
                             if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
                             return err;
@@ -1969,7 +1969,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     // depth slot was just vacated) and propagate via the outer
                     // unwind, like an error thrown by the callee on entry.
                     .tail_inline => {
-                        try machine.tailCallReuse(global, stack, inline_call_req.target, inline_call_req.region_base, inline_call_req.argc, inline_call_req.layout);
+                        try machine.tailCallReuse(global, stack, &inline_call_req.target, inline_call_req.region_base, inline_call_req.argc, inline_call_req.layout);
                         continue;
                     },
                 }
@@ -1982,7 +1982,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     // Non-%eval% callee in tail position: proper tail call via
                     // frame reuse, mirroring the op.tail_call leg.
                     .tail_inline => |request| {
-                        try machine.tailCallReuse(global, stack, request.target, request.region_base, request.argc, request.layout);
+                        try machine.tailCallReuse(global, stack, &request.target, request.region_base, request.argc, request.layout);
                         continue;
                     },
                 }
@@ -2006,7 +2006,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     // Method call to a plain bytecode function: run it as an inline
                     // frame (receiver becomes `this`), mirroring the op.call leg.
                     .inline_call => {
-                        machine.pushCall(global, stack, inline_call_req.target, inline_call_req.region_base, inline_call_req.argc, inline_call_req.layout) catch |err| {
+                        machine.pushCall(global, stack, &inline_call_req.target, inline_call_req.region_base, inline_call_req.argc, inline_call_req.layout) catch |err| {
                             try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
                             if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
                             return err;
@@ -2038,7 +2038,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     // reuse the current inline frame with the receiver as `this`,
                     // mirroring the op.tail_call leg.
                     .tail_inline => {
-                        try machine.tailCallReuse(global, stack, inline_call_req.target, inline_call_req.region_base, inline_call_req.argc, inline_call_req.layout);
+                        try machine.tailCallReuse(global, stack, &inline_call_req.target, inline_call_req.region_base, inline_call_req.argc, inline_call_req.layout);
                         continue;
                     },
                 }

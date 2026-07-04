@@ -1206,14 +1206,15 @@ pub fn run(vm: *Vm) HostError!JSValue {
             },
             .threw => return vm.pending_error,
             .tail => {
-                const req = vm.tail_request;
+                // Read the request in place — no by-value copy of the target.
+                const req = &vm.tail_request;
                 if (vm.tail_is_reuse) {
-                    try vm.machine.tailCallReuse(vm.global, vm.stack, req.target, req.region_base, req.argc, req.layout);
+                    try vm.machine.tailCallReuse(vm.global, vm.stack, &req.target, req.region_base, req.argc, req.layout);
                 } else {
                     // TODO(debug-phase): pushCall-setup failure must run
                     // closeStackTopForOfIteratorForPendingError + handleCatchableRuntimeError
                     // (op.call's `catch |err|` leg) before re-dispatching.
-                    try vm.machine.pushCall(vm.global, vm.stack, req.target, req.region_base, req.argc, req.layout);
+                    try vm.machine.pushCall(vm.global, vm.stack, &req.target, req.region_base, req.argc, req.layout);
                 }
                 reloadTop(vm, &pc, &sp, &var_buf);
             },
