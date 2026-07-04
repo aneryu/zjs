@@ -203,6 +203,19 @@ pub fn cachedRealmObject(global: *core.Object, slot: core.object.RealmValueSlot)
     return property_ops.expectObject(stored) catch null;
 }
 
+pub fn primitivePrototypeFromRealmOrGlobal(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    slot: core.object.RealmValueSlot,
+    constructor_atom: core.Atom,
+) ?*core.Object {
+    // Mirror QuickJS JS_GetPrototypePrimitive (quickjs.c:7995-8011): primitive
+    // prototype lookup reads ctx->class_proto[...] directly. The realm slot is
+    // the intrinsic pointer; fallback preserves bare-runtime/global-walk behavior.
+    if (cachedRealmObject(global, slot)) |stored| return stored;
+    return constructorPrototypeFromGlobalAtom(rt, global, constructor_atom);
+}
+
 pub fn generatorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
     if (cachedRealmObject(global, .generator_prototype)) |stored| return stored;
     const object = try core.Object.create(rt, core.class.ids.object, iteratorPrototypeFromGlobal(rt, global) orelse objectPrototypeFromGlobal(rt, global));
@@ -3046,7 +3059,8 @@ pub fn getFastNumberPrimitiveDataProperty(
     if (!receiver.isNumber()) return null;
     if (!isStandardNumberPrototypeMethodAtom(ctx.runtime, atom_id)) return null;
 
-    const proto = constructorPrototypeFromGlobal(ctx.runtime, global, "Number") orelse return null;
+    const number_ctor_atom = comptime (core.atom.predefinedId("Number", .string)).?;
+    const proto = primitivePrototypeFromRealmOrGlobal(ctx.runtime, global, .number_prototype, number_ctor_atom) orelse return null;
     const desc = (try findPropertyDescriptor(ctx.runtime, proto, atom_id)) orelse return core.JSValue.undefinedValue();
     defer desc.destroy(ctx.runtime);
     return switch (desc.kind) {
@@ -3106,7 +3120,8 @@ pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primi
     defer rt.active_value_roots = root_frame.previous;
 
     if (rooted_primitive.isString()) {
-        const prototype = constructorPrototypeFromGlobal(rt, global, "String") orelse return error.TypeError;
+        const string_ctor_atom = comptime (core.atom.predefinedId("String", .string)).?;
+        const prototype = primitivePrototypeFromRealmOrGlobal(rt, global, .string_prototype, string_ctor_atom) orelse return error.TypeError;
         const object = try core.Object.create(rt, core.class.ids.string, prototype);
         errdefer core.Object.destroyFromHeader(rt, &object.header);
         try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive.dup());
@@ -3137,8 +3152,15 @@ pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primi
         "BigInt"
     else
         "Symbol";
-    const prototype = constructorPrototypeFromGlobal(rt, global, constructor_name) orelse return error.TypeError;
-    const object = try core.Object.create(rt, class_id, prototype);
+    const prototype = if (rooted_primitive.isNumber()) blk: {
+        const number_ctor_atom = comptime (core.atom.predefinedId("Number", .string)).?;
+        break :blk primitivePrototypeFromRealmOrGlobal(rt, global, .number_prototype, number_ctor_atom);
+    } else if (rooted_primitive.isBool()) blk: {
+        const boolean_ctor_atom = comptime (core.atom.predefinedId("Boolean", .string)).?;
+        break :blk primitivePrototypeFromRealmOrGlobal(rt, global, .boolean_prototype, boolean_ctor_atom);
+    } else constructorPrototypeFromGlobal(rt, global, constructor_name);
+    const resolved_prototype = prototype orelse return error.TypeError;
+    const object = try core.Object.create(rt, class_id, resolved_prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
     try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive.dup());
     return object.value();

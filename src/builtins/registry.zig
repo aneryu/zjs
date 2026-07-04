@@ -774,6 +774,9 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
                     try installSymbolExtras(rt, constructor);
                 },
                 .boolean => {
+                    const boolean_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+                    const cached = try global.cachedRealmValueSlot(rt, .boolean_prototype);
+                    try global.setOptionalValueSlot(rt, cached, boolean_proto.value().dup());
                     constructor.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.primitive, primitive_boolean_ctor_call_id);
                 },
                 .proxy => {
@@ -790,11 +793,17 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
                     try bindArrayPrototypeNativeRecords(rt, constructor);
                 },
                 .string => {
+                    const string_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+                    const cached = try global.cachedRealmValueSlot(rt, .string_prototype);
+                    try global.setOptionalValueSlot(rt, cached, string_proto.value().dup());
                     constructor.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.string, @intFromEnum(@import("string.zig").ConstructorMethod.call));
                     try installStringPrototypeAliases(rt, global, constructor);
                     try bindStringNativeRecords(rt, constructor);
                 },
                 .number => {
+                    const number_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+                    const cached = try global.cachedRealmValueSlot(rt, .number_prototype);
+                    try global.setOptionalValueSlot(rt, cached, number_proto.value().dup());
                     try bindNumberNativeRecords(rt, constructor);
                 },
                 .regexp => {

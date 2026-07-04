@@ -4216,12 +4216,11 @@ pub fn getFastStringPrimitiveDataProperty(
     if (core.atom.isTaggedInt(atom_id) or atom_id == 0 or atom_id > core.atom.predefined_count) return null;
     if (atom_id == core.atom.ids.length) return null;
 
-    // `constructorPrototypeFromGlobal(.., "String")` interns the atom "String" on
-    // EVERY `s.method()` resolution (the internString hot spot) before walking
-    // `global.String -> .prototype`. "String" is a predefined atom, so resolve it
-    // at comptime and walk with the cached id — no per-call atom allocation.
+    // Primitive method lookup uses the realm intrinsic `%String.prototype%`,
+    // mirroring QuickJS JS_GetPrototypePrimitive (quickjs.c:7995-8011). If a bare
+    // runtime has no realm slot, fall back to the old global constructor walk.
     const string_ctor_atom = comptime (core.atom.predefinedId("String", .string)).?;
-    const proto = object_ops.constructorPrototypeFromGlobalAtom(ctx.runtime, global, string_ctor_atom) orelse return null;
+    const proto = object_ops.primitivePrototypeFromRealmOrGlobal(ctx.runtime, global, .string_prototype, string_ctor_atom) orelse return null;
     return ownDataOrAutoInitPropertyValue(proto, atom_id);
 }
 
