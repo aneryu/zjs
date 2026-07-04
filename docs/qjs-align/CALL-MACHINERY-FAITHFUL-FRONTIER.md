@@ -91,6 +91,32 @@
   682 → 664, wall 1.88× — first time under 2×.** Every phase passed the full gate
   (test262 0/49775 known 13 exact, force-GC smokes, parity suites three-way vs qjs,
   unit-suite sequential FAIL-set identity).
+- **Fourth tranche (workflow `wf_59aa590c`, accounting-driven): 4 knives landed
+  (`4a04ff7`/`34187e1`/`ce508be`/`07b6144`) — fib 870 → 840 insn/call, 351 → 332 ms =
+  2.32×; funcall tax 668 → 638, wall 1.77×.** (1) return value is an ownership MOVE
+  (qjs `ret_val = *--sp` 18266) — the old peek+dup+teardown-free did strictly more
+  refcount work than qjs; ALSO resolves this doc's long-standing returnTop
+  value-semantics question. (2) register-resident ret_val — finishFunctionReturn's
+  error union forced a 3-slot memory phi (funcall's hottest single instruction,
+  23.6% of op_return); derived-ctor/generator legs are now cold branches, hot leg
+  carries a plain JSValue (qjs OP_return is infallible; ctor legality is a separate
+  opcode 18273). (3) qjs frame-pointer chain transplanted: Entry.prev + cached
+  Machine.top ≅ JSStackFrame.prev_frame / rt->current_stack_frame (408/17869/20709)
+  — both per-return umaddl index chains gone; best single knife (−2.9 % wall).
+  (4) direct-eval const wrapper de-nested to a pvalue alias — last nested-cell
+  producer gone. **REJECTED: get-var-frame-flag-fold (+2.8 % wall — guard fold
+  into a Vm flag backfired).**
+- **The accounting ledger (fib, 477 insn/call gap decomposed, closes to 0.0):
+  call machinery +402 (84 %) | op bodies +75 (16 %: get_var 49, arithmetic 33,
+  compare 13, minus zjs-ahead ops −20) | dispatch −44 (zjs is AHEAD of qjs).**
+  Priority read-out: collapse the return/teardown half first (~276 of the
+  machinery gap), then the call/setup half (~354 vs qjs ~170). Full qjs-form
+  convergence projects fib ≈ 1.16×. Dispatch work is negative-value.
+  Next: the op_call/setup half (resolve chain + cachedBytecodeView loads +
+  enterInlineCallDepth double check + frameOpenVarRefStorageCount recompute —
+  precomputable per-FB like simple_inline_eligible), op_binary's 0x1e0
+  frame-open/close (the frame=sum-of-arm-spills problem, instance-level),
+  and get_var's remaining spill prologue (Step-4 direct-eval domain).
 - **Gates:** test262 full 0/49775 (known 13, == main); force-GC build smoke green
   (closure/recursion/PTC/exception mix byte-identical to qjs); unit suite compared
   segment-by-segment against the unpatched-HEAD binary — identical failure sets. NOTE: the
