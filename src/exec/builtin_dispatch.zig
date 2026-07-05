@@ -41,6 +41,28 @@ pub fn callInternalRecord(
     caller_frame: ?*Frame,
 ) HostError!?core.JSValue {
     const record = ctx.runtime.internalBuiltinRecord(@intCast(@intFromEnum(native_ref.domain)), native_ref.id) orelse return null;
+    return try callInternalRecordDirect(ctx, output, global, globals, func_obj, this_value, record, args, caller_function, caller_frame);
+}
+
+/// Invoke an already-resolved internal record WITHOUT the `internalBuiltinRecord`
+/// probe. Divergence B: `fastNativeMethodCall` memoizes the resolved record on
+/// the func-object payload (qjs `func = p->u.cfunc.c_function`), and the memo only
+/// ever stores records that already passed the probe, so re-validating on every
+/// hot call is pure overhead. Shares the `InternalCall` build with
+/// `callInternalRecord`. Returns the record's result (unwrapped, never null — a
+/// resolved record always dispatches).
+pub fn callInternalRecordDirect(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    globals: []core.global_slots.Slot,
+    func_obj: ?*core.Object,
+    this_value: core.JSValue,
+    record: *const core.host_function.InternalRecord,
+    args: []const core.JSValue,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+) HostError!core.JSValue {
     const call_fn = record.call.?;
     // Record implementations are declared with error sets contained in
     // HostError and only widen to anyerror at the table boundary, so the

@@ -962,6 +962,15 @@ pub const FunctionRarePayload = struct {
 pub const FunctionPayload = struct {
     host_function_kind: i32 = 0,
     native_function_id: i32 = 0,
+    // Memoized resolved internal-record handle (divergence B), mirroring qjs
+    // `func = p->u.cfunc.c_function` — the dispatchable handle lives on the
+    // object so the hot `call_method` path skips the per-call native-id DECODE +
+    // record-table LOOKUP. SAFE memoization: `native_function_id` is write-once
+    // at registration/materialization, and the record it resolves to is a
+    // comptime `pub const` in `rt.internal_builtins` (rodata), program-lifetime
+    // stable and identical across runtimes — it can never go stale or dangle.
+    // Reset for free by `destroy`'s `self.* = .{}`.
+    native_record: ?*const host_function.InternalRecord = null,
     external_host_function_id: u32 = 0,
     native_dispatch_name: atom.Atom = atom.null_atom,
     typed_array_element_size: u32 = 0,
@@ -3989,6 +3998,22 @@ pub const Object = struct {
     pub fn nativeFunctionId(self: *const Object) i32 {
         if (self.functionPayloadConst()) |payload| return payload.native_function_id;
         return 0;
+    }
+
+    // Divergence B: on-object memo of the resolved internal record. `Slot`
+    // returns a mutable pointer to the payload field so the hot call site can
+    // lazily populate it after its first DECODE+LOOKUP; the read-only accessor
+    // returns null when there is no function payload (matching nativeFunctionId's
+    // 0 default) so a non-native callable simply misses the memo.
+    pub fn nativeRecordSlot(self: *Object) *?*const host_function.InternalRecord {
+        if (self.functionPayload()) |payload| return &payload.native_record;
+        std.debug.assert(self.class_payload_kind == .function);
+        unreachable;
+    }
+
+    pub fn nativeRecord(self: *const Object) ?*const host_function.InternalRecord {
+        if (self.functionPayloadConst()) |payload| return payload.native_record;
+        return null;
     }
 
     pub fn externalHostFunctionIdSlot(self: *Object) *u32 {
