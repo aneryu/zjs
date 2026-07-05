@@ -60,7 +60,26 @@ tagged-int atom, so a non-tagged string atom is an index only if 10 digits.
 Length pre-filter (name.len<10 → not an index) skips the parse. qjs anchor
 JS_AtomIsArrayIndex (3634). objalloc 2.42→2.29× (final combined 2.38×).
 
-## Remaining bustable knives (documented, not yet landed)
+### H1 — defineField fast path for any prop_count (`5fde94c`, objalloc 2.38→2.24×)
+defineField's non-refcount fast path (defineOwnPropertyAssumingNew directly)
+was gated on `prop_count == 0` — only the FIRST field of a literal took it;
+fields 2..n fell to the rooted slow path (value-root frame +
+remapPrivateAtomForOperation + createDataPropertyOrThrow → ... →
+defineOrdinaryOwnProperty, ~12% of objalloc). **qjs proof:** OP_define_field
+(quickjs.c:19269) has no prop_count special-case. Widened to any prop_count
+(AssumingNew → defineOwnProperty for duplicate-literal-key correctness).
+
+### Round convergence note (recon-then-codex `wf_8450895e`)
+This round's recon honestly found the clean codex floors are largely harvested.
+Only H1 landed; two measured flat and were **rejected**: putfield_lean_writable_slot
+(objprop's cost is the mightBePrivate + needsSlowPropertyAccess guards, which
+are codex=False to remove — shared get/put contract + multi-class audit) and
+atom toStringValue bufPrint→formatInt32 (template flat). The remaining big
+levers are structural/codex-unsuitable: the charcode ~8-function native dispatch
+tail (unified builtin-record contract), the objalloc multi-function property-add
+chain collapse (rooting invariants, cross-file), and the put_field guard removal.
+
+## Remaining knives (structural / codex-unsuitable, documented for later)
 
 - **gate-arrayindex-in-defineOrdinaryOwnProperty** (objalloc defineField 10.86%):
   arrayIndexFromAtom called unconditionally per field but result only used for
@@ -74,10 +93,13 @@ JS_AtomIsArrayIndex (3634). objalloc 2.42→2.29× (final combined 2.38×).
   builtin-record dispatch contract — codex-unsuitable (needs care).
 
 ## Spectrum after this session's floor-busting (vs qjs, X925 pinned)
-objalloc 2.63→2.38× · objprop 2.68→2.54× · template 2.85→2.30× ·
-charcode 3.00→2.54× · array 2.35× (loop/arith, not alloc) · fib ~2.0× · funcall 1.88×.
-Five floors busted (F1/F2/F3/G1/G2), all with qjs counter-proofs, all gated
-(test262 0/49775 known 13 + force-GC + unit-suite identity).
+objalloc 2.63→**2.24×** · objprop 2.68→2.50× · template 2.85→2.36× ·
+charcode 3.00→2.57× · array 2.38× (loop/arith, not alloc) · fib ~2.0× · funcall 1.88×.
+**Six floors busted (F1/F2/F3/G1/G2/H1)**, all with qjs counter-proofs, all gated
+(test262 0/49775 known 13 + force-GC + unit-suite identity). The clean
+codex-suitable floor knives are now largely harvested; the residual gap in each
+category is structural (multi-function dispatch/property-add chains, guard
+removal needing multi-class audits) — codex-unsuitable, documented above.
 
 ## Not a floor to bust elsewhere / dropped
 - fn_array 2.34× is a loop/arith frontier (binaryVm 36%, no gc/shape symbols),
