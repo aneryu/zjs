@@ -4242,7 +4242,18 @@ pub fn getFastStringPrimitiveDataProperty(
     // runtime has no realm slot, fall back to the old global constructor walk.
     const string_ctor_atom = comptime (core.atom.predefinedId("String", .string)).?;
     const proto = object_ops.primitivePrototypeFromRealmOrGlobal(ctx.runtime, global, .string_prototype, string_ctor_atom) orelse return null;
-    return ownDataOrAutoInitPropertyValue(proto, atom_id);
+    // W1: route the hot data-property lookup through the lean, already-inline
+    // `findOwnDataValueFast` — the SAME primitive the ordinary object get_field path
+    // uses — instead of the defensive out-of-line `findProperty`. Mirrors qjs
+    // `find_own_property` returning prs+pr in one force_inline pass, then the TMASK
+    // switch reading the already-loaded flags (quickjs.c:6135/8271): no out-of-line
+    // call/frame, no FAM-base re-derivation, no flags re-read. The rare non-data
+    // (accessor / auto-init) property falls back to the full resolver.
+    if (proto.hasExoticMethods()) return null;
+    var slow = false;
+    if (proto.findOwnDataValueFast(atom_id, &slow)) |value| return value.dup();
+    if (slow) return ownDataOrAutoInitPropertyValue(proto, atom_id);
+    return null;
 }
 
 /// Comptime bitset of the predefined atom ids whose name is a standard
