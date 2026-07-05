@@ -201,10 +201,19 @@ fn stringCall(host_call: InternalCall) HostError!core.JSValue {
     // realm), so it REPLACES the coercion tower for these methods rather than special-
     // casing a primitive-string subset.
     if (!host_call.flags.constructor and host_call.global != null) {
-        if (decodePrototypeMethodId(id)) |mid| {
-            if (mid == 29 or mid == 30 or mid == 31) {
-                return stringIndexReadMethod(host_call, mid) catch |err| return @as(HostError, @errorCast(err));
-            }
+        // Raw record-id range check, skipping the ~30-arm decodePrototypeMethodId
+        // switch: the encoded ids char_code_at/at/code_point_at are contiguous
+        // (129/130/131, comptime-asserted below) and decode to exactly id-100
+        // (29/30/31, the value stringIndexReadMethod switches on — host_function.zig:838).
+        // Mirrors qjs's direct JSCFunctionListEntry->body dispatch (its call reads a
+        // function pointer, never re-decodes a method id).
+        comptime {
+            std.debug.assert(@intFromEnum(PrototypeMethod.char_code_at) == 129);
+            std.debug.assert(@intFromEnum(PrototypeMethod.at) == 130);
+            std.debug.assert(@intFromEnum(PrototypeMethod.code_point_at) == 131);
+        }
+        if (id >= @intFromEnum(PrototypeMethod.char_code_at) and id <= @intFromEnum(PrototypeMethod.code_point_at)) {
+            return stringIndexReadMethod(host_call, id - 100) catch |err| return @as(HostError, @errorCast(err));
         }
     }
 
