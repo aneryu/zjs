@@ -632,7 +632,7 @@ pub noinline fn tailCallMethod(
     return .{ .return_value = result };
 }
 
-fn fastNativeMethodCall(
+inline fn fastNativeMethodCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -674,8 +674,23 @@ fn fastNativeMethodCall(
     // non-table domains (`.atomics` / `.performance` / `.host` / `.promise`)
     // already relied on.
     const function_object = property_ops.expectObject(func) catch return null;
+    // Structural .function proof (divergence C, mitigation): only a native c_function
+    // object has a FunctionPayload; a bound_function/proxy/other-class callable reaches
+    // here in method position (e.g. `obj.m()` where `obj.m = charCodeAt.bind(s)`) and
+    // must MISS so the caller falls to the generic value/bytecode dispatch. Guarding on
+    // class_payload_kind up front makes the following nativeFunctionIdSlot() and
+    // nativeFunctionRealmGlobalPtr() provably safe (both otherwise `unreachable` on a
+    // non-.function payload — a pre-existing latent UB that only benignly misses today).
+    if (function_object.class_payload_kind != core.class.PayloadKind.function) return null;
     const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return null;
-    const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
+    // qjs `ctx = p->u.cfunc.realm` (quickjs.c:17586): the callee realm is a DIRECT field
+    // on the c_function object, one load — not the ~18-arm functionRealmGlobalPtr payload
+    // chain + bound-recursion of objectRealmGlobal. The .function guard above lets us read
+    // realm_global_ptr straight off the payload; the objectRealmGlobal fallback covers the
+    // rare payload whose ptr is unset (dead for native builtins — always set at
+    // materialization) so behavior stays byte-identical.
+    const function_global = (function_object.nativeFunctionRealmGlobalPtr() orelse
+        object_ops.objectRealmGlobal(function_object)) orelse global;
     return builtin_dispatch.callInternalRecord(ctx, output, function_global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame);
 }
 

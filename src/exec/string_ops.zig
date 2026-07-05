@@ -363,6 +363,27 @@ pub fn toStringForAnnexB(
     return value_ops.toStringValue(ctx.runtime, primitive);
 }
 
+/// qjs `JS_ToStringCheckObject` (quickjs.c:13670): a null/undefined receiver
+/// throws TypeError "null or undefined are forbidden" in the callee realm;
+/// everything else is `JS_ToString`d. This is the exact `this`-coercion the
+/// String.prototype method bodies open with (`js_string_charCodeAt` etc.,
+/// quickjs.c:45453). Exposed so the self-contained builtin bodies can perform
+/// it inline and be reached directly by the record — mirroring qjs's per-method
+/// dispatch — instead of routing through the exec `qjsStringPrototypeMethod`
+/// coercion tower.
+pub fn toStringCheckObject(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    value: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    if (value.isNull() or value.isUndefined())
+        return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    return toStringForAnnexB(ctx, output, global, value, caller_function, caller_frame);
+}
+
 pub fn toPrimitiveForString(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,

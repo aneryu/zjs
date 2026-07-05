@@ -10,6 +10,7 @@ const builtin_dispatch = @import("../exec/builtin_dispatch.zig");
 // exec-only and live in `exec/string_ops.zig`; this module only reaches the
 // shared VM string entry points (`string_ops.*`) for dispatch.
 const string_ops = @import("../exec/string_ops.zig");
+const builtin_glue = @import("../exec/builtin_glue.zig");
 const exceptions = @import("../exec/exceptions.zig");
 
 const HostError = exceptions.HostError;
@@ -127,14 +128,85 @@ fn stringConstructorEntry(comptime name: []const u8, comptime length: u8, compti
 /// the `from*`/constructor statics run their own helpers, while the prototype
 /// methods (and `String.raw`) delegate to the exec VM ops, which stay in exec
 /// because the string opcode handlers and `regexp_fastpath.zig` also call them.
+/// Self-contained String.prototype index-read body, mirroring qjs's per-method
+/// `js_string_{charCodeAt,charAt(at),codePointAt}` (quickjs.c:45445/45470/45500):
+/// `JS_ToStringCheckObject(this)` + `JS_ToInt32Sat(argv[0])` + the bounded read, all
+/// inline in one function reached directly by the record — no generic re-dispatch and
+/// no exec `qjsStringPrototypeMethod` coercion tower (a Phase-6 modularity artifact the
+/// qjs monolith never had). The `this`/index coercions carry qjs's own fast paths
+/// (string tag → dup; int/number tag → `stringInteger`) and only fall to the full
+/// realm-aware `ToString`/`ToNumber` (valueOf-observable) for other tags — identical
+/// observable order to the tower (this coerced before the index). `mid` is a decoded
+/// PrototypeMethod id: 29 charCodeAt, 30 at, 31 codePointAt.
+fn stringIndexReadMethod(host_call: InternalCall, mid: u32) !core.JSValue {
+    const ctx = host_call.ctx;
+    const rt = ctx.runtime;
+    const global = host_call.global.?;
+    const args = host_call.args;
+    const string_value = if (host_call.this_value.isString())
+        host_call.this_value.dup()
+    else
+        try string_ops.toStringCheckObject(ctx, host_call.output, global, host_call.this_value, builtin_dispatch.callerBytecode(host_call), builtin_dispatch.callerFrame(host_call));
+    defer string_value.free(rt);
+    const body = string_value.asStringBody() orelse return error.TypeError;
+    const idx: i64 = if (args.len == 0)
+        0
+    else if (args[0].isNumber())
+        try stringInteger(rt, args[0])
+    else
+        try stringInteger(rt, try builtin_glue.toNumberLikeArgument(ctx, host_call.output, global, args[0]));
+    const len: i64 = @intCast(body.len());
+    switch (mid) {
+        29 => { // charCodeAt
+            if (idx < 0 or idx >= len) return core.JSValue.float64(std.math.nan(f64));
+            try body.ensureFlat(rt);
+            return core.JSValue.int32(body.codeUnitAt(@intCast(idx)));
+        },
+        30 => { // at (relative index → string char or undefined)
+            const index = if (idx < 0) len + idx else idx;
+            if (index < 0 or index >= len) return core.JSValue.undefinedValue();
+            try body.ensureFlat(rt);
+            return try codeUnitStringValue(rt, body.codeUnitAt(@intCast(index)));
+        },
+        else => { // 31 codePointAt (surrogate-pair aware)
+            if (idx < 0 or idx >= len) return core.JSValue.undefinedValue();
+            try body.ensureFlat(rt);
+            const unit = body.codeUnitAt(@intCast(idx));
+            if (isHighSurrogateUnit(unit) and idx + 1 < len) {
+                const next = body.codeUnitAt(@intCast(idx + 1));
+                if (isLowSurrogateUnit(next)) return core.JSValue.int32(@intCast(unicode.codePointFromSurrogatePair(unit, next)));
+            }
+            return core.JSValue.int32(unit);
+        },
+    }
+}
+
 fn stringCall(host_call: InternalCall) HostError!core.JSValue {
     const ctx = host_call.ctx;
-    const output = host_call.output;
     const id: u32 = host_call.magic;
     const args = host_call.args;
     const this_value = host_call.this_value;
-    const caller_function = builtin_dispatch.callerBytecode(host_call);
-    const caller_frame = builtin_dispatch.callerFrame(host_call);
+
+    // Faithful self-contained dispatch for the string index reads (charCodeAt id 29 /
+    // at id 30 / codePointAt id 31), mirroring qjs's per-method js_string_{charCodeAt,
+    // charAt,codePointAt}: JS_ToStringCheckObject(this) then the body's own
+    // JS_ToInt32Sat(idx), reaching the body directly. qjs has no re-dispatch and no exec
+    // coercion round-trip — its JSCFunctionListEntry points straight at the body; zjs's
+    // generic stringCall + exec `qjsStringPrototypeMethod` tower is a Phase-6 modularity
+    // artifact a monolith never needed. `global != null` selects the coercion-bearing
+    // entries (the real method call and the prepared-call fast path, which thread the
+    // realm and RAW args); the engine-internal reuse arm (global == null, args already
+    // coerced) still falls through to `methodCall` below. This does the FULL ToString(this)
+    // for every receiver (object/number/bool coerced, null/undefined thrown in the callee
+    // realm), so it REPLACES the coercion tower for these methods rather than special-
+    // casing a primitive-string subset.
+    if (!host_call.flags.constructor and host_call.global != null) {
+        if (decodePrototypeMethodId(id)) |mid| {
+            if (mid == 29 or mid == 30 or mid == 31) {
+                return stringIndexReadMethod(host_call, mid) catch |err| return @as(HostError, @errorCast(err));
+            }
+        }
+    }
 
     if (id == @intFromEnum(PrototypeMethod.iterator_next)) {
         const receiver = thisObject(this_value) orelse return error.TypeError;
@@ -153,6 +225,10 @@ fn stringCall(host_call: InternalCall) HostError!core.JSValue {
     if (host_call.flags.constructor and id == @intFromEnum(ConstructorMethod.call)) {
         return constructWithPrototype(ctx.runtime, args, host_call.new_target);
     }
+
+    const output = host_call.output;
+    const caller_function = builtin_dispatch.callerBytecode(host_call);
+    const caller_frame = builtin_dispatch.callerFrame(host_call);
 
     // Engine-internal dispatch arm: the exec string dispatcher and fast paths
     // (`exec/string_ops.zig`, `exec/call_runtime.zig`) have already resolved the

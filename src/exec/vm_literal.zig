@@ -193,7 +193,7 @@ pub noinline fn defineField(
                 !target.flags.is_array and
                 target.flags.extensible)
             {
-                try target.defineOwnProperty(ctx.runtime, atom_id, core.Descriptor.data(value, true, true, true));
+                try target.definePlainDataPropertyKnownFast(ctx.runtime, atom_id, core.Descriptor.data(value, true, true, true));
                 return .done;
             }
         } else |_| {}

@@ -706,7 +706,7 @@ pub fn opBinary(comptime kind: BinOp) Handler {
         fn hnd(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
             // qjs JS_VALUE_IS_BOTH_INT — one fused (tag1|tag2)==0 test.
             const ints = JSValue.asInt32Pair((sp - 2)[0], (sp - 1)[0]) orelse
-                return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                return @call(.always_tail, opBinaryFloat(kind), .{ pc, sp, var_buf, vm });
             const a = ints.lhs;
             const b = ints.rhs;
             // Each arm stores its own result into sp[-2] (qjs: every CASE writes
@@ -778,6 +778,41 @@ pub fn opBinary(comptime kind: BinOp) Handler {
                 .bxor => (sp - 2)[0] = JSValue.int32(a ^ b),
             }
             return cont(pc + 1, sp - 1, var_buf, vm);
+        }
+    }.hnd;
+}
+
+/// Inline float64 leg for a generic binary op whose both-int32 fast path missed
+/// (opBinary tail-jumps here). Mirrors qjs OP_add's float leg (quickjs.c:19710-19728):
+/// add/sub/mul extract each operand as a double (float64 OR int32; any other tag —
+/// string/object/BigInt — falls to the cold slow path), then store a bare float64
+/// result exactly like the both-float leg op_add_loc already inlines (tailcall_dispatch
+/// :1296-1300). This keeps float-heavy generic binaries — e.g. `s += arr[i]` numeric
+/// reductions, which compile to a non-fused OP_add and previously fell all the way to
+/// binaryVm/value_ops.binary — on a register-resident path. div/mod are excluded (they
+/// carry qjs's zero / sign / -0 special-cases and canonicalizing quotient) and the
+/// bitwise ops ToInt32 their operands, so both keep routing cold.
+fn opBinaryFloat(comptime kind: BinOp) Handler {
+    return struct {
+        fn hnd(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+            switch (kind) {
+                .add, .sub, .mul => {
+                    if (value_ops.numberValue((sp - 2)[0])) |d1| {
+                        if (value_ops.numberValue((sp - 1)[0])) |d2| {
+                            const d = switch (kind) {
+                                .add => d1 + d2,
+                                .sub => d1 - d2,
+                                .mul => d1 * d2,
+                                else => unreachable,
+                            };
+                            (sp - 2)[0] = JSValue.float64(d);
+                            return cont(pc + 1, sp - 1, var_buf, vm);
+                        }
+                    }
+                },
+                else => {},
+            }
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
         }
     }.hnd;
 }

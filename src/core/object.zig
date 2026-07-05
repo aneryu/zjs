@@ -5053,6 +5053,19 @@ pub const Object = struct {
         unreachable;
     }
 
+    /// Direct realm read for the native-c_function call path — qjs `ctx =
+    /// p->u.cfunc.realm` (quickjs.c:17586). Same one-load `.function` payload body as
+    /// `bytecodeFunctionRealmGlobalPtr`; a distinct name documents the call-site
+    /// invariant (`fastNativeMethodCall` proves `class_payload_kind == .function` up
+    /// front before calling this, so the `unreachable` can never fire). Returns null
+    /// only when the payload's `realm_global_ptr` is unset (dead for materialized native
+    /// builtins), letting the caller fall back to the generic realm resolver.
+    pub fn nativeFunctionRealmGlobalPtr(self: *const Object) ?*Object {
+        if (self.functionPayloadConst()) |payload| return payload.realm_global_ptr;
+        std.debug.assert(self.class_payload_kind == .function);
+        unreachable;
+    }
+
     pub fn functionRealmGlobalPtr(self: *const Object) ?*Object {
         // Function/generator payloads are checked FIRST: this accessor is on the
         // per-call inline-target resolution hot path (resolveInlineTarget), where
@@ -9524,6 +9537,26 @@ pub const Object = struct {
     fn addProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
         const slot = slotFromDescriptor(&rt.atoms, atom_id, desc);
         try self.appendPreparedPropertyEntry(rt, atom_id, flagsFromDescriptor(desc), slot);
+    }
+
+    /// Lean plain-object define for the object-literal fast path (OP_define_field
+    /// on a fresh ordinary object). Mirrors qjs JS_DefineProperty -> JS_CreateProperty
+    /// for a NON-exotic object (quickjs.c:10164 `if (p->is_exotic)` gates the whole
+    /// array/typed-array/exotic prelude, which a plain object skips): one
+    /// find_own_property hash probe, then straight to add_property on a miss.
+    /// Skips the array-length / regexp-lastIndex / mapped-arguments / module-namespace
+    /// preludes and the duplicate arrayIndexFromAtom of defineOwnProperty+
+    /// defineOrdinaryOwnProperty. Preserves duplicate-literal-key semantics
+    /// (`{a:1,a:2}`) via the findProperty branch. Caller guarantees:
+    /// class_id==object, !hasExoticMethods, !is_array, extensible.
+    pub fn definePlainDataPropertyKnownFast(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
+        if (self.findProperty(atom_id)) |index| {
+            try self.materializeAutoInitEntryForMutation(index);
+            if (!isCompatible(self.propFlagsAt(index), self.prop_values[index].slot, desc)) return error.IncompatibleDescriptor;
+            try self.replaceProperty(rt, index, desc);
+            return;
+        }
+        try self.addProperty(rt, atom_id, desc);
     }
 
     pub fn appendPreparedPropertyEntry(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
