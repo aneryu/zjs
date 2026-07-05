@@ -157,7 +157,7 @@ pub noinline fn compareVm(
 /// js_eq_slow): takes the two operands BY VALUE and RETURNS the result, never
 /// reading frame.pc or popping the stack — the dispatch handler keeps pc/sp in
 /// registers and stores the result into sp[-2] itself, syncing only on the error
-/// path. Reached only after op_compare's both-int32 fast path missed, so the body
+/// path. Reached only after opCompare's both-int32 fast path missed, so the body
 /// is `compare`'s minus that arm (the float-vs-int / float-vs-float / object /
 /// loose-eq cases). `lhs`/`rhs` are OWNED here (consumed via the defers / the
 /// borrowing coercions, exactly as `compare`'s popped operands were).
@@ -173,7 +173,7 @@ pub fn compareAt(
     defer lhs.free(ctx.runtime);
     // Number fast path — qjs js_relational_slow's `float64_compare` (both operands
     // already numeric ⇒ ToPrimitive is a no-op, so compare the doubles directly).
-    // Covers the float-vs-int `x < n` that misses op_compare's both-int32 arm every
+    // Covers the float-vs-int `x < n` that misses opCompare's both-int32 arm every
     // float-counter iteration, skipping toPrimitiveForNumber + value_ops.compare.
     switch (cmp) {
         op.lt, op.lte, op.gt, op.gte => {

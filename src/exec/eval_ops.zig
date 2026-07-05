@@ -25,6 +25,7 @@ const string_ops = @import("string_ops.zig");
 // cluster).
 const InlineCallRequest = call_runtime.InlineCallRequest;
 const ValueSliceRoot = array_ops.ValueSliceRoot;
+const CellSliceRoot = array_ops.CellSliceRoot;
 const appendPrivateBoundName = call_runtime.appendPrivateBoundName;
 const appendPrivateBoundNamesFromObject = object_ops.appendPrivateBoundNamesFromObject;
 const appendPrivateBoundNamesFromValue = call_runtime.appendPrivateBoundNamesFromValue;
@@ -150,12 +151,68 @@ fn createDirectEvalOuterVarRefs(
             if (closureVarIsNonLexicalGlobalSentinel(function, idx) and global.hasOwnProperty(atom_id)) continue;
             names[initialized_names] = ctx.runtime.atoms.dup(atom_id);
             initialized_names += 1;
-            refs[initialized_refs] = frame.var_refs[idx].dup();
+            refs[initialized_refs] = try directEvalOuterVarRefView(ctx, function, frame, idx);
             initialized_refs += 1;
             rooted_refs = refs[0..initialized_refs];
         }
     }
     return .{ .names = names, .refs = refs };
+}
+
+/// The direct-eval name table's view of an outer var_ref slot. Normally the
+/// slot cell itself (rc++). For a read-only closure var whose shared cell
+/// carries no const flag — a module import slot directly aliases the
+/// EXPORTING module's live cell (qjs js_inner_module_linking form,
+/// quickjs.c:30765-30777) and must not have importer-side const-ness stamped
+/// onto it — the eval table gets a const VIEW cell instead, so the runtime
+/// named-overlay write path (setNamedVarRefValue) still rejects
+/// `eval("imported = v")` with TypeError. The view is pvalue-ALIASING, not
+/// nesting: `value` retains the target cell (ownership + GC tracing) while
+/// `pvalue` aliases the target's live `pvalue` — the same aliasing mechanism
+/// qjs itself uses for cells that share a binding (module import cells alias
+/// the exporter's live cell, js_inner_module_linking quickjs.c:30765-30777),
+/// so a cell's VALUE is never itself a cell and every reader reaches the
+/// plain value with a bare `*pvalue` deref (qjs OP_get_var_ref,
+/// quickjs.c:18627). qjs needs no runtime analog of the view: its direct
+/// eval compiles against the enclosing closure vars, so such writes are
+/// rejected at eval-compile time (resolve_scope_var has_idx,
+/// quickjs.c:33301-33306) — zjs's name-table eval (Step 4 domain) enforces
+/// at the table boundary instead.
+fn directEvalOuterVarRefView(
+    ctx: *core.JSContext,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    idx: usize,
+) !core.JSValue {
+    const slot = slot_ops.varRefSlot(frame, idx);
+    const needs_const_view = blk: {
+        if (idx >= function.closure_var.len) break :blk false;
+        const cv = function.closure_var[idx];
+        if (!cv.is_const or cv.var_kind == .function_name) break :blk false;
+        switch (cv.closure_type) {
+            // Global-family const-ness lives on the global lexical cell
+            // itself (qjs js_closure_define_global_var quickjs.c:17215).
+            .global, .global_decl, .global_ref => break :blk false,
+            .local, .arg, .ref, .module_decl, .module_import => {},
+        }
+        const cell = varRefCellFromValue(slot) orelse break :blk false;
+        break :blk !cell.varRefIsConstSlot().*;
+    };
+    if (!needs_const_view) return slot.dup();
+    const target = slot.dup();
+    errdefer target.free(ctx.runtime);
+    const inner = varRefCellFromValue(target) orelse unreachable; // needs_const_view proved the slot is a cell
+    // A const cv is lexical by construction (parser: const => is_lexical),
+    // and lexical captures always materialize CLOSED cells
+    // (ensureLocalVarRefCell is_lexical arm) — so `inner.pvalue` is stable
+    // for the cell's lifetime (never re-pointed by VarRef.close) and the
+    // alias below cannot dangle. The wrapper's `value` ref keeps `inner`
+    // (and thus the aliased storage) alive.
+    std.debug.assert(!inner.is_open);
+    const wrapper = try core.VarRef.createClosed(ctx.runtime, target);
+    wrapper.pvalue = inner.pvalue;
+    wrapper.varRefIsConstSlot().* = true;
+    return wrapper.valueRef();
 }
 
 fn initialDirectEvalFrameVarRef(
@@ -201,37 +258,43 @@ fn createDirectEvalFrameVarRefs(
     eval_var_names: []const core.Atom,
     eval_var_refs: []const core.JSValue,
     outer_var_refs: DirectEvalOuterVarRefs,
-) ![]core.JSValue {
+) ![]*core.VarRef {
     const count = @max(function.closure_var.len, function.varRefNamesLen());
     if (count == 0) return &.{};
 
-    const refs = try ctx.runtime.memory.alloc(core.JSValue, count);
-    var rooted_refs: []core.JSValue = refs[0..0];
-    var refs_root = ValueSliceRoot{};
+    // Slot-typed direct-eval frame refs: every source hands back an owned
+    // cell (eval-table cells, outer const-wrapper views, fresh cells) —
+    // converted at this boundary from their JSValue handles.
+    const refs = try ctx.runtime.memory.alloc(*core.VarRef, count);
+    var rooted_refs: []*core.VarRef = refs[0..0];
+    var refs_root = CellSliceRoot{};
     refs_root.init(ctx.runtime, &rooted_refs);
     defer refs_root.deinit();
 
     var initialized: usize = 0;
     errdefer {
-        for (refs[0..initialized]) |*value| {
-            value.free(ctx.runtime);
-            value.* = core.JSValue.undefinedValue();
-        }
+        for (refs[0..initialized]) |cell| cell.freeCell(ctx.runtime);
         rooted_refs = &.{};
-        ctx.runtime.memory.free(core.JSValue, refs);
+        ctx.runtime.memory.free(*core.VarRef, refs);
     }
 
     while (initialized < count) : (initialized += 1) {
         const atom_id = directEvalFrameVarRefName(function, initialized);
-        refs[initialized] = if (atom_id) |name|
+        const cell_value = if (atom_id) |name|
             namedRefValue(ctx.runtime, eval_var_names, eval_var_refs, name) orelse
                 namedRefValue(ctx.runtime, outer_var_refs.names, outer_var_refs.refs, name) orelse
                 try initialDirectEvalFrameVarRef(ctx, global, function, initialized)
         else
             try initialDirectEvalFrameVarRef(ctx, global, function, initialized);
+        refs[initialized] = core.VarRef.fromValue(cell_value) orelse unreachable;
         rooted_refs = refs[0 .. initialized + 1];
     }
     return refs;
+}
+
+fn freeDirectEvalFrameVarRefs(rt: *core.JSRuntime, refs: []*core.VarRef) void {
+    for (refs) |cell| cell.freeCell(rt);
+    if (refs.len != 0) rt.memory.free(*core.VarRef, refs);
 }
 
 pub fn evalBytecodeHasVarDeclarations(rt: *core.JSRuntime, function: *const bytecode.Bytecode) bool {
@@ -636,8 +699,8 @@ pub fn directEval(
         try initializeDirectEvalGlobalVarRefs(ctx, global, eval_var_names, eval_var_refs);
     }
     var direct_eval_frame_var_refs = try createDirectEvalFrameVarRefs(ctx, global, &compiled.function, eval_var_names, eval_var_refs, outer_var_refs);
-    defer freeValueSlice(ctx.runtime, direct_eval_frame_var_refs);
-    var direct_eval_frame_var_refs_root = ValueSliceRoot{};
+    defer freeDirectEvalFrameVarRefs(ctx.runtime, direct_eval_frame_var_refs);
+    var direct_eval_frame_var_refs_root = CellSliceRoot{};
     direct_eval_frame_var_refs_root.init(ctx.runtime, &direct_eval_frame_var_refs);
     defer direct_eval_frame_var_refs_root.deinit();
     var combined_eval_local_names: []core.Atom = &.{};

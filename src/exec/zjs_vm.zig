@@ -317,7 +317,7 @@ pub fn runWithOutputAndVarRefs(
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     output: ?*std.Io.Writer,
-    var_refs: []const core.JSValue,
+    var_refs: []const *core.VarRef,
 ) !core.JSValue {
     const global_object = try contextGlobal(ctx);
     const this_value = if (function.flags.is_module or function.flags.runtime_strict) core.JSValue.undefinedValue() else global_object.value();
@@ -329,7 +329,7 @@ pub fn runModuleWithOutputAndVarRefsState(
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     output: ?*std.Io.Writer,
-    var_refs: []const core.JSValue,
+    var_refs: []const *core.VarRef,
     module_state: *core.Object,
     resume_value: ?core.JSValue,
 ) !core.JSValue {
@@ -386,7 +386,7 @@ pub fn runWithArgs(
     function: *const bytecode.Bytecode,
     initial_this_value: core.JSValue,
     args: []const core.JSValue,
-    var_refs: []const core.JSValue,
+    var_refs: []const *core.VarRef,
     output: ?*std.Io.Writer,
     global: *core.Object,
     break_var_ref_cycles_on_exit: bool,
@@ -413,7 +413,7 @@ pub const CallEnv = struct {
     function: *const bytecode.Bytecode,
     initial_this_value: core.JSValue = core.JSValue.undefinedValue(),
     args: []const core.JSValue = &.{},
-    var_refs: []const core.JSValue = &.{},
+    var_refs: []const *core.VarRef = &.{},
     output: ?*std.Io.Writer = null,
     global: *core.Object,
     break_var_ref_cycles_on_exit: bool = false,
@@ -481,7 +481,7 @@ pub fn runWithArgsState(
     entry_function: *const bytecode.Bytecode,
     initial_this_value: core.JSValue,
     args: []const core.JSValue,
-    var_refs: []const core.JSValue,
+    var_refs: []const *core.VarRef,
     output: ?*std.Io.Writer,
     global: *core.Object,
     break_var_ref_cycles_on_exit: bool,
@@ -710,6 +710,7 @@ fn runTC(loop_state: *LoopState) HostError!core.JSValue {
         .l0_frame = loop_state.frame_storage,
         .l0_stack = loop_state.entry_stack,
         .l0_catch_target = loop_state.catch_target_storage,
+        .poller = .init(loop_state.ctx.runtime),
         .l0 = .{
             .is_eval_code = loop_state.entry_is_eval_code,
             .eval_local_names = loop_state.entry_eval_local_names,
@@ -1102,20 +1103,22 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
 
             // qjs OP_get_var_ref(_check) inline (quickjs.c:18627): val=*var_refs[idx]->pvalue;
-            // push dup. Uninitialized(TDZ)/deleted/non-cell fall through to the noinline handler.
+            // push dup. Uninitialized (TDZ or deleted binding parked at UNINITIALIZED)
+            // and non-cell fall through to the noinline handler.
             op.get_var_ref, op.get_var_ref_check => {
                 if (comptime thread_dispatch) get_var_ref_fast: {
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     if (idx >= frame.var_refs.len) break :get_var_ref_fast;
-                    const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :get_var_ref_fast;
-                    if (cell.is_deleted) break :get_var_ref_fast;
+                    // Slot is a cell by type (guard #4 deleted, phase D).
+                    const cell = slot_ops.varRefSlotCellUnchecked(frame, idx);
                     const v = cell.pvalue.*;
                     if (v.isUninitialized()) break :get_var_ref_fast;
-                    // Imported module bindings wrap the exporting module's cell
-                    // in a const cell (createConstVarRefCell), so a single deref
-                    // yields another var_ref cell, not the value. The slow path
-                    // chases the chain (slotValueBorrow); route there.
-                    if (core.VarRef.fromValue(v) != null) break :get_var_ref_fast;
+                    // Guard #7 retired: cell values are never cells — import
+                    // slots alias the exporting module's cell directly (qjs
+                    // js_inner_module_linking, quickjs.c:30765-30777) and the
+                    // direct-eval const view now pvalue-aliases its target
+                    // (eval_ops.directEvalOuterVarRefView), so this is qjs's
+                    // bare *var_refs[idx]->pvalue (18627).
                     reg_ip += 2;
                     reg_sp[0] = v.dup();
                     reg_sp += 1;
@@ -1133,13 +1136,12 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 if (comptime thread_dispatch) get_var_ref_short_fast: {
                     const idx: u16 = opc - op.get_var_ref0;
                     if (idx >= frame.var_refs.len) break :get_var_ref_short_fast;
-                    const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :get_var_ref_short_fast;
-                    if (cell.is_deleted) break :get_var_ref_short_fast;
+                    // Slot is a cell by type (guard #4 deleted, phase D).
+                    const cell = slot_ops.varRefSlotCellUnchecked(frame, idx);
                     const v = cell.pvalue.*;
                     if (v.isUninitialized()) break :get_var_ref_short_fast;
-                    // See get_var_ref above: an imported binding's cell wraps the
-                    // exporting module's cell; route the chained deref to the slow path.
-                    if (core.VarRef.fromValue(v) != null) break :get_var_ref_short_fast;
+                    // Guard #7 retired (see get_var_ref above): cell values
+                    // are never cells, bare *pvalue deref (qjs 18627).
                     reg_sp[0] = v.dup();
                     reg_sp += 1;
                     opc = reg_ip[0];
@@ -1153,13 +1155,14 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 }
             },
             // qjs OP_put_var_ref(_check) inline (quickjs.c:18638): set_value(var_ref->pvalue, sp[-1]).
-            // const / deleted / function-name / (check:)uninitialized fall through to the handler.
+            // const / function-name / (check:)uninitialized fall through to the handler.
             op.put_var_ref, op.put_var_ref_check => {
                 if (comptime thread_dispatch) put_var_ref_fast: {
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     if (idx >= frame.var_refs.len) break :put_var_ref_fast;
-                    const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :put_var_ref_fast;
-                    if (cell.is_deleted or cell.is_const or cell.is_function_name) break :put_var_ref_fast;
+                    // Slot is a cell by type (guard #4 deleted, phase D).
+                    const cell = slot_ops.varRefSlotCellUnchecked(frame, idx);
+                    if (cell.is_const or cell.is_function_name) break :put_var_ref_fast;
                     // A top-level function declaration stores its closure through
                     // put_var_ref and must also be published as a global object
                     // property (qjs js_closure_define_global_var non-lexical: the
@@ -1170,9 +1173,10 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     if ((reg_sp - 1)[0].isObject()) break :put_var_ref_fast;
                     const cur = cell.pvalue.*;
                     if (opc == op.put_var_ref_check and cur.isUninitialized()) break :put_var_ref_fast;
-                    // A chained cell (imported binding) must store through the
-                    // final cell, not clobber the inner cell pointer; defer to slow.
-                    if (core.VarRef.fromValue(cur) != null) break :put_var_ref_fast;
+                    // Guard #7 retired: cell values are never cells (the only
+                    // producer, the direct-eval const view, now pvalue-aliases
+                    // its target and is is_const-rejected above anyway) — bare
+                    // set_value(var_refs[idx]->pvalue, ...) like qjs 18638.
                     reg_ip += 2;
                     reg_sp -= 1;
                     cell.pvalue.* = reg_sp[0];
@@ -1191,17 +1195,17 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 if (comptime thread_dispatch) put_var_ref_short_fast: {
                     const idx: u16 = opc - op.put_var_ref0;
                     if (idx >= frame.var_refs.len) break :put_var_ref_short_fast;
-                    const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :put_var_ref_short_fast;
-                    if (cell.is_deleted or cell.is_const or cell.is_function_name) break :put_var_ref_short_fast;
+                    // Slot is a cell by type (guard #4 deleted, phase D).
+                    const cell = slot_ops.varRefSlotCellUnchecked(frame, idx);
+                    if (cell.is_const or cell.is_function_name) break :put_var_ref_short_fast;
                     // Top-level function declarations store their closure here and
                     // must also be published as a global property (see put_var_ref
                     // above). Defer object stores to the slow handler so
                     // publishTopLevelFunctionVarRef runs; primitives stay inline.
                     if ((reg_sp - 1)[0].isObject()) break :put_var_ref_short_fast;
                     const cur = cell.pvalue.*;
-                    // A chained cell (imported binding) must store through the
-                    // final cell, not clobber the inner cell pointer; defer to slow.
-                    if (core.VarRef.fromValue(cur) != null) break :put_var_ref_short_fast;
+                    // Guard #7 retired (see put_var_ref above): cell values
+                    // are never cells, bare set_value store (qjs 18638).
                     reg_sp -= 1;
                     cell.pvalue.* = reg_sp[0];
                     cur.free(ctx.runtime);
@@ -1710,12 +1714,17 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     if (vm_property_globals.hasDynamicGlobalOverlay(frame, (if (machine.depth == 0) entry_eval_local_names else &.{}), frame.evalVarRefNames(), (if (machine.depth == 0) entry_eval_with_object else core.JSValue.undefinedValue()))) break :get_var_fast;
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     if (idx >= frame.var_refs.len) break :get_var_fast;
-                    const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :get_var_fast;
-                    if (cell.is_deleted) break :get_var_fast;
+                    // Slot is a cell by type (guard #4 deleted, phase D).
+                    const cell = slot_ops.varRefSlotCellUnchecked(frame, idx);
                     const v = cell.pvalue.*;
                     if (v.isUninitialized()) break :get_var_fast;
-                    if (core.VarRef.fromValue(v) != null) break :get_var_fast;
-                    if (vm_property_globals.globalLexicalShadowsGlobalForIdx(ctx, global, function, idx)) break :get_var_fast;
+                    // Guard #7 retired: cell values are never cells (direct-eval
+                    // const view pvalue-aliases its target) — bare *pvalue like
+                    // qjs OP_get_var (18461-18488).
+                    // No global-lexical shadow check: definition-time cell surgery /
+                    // parked-cell reuse (qjs js_closure_define_global_var,
+                    // quickjs.c:17148-17205) makes an initialized cell authoritative
+                    // (qjs OP_get_var, 18461-18488).
                     if (vm_property_globals.parentEvalShadowsGlobalForIdx(ctx.runtime, frame, function, idx)) break :get_var_fast;
                     reg_ip += 2;
                     reg_sp[0] = v.dup();
@@ -1761,12 +1770,15 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     if (vm_property_globals.hasDynamicGlobalOverlay(frame, (if (machine.depth == 0) entry_eval_local_names else &.{}), frame.evalVarRefNames(), (if (machine.depth == 0) entry_eval_with_object else core.JSValue.undefinedValue()))) break :put_var_fast;
                     const idx = std.mem.readInt(u16, reg_ip[0..2], .little);
                     if (idx >= frame.var_refs.len) break :put_var_fast;
-                    const cell = slot_ops.varRefCellFromValue(frame.var_refs.ptr[idx]) orelse break :put_var_fast;
-                    if (cell.is_deleted or cell.is_const or cell.is_function_name) break :put_var_fast;
+                    // Slot is a cell by type (guard #4 deleted, phase D).
+                    const cell = slot_ops.varRefSlotCellUnchecked(frame, idx);
+                    if (cell.is_const or cell.is_function_name) break :put_var_fast;
                     const cur = cell.pvalue.*;
                     if (cur.isUninitialized()) break :put_var_fast;
-                    if (core.VarRef.fromValue(cur) != null) break :put_var_fast;
-                    if (vm_property_globals.globalLexicalShadowsGlobalForIdx(ctx, global, function, idx)) break :put_var_fast;
+                    // Guard #7 retired: cell values are never cells (see
+                    // get_var above; the const view is is_const-rejected).
+                    // No global-lexical shadow check (see get_var above; qjs
+                    // OP_put_var, quickjs.c:18490-18525).
                     if (vm_property_globals.parentEvalShadowsGlobalForIdx(ctx.runtime, frame, function, idx)) break :put_var_fast;
                     reg_ip += 2;
                     reg_sp -= 1;
@@ -1936,7 +1948,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     .done => {},
                     .continue_loop => continue,
                     .inline_call => {
-                        machine.pushCall(global, stack, inline_call_req.target, inline_call_req.region_base, inline_call_req.argc, inline_call_req.layout) catch |err| {
+                        _ = machine.pushCall(global, stack, &inline_call_req.target, inline_call_req.region_base, inline_call_req.argc, inline_call_req.layout) catch |err| {
                             try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
                             if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
                             return err;
@@ -1969,7 +1981,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     // depth slot was just vacated) and propagate via the outer
                     // unwind, like an error thrown by the callee on entry.
                     .tail_inline => {
-                        try machine.tailCallReuse(global, stack, inline_call_req.target, inline_call_req.region_base, inline_call_req.argc, inline_call_req.layout);
+                        _ = try machine.tailCallReuse(global, stack, &inline_call_req.target, inline_call_req.region_base, inline_call_req.argc, inline_call_req.layout);
                         continue;
                     },
                 }
@@ -1982,7 +1994,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     // Non-%eval% callee in tail position: proper tail call via
                     // frame reuse, mirroring the op.tail_call leg.
                     .tail_inline => |request| {
-                        try machine.tailCallReuse(global, stack, request.target, request.region_base, request.argc, request.layout);
+                        _ = try machine.tailCallReuse(global, stack, &request.target, request.region_base, request.argc, request.layout);
                         continue;
                     },
                 }
@@ -2006,7 +2018,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     // Method call to a plain bytecode function: run it as an inline
                     // frame (receiver becomes `this`), mirroring the op.call leg.
                     .inline_call => {
-                        machine.pushCall(global, stack, inline_call_req.target, inline_call_req.region_base, inline_call_req.argc, inline_call_req.layout) catch |err| {
+                        _ = machine.pushCall(global, stack, &inline_call_req.target, inline_call_req.region_base, inline_call_req.argc, inline_call_req.layout) catch |err| {
                             try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
                             if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
                             return err;
@@ -2038,7 +2050,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     // reuse the current inline frame with the receiver as `this`,
                     // mirroring the op.tail_call leg.
                     .tail_inline => {
-                        try machine.tailCallReuse(global, stack, inline_call_req.target, inline_call_req.region_base, inline_call_req.argc, inline_call_req.layout);
+                        _ = try machine.tailCallReuse(global, stack, &inline_call_req.target, inline_call_req.region_base, inline_call_req.argc, inline_call_req.layout);
                         continue;
                     },
                 }

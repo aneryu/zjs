@@ -261,8 +261,8 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     inline for ([_]u8{ op.add, op.sub, op.mul, op.div, op.mod, op.pow, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor }) |o| t[o] = h_binary;
     // Register-resident cold compare (no publish round-trip) — falls back to the
     // publishing h_compare path internally at a generator stop boundary. Reached via
-    // the same indirect cold_table dispatch op_compare always used (direct routing
-    // would perturb the int32 fast-path codegen).
+    // the same indirect cold_table dispatch the compare fast handlers always used
+    // (direct routing would perturb the int32 fast-path codegen).
     inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = td.op_compare_cold;
     inline for ([_]u8{ op.neg, op.plus, op.inc, op.dec }) |o| t[o] = h_unary;
     t[op.in] = h(struct {
@@ -305,19 +305,24 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.add_loc] = td.op_add_loc_cold;
 
     // --- control ---
+    // qjs polls interrupts on every OP_goto/goto16/goto8 (quickjs.c:18822-18836)
+    // — the loop back edge; a pure loop otherwise never reaches a poll point.
     t[op.goto] = h(struct {
         fn b(vm: *Vm) HostError!void {
             control_vm.jump32(vm.function, vm.frame);
+            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
         }
     }.b);
     t[op.goto16] = h(struct {
         fn b(vm: *Vm) HostError!void {
             control_vm.jump16(vm.function, vm.frame);
+            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
         }
     }.b);
     t[op.goto8] = h(struct {
         fn b(vm: *Vm) HostError!void {
             control_vm.jump8(vm.function, vm.frame);
+            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
         }
     }.b);
     t[op.if_false] = h(struct {
@@ -801,8 +806,26 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
         .{ .o = op.set_loc, .h = td.opLoc(.set, .half) },
     }) |e| t[e.o] = e.h;
     inline for ([_]u8{ op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3 }) |o| t[o] = td.op_get_arg_short;
-    inline for ([_]u8{ op.add, op.sub, op.mul, op.div, op.mod, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor }) |o| t[o] = td.op_binary;
-    inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = td.op_compare;
+    // Per-op binary handlers (qjs CASE(OP_add)/…/CASE(OP_xor) are distinct labels,
+    // quickjs.c:19696-20227; op.pow keeps the cold h_binary — qjs OP_pow:19916 has
+    // no fast leg and falls straight to js_binary_arith_slow).
+    inline for ([_]struct { o: u8, h: Handler }{
+        .{ .o = op.add, .h = td.opBinary(.add) },
+        .{ .o = op.sub, .h = td.opBinary(.sub) },
+        .{ .o = op.mul, .h = td.opBinary(.mul) },
+        .{ .o = op.div, .h = td.opBinary(.div) },
+        .{ .o = op.mod, .h = td.opBinary(.mod) },
+        .{ .o = op.shl, .h = td.opBinary(.shl) },
+        .{ .o = op.sar, .h = td.opBinary(.sar) },
+        .{ .o = op.shr, .h = td.opBinary(.shr) },
+        .{ .o = op.@"and", .h = td.opBinary(.band) },
+        .{ .o = op.@"or", .h = td.opBinary(.bor) },
+        .{ .o = op.xor, .h = td.opBinary(.bxor) },
+    }) |e| t[e.o] = e.h;
+    // Per-op compare handlers (qjs OP_CMP/OP_CMP_EQ/OP_CMP_STRICT_EQ expand one
+    // independent CASE per opcode, quickjs.c:20268-20271/20340-20341/20397-20398 —
+    // no runtime predicate select on the int fast path).
+    inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = td.opCompare(o);
     inline for ([_]u8{ op.inc, op.dec }) |o| t[o] = td.op_inc_dec;
     t[op.dup] = td.op_dup;
     t[op.swap] = td.op_swap;

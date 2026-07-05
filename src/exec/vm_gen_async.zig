@@ -566,18 +566,26 @@ pub fn freeGeneratorFrameStorage(
     storage: []core.JSValue,
     locals: []core.JSValue,
     args: []core.JSValue,
-    var_refs: []core.JSValue,
+    var_refs: []*core.VarRef,
 ) void {
     if (storage.len == 0) {
         freeValueSlice(rt, locals);
         freeValueSlice(rt, args);
-        freeValueSlice(rt, var_refs);
+        // Owned var_refs are always windows inside `storage` (slab carve /
+        // allocHeap / capacity growth all back them with []JSValue storage),
+        // so a storage-less frame cannot own a var_refs allocation — release
+        // the cell refs only (qjs free_var_ref, quickjs.c:16199).
+        freeCellSliceCellsOnly(rt, var_refs);
         return;
     }
     freeValueSliceValuesOnly(rt, locals);
     freeValueSliceValuesOnly(rt, args);
-    freeValueSliceValuesOnly(rt, var_refs);
+    freeCellSliceCellsOnly(rt, var_refs);
     rt.memory.free(core.JSValue, storage);
+}
+
+fn freeCellSliceCellsOnly(rt: *core.JSRuntime, cells: []*core.VarRef) void {
+    for (cells) |cell| cell.freeCell(rt);
 }
 
 fn readInt(comptime T: type, bytes: []const u8) T {

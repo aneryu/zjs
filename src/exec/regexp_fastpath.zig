@@ -327,7 +327,7 @@ pub fn qjsRegExpTestMethod(
         owned_string = value;
         break :blk value;
     };
-    const exec_atom = core.atom.predefinedId("exec", .string) orelse return error.TypeError;
+    const exec_atom = (comptime core.atom.predefinedId("exec", .string)) orelse return error.TypeError;
     if (qjsRegExpPrototypeMethodIsDefault(ctx.runtime, receiver_object, exec_atom, @intFromEnum(method_ids.regexp.PrototypeMethod.exec))) {
         if (try qjsRegExpTestFastNoResult(ctx, receiver_object, string_value)) |matched| {
             return core.JSValue.boolean(matched);
@@ -483,7 +483,7 @@ pub fn qjsRegExpSpeciesConstructor(
         return error.TypeError;
     }
 
-    const species_atom = core.atom.predefinedId("Symbol.species", .symbol) orelse {
+    const species_atom = (comptime core.atom.predefinedId("Symbol.species", .symbol)) orelse {
         default_constructor.free(ctx.runtime);
         return error.TypeError;
     };
@@ -570,7 +570,7 @@ pub fn qjsRegExpExecGeneric(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const exec_atom = core.atom.predefinedId("exec", .string) orelse return error.TypeError;
+    const exec_atom = (comptime core.atom.predefinedId("exec", .string)) orelse return error.TypeError;
     const exec_method = try getValueProperty(ctx, output, global, rx, exec_atom, caller_function, caller_frame);
     defer exec_method.free(ctx.runtime);
     if (!exec_method.isUndefined() and !exec_method.isNull()) {
@@ -914,7 +914,7 @@ pub fn isRegExpObservable(
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
     if (!value.isObject()) return false;
-    const match_atom = core.atom.predefinedId("Symbol.match", .symbol) orelse return isRegExpValue(value);
+    const match_atom = (comptime core.atom.predefinedId("Symbol.match", .symbol)) orelse return isRegExpValue(value);
     const matcher = try getValueProperty(ctx, output, global, value, match_atom, caller_function, caller_frame);
     defer matcher.free(ctx.runtime);
     if (!matcher.isUndefined()) return valueTruthy(matcher);

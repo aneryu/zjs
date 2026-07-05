@@ -114,6 +114,12 @@ pub const Vm = struct {
     /// catch handler set in one frame doesn't leak into another.
     catch_target: *?usize,
 
+    /// Interrupt poll state — qjs polls on every OP_goto (quickjs.c:18822,
+    /// `js_poll_interrupts`) and at JS_CallInternal entry (17787). Gated on an
+    /// installed handler (`poller.active`) like the old dispatchLoop leg: with
+    /// none installed the jump handlers stay poll-free.
+    poller: control_vm.InterruptPoller,
+
     /// The L0 (depth-0) frame, captured at entry. When a return pops the last inline
     /// frame (depth back to 0), reloadTop restores THESE (topEntry() is invalid at
     /// depth 0 — the L0 frame is loop_state.frame_storage, not a Machine Entry).
@@ -324,17 +330,160 @@ const eval_parameter_initializer_flag: u16 = 0x4000;
 
 // ---- SPECIAL handlers (call / return / tail / drop / throw / eval / generator) ----
 
+/// op.call's `catch |err|` recovery, shared by the in-handler push (below)
+/// and kept verbatim from the driver's old `.tail` arm: close a pending
+/// for-of iterator, then try to convert the setup failure (OOM-class) into a
+/// JS-catchable error in the CALLER frame. Returns true when the caller frame
+/// caught it (frame.pc is at the handler — re-dispatch via coldNext); false
+/// when it must propagate (vm.pending_error is set). Kept OUT of the handler
+/// (noinline) so the cold recovery never touches the hot path's registers.
+noinline fn callSetupRecover(vm: *Vm, err: HostError) bool {
+    forof_ops.closeStackTopForOfIteratorForPendingError(vm.ctx, vm.output, vm.global, vm.stack) catch |e2| {
+        vm.pending_error = e2;
+        return false;
+    };
+    const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| {
+        vm.pending_error = e2;
+        return false;
+    };
+    if (!caught) {
+        vm.pending_error = err;
+        return false;
+    }
+    return true;
+}
+
+/// Complete an inline call INSIDE the handler — qjs's CASE(OP_call) shape
+/// (quickjs.c:18182-18202): push the callee frame, poll interrupts at call
+/// entry (17787), reload the per-frame registers, and tail-dispatch straight
+/// into the callee's first opcode. No driver round-trip: no Outcome encode,
+/// no tail_request staging, no driver-side spill/reload detour. Expanded
+/// inline into the (Handler-signature) caller so the tail calls are legal.
+inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.InlineTarget, region_base: usize, argc: u16, layout: inline_calls.RegionLayout) Outcome {
+    const entry = vm.machine.pushCall(vm.global, vm.stack, target, region_base, argc, layout) catch |err| {
+        if (!callSetupRecover(vm, err)) return .threw;
+        return coldNext(vb, vm);
+    };
+    if (vm.poller.active) {
+        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
+    }
+    // Enter the entry pushCall handed back instead of reloading
+    // `machine.top` — qjs enters the callee via the alloca result pointer
+    // already in a register (quickjs.c:17846); this is the equivalent
+    // pointer pass-through (pushFrame just stored the same pointer into
+    // `machine.top`, quickjs.c:17870). The manual expansion below is
+    // reloadTop's depth>0 arm verbatim.
+    vm.function = entry.function;
+    vm.frame = &entry.frame;
+    vm.stack = &entry.stack;
+    vm.catch_target = &entry.catch_target;
+    vm.code_base = vm.function.code.ptr;
+    vm.code_end = vm.function.code.ptr + vm.function.code.len;
+    vm.stack_base = vm.stack.values.ptr;
+    vm.arg_buf = vm.frame.args.ptr;
+    // Just pushed, so depth > 0; the generator stop-boundary guard is L0-only.
+    vm.local_fast_blocked = false;
+    const pc2: [*]const u8 = vm.code_base; // fresh frame: frame.pc == 0
+    const sp2: [*]JSValue = vm.stack.values.ptr + vm.stack.values.len;
+    const vb2: [*]JSValue = vm.frame.locals.ptr;
+    return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
+}
+
+/// Fused popReturn + reload for an in-handler return to an inline caller —
+/// qjs OP_return + the done: epilogue (quickjs.c:18266, 20698-20710):
+/// teardown, unlink the frame (`rt->current_stack_frame = sf->prev_frame`,
+/// quickjs.c:20709), deliver the result into the caller's operand stack,
+/// resume the caller — all in the handler. Expanded inline into the
+/// Handler-signature caller so the tail call is legal.
+inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
+    const machine = vm.machine;
+    const dying = machine.topEntry();
+    // Straight-line teardown (qjs done: epilogue) unless execution escaped
+    // the simple shape: grew the operand stack to the heap, materialized the
+    // cold box (arguments object), or moved frame storage to the heap.
+    if (dying.fast_teardown and dying.frame.cold == null and
+        !dying.frame.storage_on_heap and dying.stack.arena_window)
+    {
+        inline_calls.Machine.teardownSimpleEntry(vm.ctx, dying);
+    } else {
+        inline_calls.Machine.teardownInlineEntry(vm.ctx, dying);
+    }
+    vm.ctx.call_depth -= 1;
+    machine.depth -= 1;
+    // qjs done: `rt->current_stack_frame = sf->prev_frame;` (quickjs.c:20709)
+    // — the caller's Entry address comes from the chain, not from re-deriving
+    // entryAt(depth-1) chunk arithmetic; reloadTop below reads it back.
+    machine.top = dying.prev;
+    machine.switched = true;
+    var pc2: [*]const u8 = undefined;
+    var sp2: [*]JSValue = undefined;
+    var vb2: [*]JSValue = undefined;
+    reloadTop(vm, &pc2, &sp2, &vb2);
+    // Deliver the result on the (now-current) caller stack. AssumeCapacity
+    // never reallocs, so the stack_base reloadTop captured stays valid; sp
+    // just advances past the pushed slot.
+    vm.stack.pushOwnedAssumeCapacity(value);
+    sp2 += 1;
+    return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
+}
+
 fn op_return(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    // qjs OP_return (quickjs.c:18266) is check-free and infallible: `ret_val =
+    // *--sp; goto done;` — ret_val is a plain local carried in registers to the
+    // done: epilogue. Derived-ctor return legality is a SEPARATE opcode there
+    // (OP_check_ctor_return, quickjs.c:18273, emitted at parse time 28459) and
+    // the depth-0/generator hand-off lives at the JS_CallInternal boundary —
+    // neither is ever inline in OP_return's value dataflow. zjs's compiler does
+    // not emit a check-ctor op, so the flag test must remain, but only as a
+    // branch off to the cold sibling handler below: the hot leg carries the
+    // value as a plain JSValue (no `!JSValue` error union, no memory phi)
+    // straight into popAndResume.
+    if (vm.frame.function.flags.is_derived_class_constructor or vm.machine.depth == 0)
+        return @call(.always_tail, op_return_cold, .{ pc, sp, vb, vm });
+    vm.publish(pc, sp);
+    // returnTop's value grab minus the generator/ctor legs: dup the stack top
+    // (the raw slot is freed by the frame teardown inside popAndResume).
+    const value = vm.stack.peek() orelse JSValue.undefinedValue();
+    return popAndResume(vm, value);
+}
+/// Cold sibling of op_return — the depth-0 exit (generator done-slot + driver
+/// hand-off) and the derived-ctor return-legality machinery (qjs
+/// OP_check_ctor_return, quickjs.c:18273; a flag-guarded cold handler here
+/// because zjs has no separate opcode). Reached by tail call. (No `noinline`
+/// keyword — it would change the fn type and break the always_tail match.
+/// LLVM inlines it back as the flag-taken branch, which is fine: disassembly
+/// shows the error-union spill slots confined to the cold branch while the
+/// hot leg's value rides x8/x9 into the teardown with no strh/q0 round-trip.)
+fn op_return_cold(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     _ = vb;
     vm.publish(pc, sp);
-    vm.return_value = control_vm.returnTop(vm.ctx, vm.stack, vm.frame, if (vm.machine.depth == 0) vm.l0.generator_state else null) catch |e| return vm.fail(e);
-    return .returned;
+    const depth0 = vm.machine.depth == 0;
+    const value = control_vm.returnTop(vm.ctx, vm.stack, vm.frame, if (depth0) vm.l0.generator_state else null) catch |e| return vm.fail(e);
+    if (depth0) {
+        vm.return_value = value;
+        return .returned; // L0 exit stays on the driver
+    }
+    return popAndResume(vm, value);
 }
 fn op_return_undef(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    // Same split as op_return — qjs OP_return_undef (quickjs.c:18270) is
+    // `ret_val = JS_UNDEFINED; goto done;`, check-free and infallible.
+    if (vm.frame.function.flags.is_derived_class_constructor or vm.machine.depth == 0)
+        return @call(.always_tail, op_return_undef_cold, .{ pc, sp, vb, vm });
+    vm.publish(pc, sp);
+    return popAndResume(vm, JSValue.undefinedValue());
+}
+/// Cold sibling of op_return_undef (see op_return_cold).
+fn op_return_undef_cold(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     _ = vb;
     vm.publish(pc, sp);
-    vm.return_value = control_vm.returnUndefined(vm.ctx, vm.frame, if (vm.machine.depth == 0) vm.l0.generator_state else null) catch |e| return vm.fail(e);
-    return .returned;
+    const depth0 = vm.machine.depth == 0;
+    const value = control_vm.returnUndefined(vm.ctx, vm.frame, if (depth0) vm.l0.generator_state else null) catch |e| return vm.fail(e);
+    if (depth0) {
+        vm.return_value = value;
+        return .returned;
+    }
+    return popAndResume(vm, value);
 }
 
 fn op_call(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
@@ -355,17 +504,15 @@ fn op_call(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c
     // Inline the common bytecode-to-bytecode resolution here instead of paying
     // execCall's 10-argument call boundary every iteration: resolveInlineTarget
     // (an inline fn) reads the callable off the operand region exactly as
-    // execCall's inline leg does and, on a hit, hands the dispatch driver a
-    // pushCall request directly. A miss (host fn / ctor / cross-realm / underflow)
-    // falls to execCall with allow_inline=false so the inline check isn't redone.
+    // execCall's inline leg does and, on a hit, completes the call in the
+    // handler (qjs CASE(OP_call)). A miss (host fn / ctor / cross-realm /
+    // underflow) falls to execCall with allow_inline=false.
     const total = @as(usize, argc) + 1;
     if (vm.stack.values.len >= total) {
         const region_base = vm.stack.values.len - total;
         const func = vm.stack.values[region_base];
         if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, JSValue.undefinedValue(), func)) |target| {
-            vm.tail_request = .{ .target = target, .region_base = region_base, .argc = argc };
-            vm.tail_is_reuse = false;
-            return .tail;
+            return pushAndEnter(vb, vm, &target, region_base, argc, .plain);
         }
     }
     switch (call_runtime.execCall(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, argc, vm.output, vm.global, false, &vm.tail_request) catch |e| return vm.fail(e)) {
@@ -393,9 +540,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) call
         const method = vm.stack.values[region_base + 1];
         if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, receiver, method)) |target| {
             vm.frame.pc += 2;
-            vm.tail_request = .{ .target = target, .region_base = region_base, .argc = argc, .layout = .method };
-            vm.tail_is_reuse = false;
-            return .tail;
+            return pushAndEnter(vb, vm, &target, region_base, argc, .method);
         }
     }
     switch (call_vm.callMethod(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, false, &vm.tail_request) catch |e| return vm.fail(e)) {
@@ -529,38 +674,147 @@ inline fn decodeLocalOperand(opc: u8, operand: [*]const u8) LocalOperand {
     };
 }
 
-/// Register-resident int32 binary (mirrors zjs_vm.dispatchFastBinaryInt32). `null`
-/// → not int32-representable / unsupported op → caller falls to the cold helper.
-inline fn fastBinaryInt32(binop: u8, a: i32, b: i32) ?JSValue {
-    return switch (binop) {
-        op.add => blk: {
-            const r = @addWithOverflow(a, b);
-            break :blk if (r[1] == 0) JSValue.int32(r[0]) else value_ops.numberToValue(@as(f64, @floatFromInt(a)) + @as(f64, @floatFromInt(b)));
-        },
-        op.sub => blk: {
-            const r = @subWithOverflow(a, b);
-            break :blk if (r[1] == 0) JSValue.int32(r[0]) else value_ops.numberToValue(@as(f64, @floatFromInt(a)) - @as(f64, @floatFromInt(b)));
-        },
-        op.mul => blk: {
-            if ((a == 0 and b < 0) or (b == 0 and a < 0)) break :blk JSValue.float64(-0.0);
-            const r = @mulWithOverflow(a, b);
-            break :blk if (r[1] == 0) JSValue.int32(r[0]) else value_ops.numberToValue(@as(f64, @floatFromInt(a)) * @as(f64, @floatFromInt(b)));
-        },
-        op.div => value_ops.numberToValue(@as(f64, @floatFromInt(a)) / @as(f64, @floatFromInt(b))),
-        op.mod => blk: {
-            if (b == 0) break :blk JSValue.float64(std.math.nan(f64));
-            if (b == -1) break :blk if (a < 0) JSValue.float64(-0.0) else JSValue.int32(0);
-            const r = @rem(a, b);
-            break :blk if (r == 0 and a < 0) JSValue.float64(-0.0) else JSValue.int32(r);
-        },
-        op.shl => JSValue.int32(a << @intCast(b & 31)),
-        op.sar => JSValue.int32(a >> @intCast(b & 31)),
-        op.shr => value_ops.numberToValue(@floatFromInt(@as(u32, @bitCast(a)) >> @intCast(b & 31))),
-        op.@"and" => JSValue.int32(a & b),
-        op.@"or" => JSValue.int32(a | b),
-        op.xor => JSValue.int32(a ^ b),
-        else => null,
-    };
+/// Per-op binary-arithmetic handlers — qjs gives every binary op its own CASE
+/// label with its own JS_VALUE_IS_BOTH_INT fast leg (quickjs.c:19696 OP_add,
+/// 19792 OP_sub, 19830 OP_mul, 19879 OP_div, 19895 OP_mod, 20113 OP_shl, 20133
+/// OP_shr, 20154 OP_sar, 20174 OP_and, 20192 OP_or, 20210 OP_xor); OP_pow has
+/// NO fast leg (19916 falls straight to js_binary_arith_slow — its table entry
+/// stays the cold h_binary). The previous single op_binary handler fused all
+/// eleven ops through one runtime `switch` returning `?JSValue`: LLVM gave each
+/// arm's optional result a distinct stack slot (0x1e0 frame, non-coalescing) and
+/// merged them through memory (`ldr q0/str q0` round-trip), and the float-mod
+/// arm's `bl fmod` forced lr + 4 callee-saved pairs onto every int add — 44
+/// insn/op against qjs's 22. Splitting per op (same knife as opLoc vs the fused
+/// op_loc) leaves each handler a pure-register straight line: both-int tag fold
+/// → int op (+overflow check) → 16-byte scalar store into sp[-2] → tail dispatch.
+///
+/// Guard misses take the INDIRECT `cold_table[pc[0]]` hop (op_if_false8 pattern:
+/// the runtime index defeats devirtualization so the cold publish+helper is not
+/// inlined back). Everything the qjs int leg does not fully resolve inline is
+/// routed there rather than re-implemented: int overflow on add/sub/mul and
+/// mul's -0 (qjs handles those in-CASE via __JS_NewFloat64, 19704/19800/19842/
+/// 19847 — the cold path's vm_arith.fastInt32Add/Sub/Mul computes bit-identical
+/// results), mod's `v1 < 0 || v2 <= 0` (qjs 19906 also goes slow), and every
+/// non-(both-int) pairing. qjs OP_add/sub/mul additionally inline a float leg
+/// (19710-19728) and OP_add a string leg (19729): those stay cold here — this
+/// knife is int-only (the reverted op_add_loc float-inline precedent), and the
+/// cold h_binary already carries the full float/string/object/BigInt protocol.
+const BinOp = enum { add, sub, mul, div, mod, shl, sar, shr, band, bor, bxor };
+
+pub fn opBinary(comptime kind: BinOp) Handler {
+    return struct {
+        fn hnd(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+            // qjs JS_VALUE_IS_BOTH_INT — one fused (tag1|tag2)==0 test.
+            const ints = JSValue.asInt32Pair((sp - 2)[0], (sp - 1)[0]) orelse
+                return @call(.always_tail, opBinaryFloat(kind), .{ pc, sp, var_buf, vm });
+            const a = ints.lhs;
+            const b = ints.rhs;
+            // Each arm stores its own result into sp[-2] (qjs: every CASE writes
+            // sp[-2] then BREAKs) — a shared `result` merge point would make LLVM
+            // spill the 16-byte JSValue phi to a stack slot and reload it as a q
+            // register (the old fused handler's ldr q0/str q0 round-trip).
+            switch (kind) {
+                // qjs OP_add int leg (19701-19709): `r = (int64_t)v1 + v2; if
+                // ((int)r != r)` — the int64-widen + truncation check, NOT
+                // @addWithOverflow (whose result tuple makes LLVM materialize
+                // the overflow flag into a stack byte — a dead cset+strb and a
+                // 16B frame; same finding as vm_arith.fastInt32Add). The
+                // overflow (double) result comes from the cold side instead of
+                // an in-line scvtf so the hot line stays integer-register only.
+                .add => {
+                    const r: i64 = @as(i64, a) + b;
+                    const r32: i32 = @truncate(r);
+                    if (r32 != r) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    (sp - 2)[0] = JSValue.int32(r32);
+                },
+                // qjs OP_sub int leg (19797-19805), same int64-widen form.
+                .sub => {
+                    const r: i64 = @as(i64, a) - b;
+                    const r32: i32 = @truncate(r);
+                    if (r32 != r) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    (sp - 2)[0] = JSValue.int32(r32);
+                },
+                // qjs OP_mul int leg (19836-19852): 64-bit product truncation
+                // check, then the `r == 0 && (v1|v2) < 0` -0 test — both special
+                // cases route cold (fastInt32Mul reproduces qjs's mul_fp_res).
+                .mul => {
+                    const r: i64 = @as(i64, a) * b;
+                    const r32: i32 = @truncate(r);
+                    if (r32 != r) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    if (r == 0 and (a | b) < 0) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    (sp - 2)[0] = JSValue.int32(r32);
+                },
+                // qjs OP_div int leg (19884-19889): always the double quotient,
+                // through the canonicalizing JS_NewFloat64 (= numberToValue).
+                .div => (sp - 2)[0] = value_ops.numberToValue(@as(f64, @floatFromInt(a)) / @as(f64, @floatFromInt(b))),
+                // qjs OP_mod int leg (19900-19910): `v1 < 0 || v2 <= 0` goes
+                // slow (avoids v2==0, INT32_MIN%-1 and -0 results); the hot
+                // remainder is nonnegative % positive — plain int32.
+                .mod => {
+                    if (a < 0 or b <= 0) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    (sp - 2)[0] = JSValue.int32(@rem(a, b));
+                },
+                // qjs OP_shl int leg (20118-20124).
+                .shl => (sp - 2)[0] = JSValue.int32(a << @intCast(b & 31)),
+                // qjs OP_sar int leg (20159-20164).
+                .sar => (sp - 2)[0] = JSValue.int32(a >> @intCast(b & 31)),
+                // qjs OP_shr int leg (20138-20145): JS_NewUint32 — result keeps
+                // the int tag while it fits int32, else the exact double (bare
+                // __JS_NewFloat64; >INT32_MAX is never int32-canonicalizable, so
+                // this equals the old numberToValue bits without its scan). The
+                // legs store separately: an if/else JSValue *value* merge would
+                // reintroduce the stack-slot + q-register round-trip.
+                .shr => {
+                    const r = @as(u32, @bitCast(a)) >> @intCast(b & 31);
+                    if (r <= std.math.maxInt(i32)) {
+                        (sp - 2)[0] = JSValue.int32(@intCast(r));
+                    } else {
+                        (sp - 2)[0] = JSValue.float64(@floatFromInt(r));
+                    }
+                },
+                // qjs OP_and/OP_or/OP_xor int legs (20179-20182/20197-20200/20215-20218).
+                .band => (sp - 2)[0] = JSValue.int32(a & b),
+                .bor => (sp - 2)[0] = JSValue.int32(a | b),
+                .bxor => (sp - 2)[0] = JSValue.int32(a ^ b),
+            }
+            return cont(pc + 1, sp - 1, var_buf, vm);
+        }
+    }.hnd;
+}
+
+/// Inline float64 leg for a generic binary op whose both-int32 fast path missed
+/// (opBinary tail-jumps here). Mirrors qjs OP_add's float leg (quickjs.c:19710-19728):
+/// add/sub/mul extract each operand as a double (float64 OR int32; any other tag —
+/// string/object/BigInt — falls to the cold slow path), then store a bare float64
+/// result exactly like the both-float leg op_add_loc already inlines (tailcall_dispatch
+/// :1296-1300). This keeps float-heavy generic binaries — e.g. `s += arr[i]` numeric
+/// reductions, which compile to a non-fused OP_add and previously fell all the way to
+/// binaryVm/value_ops.binary — on a register-resident path. div/mod are excluded (they
+/// carry qjs's zero / sign / -0 special-cases and canonicalizing quotient) and the
+/// bitwise ops ToInt32 their operands, so both keep routing cold.
+fn opBinaryFloat(comptime kind: BinOp) Handler {
+    return struct {
+        fn hnd(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+            switch (kind) {
+                .add, .sub, .mul => {
+                    if (value_ops.numberValue((sp - 2)[0])) |d1| {
+                        if (value_ops.numberValue((sp - 1)[0])) |d2| {
+                            const d = switch (kind) {
+                                .add => d1 + d2,
+                                .sub => d1 - d2,
+                                .mul => d1 * d2,
+                                else => unreachable,
+                            };
+                            (sp - 2)[0] = JSValue.float64(d);
+                            return cont(pc + 1, sp - 1, var_buf, vm);
+                        }
+                    }
+                },
+                else => {},
+            }
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        }
+    }.hnd;
 }
 
 /// Direct dispatch to the handler for the opcode at `npc[0]`, SKIPPING `next`'s
@@ -624,7 +878,8 @@ pub fn opLoc(comptime kind: LocKind, comptime idx_src: LocIdx) Handler {
 
 /// Closure/global var-ref read (qjs OP_get_var_ref0..3 distinct labels). The `fib`
 /// recursive self-reference is get_var_ref0 — fib's per-call hottest non-call op.
-/// Deleted / TDZ-uninitialized / chained-import-cell route to the cold resolver.
+/// Uninitialized (TDZ or deleted binding parked at UNINITIALIZED, qjs
+/// remove_global_object_property) routes to the cold resolver.
 const VarRefIdx = enum { c0, c1, c2, c3, half };
 pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
     return struct {
@@ -640,12 +895,22 @@ pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
                 .c0, .c1, .c2, .c3 => 1,
                 .half => 3,
             };
+            // Bounds check stays: zjs still grows var_refs dynamically for
+            // eval-introduced refs (ensureVarRefsCapacity; qjs sizes once at
+            // 17277 and reads unchecked, 18627) — deletion is phase-E gated
+            // on construction-fixed length.
             if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-            const cell = slot_ops.varRefCellFromValue(vm.frame.var_refs.ptr[idx]) orelse return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-            if (cell.is_deleted) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            // Slot is a cell by type (`[]*core.VarRef`): the pre-typed
+            // "is this slot a cell" header load (guard #4) is deleted —
+            // qjs OP_get_var_ref is a bare `*var_refs[idx]->pvalue` (18627).
+            const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
             const v = cell.pvalue.*;
             if (v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-            if (core.VarRef.fromValue(v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            // Guard #7 (nested-cell check) retired: a cell's VALUE is never
+            // itself a cell — the direct-eval const view now pvalue-ALIASES
+            // its target (eval_ops.directEvalOuterVarRefView) instead of
+            // nesting it, so `*var_refs[idx]->pvalue` is the plain value,
+            // exactly qjs OP_get_var_ref (quickjs.c:18627-18636).
             sp[0] = v.dup();
             return cont(pc + advance, sp + 1, var_buf, vm);
         }
@@ -701,7 +966,8 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     // from the holder slot, so dup onto the stack (which owns its entries) and free
     // the receiver. Exotic/private/non-object/prototype-fallback falls to cold field().
     if (vm_property_field.qjsGetFieldFast(vm.ctx.runtime, receiver, atom_id)) |value| {
-        (sp - 1)[0] = if (value.requiresRefCount()) value.dup() else value;
+        const stack_value = if (value.requiresRefCount()) value.dup() else value;
+        (sp - 1)[0] = stack_value;
         receiver.free(vm.ctx.runtime);
         return cont(pc + 5, sp, var_buf, vm);
     }
@@ -724,7 +990,8 @@ pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     // BORROWED from its holder slot, so dup it onto the stack exactly as the cold
     // path's `pushAssumeCapacity` does; the receiver stays beneath as `this`.
     if (vm_property_field.qjsGetFieldFast(vm.ctx.runtime, receiver, atom_id)) |value| {
-        sp[0] = if (value.requiresRefCount()) value.dup() else value;
+        const stack_value = if (value.requiresRefCount()) value.dup() else value;
+        sp[0] = stack_value;
         return cont(pc + 5, sp + 1, var_buf, vm);
     }
     // Primitive string receiver: standard String.prototype method (and every
@@ -825,87 +1092,70 @@ pub fn op_get_length(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
-pub fn op_binary(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    const opc = pc[0];
-    if (opc != op.pow) {
-        if ((sp - 2)[0].asInt32()) |a| {
-            if ((sp - 1)[0].asInt32()) |b| {
-                if (fastBinaryInt32(opc, a, b)) |result| {
-                    (sp - 2)[0] = result;
-                    return cont(pc + 1, sp - 1, var_buf, vm);
-                }
-            }
-        }
-    }
-    switch (opc) {
-        op.add, op.sub, op.mul, op.div, op.mod => {
-            if ((sp - 2)[0].asNumber()) |fa| {
-                if ((sp - 1)[0].asNumber()) |fb| {
-                    const fout = switch (opc) {
-                        op.add => fa + fb,
-                        op.sub => fa - fb,
-                        op.mul => fa * fb,
-                        op.div => fa / fb,
-                        op.mod => @rem(fa, fb),
-                        else => unreachable,
-                    };
-                    (sp - 2)[0] = value_ops.numberToValue(fout);
-                    return cont(pc + 1, sp - 1, var_buf, vm);
-                }
-            }
-        },
-        else => {},
-    }
-    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-}
-
-pub fn op_compare(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    const opc = pc[0];
-    if ((sp - 2)[0].asInt32()) |a| {
-        if ((sp - 1)[0].asInt32()) |b| {
-            const r = switch (opc) {
-                op.lt => a < b,
-                op.lte => a <= b,
-                op.gt => a > b,
-                op.gte => a >= b,
-                op.eq, op.strict_eq => a == b,
-                op.neq, op.strict_neq => a != b,
-                else => unreachable,
-            };
-            (sp - 2)[0] = JSValue.boolean(r);
-            return cont(pc + 1, sp - 1, var_buf, vm);
-        }
-    }
-    // qjs OP_CMP inlines the float64/int relational compare too (FLOAT64(a)||FLOAT64(b)
-    // → convert both to double, compare) before falling to js_relational_slow. Both
-    // operands are non-refcounted numbers here, so nothing to free. This is what makes
-    // a float-counter `x < n` not pay the cold hop every iteration.
-    switch (opc) {
-        op.lt, op.lte, op.gt, op.gte => {
-            if ((sp - 2)[0].asNumber()) |fa| {
-                if ((sp - 1)[0].asNumber()) |fb| {
+/// Per-op comparison handler generator (qjs OP_CMP / OP_CMP_EQ / OP_CMP_STRICT_EQ
+/// each expand to an INDEPENDENT CASE label per opcode — quickjs.c:20230-20271
+/// (OP_CMP → OP_lt/OP_lte/OP_gt/OP_gte), 20273-20341 (OP_CMP_EQ → OP_eq/OP_neq),
+/// 20343-20398 (OP_CMP_STRICT_EQ → OP_strict_eq/OP_strict_neq) — so OP_lt's
+/// both-int fast path is a single cmp+cset with no runtime predicate select).
+/// The former shared op_compare handler decoded pc[0] into the predicate through
+/// a cmp+cset+csel selection chain (~30 insn/compare measured vs qjs's 17). With
+/// `opc` comptime the switches below fold away and each handler compiles to:
+/// two tag checks + one cmp + one cset + write sp[-2] + tail-jump next —
+/// qjs's exact int fast-path shape. Non-number operands fall INDIRECTLY to
+/// cold_table[pc[0]] (op_compare_cold → full js_relational_slow/js_eq_slow
+/// semantics), the same routing discipline the shared handler used.
+pub fn opCompare(comptime opc: u8) Handler {
+    return struct {
+        fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+            if ((sp - 2)[0].asInt32()) |a| {
+                if ((sp - 1)[0].asInt32()) |b| {
                     const r = switch (opc) {
-                        op.lt => fa < fb,
-                        op.lte => fa <= fb,
-                        op.gt => fa > fb,
-                        op.gte => fa >= fb,
+                        op.lt => a < b,
+                        op.lte => a <= b,
+                        op.gt => a > b,
+                        op.gte => a >= b,
+                        op.eq, op.strict_eq => a == b,
+                        op.neq, op.strict_neq => a != b,
                         else => unreachable,
                     };
                     (sp - 2)[0] = JSValue.boolean(r);
                     return cont(pc + 1, sp - 1, var_buf, vm);
                 }
             }
-        },
-        else => {},
-    }
-    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            // qjs OP_CMP inlines the float64/int relational compare too (FLOAT64(a)||FLOAT64(b)
+            // → convert both to double, compare) before falling to js_relational_slow. Both
+            // operands are non-refcounted numbers here, so nothing to free. This is what makes
+            // a float-counter `x < n` not pay the cold hop every iteration. (Relational ops
+            // only — same coverage the shared handler had; the eq family keeps its existing
+            // int-int fast arm and falls cold otherwise.)
+            switch (opc) {
+                op.lt, op.lte, op.gt, op.gte => {
+                    if ((sp - 2)[0].asNumber()) |fa| {
+                        if ((sp - 1)[0].asNumber()) |fb| {
+                            const r = switch (opc) {
+                                op.lt => fa < fb,
+                                op.lte => fa <= fb,
+                                op.gt => fa > fb,
+                                op.gte => fa >= fb,
+                                else => unreachable,
+                            };
+                            (sp - 2)[0] = JSValue.boolean(r);
+                            return cont(pc + 1, sp - 1, var_buf, vm);
+                        }
+                    }
+                },
+                else => {},
+            }
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        }
+    }.h;
 }
 
 /// Dedicated cold handler for OP_lt/OP_le/…/OP_eq's non-(both-int32) operands — the
 /// float-vs-int / float / object / loose-eq cases (qjs js_relational_slow /
-/// js_eq_slow). Installed as the cold_table entry for the compare ops, so op_compare
-/// reaches it through the same indirect `cold_table[pc[0]]` dispatch it always used
-/// (a DIRECT tail-call here would perturb op_compare's int32 fast-path codegen — the
+/// js_eq_slow). Installed as the cold_table entry for the compare ops, so the
+/// opCompare handlers reach it through the same indirect `cold_table[pc[0]]` dispatch
+/// (a DIRECT tail-call here would perturb the int32 fast-path codegen — the
 /// canonical `s=s+i` loop regressed +37 insn/iter when routed directly).
 ///
 /// `compareAt` runs register-resident (no publish round-trip) and the handler writes
@@ -972,6 +1222,14 @@ inline fn jump8Target(pc: [*]const u8, vm: *Vm) [*]const u8 {
     return vm.code_base + @as(usize, @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff)));
 }
 pub fn op_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    // qjs CASE(OP_goto) polls interrupts on every unconditional jump — the
+    // loop back edge (quickjs.c:18822-18826). Without this, a pure loop never
+    // reaches a poll point and an installed interrupt handler can't abort it.
+    if (vm.poller.active) {
+        @branchHint(.unlikely);
+        vm.publish(pc, sp);
+        vm.poller.poll(vm.ctx.runtime) catch |e| return vm.fail(e);
+    }
     return @call(.always_tail, next, .{ jump8Target(pc, vm), sp, var_buf, vm });
 }
 // The boolean fast path (a comparison result — the hot loop condition) inlines; a
@@ -979,7 +1237,7 @@ pub fn op_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) c
 // That routing is INDIRECT, which LLVM cannot inline back — so the hot handler stays
 // prologue-free (a direct tail-call to a local slow shell got re-inlined, dragging in
 // its 64B frame + callee-saved spills, which pressured the store buffer and stalled
-// the boolean's store→load forward from op_compare). Booleans need no free / no call.
+// the boolean's store→load forward from opCompare). Booleans need no free / no call.
 pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if ((sp - 1)[0].asBool()) |b| {
         if (!b) return @call(.always_tail, next, .{ jump8Target(pc, vm), sp - 1, var_buf, vm });
@@ -1113,19 +1371,29 @@ pub fn op_add_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
 }
 
 // Global var read (2-byte var-ref index). qjs OP_get_var_ref-backed global cell read
-// — the per-call `fib` lookup in recursive code. Any dynamic-overlay / shadow / TDZ /
-// deleted / nested-var-ref condition falls back to the cold getVar resolver.
+// — the per-call `fib` lookup in recursive code. Any dynamic-overlay / shadow /
+// uninitialized (TDZ or deleted binding parked at UNINITIALIZED, qjs
+// remove_global_object_property) condition falls back to the cold getVar resolver.
 pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     if (vm_property_globals.hasDynamicGlobalOverlay(vm.frame, evLocalNames(vm), vm.frame.evalVarRefNames(), evWithObject(vm))) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
+    // Bounds check stays (dynamic eval growth; phase-E deletion is gated on
+    // construction-fixed length — qjs reads unchecked, 18461).
     if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    const cell = slot_ops.varRefCellFromValue(vm.frame.var_refs.ptr[idx]) orelse return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    if (cell.is_deleted) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // Slot is a cell by type: guard #4 (slot header load) deleted — qjs
+    // OP_get_var is `*var_refs[idx]->pvalue` + one uninitialized check
+    // (18461-18488).
+    const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
     const v = cell.pvalue.*;
     if (v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    if (core.VarRef.fromValue(v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    if (vm_property_globals.globalLexicalShadowsGlobalForIdx(vm.ctx, vm.global, vm.function, idx)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // Guard #7 (nested-cell check) retired: cell values are never cells (the
+    // direct-eval const view pvalue-aliases its target, see opGetVarRef) —
+    // bare `*var_refs[idx]->pvalue` like qjs OP_get_var (18461-18488).
+    // No global-lexical shadow check: a shadowing top-level let/const performs
+    // definition-time cell surgery / parked-cell reuse (qjs
+    // js_closure_define_global_var, quickjs.c:17148-17205), so an initialized
+    // cell is always the authoritative binding (qjs OP_get_var, 18461-18488).
     if (vm_property_globals.parentEvalShadowsGlobalForIdx(vm.ctx.runtime, vm.frame, vm.function, idx)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     sp[0] = v.dup();
     return cont(pc + 3, sp + 1, var_buf, vm);
@@ -1206,15 +1474,29 @@ pub fn run(vm: *Vm) HostError!JSValue {
             },
             .threw => return vm.pending_error,
             .tail => {
-                const req = vm.tail_request;
+                // Read the request in place — no by-value copy of the target.
+                const req = &vm.tail_request;
                 if (vm.tail_is_reuse) {
-                    try vm.machine.tailCallReuse(vm.global, vm.stack, req.target, req.region_base, req.argc, req.layout);
+                    _ = try vm.machine.tailCallReuse(vm.global, vm.stack, &req.target, req.region_base, req.argc, req.layout);
                 } else {
-                    // TODO(debug-phase): pushCall-setup failure must run
-                    // closeStackTopForOfIteratorForPendingError + handleCatchableRuntimeError
-                    // (op.call's `catch |err|` leg) before re-dispatching.
-                    try vm.machine.pushCall(vm.global, vm.stack, req.target, req.region_base, req.argc, req.layout);
+                    _ = vm.machine.pushCall(vm.global, vm.stack, &req.target, req.region_base, req.argc, req.layout) catch |err| {
+                        // op.call's `catch |err|` leg (the old dispatchLoop's
+                        // push-failure path): close a pending for-of iterator,
+                        // then convert a setup failure (OOM-class) into a
+                        // JS-catchable error in the CALLER frame — qjs delivers
+                        // the preallocated InternalError to the frame's catch.
+                        // Only an uncaught error propagates out of the loop.
+                        try forof_ops.closeStackTopForOfIteratorForPendingError(vm.ctx, vm.output, vm.global, vm.stack);
+                        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err)) {
+                            reloadTop(vm, &pc, &sp, &var_buf);
+                            continue;
+                        }
+                        return err;
+                    };
                 }
+                // qjs polls at call entry (js_poll_interrupts, quickjs.c:17787),
+                // so unbounded recursion is also abortable.
+                if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
                 reloadTop(vm, &pc, &sp, &var_buf);
             },
             .suspended => return vm.return_value,

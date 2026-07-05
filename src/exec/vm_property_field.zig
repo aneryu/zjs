@@ -353,11 +353,9 @@ pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_
     var object = objectFromValue(receiver) orelse return null;
     while (true) {
         if (object.needsSlowPropertyAccess()) return null;
-        switch (object.findOwnDataValueFast(atom_id)) {
-            .value => |v| return v,
-            .slow => return null,
-            .missing => {},
-        }
+        var slow_property = false;
+        if (object.findOwnDataValueFast(atom_id, &slow_property)) |v| return v;
+        if (slow_property) return null;
         // End of the explicit self.prototype chain. We must NOT synthesize `undefined`
         // here: zjs resolves built-in prototype methods/constructor for arrays and other
         // class objects via a by-class-name global fallback (object_ops.getValueProperty),

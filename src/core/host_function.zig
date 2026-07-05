@@ -745,6 +745,7 @@ pub const builtin_method_ids = struct {
             replace_all = 142,
             match_all = 143,
             iterator_next = 144,
+            replace = 145,
         };
     };
 };
@@ -773,6 +774,7 @@ pub const builtin_method_id_lookup = struct {
         pub const legacy_match_method_id: u32 = 41;
         pub const legacy_replace_all_method_id: u32 = 42;
         pub const legacy_match_all_method_id: u32 = 43;
+        pub const legacy_replace_method_id: u32 = 44;
 
         pub fn staticMethodId(name: []const u8) ?u32 {
             if (std.mem.eql(u8, name, "fromCharCode")) return @intFromEnum(StaticMethod.from_char_code);
@@ -813,6 +815,7 @@ pub const builtin_method_id_lookup = struct {
             if (std.mem.eql(u8, name, "match")) return @intFromEnum(PrototypeMethod.match);
             if (std.mem.eql(u8, name, "matchAll")) return @intFromEnum(PrototypeMethod.match_all);
             if (std.mem.eql(u8, name, "replaceAll")) return @intFromEnum(PrototypeMethod.replace_all);
+            if (std.mem.eql(u8, name, "replace")) return @intFromEnum(PrototypeMethod.replace);
             return null;
         }
 
@@ -847,6 +850,7 @@ pub const builtin_method_id_lookup = struct {
                 @intFromEnum(PrototypeMethod.match) => legacy_match_method_id,
                 @intFromEnum(PrototypeMethod.replace_all) => legacy_replace_all_method_id,
                 @intFromEnum(PrototypeMethod.match_all) => legacy_match_all_method_id,
+                @intFromEnum(PrototypeMethod.replace) => legacy_replace_method_id,
                 else => null,
             };
         }
@@ -891,6 +895,7 @@ pub const builtin_method_id_lookup = struct {
                 legacy_match_method_id => @intFromEnum(PrototypeMethod.match),
                 legacy_replace_all_method_id => @intFromEnum(PrototypeMethod.replace_all),
                 legacy_match_all_method_id => @intFromEnum(PrototypeMethod.match_all),
+                legacy_replace_method_id => @intFromEnum(PrototypeMethod.replace),
                 else => null,
             };
         }

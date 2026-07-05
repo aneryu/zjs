@@ -1,5 +1,7 @@
 //! Local, argument, var-ref and global-lexical slot operations shared between the VM and call runtime.
 
+const std = @import("std");
+const builtin = @import("builtin");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
@@ -172,7 +174,7 @@ pub fn execGetVarRef(
     frame.pc += consume;
     _ = opc;
     if (idx >= frame.var_refs.len) try ensureVarRefsCapacity(ctx, frame, idx);
-    try pushSlotValue(stack, frame.var_refs[idx]);
+    try pushSlotValue(stack, varRefSlot(frame, idx));
 }
 
 pub fn execGetVarRefMaybeTdz(
@@ -217,33 +219,27 @@ pub fn execGetVarRefMaybeTdz(
             return false;
         }
     }
-    const slot = frame.var_refs[idx];
-    if (varRefCellFromValue(slot)) |cell| {
-        if (cell.varRefIsDeletedSlot().*) {
+    // Slot is a cell by type (qjs OP_get_var_ref_check, quickjs.c:18630);
+    // the pre-typed raw-slot arm is gone with the type flip.
+    const cell = varRefSlotCell(frame, idx);
+    const value = slotValueBorrow(cell.valueRef());
+    if (value.isUninitialized()) {
+        // A deletable cell parked at UNINITIALIZED is a deleted
+        // eval-created binding (qjs remove_global_object_property):
+        // plain ReferenceError, not the TDZ message.
+        if (cell.varRefIsDeletableSlot().*) {
             if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) {
                 return true;
             }
             return error.ReferenceError;
         }
-        const value = slotValueBorrow(slot);
-        if (value.isUninitialized()) {
-            const err = throwTdzReference(ctx);
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
-                return true;
-            }
-            return err;
-        }
-        try stack.push(value);
-        return false;
-    }
-    if (slot.isUninitialized()) {
         const err = throwTdzReference(ctx);
         if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
             return true;
         }
         return err;
     }
-    try stack.push(slot);
+    try stack.push(value);
     return false;
 }
 
@@ -262,75 +258,43 @@ pub fn execPutVarRef(
     frame.pc += consume;
     if (idx >= frame.var_refs.len) try ensureVarRefsCapacity(ctx, frame, idx);
     const value = try stack.pop();
-    const slot = frame.var_refs[idx];
-    if (varRefCellFromValue(slot)) |cell| {
-        if (opc == op.put_var_ref_check_init) {
-            const current = cell.varRefValue();
-            if (!current.isUninitialized()) {
-                value.free(ctx.runtime);
-                return error.ReferenceError;
-            }
-        }
-        if (opc == op.put_var_ref_check) {
-            const current = cell.varRefValue();
-            if (current.isUninitialized()) {
-                value.free(ctx.runtime);
-                return throwTdzReference(ctx);
-            }
-        }
-        if (cell.varRefIsFunctionNameSlot().*) {
+    // Slot is a cell by type (qjs OP_put_var_ref set_value into
+    // var_refs[idx]->pvalue, quickjs.c:18638); the raw-slot arm — including
+    // its global-lexical/sentinel fallbacks, which post phase-B could never
+    // execute (every slot was already a cell) — is deleted with the type.
+    const cell = varRefSlotCell(frame, idx);
+    if (opc == op.put_var_ref_check_init) {
+        const current = cell.varRefValue();
+        if (!current.isUninitialized()) {
             value.free(ctx.runtime);
-            if (function.flags.is_strict) return error.TypeError;
-            return;
+            return error.ReferenceError;
         }
-        if (cell.varRefIsConstSlot().* and !constVarRefWriteAllowed(cell, opc)) {
+    }
+    if (opc == op.put_var_ref_check) {
+        const current = cell.varRefValue();
+        if (current.isUninitialized()) {
             value.free(ctx.runtime);
-            _ = throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
-            return error.TypeError;
+            return throwTdzReference(ctx);
         }
-        try publishTopLevelFunctionVarRef(ctx.runtime, function, global, frame, idx, value, eval_global_var_bindings, is_eval_code);
-        var assigned = value;
-        if (varRefCellFromValue(value) != null) {
-            assigned = slotValueDup(value);
-            value.free(ctx.runtime);
-        }
-        cell.varRefIsDeletedSlot().* = false;
-        errdefer assigned.free(ctx.runtime);
-        try cell.setVarRefValue(ctx.runtime, assigned);
+    }
+    if (cell.varRefIsFunctionNameSlot().*) {
+        value.free(ctx.runtime);
+        if (function.flags.is_strict) return error.TypeError;
         return;
     }
-    if (opc == op.put_var_ref_check_init and !slot.isUninitialized()) {
-        value.free(ctx.runtime);
-        return error.ReferenceError;
-    }
-    if (opc == op.put_var_ref_check and slot.isUninitialized()) {
-        value.free(ctx.runtime);
-        return throwTdzReference(ctx);
-    }
-    if (opc == op.put_var_ref_check and idx < function.varRefNamesLen()) {
-        const atom_id = function.varRefName(idx);
-        if (globalLexicalHasForGlobal(ctx, global, atom_id)) {
-            _ = setGlobalLexicalValueForGlobal(ctx, global, atom_id, value) catch |err| {
-                value.free(ctx.runtime);
-                return err;
-            };
-            return;
-        }
-        if (call_runtime.closureVarIsNonLexicalGlobalSentinel(function, idx)) {
-            errdefer value.free(ctx.runtime);
-            try publishTopLevelFunctionVarRef(ctx.runtime, function, global, frame, idx, value, eval_global_var_bindings, is_eval_code);
-            try property_ops.setProperty(ctx.runtime, global, atom_id, value);
-            value.free(ctx.runtime);
-            return;
-        }
-    }
-    if (opc == op.put_var_ref_check and function.varRefIsConstAt(idx)) {
+    if (cell.varRefIsConstSlot().* and !constVarRefWriteAllowed(cell, opc)) {
         value.free(ctx.runtime);
         _ = throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
         return error.TypeError;
     }
     try publishTopLevelFunctionVarRef(ctx.runtime, function, global, frame, idx, value, eval_global_var_bindings, is_eval_code);
-    try setSlotValue(ctx, &frame.var_refs[idx], value);
+    var assigned = value;
+    if (varRefCellFromValue(value) != null) {
+        assigned = slotValueDup(value);
+        value.free(ctx.runtime);
+    }
+    errdefer assigned.free(ctx.runtime);
+    try cell.setVarRefValue(ctx.runtime, assigned);
 }
 
 pub fn isVarRefInitOpcode(opc: u8) bool {
@@ -386,7 +350,6 @@ pub fn defineGlobalFunctionBindingValue(
         if (!flags.deleted and !flags.isAccessor()) {
             if (global.asVarRefAt(index)) |cell| {
                 try cell.setVarRefValue(rt, value.dup());
-                cell.varRefIsDeletedSlot().* = false;
                 return;
             }
         }
@@ -423,7 +386,7 @@ pub fn execSetVarRef(
     _ = opc;
     const value = stack.peek() orelse return error.StackUnderflow;
     defer value.free(ctx.runtime);
-    try setSlotValue(ctx, &frame.var_refs[idx], value.dup());
+    try setVarRefSlotValue(ctx, frame, idx, value.dup());
 }
 
 pub fn slotValueDup(slot: core.JSValue) core.JSValue {
@@ -431,22 +394,30 @@ pub fn slotValueDup(slot: core.JSValue) core.JSValue {
 }
 
 pub fn slotValueBorrow(slot: core.JSValue) callconv(.c) core.JSValue {
-    var current = slot;
-    var depth: usize = 0;
-    while (depth < 16) : (depth += 1) {
-        const cell = varRefCellFromValue(current) orelse return current;
-        current = cell.varRefValue();
+    // Terminal-state invariant: a cell's VALUE is never itself a cell — the
+    // last nesting producer (the direct-eval const view) now pvalue-aliases
+    // its target (eval_ops.directEvalOuterVarRefView) — so ONE unwrap reaches
+    // the plain value (qjs bare `*var_ref->pvalue`, quickjs.c:18627).
+    const cell = varRefCellFromValue(slot) orelse return slot;
+    const value = cell.varRefValue();
+    if (comptime builtin.mode == .Debug) {
+        std.debug.assert(varRefCellFromValue(value) == null);
     }
-    return current;
+    return value;
 }
 
 pub fn varRefSlotIsUninitialized(slot: core.JSValue) bool {
     return slotValueBorrow(slot).isUninitialized();
 }
 
-pub fn varRefSlotIsDeleted(slot: core.JSValue) bool {
+/// A deleted eval-created binding: its deletable cell was parked at
+/// UNINITIALIZED by deleteVarRefSlot (qjs remove_global_object_property,
+/// quickjs.c:9289-9309). Distinct from a TDZ cell, which is uninitialized
+/// but NOT deletable.
+pub fn varRefSlotIsDeletedEvalBinding(slot: core.JSValue) bool {
     const cell = varRefCellFromValue(slot) orelse return false;
-    return cell.varRefIsDeletedSlot().*;
+    if (!cell.varRefIsDeletableSlot().*) return false;
+    return cell.varRefValue().isUninitialized();
 }
 
 pub fn evalLocalSlotIsEvalVarCell(slot: core.JSValue) bool {
@@ -474,7 +445,6 @@ noinline fn setSlotValueRefCounted(ctx: *core.JSContext, slot: *core.JSValue, va
         value.free(ctx.runtime);
     }
     if (varRefCellFromValue(slot.*)) |cell| {
-        cell.varRefIsDeletedSlot().* = false;
         try cell.setVarRefValue(ctx.runtime, assigned);
         return;
     }
@@ -529,6 +499,67 @@ pub fn ensureLocalVarRefCell(ctx: *core.JSContext, frame: *frame_mod.Frame, idx:
 
 pub fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
     return core.VarRef.fromValue(value);
+}
+
+// ---- frame.var_refs slot accessors (VARREFS-SLOT-TYPING-BLUEPRINT, phase D) ----
+//
+// Single funnel for every ELEMENT access of `frame.var_refs: []*core.VarRef`
+// (qjs `JSVarRef **var_refs`: JSObject.u.func.var_refs alloc, quickjs.c:17277;
+// JS_CallInternal prologue `var_refs = p->u.func.var_refs`, 17844). Every slot
+// is a live cell by the type; the phase-A/B "is this slot a cell" runtime
+// discrimination and its debug canary are gone. `varRefSlot*` returning
+// JSValue are the boundary views for the JSValue-typed domains (eval name
+// tables, property cells) — they wrap the cell, they do not chase its value.
+
+/// Bounds-checked cell read: `frame.var_refs[idx]`.
+pub inline fn varRefSlotCell(frame: *const frame_mod.Frame, idx: usize) *core.VarRef {
+    return frame.var_refs[idx];
+}
+
+/// Unchecked cell read: `frame.var_refs.ptr[idx]`, for hot handlers that
+/// already tested `idx < frame.var_refs.len` (qjs OP_get_var_ref reads
+/// `var_refs[idx]` with no bounds check at all, quickjs.c:18627).
+pub inline fn varRefSlotCellUnchecked(frame: *const frame_mod.Frame, idx: usize) *core.VarRef {
+    return frame.var_refs.ptr[idx];
+}
+
+/// Bounds-checked element read in JSValue form (the cell's value view) —
+/// boundary accessor for the JSValue-typed eval/name-table domains. Borrowed:
+/// callers dup for ownership, exactly as they did on the pre-typed slot.
+pub inline fn varRefSlot(frame: *const frame_mod.Frame, idx: usize) core.JSValue {
+    return frame.var_refs[idx].valueRef();
+}
+
+/// Cell store — slot REBIND, not value write-through. The only users are the
+/// element-level replacement points (eval republish
+/// `replaceFrameVarRefBinding`, global-decl PASS2 cell surgery
+/// `defineGlobalDecl*Cell`, module prologue fill): the caller owns the
+/// refcount choreography for both the incoming cell and the displaced one.
+/// The JSValue parameter is the boundary form those callers hold (an owned
+/// ref to a cell by construction); the transfer keeps its refcount.
+pub inline fn storeVarRefSlot(frame: *frame_mod.Frame, idx: usize, slot: core.JSValue) void {
+    frame.var_refs[idx] = varRefCellFromValue(slot) orelse unreachable;
+}
+
+/// Write-through store into the slot's cell (qjs OP_put_var_ref
+/// `set_value(ctx, var_refs[idx]->pvalue, ...)`, quickjs.c:18638). Preserves
+/// the setSlotValueRefCounted unwrap: an incoming cell VALUE is dereferenced
+/// before the store so cell values never nest through writes.
+pub inline fn setVarRefSlotValue(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: usize, value: core.JSValue) !void {
+    var assigned = value;
+    if (varRefCellFromValue(value) != null) {
+        assigned = slotValueDup(value);
+        value.free(ctx.runtime);
+    }
+    return frame.var_refs[idx].setVarRefValue(ctx.runtime, assigned);
+}
+
+/// Owned JSValue ref to the slot's cell. Pre-flip this cellified a raw slot
+/// in place; the slot type now guarantees the cell, so this is a pure rc++
+/// (qjs JS_CLOSURE_REF pointer copy + ref_count++, quickjs.c:17322-17324).
+pub inline fn ensureVarRefSlotCell(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: usize) !core.JSValue {
+    _ = ctx;
+    return frame.var_refs[idx].valueRef().dup();
 }
 
 fn frameSlotCanOpenAlias(frame: *const frame_mod.Frame, slot: *const core.JSValue) bool {

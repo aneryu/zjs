@@ -135,6 +135,23 @@ fn destroyValueSliceValuesOnly(rt: *JSRuntime, slot: *[]JSValue) void {
     for (values) |stored| stored.free(rt);
 }
 
+/// `destroyValueSlice` for a slot-typed var-ref cell slice (`[]*VarRef`):
+/// release each cell (qjs free_var_ref, quickjs.c:16199) and the slice memory.
+fn destroyVarRefCellSlice(rt: *JSRuntime, slot: *[]*var_ref_mod.VarRef) void {
+    const cells = slot.*;
+    slot.* = &.{};
+    for (cells) |cell| cell.freeCell(rt);
+    if (cells.len != 0) rt.memory.free(*var_ref_mod.VarRef, cells);
+}
+
+/// Cell releases only — for a var-ref window whose backing memory belongs to
+/// a surrounding storage slab.
+fn destroyVarRefCellSliceValuesOnly(rt: *JSRuntime, slot: *[]*var_ref_mod.VarRef) void {
+    const cells = slot.*;
+    slot.* = &.{};
+    for (cells) |cell| cell.freeCell(rt);
+}
+
 fn destroyValueSliceWithCapacity(rt: *JSRuntime, slot: *[]JSValue, capacity: *usize) void {
     const values = slot.*;
     const old_capacity = capacity.*;
@@ -493,7 +510,6 @@ pub const VarRefPayload = struct {
     is_const: bool = false,
     is_function_name: bool = false,
     is_deletable: bool = false,
-    is_deleted: bool = false,
     realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *VarRefPayload, rt: *JSRuntime) void {
@@ -607,6 +623,9 @@ pub const RealmValueSlot = enum(u8) {
     throw_type_error_intrinsic,
     object_prototype,
     array_prototype,
+    string_prototype,
+    number_prototype,
+    boolean_prototype,
     async_function_constructor,
     async_function_prototype,
     generator_prototype,
@@ -634,6 +653,13 @@ pub const RealmPayload = struct {
     cached_promise_proto: ?*Object = null,
     cached_values: [realm_value_slot_count]?JSValue = @splat(null),
     global_lexicals: ?*Object = null,
+    // qjs JSGlobalObject.uninitialized_vars (quickjs.c js_global_object_get_-
+    // uninitialized_var, 17069-17096): side table of shared UNINITIALIZED
+    // var-ref cells for globals captured before any declaration exists. A later
+    // global var/let/const declaration of the same name reuses the parked cell
+    // (js_global_object_find_uninitialized_var, 17098-17123) so every earlier
+    // capture aliases the new binding.
+    uninitialized_vars: ?*Object = null,
     shared_lazy_native_functions: ?*[runtime_mod.shared_lazy_native_function_slots]?JSValue = null,
 
     pub fn destroy(self: *RealmPayload, rt: *JSRuntime) void {
@@ -643,6 +669,11 @@ pub const RealmPayload = struct {
         const global_lexicals = self.global_lexicals;
         self.global_lexicals = null;
         if (global_lexicals) |env| {
+            if (rt.gc.phase != .deinit) env.value().free(rt);
+        }
+        const uninitialized_vars = self.uninitialized_vars;
+        self.uninitialized_vars = null;
+        if (uninitialized_vars) |env| {
             if (rt.gc.phase != .deinit) env.value().free(rt);
         }
         const shared_lazy_native_functions = self.shared_lazy_native_functions;
@@ -702,7 +733,9 @@ pub const GeneratorSuspendKind = enum(u8) {
 
 pub const GeneratorPayload = struct {
     bytecode: ?JSValue = null,
-    captures: []JSValue = &.{},
+    // Slot-typed closure captures (`JSVarRef **`, qjs JSObject.u.func.var_refs
+    // quickjs.c:17277; VARREFS-SLOT-TYPING-BLUEPRINT phase D).
+    captures: []*var_ref_mod.VarRef = &.{},
     eval_local_names: []atom.Atom = &.{},
     eval_local_refs: []JSValue = &.{},
     home_object: ?*Object = null,
@@ -714,7 +747,10 @@ pub const GeneratorPayload = struct {
     frame_storage: []JSValue = &.{},
     frame_locals: []JSValue = &.{},
     frame_args: []JSValue = &.{},
-    frame_var_refs: []JSValue = &.{},
+    // The suspended frame's var_refs slice, migrated through save/resume
+    // (vm_gen_async.zig). Same slot typing as Frame.var_refs; the cell
+    // pointers keep their frame-held refcounts while parked here.
+    frame_var_refs: []*var_ref_mod.VarRef = &.{},
     current_function: ?JSValue = null,
     yield_star_iterator: ?JSValue = null,
     async_promise: ?JSValue = null,
@@ -737,7 +773,7 @@ pub const GeneratorPayload = struct {
 
     pub fn destroy(self: *GeneratorPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.bytecode);
-        destroyValueSlice(rt, &self.captures);
+        destroyVarRefCellSlice(rt, &self.captures);
         destroyAtomSlice(rt, &self.eval_local_names);
         destroyValueSlice(rt, &self.eval_local_refs);
         destroyOptionalObjectRef(rt, &self.home_object);
@@ -747,13 +783,20 @@ pub const GeneratorPayload = struct {
         if (self.frame_storage.len != 0) {
             destroyValueSliceValuesOnly(rt, &self.frame_locals);
             destroyValueSliceValuesOnly(rt, &self.frame_args);
-            destroyValueSliceValuesOnly(rt, &self.frame_var_refs);
+            // frame_var_refs is a window inside frame_storage (qjs free_var_ref
+            // per cell, quickjs.c:16199; the window memory dies with storage).
+            destroyVarRefCellSliceValuesOnly(rt, &self.frame_var_refs);
             rt.memory.free(JSValue, self.frame_storage);
             self.frame_storage = &.{};
         } else {
             destroyValueSlice(rt, &self.frame_locals);
             destroyValueSlice(rt, &self.frame_args);
-            destroyValueSlice(rt, &self.frame_var_refs);
+            // Owned frame var_refs are always windows inside frame_storage
+            // (slab carve / heap fallback / capacity growth all back them with
+            // []JSValue storage), so a storage-less payload can only hold an
+            // empty slice here — release cell refs only, never a typed free
+            // of window memory.
+            destroyVarRefCellSliceValuesOnly(rt, &self.frame_var_refs);
         }
         destroyOptionalValue(rt, &self.current_function);
         destroyOptionalValue(rt, &self.yield_star_iterator);
@@ -923,13 +966,13 @@ pub const FunctionPayload = struct {
     native_dispatch_name: atom.Atom = atom.null_atom,
     typed_array_element_size: u32 = 0,
     typed_array_kind: u8 = 0,
-    /// Cached "are all closure captures VarRef cells" (0 = not computed, 1 = all
-    /// cells, 2 = some non-cell). Captures are fixed at closure creation, so the
-    /// inline-call simple-frame gate computes this once instead of a cold per-call
-    /// header-load loop over the cells.
-    captures_cell_state: u8 = 0,
     bytecode: ?JSValue = null,
-    captures: []JSValue = &.{},
+    // Slot-typed closure captures — qjs `JSVarRef **var_refs`
+    // (JSObject.u.func.var_refs, quickjs.c:17277). Every element is a live
+    // cell by construction (js_closure2, 17297-17331), so the former
+    // captures_cell_state memo ("are all captures cells") is deleted: the
+    // type answers it.
+    captures: []*var_ref_mod.VarRef = &.{},
     home_object: ?*Object = null,
     realm_global_ptr: ?*Object = null,
     rare: ?*FunctionRarePayload = null,
@@ -939,7 +982,7 @@ pub const FunctionPayload = struct {
         const native_dispatch_name = self.native_dispatch_name;
         self.native_dispatch_name = atom.null_atom;
         rt.atoms.free(native_dispatch_name);
-        destroyValueSlice(rt, &self.captures);
+        destroyVarRefCellSlice(rt, &self.captures);
         destroyOptionalObjectRef(rt, &self.home_object);
         if (self.rare) |rare| {
             self.rare = null;
@@ -1555,6 +1598,15 @@ pub const Object = struct {
 
     pub fn setGlobalLexicals(self: *Object, rt: *JSRuntime, v: ?*Object) !void {
         (try self.ensureRealmPayload(rt)).global_lexicals = v;
+    }
+
+    // qjs u.global_object.uninitialized_vars accessors (quickjs.c:17069).
+    pub fn globalUninitializedVars(self: *const Object) ?*Object {
+        return if (self.realmPayloadConst()) |payload| payload.uninitialized_vars else null;
+    }
+
+    pub fn setGlobalUninitializedVars(self: *Object, rt: *JSRuntime, v: ?*Object) !void {
+        (try self.ensureRealmPayload(rt)).uninitialized_vars = v;
     }
 
     pub fn ensureRealmPayload(self: *Object, rt: *JSRuntime) !*RealmPayload {
@@ -2790,9 +2842,8 @@ pub const Object = struct {
     }
 
     pub fn initVarRefPayload(self: *Object, rt: *JSRuntime, initial_value: JSValue) !void {
-        const payload = try self.ensureVarRefPayload(rt);
+        _ = try self.ensureVarRefPayload(rt);
         try self.setVarRefValue(rt, initial_value);
-        payload.is_deleted = false;
     }
 
     pub fn setVarRefValue(self: *Object, rt: *JSRuntime, next_value: JSValue) !void {
@@ -2939,12 +2990,6 @@ pub const Object = struct {
 
     pub fn varRefIsDeletableSlot(self: *Object) *bool {
         if (self.varRefPayload()) |payload| return &payload.is_deletable;
-        std.debug.assert(self.class_payload_kind == .var_ref);
-        unreachable;
-    }
-
-    pub fn varRefIsDeletedSlot(self: *Object) *bool {
-        if (self.varRefPayload()) |payload| return &payload.is_deleted;
         std.debug.assert(self.class_payload_kind == .var_ref);
         unreachable;
     }
@@ -3758,13 +3803,13 @@ pub const Object = struct {
         return &.{};
     }
 
-    pub fn generatorFrameVarRefsSlot(self: *Object) *[]JSValue {
+    pub fn generatorFrameVarRefsSlot(self: *Object) *[]*var_ref_mod.VarRef {
         if (self.generatorPayload()) |payload| return &payload.frame_var_refs;
         std.debug.assert(self.class_payload_kind == .generator);
         unreachable;
     }
 
-    pub fn generatorFrameVarRefs(self: *const Object) []JSValue {
+    pub fn generatorFrameVarRefs(self: *const Object) []*var_ref_mod.VarRef {
         if (self.generatorPayloadConst()) |payload| return payload.frame_var_refs;
         return &.{};
     }
@@ -4523,28 +4568,25 @@ pub const Object = struct {
         return null;
     }
 
-    pub fn functionCapturesSlot(self: *Object) *[]JSValue {
+    pub fn functionCapturesSlot(self: *Object) *[]*var_ref_mod.VarRef {
         if (self.functionPayload()) |payload| return &payload.captures;
         if (self.generatorPayload()) |payload| return &payload.captures;
         std.debug.assert(self.class_payload_kind == .function or self.class_payload_kind == .generator);
         unreachable;
     }
 
-    pub fn functionCaptures(self: *const Object) []JSValue {
+    pub fn functionCaptures(self: *const Object) []*var_ref_mod.VarRef {
         if (self.functionPayloadConst()) |payload| return payload.captures;
         if (self.generatorPayloadConst()) |payload| return payload.captures;
         return &.{};
     }
 
-    /// Cached "all captures are VarRef cells" tri-state (FunctionPayload):
-    /// 0 = not computed, 1 = all cells, 2 = some non-cell. Normal-function only
-    /// (the inline simple-frame gate is normal-only).
-    pub fn functionCapturesCellState(self: *Object) u8 {
-        if (self.functionPayload()) |payload| return payload.captures_cell_state;
-        return 0;
-    }
-    pub fn setFunctionCapturesCellState(self: *Object, state: u8) void {
-        if (self.functionPayload()) |payload| payload.captures_cell_state = state;
+    /// Replace the closure-captures slice, releasing the previous cells —
+    /// the cell-typed `setValueSlice` (ownership of `next_cells` transfers).
+    pub fn setFunctionCaptures(self: *Object, rt: *JSRuntime, next_cells: []*var_ref_mod.VarRef) void {
+        const slot = self.functionCapturesSlot();
+        destroyVarRefCellSlice(rt, slot);
+        slot.* = next_cells;
     }
 
     pub fn functionEvalLocalNamesSlot(self: *Object, rt: *JSRuntime) !*[]atom.Atom {
@@ -4988,6 +5030,40 @@ pub const Object = struct {
             slot.* = realm_global;
             if (realm_global == null) self.pruneBorrowedReferenceHolderIfEmpty(rt);
         }
+    }
+
+    /// Realm-global pointer for a PROVEN bytecode-function object (the caller
+    /// already matched `class_id == bytecode_function`): that class maps to
+    /// payload kind `.function` deterministically (`standardPayloadKind`; the
+    /// `.generator` payload belongs to generator-INSTANCE class ids, and
+    /// generator functions use class `generator_function`), so the generic
+    /// `functionRealmGlobalPtr` 18-way payload dispatch collapses to one
+    /// unconditional payload load — no `class_payload_kind` load at all. qjs's
+    /// callee prologue reads the realm as ONE unconditional load off the hot
+    /// function struct (`ctx = b->realm`, quickjs.c:17871); zjs keeps the
+    /// realm on the function object's payload (the 128B FB carries no realm
+    /// field), so this is the analogous single payload-resident load —
+    /// `resolveInlineTarget` previously routed it through the out-of-line
+    /// recursive `objectRealmGlobal` call whose bound-function leg is dead for
+    /// this class. Same assert-unreachable shape as `functionBytecodeSlot`,
+    /// which already stakes every call on this class→payload invariant.
+    pub fn bytecodeFunctionRealmGlobalPtr(self: *const Object) ?*Object {
+        if (self.functionPayloadConst()) |payload| return payload.realm_global_ptr;
+        std.debug.assert(self.class_payload_kind == .function);
+        unreachable;
+    }
+
+    /// Direct realm read for the native-c_function call path — qjs `ctx =
+    /// p->u.cfunc.realm` (quickjs.c:17586). Same one-load `.function` payload body as
+    /// `bytecodeFunctionRealmGlobalPtr`; a distinct name documents the call-site
+    /// invariant (`fastNativeMethodCall` proves `class_payload_kind == .function` up
+    /// front before calling this, so the `unreachable` can never fire). Returns null
+    /// only when the payload's `realm_global_ptr` is unset (dead for materialized native
+    /// builtins), letting the caller fall back to the generic realm resolver.
+    pub fn nativeFunctionRealmGlobalPtr(self: *const Object) ?*Object {
+        if (self.functionPayloadConst()) |payload| return payload.realm_global_ptr;
+        std.debug.assert(self.class_payload_kind == .function);
+        unreachable;
     }
 
     pub fn functionRealmGlobalPtr(self: *const Object) ?*Object {
@@ -5445,7 +5521,19 @@ pub const Object = struct {
             },
             .var_ref => {
                 const ref: *var_ref_mod.VarRef = @alignCast(@fieldParentPtr("header", header));
-                visitor.visitValue(ref.varRefValueSlot());
+                // Closed cell: the owned edge is `value` (qjs gc marks a
+                // detached var_ref's *pvalue, which IS &value there —
+                // gc_decref/mark var-ref arm). Not `pvalue.*` here: the
+                // direct-eval const VIEW (eval_ops.directEvalOuterVarRefView)
+                // aliases pvalue into its TARGET cell's storage while owning
+                // the target cell through `value` — tracing pvalue.* would
+                // count an edge the view holds no ref on (the target's plain
+                // value) and miss the owned target-cell ref.
+                if (ref.is_open) {
+                    visitor.visitValue(ref.varRefValueSlot());
+                } else {
+                    visitor.visitValue(&ref.value);
+                }
             },
             .shape => {
                 const shape_ref: *shape.Shape = @alignCast(@fieldParentPtr("header", header));
@@ -6158,6 +6246,8 @@ pub const Object = struct {
         try Helper.callVisitShape(visitor, self.shape_ref);
         if (self.realmPayload()) |payload| {
             try Helper.callVisitObject(visitor, &payload.global_lexicals);
+            // qjs js_global_object_mark (quickjs.c:17062-17067).
+            try Helper.callVisitObject(visitor, &payload.uninitialized_vars);
             if (payload.shared_lazy_native_functions) |cache| {
                 for (cache) |*maybe_cached| {
                     try Helper.traceOptValue(visitor, maybe_cached);
@@ -6248,7 +6338,14 @@ pub const Object = struct {
         }
         if (self.functionPayload()) |payload| {
             try Helper.traceOptValue(visitor, &payload.bytecode);
-            for (payload.captures) |*stored| try Helper.callVisitValue(visitor, stored);
+            // Slot-typed captures: visit each cell through its JSValue view —
+            // same header edge as qjs `mark_func(rt, &var_refs[i]->header)`
+            // (js_bytecode_function_mark, quickjs.c:16211) and bit-identical
+            // to the pre-typed slot visit (the slot WAS the cell's JSValue).
+            for (payload.captures) |cell| {
+                var cell_value = cell.valueRef();
+                try Helper.callVisitValue(visitor, &cell_value);
+            }
             try Helper.callVisitObject(visitor, &payload.home_object);
             if (payload.rare) |rare| {
                 try Helper.traceOptValue(visitor, &rare.source);
@@ -6334,14 +6431,25 @@ pub const Object = struct {
         }
         if (self.generatorPayload()) |payload| {
             try Helper.traceOptValue(visitor, &payload.bytecode);
-            for (payload.captures) |*stored| try Helper.callVisitValue(visitor, stored);
+            // Cell-typed captures / suspended-frame var_refs: header edge per
+            // cell (qjs mark_func on var_refs[i]->header, quickjs.c:16211 and
+            // the suspended async_func_state mark walking the frame's
+            // var_refs). A missed edge here would let the cycle collector
+            // free a live cell under a suspended generator (blueprint risk 1).
+            for (payload.captures) |cell| {
+                var cell_value = cell.valueRef();
+                try Helper.callVisitValue(visitor, &cell_value);
+            }
             for (payload.eval_local_refs) |*stored| try Helper.callVisitValue(visitor, stored);
             try Helper.traceOptValue(visitor, &payload.this_value);
             for (payload.args) |*stored| try Helper.callVisitValue(visitor, stored);
             for (payload.stack) |*stored| try Helper.callVisitValue(visitor, stored);
             for (payload.frame_locals) |*stored| try Helper.callVisitValue(visitor, stored);
             for (payload.frame_args) |*stored| try Helper.callVisitValue(visitor, stored);
-            for (payload.frame_var_refs) |*stored| try Helper.callVisitValue(visitor, stored);
+            for (payload.frame_var_refs) |cell| {
+                var cell_value = cell.valueRef();
+                try Helper.callVisitValue(visitor, &cell_value);
+            }
             try Helper.traceOptValue(visitor, &payload.current_function);
             try Helper.traceOptValue(visitor, &payload.yield_star_iterator);
             try Helper.traceOptValue(visitor, &payload.async_promise);
@@ -6801,7 +6909,7 @@ pub const Object = struct {
         count += countOptionalFunctionBytecodeRef(self.iteratorZipKeys(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionBytecode(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionClassFieldsInit(), function_bytecode);
-        for (self.functionCaptures()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
+        for (self.functionCaptures()) |cell| count += countFunctionBytecodeValueRef(cell.valueRef(), function_bytecode);
         for (self.functionEvalLocalRefs()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionEvalParentFunction(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionImportMeta(), function_bytecode);
@@ -6842,7 +6950,7 @@ pub const Object = struct {
         for (self.generatorStack()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
         for (self.generatorFrameLocals()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
         for (self.generatorFrameArgs()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
-        for (self.generatorFrameVarRefs()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
+        for (self.generatorFrameVarRefs()) |cell| count += countFunctionBytecodeValueRef(cell.valueRef(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.generatorCurrentFunction(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.generatorYieldStarIterator(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.generatorAsyncPromise(), function_bytecode);
@@ -7913,9 +8021,9 @@ pub const Object = struct {
         std.debug.assert(self.flags.is_array);
         std.debug.assert(self.flags.extensible);
 
-        const index_atom = atom.predefinedId("index", .string).?;
-        const input_atom = atom.predefinedId("input", .string).?;
-        const groups_atom = atom.predefinedId("groups", .string).?;
+        const index_atom = comptime atom.predefinedId("index", .string).?;
+        const input_atom = comptime atom.predefinedId("input", .string).?;
+        const groups_atom = comptime atom.predefinedId("groups", .string).?;
         const enumerable_flags = property.Flags.data(true, true, true);
         try self.appendPreparedPropertyEntry(rt, index_atom, enumerable_flags, .{ .data = JSValue.int32(match_index) });
         try self.appendPreparedPropertyEntry(rt, input_atom, enumerable_flags, .{ .data = input_value.dup() });
@@ -8839,7 +8947,6 @@ pub const Object = struct {
                 const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
                 errdefer next_value.free(rt);
                 try cell.setVarRefValue(rt, next_value);
-                cell.varRefIsDeletedSlot().* = false;
                 return;
             }
             // Data or data-destined auto_init placeholder: overwrite with the
@@ -8908,7 +9015,6 @@ pub const Object = struct {
                         const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
                         errdefer next_value.free(rt);
                         try cell.setVarRefValue(rt, next_value);
-                        cell.varRefIsDeletedSlot().* = false;
                         return true;
                     },
                     // Data-destined auto_init placeholder: overwrite with the new
@@ -9093,6 +9199,23 @@ pub const Object = struct {
             if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |mapped_index| {
                 if (mapped_index < self.argumentsVarRefs().len) self.deleteMappedArgumentsBinding(rt, mapped_index);
             }
+        }
+        // qjs remove_global_object_property (quickjs.c:9289-9309): deleting a
+        // global-object VARREF property parks the shared cell at UNINITIALIZED
+        // (clearing is_lexical/is_const) so every capturing frame's reader
+        // routes through the uninitialized slow path (OP_get_var's generic
+        // global lookup / OP_put_var's global set). qjs additionally files the
+        // cell in the uninitialized_vars side table so a later re-declaration
+        // reuses it; zjs has no side table — re-declaration creates a fresh
+        // property and parked captures reach it through the same name-based
+        // slow path, so the observable semantics match.
+        if (self.flags.is_global and old_flags.kind == .var_ref and !old_flags.deleted) {
+            const cell = old_slot.var_ref;
+            const old_value = cell.varRefValueSlot().*;
+            cell.varRefValueSlot().* = JSValue.uninitialized();
+            cell.is_lexical = false;
+            cell.is_const = false;
+            old_value.free(rt);
         }
         destroyPropertySlot(rt, atom_id, old_flags, old_slot);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
@@ -9416,6 +9539,26 @@ pub const Object = struct {
         try self.appendPreparedPropertyEntry(rt, atom_id, flagsFromDescriptor(desc), slot);
     }
 
+    /// Lean plain-object define for the object-literal fast path (OP_define_field
+    /// on a fresh ordinary object). Mirrors qjs JS_DefineProperty -> JS_CreateProperty
+    /// for a NON-exotic object (quickjs.c:10164 `if (p->is_exotic)` gates the whole
+    /// array/typed-array/exotic prelude, which a plain object skips): one
+    /// find_own_property hash probe, then straight to add_property on a miss.
+    /// Skips the array-length / regexp-lastIndex / mapped-arguments / module-namespace
+    /// preludes and the duplicate arrayIndexFromAtom of defineOwnProperty+
+    /// defineOrdinaryOwnProperty. Preserves duplicate-literal-key semantics
+    /// (`{a:1,a:2}`) via the findProperty branch. Caller guarantees:
+    /// class_id==object, !hasExoticMethods, !is_array, extensible.
+    pub fn definePlainDataPropertyKnownFast(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
+        if (self.findProperty(atom_id)) |index| {
+            try self.materializeAutoInitEntryForMutation(index);
+            if (!isCompatible(self.propFlagsAt(index), self.prop_values[index].slot, desc)) return error.IncompatibleDescriptor;
+            try self.replaceProperty(rt, index, desc);
+            return;
+        }
+        try self.addProperty(rt, atom_id, desc);
+    }
+
     pub fn appendPreparedPropertyEntry(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
         const atom_guard = rt.atoms.dup(atom_id);
         defer rt.atoms.free(atom_guard);
@@ -9552,7 +9695,6 @@ pub const Object = struct {
             errdefer next_value.free(rt);
             try self.ensureUniqueShapeForMutation(rt);
             try cell.setVarRefValue(rt, next_value);
-            cell.varRefIsDeletedSlot().* = false;
             rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.withKind(.var_ref).bits());
             return;
         }
@@ -9699,18 +9841,13 @@ pub const Object = struct {
         return .{ .value = .{ .index = lookup.index, .flags = flags, .value = self.prop_values[lookup.index].slot.data } };
     }
 
-    pub const OwnDataValueResult = union(enum) {
-        value: JSValue,
-        missing,
-        slow,
-    };
-
     /// Lean own-data-property lookup for the hot get_field path: returns just the
-    /// BORROWED slot value (16B) instead of materializing the {index, flags, value}
-    /// probe struct, so the decoded flags/index stay in registers rather than
-    /// spilling to the stack. Mirrors qjs find_own_property + the data-kind guard;
-    /// folds the chain walk, deleted skip, and kind check into one pass.
-    pub inline fn findOwnDataValueFast(self: *const Object, atom_id: atom.Atom) OwnDataValueResult {
+    /// BORROWED slot value instead of materializing a 3-way result union. Mirrors
+    /// qjs find_own_property plus the data-kind guard; qjs then feeds the borrowed
+    /// value directly to JS_DupValue (quickjs.c:19131, quickjs.h:707).
+    /// `slow` is written only for the non-data-property case; the caller initializes
+    /// it to false so missing can continue the prototype walk without another tag.
+    pub inline fn findOwnDataValueFast(self: *const Object, atom_id: atom.Atom, slow: *bool) ?JSValue {
         const props = self.shape_ref.props().ptr;
         var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
         while (shape_index != shape.no_property_index) {
@@ -9719,11 +9856,14 @@ pub const Object = struct {
             shape_index = prop.hash_next;
             const flags = property.Flags.fromBits(prop.flags);
             if (prop.atom_id == atom_id and !flags.deleted) {
-                if (flags.kind != .data) return .slow;
-                return .{ .value = self.prop_values[index].slot.data };
+                if (flags.kind != .data) {
+                    slow.* = true;
+                    return null;
+                }
+                return self.prop_values[index].slot.data;
             }
         }
-        return .missing;
+        return null;
     }
 
     pub fn findWritableOwnDataPropertyFast(self: *Object, atom_id: atom.Atom) ?WritableOwnDataPropertyFastLookup {

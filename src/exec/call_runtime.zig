@@ -2278,7 +2278,7 @@ pub fn collectCallerEvalRefs(
         while (idx < var_ref_count) : (idx += 1) {
             const atom_id = caller.varRefName(idx);
             names[initialized] = atom_id;
-            refs[initialized] = frame.var_refs[idx].dup();
+            refs[initialized] = slot_ops.varRefSlot(frame, idx).dup();
             initialized += 1;
             rooted_refs = refs[0..initialized];
         }
@@ -3779,6 +3779,55 @@ pub fn globalObjectVarRefCell(global: *core.Object, atom_id: core.Atom) ?core.JS
     return cell.valueRef().dup();
 }
 
+/// qjs u.global_object.uninitialized_vars, create-on-demand: the side table
+/// object hangs off the global object (quickjs.c js_global_object_get/
+/// find_uninitialized_var operate on it, 17069-17123).
+fn globalUninitializedVarsEnv(ctx: *core.JSContext, global: *core.Object) !*core.Object {
+    if (global.globalUninitializedVars()) |env| return env;
+    const env = try core.Object.create(ctx.runtime, core.class.ids.object, null);
+    errdefer env.value().free(ctx.runtime);
+    try global.setGlobalUninitializedVars(ctx.runtime, env);
+    return env;
+}
+
+/// qjs js_global_object_get_uninitialized_var (quickjs.c:17069-17096): return
+/// the shared UNINITIALIZED cell for `atom_id`, creating and filing it in the
+/// side table when absent. The caller owns the returned ref; the table slot
+/// holds its own ref. The fresh cell's value carries the UNINITIALIZED
+/// sentinel (js_create_var_ref(ctx, TRUE)); is_lexical/is_const stay false.
+pub fn globalObjectGetUninitializedVar(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom) !core.JSValue {
+    const rt = ctx.runtime;
+    const env = try globalUninitializedVarsEnv(ctx, global);
+    if (env.findProperty(atom_id)) |index| {
+        if (env.asVarRefAt(index)) |cell| return cell.valueRef().dup();
+    }
+    const cell = try core.VarRef.createClosed(rt, core.JSValue.uninitialized());
+    errdefer cell.valueRef().free(rt);
+    // qjs JS_PROP_C_W_E | JS_PROP_VARREF (17088).
+    try env.appendPreparedPropertyEntry(rt, atom_id, core.property.Flags.varRef(true, true, true), .{ .var_ref = cell });
+    return cell.valueRef().dup();
+}
+
+/// qjs js_global_object_find_uninitialized_var (quickjs.c:17098-17123): if a
+/// parked cell exists for `atom_id`, remove it from the side table and hand it
+/// to the new declaration so every earlier capture aliases the new binding
+/// (non-lexical reuse resets the value to undefined). Returns a fresh owned
+/// ref, or null when no parked cell exists (caller creates a fresh cell).
+pub fn globalObjectFindUninitializedVar(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom, is_lexical: bool) ?core.JSValue {
+    const rt = ctx.runtime;
+    const env = global.globalUninitializedVars() orelse return null;
+    const index = env.findProperty(atom_id) orelse return null;
+    const cell = env.asVarRefAt(index) orelse return null;
+    const cell_value = cell.valueRef().dup();
+    _ = env.deleteProperty(rt, atom_id);
+    if (!is_lexical) {
+        const old_value = cell.varRefValueSlot().*;
+        cell.varRefValueSlot().* = core.JSValue.undefinedValue();
+        old_value.free(rt);
+    }
+    return cell_value;
+}
+
 /// Create the JS_PROP_VARREF slot backing a FRESH top-level `var`/function global.
 /// An already-existing global property is left entirely untouched (see below): we
 /// only materialize a cell when the binding is new, so closures can alias it.
@@ -3808,8 +3857,16 @@ pub fn ensureGlobalObjectVarRefCell(
         return null;
     }
 
-    const cell = try core.VarRef.createClosed(rt, core.JSValue.undefinedValue());
-    errdefer cell.valueRef().free(rt);
+    // qjs js_closure_define_global_var tail (quickjs.c:17186-17193): "if there
+    // is a corresponding uninitialized variable, use it" — a capture parked in
+    // the side table before this declaration is reused (value reset to
+    // undefined), so every earlier capture aliases the new property cell.
+    const cell_value = globalObjectFindUninitializedVar(ctx, global, atom_id, false) orelse blk: {
+        const fresh = try core.VarRef.createClosed(rt, core.JSValue.undefinedValue());
+        break :blk fresh.valueRef();
+    };
+    const cell = core.VarRef.fromValue(cell_value) orelse unreachable;
+    errdefer cell_value.free(rt);
     try global.appendPreparedPropertyEntry(
         rt,
         atom_id,
@@ -3842,8 +3899,8 @@ pub fn defineGlobalDeclVarCell(
         if (idx >= frame.var_refs.len) {
             try frame_mod.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
         }
-        const old_slot = frame.var_refs[idx];
-        frame.var_refs[idx] = cell_value.dup();
+        const old_slot = slot_ops.varRefSlot(frame, idx);
+        slot_ops.storeVarRefSlot(frame, idx, cell_value.dup());
         old_slot.free(ctx.runtime);
         rebound = true;
     }
@@ -3851,17 +3908,52 @@ pub fn defineGlobalDeclVarCell(
 }
 
 /// Create-or-fetch the VarRef cell for a top-level lexical in ctx.lexicals,
-/// stored as a JS_PROP_VARREF slot (qjs js_closure_define_global_var). Returns
-/// a fresh ref the caller owns (for frame.var_refs[idx]). The slot holds its
-/// own ref; the cell starts uninitialized (TDZ) like qjs js_create_var_ref.
-pub fn ensureGlobalLexicalCell(ctx: *core.JSContext, atom_id: core.Atom, is_const: bool) !core.JSValue {
+/// stored as a JS_PROP_VARREF slot (qjs js_closure_define_global_var, lexical
+/// arm, quickjs.c:17134-17162). Returns a fresh ref the caller owns (for
+/// frame.var_refs[idx]). The slot holds its own ref; the cell starts
+/// uninitialized (TDZ) like qjs js_create_var_ref.
+pub fn ensureGlobalLexicalCell(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom, is_const: bool) !core.JSValue {
     const env = try globalLexicalEnv(ctx);
     if (env.findProperty(atom_id)) |index| {
         if (env.asVarRefAt(index)) |cell| return cell.valueRef().dup();
     }
     const rt = ctx.runtime;
-    const cell = try core.VarRef.createClosed(rt, core.JSValue.uninitialized());
-    errdefer cell.valueRef().free(rt);
+    // qjs quickjs.c:17148-17162: "if there is a corresponding global variable,
+    // reuse its reference and create a new one for the global variable" — the
+    // definition-time cell surgery. The OLD property cell (which every earlier
+    // capture aliases) becomes the lexical cell (value parked at UNINITIALIZED
+    // for the TDZ window); a NEW cell holding the old value takes its place as
+    // the global-object property, so globalThis.<name> keeps the var value.
+    if (global.findProperty(atom_id)) |gidx| {
+        if (global.asVarRefAt(gidx)) |old_cell| {
+            const new_cell = new_cell: {
+                // var_ref1->value = var_ref->value; var_ref->value = JS_UNINITIALIZED
+                // — the value MOVES (no dup/free), qjs 17155-17156.
+                const moved_value = old_cell.varRefValueSlot().*;
+                old_cell.varRefValueSlot().* = core.JSValue.uninitialized();
+                break :new_cell try core.VarRef.createClosed(rt, moved_value);
+            };
+            // pr->u.var_ref = var_ref1 (17157): the property slot's ref on the
+            // old cell transfers to us; the new cell's creation ref transfers
+            // to the property slot. Kind stays .var_ref — no shape change.
+            global.prop_values[gidx].slot.var_ref = new_cell;
+            const old_cell_value = old_cell.valueRef();
+            errdefer old_cell_value.free(rt);
+            // add_var_ref (17210-17223): the old cell becomes the lexical cell.
+            old_cell.is_lexical = true;
+            old_cell.varRefIsConstSlot().* = is_const;
+            try env.appendPreparedPropertyEntry(rt, atom_id, core.property.Flags.varRef(!is_const, false, false), .{ .var_ref = old_cell });
+            return old_cell.valueRef().dup();
+        }
+    }
+    // qjs 17193: reuse a parked uninitialized capture cell if one exists (the
+    // value stays UNINITIALIZED for the lexical TDZ window), else fresh.
+    const cell_value = globalObjectFindUninitializedVar(ctx, global, atom_id, true) orelse blk: {
+        const fresh = try core.VarRef.createClosed(rt, core.JSValue.uninitialized());
+        break :blk fresh.valueRef();
+    };
+    const cell = core.VarRef.fromValue(cell_value) orelse unreachable;
+    errdefer cell_value.free(rt);
     cell.varRefIsConstSlot().* = is_const;
     cell.is_lexical = true;
     try env.appendPreparedPropertyEntry(rt, atom_id, core.property.Flags.varRef(!is_const, false, false), .{ .var_ref = cell });
@@ -3892,6 +3984,7 @@ pub fn defineGlobalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom, value:
 /// falls back to defineGlobalLexicalValue for module/eval data-property paths).
 pub fn defineGlobalDeclLexicalCell(
     ctx: *core.JSContext,
+    global: *core.Object,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     atom_id: core.Atom,
@@ -3902,12 +3995,12 @@ pub fn defineGlobalDeclLexicalCell(
         const name = function.varRefName(idx);
         if (name != atom_id) continue;
         if (!function.varRefIsGlobalDeclAt(idx)) return false;
-        const cell_value = try ensureGlobalLexicalCell(ctx, atom_id, is_const);
+        const cell_value = try ensureGlobalLexicalCell(ctx, global, atom_id, is_const);
         if (idx >= frame.var_refs.len) {
             try frame_mod.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
         }
-        const old_slot = frame.var_refs[idx];
-        frame.var_refs[idx] = cell_value;
+        const old_slot = slot_ops.varRefSlot(frame, idx);
+        slot_ops.storeVarRefSlot(frame, idx, cell_value);
         old_slot.free(ctx.runtime);
         return true;
     }
@@ -5197,7 +5290,7 @@ pub fn functionHasFrameBinding(
     var idx: usize = 0;
     while (idx < ref_count) : (idx += 1) {
         const binding = function.varRefName(idx);
-        if (slot_ops.varRefSlotIsUninitialized(frame.var_refs[idx]) and closureVarIsNonLexicalGlobalSentinel(function, idx)) continue;
+        if (slot_ops.varRefSlotIsUninitialized(slot_ops.varRefSlot(frame, idx)) and closureVarIsNonLexicalGlobalSentinel(function, idx)) continue;
         if (binding == atom_id or atomNamesEqual(rt, binding, atom_id)) return true;
     }
     return false;
@@ -5310,11 +5403,11 @@ pub fn callFunctionBytecode(
     current_function_value: core.JSValue,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    var_refs: []const core.JSValue,
+    var_refs: []const *core.VarRef,
     output: ?*std.Io.Writer,
     global: *core.Object,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
+    eval_var_refs: []core.JSValue,
 ) !core.JSValue {
     return callFunctionBytecodeMode(ctx, func, current_function_value, this_value, args, var_refs, output, global, eval_var_ref_names, eval_var_refs, true);
 }
@@ -5325,11 +5418,11 @@ pub fn callFunctionBytecodeConstruct(
     current_function_value: core.JSValue,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    var_refs: []const core.JSValue,
+    var_refs: []const *core.VarRef,
     output: ?*std.Io.Writer,
     global: *core.Object,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
+    eval_var_refs: []core.JSValue,
     new_target_value: core.JSValue,
     constructor_this_value: core.JSValue,
 ) !core.JSValue {
@@ -5342,11 +5435,11 @@ pub fn callFunctionBytecodeMode(
     current_function_value: core.JSValue,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    var_refs: []const core.JSValue,
+    var_refs: []const *core.VarRef,
     output: ?*std.Io.Writer,
     global: *core.Object,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
+    eval_var_refs: []core.JSValue,
     defer_generators: bool,
 ) !core.JSValue {
     return callFunctionBytecodeModeState(ctx, func, current_function_value, this_value, args, var_refs, output, global, eval_var_ref_names, eval_var_refs, defer_generators, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
@@ -5358,11 +5451,11 @@ pub fn callFunctionBytecodeModeState(
     current_function_value: core.JSValue,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    var_refs: []const core.JSValue,
+    var_refs: []const *core.VarRef,
     output: ?*std.Io.Writer,
     global: *core.Object,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
+    eval_var_refs: []core.JSValue,
     defer_generators: bool,
     generator_state: ?*core.Object,
     resume_value: ?core.JSValue,
@@ -5379,9 +5472,9 @@ pub fn callFunctionBytecodeModeState(
     var nested_base = bytecode.makeBytecodeView(fb, &ctx.runtime.memory, &ctx.runtime.atoms);
     var nested: *const bytecode.Bytecode = &nested_base;
 
-    var combined_var_refs: []const core.JSValue = var_refs;
-    var allocated_combined_refs: []core.JSValue = &.{};
-    defer if (allocated_combined_refs.len != 0) ctx.runtime.memory.free(core.JSValue, allocated_combined_refs);
+    var combined_var_refs: []const *core.VarRef = var_refs;
+    var allocated_combined_refs: []*core.VarRef = &.{};
+    defer if (allocated_combined_refs.len != 0) ctx.runtime.memory.free(*core.VarRef, allocated_combined_refs);
     var allocated_var_ref_names: []core.Atom = &.{};
     defer {
         for (allocated_var_ref_names) |atom_id| ctx.runtime.atoms.free(atom_id);
@@ -5407,13 +5500,24 @@ pub fn callFunctionBytecodeModeState(
         for (eval_var_ref_names[0..add_len], 0..) |atom_id, idx| names[old_name_len + idx] = ctx.runtime.atoms.dup(atom_id);
         initialized_names += add_len;
 
-        const refs = try ctx.runtime.memory.alloc(core.JSValue, var_refs.len + add_len);
+        const refs = try ctx.runtime.memory.alloc(*core.VarRef, var_refs.len + add_len);
         var refs_transferred = false;
         errdefer if (!refs_transferred) {
-            ctx.runtime.memory.free(core.JSValue, refs);
+            ctx.runtime.memory.free(*core.VarRef, refs);
         };
-        for (var_refs, 0..) |value, idx| refs[idx] = value;
-        for (eval_var_refs[0..add_len], 0..) |value, idx| refs[var_refs.len + idx] = value;
+        for (var_refs, 0..) |cell, idx| refs[idx] = cell;
+        // Boundary cellify (mirror of the inline path's mergeEvalBindings):
+        // the eval-local table may hold raw snapshots; rebind them in place to
+        // fresh closed cells (the table keeps ownership, the combined slice
+        // borrows) so the frame slots are cells by construction (qjs
+        // js_closure2 slots are always JSVarRef*, quickjs.c:17297-17331).
+        for (eval_var_refs[0..add_len], 0..) |*slot, idx| {
+            if (core.VarRef.fromValue(slot.*) == null) {
+                const cell = try core.VarRef.createClosed(ctx.runtime, slot.*);
+                slot.* = cell.valueRef();
+            }
+            refs[var_refs.len + idx] = core.VarRef.fromValue(slot.*) orelse unreachable;
+        }
 
         nested_overlay = nested.*;
         nested_overlay.var_ref_names = names;
@@ -5464,7 +5568,7 @@ pub fn runGeneratorParameterInit(
     current_function_value: core.JSValue,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    var_refs: []const core.JSValue,
+    var_refs: []const *core.VarRef,
     output: ?*std.Io.Writer,
     global: *core.Object,
 ) !core.JSValue {
@@ -6363,7 +6467,10 @@ pub fn closeGeneratorDestructuringIterators(
     try closeDestructuringIteratorsInValues(ctx, output, global, generator.generatorStack());
     try closeDestructuringIteratorsInValues(ctx, output, global, generator.generatorFrameLocals());
     try closeDestructuringIteratorsInValues(ctx, output, global, generator.generatorFrameArgs());
-    try closeDestructuringIteratorsInValues(ctx, output, global, generator.generatorFrameVarRefs());
+    // frame_var_refs: every element is a VarRef cell (typed slots), never a
+    // destructuring-iterator-state Object — the pre-typed scan over the slots
+    // was a provable no-op (expectObject rejects the var_ref GC kind), so the
+    // typed slice is simply skipped.
 }
 
 pub fn closeDestructuringIteratorsInValues(
@@ -6419,7 +6526,8 @@ pub fn closeFrameDestructuringIteratorsForAbruptCompletion(
     closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, stack.values);
     closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, frame.locals);
     closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, frame.args);
-    closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, frame.var_refs);
+    // frame.var_refs: typed cell slots are never iterator-state Objects (the
+    // pre-typed slot scan was a provable no-op) — skipped.
 }
 
 pub fn qjsIteratorCallForNativeRecord(
@@ -7947,8 +8055,9 @@ pub fn lookupFrameVarRef(ctx: *core.JSContext, global: *core.Object, function: *
             if (globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| return lexical_value;
             continue;
         }
-        if (slot_ops.varRefSlotIsDeleted(frame.var_refs[idx])) return core.JSValue.uninitialized();
-        const value = slot_ops.slotValueDup(frame.var_refs[idx]);
+        // A deleted binding's cell is parked at UNINITIALIZED (qjs
+        // remove_global_object_property), so slotValueDup reports it naturally.
+        const value = slot_ops.slotValueDup(slot_ops.varRefSlot(frame, idx));
         return value;
     }
     return null;
@@ -8030,7 +8139,8 @@ pub fn atomIdOrNameEql(rt: *core.JSRuntime, left: core.Atom, right: core.Atom) b
 pub fn lookupNamedVarRef(rt: *core.JSRuntime, names: []const core.Atom, refs: []const core.JSValue, atom_id: core.Atom) ?core.JSValue {
     for (names, 0..) |name, idx| {
         if (!atomIdOrNameEql(rt, name, atom_id) or idx >= refs.len) continue;
-        if (slot_ops.varRefSlotIsDeleted(refs[idx])) return core.JSValue.uninitialized();
+        // Deleted binding = cell parked at UNINITIALIZED; slotValueDup
+        // surfaces the sentinel directly (qjs OP_get_var uninit route).
         return slot_ops.slotValueDup(refs[idx]);
     }
     return null;
@@ -8109,11 +8219,18 @@ pub fn deleteNamedVarRefBinding(rt: *core.JSRuntime, names: []const core.Atom, r
 
 pub fn deleteVarRefSlot(rt: *core.JSRuntime, slot: core.JSValue) ?bool {
     const cell = slot_ops.varRefCellFromValue(slot) orelse return false;
-    if (cell.varRefIsDeletedSlot().*) return null;
     if (!cell.varRefIsDeletableSlot().*) return false;
+    // qjs remove_global_object_property (quickjs.c:9289-9309): deleting a
+    // captured binding parks the shared cell at UNINITIALIZED (clearing
+    // is_lexical/is_const) instead of flagging it — every reader routes
+    // through the existing uninitialized slow path. A cell that is already
+    // parked means the binding is gone; report "not found" (null) so the
+    // caller keeps searching outer scopes / the global object.
+    if (cell.varRefValueSlot().*.isUninitialized()) return null;
     const old_value = cell.varRefValueSlot().*;
-    cell.varRefValueSlot().* = core.JSValue.undefinedValue();
-    cell.varRefIsDeletedSlot().* = true;
+    cell.varRefValueSlot().* = core.JSValue.uninitialized();
+    cell.is_lexical = false;
+    cell.varRefIsConstSlot().* = false;
     old_value.free(rt);
     return true;
 }
@@ -8121,7 +8238,8 @@ pub fn deleteVarRefSlot(rt: *core.JSRuntime, slot: core.JSValue) ?bool {
 pub fn lookupNamedSlotValue(rt: *core.JSRuntime, names: []const core.Atom, slots: []const core.JSValue, atom_id: core.Atom) ?core.JSValue {
     for (names, 0..) |name, idx| {
         if (!atomIdOrNameEql(rt, name, atom_id) or idx >= slots.len) continue;
-        if (slot_ops.varRefSlotIsDeleted(slots[idx])) return core.JSValue.uninitialized();
+        // Deleted binding = cell parked at UNINITIALIZED; slotValueDup
+        // surfaces the sentinel directly (qjs OP_get_var uninit route).
         return slot_ops.slotValueDup(slots[idx]);
     }
     return null;
@@ -8130,7 +8248,11 @@ pub fn lookupNamedSlotValue(rt: *core.JSRuntime, names: []const core.Atom, slots
 pub fn lookupNamedRawSlotValue(rt: *core.JSRuntime, names: []const core.Atom, slots: []const core.JSValue, atom_id: core.Atom) ?core.JSValue {
     for (names, 0..) |name, idx| {
         if (!atomIdOrNameEql(rt, name, atom_id) or idx >= slots.len) continue;
-        if (slot_ops.varRefSlotIsDeleted(slots[idx])) continue;
+        // Skip a deleted eval-created binding: its deletable cell is parked at
+        // UNINITIALIZED (qjs remove_global_object_property) and must not be
+        // re-aliased into a fresh eval frame. A non-deletable uninitialized
+        // cell is a live TDZ binding and IS returned, as before.
+        if (slot_ops.varRefSlotIsDeletedEvalBinding(slots[idx])) continue;
         return slots[idx].dup();
     }
     return null;
@@ -8198,10 +8320,10 @@ pub fn setFrameVarRefValue(
         const name = function.varRefName(idx);
         if (name != atom_id) continue;
         if (idx >= frame.var_refs.len) try frame_mod.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
-        if (closureVarIsNonLexicalGlobalSentinel(function, idx) and slot_ops.varRefSlotIsUninitialized(frame.var_refs[idx])) {
+        if (closureVarIsNonLexicalGlobalSentinel(function, idx) and slot_ops.varRefSlotIsUninitialized(slot_ops.varRefSlot(frame, idx))) {
             return false;
         }
-        try slot_ops.setSlotValue(ctx, &frame.var_refs[idx], value);
+        try slot_ops.setVarRefSlotValue(ctx, frame, idx, value);
         return true;
     }
     return false;

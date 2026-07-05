@@ -1,13 +1,175 @@
 # Call-machinery faithful frontier — current state & conclusion
 
 > **Single source of truth** for where zjs's call/dispatch alignment to QuickJS stands.
-> Updated 2026-06-29 after the route-2 de-risk experiment. This doc consolidates and replaces a
+> Updated 2026-07-04: method-A first tranche LANDED (`952592f` + `f3a517d`) — see §0. Previous
+> update 2026-06-29 after the route-2 de-risk experiment. This doc consolidates and replaces a
 > cluster of now-historical plan/investigation/handover docs (DISPATCH-TAX-FINDINGS,
 > TAILCALL-DISPATCH-ONESHOT-BLUEPRINT, FRAME-MODEL-ONESHOT-BLUEPRINT, FRAME-RAW-SP-BLUEPRINT,
 > FRAME-STRUCTURAL-ALIGN, COLLAPSE-CALL-MACHINERY-BLUEPRINT, HANDOVER-call-dispatch-align,
 > HANDOVER-frame-incremental, PHASE3-leaves-and-levers) — deleted; their durable conclusions,
 > invariants, and disproven claims are folded in below. qjs-side mechanism reference is kept in
 > `CALL-MACHINERY-QJS.md`.
+
+## 0. 2026-07-04 method-A first tranche — LANDED (`952592f`, fix `f3a517d`)
+
+- **Knife 1 — InlineTarget is scalars-only and rides by pointer.** The old target embedded a
+  by-value `bytecode.Bytecode` (~450B) and was copied 4-5× per call through
+  `op_call -> vm.tail_request -> driver -> pushCall -> pushFrame` — memcpy was the #1 fib
+  profile line (16.96%). Now `view: ?*const Bytecode` (the per-FB cached view; null for a
+  cache-less fixture FB, which gets an Entry-owned heap-boxed rebuild — old per-call-rebuild
+  semantics preserved). `Entry.view_storage` is deleted. qjs anchor: OP_call passes only the
+  16B func_obj; the callee prologue dereferences `p->u.func.function_bytecode` (17800).
+- **Knife 2 — `setupSimpleInlineEntry` is a straight-line mirror of qjs's prologue
+  (17828-17871):** one size computation, ONE arena carve, pointer-arithmetic partition, every
+  frame field bound exactly once. The `Frame.init` default-then-overwrite pass, the 7-slice
+  by-value `FrameSlab` round-trip, `FrameStorageWindows`, and the double open_var_refs memset
+  are gone from the simple path. Ownership flags unchanged (verified under force-GC).
+- **Fix — two dispatcher semantics lost when tail-call threading landed** (pre-existing on
+  HEAD, exposed by the gate): (a) interrupt polling — qjs polls on every OP_goto (18822) and
+  at call entry (17787); the tail-call path had NO poll point, so pure loops hung the
+  interrupt tests (suite idx 38/56) and the whole unit suite never completed. (b) op.call's
+  push-failure catch leg (`handleCatchableRuntimeError`) — a bare `try` leaked OOM out of
+  eval instead of delivering the preallocated InternalError to the caller's catch.
+- **Numbers (fib(30)×3, X925 pinned):** 1390 → **988 insn/call**, 4.15× → **3.02×** qjs wall.
+  funcall pure per-call tax (differential vs inlined body): 1169 → **774** insn (qjs 249).
+- **Second tranche (same day, `ea1760e` + `a6c25bb` + `4ae9a79`) — in-handler call/return:**
+  op_call/op_call_method fast hits complete the whole call inside the handler
+  (pushAndEnter: push + poll + reload + tail-dispatch into the callee, qjs CASE(OP_call)
+  18182-18202) and op_return/op_return_undef at depth>0 run a fused teardown + result
+  delivery + caller resume (popAndResume) — the driver round-trip (Outcome encode, 88B
+  tail_request staging, Vm spill/reload; `runWithArgsState` 19% self) is gone from the hot
+  path. The dying simple frame tears down via straight-line `teardownSimpleEntry` (qjs done:
+  epilogue 20698-20710; `Entry.fast_teardown` static gate + dynamic escapes for cold-box /
+  heap-storage / heap-stack, any escape → full teardown), inlined so the return value stays
+  in a register. **fib 988 → 920 insn/call, 3.02× → 2.64× wall — past the 2.66× pre-
+  struct-align best. funcall tax 774 → 704 (wall 2.06×).** Disproven en route: manually
+  inlining pushCall/pushFrame and a depth>0-specialized reloadTop are both no-ops (LLVM
+  already has them; the vm-field stores are the irreducible tail-call-architecture cost).
+- **Third tranche (workflow `wf_972da3d7`, 4 experiments A/B-measured on isolated
+  worktrees, TIME as the yardstick): E2+E5 landed (`17bb4b7` + `f14c3f0`) — fib
+  925.4 → 909.4 insn/call, 378 → 358.6 ms = 2.51×; funcall tax 709 → 689.**
+  E2: pushFrame/pushCall return the acquired `*Entry`; pushAndEnter reloads from it
+  directly (qjs never re-derives the frame address — it IS the alloca pointer, 17846);
+  kills the 344B-stride umaddl on the push edge (−9 insn, −3.8% time). E5: caller
+  operand-region retreat moved to the top of the simple prologue (qjs borrows argv at
+  17841 before the alloca; the length retreat was the setup chain's hottest tail store),
+  errdefer restores the length before cleanup (−7 insn, −0.3% time).
+  **DISPROVEN (do not re-attempt without new evidence): E1 handler 5th-register-arg for
+  code_base — −5 insn but +0.9% TIME (register-pressure/layout backfire at ~45-handler
+  scale); E3 Entry stride 512 — −3 insn but +2.0% TIME (cache-footprint loss beats the
+  multiply→shift win). Both prove insn-count alone is not the yardstick.**
+- **get_var recon (docs/qjs-align/GET-VAR-FIB-RECON.md): the presumed "lever ② parser
+  divergence" is REFUTED** — both engines compile fib's self-reference to isomorphic
+  bytecode (get_var u16-idx / get_var_ref0) and zjs's hot op_get_var already reads the
+  cell directly (no name lookup, no IC on the hot path). The REAL divergence is the
+  var_refs slot contract: qjs's typed `JSVarRef **var_refs` folds delete / top-level-let
+  shadowing / eval bindings / undeclared-global into cell state at closure-creation /
+  mutation time, leaving ONE read-side check; zjs's untyped `[]JSValue` slots re-verify
+  all four per read (8 guards, 28 vs 4 cycles, 10.9% of fib).
+- **Slot contract — EXECUTED (workflows `wf_a735f162` + `wf_6595def0`, 6 commits):**
+  Step1 delete→UNINITIALIZED sentinel, is_deleted retired (`90dd5f3`, qjs 9288; also
+  structurally fixed a pre-existing revival-asymmetry bug). Step2 top-level-lexical
+  shadowing folds into the global cell at definition time, shadows guard retired
+  (`4cfeeb3`, qjs 17148 dual-channel: VARREF cell surgery + uninitialized_vars side
+  table; first version was gate-rejected 2/49775 — root cause was NOT the mechanism but
+  zjs's parser globalizing `arguments` in two corner shapes where qjs resolves it at
+  parse time (32970), fixed by restoring the frame-model rescue in the new uninit arm;
+  also fixed pre-existing fn-before-let permanent-TDZ bug via cells-before-values
+  ordering). Slot typing via blueprint (`f3c4821`) in 4 gated phases: A accessor funnel
+  (`52badfc`, 39 raw accesses → 7 inline accessors, objdump-verified zero codegen
+  change), B every slot source produces a real cell (`9eac2a6`, backfill/global_ref/
+  eval-boundary cellified + Debug asserts, 2930-file canary sweep), C module import
+  slots alias the exporter's cell directly (`71d6574`, qjs 30765, const wrapper
+  de-nested to cv.is_const), D atomic type flip `[]JSValue → []*VarRef` across the
+  whole coupling network — Frame/captures/generator payload/module/merged/FrameSlab
+  8B windows/GC visitor/teardown, 22 files in one commit (`2b360fb`); read-side
+  cell-kind + bounds + nested-cell guards retired (qjs OP_get_var_ref 18627 zero-check
+  deref is the landed end state). Remaining guards (dynamic-overlay + parentEvalShadows)
+  are Step-4 domain: eval-overlay→compile-time closure vars, folds into the
+  REMAINING-KNOWN direct-eval rework.
+  **Numbers: fib 902.5 → 866-870 insn/call, 356.7 → 350.4 ms = 2.45×; funcall tax
+  682 → 664, wall 1.88× — first time under 2×.** Every phase passed the full gate
+  (test262 0/49775 known 13 exact, force-GC smokes, parity suites three-way vs qjs,
+  unit-suite sequential FAIL-set identity).
+- **Fourth tranche (workflow `wf_59aa590c`, accounting-driven): 4 knives landed
+  (`4a04ff7`/`34187e1`/`ce508be`/`07b6144`) — fib 870 → 840 insn/call, 351 → 332 ms =
+  2.32×; funcall tax 668 → 638, wall 1.77×.** (1) return value is an ownership MOVE
+  (qjs `ret_val = *--sp` 18266) — the old peek+dup+teardown-free did strictly more
+  refcount work than qjs; ALSO resolves this doc's long-standing returnTop
+  value-semantics question. (2) register-resident ret_val — finishFunctionReturn's
+  error union forced a 3-slot memory phi (funcall's hottest single instruction,
+  23.6% of op_return); derived-ctor/generator legs are now cold branches, hot leg
+  carries a plain JSValue (qjs OP_return is infallible; ctor legality is a separate
+  opcode 18273). (3) qjs frame-pointer chain transplanted: Entry.prev + cached
+  Machine.top ≅ JSStackFrame.prev_frame / rt->current_stack_frame (408/17869/20709)
+  — both per-return umaddl index chains gone; best single knife (−2.9 % wall).
+  (4) direct-eval const wrapper de-nested to a pvalue alias — last nested-cell
+  producer gone. **REJECTED: get-var-frame-flag-fold (+2.8 % wall — guard fold
+  into a Vm flag backfired).**
+- **The accounting ledger (fib, 477 insn/call gap decomposed, closes to 0.0):
+  call machinery +402 (84 %) | op bodies +75 (16 %: get_var 49, arithmetic 33,
+  compare 13, minus zjs-ahead ops −20) | dispatch −44 (zjs is AHEAD of qjs).**
+  Priority read-out: collapse the return/teardown half first (~276 of the
+  machinery gap), then the call/setup half (~354 vs qjs ~170). Full qjs-form
+  convergence projects fib ≈ 1.16×. Dispatch work is negative-value.
+  Next: the op_call/setup half (resolve chain + cachedBytecodeView loads +
+  enterInlineCallDepth double check + frameOpenVarRefStorageCount recompute —
+  precomputable per-FB like simple_inline_eligible), op_binary's 0x1e0
+  frame-open/close (the frame=sum-of-arm-spills problem, instance-level),
+  and get_var's remaining spill prologue (Step-4 direct-eval domain).
+- **Fifth tranche (workflow `wf_4bc6919f`, ledger-targeted 5 knives, 3 landed):
+  fib 840 → 727 insn/call, 330 → 289 ms = 2.02×; funcall tax 638 → 521,
+  215 → 195 ms = 1.62×.** (K3, `c4ee2cd`) resolveInlineTarget tightened to
+  qjs prologue form: recursive `bl objectRealmGlobal` → single
+  `ldr [payload,#48]` (`ctx = b->realm`, 17871), cachedBytecodeView split
+  inline-hot/noinline-cold, arrow legs outlined — −56/call, the round's
+  biggest. (K4, `2d47467`) op_binary de-framed into per-op `opBinary(kind)`
+  generators: int leg is int64-widen+truncate (19701, NOT @addWithOverflow),
+  each arm writes sp[-2] directly (no 16B phi spill), float/overflow fall
+  indirect to cold — killed the 0x1e0 frame + fmod bl + double-dispatch,
+  −36.5/call. (K5, `eab00dd`) op_compare split into per-op `opCompare(opc)`:
+  comptime predicate folds the cmp+cset+csel select chain to one cmp+cset
+  (qjs OP_CMP 20230), −13/call fib, −30 funcall tax. **DEFERRED (faithful but
+  flat on fib/funcall — not on these benchmarks' hot path, kept for
+  native-entry/eval-heavy code): K1 frameOpenVarRefStorageCount per-FB
+  precompute (setup-path flag already cheap here), K2 native depth-check
+  shape (`max_native_call_depth` field — the recompute was on the VM-entry
+  path, not the inline path fib/funcall exercise).**
+- **Sixth round (workflow `wf_99b8c92e`, orchestrating the `codex` CLI to
+  implement in isolated worktrees): NULL RESULT — all 3 micro-targets
+  rejected, base unchanged.** The three "safe" remaining hotspots were handed
+  to codex (a Claude wrapper drove `codex exec`, then authoritatively
+  built/smoked/faithfulness-reviewed each diff). All landed clean and
+  faithful but none is a demonstrated win on deterministic insn count:
+  C1 op_get_arg_short early-out for non-refcounted args = **+4 insn/call
+  (regression** — JSValue.dup() already tag-checks internally, so the
+  explicit branch is redundant work, not a save); C2 setupSimpleInlineEntry
+  errdefer calling popOwnedStackRegion directly instead of cleanupStackSource
+  = cold-error-path-only, +3 insn/call layout perturbation, hot path
+  untouched; C3 op_get_var guard reorder = 0 insn change (LLVM already
+  scheduled it). **Lesson: these three hotspots (get_arg 13.6% / setup 10.5%
+  / get_var 9.0% self) are already at qjs-form — no micro-optimization is
+  accessible. Their residual cost is STRUCTURAL: get_var's is the two Step-4
+  direct-eval guards (deferred), setup/get_arg's is irreducible per-call
+  work already matching qjs. Future effort must go to the big handlers
+  (op_call 17-24% / op_return 20% — restructuring, not micro-tightening) or
+  Step-4, NOT back to these three.** Codex mechanics for the record: `codex
+  exec --dangerously-bypass-approvals-and-sandbox -C <worktree>` works
+  headless under ChatGPT auth; `-o <file>` did NOT reliably capture the last
+  message (read the stdout tail instead); the wrapper's independent
+  build+smoke+diff-review is the source of truth (codex's self-report is
+  not).
+- **Gates:** test262 full 0/49775 (known 13, == main); force-GC build smoke green
+  (closure/recursion/PTC/exception mix byte-identical to qjs); unit suite compared
+  segment-by-segment against the unpatched-HEAD binary — identical failure sets. NOTE: the
+  unit suite itself is **pre-broken on HEAD** (idx-58 NativeBinding crash stops a sequential
+  run; ForbiddenCoreRuntimeDependency + oom_cap FAILs; crashes past idx 900) and has
+  process-global order coupling (isolated/range runs differ from sequential runs).
+- **Next in §2.1, by current profile:** driver round-trip collapse for call/return (the
+  `.tail`/`.returned` detour through the driver — push/pop + reload + tail-jump directly in
+  the handler, qjs's "the whole call happens inside CASE(OP_call)" shape;
+  `runWithArgsState`(driver) is 19% self), then teardown straight-lining (6.5%), then
+  `op_call` resolve+stage (9.4%).
 
 ## TL;DR — the current verdict
 

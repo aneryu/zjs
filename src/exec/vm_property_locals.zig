@@ -496,7 +496,7 @@ fn storeBindingInt32(
     _ = function;
     _ = global;
     if (binding.is_var_ref) {
-        try slot_ops.setSlotValue(ctx, &frame.var_refs[binding.idx], core.JSValue.int32(value));
+        try slot_ops.setVarRefSlotValue(ctx, frame, binding.idx, core.JSValue.int32(value));
     } else {
         try slot_ops.setSlotValue(ctx, &frame.locals[binding.idx], core.JSValue.int32(value));
     }

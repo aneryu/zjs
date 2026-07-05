@@ -5,6 +5,7 @@
 //! a closed ref owns `value` and points `pvalue` at it.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const gc = @import("gc.zig");
 const JSValue = @import("value.zig").JSValue;
@@ -19,8 +20,11 @@ pub const VarRef = struct {
     // top-level global lexical bindings; gates TDZ-throw on read.
     is_lexical: bool = false,
     is_function_name: bool = false,
+    // qjs has no per-cell deleted flag: deleting a captured binding parks the
+    // cell's value at UNINITIALIZED (remove_global_object_property,
+    // quickjs.c:9289-9309); deletable-ness itself is a zjs bookkeeping bit for
+    // eval-created bindings (qjs encodes it as the property's CONFIGURABLE flag).
     is_deletable: bool = false,
-    is_deleted: bool = false,
     is_open: bool = false,
 
     comptime {
@@ -82,6 +86,23 @@ pub const VarRef = struct {
         return @alignCast(@fieldParentPtr("header", header));
     }
 
+    /// Slot-typed retain: rc++ on the cell and return it — the qjs
+    /// `JSVarRef*` copy `js_rc(var_ref)->ref_count++` (js_closure2,
+    /// quickjs.c:17322-17324). Routed through `valueRef().dup()` so the
+    /// refcount/profiling behavior is bit-identical to the pre-typed
+    /// `slot.dup()` on the cell's JSValue form.
+    pub inline fn dupCell(self: *VarRef) *VarRef {
+        _ = self.valueRef().dup();
+        return self;
+    }
+
+    /// Slot-typed release — qjs `free_var_ref` (quickjs.c:16199): rc--,
+    /// destroy at 0. Routed through `valueRef().free(rt)` so the deinit-phase
+    /// and cycle-removal gates of the JSValue path apply unchanged.
+    pub inline fn freeCell(self: *VarRef, rt: anytype) void {
+        self.valueRef().free(rt);
+    }
+
     pub fn close(self: *VarRef, rt: anytype) void {
         if (!self.is_open) return;
         const closed_value = self.pvalue.*.dup();
@@ -92,6 +113,17 @@ pub const VarRef = struct {
     }
 
     pub fn setVarRefValue(self: *VarRef, rt: anytype, next_value: JSValue) !void {
+        // Terminal-state invariant (VARREFS-SLOT-TYPING-BLUEPRINT risk 3): a
+        // cell's VALUE is NEVER itself a cell — every write path unwraps an
+        // incoming cell value first (setSlotValueRefCounted / execPutVarRef /
+        // publishDirectEvalVarRefs), and the former nesting producer (the
+        // direct-eval const view) now pvalue-ALIASES its target cell instead
+        // (eval_ops.directEvalOuterVarRefView), so readers do qjs's bare
+        // `*var_ref->pvalue` (quickjs.c:18627) with no chase. Debug-resident
+        // so a regression that would silently corrupt the read fast path traps.
+        if (comptime builtin.mode == .Debug) {
+            std.debug.assert(fromValue(next_value) == null);
+        }
         errdefer next_value.free(rt);
         const old_value = self.pvalue.*;
         self.pvalue.* = next_value;
@@ -116,9 +148,5 @@ pub const VarRef = struct {
 
     pub fn varRefIsDeletableSlot(self: *VarRef) *bool {
         return &self.is_deletable;
-    }
-
-    pub fn varRefIsDeletedSlot(self: *VarRef) *bool {
-        return &self.is_deleted;
     }
 };
