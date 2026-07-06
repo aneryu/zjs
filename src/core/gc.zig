@@ -1580,7 +1580,24 @@ noinline fn releaseAndDestroy(rt: anytype, header: *Header) void {
     // round, so shape needs no gate. (zjs has no `.module` GC-kind in flight, so the
     // MODULE arm of the qjs gate has no zjs analogue.)
     if (rt.gc.phase == .remove_cycles and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode)) return;
-    rt.gc.unlinkObjectWithBytes(header, Registry.heapByteSizeFromHeader(rt, header));
+    // GC-list unlink + free-byte accounting. `Object.destroyFromHeader`
+    // (via `unregisterObjectWithBytes`) and `Registry.destroyShape` each ALREADY
+    // unlink their own header and record the space-account free as the first
+    // thing they do — so calling `unlinkObjectWithBytes` here first would only
+    // make that in-destructor unlink a double no-op (`recordHeapFreeWithBytes`
+    // short-circuits on `size_class == 0`, `removeGcObject` on a null prev/next),
+    // yet still pays a `heapByteSizeFromHeader` load + a call that re-derives
+    // `is_large` and re-walks the page-account arithmetic per free. Skip it for
+    // those two kinds and let their destructor be the single accounting site
+    // (identical bytes: both resolve the size the same way — `size_class` /
+    // `allocationSize`). bigint / var_ref / function_bytecode destructors do NOT
+    // self-unlink, so they still need the unlink here. This mirrors qjs, where
+    // `free_object` / `free_shape` do the gc_obj_list unlink + malloc_size
+    // adjustment exactly once inside the object/shape teardown, never twice.
+    switch (header.meta().kind) {
+        .object, .shape => {},
+        else => rt.gc.unlinkObjectWithBytes(header, Registry.heapByteSizeFromHeader(rt, header)),
+    }
 
     // 10.1 静态 kind switch 派发销毁
     switch (header.meta().kind) {
