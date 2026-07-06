@@ -1278,7 +1278,6 @@ pub const Registry = struct {
     pub fn releaseObject(self: *Registry, h: *GCObjectHeader) bool {
         std.debug.assert(h.meta().rc > 0);
         h.meta().rc -= 1;
-        self.stats.rc_dec += 1;
 
         if (h.meta().rc == 0) {
             self.unlinkObject(h);
@@ -1542,7 +1541,6 @@ pub inline fn release(rt: anytype, header: anytype) void {
     }
     std.debug.assert(header.meta().rc > 0);
     header.meta().rc -= 1;
-    rt.gc.stats.rc_dec += 1;
 
     if (header.meta().rc == 0) releaseAndDestroy(rt, header);
 }

@@ -532,7 +532,6 @@ pub const Registry = struct {
     pub fn release(self: *Registry, shape: *Shape) void {
         std.debug.assert(shape.header.meta().rc > 0);
         shape.header.meta().rc -= 1;
-        self.gc_registry.stats.rc_dec += 1;
         if (shape.header.meta().rc != 0) return;
 
         // During runtime teardown, shapes are destroyed in a single dedicated

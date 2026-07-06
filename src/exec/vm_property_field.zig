@@ -349,8 +349,12 @@ pub inline fn fastArrayLengthValue(value: core.JSValue) ?core.JSValue {
 }
 
 pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.JSValue {
-    if (rt.atoms.mightBePrivate(atom_id)) return null;
+    // Object-ness gate FIRST, mirroring qjs GET_FIELD_INLINE's leading
+    // JS_VALUE_GET_TAG(obj)==JS_TAG_OBJECT check (quickjs.c:19107-19160): a non-object
+    // receiver (e.g. a string routed here from op_get_field2) returns immediately
+    // without paying the private-atom probe. Two pure guards reordered.
     var object = objectFromValue(receiver) orelse return null;
+    if (rt.atoms.mightBePrivate(atom_id)) return null;
     while (true) {
         if (object.needsSlowPropertyAccess()) return null;
         var slow_property = false;
