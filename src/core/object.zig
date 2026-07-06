@@ -1313,127 +1313,23 @@ pub const Object = struct {
             record.payload_kind
         else
             class.standardPayloadKind(class_id);
-        switch (payload_kind) {
-            .iterator => {
-                const payload = try rt.createRuntime(IteratorPayload);
-                errdefer rt.memory.destroy(IteratorPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .iterator;
-            },
-            .collection => {
-                const payload = try rt.createRuntime(CollectionPayload);
-                errdefer rt.memory.destroy(CollectionPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .collection;
-            },
-            .buffer => {
-                const payload = try rt.createRuntime(BufferPayload);
-                errdefer rt.memory.destroy(BufferPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .buffer;
-            },
-            .typed_array => {
-                const payload = try rt.createRuntime(TypedArrayPayload);
-                errdefer rt.memory.destroy(TypedArrayPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .typed_array;
-            },
-            .regexp => {
-                const payload = try rt.createRuntime(RegExpPayload);
-                errdefer rt.memory.destroy(RegExpPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .regexp;
-            },
-            .bound_function => {
-                const payload = try rt.createRuntime(BoundFunctionPayload);
-                errdefer rt.memory.destroy(BoundFunctionPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .bound_function;
-            },
-            .proxy => {
-                const payload = try rt.createRuntime(ProxyPayload);
-                errdefer rt.memory.destroy(ProxyPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .proxy;
-            },
-            .arguments => {
-                const payload = try rt.createRuntime(ArgumentsPayload);
-                errdefer rt.memory.destroy(ArgumentsPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .arguments;
-            },
-            .object_data => {
-                const payload = try rt.createRuntime(ObjectDataPayload);
-                errdefer rt.memory.destroy(ObjectDataPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .object_data;
-            },
-            .var_ref => {
-                const payload = try rt.createRuntime(VarRefPayload);
-                errdefer rt.memory.destroy(VarRefPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .var_ref;
-            },
-            .promise => {
-                const payload = try rt.createRuntime(PromisePayload);
-                errdefer rt.memory.destroy(PromisePayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .promise;
-            },
-            .generator => {
-                const payload = try rt.createRuntime(GeneratorPayload);
-                errdefer rt.memory.destroy(GeneratorPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .generator;
-            },
-            .function => {
-                const payload = try rt.createRuntime(FunctionPayload);
-                errdefer rt.memory.destroy(FunctionPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .function;
-            },
-            .module_namespace => {
-                const payload = try rt.createRuntime(ModuleNamespacePayload);
-                errdefer rt.memory.destroy(ModuleNamespacePayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .module_namespace;
-            },
-            .finalization_registry => {
-                const payload = try rt.createRuntime(FinalizationRegistryPayload);
-                errdefer rt.memory.destroy(FinalizationRegistryPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .finalization_registry;
-            },
-            .std_file => {
-                const payload = try rt.createRuntime(StdFilePayload);
-                errdefer rt.memory.destroy(StdFilePayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .std_file;
-            },
-            .disposable_stack => {
-                const payload = try rt.createRuntime(DisposableStackPayload);
-                errdefer rt.memory.destroy(DisposableStackPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .disposable_stack;
-            },
-            else => {},
+        // The plain-object (`.ordinary`), fast-array (`.none`) and `.realm` hot
+        // paths carry NO class payload — they skip the allocating switch
+        // entirely. Every allocating arm has identical shape
+        // (`createRuntime(T); payload.* = .{}`), so it lives in a `noinline`
+        // out-of-line helper (`allocClassPayload`): keeping those 17 arms out
+        // of `createInternal` drops the register-spill frame — the union of all
+        // arms' locals — off the emptyobj/objalloc/array3 hot path. Mirrors qjs
+        // where JS_NewObjectFromShape's class `switch` is tiny scalar init, not
+        // 17 sub-allocations inlined into one oversized frame. Pre-`initialized`
+        // cleanup is a single by-kind free (mirror of the per-arm
+        // `errdefer destroy`).
+        var class_payload_allocated = false;
+        errdefer if (class_payload_allocated) freeClassPayloadAllocation(rt, class_payload, class_payload_kind);
+        if (payloadKindAllocates(payload_kind)) {
+            class_payload = try allocClassPayload(rt, payload_kind);
+            class_payload_kind = payload_kind;
+            class_payload_allocated = true;
         }
         if (inline_layout) |layout| {
             class_payload = inlineClassPayloadPtr(self, layout);
@@ -1466,10 +1362,150 @@ pub const Object = struct {
         property_storage_owned = false;
         reserved_class_payload_finalizer_slot = false;
         shape_owned = false;
+        // The object now owns the payload (stored in `u.payload` +
+        // `class_payload_kind`): from here `destroyFromHeader` (the
+        // `initialized` errdefer) is the sole teardown owner, so drop the
+        // pre-init single-payload free to avoid a double free.
+        class_payload_allocated = false;
         initialized = true;
         try rt.registerObject(self);
         initialized = false;
         return self;
+    }
+
+    /// True iff `payload_kind` names a class whose object carries a separately
+    /// heap-allocated payload behind `u.payload`. The plain-object hot kinds
+    /// (`.none` fast array, `.ordinary`, `.realm`) return false and skip
+    /// `allocClassPayload` entirely.
+    inline fn payloadKindAllocates(payload_kind: class.PayloadKind) bool {
+        return switch (payload_kind) {
+            .none, .ordinary, .realm => false,
+            else => true,
+        };
+    }
+
+    /// Out-of-line allocator for the 17 class-payload kinds. Kept `noinline`
+    /// so its combined stack usage does NOT inflate `createInternal`'s frame on
+    /// the payload-free hot path. Each arm mirrors the former inline switch:
+    /// one `createRuntime(T)` then zero-init. On the error return the payload
+    /// is unallocated, so the caller's `class_payload_allocated` stays false.
+    noinline fn allocClassPayload(rt: *JSRuntime, payload_kind: class.PayloadKind) !class.Payload {
+        switch (payload_kind) {
+            .iterator => {
+                const payload = try rt.createRuntime(IteratorPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .collection => {
+                const payload = try rt.createRuntime(CollectionPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .buffer => {
+                const payload = try rt.createRuntime(BufferPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .typed_array => {
+                const payload = try rt.createRuntime(TypedArrayPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .regexp => {
+                const payload = try rt.createRuntime(RegExpPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .bound_function => {
+                const payload = try rt.createRuntime(BoundFunctionPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .proxy => {
+                const payload = try rt.createRuntime(ProxyPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .arguments => {
+                const payload = try rt.createRuntime(ArgumentsPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .object_data => {
+                const payload = try rt.createRuntime(ObjectDataPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .var_ref => {
+                const payload = try rt.createRuntime(VarRefPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .promise => {
+                const payload = try rt.createRuntime(PromisePayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .generator => {
+                const payload = try rt.createRuntime(GeneratorPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .function => {
+                const payload = try rt.createRuntime(FunctionPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .module_namespace => {
+                const payload = try rt.createRuntime(ModuleNamespacePayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .finalization_registry => {
+                const payload = try rt.createRuntime(FinalizationRegistryPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .std_file => {
+                const payload = try rt.createRuntime(StdFilePayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .disposable_stack => {
+                const payload = try rt.createRuntime(DisposableStackPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .none, .ordinary, .realm => unreachable,
+        }
+    }
+
+    /// Free a payload allocated by `allocClassPayload` when `createInternal`
+    /// fails before the object is `initialized` (i.e. before `destroyFromHeader`
+    /// owns teardown). Mirrors the per-arm `errdefer rt.memory.destroy(T, ...)`
+    /// of the former inline switch — a single by-kind `destroy`.
+    noinline fn freeClassPayloadAllocation(rt: *JSRuntime, payload: class.Payload, payload_kind: class.PayloadKind) void {
+        const ptr = payload orelse return;
+        switch (payload_kind) {
+            .iterator => rt.memory.destroy(IteratorPayload, @ptrCast(@alignCast(ptr))),
+            .collection => rt.memory.destroy(CollectionPayload, @ptrCast(@alignCast(ptr))),
+            .buffer => rt.memory.destroy(BufferPayload, @ptrCast(@alignCast(ptr))),
+            .typed_array => rt.memory.destroy(TypedArrayPayload, @ptrCast(@alignCast(ptr))),
+            .regexp => rt.memory.destroy(RegExpPayload, @ptrCast(@alignCast(ptr))),
+            .bound_function => rt.memory.destroy(BoundFunctionPayload, @ptrCast(@alignCast(ptr))),
+            .proxy => rt.memory.destroy(ProxyPayload, @ptrCast(@alignCast(ptr))),
+            .arguments => rt.memory.destroy(ArgumentsPayload, @ptrCast(@alignCast(ptr))),
+            .object_data => rt.memory.destroy(ObjectDataPayload, @ptrCast(@alignCast(ptr))),
+            .var_ref => rt.memory.destroy(VarRefPayload, @ptrCast(@alignCast(ptr))),
+            .promise => rt.memory.destroy(PromisePayload, @ptrCast(@alignCast(ptr))),
+            .generator => rt.memory.destroy(GeneratorPayload, @ptrCast(@alignCast(ptr))),
+            .function => rt.memory.destroy(FunctionPayload, @ptrCast(@alignCast(ptr))),
+            .module_namespace => rt.memory.destroy(ModuleNamespacePayload, @ptrCast(@alignCast(ptr))),
+            .finalization_registry => rt.memory.destroy(FinalizationRegistryPayload, @ptrCast(@alignCast(ptr))),
+            .std_file => rt.memory.destroy(StdFilePayload, @ptrCast(@alignCast(ptr))),
+            .disposable_stack => rt.memory.destroy(DisposableStackPayload, @ptrCast(@alignCast(ptr))),
+            .none, .ordinary, .realm => {},
+        }
     }
 
     const InlineClassPayloadLayout = struct {
