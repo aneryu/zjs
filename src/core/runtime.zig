@@ -1129,15 +1129,38 @@ pub const JSRuntime = struct {
         // and set major_request.pending iff over threshold, so re-loading
         // allocated_bytes here is pure redundant work. Keep addWithSize (the
         // faithful add_gc_object) and only service an already-pending request.
-        try self.gc.addWithSize(&object.header, object.allocationSize(self));
+        try self.registerObjectWithBytes(object, object.allocationSize(self));
+    }
+
+    /// Same as `registerObject` but with the object's allocation size supplied by
+    /// the caller. `createInternal` already computes the inline-class-payload
+    /// layout to size/place the allocation; reusing its `total_size` here avoids a
+    /// second record-table lookup + inline-layout recompute on the object-creation
+    /// hot path (mirror of `unregisterObjectWithBytes` on the free path). The
+    /// stored value is identical to what `allocationSize` would recompute.
+    pub fn registerObjectWithBytes(self: *JSRuntime, object: *Object, bytes: usize) !void {
+        try self.gc.addWithSize(&object.header, bytes);
         if (self.gc.hasPendingMajorRequest()) {
             _ = self.pollGC(null, .normal) catch {};
         }
     }
 
     pub fn unregisterObject(self: *JSRuntime, object: *Object) void {
+        self.unregisterObjectWithBytes(object, object.allocationSize(self));
+    }
+
+    /// Same as `unregisterObject` but with the object's allocation size supplied
+    /// by the caller. `destroyFromHeader` already computes the inline-class-payload
+    /// layout (for the tail `freeObjectAllocation`); its `total_size` is bit-for-bit
+    /// the value `allocationSize` would recompute here (both go through
+    /// `inlineClassPayloadLayout(recordPtr(class_id))`, and `class_id` is unchanged
+    /// between the two calls). Reusing it drops a redundant record-table lookup +
+    /// 88-byte-stride multiply + inline-layout recompute off the hot free path —
+    /// qjs `free_object` (quickjs.c:6340) never recomputes an object's size at
+    /// teardown either (the slab block carries it).
+    pub fn unregisterObjectWithBytes(self: *JSRuntime, object: *Object, bytes: usize) void {
         self.unregisterBorrowedReferenceHolder(object);
-        self.gc.unlinkObjectWithBytes(&object.header, object.allocationSize(self));
+        self.gc.unlinkObjectWithBytes(&object.header, bytes);
     }
 
     pub fn registerBorrowedReferenceHolder(self: *JSRuntime, object: *Object) !void {

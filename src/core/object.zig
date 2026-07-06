@@ -1368,7 +1368,11 @@ pub const Object = struct {
         // pre-init single-payload free to avoid a double free.
         class_payload_allocated = false;
         initialized = true;
-        try rt.registerObject(self);
+        // Reuse the inline-layout size computed at the top of createInternal
+        // instead of recomputing it inside registerObject (mirror of the free
+        // path's unregisterObjectWithBytes). Same value allocationSize derives.
+        const alloc_size = if (inline_layout) |layout| layout.total_size else @sizeOf(Object);
+        try rt.registerObjectWithBytes(self, alloc_size);
         initialized = false;
         return self;
     }
@@ -1820,7 +1824,12 @@ pub const Object = struct {
         // object mid-teardown — a double free corrupting the slab free list.
         header.meta().flags.mark = true;
         const inline_layout = inlineClassPayloadLayout(rt.classes.recordPtr(self.class_id));
-        rt.unregisterObject(self);
+        // Size for GC free-accounting is the same value `allocationSize` derives
+        // from `inline_layout` (total_size for inline-payload classes, else
+        // @sizeOf(Object)) — reuse the layout we just computed instead of a second
+        // record-table lookup + inline-layout recompute inside unregisterObject.
+        const alloc_size = if (inline_layout) |layout| layout.total_size else @sizeOf(Object);
+        rt.unregisterObjectWithBytes(self, alloc_size);
         clearBorrowedReferencesForDestroyedObject(rt, self);
         self.enqueueDeferredStdFileClose(rt);
         if (!self.finalizeInlineClassPayload(rt)) self.enqueueClassPayloadFinalizer(rt);
