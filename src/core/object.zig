@@ -9724,8 +9724,13 @@ pub const Object = struct {
     }
 
     fn adoptShapeForNewProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, flags: u6, property_capacity: usize, array_index: ?u32) !void {
-        const atom_guard = rt.atoms.dup(atom_id);
-        defer rt.atoms.free(atom_guard);
+        // No local atom guard: the sole caller `appendPreparedPropertyEntry`
+        // already holds an `atoms.dup(atom_id)` guard live across this entire
+        // call (its `defer atoms.free` runs only after we return), so `atom_id`
+        // cannot be collected under a GC triggered by the shape allocations
+        // below. A second dup/free here just duplicated that root — qjs
+        // add_property likewise relies on the single caller-held atom ref
+        // through add_shape_property (which does the one owning JS_DupAtom).
         // The shape is rc==1 here (made unique above / never shared), so the
         // FAM grow inside reserveProperties/addProperty may relocate it; pass
         // &self.shape_ref so the new address flows back (qjs resize_properties
