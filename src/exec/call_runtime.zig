@@ -206,14 +206,23 @@ pub fn popCallFuncFromStack(rt: *core.JSRuntime, stack: *stack_mod.Stack, region
 /// stack. Used by the zero-copy call sequence to drop the borrowed
 /// `func | args...` region once a call completes.
 pub fn popOwnedStackRegion(rt: *core.JSRuntime, stack: *stack_mod.Stack, region_base: usize) void {
+    // Mirror qjs OP_call_method teardown (quickjs.c:18232): `call_argv` is a
+    // register-held local and the loop just `JS_FreeValue(call_argv[i])` — no
+    // per-slot poison-store and no re-derivation of the operand-stack base.
+    // `free`/`releaseAndDestroy` runs GC-release + object destructors; none of
+    // those push to this operand stack, so `stack.values.ptr` is loop-invariant.
+    // Holding it in a local lets LLVM keep the base in a register instead of
+    // reloading `stack.values.ptr` each iteration (opaque free() otherwise
+    // forces the reload). Slots above the shrunk length are logically dead —
+    // every `push*` overwrites its target and GC scans only `values[0..len]` —
+    // so the qjs form omits the undefined poison-store entirely.
+    const base = stack.values.ptr;
     var index = stack.values.len;
     while (index > region_base) {
         index -= 1;
-        const value = stack.values[index];
-        stack.values[index] = core.JSValue.undefinedValue();
-        value.free(rt);
+        base[index].free(rt);
     }
-    stack.values = stack.values.ptr[0..region_base];
+    stack.values = base[0..region_base];
 }
 
 // noinline: this is the cold exception path shared by every `*Vm` opcode wrapper.
