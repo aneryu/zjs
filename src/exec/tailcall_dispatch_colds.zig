@@ -849,6 +849,15 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.get_array_el] = td.op_get_array_el; // dense fast path; miss → cold h_array_element
     t[op.put_array_el] = td.op_put_array_el; // dense write fast path; miss → cold h_array_element
     t[op.get_length] = td.op_get_length; // inline string-length read; non-string → cold getLength
+    // Object/array-literal ops (qjs CASE(OP_object)/(OP_define_field)/(OP_array_from)
+    // are register-resident single-`bl` inlines, quickjs.c:17961/19269/18239). Without
+    // these overrides they routed through the 224-byte coldStd publish shell EVERY
+    // iteration — the per-iter hottest ops of the object/array-literal benchmarks (see
+    // dispatch-audit). Fast handler on the plain-data-add / OOM-free path; every exotic
+    // case falls to the cold h_* shell assigned above.
+    t[op.object] = td.op_object; // bare {} create; OOM → cold h_object
+    t[op.define_field] = td.op_define_field; // plain data add; array/private/proxy/setter → cold h_field
+    t[op.array_from] = td.op_array_from; // dense array build; OOM → cold h_array_from
     t[op.add_loc] = td.op_add_loc;
     t[op.get_var] = td.op_get_var;
     t[op.get_var_undef] = td.op_get_var;

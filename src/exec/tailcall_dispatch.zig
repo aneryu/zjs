@@ -1142,6 +1142,69 @@ pub fn op_get_length(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
+// Frameless OP_object — qjs CASE(OP_object): `*sp++ = JS_NewObject(ctx)`
+// (quickjs.c:17961), the per-iteration hottest op of `o = {}` / every object literal.
+// The cold h_object shell paid the full 224-byte coldStd publish+spill tax every
+// iteration for a op that runs no user code and captures no backtrace; this handler
+// creates the bare `{}` register-resident and pushes it, exactly qjs's one-`bl`
+// inline. Only OOM (create returns error) routes to the cold shell (which re-derives
+// sp from the published stack — no state was mutated here, so the fall-through is
+// clean). No pc/sp publish, no coldNext round-trip.
+pub fn op_object(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const value = literal_vm.newPlainObjectValue(vm.ctx, vm.global) catch
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    sp[0] = value; // owned
+    return cont(pc + 1, sp + 1, var_buf, vm);
+}
+
+// Frameless OP_define_field — qjs CASE(OP_define_field): one JS_DefinePropertyValue on
+// sp[-2] with sp[-1] (quickjs.c:19269), the 3-per-iteration hot op of `o={a:i,b:i,c:i}`
+// object literals. The cold h_field shell paid the 224-byte coldStd publish+spill tax
+// each of those three times per iteration. `defineFieldFast` handles the plain-data-add
+// case (non-refcounted value, ordinary extensible non-array non-exotic non-proxy obj —
+// the same in-CASE fast leg the cold defineField itself runs first); on a hit the value
+// is consumed into the slot, so pop it and free the popped obj slot at sp[-2]. Arrays,
+// private atoms, proxies, non-extensible, setters, and refcounted values (every
+// backtrace/user-code-capable case) fall to the cold shell (which publishes frame.pc at
+// the u32 atom operand — this handler left frame.pc untouched, so the decode matches).
+// 5-byte op (u32 atom).
+pub fn op_define_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const value = (sp - 1)[0];
+    const obj = (sp - 2)[0];
+    const atom_id = readInt(u32, pc + 1);
+    if (literal_vm.defineFieldFast(vm.ctx.runtime, obj, atom_id, value)) {
+        // value consumed into the property slot; obj stays on the stack as the
+        // literal's running receiver (qjs leaves sp[-2] in place, only sp--).
+        return cont(pc + 5, sp - 1, var_buf, vm);
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
+// Frameless OP_array_from — qjs CASE(OP_array_from): `js_create_array_free(ctx,
+// argc, sp - argc)` building the dense array in one call (quickjs.c:18239), the
+// per-iteration hot op of `a = [i, i+1, i+2]` and every non-spread array literal. The
+// cold h_array_from shell paid the 224-byte coldStd publish+spill tax plus a heap temp
+// buffer + per-element stack.pop every iteration. `constructLiteralWithPrototype`
+// DUPS the values slice into the array (initDenseArrayLiteralValuesAssumingEmpty) and
+// roots it during the create (GC-safe), so this handler hands it the register-resident
+// operand window `(sp-argc)[0..argc]` directly — no temp buffer, no per-element pop —
+// then frees the argc popped originals (balancing the dup, exactly the cold arrayFrom's
+// trailing free) and pushes the array. OOM routes to the cold shell (values untouched
+// on the stack, frame.pc left at the u16 argc operand for its own decode). 3-byte op.
+pub fn op_array_from(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const argc: usize = readInt(u16, pc + 1);
+    const rt = vm.ctx.runtime;
+    const values = (sp - argc)[0..argc];
+    const array = core.array.constructLiteralWithPrototype(rt, values, array_ops.arrayPrototypeFromGlobal(rt, vm.global)) catch
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // Free the popped originals (the array dup'd them); then the array replaces the
+    // whole [v0..v_argc) window at sp-argc, so the net stack effect is -argc+1.
+    for (values) |v| v.free(rt);
+    const nsp = sp - argc;
+    nsp[0] = array; // owned
+    return cont(pc + 3, nsp + 1, var_buf, vm);
+}
+
 /// Per-op comparison handler generator (qjs OP_CMP / OP_CMP_EQ / OP_CMP_STRICT_EQ
 /// each expand to an INDEPENDENT CASE label per opcode — quickjs.c:20230-20271
 /// (OP_CMP → OP_lt/OP_lte/OP_gt/OP_gte), 20273-20341 (OP_CMP_EQ → OP_eq/OP_neq),
