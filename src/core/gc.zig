@@ -1141,10 +1141,18 @@ pub const Registry = struct {
         self.stats.peak_allocated_bytes = @max(self.stats.peak_allocated_bytes, self.stats.allocated_bytes);
         self.addLiveHeapBytes(is_large, bytes);
         self.recordSpaceAlloc(is_large, bytes);
-        const kind_weight = if (is_large) self.policy.large_weight else self.policy.old_weight;
-        const weighted = std.math.mul(usize, bytes, kind_weight) catch std.math.maxInt(usize);
-        self.stats.allocation_debt = std.math.add(usize, self.stats.allocation_debt, weighted) catch std.math.maxInt(usize);
-
+        // QuickJS js_trigger_gc paces on rt->malloc_state.malloc_size vs
+        // rt->malloc_gc_threshold (quickjs.c:1780/1795); zjs mirrors that exactly
+        // via memory.allocated_bytes vs malloc_gc_threshold (runtime.zig:2072,
+        // reset to malloc_size*3/2 in resetGCThreshold). The weighted
+        // `allocation_debt` accumulated here has NO functional consumer on the
+        // heap path — externalMemoryRequestReason (gc.zig:830) is only invoked
+        // from reportExternalAlloc (the off-heap trigger), never after a heap
+        // object alloc (asserted by the "function bytecode registration is
+        // old-space accounted" test: heap allocs leave gcPending false). So the
+        // per-object mul+add here is a zjs-only tax that never gates a heap GC;
+        // drop it and let the external-memory debt stand on its own off-heap
+        // trigger.
         if (is_large) {
             self.stats.large_allocated_bytes = std.math.add(usize, self.stats.large_allocated_bytes, bytes) catch std.math.maxInt(usize);
             self.stats.large_alloc_count +|= 1;

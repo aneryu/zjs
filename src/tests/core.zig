@@ -2982,7 +2982,11 @@ test "function bytecode registration is old-space accounted" {
 
     try std.testing.expectEqual(@as(usize, @sizeOf(engine.bytecode.FunctionBytecode)), rt.gc.stats.old_allocated_bytes);
     try std.testing.expectEqual(@as(usize, 1), rt.gc.stats.old_alloc_count);
-    try std.testing.expectEqual(@as(usize, @sizeOf(engine.bytecode.FunctionBytecode) * 3), rt.allocationDebtBytes());
+    // Heap object registration no longer accrues weighted allocation_debt; that
+    // counter is reserved for the off-heap external-memory trigger. Even with a
+    // debt threshold sized to this allocation, the heap path never consults
+    // externalMemoryRequestReason, so no GC is requested (asserted below).
+    try std.testing.expectEqual(@as(usize, 0), rt.allocationDebtBytes());
     if (!core.memory.force_gc_on_allocation_enabled) {
         try std.testing.expect(!rt.gcPendingForTest());
         try std.testing.expect(!rt.gc.hasPendingMajorRequest());

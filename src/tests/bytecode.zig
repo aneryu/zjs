@@ -1951,7 +1951,12 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
     try std.testing.expect(stats.large_committed_bytes >= heap_bytes);
     try std.testing.expectEqual(stats.large_committed_bytes, stats.heap_committed_bytes);
     try std.testing.expectEqual(@as(usize, 0), stats.old_alloc_count);
-    try std.testing.expectEqual(heap_bytes * large_weight, stats.allocation_debt);
+    // Heap object allocations no longer feed the weighted allocation_debt:
+    // js_trigger_gc pacing rides on memory.allocated_bytes vs malloc_gc_threshold
+    // (runtime.zig), and allocation_debt is reserved for the off-heap external
+    // memory trigger (reportExternalAlloc). A large heap payload therefore leaves
+    // the debt untouched.
+    try std.testing.expectEqual(@as(usize, 0), stats.allocation_debt);
 
     core.JSValue.functionBytecode(&fb.header).free(rt);
     const after_free = rt.gcStats();
