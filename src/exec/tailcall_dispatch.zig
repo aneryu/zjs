@@ -941,10 +941,19 @@ pub fn opLocCheck(comptime kind: LocKind) Handler {
             if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             const idx: u16 = readInt(u16, pc + 1);
             const old_v = var_buf[idx];
+            // A `var_buf` local can hold a var-ref cell only in a function whose
+            // locals may be boxed (closure capture / make_loc_ref / derived-ctor
+            // `this` / direct-eval). `locals_never_boxed` is precomputed at
+            // finalize (bytecode.computeLocalsNeverBoxed); when set, no cell can
+            // reach either the slot or the operand stack, so both per-op
+            // `varRefCellFromValue` guards are dropped — qjs reads `var_buf[idx]`
+            // as a plain value with no cell test at all (quickjs.c:18704). When
+            // clear, the guards run exactly as before (captured binding → cold).
+            const may_box = !vm.function.locals_never_boxed;
             // Cell slot OR plain-uninitialized (TDZ) slot both fall to the cold
             // checkedLocVm: `varRefCellFromValue` catches the captured-binding case
             // and `isUninitialized` the plain-TDZ case (qjs 18709 tag test).
-            if (slot_ops.varRefCellFromValue(old_v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            if (may_box and slot_ops.varRefCellFromValue(old_v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             if (old_v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             switch (kind) {
                 .get => {
@@ -954,14 +963,14 @@ pub fn opLocCheck(comptime kind: LocKind) Handler {
                 .put => {
                     if (idx < vm.function.vardefs.len and vm.function.vardefs[idx].is_const) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
                     const value = (sp - 1)[0];
-                    if (slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    if (may_box and slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
                     var_buf[idx] = value;
                     old_v.free(vm.ctx.runtime);
                     return cont(pc + 3, sp - 1, var_buf, vm);
                 },
                 .set => {
                     const value = (sp - 1)[0];
-                    if (slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    if (may_box and slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
                     const assigned = value.dup();
                     var_buf[idx] = assigned;
                     old_v.free(vm.ctx.runtime);
