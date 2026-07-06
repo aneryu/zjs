@@ -838,6 +838,11 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     inline for ([_]u8{ op.inc, op.dec }) |o| t[o] = td.op_inc_dec;
     t[op.dup] = td.op_dup;
     t[op.swap] = td.op_swap;
+    // Trailing expression-statement drop (the per-iter `dup; put_loc_check; DROP`
+    // tail of every `o = {…}` / `s = …` / `a = […]` loop). qjs OP_drop:17968 is a
+    // register-resident `JS_FreeValue(sp[-1]); sp--`; the plain-value / live-refcount
+    // fast leg inlines here, a `catch_offset` marker on top falls to the cold shell.
+    t[op.drop] = td.op_drop_fast; // catch-marker (finally/catch epilogue) → cold s.op_drop
     t[op.goto8] = td.op_goto8;
     t[op.if_false8] = td.op_if_false8;
     t[op.if_true8] = td.op_if_true8;

@@ -590,6 +590,52 @@ fn op_eval(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c
         },
     }
 }
+/// Frameless OP_drop (qjs CASE(OP_drop):17968 — `JS_FreeValue(ctx, sp[-1]); sp--`,
+/// register-resident, no pc-publish / backtrace round-trip). Without this the
+/// per-iteration `o = {…}` / `s = …` / `a = […]` loops route their trailing `drop`
+/// (the stack copy left after `dup; put_loc_check`) through the 416-byte publishing
+/// coldStd shell EVERY iteration — the ONLY hot op still cold in all four
+/// object/array/string-literal benchmarks (see dispatch-audit).
+///
+/// GC-window contract (why this MUST shrink stack.values before free, unlike the
+/// non-freeing op_dup/op_swap): the collector traces the operand roots as
+/// `stack.values.ptr[0..stack.values.len]` (runtime.zig:1276). Fast handlers advance
+/// only the register `sp`; `stack.values.len` is stale until a publish/syncDown (see
+/// zjs_vm.syncDown — "fast paths advance only reg_sp"). op_dup/op_swap never free, so
+/// a slot inside that window is always still live and a stale len is harmless. But
+/// `drop` FREES sp[-1]: if that slot is still inside the traced window when a GC fires
+/// during free() (rc→0 destroy → …, or a later alloc before the next publish), the
+/// collector scans a freed value → use-after-free (nondeterministic in-process crash;
+/// the cold path is safe only because value_vm.drop's `stack.pop()` shrinks
+/// stack.values BEFORE free). So publish the post-drop operand length here first, then
+/// free — the freed slot is then outside `[0..len]`. This is a single store off the
+/// hot dependency chain (no pc write, no coldNext/maybeStop round-trip, no 416B frame).
+///   - plain data value (int/bool/undefined): free is a tag-test no-op (requiresRefCount
+///     early-out); the store+sp-- is the whole cost.
+///   - still-live object/rope (`o`/`s` holds the other ref): register-resident refcount
+///     decrement, now GC-safe against the shrunk window.
+/// A `catch_offset` marker on top (the `try`/finally sentinel, drop's `.catch_target`
+/// leg → mutates vm.catch_target.*) falls to the cold op via the indirect
+/// `cold_table[pc[0]]` hop (op_if_false8 pattern — LLVM can't devirtualize it, so the
+/// fast leaf stays prologue-free).
+pub fn op_drop_fast(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    // Generator/eval stop boundary: during a generator's parameter-init phase the
+    // cold path's coldNext runs maybeStop (suspend at the body-start pc). `cont`
+    // skips that check, so a `drop` that is the last param-init op would blow past the
+    // suspend and execute the generator body eagerly (corrupting generator state — the
+    // runGeneratorParameterInit crash). Fall to the publishing cold op when blocked,
+    // exactly as opLoc/opLocCheck/op_update_loc do.
+    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const v = (sp - 1)[0];
+    if (v.isCatchOffset()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // Shrink the GC-traced operand window to exclude the slot we are about to free
+    // (mirrors value_vm.drop's stack.pop()-before-free); the freed slot must not be
+    // reachable from stack.values[0..len] if free() triggers a collection.
+    const nsp = sp - 1;
+    vm.stack.values = vm.stack_base[0 .. (@intFromPtr(nsp) - @intFromPtr(vm.stack_base)) / @sizeOf(JSValue)];
+    v.free(vm.ctx.runtime);
+    return cont(pc + 1, nsp, var_buf, vm);
+}
 fn op_drop(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     vm.publish(pc, sp);
     switch (value_vm.drop(vm.ctx.runtime, vm.stack) catch |e| return vm.fail(e)) {
