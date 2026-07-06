@@ -805,6 +805,15 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
         .{ .o = op.set_loc8, .h = td.opLoc(.set, .byte) },
         .{ .o = op.set_loc, .h = td.opLoc(.set, .half) },
     }) |e| t[e.o] = e.h;
+    // TDZ-checked locals: the per-iteration hot loc ops in `for (let i…)` loops
+    // (quickjs.c emits OP_get_loc_check/OP_put_loc_check for every lexical var,
+    // 33072-33078). get_loc_checkthis / put_loc_check_init / set_loc_uninitialized
+    // stay on cold h_checkedloc (rare derived-ctor-this / block-entry init paths).
+    inline for ([_]struct { o: u8, h: Handler }{
+        .{ .o = op.get_loc_check, .h = td.opLocCheck(.get) },
+        .{ .o = op.put_loc_check, .h = td.opLocCheck(.put) },
+        .{ .o = op.set_loc_check, .h = td.opLocCheck(.set) },
+    }) |e| t[e.o] = e.h;
     inline for ([_]u8{ op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3 }) |o| t[o] = td.op_get_arg_short;
     // Per-op binary handlers (qjs CASE(OP_add)/…/CASE(OP_xor) are distinct labels,
     // quickjs.c:19696-20227; op.pow keeps the cold h_binary — qjs OP_pow:19916 has

@@ -876,6 +876,56 @@ pub fn opLoc(comptime kind: LocKind, comptime idx_src: LocIdx) Handler {
     }.h;
 }
 
+/// TDZ-checked local access (qjs OP_get_loc_check/OP_put_loc_check/OP_set_loc_check,
+/// quickjs.c:18704/18730/18743). The lexical `let`/`const` loop counter and
+/// block-scoped result in `for (let i…)` bodies are ALWAYS emitted as these checked
+/// forms (quickjs.c:33072-33078 emits OP_get_loc_check for every `is_lexical` var —
+/// there is no downgrade to plain OP_get_loc), so these are the per-iteration hot
+/// loc ops in every counting loop; without this handler they route to the 192-byte-
+/// frame `checkedLocVm` cold path (the four-benchmark self%-#1). Same shape as
+/// `opLoc` plus qjs's `JS_IsUninitialized(var_buf[idx])` TDZ guard:
+///   - a var-ref cell slot (captured binding) → cold: checkedLocVm unwraps the cell,
+///   - an uninitialized plain slot → cold: checkedLocVm throws the TDZ ReferenceError,
+///   - (put) a `const` slot → cold: checkedLocVm throws the const-reassign TypeError.
+/// The checked encodings only exist in the u16 operand form (no short variants —
+/// bytecode.zig:442-445), so one handler per kind covers them.
+pub fn opLocCheck(comptime kind: LocKind) Handler {
+    return struct {
+        fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+            if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            const idx: u16 = readInt(u16, pc + 1);
+            const old_v = var_buf[idx];
+            // Cell slot OR plain-uninitialized (TDZ) slot both fall to the cold
+            // checkedLocVm: `varRefCellFromValue` catches the captured-binding case
+            // and `isUninitialized` the plain-TDZ case (qjs 18709 tag test).
+            if (slot_ops.varRefCellFromValue(old_v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            if (old_v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            switch (kind) {
+                .get => {
+                    sp[0] = old_v.dup();
+                    return cont(pc + 3, sp + 1, var_buf, vm);
+                },
+                .put => {
+                    if (idx < vm.function.vardefs.len and vm.function.vardefs[idx].is_const) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    const value = (sp - 1)[0];
+                    if (slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    var_buf[idx] = value;
+                    old_v.free(vm.ctx.runtime);
+                    return cont(pc + 3, sp - 1, var_buf, vm);
+                },
+                .set => {
+                    const value = (sp - 1)[0];
+                    if (slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    const assigned = value.dup();
+                    var_buf[idx] = assigned;
+                    old_v.free(vm.ctx.runtime);
+                    return cont(pc + 3, sp, var_buf, vm);
+                },
+            }
+        }
+    }.h;
+}
+
 /// Closure/global var-ref read (qjs OP_get_var_ref0..3 distinct labels). The `fib`
 /// recursive self-reference is get_var_ref0 — fib's per-call hottest non-call op.
 /// Uninitialized (TDZ or deleted binding parked at UNINITIALIZED, qjs
