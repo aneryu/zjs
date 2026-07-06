@@ -1823,7 +1823,13 @@ pub const Object = struct {
         // `releaseWeakIdentity` could reentrantly `destroyDeadWeakHusk` this
         // object mid-teardown — a double free corrupting the slab free list.
         header.meta().flags.mark = true;
-        const inline_layout = inlineClassPayloadLayout(rt.classes.recordPtr(self.class_id));
+        // Single pointer-only class-record view (qjs reads class_array[class_id]
+        // in place, quickjs.c:6365). Reused for BOTH the inline-payload layout and
+        // the inline-payload finalize below, so the plain-object free path does
+        // ONE bounds-checked pointer fetch instead of a `recordPtr` here plus a
+        // second by-value 88B `record()` copy inside finalizeInlineClassPayload.
+        const class_record = rt.classes.recordPtr(self.class_id);
+        const inline_layout = inlineClassPayloadLayout(class_record);
         // Size for GC free-accounting is the same value `allocationSize` derives
         // from `inline_layout` (total_size for inline-payload classes, else
         // @sizeOf(Object)) — reuse the layout we just computed instead of a second
@@ -1832,7 +1838,11 @@ pub const Object = struct {
         rt.unregisterObjectWithBytes(self, alloc_size);
         clearBorrowedReferencesForDestroyedObject(rt, self);
         self.enqueueDeferredStdFileClose(rt);
-        if (!self.finalizeInlineClassPayload(rt)) self.enqueueClassPayloadFinalizer(rt);
+        // `inline_layout != null` is exactly `record.hasInlinePayload()`
+        // (inlineClassPayloadLayout returns null iff inline_payload_size == 0), so
+        // the plain-object hot path (no inline payload) skips the finalize helper —
+        // and its record re-lookup — and takes the deferred-finalizer arm directly.
+        if (inline_layout == null or !self.finalizeInlineClassPayload(rt, class_record.?)) self.enqueueClassPayloadFinalizer(rt);
         const old_properties = self.propertyEntries();
         const old_property_capacity = self.propertyStorageCapacity();
         const old_shape_props = self.shape_ref.props()[0..@min(self.shape_ref.prop_count, old_properties.len)];
@@ -1917,9 +1927,13 @@ pub const Object = struct {
         freeObjectAllocation(rt, self, inline_layout);
     }
 
-    fn finalizeInlineClassPayload(self: *Object, rt: *JSRuntime) bool {
-        const record = rt.classes.record(self.class_id) orelse return false;
-        if (!record.hasInlinePayload()) return false;
+    /// Precondition: `record.hasInlinePayload()` — the caller
+    /// (`destroyFromHeader`) only enters this when the already-computed
+    /// `inline_layout` is non-null, which is exactly that predicate. `record` is
+    /// the pointer view fetched once at the top of the free path, so this no
+    /// longer re-looks-up the class table (nor makes the by-value 88B `Record`
+    /// copy the old `rt.classes.record(...)` did on every object free).
+    fn finalizeInlineClassPayload(self: *Object, rt: *JSRuntime, record: *const class.Record) bool {
         const finalizer = record.payload_finalizer orelse {
             self.u.payload = null;
             self.class_payload_kind = .none;
