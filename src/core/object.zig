@@ -3561,7 +3561,14 @@ pub const Object = struct {
     fn ensureArrayBufferCapacity(self: *Object, rt: *JSRuntime, needed_len: usize) !void {
         const old_capacity: usize = @intCast(self.array_capacity);
         if (needed_len <= old_capacity) return;
-        var next_capacity = if (old_capacity == 0) @as(usize, 16) else old_capacity + old_capacity / 2;
+        // Mirror QuickJS expand_fast_array (quickjs.c:9530):
+        //   new_size = max_int(new_len, size * 3 / 2)
+        // When the array has no backing storage yet (size == 0) the 3/2 term is
+        // zero, so qjs allocates exactly `new_len` slots — no hardcoded floor.
+        // The prior min-16 seed (16d7826e, not a qjs anchor) over-allocated a
+        // 3-element literal into 16 slots (256B, 13 wasted). Fall back to
+        // exact-fit and keep the 1.5x growth branch (already == qjs size*3/2).
+        var next_capacity = if (old_capacity == 0) needed_len else old_capacity + old_capacity / 2;
         if (next_capacity <= old_capacity) next_capacity = old_capacity + 1;
         while (next_capacity < needed_len) {
             const growth = @max(next_capacity / 2, 1);
