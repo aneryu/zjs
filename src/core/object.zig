@@ -1144,10 +1144,10 @@ pub const ObjectFlags = packed struct(u32) {
 
 var test_standard_exotic_methods: [class.ids.init_count]?*const ExoticMethods = @splat(null);
 
-fn classHasExoticMethods(rt: *const JSRuntime, class_id: class.ClassId, class_record: ?class.Record) bool {
+fn classHasExoticMethods(rt: *const JSRuntime, class_id: class.ClassId, class_record: ?*const class.Record) bool {
     if (exoticMethodsForClassId(class_id) != null) return true;
     if (class_record) |record| return record.has_exotic or record.exotic_methods != null;
-    const record = rt.classes.record(class_id) orelse return false;
+    const record = rt.classes.recordPtr(class_id) orelse return false;
     return record.has_exotic or record.exotic_methods != null;
 }
 
@@ -1266,7 +1266,13 @@ pub const Object = struct {
     }
 
     fn createInternal(rt: *JSRuntime, class_id: class.ClassId, prototype: ?*Object, own_property_capacity: usize) !*Object {
-        const class_record = rt.classes.record(class_id);
+        // qjs JS_NewObjectFromShape reads class metadata in place from
+        // `ctx->rt->class_array[class_id]` — it never copies the whole JSClass
+        // onto the stack. Mirror that with a pointer-only view so the plain
+        // object / array hot path (emptyobj/objalloc/array3) touches just the
+        // scalar fields it needs (inline_payload_size, payload_kind,
+        // payload_finalizer, exotic) instead of an 88B SIMD block copy of Record.
+        const class_record = rt.classes.recordPtr(class_id);
         const inline_layout = inlineClassPayloadLayout(class_record);
         const self = if (inline_layout) |layout| blk: {
             const bytes = try rt.allocRuntimeAlignedBytes(layout.total_size, layout.allocation_alignment);
@@ -1436,7 +1442,7 @@ pub const Object = struct {
         var reserved_class_payload_finalizer_slot = false;
         errdefer if (reserved_class_payload_finalizer_slot) rt.releaseDeferredClassPayloadFinalizerSlot();
         if (class_record) |record| {
-            if (record.payload_finalizer != null and !record.hasInlinePayload()) {
+            if (record.payload_finalizer != null and record.inline_payload_size == 0) {
                 try rt.reserveDeferredClassPayloadFinalizerSlot();
                 reserved_class_payload_finalizer_slot = true;
             }
@@ -1472,9 +1478,9 @@ pub const Object = struct {
         allocation_alignment: std.mem.Alignment,
     };
 
-    fn inlineClassPayloadLayout(maybe_record: ?class.Record) ?InlineClassPayloadLayout {
+    fn inlineClassPayloadLayout(maybe_record: ?*const class.Record) ?InlineClassPayloadLayout {
         const record = maybe_record orelse return null;
-        if (!record.hasInlinePayload()) return null;
+        if (record.inline_payload_size == 0) return null;
         const payload_align = std.mem.Alignment.fromByteUnits(record.inline_payload_align);
         const object_align = std.mem.Alignment.of(Object);
         const allocation_alignment = if (payload_align.compare(.gt, object_align)) payload_align else object_align;
@@ -1502,7 +1508,7 @@ pub const Object = struct {
     }
 
     pub fn allocationSize(self: *const Object, rt: *JSRuntime) usize {
-        if (inlineClassPayloadLayout(rt.classes.record(self.class_id))) |layout| return layout.total_size;
+        if (inlineClassPayloadLayout(rt.classes.recordPtr(self.class_id))) |layout| return layout.total_size;
         return @sizeOf(Object);
     }
 
@@ -1777,7 +1783,7 @@ pub const Object = struct {
         // `releaseWeakIdentity` could reentrantly `destroyDeadWeakHusk` this
         // object mid-teardown — a double free corrupting the slab free list.
         header.meta().flags.mark = true;
-        const inline_layout = inlineClassPayloadLayout(rt.classes.record(self.class_id));
+        const inline_layout = inlineClassPayloadLayout(rt.classes.recordPtr(self.class_id));
         rt.unregisterObject(self);
         clearBorrowedReferencesForDestroyedObject(rt, self);
         self.enqueueDeferredStdFileClose(rt);
@@ -1837,7 +1843,7 @@ pub const Object = struct {
     /// resource pass; only the struct memory remains. Mirrors qjs Pass B
     /// (quickjs.c:6797). Non-weakref objects only (weakref'd ones husk earlier).
     pub fn freeCycleDeferredStruct(rt: *JSRuntime, self: *Object) void {
-        const inline_layout = inlineClassPayloadLayout(rt.classes.record(self.class_id));
+        const inline_layout = inlineClassPayloadLayout(rt.classes.recordPtr(self.class_id));
         _ = rt.takeWeakObjectIdentity(self);
         freeObjectAllocation(rt, self, inline_layout);
     }
@@ -1846,7 +1852,7 @@ pub const Object = struct {
         std.debug.assert(self.header.meta().rc == 0);
         std.debug.assert(self.weakref_count == 0);
         std.debug.assert(!self.header.meta().flags.mark);
-        const inline_layout = inlineClassPayloadLayout(rt.classes.record(self.class_id));
+        const inline_layout = inlineClassPayloadLayout(rt.classes.recordPtr(self.class_id));
         _ = rt.takeWeakObjectIdentity(self);
         freeObjectAllocation(rt, self, inline_layout);
     }
