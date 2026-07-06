@@ -1118,8 +1118,19 @@ pub const JSRuntime = struct {
     }
 
     pub fn registerObject(self: *JSRuntime, object: *Object) !void {
+        // qjs add_gc_object (quickjs.c:6540) only links the header into
+        // gc_obj_list; it never re-evaluates the GC threshold. The single
+        // object-creation threshold check is js_trigger_gc(sizeof(JSObject))
+        // at the top of JS_NewObjectFromShape (quickjs.c:5619) — mirrored here
+        // by requestGCForAllocation on every sub-allocation of the object body,
+        // property array, and payload (each NoTrigger alloc is wrapped by an
+        // explicit threshold check in allocRuntime*). By the time we link, the
+        // last such sub-alloc has already observed the final allocated_bytes
+        // and set major_request.pending iff over threshold, so re-loading
+        // allocated_bytes here is pure redundant work. Keep addWithSize (the
+        // faithful add_gc_object) and only service an already-pending request.
         try self.gc.addWithSize(&object.header, object.allocationSize(self));
-        if (self.gc.hasPendingMajorRequest() or self.memory.allocated_bytes > self.malloc_gc_threshold) {
+        if (self.gc.hasPendingMajorRequest()) {
             _ = self.pollGC(null, .normal) catch {};
         }
     }
