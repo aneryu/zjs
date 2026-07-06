@@ -186,10 +186,44 @@ pub const SmallObjectSlab = struct {
     inline fn classIndex(byte_count: usize, alignment: std.mem.Alignment) ?usize {
         if (alignment.compare(.gt, slab_alignment)) return null;
         const total_size = totalBlockSize(byte_count) orelse return null;
-        inline for (block_sizes, 0..) |block_size, index| {
-            if (total_size <= block_size) return index;
+        return blockSizeIndex(total_size);
+    }
+
+    /// Map a required block size (<= `max_size`) to its `block_sizes` index by
+    /// piecewise arithmetic instead of walking a fully-unrolled 31-rung linear
+    /// `cmp` ladder. Faithful port of qjs `get_block_size_index`
+    /// (quickjs.c:1453): the `block_sizes` table is byte-identical to qjs
+    /// `js_malloc_block_sizes`, so the three arithmetic segments (step-8 up to
+    /// 128, step-16 up to 256, step-32 up to 512) reproduce the exact same
+    /// index the linear scan returned (verified by the comptime cross-check
+    /// below). This collapses ~7-14 walked rungs (each `cmp`+`b.cs`+`adrp`+
+    /// `add`+`b`) into a handful of `add`/`lsr`/`cmp` on every slab alloc/free.
+    inline fn blockSizeIndex(total_size: usize) usize {
+        std.debug.assert(total_size <= max_size);
+        if (total_size <= 16) return 0;
+        if (total_size <= 128) return (total_size + 7) / 8 - 2;
+        if (total_size <= 256) return (total_size + 15) / 16 + 6;
+        return (total_size + 31) / 32 + 14;
+    }
+
+    comptime {
+        // Guard the arithmetic against any future edit to `block_sizes`: for
+        // every reachable block size the arithmetic index must equal the
+        // smallest `block_sizes[i] >= size` that the old linear scan picked.
+        @setEvalBranchQuota(20000);
+        var size: usize = 1;
+        while (size <= max_size) : (size += 1) {
+            var linear_index: usize = block_sizes.len;
+            for (block_sizes, 0..) |block_size, index| {
+                if (size <= block_size) {
+                    linear_index = index;
+                    break;
+                }
+            }
+            if (linear_index != block_sizes.len) {
+                std.debug.assert(blockSizeIndex(size) == linear_index);
+            }
         }
-        return null;
     }
 
     inline fn totalBlockSize(byte_count: usize) ?usize {

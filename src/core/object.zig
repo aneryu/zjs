@@ -1798,26 +1798,41 @@ pub const Object = struct {
             destroyPropertySlot(rt, entry_atom, entry_flags, entry.slot);
         }
         if (old_property_capacity != 0) rt.memory.free(property.Entry, old_properties.ptr[0..old_property_capacity]);
-        self.destroyOrdinaryPayload(rt);
+        // Array elements live in the `u.array_values` union arm (gated by
+        // `is_array`), orthogonal to the class-payload arm below.
         self.destroyArrayElements(rt);
-        self.destroyBufferPayload(rt);
-        self.destroyTypedArrayPayload(rt);
-        self.destroyObjectDataPayload(rt);
-        self.destroyVarRefPayload(rt);
-        self.destroyFunctionPayload(rt);
-        self.destroyBoundFunctionPayload(rt);
-        self.destroyCollectionPayload(rt);
-        self.destroyIteratorPayload(rt);
-        self.destroyGeneratorPayload(rt);
-        self.destroyArgumentsPayload(rt);
-        self.destroyProxyPayload(rt);
-        self.destroyModuleNamespacePayload(rt);
-        self.destroyFinalizationRegistryPayload(rt);
-        self.destroyStdFilePayload(rt);
-        self.destroyDisposableStackPayload(rt);
-        self.destroyRealmPayload(rt);
-        self.destroyPromisePayload(rt);
-        self.destroyRegExpPayload(rt);
+        // The 19 non-array class payloads all share the single `u.payload`
+        // union slot, discriminated by `class_payload_kind` — at most ONE is
+        // ever live per object. qjs frees the class-specific payload with a
+        // SINGLE table lookup (`class_array[class_id].finalizer`,
+        // quickjs.c:6365); mirror that with one switch on the discriminant
+        // instead of walking 19 mutually-exclusive `if (kind != .X) return`
+        // destroyers in sequence (LLVM re-materializes each as
+        // ldrb+and+cmp+b.ne — ~76 insn of dead dispatch for a plain object).
+        // Each arm's destroyer keeps its own `kind != .X` guard, so this is a
+        // pure dispatch-shape change with identical per-object semantics.
+        switch (self.class_payload_kind) {
+            .none => {},
+            .ordinary => self.destroyOrdinaryPayload(rt),
+            .arguments => self.destroyArgumentsPayload(rt),
+            .object_data => self.destroyObjectDataPayload(rt),
+            .function => self.destroyFunctionPayload(rt),
+            .bound_function => self.destroyBoundFunctionPayload(rt),
+            .var_ref => self.destroyVarRefPayload(rt),
+            .generator => self.destroyGeneratorPayload(rt),
+            .promise => self.destroyPromisePayload(rt),
+            .proxy => self.destroyProxyPayload(rt),
+            .regexp => self.destroyRegExpPayload(rt),
+            .iterator => self.destroyIteratorPayload(rt),
+            .collection => self.destroyCollectionPayload(rt),
+            .buffer => self.destroyBufferPayload(rt),
+            .typed_array => self.destroyTypedArrayPayload(rt),
+            .module_namespace => self.destroyModuleNamespacePayload(rt),
+            .finalization_registry => self.destroyFinalizationRegistryPayload(rt),
+            .std_file => self.destroyStdFilePayload(rt),
+            .disposable_stack => self.destroyDisposableStackPayload(rt),
+            .realm => self.destroyRealmPayload(rt),
+        }
         if (rt.gc.phase != .deinit) self.clearCachedIteratorNext(rt) else clearCachedIteratorNextWithoutFree(rt, self);
         const object_shape = self.shape_ref;
         if (!(rt.gc.phase == .remove_cycles and headerIsCycleGarbage(&object_shape.header))) {
