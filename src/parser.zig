@@ -6235,9 +6235,13 @@ pub const parser_core = struct {
                 try emitPutRefValue(s, flags.result_needed);
             } else if (flags.result_needed) {
                 try emitPutLValueKeepTop(s, shape);
-            } else if (shape == .var_ref and !isNonLexicalBinding(s, shape.var_ref.atom)) {
-                try emitPutLValueKeepTop(s, shape);
             } else {
+                // qjs stores a result-unused compound assignment with a plain
+                // consuming put (no keep-top + drop); the prior lexical-only
+                // `emitPutLValueKeepTop` arm forced a dup+drop round-trip qjs
+                // never pays. `result_needed` already covers value-consuming
+                // contexts (nested/eval completion); emitPutLValueNoKeep handles
+                // var_ref via suppress_expr_statement_drop + scope_put_var.
                 try emitPutLValueNoKeep(s, shape);
             }
         } else {
