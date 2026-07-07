@@ -1836,8 +1836,15 @@ pub const Object = struct {
         // record-table lookup + inline-layout recompute inside unregisterObject.
         const alloc_size = if (inline_layout) |layout| layout.total_size else @sizeOf(Object);
         rt.unregisterObjectWithBytes(self, alloc_size);
-        clearBorrowedReferencesForDestroyedObject(rt, self);
-        self.enqueueDeferredStdFileClose(rt);
+        // qjs free_object keeps no borrowed-ref / std-file side tables, so the
+        // plain-object hot free path must not call into either scan. Hoist each
+        // helper's own entry guard to the call site: an object with no realm-
+        // global borrowed identity (is_global, false for ~every object) and no
+        // .std_file payload skips BOTH calls — the helpers keep their internal
+        // guards for the rare live-resource path. (borrowed guard already no-ops
+        // for non-global; pure dispatch-shape change, zero behavioral risk.)
+        if (self.flags.is_global and rt.borrowed_reference_holders.len != 0) clearBorrowedReferencesForDestroyedObject(rt, self);
+        if (self.class_payload_kind == .std_file) self.enqueueDeferredStdFileClose(rt);
         // `inline_layout != null` is exactly `record.hasInlinePayload()`
         // (inlineClassPayloadLayout returns null iff inline_payload_size == 0), so
         // the plain-object hot path (no inline payload) skips the finalize helper —
@@ -1905,7 +1912,11 @@ pub const Object = struct {
             rt.gc.deferCycleStructFree(&self.header);
             return;
         }
-        _ = rt.takeWeakObjectIdentity(self);
+        // qjs releases the weak-id mapping in its weak sweep, never per plain
+        // object; only objects handed a weak id (has_weak_id) have an entry, so
+        // gate the call — a plain object never enters takeWeakObjectIdentity just
+        // to load the flag and return.
+        if (self.flags.has_weak_id) _ = rt.takeWeakObjectIdentity(self);
         freeObjectAllocation(rt, self, inline_layout);
     }
 
