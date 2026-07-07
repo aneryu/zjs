@@ -425,7 +425,15 @@ pub const Registry = struct {
         shape_ptr.* = new_shape;
     }
 
-    pub fn addProperty(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6) !void {
+    // `inline` collapses the object-literal define stack toward qjs's tight
+    // 2-frame add_property -> add_shape_property. zjs's shape-build spans
+    // Object.appendPreparedPropertyEntry -> adoptShapeForNewProperty (inlined)
+    // -> Registry.addProperty -> Registry.appendProperty; folding this thin
+    // hash-transition wrapper and appendProperty into the caller removes the
+    // per-property call-frame prologue/epilogue + arg marshaling (3M+ crossings
+    // on `o={a,b,c}` loops). Pure codegen hint — semantically identical, faithful
+    // to qjs where add_shape_property is a leaf the compiler folds hot.
+    pub inline fn addProperty(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6) !void {
         try self.appendProperty(shape_ptr, atom_id, flags);
         const shape = shape_ptr.*;
         const old_hash = shape.hash;
@@ -632,7 +640,7 @@ pub const Registry = struct {
         return shape;
     }
 
-    fn appendProperty(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6) !void {
+    inline fn appendProperty(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6) !void {
         const retained_atom = self.atoms.dup(atom_id);
         var retained_atom_owned = true;
         errdefer if (retained_atom_owned) self.atoms.free(retained_atom);

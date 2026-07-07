@@ -9646,9 +9646,20 @@ pub const Object = struct {
         }
     }
 
-    fn addProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
+    inline fn addProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
         const slot = slotFromDescriptor(&rt.atoms, atom_id, desc);
         try self.appendPreparedPropertyEntry(rt, atom_id, flagsFromDescriptor(desc), slot);
+    }
+
+    /// Trusted variant of `addProperty` for callers that already hold a live
+    /// `atom_id` ref across the whole call (see `appendPreparedPropertyEntryTrusted`
+    /// for the guard-elision rationale). Used only by
+    /// `definePlainDataPropertyKnownFast` on the object-literal `OP_define_field`
+    /// path, where `atom_id` is the executing function bytecode's inline operand
+    /// and is rooted for the entire opcode.
+    fn addPropertyTrusted(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
+        const slot = slotFromDescriptor(&rt.atoms, atom_id, desc);
+        try self.appendPreparedPropertyEntryTrusted(rt, atom_id, flagsFromDescriptor(desc), slot);
     }
 
     /// Lean plain-object define for the object-literal fast path (OP_define_field
@@ -9661,19 +9672,53 @@ pub const Object = struct {
     /// defineOrdinaryOwnProperty. Preserves duplicate-literal-key semantics
     /// (`{a:1,a:2}`) via the findProperty branch. Caller guarantees:
     /// class_id==object, !hasExoticMethods, !is_array, extensible.
-    pub fn definePlainDataPropertyKnownFast(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
-        if (self.findProperty(atom_id)) |index| {
+    pub inline fn definePlainDataPropertyKnownFast(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
+        if (self.findPropertyIndexTrusted(atom_id)) |index| {
             try self.materializeAutoInitEntryForMutation(index);
             if (!isCompatible(self.propFlagsAt(index), self.prop_values[index].slot, desc)) return error.IncompatibleDescriptor;
             try self.replaceProperty(rt, index, desc);
             return;
         }
-        try self.addProperty(rt, atom_id, desc);
+        // Both call sites (vm_literal.zig defineFieldFast + the cold defineField
+        // shell) read `atom_id` from `function.code[frame.pc..]` — the executing
+        // bytecode's inline OP_define_field operand — which the finalized
+        // FunctionBytecode holds a ref on (dupBytecodeAtoms) and the frame's
+        // current_function ref keeps live for the whole opcode. That external
+        // root makes appendPreparedPropertyEntry's own atom guard redundant here,
+        // so use the trusted (guard-free) add.
+        try self.addPropertyTrusted(rt, atom_id, desc);
     }
 
+    /// Default entry point: the caller does NOT guarantee an independent live
+    /// `atom_id` ref, so a local dup/free guard roots the atom across the shape
+    /// allocations below (which can trigger GC, whose object/shape sweep frees
+    /// prop atoms — dropping an otherwise-unrooted atom to ref_count 0 mid-call).
     pub fn appendPreparedPropertyEntry(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
-        const atom_guard = rt.atoms.dup(atom_id);
-        defer rt.atoms.free(atom_guard);
+        return self.appendPreparedPropertyEntryImpl(false, rt, atom_id, entry_flags, slot);
+    }
+
+    /// Trusted entry point: the caller already holds a live `atom_id` ref for
+    /// the whole call (e.g. the object-literal `OP_define_field` path, whose atom
+    /// is the executing function bytecode's inline operand — rooted by the
+    /// finalized-bytecode atom-retention walk + the frame's `current_function`
+    /// ref). With that external root the local dup/free guard is pure redundancy
+    /// (the atom cannot reach ref_count 0 under a GC from the shape allocations),
+    /// so elide it. qjs add_property likewise relies on the single caller-held
+    /// atom ref through add_shape_property (the one owning JS_DupAtom) and has no
+    /// per-property guard. MUST NOT be used with a transient/just-interned atom
+    /// that has no other root than the (removed) guard.
+    pub fn appendPreparedPropertyEntryTrusted(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
+        return self.appendPreparedPropertyEntryImpl(true, rt, atom_id, entry_flags, slot);
+    }
+
+    inline fn appendPreparedPropertyEntryImpl(self: *Object, comptime caller_holds_atom_ref: bool, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
+        // Root the atom across the shape allocations below unless the caller
+        // already holds a live ref. The dup/free must span the WHOLE function
+        // (defer at function scope), so gate via comptime rather than a runtime
+        // `if` block — a `defer` inside an `if` would fire at the block's end,
+        // before the allocations it must protect.
+        if (!caller_holds_atom_ref) _ = rt.atoms.dup(atom_id);
+        defer if (!caller_holds_atom_ref) rt.atoms.free(atom_id);
         var slot_owned = true;
         errdefer if (slot_owned) destroyPropertySlot(rt, atom_id, entry_flags, slot);
 
@@ -9716,11 +9761,18 @@ pub const Object = struct {
             }
         };
 
-        const array_index = array.arrayIndexFromAtom(&rt.atoms, atom_id);
-        if (array_index != null) {
+        // Only the boolean "is this atom an array index?" is needed here (the
+        // index value is never consumed): `markIndexedProperties` is a flag flip
+        // and `adoptShapeForNewProperty` only tests `!= null`. Route through the
+        // lean `atomIsArrayIndex` predicate, which — unlike `arrayIndexFromAtom` —
+        // does not resolve `name()` for the common named-key case (a/b/c). qjs
+        // `add_property` (quickjs.c:9184) likewise pays only `__JS_AtomIsTaggedInt`
+        // per add for a plain object.
+        const is_array_index = rt.atoms.atomIsArrayIndex(atom_id);
+        if (is_array_index) {
             self.markIndexedProperties(rt);
         }
-        try self.adoptShapeForNewProperty(rt, atom_id, entry_flags.bits(), current_capacity, array_index);
+        try self.adoptShapeForNewProperty(rt, atom_id, entry_flags.bits(), current_capacity, is_array_index);
         if (grew_properties and old_capacity != 0) rt.memory.free(property.Entry, old_properties);
         inserted = false;
     }
@@ -9737,7 +9789,7 @@ pub const Object = struct {
         rt.shapes.release(old_shape);
     }
 
-    fn adoptShapeForNewProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, flags: u6, property_capacity: usize, array_index: ?u32) !void {
+    fn adoptShapeForNewProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, flags: u6, property_capacity: usize, is_array_index: bool) !void {
         // No local atom guard: the sole caller `appendPreparedPropertyEntry`
         // already holds an `atoms.dup(atom_id)` guard live across this entire
         // call (its `defer atoms.free` runs only after we return), so `atom_id`
@@ -9749,7 +9801,7 @@ pub const Object = struct {
         // FAM grow inside reserveProperties/addProperty may relocate it; pass
         // &self.shape_ref so the new address flows back (qjs resize_properties
         // updates p->shape through `JSShape **psh`).
-        if (array_index != null) {
+        if (is_array_index) {
             try self.ensureUniqueShapeForMutation(rt);
             try rt.shapes.reserveProperties(&self.shape_ref, property_capacity);
             try rt.shapes.addProperty(&self.shape_ref, atom_id, flags);
@@ -9989,6 +10041,20 @@ pub const Object = struct {
         if (flags.kind != .data or !flags.writable) return null;
         const entry = &self.prop_values[lookup.index];
         return .{ .index = lookup.index, .flags = flags, .value = &entry.slot.data };
+    }
+
+    /// Trusted-index dedup probe for the object-literal define fast path.
+    /// Returns just the property index (all `definePlainDataPropertyKnownFast`
+    /// needs), routed through `findPropertyProbeTrusted` so release builds drop
+    /// the runtime `steps < prop_count` / double-bounds guards that `findProperty`
+    /// carries. Faithful to qjs `find_own_property` (quickjs.c:6135), which is
+    /// `force_inline` and trusts the shape hash-chain invariant (every chained
+    /// index is `< prop_count` and non-cyclic). The get/set fast paths already
+    /// route the exact same shapes through the trusted probe, so no additional
+    /// invariant is assumed here.
+    fn findPropertyIndexTrusted(self: *const Object, atom_id: atom.Atom) ?usize {
+        const probe = self.findPropertyProbeTrusted(atom_id) orelse return null;
+        return probe.index;
     }
 
     pub fn findProperty(self: *const Object, atom_id: atom.Atom) ?usize {
