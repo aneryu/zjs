@@ -6266,7 +6266,7 @@ pub const parser_core = struct {
                     }
                     if (use_reference_snapshot) {
                         try emitPutRefValue(s, flags.result_needed);
-                    } else if (flags.result_needed or !isNonLexicalBinding(s, v.atom)) {
+                    } else if (flags.result_needed) {
                         try s.emitOp(opcode.op.dup);
                         try s.emitScopePutVar(v.atom);
                     } else {
