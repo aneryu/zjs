@@ -1964,8 +1964,11 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
     try std.testing.expectEqual(heap_bytes, after_free.large_allocated_bytes);
     try std.testing.expectEqual(@as(usize, 0), after_free.heap_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), after_free.large_object_bytes);
+    // Large-space committed follows live_bytes to zero the moment the payload is
+    // freed (derived on demand); the freed bytes are returned to the backing
+    // allocator directly, so there is no separately-tracked decommit hysteresis.
     try std.testing.expectEqual(@as(usize, 0), after_free.large_committed_bytes);
-    try std.testing.expect(after_free.decommitted_bytes >= heap_bytes);
+    try std.testing.expectEqual(@as(usize, 0), after_free.decommitted_bytes);
 }
 
 fn observedGcCapacityBytes(before_capacity: usize, after_capacity: usize) usize {

@@ -49,9 +49,6 @@ pub const Policy = struct {
     cgroup_soft_ratio_per_mille: usize = 0,
     cgroup_hard_ratio_per_mille: usize = 0,
 
-    decommit_empty_pages: bool = true,
-    retain_hot_empty_pages: usize = 64,
-
     enable_concurrent_mark: bool = false,
     enable_concurrent_sweep: bool = false,
     enable_selective_evacuation: bool = false,
@@ -73,7 +70,6 @@ pub const Policy = struct {
                 policy.old_heap_growth_factor = 1.3;
                 policy.callback_slice_budget_ns = 300_000;
                 policy.idle_slice_budget_ns = 5_000_000;
-                policy.decommit_empty_pages = true;
                 policy.external_weight = 12;
                 policy.native_cleanup_slice_jobs = 16;
                 policy.cgroup_soft_ratio_per_mille = 850;
@@ -213,50 +209,43 @@ pub const SpaceAccount = struct {
     evacuation_candidate_page_count: usize = 0,
     sweep_cursor_page: usize = 0,
 
+    // qjs-aligned hot path: mirror rt->malloc_size / rt->malloc_count by tracking
+    // only live_bytes (quickjs.c:2160 js_def_malloc bumps a single scalar and
+    // delegates all page management to the system allocator). The committed/free
+    // page geometry that used to be maintained on every alloc/free is now derived
+    // from live_bytes on demand in refreshPageState (statsSnapshot / Debug verify
+    // only). This also tracks the slab's real behaviour more faithfully: the
+    // SmallObjectSlab eagerly rawFrees an arena the moment it empties (memory.zig),
+    // so there is no retained-empty-page hysteresis to carry on the hot path.
     fn recordAlloc(self: *SpaceAccount, bytes: usize) void {
         if (bytes == 0) return;
         self.live_bytes = std.math.add(usize, self.live_bytes, bytes) catch std.math.maxInt(usize);
-        if (self.free_bytes >= bytes) {
-            self.free_bytes -= bytes;
-            return;
-        }
-
-        const needed = bytes - self.free_bytes;
-        self.free_bytes = 0;
-        const committed = alignForwardSaturating(needed, logical_page_size);
-        self.committed_bytes = std.math.add(usize, self.committed_bytes, committed) catch std.math.maxInt(usize);
-        if (committed > needed) {
-            self.free_bytes = std.math.add(usize, self.free_bytes, committed - needed) catch std.math.maxInt(usize);
-        }
     }
 
-    fn recordFree(self: *SpaceAccount, bytes: usize, retain_hot_empty_pages: usize, decommit_empty_pages: bool) void {
+    fn recordFree(self: *SpaceAccount, bytes: usize) void {
         if (bytes == 0) return;
         self.live_bytes -|= bytes;
-        self.free_bytes = std.math.add(usize, self.free_bytes, bytes) catch std.math.maxInt(usize);
-        if (decommit_empty_pages) self.trimFreePages(retain_hot_empty_pages);
-    }
-
-    fn trimFreePages(self: *SpaceAccount, retain_hot_empty_pages: usize) void {
-        const retain_bytes = std.math.mul(usize, retain_hot_empty_pages, logical_page_size) catch std.math.maxInt(usize);
-        if (self.free_bytes <= retain_bytes) return;
-        const releasable = alignDown(self.free_bytes - retain_bytes, logical_page_size);
-        if (releasable == 0) return;
-        self.free_bytes -= releasable;
-        self.committed_bytes -|= releasable;
-        self.decommitted_bytes = std.math.add(usize, self.decommitted_bytes, releasable) catch std.math.maxInt(usize);
     }
 
     fn fragmentationPerMille(self: SpaceAccount) usize {
         return ratioPerMille(self.free_bytes, self.committed_bytes);
     }
 
+    // Derive the page-geometry diagnostics from live_bytes on demand (qjs has no
+    // page geometry; this mirrors JS_ComputeMemoryUsage recomputing usage from the
+    // object graph). committed = live rounded up to logical pages, free = the
+    // intra-page slack; there is no retained-empty-page or virtual-decommit
+    // hysteresis because the slab returns empty arenas eagerly, so committed
+    // tracks live exactly (rounded to a page).
     fn refreshPageState(self: *SpaceAccount, fragmentation_trigger_per_mille: usize) void {
-        const committed_pages = self.committedPageCount();
-        const empty_pages = @min(committed_pages, self.free_bytes / logical_page_size);
+        const committed = alignForwardSaturating(self.live_bytes, logical_page_size);
+        self.committed_bytes = committed;
+        self.free_bytes = committed -| self.live_bytes;
+        self.decommitted_bytes = 0;
+        const committed_pages = committed / logical_page_size;
         const live_pages = @min(committed_pages, alignForwardSaturating(self.live_bytes, logical_page_size) / logical_page_size);
-        self.empty_page_count = empty_pages;
-        self.decommitted_page_count = self.decommitted_bytes / logical_page_size;
+        self.empty_page_count = @min(committed_pages, self.free_bytes / logical_page_size);
+        self.decommitted_page_count = 0;
         self.full_page_count = @min(live_pages, self.live_bytes / logical_page_size);
         self.allocating_page_count = if (live_pages > self.full_page_count) 1 else 0;
         const fragmented_pages = committed_pages -| self.full_page_count -| self.empty_page_count -| self.allocating_page_count;
@@ -312,10 +301,6 @@ fn alignForwardSaturating(value: usize, alignment: usize) usize {
     const rem = value % alignment;
     if (rem == 0) return value;
     return std.math.add(usize, value, alignment - rem) catch std.math.maxInt(usize);
-}
-
-fn alignDown(value: usize, alignment: usize) usize {
-    return value - (value % alignment);
 }
 
 pub const BlockFlags = packed struct(u8) {
@@ -477,8 +462,6 @@ pub const InvariantError = error{
     LargeObjectBytesMismatch,
     OldSpaceLiveBytesMismatch,
     LargeSpaceLiveBytesMismatch,
-    OldSpaceCommittedBytesMismatch,
-    LargeSpaceCommittedBytesMismatch,
     OldSpacePageStateMismatch,
     LargeSpacePageStateMismatch,
     DuplicateExternalMemoryToken,
@@ -861,8 +844,11 @@ pub const Registry = struct {
     }
 
     pub fn decommitEmptyPagesNow(self: *Registry) void {
-        self.old_space.trimFreePages(0);
-        self.large_space.trimFreePages(0);
+        // The SmallObjectSlab returns an arena to the backing allocator the moment
+        // it empties (memory.zig free()), so there are no retained empty pages for
+        // the GC layer to hand back here. Page geometry is derived from live_bytes
+        // on demand, so all this does now is refresh the diagnostics for an
+        // urgent-pressure caller (mirrors qjs delegating reclaim to system malloc).
         self.refreshSpacePageState();
     }
 
@@ -1159,11 +1145,12 @@ pub const Registry = struct {
         // old_live_bytes / large_object_bytes / old_allocated_bytes /
         // old_alloc_count are all pure functions of the space accounts + the
         // large_* bucket; every one is recomputed lazily in statsSnapshot
-        // (JS_ComputeMemoryUsage). recordSpaceAlloc still maintains
-        // {old,large}_space.live_bytes and the committed/free page hysteresis
-        // (needed by the incremental sweep and the Debug verifyHeapAccounting
-        // cross-check); its steady-state cost is just live_bytes += / free_bytes
-        // -= because freed pages replenish free_bytes.
+        // (JS_ComputeMemoryUsage). recordSpaceAlloc now only bumps
+        // {old,large}_space.live_bytes; the committed/free page geometry is no
+        // longer maintained per-alloc. It is derived from live_bytes on demand in
+        // refreshPageState (statsSnapshot / incremental sweep / Debug verify),
+        // mirroring qjs which tracks a single rt->malloc_size scalar and delegates
+        // page management to the system allocator.
         self.stats.allocated_bytes = std.math.add(usize, self.stats.allocated_bytes, bytes) catch std.math.maxInt(usize);
         self.stats.alloc_count +|= 1;
         self.recordSpaceAlloc(is_large, bytes);
@@ -1179,7 +1166,8 @@ pub const Registry = struct {
         if (header.meta().size_class == 0 or bytes == 0) return;
         const is_large = self.isLargeAllocation(bytes);
         // Live-bytes bookkeeping lives entirely in the space accounts now (see
-        // recordHeapAlloc); the free path only replenishes free_bytes / trims.
+        // recordHeapAlloc); the free path just decrements live_bytes. Page
+        // geometry is derived lazily in refreshPageState, not trimmed here.
         self.recordSpaceFree(is_large, bytes);
         header.meta().size_class = 0;
     }
@@ -1234,9 +1222,9 @@ pub const Registry = struct {
 
     fn recordSpaceFree(self: *Registry, is_large: bool, bytes: usize) void {
         if (is_large) {
-            self.large_space.recordFree(bytes, 0, self.policy.decommit_empty_pages);
+            self.large_space.recordFree(bytes);
         } else {
-            self.old_space.recordFree(bytes, self.policy.retain_hot_empty_pages, self.policy.decommit_empty_pages);
+            self.old_space.recordFree(bytes);
         }
     }
 
@@ -1480,8 +1468,10 @@ pub const Registry = struct {
         if (accounted_external_bytes != self.stats.external_bytes) return error.ExternalTokenBytesMismatch;
         if (old_live_bytes != self.old_space.live_bytes) return error.OldSpaceLiveBytesMismatch;
         if (large_object_bytes != self.large_space.live_bytes) return error.LargeSpaceLiveBytesMismatch;
-        if (self.old_space.live_bytes +| self.old_space.free_bytes > self.old_space.committed_bytes) return error.OldSpaceCommittedBytesMismatch;
-        if (self.large_space.live_bytes +| self.large_space.free_bytes > self.large_space.committed_bytes) return error.LargeSpaceCommittedBytesMismatch;
+        // committed_bytes / free_bytes are derived from live_bytes on demand
+        // (refreshPageState), so live + free == committed holds by construction —
+        // there is no independently-maintained committed total left to cross-check
+        // here. spacePageStateMatches still verifies the derivation is idempotent.
         if (!self.spacePageStateMatches(self.old_space)) return error.OldSpacePageStateMismatch;
         if (!self.spacePageStateMatches(self.large_space)) return error.LargeSpacePageStateMismatch;
     }

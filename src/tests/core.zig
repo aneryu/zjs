@@ -3074,15 +3074,22 @@ test "gc live heap stats drop when object is released" {
     try std.testing.expectEqual(@as(usize, 0), released.heap_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.old_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.large_object_bytes);
-    try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), released.heap_committed_bytes);
-    try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), released.empty_page_bytes);
-    try std.testing.expectEqual(@as(usize, 1000), released.old_fragmentation_ratio);
+    // Page geometry is derived from live_bytes on demand, and the SmallObjectSlab
+    // returns an arena to the backing allocator the moment it empties, so a
+    // fully-freed heap reports zero committed/empty/fragmentation immediately —
+    // there is no retained-empty-page hysteresis (mirrors qjs delegating reclaim
+    // to system malloc).
+    try std.testing.expectEqual(@as(usize, 0), released.heap_committed_bytes);
+    try std.testing.expectEqual(@as(usize, 0), released.empty_page_bytes);
+    try std.testing.expectEqual(@as(usize, 0), released.old_fragmentation_ratio);
 
+    // decommitEmptyPagesNow is now a diagnostics refresh: the slab already
+    // returned the memory, so nothing is left to hand back.
     rt.gc.decommitEmptyPagesNow();
     const decommitted = rt.gcStats();
     try std.testing.expectEqual(@as(usize, 0), decommitted.heap_committed_bytes);
     try std.testing.expectEqual(@as(usize, 0), decommitted.empty_page_bytes);
-    try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), decommitted.decommitted_bytes);
+    try std.testing.expectEqual(@as(usize, 0), decommitted.decommitted_bytes);
 }
 
 test "external memory token registry audits duplicate releases and leaks" {
