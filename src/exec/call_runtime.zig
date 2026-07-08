@@ -29,7 +29,7 @@ const libc = @cImport({
 const op = bytecode.opcode.op;
 const eval_ret_atom: core.Atom = 82;
 const runWithArgs = zjs_vm.runWithArgs;
-const runWithArgsState = zjs_vm.runWithArgsState;
+const runWithCallEnv = zjs_vm.runWithCallEnv;
 const exceptions = @import("exceptions.zig");
 
 const string_ops = @import("string_ops.zig");
@@ -5134,7 +5134,17 @@ pub fn indirectEval(
         }
         var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
         defer nested_stack.deinit(ctx.runtime);
-        break :blk runWithArgsState(ctx, &nested_stack, &compiled.function, eval_global.value(), &.{}, &.{}, output, eval_global, true, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), true, true, core.JSValue.undefinedValue(), null, false) catch |err| exception_ops.normalizeEvalRuntimeError(err);
+        break :blk runWithCallEnv(.{
+            .ctx = ctx,
+            .stack = &nested_stack,
+            .function = &compiled.function,
+            .initial_this_value = eval_global.value(),
+            .output = output,
+            .global = eval_global,
+            .break_var_ref_cycles_on_exit = true,
+            .eval_global_var_bindings = true,
+            .is_eval_code = true,
+        }) catch |err| exception_ops.normalizeEvalRuntimeError(err);
     };
 
     if (use_global_lexicals) {
@@ -5567,7 +5577,26 @@ pub fn callFunctionBytecodeModeState(
     // the queue machine (exec/async_generator.zig execBody) — no promise
     // wrapping here (qjs async_func_resume returns the raw value/ret code,
     // quickjs.c:20951).
-    return runWithArgsState(ctx, &nested_stack, nested, effective_this, args, combined_var_refs, output, global, false, fb_runtime_strict, stop_on_yield, &.{}, &.{}, eval_var_ref_names, eval_var_refs, &.{}, &.{}, &.{}, &.{}, generator_state, resume_value, stop_before_pc, current_function_value, new_target_value, constructor_this_value, false, false, core.JSValue.undefinedValue(), null, false);
+    return runWithCallEnv(.{
+        .ctx = ctx,
+        .stack = &nested_stack,
+        .function = nested,
+        .initial_this_value = effective_this,
+        .args = args,
+        .var_refs = combined_var_refs,
+        .output = output,
+        .global = global,
+        .strict_unresolved_get_var = fb_runtime_strict,
+        .stop_on_yield = stop_on_yield,
+        .eval_var_ref_names = eval_var_ref_names,
+        .eval_var_refs = eval_var_refs,
+        .generator_state = generator_state,
+        .resume_value = resume_value,
+        .stop_before_pc = stop_before_pc,
+        .current_function_value = current_function_value,
+        .new_target_value = new_target_value,
+        .constructor_this_value = constructor_this_value,
+    });
 }
 
 pub fn runGeneratorParameterInit(
@@ -5634,7 +5663,22 @@ pub fn runGeneratorParameterInit(
 
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
-    return runWithArgsState(ctx, &nested_stack, &nested, this_value, args, var_refs, output, global, false, true, false, &.{}, &.{}, object.functionEvalLocalNames(), object.functionEvalLocalRefs(), &.{}, &.{}, &.{}, &.{}, object, null, fb.generatorBodyPc(), current_function_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), null, false);
+    return runWithCallEnv(.{
+        .ctx = ctx,
+        .stack = &nested_stack,
+        .function = &nested,
+        .initial_this_value = this_value,
+        .args = args,
+        .var_refs = var_refs,
+        .output = output,
+        .global = global,
+        .strict_unresolved_get_var = true,
+        .eval_var_ref_names = object.functionEvalLocalNames(),
+        .eval_var_refs = object.functionEvalLocalRefs(),
+        .generator_state = object,
+        .stop_before_pc = fb.generatorBodyPc(),
+        .current_function_value = current_function_value,
+    });
 }
 
 pub fn qjsGeneratorNext(

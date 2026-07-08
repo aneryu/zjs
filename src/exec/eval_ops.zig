@@ -11,7 +11,7 @@ const value_ops = @import("value_ops.zig");
 const zjs_vm = @import("zjs_vm.zig");
 
 const op = bytecode.opcode.op;
-const runWithArgsState = zjs_vm.runWithArgsState;
+const runWithCallEnv = zjs_vm.runWithCallEnv;
 
 const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
@@ -768,7 +768,30 @@ pub fn directEval(
     };
     const eval_with_object = directEvalWithObject(ctx.runtime, caller_function, caller_frame);
     defer eval_with_object.free(ctx.runtime);
-    const result = try runWithArgsState(ctx, &nested_stack, &compiled.function, eval_this, &.{}, direct_eval_frame_var_refs, output, global, false, eval_strict, false, run_eval_local_names, run_eval_local_slots, outer_var_refs.names, outer_var_refs.refs, inherited_local_names, inherited_locals, inherited_ref_names, inherited_refs, null, null, null, eval_current_function, eval_new_target, core.JSValue.undefinedValue(), eval_global_var_bindings, true, eval_with_object, caller_frame, false);
+    const result = try runWithCallEnv(.{
+        .ctx = ctx,
+        .stack = &nested_stack,
+        .function = &compiled.function,
+        .initial_this_value = eval_this,
+        .var_refs = direct_eval_frame_var_refs,
+        .output = output,
+        .global = global,
+        .strict_unresolved_get_var = eval_strict,
+        .eval_local_names = run_eval_local_names,
+        .eval_local_slots = run_eval_local_slots,
+        .eval_var_ref_names = outer_var_refs.names,
+        .eval_var_refs = outer_var_refs.refs,
+        .inherited_eval_local_names = inherited_local_names,
+        .inherited_eval_local_slots = inherited_locals,
+        .inherited_eval_var_ref_names = inherited_ref_names,
+        .inherited_eval_var_refs = inherited_refs,
+        .current_function_value = eval_current_function,
+        .new_target_value = eval_new_target,
+        .eval_global_var_bindings = eval_global_var_bindings,
+        .is_eval_code = true,
+        .eval_with_object = eval_with_object,
+        .eval_caller_frame = caller_frame,
+    });
     errdefer result.free(ctx.runtime);
     try publishDirectEvalVarRefs(ctx, global, caller_frame, eval_var_names, eval_var_refs, eval_in_parameter_initializer, eval_global_var_bindings);
     return result;

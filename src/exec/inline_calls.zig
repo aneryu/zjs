@@ -591,7 +591,7 @@ pub const Machine = struct {
         entry.frame = frame_mod.Frame.init(entry.function);
         errdefer entry.frame.deinit(&rt.memory, rt);
         // No per-call backtrace node: the invocation's single MachineBacktrace
-        // (zjs_vm.runWithArgsState) walks this Entry directly via the chain.
+        // (zjs_vm.runWithCallEnv) walks this Entry directly via the chain.
 
         // Mirror qjs's inline prologue for the common plain-call receiver:
         // strict keeps undefined, sloppy uses the global object. Arrow,

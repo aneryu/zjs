@@ -763,38 +763,13 @@ test "VM roots frame this symbol before derived constructor var-ref allocation" 
     var stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
     defer stack.deinit(rt);
 
-    const result = try engine.exec.zjs_vm.runWithArgsState(
-        ctx,
-        &stack,
-        &function,
-        try rt.symbolValue(this_symbol),
-        &.{},
-        &.{},
-        null,
-        global,
-        false,
-        false,
-        false,
-        &.{},
-        &.{},
-        &.{},
-        &.{},
-        &.{},
-        &.{},
-        &.{},
-        &.{},
-        null,
-        null,
-        null,
-        core.JSValue.undefinedValue(),
-        core.JSValue.undefinedValue(),
-        core.JSValue.undefinedValue(),
-        false,
-        false,
-        core.JSValue.undefinedValue(),
-        null,
-        false,
-    );
+    const result = try engine.exec.zjs_vm.runWithCallEnv(.{
+        .ctx = ctx,
+        .stack = &stack,
+        .function = &function,
+        .initial_this_value = try rt.symbolValue(this_symbol),
+        .global = global,
+    });
     defer result.free(rt);
 
     try std.testing.expectEqual(this_symbol, result.asSymbolAtom().?);
