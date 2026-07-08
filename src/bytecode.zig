@@ -7343,6 +7343,20 @@ const function_mod = struct {
         /// Precomputed bytecode-only half of simple inline-call eligibility.
         /// Call-site predicates remain checked in the exec inline-call path.
         simple_inline_eligible: bool = false,
+        /// Precomputed: NO `var_buf` local slot of this function can ever hold a
+        /// var-ref cell. In qjs a captured local (`capture_var`, quickjs.c:32907)
+        /// gets `is_captured = TRUE` for BOTH closure capture and OP_make_loc_ref
+        /// (quickjs.c:33029); zjs sets `is_captured` on closure capture but the
+        /// make_loc_ref lowering (bytecode.zig ~4723) does not, so this predicate
+        /// derives the complete "locals never boxed" set at finalize instead:
+        /// no vardef `is_captured`, no `make_loc_ref` in the code, not a derived
+        /// constructor (`this`-cell, vm_call.linkDerivedConstructorThisLocal),
+        /// and not eval/module code (direct-eval / module fill can box a caller
+        /// local). When true, the checked-loc fast handlers (opLocCheck) skip the
+        /// per-op `varRefCellFromValue` cell guard on both the slot and the
+        /// stored value — mirroring qjs, whose OP_get_loc_check/put_loc_check read
+        /// `var_buf[idx]` as a plain value with no cell test (quickjs.c:18704).
+        locals_never_boxed: bool = false,
         arg_count: u16 = 0,
         var_count: u16 = 0,
         stack_size: u16 = 0,
@@ -7615,6 +7629,34 @@ const function_mod = struct {
         }
     };
 
+    /// Precompute `BytecodeImpl.locals_never_boxed`: true when no `var_buf`
+    /// local of `fb` can ever hold a var-ref cell (see the field doc). A local
+    /// becomes a cell only via (a) closure capture, which marks the vardef
+    /// `is_captured`; (b) OP_make_loc_ref reference-taking; (c) the derived
+    /// constructor `this` cell (linkDerivedConstructorThisLocal); or (d) a
+    /// direct-eval that boxes a caller local (the caller then has has_eval_call).
+    /// Any of these disqualifies the function; otherwise every checked-loc slot
+    /// is a plain value, exactly as qjs reads `var_buf[idx]` (quickjs.c:18704).
+    fn computeLocalsNeverBoxed(fb: *const FunctionBytecode) bool {
+        if (fb.flags.is_derived_class_constructor) return false;
+        if (fb.flags.has_eval_call or fb.flags.is_indirect_eval) return false;
+        for (fb.varDefs()) |vd| {
+            if (vd.is_captured) return false;
+        }
+        const code = fb.byteCode();
+        var pc: usize = 0;
+        while (pc < code.len) {
+            const op_id = code[pc];
+            const size = opcode.sizeOf(op_id);
+            // A malformed/short opcode should never survive finalize; treat it
+            // conservatively as boxable rather than reading past the buffer.
+            if (size == 0 or pc + size > code.len) return false;
+            if (op_id == opcode.op.make_loc_ref) return false;
+            pc += size;
+        }
+        return true;
+    }
+
     /// Return a borrowed `BytecodeImpl` execution view for the current VM.
     ///
     /// The returned value does not own any slices and must not be deinitialized.
@@ -7652,6 +7694,7 @@ const function_mod = struct {
                 !fb.flags.is_class_constructor and !fb.flags.is_derived_class_constructor and
                 !fb.flags.is_arrow_function and !fb.flags.is_strict_mode and !fb.flags.runtime_strict_mode and
                 fb.flags.has_simple_parameter_list and !fb.flags.has_eval_call and fb.global_vars_len == 0,
+            .locals_never_boxed = computeLocalsNeverBoxed(fb),
             .arg_count = fb.arg_count,
             .var_count = fb.var_count,
             .stack_size = fb.stack_size,

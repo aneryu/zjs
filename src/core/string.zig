@@ -495,7 +495,6 @@ pub const String = struct {
     pub fn releaseFromHeader(rt: *JSRuntime, hdr: *gc.StringHeader) void {
         std.debug.assert(hdr.rc > 0);
         hdr.rc -= 1;
-        rt.gc.stats.rc_dec += 1;
         if (hdr.rc == 0) destroyFromHeader(rt, hdr);
     }
 
@@ -995,7 +994,6 @@ fn releaseRopeChildIntoChain(rt: *JSRuntime, child: JSValue, pending: *?*StringR
         const hdr = cnode.header();
         std.debug.assert(hdr.rc > 0);
         hdr.rc -= 1;
-        rt.gc.stats.rc_dec += 1;
         if (hdr.rc == 0) {
             cnode.chain_next = pending.*;
             pending.* = cnode;

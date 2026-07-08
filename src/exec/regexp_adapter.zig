@@ -127,3 +127,19 @@ test "JavaScript RegExp adapter compilation and execution" {
     try std.testing.expectEqual(@as(usize, 2), status.match.start);
     try std.testing.expectEqual(@as(usize, 5), status.match.end);
 }
+
+test "JavaScript RegExp adapter preserves multiple named capture groups" {
+    var compiled = try compile(std.testing.allocator, "(?<a>.)(?<b>.)(?<c>.)(?<d>.)", "");
+    defer compiled.deinit(std.testing.allocator);
+
+    const status = try regexp_bytecode.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "wxyz" }, 0);
+    try std.testing.expect(status.result == .match);
+    try std.testing.expectEqual(@as(usize, 4), status.match.capture_count);
+
+    const expected_names = [_][]const u8{ "a", "b", "c", "d" };
+    for (expected_names, 0..) |name, i| {
+        try std.testing.expectEqual(i, status.match.captures[i].start.?);
+        try std.testing.expectEqual(i + 1, status.match.captures[i].end.?);
+        try std.testing.expectEqualStrings(name, status.match.captures[i].name.?);
+    }
+}

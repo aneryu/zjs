@@ -12,7 +12,7 @@ const HostError = exceptions.HostError;
 const rejectedPromiseForRuntimeError = exception_ops.rejectedPromiseForRuntimeError;
 const qjsPromiseAggregateError = exception_ops.qjsPromiseAggregateError;
 const qjsPromiseErrorValue = exception_ops.qjsPromiseErrorValue;
-const runWithArgsState = zjs_vm.runWithArgsState;
+const runWithCallEnv = zjs_vm.runWithCallEnv;
 const exceptions = @import("exceptions.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 
@@ -2842,7 +2842,23 @@ pub fn qjsAsyncFunctionRunState(
     const async_global = objectRealmGlobal(continuation) orelse global;
     const current_function_value = continuation.generatorCurrentFunction() orelse continuation.value();
     const fb_runtime_strict = fb.flags.is_strict_mode or fb.flags.runtime_strict_mode;
-    return runWithArgsState(ctx, &nested_stack, nested, continuation.generatorThis() orelse core.JSValue.undefinedValue(), continuation.generatorArgs(), continuation.functionCapturesSlot().*, output, async_global, false, fb_runtime_strict, false, &.{}, &.{}, continuation.functionEvalLocalNames(), continuation.functionEvalLocalRefs(), &.{}, &.{}, &.{}, &.{}, continuation, resume_value, null, current_function_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), null, true);
+    return runWithCallEnv(.{
+        .ctx = ctx,
+        .stack = &nested_stack,
+        .function = nested,
+        .initial_this_value = continuation.generatorThis() orelse core.JSValue.undefinedValue(),
+        .args = continuation.generatorArgs(),
+        .var_refs = continuation.functionCapturesSlot().*,
+        .output = output,
+        .global = async_global,
+        .strict_unresolved_get_var = fb_runtime_strict,
+        .eval_var_ref_names = continuation.functionEvalLocalNames(),
+        .eval_var_refs = continuation.functionEvalLocalRefs(),
+        .generator_state = continuation,
+        .resume_value = resume_value,
+        .current_function_value = current_function_value,
+        .suspend_on_module_await = true,
+    });
 }
 
 pub fn qjsAsyncFunctionRunAndSettle(

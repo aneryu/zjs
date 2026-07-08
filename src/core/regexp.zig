@@ -16,7 +16,6 @@
 const std = @import("std");
 
 const unicode = @import("../libs/unicode.zig");
-const regexp_lib = @import("../libs/regexp.zig");
 
 pub const ClassRangeAtomKind = enum { single, character_class };
 
@@ -247,7 +246,7 @@ pub fn consumeUnicodePropertyEscape(pattern: []const u8, index: *usize) bool {
     while (scan < pattern.len and pattern[scan] != '}') : (scan += 1) {}
     if (scan == name_start or scan >= pattern.len or pattern[scan] != '}') return true;
     const name = pattern[name_start..scan];
-    if (!regexp_lib.isSupportedUnicodePropertyExpression(name)) return true;
+    if (!unicode.regexp_properties.isSupportedUnicodePropertyExpression(name)) return true;
     index.* = scan + 1;
     return false;
 }

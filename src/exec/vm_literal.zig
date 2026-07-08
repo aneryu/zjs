@@ -25,6 +25,43 @@ pub noinline fn object(
     try stack.pushOwned(value);
 }
 
+/// Frameless OP_object fast path (qjs CASE(OP_object): `*sp++ = JS_NewObject(ctx)`,
+/// quickjs.c:17961). Creates a bare `{}` and returns it OWNED for the handler to push
+/// onto the register-resident sp, so no `publish`/stack round-trip is needed — object
+/// creation runs no user code and captures no backtrace (qjs sets no `sf->cur_pc`
+/// here), only OOM can fail (→ handler routes to the cold shell). Mirrors the object()
+/// body minus the stack.pushOwned so the value stays in a register.
+pub inline fn newPlainObjectValue(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
+    const created = try core.Object.create(ctx.runtime, core.class.ids.object, object_ops.objectPrototypeFromGlobal(ctx.runtime, global));
+    return created.value();
+}
+
+/// Frameless OP_define_field fast leg (qjs CASE(OP_define_field): a single
+/// JS_DefinePropertyValue on sp[-2] with sp[-1], quickjs.c:19269). Handles ONLY the
+/// plain-data-add case the cold defineField's own fast leg handles (vm_literal.zig
+/// defineField:184-198): a non-refcounted `value` (so the shape-transition alloc/GC
+/// needs no value rooting — an int/bool/undefined cannot be collected) and a plain,
+/// extensible, non-array, non-exotic, non-proxy `obj`. Returns true on a completed
+/// add (handler pops the value + frees the popped obj slot); false routes to the cold
+/// shell (arrays, private atoms, proxies, non-extensible, setters, refcounted values —
+/// every backtrace/user-code-capable case stays on the publishing path). `value` is
+/// CONSUMED into the property slot on success (like the cold leg's Descriptor.data).
+pub inline fn defineFieldFast(rt: *core.JSRuntime, obj: core.JSValue, atom_id: core.Atom, value: core.JSValue) bool {
+    if (value.requiresRefCount()) return false;
+    if (rt.atoms.mightBePrivate(atom_id)) return false;
+    const target = object_ops.objectFromValue(obj) orelse return false;
+    // qjs OP_define_field → JS_DefinePropertyValue with JS_PROP_THROW: only a plain
+    // ordinary object with room to add a data property takes the in-CASE fast add;
+    // everything exotic/proxy/array/non-extensible defers to the general define.
+    if (target.class_id != core.class.ids.object) return false;
+    if (target.hasExoticMethods()) return false;
+    if (target.proxyTarget() != null) return false;
+    if (target.flags.is_array) return false;
+    if (!target.flags.extensible) return false;
+    target.definePlainDataPropertyKnownFast(rt, atom_id, core.Descriptor.data(value, true, true, true)) catch return false;
+    return true;
+}
+
 pub noinline fn arrayFrom(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,

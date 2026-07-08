@@ -506,46 +506,44 @@ pub noinline fn callMethod(
             }
         }
     }
-    var inline_args: [4]core.JSValue = undefined;
-    const args_buf: []core.JSValue = if (argc <= inline_args.len)
-        inline_args[0..argc]
-    else
-        try ctx.runtime.memory.alloc(core.JSValue, argc);
-    defer if (argc > inline_args.len) ctx.runtime.memory.free(core.JSValue, args_buf);
-    var remaining: usize = argc;
-    while (remaining > 0) {
-        remaining -= 1;
-        args_buf[remaining] = try stack.pop();
-    }
-    defer for (args_buf) |arg| arg.free(ctx.runtime);
-    const func = try stack.pop();
-    defer func.free(ctx.runtime);
-    const obj = try stack.pop();
-    defer obj.free(ctx.runtime);
-    const fast_result = fastNativeMethodCall(ctx, output, global, obj, func, args_buf, function, frame) catch |err| {
+    // Zero-copy method-call sequence (mirrors execCall + qjs OP_call_method):
+    // borrow `obj | func | args...` directly from the caller-owned operand stack
+    // instead of popping them into a duplicated staging buffer. The region stays
+    // on the stack (rooting obj/func/args for the whole call), and is popped and
+    // released only after the call completes.
+    const total: usize = @as(usize, argc) + 2;
+    if (stack.values.len < total) return error.StackUnderflow;
+    const region_base = stack.values.len - total;
+    const obj = stack.values[region_base];
+    const func = stack.values[region_base + 1];
+    const args: []const core.JSValue = stack.values[region_base + 2 ..][0..argc];
+    const fast_result = fastNativeMethodCall(ctx, output, global, obj, func, args, function, frame) catch |err| {
+        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     if (fast_result) |value| {
+        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
         if (dropUnusedCallResult(ctx, function, frame, value)) return .done;
-        errdefer value.free(ctx.runtime);
-        try stack.pushOwned(value);
+        stack.pushOwnedAssumeCapacity(value);
         return .done;
     }
-    const maybe_array_result = collection_vm.qjsArrayMethodFastCall(ctx, output, global, obj, func, args_buf, function, frame) catch |err| {
+    const maybe_array_result = collection_vm.qjsArrayMethodFastCall(ctx, output, global, obj, func, args, function, frame) catch |err| {
+        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     const result = if (maybe_array_result) |array_result|
         array_result
     else
-        call_runtime.callValueOrBytecodeClassMode(ctx, output, global, obj, func, args_buf, function, frame, class_init_ops.isCurrentSuperConstructor(ctx, frame, func)) catch |err| {
+        call_runtime.callValueOrBytecodeClassModePreRooted(ctx, output, global, obj, func, args, function, frame, class_init_ops.isCurrentSuperConstructor(ctx, frame, func)) catch |err| {
+            call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
             if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
+    call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
     if (dropUnusedCallResult(ctx, function, frame, result)) return .done;
-    errdefer result.free(ctx.runtime);
-    try stack.pushOwned(result);
+    stack.pushOwnedAssumeCapacity(result);
     return .done;
 }
 
@@ -595,40 +593,40 @@ pub noinline fn tailCallMethod(
             }
         }
     }
-    var inline_args: [4]core.JSValue = undefined;
-    const args_buf: []core.JSValue = if (argc <= inline_args.len)
-        inline_args[0..argc]
-    else
-        try ctx.runtime.memory.alloc(core.JSValue, argc);
-    defer if (argc > inline_args.len) ctx.runtime.memory.free(core.JSValue, args_buf);
-    var remaining: usize = argc;
-    while (remaining > 0) {
-        remaining -= 1;
-        args_buf[remaining] = try stack.pop();
-    }
-    defer for (args_buf) |arg| arg.free(ctx.runtime);
-    const func = try stack.pop();
-    defer func.free(ctx.runtime);
-    const obj = try stack.pop();
-    defer obj.free(ctx.runtime);
-    const fast_result = fastNativeMethodCall(ctx, output, global, obj, func, args_buf, function, frame) catch |err| {
+    // Zero-copy method-call sequence (mirrors execCall + qjs OP_call_method):
+    // borrow `obj | func | args...` directly from the caller-owned operand stack
+    // instead of popping them into a duplicated staging buffer. The region stays
+    // on the stack (rooting obj/func/args for the whole call), and is popped and
+    // released only after the call completes.
+    const total: usize = @as(usize, argc) + 2;
+    if (stack.values.len < total) return error.StackUnderflow;
+    const region_base = stack.values.len - total;
+    const obj = stack.values[region_base];
+    const func = stack.values[region_base + 1];
+    const args: []const core.JSValue = stack.values[region_base + 2 ..][0..argc];
+    const fast_result = fastNativeMethodCall(ctx, output, global, obj, func, args, function, frame) catch |err| {
+        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .handled;
         return err;
     };
     if (fast_result) |value| {
+        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
         return .{ .return_value = value };
     }
-    const maybe_array_result = collection_vm.qjsArrayMethodFastCall(ctx, output, global, obj, func, args_buf, function, frame) catch |err| {
+    const maybe_array_result = collection_vm.qjsArrayMethodFastCall(ctx, output, global, obj, func, args, function, frame) catch |err| {
+        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .handled;
         return err;
     };
     const result = if (maybe_array_result) |array_result|
         array_result
     else
-        call_runtime.callValueOrBytecode(ctx, output, global, obj, func, args_buf, function, frame) catch |err| {
+        call_runtime.callValueOrBytecodeClassModePreRooted(ctx, output, global, obj, func, args, function, frame, false) catch |err| {
+            call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
             if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .handled;
             return err;
         };
+    call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
     return .{ .return_value = result };
 }
 
@@ -682,7 +680,20 @@ inline fn fastNativeMethodCall(
     // nativeFunctionRealmGlobalPtr() provably safe (both otherwise `unreachable` on a
     // non-.function payload — a pre-existing latent UB that only benignly misses today).
     if (function_object.class_payload_kind != core.class.PayloadKind.function) return null;
-    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return null;
+    // Divergence B: cache the resolved `*const InternalRecord` on the func-object
+    // payload so the hot call skips the per-call native-id DECODE + record-table
+    // LOOKUP, mirroring qjs `func = p->u.cfunc.c_function` (the dispatchable
+    // handle lives on the object). SAFE memoization: `native_function_id` is
+    // write-once at registration, and the resolved record is a comptime
+    // `pub const` in `rt.internal_builtins` (rodata) — program-lifetime stable,
+    // identical across runtimes, never dangles, so the memo can never go stale.
+    // A MISS falls through to null exactly as the pre-memo decode/probe did.
+    const rec = function_object.nativeRecord() orelse blk: {
+        const nref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return null;
+        const r = ctx.runtime.internalBuiltinRecord(@intCast(@intFromEnum(nref.domain)), nref.id) orelse return null;
+        function_object.nativeRecordSlot().* = r;
+        break :blk r;
+    };
     // qjs `ctx = p->u.cfunc.realm` (quickjs.c:17586): the callee realm is a DIRECT field
     // on the c_function object, one load — not the ~18-arm functionRealmGlobalPtr payload
     // chain + bound-recursion of objectRealmGlobal. The .function guard above lets us read
@@ -691,7 +702,7 @@ inline fn fastNativeMethodCall(
     // materialization) so behavior stays byte-identical.
     const function_global = (function_object.nativeFunctionRealmGlobalPtr() orelse
         object_ops.objectRealmGlobal(function_object)) orelse global;
-    return builtin_dispatch.callInternalRecord(ctx, output, function_global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame);
+    return try builtin_dispatch.callInternalRecordDirect(ctx, output, function_global, &.{}, function_object, this_value, rec, args, caller_function, caller_frame);
 }
 
 pub noinline fn apply(

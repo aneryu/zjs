@@ -286,6 +286,23 @@ pub const Table = struct {
         return rec;
     }
 
+    /// Pointer-only view of a class record for hot paths (object creation).
+    /// qjs `JS_NewObjectFromShape` reads `ctx->rt->class_array[class_id]` fields
+    /// in place (`.exotic`, ...) — it never materializes the whole `JSClass` on
+    /// the stack. Mirror that: return `*const Record` so callers touch just the
+    /// fields they need (payload_kind / payload_finalizer / exotic) via scalar
+    /// loads instead of an 88B by-value SIMD block copy. The record table is
+    /// static once classes are registered; the pointer is only used transiently
+    /// within the caller (never stored across a class-registration point), so it
+    /// is stable and safe. Returns null for unregistered / out-of-range ids
+    /// exactly like `record`.
+    pub fn recordPtr(self: *const Table, id: ClassId) ?*const Record {
+        if (id >= self.records.len) return null;
+        const rec = &self.records[id];
+        if (!rec.isRegistered()) return null;
+        return rec;
+    }
+
     pub fn runFinalizer(self: *const Table, id: ClassId) bool {
         const rec = self.record(id) orelse return false;
         const finalizer = rec.finalizer orelse return false;

@@ -92,37 +92,6 @@ pub fn expectArray(value: JSValue) !*Object {
     return object;
 }
 
-const RootedValueCopies = struct {
-    values: []JSValue,
-    roots: []runtime.ValueRootValue,
-
-    fn init(rt: *JSRuntime, source: []const JSValue) !RootedValueCopies {
-        const values = try rt.memory.alloc(JSValue, source.len);
-        errdefer rt.memory.free(JSValue, values);
-        @memcpy(values, source);
-
-        const roots = try rt.memory.alloc(runtime.ValueRootValue, source.len);
-        errdefer rt.memory.free(runtime.ValueRootValue, roots);
-        for (values, 0..) |*value, index| {
-            roots[index] = .{ .value = value };
-        }
-
-        return .{ .values = values, .roots = roots };
-    }
-
-    fn deinit(self: RootedValueCopies, rt: *JSRuntime) void {
-        rt.memory.free(runtime.ValueRootValue, self.roots);
-        rt.memory.free(JSValue, self.values);
-    }
-};
-
-fn valuesRequireNoRoots(values: []const JSValue) bool {
-    for (values) |value| {
-        if (value.requiresRefCount()) return false;
-    }
-    return true;
-}
-
 /// Construct a dense array from already-evaluated literal element `values` for
 /// the `array_from`/array-literal opcode. Pure (only core `Object` array
 /// primitives + descriptor ops), so it lives in engine core; `src/exec/vm_literal.zig`
@@ -131,25 +100,30 @@ fn valuesRequireNoRoots(values: []const JSValue) bool {
 /// length semantics — a one-element `[n]` literal yields `[n]`, not a length-n
 /// hole array — so it is intentionally not routed through the Array construct
 /// record.
+///
+/// GC rooting: the caller (`vm_literal.zig`) holds `values` in owned operand
+/// storage (a stack buffer or heap `alloc`) for the whole call, and this
+/// function only *borrows* them (each element is `dup()`-ed into the new array).
+/// QuickJS relies on the same invariant — the array-literal opcodes build the
+/// result while the source elements still sit on the VM operand stack, which
+/// `[stack_buf, sp)` root scanning covers in place. We mirror that by
+/// registering the borrowed `values` slice as a single `.mutable` root slice
+/// (traced read-only by the non-moving cycle collector, runtime.zig:1265),
+/// instead of the previous per-value `requiresRefCount` pre-scan + a rooted
+/// dual-allocation copy. Immediate-only literals cost the same single
+/// linked-list push as refcounted ones.
 pub fn constructLiteralWithPrototype(rt: *JSRuntime, values: []const JSValue, prototype: ?*Object) !JSValue {
-    if (valuesRequireNoRoots(values)) {
-        const object = try Object.createArray(rt, prototype);
-        var object_owned = true;
-        errdefer if (object_owned) Object.destroyFromHeader(rt, &object.header);
-
-        if (try object.initDenseArrayLiteralValuesAssumingEmpty(rt, values)) {
-            object_owned = false;
-            return object.value();
-        }
-        Object.destroyFromHeader(rt, &object.header);
-        object_owned = false;
-    }
-
-    const rooted = try RootedValueCopies.init(rt, values);
-    defer rooted.deinit(rt);
+    // The backing storage is mutable (caller-owned stack/heap buffer); the
+    // const on the borrow is a contract, not a guarantee the memory is
+    // read-only. The GC visitor only reads these slots to keep referenced
+    // objects marked, so registering them as a `.mutable` slice is sound.
+    var values_root: []JSValue = @constCast(values);
+    var root_slices = [_]runtime.ValueRootSlice{
+        .{ .mutable = &values_root },
+    };
     const root_frame = runtime.ValueRootFrame{
         .previous = rt.active_value_roots,
-        .values = rooted.roots,
+        .slices = &root_slices,
     };
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
@@ -157,10 +131,10 @@ pub fn constructLiteralWithPrototype(rt: *JSRuntime, values: []const JSValue, pr
     const object = try Object.createArray(rt, prototype);
     errdefer Object.destroyFromHeader(rt, &object.header);
 
-    if (try object.initDenseArrayLiteralValuesAssumingEmpty(rt, rooted.values)) return object.value();
+    if (try object.initDenseArrayLiteralValuesAssumingEmpty(rt, values)) return object.value();
 
-    try object.reserveDenseArrayElements(rt, @intCast(rooted.values.len));
-    for (rooted.values, 0..) |value, index| {
+    try object.reserveDenseArrayElements(rt, @intCast(values.len));
+    for (values, 0..) |value, index| {
         const atom_id = atom.atomFromUInt32(@intCast(index));
         if (try object.appendDenseArrayLiteralIndex(rt, @intCast(index), value)) continue;
         try object.defineOwnProperty(rt, atom_id, Descriptor.data(value, true, true, true));

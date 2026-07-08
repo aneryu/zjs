@@ -619,7 +619,6 @@ pub const JSValue = extern struct {
         const hdr = node.header();
         std.debug.assert(hdr.rc > 0);
         hdr.rc -= 1;
-        rt.gc.stats.rc_dec += 1;
         if (hdr.rc == 0) string_mod.destroyRope(rt, node);
     }
 

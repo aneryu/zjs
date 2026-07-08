@@ -425,7 +425,15 @@ pub const Registry = struct {
         shape_ptr.* = new_shape;
     }
 
-    pub fn addProperty(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6) !void {
+    // `inline` collapses the object-literal define stack toward qjs's tight
+    // 2-frame add_property -> add_shape_property. zjs's shape-build spans
+    // Object.appendPreparedPropertyEntry -> adoptShapeForNewProperty (inlined)
+    // -> Registry.addProperty -> Registry.appendProperty; folding this thin
+    // hash-transition wrapper and appendProperty into the caller removes the
+    // per-property call-frame prologue/epilogue + arg marshaling (3M+ crossings
+    // on `o={a,b,c}` loops). Pure codegen hint — semantically identical, faithful
+    // to qjs where add_shape_property is a leaf the compiler folds hot.
+    pub inline fn addProperty(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6) !void {
         try self.appendProperty(shape_ptr, atom_id, flags);
         const shape = shape_ptr.*;
         const old_hash = shape.hash;
@@ -454,7 +462,14 @@ pub const Registry = struct {
         std.debug.assert(old.header.meta().rc == 1);
         var target_capacity: usize = if (old.prop_size == 0) initial_prop_size else old.prop_size;
         while (target_capacity < baseline_props.len) : (target_capacity *= 2) {}
-        const bucket_count: usize = @max(initial_hash_size, nextPowerOfTwo(baseline_props.len + baseline_deleted_count + 1));
+        // Keep bucket_count >= prop_size (qjs resize_properties invariant): size the
+        // table for the deleted-inclusive baseline, then lockstep-grow it to cover
+        // the (possibly larger) retained prop capacity so a later append needs no
+        // rehash.
+        const bucket_count: usize = lockstepBucketCount(
+            @max(initial_hash_size, nextPowerOfTwo(baseline_props.len + baseline_deleted_count + 1)),
+            target_capacity,
+        );
 
         // Build a fresh shape block holding the baseline layout (dup'd atoms);
         // the inline FAM forces an allocate-new + swap rather than an in-place
@@ -512,7 +527,10 @@ pub const Registry = struct {
         if (needed <= shape.prop_size) return;
         var next_capacity: usize = shape.prop_size;
         while (next_capacity < needed) : (next_capacity *= 2) {}
-        try self.relocateShape(shape_ptr, @intCast(next_capacity), shape.bucketCount());
+        // Grow the hash table alongside the prop array (qjs resize_properties,
+        // quickjs.c:5354-5356) so bucket_count >= prop_size continues to hold and
+        // a subsequent appendProperty needs no hash rebuild.
+        try self.relocateShape(shape_ptr, @intCast(next_capacity), lockstepBucketCount(shape.bucketCount(), next_capacity));
     }
 
     pub fn reservePropertyHash(self: *Registry, shape_ptr: **Shape, needed: usize) !void {
@@ -532,7 +550,6 @@ pub const Registry = struct {
     pub fn release(self: *Registry, shape: *Shape) void {
         std.debug.assert(shape.header.meta().rc > 0);
         shape.header.meta().rc -= 1;
-        self.gc_registry.stats.rc_dec += 1;
         if (shape.header.meta().rc != 0) return;
 
         // During runtime teardown, shapes are destroyed in a single dedicated
@@ -576,10 +593,16 @@ pub const Registry = struct {
         hashed: bool,
     ) !*Shape {
         const capacity: u32 = @intCast(@max(initial_prop_size, needed));
+        // qjs js_clone_shape copies hash_size = prop_hash_mask+1 verbatim because
+        // the source already satisfies hash_size >= prop_size (resize_properties
+        // grows both in lockstep). zjs can bump `capacity` above source.prop_size
+        // here (propertyCapacityForNeeded on the transition), so grow the bucket
+        // count in lockstep too (resize_properties, quickjs.c:5354-5356) to keep
+        // the same bucket_count >= prop_size invariant on the clone.
         const bucket_count: usize = if (source.bucketCount() != 0)
-            source.bucketCount()
+            lockstepBucketCount(source.bucketCount(), capacity)
         else
-            @max(initial_hash_size, nextPowerOfTwo(source.prop_count + source.deleted_prop_count + 1));
+            lockstepBucketCount(@max(initial_hash_size, nextPowerOfTwo(source.prop_count + source.deleted_prop_count + 1)), capacity);
         // Single contiguous block (struct + inline FAM) = qjs js_clone_shape's
         // js_malloc(get_shape_size(...)) (quickjs.c:5276).
         const fam_bytes = famRegionBytes(capacity, bucket_count);
@@ -617,15 +640,20 @@ pub const Registry = struct {
         return shape;
     }
 
-    fn appendProperty(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6) !void {
+    inline fn appendProperty(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6) !void {
         const retained_atom = self.atoms.dup(atom_id);
         var retained_atom_owned = true;
         errdefer if (retained_atom_owned) self.atoms.free(retained_atom);
 
         // Grow the prop array if full — this relocates the whole shape (inline
         // FAM cannot grow in place; qjs add_shape_property -> resize_properties).
+        // resize_properties grows the hash table in lockstep with the prop array
+        // (quickjs.c:5354-5356), so pass a bucket count that covers the new
+        // prop_size instead of the old one; that keeps bucket_count >= prop_size
+        // and lets the post-append hash-capacity check below stay a fast no-op.
         if (shape_ptr.*.prop_count == shape_ptr.*.prop_size) {
-            try self.relocateShape(shape_ptr, shape_ptr.*.prop_size * 2, shape_ptr.*.bucketCount());
+            const grown_prop_size = shape_ptr.*.prop_size * 2;
+            try self.relocateShape(shape_ptr, grown_prop_size, lockstepBucketCount(shape_ptr.*.bucketCount(), grown_prop_size));
         }
 
         const shape = shape_ptr.*;
@@ -647,6 +675,19 @@ pub const Registry = struct {
             s.props()[index] = .{};
             if (appended_atom != atom.null_atom) self.atoms.free(appended_atom);
         };
+        // With bucket_count >= prop_size maintained at every grow / clone, a
+        // freshly appended property (index < prop_size <= bucket_count) already
+        // fits the existing hash table UNLESS deleted-but-retained slots push
+        // prop_count + deleted_prop_count past the bucket count. Only then can the
+        // table need a rebuild, so gate the capacity re-check on deleted slots —
+        // qjs add_shape_property likewise never rechecks after resize_properties
+        // (quickjs.c:5494-5508), since qjs keeps hash_size >= prop_size and folds
+        // deletions into prop_count. The common (no-deletion) append links directly.
+        if (shape.deleted_prop_count == 0) {
+            if (shape.hasPropertyHash()) self.linkPropertyHash(shape, index);
+            appended = false;
+            return;
+        }
         const rebuilt = try self.ensurePropertyHash(shape_ptr);
         const final_shape = shape_ptr.*;
         if (final_shape.hasPropertyHash() and !rebuilt) self.linkPropertyHash(final_shape, index);
@@ -808,6 +849,19 @@ fn nextPowerOfTwo(value: usize) usize {
     var n: usize = 1;
     while (n < value) : (n *= 2) {}
     return n;
+}
+
+/// Bucket count that keeps the property hash table covering the property array,
+/// mirroring qjs `resize_properties` (quickjs.c:5354-5356): start from the
+/// current hash size and double until it is at least `new_prop_size`. Keeping
+/// `bucket_count >= prop_size` for every grow / clone means an appended property
+/// (which lands at `prop_count <= prop_size`) is always representable in the
+/// existing table without a rebuild — the hash never lags the props the way qjs
+/// avoids by growing both in the same `resize_properties` call.
+fn lockstepBucketCount(current_bucket_count: usize, new_prop_size: usize) usize {
+    var hash_size = @max(current_bucket_count, initial_hash_size);
+    while (hash_size < new_prop_size) : (hash_size *= 2) {}
+    return hash_size;
 }
 
 pub fn initialHash(proto: ?*Object) u32 {

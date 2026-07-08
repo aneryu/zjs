@@ -962,6 +962,15 @@ pub const FunctionRarePayload = struct {
 pub const FunctionPayload = struct {
     host_function_kind: i32 = 0,
     native_function_id: i32 = 0,
+    // Memoized resolved internal-record handle (divergence B), mirroring qjs
+    // `func = p->u.cfunc.c_function` — the dispatchable handle lives on the
+    // object so the hot `call_method` path skips the per-call native-id DECODE +
+    // record-table LOOKUP. SAFE memoization: `native_function_id` is write-once
+    // at registration/materialization, and the record it resolves to is a
+    // comptime `pub const` in `rt.internal_builtins` (rodata), program-lifetime
+    // stable and identical across runtimes — it can never go stale or dangle.
+    // Reset for free by `destroy`'s `self.* = .{}`.
+    native_record: ?*const host_function.InternalRecord = null,
     external_host_function_id: u32 = 0,
     native_dispatch_name: atom.Atom = atom.null_atom,
     typed_array_element_size: u32 = 0,
@@ -1135,10 +1144,10 @@ pub const ObjectFlags = packed struct(u32) {
 
 var test_standard_exotic_methods: [class.ids.init_count]?*const ExoticMethods = @splat(null);
 
-fn classHasExoticMethods(rt: *const JSRuntime, class_id: class.ClassId, class_record: ?class.Record) bool {
+fn classHasExoticMethods(rt: *const JSRuntime, class_id: class.ClassId, class_record: ?*const class.Record) bool {
     if (exoticMethodsForClassId(class_id) != null) return true;
     if (class_record) |record| return record.has_exotic or record.exotic_methods != null;
-    const record = rt.classes.record(class_id) orelse return false;
+    const record = rt.classes.recordPtr(class_id) orelse return false;
     return record.has_exotic or record.exotic_methods != null;
 }
 
@@ -1257,7 +1266,13 @@ pub const Object = struct {
     }
 
     fn createInternal(rt: *JSRuntime, class_id: class.ClassId, prototype: ?*Object, own_property_capacity: usize) !*Object {
-        const class_record = rt.classes.record(class_id);
+        // qjs JS_NewObjectFromShape reads class metadata in place from
+        // `ctx->rt->class_array[class_id]` — it never copies the whole JSClass
+        // onto the stack. Mirror that with a pointer-only view so the plain
+        // object / array hot path (emptyobj/objalloc/array3) touches just the
+        // scalar fields it needs (inline_payload_size, payload_kind,
+        // payload_finalizer, exotic) instead of an 88B SIMD block copy of Record.
+        const class_record = rt.classes.recordPtr(class_id);
         const inline_layout = inlineClassPayloadLayout(class_record);
         const self = if (inline_layout) |layout| blk: {
             const bytes = try rt.allocRuntimeAlignedBytes(layout.total_size, layout.allocation_alignment);
@@ -1298,127 +1313,23 @@ pub const Object = struct {
             record.payload_kind
         else
             class.standardPayloadKind(class_id);
-        switch (payload_kind) {
-            .iterator => {
-                const payload = try rt.createRuntime(IteratorPayload);
-                errdefer rt.memory.destroy(IteratorPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .iterator;
-            },
-            .collection => {
-                const payload = try rt.createRuntime(CollectionPayload);
-                errdefer rt.memory.destroy(CollectionPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .collection;
-            },
-            .buffer => {
-                const payload = try rt.createRuntime(BufferPayload);
-                errdefer rt.memory.destroy(BufferPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .buffer;
-            },
-            .typed_array => {
-                const payload = try rt.createRuntime(TypedArrayPayload);
-                errdefer rt.memory.destroy(TypedArrayPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .typed_array;
-            },
-            .regexp => {
-                const payload = try rt.createRuntime(RegExpPayload);
-                errdefer rt.memory.destroy(RegExpPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .regexp;
-            },
-            .bound_function => {
-                const payload = try rt.createRuntime(BoundFunctionPayload);
-                errdefer rt.memory.destroy(BoundFunctionPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .bound_function;
-            },
-            .proxy => {
-                const payload = try rt.createRuntime(ProxyPayload);
-                errdefer rt.memory.destroy(ProxyPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .proxy;
-            },
-            .arguments => {
-                const payload = try rt.createRuntime(ArgumentsPayload);
-                errdefer rt.memory.destroy(ArgumentsPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .arguments;
-            },
-            .object_data => {
-                const payload = try rt.createRuntime(ObjectDataPayload);
-                errdefer rt.memory.destroy(ObjectDataPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .object_data;
-            },
-            .var_ref => {
-                const payload = try rt.createRuntime(VarRefPayload);
-                errdefer rt.memory.destroy(VarRefPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .var_ref;
-            },
-            .promise => {
-                const payload = try rt.createRuntime(PromisePayload);
-                errdefer rt.memory.destroy(PromisePayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .promise;
-            },
-            .generator => {
-                const payload = try rt.createRuntime(GeneratorPayload);
-                errdefer rt.memory.destroy(GeneratorPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .generator;
-            },
-            .function => {
-                const payload = try rt.createRuntime(FunctionPayload);
-                errdefer rt.memory.destroy(FunctionPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .function;
-            },
-            .module_namespace => {
-                const payload = try rt.createRuntime(ModuleNamespacePayload);
-                errdefer rt.memory.destroy(ModuleNamespacePayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .module_namespace;
-            },
-            .finalization_registry => {
-                const payload = try rt.createRuntime(FinalizationRegistryPayload);
-                errdefer rt.memory.destroy(FinalizationRegistryPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .finalization_registry;
-            },
-            .std_file => {
-                const payload = try rt.createRuntime(StdFilePayload);
-                errdefer rt.memory.destroy(StdFilePayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .std_file;
-            },
-            .disposable_stack => {
-                const payload = try rt.createRuntime(DisposableStackPayload);
-                errdefer rt.memory.destroy(DisposableStackPayload, payload);
-                payload.* = .{};
-                class_payload = @ptrCast(payload);
-                class_payload_kind = .disposable_stack;
-            },
-            else => {},
+        // The plain-object (`.ordinary`), fast-array (`.none`) and `.realm` hot
+        // paths carry NO class payload — they skip the allocating switch
+        // entirely. Every allocating arm has identical shape
+        // (`createRuntime(T); payload.* = .{}`), so it lives in a `noinline`
+        // out-of-line helper (`allocClassPayload`): keeping those 17 arms out
+        // of `createInternal` drops the register-spill frame — the union of all
+        // arms' locals — off the emptyobj/objalloc/array3 hot path. Mirrors qjs
+        // where JS_NewObjectFromShape's class `switch` is tiny scalar init, not
+        // 17 sub-allocations inlined into one oversized frame. Pre-`initialized`
+        // cleanup is a single by-kind free (mirror of the per-arm
+        // `errdefer destroy`).
+        var class_payload_allocated = false;
+        errdefer if (class_payload_allocated) freeClassPayloadAllocation(rt, class_payload, class_payload_kind);
+        if (payloadKindAllocates(payload_kind)) {
+            class_payload = try allocClassPayload(rt, payload_kind);
+            class_payload_kind = payload_kind;
+            class_payload_allocated = true;
         }
         if (inline_layout) |layout| {
             class_payload = inlineClassPayloadPtr(self, layout);
@@ -1427,7 +1338,7 @@ pub const Object = struct {
         var reserved_class_payload_finalizer_slot = false;
         errdefer if (reserved_class_payload_finalizer_slot) rt.releaseDeferredClassPayloadFinalizerSlot();
         if (class_record) |record| {
-            if (record.payload_finalizer != null and !record.hasInlinePayload()) {
+            if (record.payload_finalizer != null and record.inline_payload_size == 0) {
                 try rt.reserveDeferredClassPayloadFinalizerSlot();
                 reserved_class_payload_finalizer_slot = true;
             }
@@ -1451,10 +1362,154 @@ pub const Object = struct {
         property_storage_owned = false;
         reserved_class_payload_finalizer_slot = false;
         shape_owned = false;
+        // The object now owns the payload (stored in `u.payload` +
+        // `class_payload_kind`): from here `destroyFromHeader` (the
+        // `initialized` errdefer) is the sole teardown owner, so drop the
+        // pre-init single-payload free to avoid a double free.
+        class_payload_allocated = false;
         initialized = true;
-        try rt.registerObject(self);
+        // Reuse the inline-layout size computed at the top of createInternal
+        // instead of recomputing it inside registerObject (mirror of the free
+        // path's unregisterObjectWithBytes). Same value allocationSize derives.
+        const alloc_size = if (inline_layout) |layout| layout.total_size else @sizeOf(Object);
+        try rt.registerObjectWithBytes(self, alloc_size);
         initialized = false;
         return self;
+    }
+
+    /// True iff `payload_kind` names a class whose object carries a separately
+    /// heap-allocated payload behind `u.payload`. The plain-object hot kinds
+    /// (`.none` fast array, `.ordinary`, `.realm`) return false and skip
+    /// `allocClassPayload` entirely.
+    inline fn payloadKindAllocates(payload_kind: class.PayloadKind) bool {
+        return switch (payload_kind) {
+            .none, .ordinary, .realm => false,
+            else => true,
+        };
+    }
+
+    /// Out-of-line allocator for the 17 class-payload kinds. Kept `noinline`
+    /// so its combined stack usage does NOT inflate `createInternal`'s frame on
+    /// the payload-free hot path. Each arm mirrors the former inline switch:
+    /// one `createRuntime(T)` then zero-init. On the error return the payload
+    /// is unallocated, so the caller's `class_payload_allocated` stays false.
+    noinline fn allocClassPayload(rt: *JSRuntime, payload_kind: class.PayloadKind) !class.Payload {
+        switch (payload_kind) {
+            .iterator => {
+                const payload = try rt.createRuntime(IteratorPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .collection => {
+                const payload = try rt.createRuntime(CollectionPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .buffer => {
+                const payload = try rt.createRuntime(BufferPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .typed_array => {
+                const payload = try rt.createRuntime(TypedArrayPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .regexp => {
+                const payload = try rt.createRuntime(RegExpPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .bound_function => {
+                const payload = try rt.createRuntime(BoundFunctionPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .proxy => {
+                const payload = try rt.createRuntime(ProxyPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .arguments => {
+                const payload = try rt.createRuntime(ArgumentsPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .object_data => {
+                const payload = try rt.createRuntime(ObjectDataPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .var_ref => {
+                const payload = try rt.createRuntime(VarRefPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .promise => {
+                const payload = try rt.createRuntime(PromisePayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .generator => {
+                const payload = try rt.createRuntime(GeneratorPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .function => {
+                const payload = try rt.createRuntime(FunctionPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .module_namespace => {
+                const payload = try rt.createRuntime(ModuleNamespacePayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .finalization_registry => {
+                const payload = try rt.createRuntime(FinalizationRegistryPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .std_file => {
+                const payload = try rt.createRuntime(StdFilePayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .disposable_stack => {
+                const payload = try rt.createRuntime(DisposableStackPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .none, .ordinary, .realm => unreachable,
+        }
+    }
+
+    /// Free a payload allocated by `allocClassPayload` when `createInternal`
+    /// fails before the object is `initialized` (i.e. before `destroyFromHeader`
+    /// owns teardown). Mirrors the per-arm `errdefer rt.memory.destroy(T, ...)`
+    /// of the former inline switch — a single by-kind `destroy`.
+    noinline fn freeClassPayloadAllocation(rt: *JSRuntime, payload: class.Payload, payload_kind: class.PayloadKind) void {
+        const ptr = payload orelse return;
+        switch (payload_kind) {
+            .iterator => rt.memory.destroy(IteratorPayload, @ptrCast(@alignCast(ptr))),
+            .collection => rt.memory.destroy(CollectionPayload, @ptrCast(@alignCast(ptr))),
+            .buffer => rt.memory.destroy(BufferPayload, @ptrCast(@alignCast(ptr))),
+            .typed_array => rt.memory.destroy(TypedArrayPayload, @ptrCast(@alignCast(ptr))),
+            .regexp => rt.memory.destroy(RegExpPayload, @ptrCast(@alignCast(ptr))),
+            .bound_function => rt.memory.destroy(BoundFunctionPayload, @ptrCast(@alignCast(ptr))),
+            .proxy => rt.memory.destroy(ProxyPayload, @ptrCast(@alignCast(ptr))),
+            .arguments => rt.memory.destroy(ArgumentsPayload, @ptrCast(@alignCast(ptr))),
+            .object_data => rt.memory.destroy(ObjectDataPayload, @ptrCast(@alignCast(ptr))),
+            .var_ref => rt.memory.destroy(VarRefPayload, @ptrCast(@alignCast(ptr))),
+            .promise => rt.memory.destroy(PromisePayload, @ptrCast(@alignCast(ptr))),
+            .generator => rt.memory.destroy(GeneratorPayload, @ptrCast(@alignCast(ptr))),
+            .function => rt.memory.destroy(FunctionPayload, @ptrCast(@alignCast(ptr))),
+            .module_namespace => rt.memory.destroy(ModuleNamespacePayload, @ptrCast(@alignCast(ptr))),
+            .finalization_registry => rt.memory.destroy(FinalizationRegistryPayload, @ptrCast(@alignCast(ptr))),
+            .std_file => rt.memory.destroy(StdFilePayload, @ptrCast(@alignCast(ptr))),
+            .disposable_stack => rt.memory.destroy(DisposableStackPayload, @ptrCast(@alignCast(ptr))),
+            .none, .ordinary, .realm => {},
+        }
     }
 
     const InlineClassPayloadLayout = struct {
@@ -1463,9 +1518,9 @@ pub const Object = struct {
         allocation_alignment: std.mem.Alignment,
     };
 
-    fn inlineClassPayloadLayout(maybe_record: ?class.Record) ?InlineClassPayloadLayout {
+    fn inlineClassPayloadLayout(maybe_record: ?*const class.Record) ?InlineClassPayloadLayout {
         const record = maybe_record orelse return null;
-        if (!record.hasInlinePayload()) return null;
+        if (record.inline_payload_size == 0) return null;
         const payload_align = std.mem.Alignment.fromByteUnits(record.inline_payload_align);
         const object_align = std.mem.Alignment.of(Object);
         const allocation_alignment = if (payload_align.compare(.gt, object_align)) payload_align else object_align;
@@ -1493,7 +1548,7 @@ pub const Object = struct {
     }
 
     pub fn allocationSize(self: *const Object, rt: *JSRuntime) usize {
-        if (inlineClassPayloadLayout(rt.classes.record(self.class_id))) |layout| return layout.total_size;
+        if (inlineClassPayloadLayout(rt.classes.recordPtr(self.class_id))) |layout| return layout.total_size;
         return @sizeOf(Object);
     }
 
@@ -1768,11 +1823,33 @@ pub const Object = struct {
         // `releaseWeakIdentity` could reentrantly `destroyDeadWeakHusk` this
         // object mid-teardown — a double free corrupting the slab free list.
         header.meta().flags.mark = true;
-        const inline_layout = inlineClassPayloadLayout(rt.classes.record(self.class_id));
-        rt.unregisterObject(self);
-        clearBorrowedReferencesForDestroyedObject(rt, self);
-        self.enqueueDeferredStdFileClose(rt);
-        if (!self.finalizeInlineClassPayload(rt)) self.enqueueClassPayloadFinalizer(rt);
+        // Single pointer-only class-record view (qjs reads class_array[class_id]
+        // in place, quickjs.c:6365). Reused for BOTH the inline-payload layout and
+        // the inline-payload finalize below, so the plain-object free path does
+        // ONE bounds-checked pointer fetch instead of a `recordPtr` here plus a
+        // second by-value 88B `record()` copy inside finalizeInlineClassPayload.
+        const class_record = rt.classes.recordPtr(self.class_id);
+        const inline_layout = inlineClassPayloadLayout(class_record);
+        // Size for GC free-accounting is the same value `allocationSize` derives
+        // from `inline_layout` (total_size for inline-payload classes, else
+        // @sizeOf(Object)) — reuse the layout we just computed instead of a second
+        // record-table lookup + inline-layout recompute inside unregisterObject.
+        const alloc_size = if (inline_layout) |layout| layout.total_size else @sizeOf(Object);
+        rt.unregisterObjectWithBytes(self, alloc_size);
+        // qjs free_object keeps no borrowed-ref / std-file side tables, so the
+        // plain-object hot free path must not call into either scan. Hoist each
+        // helper's own entry guard to the call site: an object with no realm-
+        // global borrowed identity (is_global, false for ~every object) and no
+        // .std_file payload skips BOTH calls — the helpers keep their internal
+        // guards for the rare live-resource path. (borrowed guard already no-ops
+        // for non-global; pure dispatch-shape change, zero behavioral risk.)
+        if (self.flags.is_global and rt.borrowed_reference_holders.len != 0) clearBorrowedReferencesForDestroyedObject(rt, self);
+        if (self.class_payload_kind == .std_file) self.enqueueDeferredStdFileClose(rt);
+        // `inline_layout != null` is exactly `record.hasInlinePayload()`
+        // (inlineClassPayloadLayout returns null iff inline_payload_size == 0), so
+        // the plain-object hot path (no inline payload) skips the finalize helper —
+        // and its record re-lookup — and takes the deferred-finalizer arm directly.
+        if (inline_layout == null or !self.finalizeInlineClassPayload(rt, class_record.?)) self.enqueueClassPayloadFinalizer(rt);
         const old_properties = self.propertyEntries();
         const old_property_capacity = self.propertyStorageCapacity();
         const old_shape_props = self.shape_ref.props()[0..@min(self.shape_ref.prop_count, old_properties.len)];
@@ -1783,26 +1860,41 @@ pub const Object = struct {
             destroyPropertySlot(rt, entry_atom, entry_flags, entry.slot);
         }
         if (old_property_capacity != 0) rt.memory.free(property.Entry, old_properties.ptr[0..old_property_capacity]);
-        self.destroyOrdinaryPayload(rt);
+        // Array elements live in the `u.array_values` union arm (gated by
+        // `is_array`), orthogonal to the class-payload arm below.
         self.destroyArrayElements(rt);
-        self.destroyBufferPayload(rt);
-        self.destroyTypedArrayPayload(rt);
-        self.destroyObjectDataPayload(rt);
-        self.destroyVarRefPayload(rt);
-        self.destroyFunctionPayload(rt);
-        self.destroyBoundFunctionPayload(rt);
-        self.destroyCollectionPayload(rt);
-        self.destroyIteratorPayload(rt);
-        self.destroyGeneratorPayload(rt);
-        self.destroyArgumentsPayload(rt);
-        self.destroyProxyPayload(rt);
-        self.destroyModuleNamespacePayload(rt);
-        self.destroyFinalizationRegistryPayload(rt);
-        self.destroyStdFilePayload(rt);
-        self.destroyDisposableStackPayload(rt);
-        self.destroyRealmPayload(rt);
-        self.destroyPromisePayload(rt);
-        self.destroyRegExpPayload(rt);
+        // The 19 non-array class payloads all share the single `u.payload`
+        // union slot, discriminated by `class_payload_kind` — at most ONE is
+        // ever live per object. qjs frees the class-specific payload with a
+        // SINGLE table lookup (`class_array[class_id].finalizer`,
+        // quickjs.c:6365); mirror that with one switch on the discriminant
+        // instead of walking 19 mutually-exclusive `if (kind != .X) return`
+        // destroyers in sequence (LLVM re-materializes each as
+        // ldrb+and+cmp+b.ne — ~76 insn of dead dispatch for a plain object).
+        // Each arm's destroyer keeps its own `kind != .X` guard, so this is a
+        // pure dispatch-shape change with identical per-object semantics.
+        switch (self.class_payload_kind) {
+            .none => {},
+            .ordinary => self.destroyOrdinaryPayload(rt),
+            .arguments => self.destroyArgumentsPayload(rt),
+            .object_data => self.destroyObjectDataPayload(rt),
+            .function => self.destroyFunctionPayload(rt),
+            .bound_function => self.destroyBoundFunctionPayload(rt),
+            .var_ref => self.destroyVarRefPayload(rt),
+            .generator => self.destroyGeneratorPayload(rt),
+            .promise => self.destroyPromisePayload(rt),
+            .proxy => self.destroyProxyPayload(rt),
+            .regexp => self.destroyRegExpPayload(rt),
+            .iterator => self.destroyIteratorPayload(rt),
+            .collection => self.destroyCollectionPayload(rt),
+            .buffer => self.destroyBufferPayload(rt),
+            .typed_array => self.destroyTypedArrayPayload(rt),
+            .module_namespace => self.destroyModuleNamespacePayload(rt),
+            .finalization_registry => self.destroyFinalizationRegistryPayload(rt),
+            .std_file => self.destroyStdFilePayload(rt),
+            .disposable_stack => self.destroyDisposableStackPayload(rt),
+            .realm => self.destroyRealmPayload(rt),
+        }
         if (rt.gc.phase != .deinit) self.clearCachedIteratorNext(rt) else clearCachedIteratorNextWithoutFree(rt, self);
         const object_shape = self.shape_ref;
         if (!(rt.gc.phase == .remove_cycles and headerIsCycleGarbage(&object_shape.header))) {
@@ -1820,7 +1912,11 @@ pub const Object = struct {
             rt.gc.deferCycleStructFree(&self.header);
             return;
         }
-        _ = rt.takeWeakObjectIdentity(self);
+        // qjs releases the weak-id mapping in its weak sweep, never per plain
+        // object; only objects handed a weak id (has_weak_id) have an entry, so
+        // gate the call — a plain object never enters takeWeakObjectIdentity just
+        // to load the flag and return.
+        if (self.flags.has_weak_id) _ = rt.takeWeakObjectIdentity(self);
         freeObjectAllocation(rt, self, inline_layout);
     }
 
@@ -1828,7 +1924,7 @@ pub const Object = struct {
     /// resource pass; only the struct memory remains. Mirrors qjs Pass B
     /// (quickjs.c:6797). Non-weakref objects only (weakref'd ones husk earlier).
     pub fn freeCycleDeferredStruct(rt: *JSRuntime, self: *Object) void {
-        const inline_layout = inlineClassPayloadLayout(rt.classes.record(self.class_id));
+        const inline_layout = inlineClassPayloadLayout(rt.classes.recordPtr(self.class_id));
         _ = rt.takeWeakObjectIdentity(self);
         freeObjectAllocation(rt, self, inline_layout);
     }
@@ -1837,14 +1933,18 @@ pub const Object = struct {
         std.debug.assert(self.header.meta().rc == 0);
         std.debug.assert(self.weakref_count == 0);
         std.debug.assert(!self.header.meta().flags.mark);
-        const inline_layout = inlineClassPayloadLayout(rt.classes.record(self.class_id));
+        const inline_layout = inlineClassPayloadLayout(rt.classes.recordPtr(self.class_id));
         _ = rt.takeWeakObjectIdentity(self);
         freeObjectAllocation(rt, self, inline_layout);
     }
 
-    fn finalizeInlineClassPayload(self: *Object, rt: *JSRuntime) bool {
-        const record = rt.classes.record(self.class_id) orelse return false;
-        if (!record.hasInlinePayload()) return false;
+    /// Precondition: `record.hasInlinePayload()` — the caller
+    /// (`destroyFromHeader`) only enters this when the already-computed
+    /// `inline_layout` is non-null, which is exactly that predicate. `record` is
+    /// the pointer view fetched once at the top of the free path, so this no
+    /// longer re-looks-up the class table (nor makes the by-value 88B `Record`
+    /// copy the old `rt.classes.record(...)` did on every object free).
+    fn finalizeInlineClassPayload(self: *Object, rt: *JSRuntime, record: *const class.Record) bool {
         const finalizer = record.payload_finalizer orelse {
             self.u.payload = null;
             self.class_payload_kind = .none;
@@ -3546,7 +3646,14 @@ pub const Object = struct {
     fn ensureArrayBufferCapacity(self: *Object, rt: *JSRuntime, needed_len: usize) !void {
         const old_capacity: usize = @intCast(self.array_capacity);
         if (needed_len <= old_capacity) return;
-        var next_capacity = if (old_capacity == 0) @as(usize, 16) else old_capacity + old_capacity / 2;
+        // Mirror QuickJS expand_fast_array (quickjs.c:9530):
+        //   new_size = max_int(new_len, size * 3 / 2)
+        // When the array has no backing storage yet (size == 0) the 3/2 term is
+        // zero, so qjs allocates exactly `new_len` slots — no hardcoded floor.
+        // The prior min-16 seed (16d7826e, not a qjs anchor) over-allocated a
+        // 3-element literal into 16 slots (256B, 13 wasted). Fall back to
+        // exact-fit and keep the 1.5x growth branch (already == qjs size*3/2).
+        var next_capacity = if (old_capacity == 0) needed_len else old_capacity + old_capacity / 2;
         if (next_capacity <= old_capacity) next_capacity = old_capacity + 1;
         while (next_capacity < needed_len) {
             const growth = @max(next_capacity / 2, 1);
@@ -3989,6 +4096,22 @@ pub const Object = struct {
     pub fn nativeFunctionId(self: *const Object) i32 {
         if (self.functionPayloadConst()) |payload| return payload.native_function_id;
         return 0;
+    }
+
+    // Divergence B: on-object memo of the resolved internal record. `Slot`
+    // returns a mutable pointer to the payload field so the hot call site can
+    // lazily populate it after its first DECODE+LOOKUP; the read-only accessor
+    // returns null when there is no function payload (matching nativeFunctionId's
+    // 0 default) so a non-native callable simply misses the memo.
+    pub fn nativeRecordSlot(self: *Object) *?*const host_function.InternalRecord {
+        if (self.functionPayload()) |payload| return &payload.native_record;
+        std.debug.assert(self.class_payload_kind == .function);
+        unreachable;
+    }
+
+    pub fn nativeRecord(self: *const Object) ?*const host_function.InternalRecord {
+        if (self.functionPayloadConst()) |payload| return payload.native_record;
+        return null;
     }
 
     pub fn externalHostFunctionIdSlot(self: *Object) *u32 {
@@ -9534,9 +9657,20 @@ pub const Object = struct {
         }
     }
 
-    fn addProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
+    inline fn addProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
         const slot = slotFromDescriptor(&rt.atoms, atom_id, desc);
         try self.appendPreparedPropertyEntry(rt, atom_id, flagsFromDescriptor(desc), slot);
+    }
+
+    /// Trusted variant of `addProperty` for callers that already hold a live
+    /// `atom_id` ref across the whole call (see `appendPreparedPropertyEntryTrusted`
+    /// for the guard-elision rationale). Used only by
+    /// `definePlainDataPropertyKnownFast` on the object-literal `OP_define_field`
+    /// path, where `atom_id` is the executing function bytecode's inline operand
+    /// and is rooted for the entire opcode.
+    fn addPropertyTrusted(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
+        const slot = slotFromDescriptor(&rt.atoms, atom_id, desc);
+        try self.appendPreparedPropertyEntryTrusted(rt, atom_id, flagsFromDescriptor(desc), slot);
     }
 
     /// Lean plain-object define for the object-literal fast path (OP_define_field
@@ -9549,19 +9683,53 @@ pub const Object = struct {
     /// defineOrdinaryOwnProperty. Preserves duplicate-literal-key semantics
     /// (`{a:1,a:2}`) via the findProperty branch. Caller guarantees:
     /// class_id==object, !hasExoticMethods, !is_array, extensible.
-    pub fn definePlainDataPropertyKnownFast(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
-        if (self.findProperty(atom_id)) |index| {
+    pub inline fn definePlainDataPropertyKnownFast(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
+        if (self.findPropertyIndexTrusted(atom_id)) |index| {
             try self.materializeAutoInitEntryForMutation(index);
             if (!isCompatible(self.propFlagsAt(index), self.prop_values[index].slot, desc)) return error.IncompatibleDescriptor;
             try self.replaceProperty(rt, index, desc);
             return;
         }
-        try self.addProperty(rt, atom_id, desc);
+        // Both call sites (vm_literal.zig defineFieldFast + the cold defineField
+        // shell) read `atom_id` from `function.code[frame.pc..]` — the executing
+        // bytecode's inline OP_define_field operand — which the finalized
+        // FunctionBytecode holds a ref on (dupBytecodeAtoms) and the frame's
+        // current_function ref keeps live for the whole opcode. That external
+        // root makes appendPreparedPropertyEntry's own atom guard redundant here,
+        // so use the trusted (guard-free) add.
+        try self.addPropertyTrusted(rt, atom_id, desc);
     }
 
+    /// Default entry point: the caller does NOT guarantee an independent live
+    /// `atom_id` ref, so a local dup/free guard roots the atom across the shape
+    /// allocations below (which can trigger GC, whose object/shape sweep frees
+    /// prop atoms — dropping an otherwise-unrooted atom to ref_count 0 mid-call).
     pub fn appendPreparedPropertyEntry(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
-        const atom_guard = rt.atoms.dup(atom_id);
-        defer rt.atoms.free(atom_guard);
+        return self.appendPreparedPropertyEntryImpl(false, rt, atom_id, entry_flags, slot);
+    }
+
+    /// Trusted entry point: the caller already holds a live `atom_id` ref for
+    /// the whole call (e.g. the object-literal `OP_define_field` path, whose atom
+    /// is the executing function bytecode's inline operand — rooted by the
+    /// finalized-bytecode atom-retention walk + the frame's `current_function`
+    /// ref). With that external root the local dup/free guard is pure redundancy
+    /// (the atom cannot reach ref_count 0 under a GC from the shape allocations),
+    /// so elide it. qjs add_property likewise relies on the single caller-held
+    /// atom ref through add_shape_property (the one owning JS_DupAtom) and has no
+    /// per-property guard. MUST NOT be used with a transient/just-interned atom
+    /// that has no other root than the (removed) guard.
+    pub fn appendPreparedPropertyEntryTrusted(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
+        return self.appendPreparedPropertyEntryImpl(true, rt, atom_id, entry_flags, slot);
+    }
+
+    inline fn appendPreparedPropertyEntryImpl(self: *Object, comptime caller_holds_atom_ref: bool, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
+        // Root the atom across the shape allocations below unless the caller
+        // already holds a live ref. The dup/free must span the WHOLE function
+        // (defer at function scope), so gate via comptime rather than a runtime
+        // `if` block — a `defer` inside an `if` would fire at the block's end,
+        // before the allocations it must protect.
+        if (!caller_holds_atom_ref) _ = rt.atoms.dup(atom_id);
+        defer if (!caller_holds_atom_ref) rt.atoms.free(atom_id);
         var slot_owned = true;
         errdefer if (slot_owned) destroyPropertySlot(rt, atom_id, entry_flags, slot);
 
@@ -9604,11 +9772,18 @@ pub const Object = struct {
             }
         };
 
-        const array_index = array.arrayIndexFromAtom(&rt.atoms, atom_id);
-        if (array_index != null) {
+        // Only the boolean "is this atom an array index?" is needed here (the
+        // index value is never consumed): `markIndexedProperties` is a flag flip
+        // and `adoptShapeForNewProperty` only tests `!= null`. Route through the
+        // lean `atomIsArrayIndex` predicate, which — unlike `arrayIndexFromAtom` —
+        // does not resolve `name()` for the common named-key case (a/b/c). qjs
+        // `add_property` (quickjs.c:9184) likewise pays only `__JS_AtomIsTaggedInt`
+        // per add for a plain object.
+        const is_array_index = rt.atoms.atomIsArrayIndex(atom_id);
+        if (is_array_index) {
             self.markIndexedProperties(rt);
         }
-        try self.adoptShapeForNewProperty(rt, atom_id, entry_flags.bits(), current_capacity, array_index);
+        try self.adoptShapeForNewProperty(rt, atom_id, entry_flags.bits(), current_capacity, is_array_index);
         if (grew_properties and old_capacity != 0) rt.memory.free(property.Entry, old_properties);
         inserted = false;
     }
@@ -9625,14 +9800,19 @@ pub const Object = struct {
         rt.shapes.release(old_shape);
     }
 
-    fn adoptShapeForNewProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, flags: u6, property_capacity: usize, array_index: ?u32) !void {
-        const atom_guard = rt.atoms.dup(atom_id);
-        defer rt.atoms.free(atom_guard);
+    fn adoptShapeForNewProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, flags: u6, property_capacity: usize, is_array_index: bool) !void {
+        // No local atom guard: the sole caller `appendPreparedPropertyEntry`
+        // already holds an `atoms.dup(atom_id)` guard live across this entire
+        // call (its `defer atoms.free` runs only after we return), so `atom_id`
+        // cannot be collected under a GC triggered by the shape allocations
+        // below. A second dup/free here just duplicated that root — qjs
+        // add_property likewise relies on the single caller-held atom ref
+        // through add_shape_property (which does the one owning JS_DupAtom).
         // The shape is rc==1 here (made unique above / never shared), so the
         // FAM grow inside reserveProperties/addProperty may relocate it; pass
         // &self.shape_ref so the new address flows back (qjs resize_properties
         // updates p->shape through `JSShape **psh`).
-        if (array_index != null) {
+        if (is_array_index) {
             try self.ensureUniqueShapeForMutation(rt);
             try rt.shapes.reserveProperties(&self.shape_ref, property_capacity);
             try rt.shapes.addProperty(&self.shape_ref, atom_id, flags);
@@ -9872,6 +10052,20 @@ pub const Object = struct {
         if (flags.kind != .data or !flags.writable) return null;
         const entry = &self.prop_values[lookup.index];
         return .{ .index = lookup.index, .flags = flags, .value = &entry.slot.data };
+    }
+
+    /// Trusted-index dedup probe for the object-literal define fast path.
+    /// Returns just the property index (all `definePlainDataPropertyKnownFast`
+    /// needs), routed through `findPropertyProbeTrusted` so release builds drop
+    /// the runtime `steps < prop_count` / double-bounds guards that `findProperty`
+    /// carries. Faithful to qjs `find_own_property` (quickjs.c:6135), which is
+    /// `force_inline` and trusts the shape hash-chain invariant (every chained
+    /// index is `< prop_count` and non-cyclic). The get/set fast paths already
+    /// route the exact same shapes through the trusted probe, so no additional
+    /// invariant is assumed here.
+    fn findPropertyIndexTrusted(self: *const Object, atom_id: atom.Atom) ?usize {
+        const probe = self.findPropertyProbeTrusted(atom_id) orelse return null;
+        return probe.index;
     }
 
     pub fn findProperty(self: *const Object, atom_id: atom.Atom) ?usize {

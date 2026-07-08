@@ -590,6 +590,52 @@ fn op_eval(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c
         },
     }
 }
+/// Frameless OP_drop (qjs CASE(OP_drop):17968 — `JS_FreeValue(ctx, sp[-1]); sp--`,
+/// register-resident, no pc-publish / backtrace round-trip). Without this the
+/// per-iteration `o = {…}` / `s = …` / `a = […]` loops route their trailing `drop`
+/// (the stack copy left after `dup; put_loc_check`) through the 416-byte publishing
+/// coldStd shell EVERY iteration — the ONLY hot op still cold in all four
+/// object/array/string-literal benchmarks (see dispatch-audit).
+///
+/// GC-window contract (why this MUST shrink stack.values before free, unlike the
+/// non-freeing op_dup/op_swap): the collector traces the operand roots as
+/// `stack.values.ptr[0..stack.values.len]` (runtime.zig:1276). Fast handlers advance
+/// only the register `sp`; `stack.values.len` is stale until a publish/syncDown (see
+/// zjs_vm.syncDown — "fast paths advance only reg_sp"). op_dup/op_swap never free, so
+/// a slot inside that window is always still live and a stale len is harmless. But
+/// `drop` FREES sp[-1]: if that slot is still inside the traced window when a GC fires
+/// during free() (rc→0 destroy → …, or a later alloc before the next publish), the
+/// collector scans a freed value → use-after-free (nondeterministic in-process crash;
+/// the cold path is safe only because value_vm.drop's `stack.pop()` shrinks
+/// stack.values BEFORE free). So publish the post-drop operand length here first, then
+/// free — the freed slot is then outside `[0..len]`. This is a single store off the
+/// hot dependency chain (no pc write, no coldNext/maybeStop round-trip, no 416B frame).
+///   - plain data value (int/bool/undefined): free is a tag-test no-op (requiresRefCount
+///     early-out); the store+sp-- is the whole cost.
+///   - still-live object/rope (`o`/`s` holds the other ref): register-resident refcount
+///     decrement, now GC-safe against the shrunk window.
+/// A `catch_offset` marker on top (the `try`/finally sentinel, drop's `.catch_target`
+/// leg → mutates vm.catch_target.*) falls to the cold op via the indirect
+/// `cold_table[pc[0]]` hop (op_if_false8 pattern — LLVM can't devirtualize it, so the
+/// fast leaf stays prologue-free).
+pub fn op_drop_fast(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    // Generator/eval stop boundary: during a generator's parameter-init phase the
+    // cold path's coldNext runs maybeStop (suspend at the body-start pc). `cont`
+    // skips that check, so a `drop` that is the last param-init op would blow past the
+    // suspend and execute the generator body eagerly (corrupting generator state — the
+    // runGeneratorParameterInit crash). Fall to the publishing cold op when blocked,
+    // exactly as opLoc/opLocCheck/op_update_loc do.
+    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const v = (sp - 1)[0];
+    if (v.isCatchOffset()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // Shrink the GC-traced operand window to exclude the slot we are about to free
+    // (mirrors value_vm.drop's stack.pop()-before-free); the freed slot must not be
+    // reachable from stack.values[0..len] if free() triggers a collection.
+    const nsp = sp - 1;
+    vm.stack.values = vm.stack_base[0 .. (@intFromPtr(nsp) - @intFromPtr(vm.stack_base)) / @sizeOf(JSValue)];
+    v.free(vm.ctx.runtime);
+    return cont(pc + 1, nsp, var_buf, vm);
+}
 fn op_drop(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     vm.publish(pc, sp);
     switch (value_vm.drop(vm.ctx.runtime, vm.stack) catch |e| return vm.fail(e)) {
@@ -876,6 +922,65 @@ pub fn opLoc(comptime kind: LocKind, comptime idx_src: LocIdx) Handler {
     }.h;
 }
 
+/// TDZ-checked local access (qjs OP_get_loc_check/OP_put_loc_check/OP_set_loc_check,
+/// quickjs.c:18704/18730/18743). The lexical `let`/`const` loop counter and
+/// block-scoped result in `for (let i…)` bodies are ALWAYS emitted as these checked
+/// forms (quickjs.c:33072-33078 emits OP_get_loc_check for every `is_lexical` var —
+/// there is no downgrade to plain OP_get_loc), so these are the per-iteration hot
+/// loc ops in every counting loop; without this handler they route to the 192-byte-
+/// frame `checkedLocVm` cold path (the four-benchmark self%-#1). Same shape as
+/// `opLoc` plus qjs's `JS_IsUninitialized(var_buf[idx])` TDZ guard:
+///   - a var-ref cell slot (captured binding) → cold: checkedLocVm unwraps the cell,
+///   - an uninitialized plain slot → cold: checkedLocVm throws the TDZ ReferenceError,
+///   - (put) a `const` slot → cold: checkedLocVm throws the const-reassign TypeError.
+/// The checked encodings only exist in the u16 operand form (no short variants —
+/// bytecode.zig:442-445), so one handler per kind covers them.
+pub fn opLocCheck(comptime kind: LocKind) Handler {
+    return struct {
+        fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+            if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            const idx: u16 = readInt(u16, pc + 1);
+            const old_v = var_buf[idx];
+            // A `var_buf` local can hold a var-ref cell only in a function whose
+            // locals may be boxed (closure capture / make_loc_ref / derived-ctor
+            // `this` / direct-eval). `locals_never_boxed` is precomputed at
+            // finalize (bytecode.computeLocalsNeverBoxed); when set, no cell can
+            // reach either the slot or the operand stack, so both per-op
+            // `varRefCellFromValue` guards are dropped — qjs reads `var_buf[idx]`
+            // as a plain value with no cell test at all (quickjs.c:18704). When
+            // clear, the guards run exactly as before (captured binding → cold).
+            const may_box = !vm.function.locals_never_boxed;
+            // Cell slot OR plain-uninitialized (TDZ) slot both fall to the cold
+            // checkedLocVm: `varRefCellFromValue` catches the captured-binding case
+            // and `isUninitialized` the plain-TDZ case (qjs 18709 tag test).
+            if (may_box and slot_ops.varRefCellFromValue(old_v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            if (old_v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            switch (kind) {
+                .get => {
+                    sp[0] = old_v.dup();
+                    return cont(pc + 3, sp + 1, var_buf, vm);
+                },
+                .put => {
+                    if (idx < vm.function.vardefs.len and vm.function.vardefs[idx].is_const) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    const value = (sp - 1)[0];
+                    if (may_box and slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    var_buf[idx] = value;
+                    old_v.free(vm.ctx.runtime);
+                    return cont(pc + 3, sp - 1, var_buf, vm);
+                },
+                .set => {
+                    const value = (sp - 1)[0];
+                    if (may_box and slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    const assigned = value.dup();
+                    var_buf[idx] = assigned;
+                    old_v.free(vm.ctx.runtime);
+                    return cont(pc + 3, sp, var_buf, vm);
+                },
+            }
+        }
+    }.h;
+}
+
 /// Closure/global var-ref read (qjs OP_get_var_ref0..3 distinct labels). The `fib`
 /// recursive self-reference is get_var_ref0 — fib's per-call hottest non-call op.
 /// Uninitialized (TDZ or deleted binding parked at UNINITIALIZED, qjs
@@ -1090,6 +1195,69 @@ pub fn op_get_length(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
         return cont(pc + 1, sp, var_buf, vm);
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
+// Frameless OP_object — qjs CASE(OP_object): `*sp++ = JS_NewObject(ctx)`
+// (quickjs.c:17961), the per-iteration hottest op of `o = {}` / every object literal.
+// The cold h_object shell paid the full 224-byte coldStd publish+spill tax every
+// iteration for a op that runs no user code and captures no backtrace; this handler
+// creates the bare `{}` register-resident and pushes it, exactly qjs's one-`bl`
+// inline. Only OOM (create returns error) routes to the cold shell (which re-derives
+// sp from the published stack — no state was mutated here, so the fall-through is
+// clean). No pc/sp publish, no coldNext round-trip.
+pub fn op_object(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const value = literal_vm.newPlainObjectValue(vm.ctx, vm.global) catch
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    sp[0] = value; // owned
+    return cont(pc + 1, sp + 1, var_buf, vm);
+}
+
+// Frameless OP_define_field — qjs CASE(OP_define_field): one JS_DefinePropertyValue on
+// sp[-2] with sp[-1] (quickjs.c:19269), the 3-per-iteration hot op of `o={a:i,b:i,c:i}`
+// object literals. The cold h_field shell paid the 224-byte coldStd publish+spill tax
+// each of those three times per iteration. `defineFieldFast` handles the plain-data-add
+// case (non-refcounted value, ordinary extensible non-array non-exotic non-proxy obj —
+// the same in-CASE fast leg the cold defineField itself runs first); on a hit the value
+// is consumed into the slot, so pop it and free the popped obj slot at sp[-2]. Arrays,
+// private atoms, proxies, non-extensible, setters, and refcounted values (every
+// backtrace/user-code-capable case) fall to the cold shell (which publishes frame.pc at
+// the u32 atom operand — this handler left frame.pc untouched, so the decode matches).
+// 5-byte op (u32 atom).
+pub fn op_define_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const value = (sp - 1)[0];
+    const obj = (sp - 2)[0];
+    const atom_id = readInt(u32, pc + 1);
+    if (literal_vm.defineFieldFast(vm.ctx.runtime, obj, atom_id, value)) {
+        // value consumed into the property slot; obj stays on the stack as the
+        // literal's running receiver (qjs leaves sp[-2] in place, only sp--).
+        return cont(pc + 5, sp - 1, var_buf, vm);
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
+// Frameless OP_array_from — qjs CASE(OP_array_from): `js_create_array_free(ctx,
+// argc, sp - argc)` building the dense array in one call (quickjs.c:18239), the
+// per-iteration hot op of `a = [i, i+1, i+2]` and every non-spread array literal. The
+// cold h_array_from shell paid the 224-byte coldStd publish+spill tax plus a heap temp
+// buffer + per-element stack.pop every iteration. `constructLiteralWithPrototype`
+// DUPS the values slice into the array (initDenseArrayLiteralValuesAssumingEmpty) and
+// roots it during the create (GC-safe), so this handler hands it the register-resident
+// operand window `(sp-argc)[0..argc]` directly — no temp buffer, no per-element pop —
+// then frees the argc popped originals (balancing the dup, exactly the cold arrayFrom's
+// trailing free) and pushes the array. OOM routes to the cold shell (values untouched
+// on the stack, frame.pc left at the u16 argc operand for its own decode). 3-byte op.
+pub fn op_array_from(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const argc: usize = readInt(u16, pc + 1);
+    const rt = vm.ctx.runtime;
+    const values = (sp - argc)[0..argc];
+    const array = core.array.constructLiteralWithPrototype(rt, values, array_ops.arrayPrototypeFromGlobal(rt, vm.global)) catch
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // Free the popped originals (the array dup'd them); then the array replaces the
+    // whole [v0..v_argc) window at sp-argc, so the net stack effect is -argc+1.
+    for (values) |v| v.free(rt);
+    const nsp = sp - argc;
+    nsp[0] = array; // owned
+    return cont(pc + 3, nsp + 1, var_buf, vm);
 }
 
 /// Per-op comparison handler generator (qjs OP_CMP / OP_CMP_EQ / OP_CMP_STRICT_EQ

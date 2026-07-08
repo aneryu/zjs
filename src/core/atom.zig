@@ -1056,6 +1056,34 @@ pub const AtomTable = struct {
         return null;
     }
 
+    /// Fast "is this atom an array index?" predicate for the property-define hot
+    /// path, where only the boolean is needed (the caller never uses the index
+    /// value). Mirrors qjs `add_property` (quickjs.c:9184), which pays only
+    /// `__JS_AtomIsTaggedInt` for a named key and treats the string-atom index
+    /// range through the ordinary shape add. zjs `internString` already tags every
+    /// numeric-form string in `[0, max_int_atom]` as an integer atom, so the only
+    /// NON-tagged atom that can still be an array index is a *dynamic string* atom
+    /// whose decimal name lands in `(max_int_atom, max_array_index]` — necessarily
+    /// >= 10 digits. Reject predefined atoms (never numeric) and short names
+    /// without touching `name()`'s null/tagged/live-value resolution chain; only a
+    /// >= 10-char dynamic string entry pays the full parse.
+    ///
+    /// Semantics are identical to `array.arrayIndexFromAtom(...) != null`: the
+    /// full decimal range is `[0, max_array_index]` (2^32-2), so the string leg
+    /// uses `parseHighArrayIndex` (bounded by `max_array_index`) — NOT
+    /// `parseArrayIndex` (bounded by the tighter `max_int_atom`).
+    pub fn atomIsArrayIndex(self: *const AtomTable, atom: Atom) bool {
+        if (isTaggedInt(atom)) return atomToUInt32(atom) <= max_array_index;
+        // Predefined atoms (id < first_dynamic_atom) are fixed identifiers/symbols;
+        // none has an all-numeric name, so none is an array index.
+        const idx = dynamicEntryIndex(atom) orelse return false;
+        if (idx >= self.entries.len) return false;
+        const entry = &self.entries[idx];
+        if (!entry.hasLiveValue() or entry.kind != .string) return false;
+        if (entry.bytes.len < 10) return false;
+        return parseHighArrayIndex(entry.bytes) != null;
+    }
+
     pub fn kind(self: *const AtomTable, atom: Atom) ?AtomKind {
         if (atom == null_atom) return null;
         if (isTaggedInt(atom)) return .string;
@@ -1488,6 +1516,27 @@ fn parseArrayIndex(bytes: []const u8) ?u32 {
         if (c < '0' or c > '9') return null;
         n = n * 10 + (c - '0');
         if (n > max_int_atom) return null;
+    }
+    return @intCast(n);
+}
+
+/// Upper bound of a JS array index (2^32-2). Mirrors `array.max_array_index`;
+/// duplicated here to keep the atom layer free of an `array.zig` import cycle.
+pub const max_array_index: u32 = 0xffff_fffe;
+
+/// Like `parseArrayIndex` but bounded by the full array-index range
+/// (`max_array_index`) instead of the tighter tagged-int range (`max_int_atom`).
+/// Matches `array.arrayIndexFromName`, used by `atomIsArrayIndex` for the high
+/// string-atom index window `(max_int_atom, max_array_index]` that stays a
+/// dynamic string atom (never tagged at intern time).
+fn parseHighArrayIndex(bytes: []const u8) ?u32 {
+    if (bytes.len == 0) return null;
+    if (bytes.len > 1 and bytes[0] == '0') return null;
+    var n: u64 = 0;
+    for (bytes) |c| {
+        if (c < '0' or c > '9') return null;
+        n = n * 10 + (c - '0');
+        if (n > max_array_index) return null;
     }
     return @intCast(n);
 }

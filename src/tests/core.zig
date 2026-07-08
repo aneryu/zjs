@@ -2980,9 +2980,16 @@ test "function bytecode registration is old-space accounted" {
     const value = core.JSValue.functionBytecode(&fb.header);
     defer value.free(&rt);
 
-    try std.testing.expectEqual(@as(usize, @sizeOf(engine.bytecode.FunctionBytecode)), rt.gc.stats.old_allocated_bytes);
-    try std.testing.expectEqual(@as(usize, 1), rt.gc.stats.old_alloc_count);
-    try std.testing.expectEqual(@as(usize, @sizeOf(engine.bytecode.FunctionBytecode) * 3), rt.allocationDebtBytes());
+    // old_allocated_bytes / old_alloc_count are now derived lazily in the stats
+    // snapshot (total minus the large bucket), not stored per-alloc.
+    const fb_stats = rt.gcStats();
+    try std.testing.expectEqual(@as(usize, @sizeOf(engine.bytecode.FunctionBytecode)), fb_stats.old_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 1), fb_stats.old_alloc_count);
+    // Heap object registration no longer accrues weighted allocation_debt; that
+    // counter is reserved for the off-heap external-memory trigger. Even with a
+    // debt threshold sized to this allocation, the heap path never consults
+    // externalMemoryRequestReason, so no GC is requested (asserted below).
+    try std.testing.expectEqual(@as(usize, 0), rt.allocationDebtBytes());
     if (!core.memory.force_gc_on_allocation_enabled) {
         try std.testing.expect(!rt.gcPendingForTest());
         try std.testing.expect(!rt.gc.hasPendingMajorRequest());
@@ -3067,15 +3074,22 @@ test "gc live heap stats drop when object is released" {
     try std.testing.expectEqual(@as(usize, 0), released.heap_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.old_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.large_object_bytes);
-    try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), released.heap_committed_bytes);
-    try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), released.empty_page_bytes);
-    try std.testing.expectEqual(@as(usize, 1000), released.old_fragmentation_ratio);
+    // Page geometry is derived from live_bytes on demand, and the SmallObjectSlab
+    // returns an arena to the backing allocator the moment it empties, so a
+    // fully-freed heap reports zero committed/empty/fragmentation immediately —
+    // there is no retained-empty-page hysteresis (mirrors qjs delegating reclaim
+    // to system malloc).
+    try std.testing.expectEqual(@as(usize, 0), released.heap_committed_bytes);
+    try std.testing.expectEqual(@as(usize, 0), released.empty_page_bytes);
+    try std.testing.expectEqual(@as(usize, 0), released.old_fragmentation_ratio);
 
+    // decommitEmptyPagesNow is now a diagnostics refresh: the slab already
+    // returned the memory, so nothing is left to hand back.
     rt.gc.decommitEmptyPagesNow();
     const decommitted = rt.gcStats();
     try std.testing.expectEqual(@as(usize, 0), decommitted.heap_committed_bytes);
     try std.testing.expectEqual(@as(usize, 0), decommitted.empty_page_bytes);
-    try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), decommitted.decommitted_bytes);
+    try std.testing.expectEqual(@as(usize, 0), decommitted.decommitted_bytes);
 }
 
 test "external memory token registry audits duplicate releases and leaks" {
@@ -3310,9 +3324,12 @@ test "gc heap accounting verifier catches live byte drift" {
     const obj = try core.Object.create(rt, core.class.ids.object, null);
     try rt.gc.verifyHeapAccounting(rt);
 
-    rt.gc.stats.heap_live_bytes += 1;
+    // heap_live_bytes is derived from old_space.live_bytes (the source of truth
+    // since the gc.stats mirror was retired); drift it there and the object-list
+    // walk still catches the mismatch first.
+    rt.gc.old_space.live_bytes += 1;
     try std.testing.expectError(error.HeapLiveBytesMismatch, rt.gc.verifyHeapAccounting(rt));
-    rt.gc.stats.heap_live_bytes -= 1;
+    rt.gc.old_space.live_bytes -= 1;
     try rt.gc.verifyHeapAccounting(rt);
 
     obj.value().free(rt);

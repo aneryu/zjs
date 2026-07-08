@@ -805,6 +805,15 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
         .{ .o = op.set_loc8, .h = td.opLoc(.set, .byte) },
         .{ .o = op.set_loc, .h = td.opLoc(.set, .half) },
     }) |e| t[e.o] = e.h;
+    // TDZ-checked locals: the per-iteration hot loc ops in `for (let i…)` loops
+    // (quickjs.c emits OP_get_loc_check/OP_put_loc_check for every lexical var,
+    // 33072-33078). get_loc_checkthis / put_loc_check_init / set_loc_uninitialized
+    // stay on cold h_checkedloc (rare derived-ctor-this / block-entry init paths).
+    inline for ([_]struct { o: u8, h: Handler }{
+        .{ .o = op.get_loc_check, .h = td.opLocCheck(.get) },
+        .{ .o = op.put_loc_check, .h = td.opLocCheck(.put) },
+        .{ .o = op.set_loc_check, .h = td.opLocCheck(.set) },
+    }) |e| t[e.o] = e.h;
     inline for ([_]u8{ op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3 }) |o| t[o] = td.op_get_arg_short;
     // Per-op binary handlers (qjs CASE(OP_add)/…/CASE(OP_xor) are distinct labels,
     // quickjs.c:19696-20227; op.pow keeps the cold h_binary — qjs OP_pow:19916 has
@@ -829,6 +838,11 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     inline for ([_]u8{ op.inc, op.dec }) |o| t[o] = td.op_inc_dec;
     t[op.dup] = td.op_dup;
     t[op.swap] = td.op_swap;
+    // Trailing expression-statement drop (the per-iter `dup; put_loc_check; DROP`
+    // tail of every `o = {…}` / `s = …` / `a = […]` loop). qjs OP_drop:17968 is a
+    // register-resident `JS_FreeValue(sp[-1]); sp--`; the plain-value / live-refcount
+    // fast leg inlines here, a `catch_offset` marker on top falls to the cold shell.
+    t[op.drop] = td.op_drop_fast; // catch-marker (finally/catch epilogue) → cold s.op_drop
     t[op.goto8] = td.op_goto8;
     t[op.if_false8] = td.op_if_false8;
     t[op.if_true8] = td.op_if_true8;
@@ -840,6 +854,15 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.get_array_el] = td.op_get_array_el; // dense fast path; miss → cold h_array_element
     t[op.put_array_el] = td.op_put_array_el; // dense write fast path; miss → cold h_array_element
     t[op.get_length] = td.op_get_length; // inline string-length read; non-string → cold getLength
+    // Object/array-literal ops (qjs CASE(OP_object)/(OP_define_field)/(OP_array_from)
+    // are register-resident single-`bl` inlines, quickjs.c:17961/19269/18239). Without
+    // these overrides they routed through the 224-byte coldStd publish shell EVERY
+    // iteration — the per-iter hottest ops of the object/array-literal benchmarks (see
+    // dispatch-audit). Fast handler on the plain-data-add / OOM-free path; every exotic
+    // case falls to the cold h_* shell assigned above.
+    t[op.object] = td.op_object; // bare {} create; OOM → cold h_object
+    t[op.define_field] = td.op_define_field; // plain data add; array/private/proxy/setter → cold h_field
+    t[op.array_from] = td.op_array_from; // dense array build; OOM → cold h_array_from
     t[op.add_loc] = td.op_add_loc;
     t[op.get_var] = td.op_get_var;
     t[op.get_var_undef] = td.op_get_var;
