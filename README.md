@@ -23,6 +23,16 @@ The gate uses `test262.conf` and writes the latest bucket/failure reports under
 `reports/test262-latest/`. Skips and excludes in that config are part of the
 current compatibility boundary.
 
+For day-to-day optimization and repair work, prefer the fast tier:
+
+```sh
+zig build quick-check --summary all
+```
+
+`quick-check` builds `zjs`, runs smoke tests, and runs a small representative
+`test262-smoke` file set. It is an iteration aid, not a release replacement for
+the full gates.
+
 `zig build engine-production-gate --summary all` is the engine semantic and
 architecture gate. A Production v1 release requires this gate to pass from a
 clean checkout; the full release checklist also requires ReleaseSafe testing,
@@ -47,11 +57,14 @@ as `zig-out/bin/run-test262`.
 Useful build steps:
 
 ```sh
+zig build quick-check --summary all
+zig build checkpoint-check --summary all
 zig build test --summary all
 zig build test -Doptimize=ReleaseSafe --summary all
 zig build smoke --summary all
+zig build test262-smoke --summary all
 zig build test-oom --summary all # OOM 注入门禁（corpus×注入+恢复金丝雀），阶段收口档位执行 / OOM injection gate (corpus x injection + recovery canaries), phase-close tier
-zig build gc-stress --summary all
+zig build test -Dzjs_force_gc=true --summary all
 zig build perf-self-check --summary all
 zig build engine-production-gate --summary all
 ```
@@ -97,8 +110,9 @@ The full direct test262 invocation is:
 ./zig-out/bin/run-test262 -t 8 -c test262.conf -d test262/test 0 100000
 ```
 
-For parser, runner, execution, or semantic changes, run a focused test262 slice
-before the full gate.
+For parser, runner, execution, or semantic changes, run
+`zig build test262-smoke --summary all` plus a focused test262 slice before the
+full gate.
 
 ## Garbage Collection And Host Ownership
 

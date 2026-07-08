@@ -327,13 +327,17 @@ Use the narrowest validation that covers the changed surface:
 
 ```sh
 zig build zjs --summary all
+zig build quick-check --summary all
+zig build checkpoint-check --summary all
 zig build smoke --summary all
 zig build test --summary all
 zig build test -Doptimize=ReleaseSafe --summary all
+zig build test262-smoke --summary all
 zig build test262-gate --summary all
 zig build architecture-check --summary all
 git diff --check
 ```
 
 For parser, runner, execution, or semantic compatibility changes, run a focused
-test262 slice before relying on the full gate.
+test262 slice before relying on the full gate. `quick-check` is the default
+inner-loop gate; `checkpoint-check` is the medium gate before broader handoff.

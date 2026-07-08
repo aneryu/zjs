@@ -6,6 +6,10 @@ Use this checklist for an engine-only Production v1 release decision.
 architecture gate. It is required release evidence, but it does not replace the
 ReleaseSafe, hygiene, and performance checks below.
 
+`zig build quick-check --summary all` and `zig build checkpoint-check --summary
+all` are iteration and handoff shortcuts. They are useful before starting the
+release sweep, but they are not release evidence replacements.
+
 ## API
 
 - Public Zig API matches `docs/public-api-contract.md`.
@@ -29,6 +33,8 @@ ReleaseSafe, hygiene, and performance checks below.
 
 ## Compatibility
 
+- `zig build checkpoint-check --summary all` passes before the final release
+  sweep starts.
 - `zig build test --summary all` passes.
 - `zig build test -Doptimize=ReleaseSafe --summary all` passes.
 - `zig build smoke --summary all` passes.

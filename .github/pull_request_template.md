@@ -12,11 +12,11 @@
 
 ## Validation
 
-- [ ] `zig build test --summary all`
-- [ ] `zig build smoke --summary all`
+- [ ] `zig build quick-check --summary all`
+- [ ] `zig build checkpoint-check --summary all` for non-trivial code-bearing changes.
 - [ ] `git diff --check`
 - [ ] Relevant test262 slice:
-- [ ] `zig build test262-gate --summary all` if semantic or bytecode behavior changed.
+- [ ] `zig build test262-gate --summary all` for final semantic/bytecode gate evidence.
 - [ ] Perf report paths if this change affects performance:
 
 ## Rollback Notes

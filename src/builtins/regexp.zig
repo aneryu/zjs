@@ -7,7 +7,6 @@ const builtin_dispatch = @import("../exec/builtin_dispatch.zig");
 const regexp_fastpath = @import("../exec/regexp_fastpath.zig");
 const string_ops = @import("../exec/string_ops.zig");
 const exceptions = @import("../exec/exceptions.zig");
-const bytecode_mod = @import("../bytecode.zig");
 const frame_mod = @import("../exec/frame.zig");
 const object_ops = @import("../exec/object_ops.zig");
 const coercion_ops = @import("../exec/coercion_ops.zig");
@@ -1272,7 +1271,7 @@ fn accessorCallById(
     this_value: core.JSValue,
     function_object: *core.Object,
     id: u32,
-    caller_function: ?*const bytecode_mod.Bytecode,
+    caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
     const rt = ctx.runtime;

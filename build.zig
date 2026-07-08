@@ -127,6 +127,37 @@ pub fn build(b: *std.Build) void {
     const test262_gate_step = b.step("test262-gate", "Run test262 with regression gate");
     test262_gate_step.dependOn(&run_test262_exec.step);
 
+    const test262_smoke_files = [_][]const u8{
+        "test262/test/language/types/null/S8.2_A1_T1.js",
+        "test262/test/language/types/undefined/S8.1_A1_T1.js",
+        "test262/test/language/expressions/assignment/S11.13.1_A3.2.js",
+        "test262/test/language/statements/for/S12.6.3_A1.js",
+        "test262/test/language/statements/try/S12.14_A1.js",
+        "test262/test/language/expressions/arrow-function/empty-function-body-returns-undefined.js",
+        "test262/test/built-ins/Array/prototype/push/S15.4.4.7_A1_T1.js",
+        "test262/test/built-ins/Object/defineProperty/15.2.3.6-4-293.js",
+        "test262/test/built-ins/String/prototype/slice/S15.5.4.13_A1_T1.js",
+        "test262/test/built-ins/RegExp/prototype/test/S15.10.6.3_A1_T1.js",
+        "test262/test/built-ins/Promise/prototype/then/S25.4.5.3_A1.1_T1.js",
+        "test262/test/built-ins/JSON/stringify/value-primitive-top-level.js",
+    };
+    const run_test262_smoke = b.addRunArtifact(run_test262_exe);
+    run_test262_smoke.step.dependOn(&install_run_test262.step);
+    run_test262_smoke.addArg("-t");
+    run_test262_smoke.addArg("8");
+    run_test262_smoke.addArg("-T");
+    run_test262_smoke.addArg("10000");
+    run_test262_smoke.addArg("-c");
+    run_test262_smoke.addArg("test262.conf");
+    for (test262_smoke_files) |file| {
+        run_test262_smoke.addArg("-f");
+        run_test262_smoke.addArg(file);
+    }
+    run_test262_smoke.addArg("-R");
+    run_test262_smoke.addArg(".zig-cache/test262-smoke");
+    const test262_smoke_step = b.step("test262-smoke", "Run a small representative test262 file set for inner-loop checks");
+    test262_smoke_step.dependOn(&run_test262_smoke.step);
+
     const run_perf_benchmark = b.addRunArtifact(zjs_exe);
     run_perf_benchmark.addArg("--perf-json");
     run_perf_benchmark.addArg("tests/perf/microbench.js");
@@ -554,6 +585,18 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all Zig tests (defaults to Debug optimization unless overridden)");
 
     test_step.dependOn(&run_unified_tests.step);
+
+    const quick_check_step = b.step("quick-check", "Run the fast inner-loop validation gate");
+    quick_check_step.dependOn(zjs_step);
+    quick_check_step.dependOn(smoke_step);
+    quick_check_step.dependOn(test262_smoke_step);
+
+    const checkpoint_check_step = b.step("checkpoint-check", "Run checkpoint validation without the full test262, OOM-injection, or alternate-representation gates");
+    checkpoint_check_step.dependOn(test_step);
+    checkpoint_check_step.dependOn(smoke_step);
+    checkpoint_check_step.dependOn(architecture_check_step);
+    checkpoint_check_step.dependOn(test262_smoke_step);
+    checkpoint_check_step.dependOn(&run_oom_cap_tests.step);
 
     const engine_production_gate_step = b.step("engine-production-gate", "Run the engine-only Production v1 release gate");
     engine_production_gate_step.dependOn(test_step);

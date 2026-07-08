@@ -79,6 +79,13 @@ available only through git history.
 
 ### Regression
 
+- `zig build quick-check --summary all` (fast inner-loop gate: build `zjs`,
+  smoke tests, and the representative `test262-smoke` set; use while iterating,
+  then add the changed-area slice)
+- `zig build checkpoint-check --summary all` (medium checkpoint gate: unified
+  Debug tests plus smoke, architecture, `test262-smoke`, and OOM-cap coverage;
+  use before handing off non-trivial code-bearing changes when full test262 is
+  not yet justified)
 - `zig build test --summary all` (Debug full unit/integration suite; during the
   current large refactor, do NOT run this after every small edit. Prefer
   targeted compile checks, focused unit tests, or changed-area slices while
@@ -100,10 +107,12 @@ available only through git history.
 ### test262
 
 Run a targeted slice based on the changed area. For runner, parser, execution, or
-semantic compatibility changes, prefer the relevant `-d` / `-f` / index range
-command. Use the full local gate when final confirmation is needed:
+semantic compatibility changes, prefer `test262-smoke` plus the relevant `-d` /
+`-f` / index range command. Use the full local gate when final confirmation is
+needed:
 
 ```bash
+zig build test262-smoke --summary all
 zig build test262-gate --summary all
 ./zig-out/bin/run-test262 -t 8 -c test262.conf -d test262/test 0 100000
 ```
