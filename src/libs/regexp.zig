@@ -8,7 +8,8 @@ pub const max_captures = 255;
 const register_count_max = 255;
 pub const max_exec_slots = max_captures * 2 + register_count_max;
 pub const small_exec_slots = 64;
-const static_stack_buf_count = 32;
+const static_bt_frame_count = 16;
+const static_undo_count = 32;
 const interrupt_counter_init = 10000;
 
 pub const flags = struct {
@@ -182,11 +183,20 @@ const REExecStateEnum = enum(u3) {
     negative_lookahead,
 };
 
-const frame_entry_count = 3;
-const bp_type_bits = 3;
-const bp_type_mask = (1 << bp_type_bits) - 1;
 const no_slot_value = std.math.maxInt(usize);
-const StackElem = usize;
+const compact_no_slot_value = std.math.maxInt(u32);
+
+const REBTFrame = extern struct {
+    pc_off: u32,
+    cptr: u32,
+    undo_top: u32,
+    typ: u8,
+};
+
+const REUndo = extern struct {
+    old_value: u32,
+    slot: u16,
+};
 
 const REExecContext = struct {
     allocator: std.mem.Allocator,
@@ -204,16 +214,20 @@ const REExecContext = struct {
     interrupt_counter: i32,
     @"opaque": ?*anyopaque,
     check_timeout: ?CheckTimeout,
-    stack_buf: []StackElem,
-    stack_size: usize,
-    static_stack_buf: [static_stack_buf_count]StackElem,
+    bt_frames: []REBTFrame,
+    undo_stack: []REUndo,
+    static_bt_frames: [static_bt_frame_count]REBTFrame,
+    static_undo_stack: [static_undo_count]REUndo,
 
     fn deinit(self: *REExecContext) void {
-        if (self.stack_buf.len != 0 and self.stack_buf.ptr != self.static_stack_buf[0..].ptr) {
-            self.allocator.free(self.stack_buf);
+        if (self.bt_frames.len != 0 and self.bt_frames.ptr != self.static_bt_frames[0..].ptr) {
+            self.allocator.free(self.bt_frames);
         }
-        self.stack_buf = &.{};
-        self.stack_size = 0;
+        if (self.undo_stack.len != 0 and self.undo_stack.ptr != self.static_undo_stack[0..].ptr) {
+            self.allocator.free(self.undo_stack);
+        }
+        self.bt_frames = &.{};
+        self.undo_stack = &.{};
     }
 
     inline fn pollTimeout(self: *REExecContext) !void {
@@ -225,17 +239,28 @@ const REExecContext = struct {
         }
     }
 
-    fn stackRealloc(self: *REExecContext, n: usize) !void {
-        var new_size = self.stack_size * 3 / 2;
+    fn btFrameRealloc(self: *REExecContext, n: usize, used: usize) !void {
+        var new_size = self.bt_frames.len * 3 / 2;
         if (new_size < n) new_size = n;
-        if (self.stack_buf.ptr == self.static_stack_buf[0..].ptr) {
-            const new_stack = try self.allocator.alloc(StackElem, new_size);
-            @memcpy(new_stack[0..self.stack_size], self.stack_buf[0..self.stack_size]);
-            self.stack_buf = new_stack;
+        if (self.bt_frames.ptr == self.static_bt_frames[0..].ptr) {
+            const new_stack = try self.allocator.alloc(REBTFrame, new_size);
+            @memcpy(new_stack[0..used], self.bt_frames[0..used]);
+            self.bt_frames = new_stack;
         } else {
-            self.stack_buf = try self.allocator.realloc(self.stack_buf, new_size);
+            self.bt_frames = try self.allocator.realloc(self.bt_frames, new_size);
         }
-        self.stack_size = new_size;
+    }
+
+    fn undoRealloc(self: *REExecContext, n: usize, used: usize) !void {
+        var new_size = self.undo_stack.len * 3 / 2;
+        if (new_size < n) new_size = n;
+        if (self.undo_stack.ptr == self.static_undo_stack[0..].ptr) {
+            const new_stack = try self.allocator.alloc(REUndo, new_size);
+            @memcpy(new_stack[0..used], self.undo_stack[0..used]);
+            self.undo_stack = new_stack;
+        } else {
+            self.undo_stack = try self.allocator.realloc(self.undo_stack, new_size);
+        }
     }
 };
 
@@ -543,6 +568,8 @@ fn execCaptureSlotsParsed(
     const alloc_count = try checkedAllocCount(header);
     if (capture.len < alloc_count) return error.BytecodeCorrupt;
     if (start_index > input.len()) return .out_of_range;
+    if (input.len() >= compact_no_slot_value) return error.BytecodeCorrupt;
+    if (header_len + header.bytecode_len >= compact_no_slot_value) return error.BytecodeCorrupt;
     const cbuf_type: CbufType = switch (input) {
         .latin1 => .latin1,
         .utf16 => if ((header.flags & (flags.unicode | flags.unicode_sets)) != 0) .utf16_unicode else .utf16_units,
@@ -573,17 +600,16 @@ fn execCaptureSlotsParsed(
         .interrupt_counter = interrupt_counter_init,
         .@"opaque" = options.@"opaque",
         .check_timeout = options.check_timeout,
-        .stack_buf = &.{},
-        .stack_size = static_stack_buf_count,
-        .static_stack_buf = undefined,
+        .bt_frames = &.{},
+        .undo_stack = &.{},
+        .static_bt_frames = undefined,
+        .static_undo_stack = undefined,
     };
-    ctx.stack_buf = ctx.static_stack_buf[0..];
+    ctx.bt_frames = ctx.static_bt_frames[0..];
+    ctx.undo_stack = ctx.static_undo_stack[0..];
     defer ctx.deinit();
 
-    @memset(capture[0 .. header.capture_count * 2], no_slot_value);
-    if (comptime safety == .checked) {
-        @memset(capture[header.capture_count * 2 .. alloc_count], no_slot_value);
-    }
+    @memset(capture[0..alloc_count], no_slot_value);
     const matched = switch (cbuf_type) {
         .latin1 => try lreExecBacktrack(safety, .latin1, &ctx, capture.ptr, header_len, initial_cptr),
         .utf16_units => try lreExecBacktrack(safety, .utf16_units, &ctx, capture.ptr, header_len, initial_cptr),
@@ -616,30 +642,20 @@ pub fn testMatchTrustedWithOptions(allocator: std.mem.Allocator, bytecode: []con
 
 //=== Execution state & backtrack interpreter ==============================
 
-inline fn decodeExecState(comptime safety: ExecSafety, meta: usize) !REExecStateEnum {
-    const type_value = meta & bp_type_mask;
-    if (comptime safety == .checked) {
-        if (type_value > @intFromEnum(REExecStateEnum.negative_lookahead)) return error.BytecodeCorrupt;
-    }
-    return @enumFromInt(type_value);
-}
-
-inline fn execStatePrevBp(meta: usize) usize {
-    return meta >> bp_type_bits;
-}
-
 const ExecState = struct {
     s: *REExecContext,
     capture: [*]usize,
     pc: [*]const u8,
     bc_end: [*]const u8,
-    stack_buf: [*]usize,
+    bt_frames: [*]REBTFrame,
+    undo_stack: [*]REUndo,
     cbuf_latin1: [*]const u8,
     cbuf_utf16: [*]const u16,
     cptr: usize,
-    sp: usize,
-    bp: usize,
-    stack_end: usize,
+    bt_len: usize,
+    bt_end: usize,
+    undo_len: usize,
+    undo_end: usize,
     cbuf_type: CbufType,
     cbuf_end: usize,
 
@@ -656,28 +672,43 @@ const ExecState = struct {
             .capture = capture,
             .pc = bc_ptr + initial_pc,
             .bc_end = bc_ptr + s.bc_buf_end,
-            .stack_buf = s.stack_buf.ptr,
+            .bt_frames = s.bt_frames.ptr,
+            .undo_stack = s.undo_stack.ptr,
             .cbuf_latin1 = s.cbuf_latin1.ptr,
             .cbuf_utf16 = s.cbuf_utf16.ptr,
             .cptr = initial_cptr,
-            .sp = 0,
-            .bp = 0,
-            .stack_end = s.stack_size,
+            .bt_len = 0,
+            .bt_end = s.bt_frames.len,
+            .undo_len = 0,
+            .undo_end = s.undo_stack.len,
             .cbuf_type = s.cbuf_type,
             .cbuf_end = s.cbuf_end,
         };
     }
 
-    inline fn checkStackSpace(self: *ExecState, comptime safety: ExecSafety, n: usize) !void {
+    inline fn checkFrameSpace(self: *ExecState, comptime safety: ExecSafety, n: usize) !void {
         const needs_grow = if (comptime safety == .checked)
-            self.stack_end < self.sp or self.stack_end - self.sp < n
+            self.bt_end < self.bt_len or self.bt_end - self.bt_len < n
         else
-            self.stack_end - self.sp < n;
+            self.bt_end - self.bt_len < n;
         if (needs_grow) {
             @branchHint(.unlikely);
-            try self.s.stackRealloc(self.sp + n);
-            self.stack_buf = self.s.stack_buf.ptr;
-            self.stack_end = self.s.stack_size;
+            try self.s.btFrameRealloc(self.bt_len + n, self.bt_len);
+            self.bt_frames = self.s.bt_frames.ptr;
+            self.bt_end = self.s.bt_frames.len;
+        }
+    }
+
+    inline fn checkUndoSpace(self: *ExecState, comptime safety: ExecSafety, n: usize) !void {
+        const needs_grow = if (comptime safety == .checked)
+            self.undo_end < self.undo_len or self.undo_end - self.undo_len < n
+        else
+            self.undo_end - self.undo_len < n;
+        if (needs_grow) {
+            @branchHint(.unlikely);
+            try self.s.undoRealloc(self.undo_len + n, self.undo_len);
+            self.undo_stack = self.s.undo_stack.ptr;
+            self.undo_end = self.s.undo_stack.len;
         }
     }
 
@@ -758,31 +789,81 @@ const ExecState = struct {
         return @bitCast(try self.getU32(safety));
     }
 
+    inline fn compactIndex(comptime safety: ExecSafety, value: usize) !u32 {
+        if (comptime safety == .checked) {
+            if (value >= compact_no_slot_value) return error.BytecodeCorrupt;
+        }
+        return @intCast(value);
+    }
+
+    inline fn compactCaptureValue(comptime safety: ExecSafety, value: usize) !u32 {
+        if (value == no_slot_value) return compact_no_slot_value;
+        if (comptime safety == .checked) {
+            if (value >= compact_no_slot_value) return error.BytecodeCorrupt;
+        }
+        return @intCast(value);
+    }
+
+    inline fn expandCaptureValue(value: u32) usize {
+        return if (value == compact_no_slot_value) no_slot_value else @as(usize, value);
+    }
+
+    inline fn frameType(comptime safety: ExecSafety, frame: REBTFrame) !REExecStateEnum {
+        if (comptime safety == .checked) {
+            if (frame.typ > @intFromEnum(REExecStateEnum.negative_lookahead)) return error.BytecodeCorrupt;
+        }
+        return @enumFromInt(frame.typ);
+    }
+
+    inline fn pcOffset(self: *const ExecState, comptime safety: ExecSafety, pc: [*]const u8) !u32 {
+        try self.ensurePc(safety, pc, 0);
+        const base_addr = @intFromPtr(self.s.bc_buf.ptr);
+        const pc_addr = @intFromPtr(pc);
+        return compactIndex(safety, pc_addr - base_addr);
+    }
+
+    inline fn pcFromOffset(self: *const ExecState, comptime safety: ExecSafety, offset: u32) ![*]const u8 {
+        if (comptime safety == .checked) {
+            if (offset > self.s.bc_buf_end) return error.BytecodeCorrupt;
+        }
+        const pc = self.s.bc_buf.ptr + offset;
+        try self.ensurePc(safety, pc, 0);
+        return pc;
+    }
+
     inline fn pushExecState(self: *ExecState, comptime safety: ExecSafety, pc: [*]const u8, typ: REExecStateEnum) !void {
-        try self.checkStackSpace(safety, frame_entry_count);
-        const pos = self.sp;
-        const stack_buf = self.stack_buf;
-        stack_buf[pos] = @intFromPtr(pc);
-        stack_buf[pos + 1] = self.cptr;
-        stack_buf[pos + 2] = (self.bp << bp_type_bits) | @intFromEnum(typ);
-        self.sp = pos + frame_entry_count;
-        self.bp = self.sp;
+        try self.checkFrameSpace(safety, 1);
+        const undo_top = try compactIndex(safety, self.undo_len);
+        self.bt_frames[self.bt_len] = .{
+            .pc_off = try self.pcOffset(safety, pc),
+            .cptr = try compactIndex(safety, self.cptr),
+            .undo_top = undo_top,
+            .typ = @intFromEnum(typ),
+        };
+        self.bt_len += 1;
     }
 
     inline fn saveCapture(self: *ExecState, comptime safety: ExecSafety, idx: usize, value: usize) !void {
         if (comptime safety == .checked) {
             if (idx >= self.s.alloc_count) return error.BytecodeCorrupt;
         }
-        try self.checkStackSpace(safety, 2);
-        self.saveCaptureAssumeSpace(idx, value);
+        try self.pushUndo(safety, idx, value);
     }
 
-    inline fn saveCaptureAssumeSpace(self: *ExecState, idx: usize, value: usize) void {
-        const pos = self.sp;
-        const stack_buf = self.stack_buf;
-        stack_buf[pos] = idx;
-        stack_buf[pos + 1] = self.capture[idx];
-        self.sp = pos + 2;
+    inline fn pushUndo(self: *ExecState, comptime safety: ExecSafety, idx: usize, value: usize) !void {
+        try self.checkUndoSpace(safety, 1);
+        try self.pushUndoAssumeSpace(safety, idx, value);
+    }
+
+    inline fn pushUndoAssumeSpace(self: *ExecState, comptime safety: ExecSafety, idx: usize, value: usize) !void {
+        if (comptime safety == .checked) {
+            if (idx > std.math.maxInt(u16)) return error.BytecodeCorrupt;
+        }
+        self.undo_stack[self.undo_len] = .{
+            .old_value = try compactCaptureValue(safety, self.capture[idx]),
+            .slot = @intCast(idx),
+        };
+        self.undo_len += 1;
         self.capture[idx] = value;
     }
 
@@ -790,22 +871,68 @@ const ExecState = struct {
         if (comptime safety == .checked) {
             if (idx >= self.s.alloc_count) return error.BytecodeCorrupt;
         }
-        const stack_buf = self.stack_buf;
-        var sp1 = self.sp;
-        while (true) {
-            if (sp1 > self.bp) {
-                if (comptime safety == .checked) {
-                    if (sp1 < 2) return error.BytecodeCorrupt;
-                }
-                if (stack_buf[sp1 - 2] == idx) break;
-                sp1 -= 2;
-            } else {
-                try self.checkStackSpace(safety, 2);
-                self.saveCaptureAssumeSpace(idx, value);
+        const undo_base = self.currentUndoBase();
+        if (comptime safety == .checked) {
+            if (undo_base > self.undo_len) return error.BytecodeCorrupt;
+        }
+        var pos = self.undo_len;
+        while (pos > undo_base) {
+            pos -= 1;
+            if (self.undo_stack[pos].slot == idx) {
+                self.capture[idx] = value;
                 return;
             }
         }
-        self.capture[idx] = value;
+        try self.pushUndo(safety, idx, value);
+    }
+
+    inline fn restoreOneUndo(self: *ExecState, comptime safety: ExecSafety) !void {
+        if (comptime safety == .checked) {
+            if (self.undo_len == 0) return error.BytecodeCorrupt;
+        }
+        self.undo_len -= 1;
+        const undo = self.undo_stack[self.undo_len];
+        const slot: usize = undo.slot;
+        if (comptime safety == .checked) {
+            if (slot >= self.s.alloc_count) return error.BytecodeCorrupt;
+        }
+        self.capture[slot] = expandCaptureValue(undo.old_value);
+    }
+
+    inline fn restoreUndoTo(self: *ExecState, comptime safety: ExecSafety, undo_top: usize) !void {
+        if (comptime safety == .checked) {
+            if (undo_top > self.undo_len) return error.BytecodeCorrupt;
+        }
+        while (self.undo_len > undo_top) {
+            try self.restoreOneUndo(safety);
+        }
+    }
+
+    inline fn currentUndoBase(self: *const ExecState) usize {
+        return if (self.bt_len == 0) 0 else self.bt_frames[self.bt_len - 1].undo_top;
+    }
+
+    inline fn popFrameRestore(self: *ExecState, comptime safety: ExecSafety) !REBTFrame {
+        if (comptime safety == .checked) {
+            if (self.bt_len == 0) return error.BytecodeCorrupt;
+        }
+        const frame = self.bt_frames[self.bt_len - 1];
+        try self.restoreUndoTo(safety, frame.undo_top);
+        self.bt_len -= 1;
+        self.pc = try self.pcFromOffset(safety, frame.pc_off);
+        self.cptr = frame.cptr;
+        return frame;
+    }
+
+    inline fn popFrameKeepUndo(self: *ExecState, comptime safety: ExecSafety) !REBTFrame {
+        if (comptime safety == .checked) {
+            if (self.bt_len == 0) return error.BytecodeCorrupt;
+        }
+        const frame = self.bt_frames[self.bt_len - 1];
+        self.bt_len -= 1;
+        self.pc = try self.pcFromOffset(safety, frame.pc_off);
+        self.cptr = frame.cptr;
+        return frame;
     }
 
     inline fn registerSlot(self: *const ExecState, register: usize) usize {
@@ -1066,67 +1193,20 @@ fn lreExecBacktrack(
                 .invalid => return error.BytecodeCorrupt,
                 .match => return true,
                 .lookahead_match => {
-                    const items = st.stack_buf;
-                    var sp1: usize = undefined;
-                    const sp_top = st.sp;
-                    var next_sp: usize = undefined;
-                    var typ: REExecStateEnum = undefined;
-
                     while (true) {
-                        sp1 = st.sp;
-                        st.sp = st.bp;
-                        if (st.sp < frame_entry_count) return error.BytecodeCorrupt;
-                        st.pc = @ptrFromInt(items[st.sp - 3]);
-                        try st.ensurePc(safety, st.pc, 0);
-                        st.cptr = items[st.sp - 2];
-                        const meta = items[st.sp - 1];
-                        typ = try decodeExecState(safety, meta);
-                        st.bp = execStatePrevBp(meta);
-                        items[st.sp - 1] = sp1;
-                        st.sp -= frame_entry_count;
-                        if (typ == .lookahead) break;
-                    }
-                    if (st.sp != 0) {
-                        sp1 = st.sp;
-                        while (sp1 < sp_top) {
-                            if (sp1 + 2 >= sp_top) return error.BytecodeCorrupt;
-                            next_sp = items[sp1 + 2];
-                            if (next_sp < sp1 + frame_entry_count or next_sp > sp_top) return error.BytecodeCorrupt;
-                            sp1 += frame_entry_count;
-                            while (sp1 < next_sp) : (sp1 += 1) {
-                                items[st.sp] = items[sp1];
-                                st.sp += 1;
-                            }
+                        if (st.bt_len == 0) return error.BytecodeCorrupt;
+                        const frame = try st.popFrameKeepUndo(safety);
+                        if (try ExecState.frameType(safety, frame) == .lookahead) {
+                            break;
                         }
                     }
                     continue :main;
                 },
                 .negative_lookahead_match => {
-                    const items = st.stack_buf;
                     while (true) {
-                        if (st.bp == 0) return error.BytecodeCorrupt;
-                        while (st.sp > st.bp) {
-                            if (comptime safety == .checked) {
-                                if (st.sp < 2) return error.BytecodeCorrupt;
-                            }
-                            const slot = items[st.sp - 2];
-                            if (comptime safety == .checked) {
-                                if (slot >= st.s.alloc_count) return error.BytecodeCorrupt;
-                            }
-                            st.capture[slot] = items[st.sp - 1];
-                            st.sp -= 2;
-                        }
-                        if (comptime safety == .checked) {
-                            if (st.sp < frame_entry_count) return error.BytecodeCorrupt;
-                        }
-                        st.pc = @ptrFromInt(items[st.sp - 3]);
-                        try st.ensurePc(safety, st.pc, 0);
-                        st.cptr = items[st.sp - 2];
-                        const meta = items[st.sp - 1];
-                        const typ = try decodeExecState(safety, meta);
-                        st.bp = execStatePrevBp(meta);
-                        st.sp -= frame_entry_count;
-                        if (typ == .negative_lookahead) break;
+                        if (st.bt_len == 0) return error.BytecodeCorrupt;
+                        const frame = try st.popFrameRestore(safety);
+                        if (try ExecState.frameType(safety, frame) == .negative_lookahead) break;
                     }
                     break :dispatch_once;
                 },
@@ -1250,26 +1330,17 @@ fn lreExecBacktrack(
                     const last = try st.readU8At(safety, st.pc + 1);
                     st.pc += 2;
                     if (last >= st.s.capture_count or first > last) return error.BytecodeCorrupt;
-                    const count = (@as(usize, last) - @as(usize, first) + 1) * 4;
-                    try st.checkStackSpace(safety, count);
-                    var pos = st.sp;
-                    const stack_buf = st.stack_buf;
+                    const undo_count = (@as(usize, last) - @as(usize, first) + 1) * 2;
+                    try st.checkUndoSpace(safety, undo_count);
                     while (first <= last) : (first += 1) {
                         var slot = @as(usize, first) * 2;
                         if (comptime safety == .checked) {
                             if (slot + 1 >= st.s.alloc_count) return error.BytecodeCorrupt;
                         }
-                        stack_buf[pos] = slot;
-                        stack_buf[pos + 1] = st.capture[slot];
-                        st.capture[slot] = no_slot_value;
-                        pos += 2;
+                        try st.pushUndoAssumeSpace(safety, slot, no_slot_value);
                         slot += 1;
-                        stack_buf[pos] = slot;
-                        stack_buf[pos + 1] = st.capture[slot];
-                        st.capture[slot] = no_slot_value;
-                        pos += 2;
+                        try st.pushUndoAssumeSpace(safety, slot, no_slot_value);
                     }
-                    st.sp = pos;
                     continue :main;
                 },
                 .set_i32 => {
@@ -1506,33 +1577,10 @@ fn lreExecBacktrack(
             continue :main;
         }
 
-        var items = st.stack_buf;
         while (true) {
-            if (st.bp == 0) return false;
-            while (st.sp > st.bp) {
-                if (comptime safety == .checked) {
-                    if (st.sp < 2) return error.BytecodeCorrupt;
-                }
-                const slot = items[st.sp - 2];
-                if (comptime safety == .checked) {
-                    if (slot >= st.s.alloc_count) return error.BytecodeCorrupt;
-                }
-                st.capture[slot] = items[st.sp - 1];
-                st.sp -= 2;
-            }
-
-            if (comptime safety == .checked) {
-                if (st.sp < frame_entry_count) return error.BytecodeCorrupt;
-            }
-            st.pc = @ptrFromInt(items[st.sp - 3]);
-            try st.ensurePc(safety, st.pc, 0);
-            st.cptr = items[st.sp - 2];
-            const meta = items[st.sp - 1];
-            const typ = try decodeExecState(safety, meta);
-            st.bp = execStatePrevBp(meta);
-            st.sp -= frame_entry_count;
-            if (typ != .lookahead) break;
-            items = st.stack_buf;
+            if (st.bt_len == 0) return false;
+            const frame = try st.popFrameRestore(safety);
+            if (try ExecState.frameType(safety, frame) != .lookahead) break;
         }
         try st.s.pollTimeout();
         continue :main;
