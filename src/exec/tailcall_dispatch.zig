@@ -43,6 +43,7 @@ const gen_async_vm = @import("vm_gen_async.zig");
 const slot_ops = @import("slot_ops.zig");
 const vm_property_ref = @import("vm_property_ref.zig");
 const vm_property_globals = @import("vm_property_globals.zig");
+const property_vm = @import("vm_property.zig");
 const vm_property_field = @import("vm_property_field.zig");
 const property_ic = @import("property_ic.zig");
 const vm_property_private = @import("vm_property_private.zig");
@@ -1552,6 +1553,12 @@ pub fn op_add_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
 pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     if (vm_property_globals.hasDynamicGlobalOverlay(vm.frame, evLocalNames(vm), vm.frame.evalVarRefNames(), evWithObject(vm))) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // A closure created inside direct eval may have parent eval bindings that
+    // shadow global names. qjs keeps OP_get_var as a direct var-ref cell read;
+    // zjs's frame model resolves this through the cold scope walker. The
+    // frame-level check avoids a hot per-name walk without caching mutable
+    // eval/with state.
+    if (property_vm.frameClosureHasEvalParent(vm.frame)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
     // Bounds check stays (dynamic eval growth; phase-E deletion is gated on
     // construction-fixed length — qjs reads unchecked, 18461).
@@ -1562,14 +1569,9 @@ pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
     const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
     const v = cell.pvalue.*;
     if (v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    // Guard #7 (nested-cell check) retired: cell values are never cells (the
-    // direct-eval const view pvalue-aliases its target, see opGetVarRef) —
-    // bare `*var_refs[idx]->pvalue` like qjs OP_get_var (18461-18488).
-    // No global-lexical shadow check: a shadowing top-level let/const performs
-    // definition-time cell surgery / parked-cell reuse (qjs
-    // js_closure_define_global_var, quickjs.c:17148-17205), so an initialized
-    // cell is always the authoritative binding (qjs OP_get_var, 18461-18488).
-    if (vm_property_globals.parentEvalShadowsGlobalForIdx(vm.ctx.runtime, vm.frame, vm.function, idx)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // Guard #7 (nested-cell check) and global-lexical shadow checks are not
+    // part of qjs's hot OP_get_var. They are folded into the cell at
+    // definition/mutation time.
     sp[0] = v.dup();
     return cont(pc + 3, sp + 1, var_buf, vm);
 }
