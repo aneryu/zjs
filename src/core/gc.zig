@@ -665,6 +665,7 @@ pub const Registry = struct {
     /// Park a resource-stripped GC object's struct for the Pass-B drain. The
     /// header is already unlinked from the GC object list by the resource pass.
     pub fn deferCycleStructFree(self: *Registry, header: *GCObjectHeader) void {
+        header.meta().flags.finalizing = true;
         self.cycle_deferred_frees.append(self.memory.persistent_allocator, header) catch {
             // Capacity was reserved up-front; reaching here means OOM. Leaking the
             // struct is the only memory-safe fallback (freeing now risks the very
@@ -1550,6 +1551,7 @@ pub inline fn release(rt: anytype, header: anytype) void {
 }
 
 noinline fn releaseAndDestroy(rt: anytype, header: *Header) void {
+    if (header.meta().flags.finalizing and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode)) return;
     if (rt.gc.phase == .deinit and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .shape)) return;
     // During cycle removal, a child reaching rc 0 must NOT be freed here: the
     // dedicated batch loop in `destroyRuntimeCyclesWithValueRoots` frees every

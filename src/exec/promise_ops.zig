@@ -8,6 +8,21 @@ const property_ops = @import("property_ops.zig");
 const zjs_vm = @import("zjs_vm.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
+
+pub const LegacyStaticMethod = core.host_function.builtin_method_ids.promise.LegacyStaticMethod;
+
+pub fn legacyStaticMethodId(name: []const u8) ?u32 {
+    if (std.mem.eql(u8, name, "resolve")) return @intFromEnum(LegacyStaticMethod.resolve);
+    if (std.mem.eql(u8, name, "all")) return @intFromEnum(LegacyStaticMethod.all);
+    if (std.mem.eql(u8, name, "race")) return @intFromEnum(LegacyStaticMethod.race);
+    if (std.mem.eql(u8, name, "reject")) return @intFromEnum(LegacyStaticMethod.reject);
+    if (std.mem.eql(u8, name, "allSettled")) return @intFromEnum(LegacyStaticMethod.all_settled);
+    if (std.mem.eql(u8, name, "any")) return @intFromEnum(LegacyStaticMethod.any);
+    if (std.mem.eql(u8, name, "try")) return @intFromEnum(LegacyStaticMethod.try_);
+    if (std.mem.eql(u8, name, "withResolvers")) return @intFromEnum(LegacyStaticMethod.with_resolvers);
+    return null;
+}
+
 const HostError = exceptions.HostError;
 const rejectedPromiseForRuntimeError = exception_ops.rejectedPromiseForRuntimeError;
 const qjsPromiseAggregateError = exception_ops.qjsPromiseAggregateError;

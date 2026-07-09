@@ -20167,6 +20167,7 @@ pub const compile_entry = struct {
         filename: []const u8 = "<input>",
         source_kind: SourceKindImpl = .auto,
         strict: bool = false,
+        runtime_strict: bool = false,
         return_completion: bool = false,
         eval_global_var_bindings: bool = false,
         eval_in_class_field_initializer: bool = false,

@@ -3096,10 +3096,11 @@ test "Engine eval closures inherit direct eval function declarations" {
 test "invalid opcode reports invalid bytecode without context exception" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    helpers.registerStandardGlobalsBare(rt);
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    var function = try makeFunction(rt, &.{255});
+    var function = try helpers.makeUncheckedFunction(rt, &.{255});
     defer function.deinit(rt);
     try std.testing.expectError(error.InvalidBytecode, runFunction(rt, ctx, &function));
     try std.testing.expect(!ctx.hasException());

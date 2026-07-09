@@ -630,7 +630,7 @@ pub fn defineNativeDataMethodWithNativeId(rt: *core.JSRuntime, object: *core.Obj
     const method = try core.function.nativeFunction(rt, name, length);
     defer method.free(rt);
     const method_object = property_ops.expectObject(method) catch return error.TypeError;
-    method_object.nativeFunctionIdSlot().* = native_builtin_id;
+    method_object.setNativeBuiltinIdAndRecord(rt, native_builtin_id);
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
 }
 

@@ -1389,7 +1389,7 @@ pub fn qjsDatePrototypeMethod(
     }
     if (try date_vm.qjsDateCapturedSetterCall(ctx, output, global, this_value, method_id, args, caller_function, caller_frame)) |value| return value;
     // Remaining (non-special-cased) prototype ids run the plain `methodCallArgs`
-    // body, which lives in `builtins/date.zig`. Route it through the record
+    // body, which lives in `exec/date_ops.zig`. Route it through the record
     // table's func-object-free arm (re-encoding the decoded id to its
     // `PrototypeMethod` record id) so exec carries no compile-time Date body
     // knowledge. The arm dispatches the body directly, so this does not re-enter
@@ -1584,15 +1584,20 @@ pub fn qjsPrimitivePrototypeMethod(
         },
         4 => {
             if (class_tag != 4) return error.TypeError;
-            return symbolDescriptionValue(rt, this_value);
+            return symbolDescriptionValue(rt, this_value) catch |err| switch (err) {
+                error.TypeError => return throwTypeErrorMessage(ctx, global, "not a symbol"),
+                else => err,
+            };
         },
         5 => {
             if (class_tag != 4) return error.TypeError;
-            return symbolPrimitiveValue(rt, this_value);
+            return symbolPrimitiveValue(rt, this_value) catch |err| switch (err) {
+                error.TypeError => return throwTypeErrorMessage(ctx, global, "not a symbol"),
+            };
         },
         else => {},
     }
-    const primitive = primitivePrototypeThisValue(rt, this_value, class_tag) catch return throwPrimitivePrototypeTypeError(ctx, global, function_object);
+    const primitive = primitivePrototypeThisValue(rt, this_value, class_tag) catch return throwPrimitivePrototypeTypeError(ctx, global, function_object, class_tag);
     defer primitive.free(rt);
     return switch (method_tag) {
         1 => if (class_tag == 1) blk: {
@@ -1625,7 +1630,7 @@ fn qjsSymbolConstructorCall(
     const rt = ctx.runtime;
     const description = blk: {
         if (args.len >= 1 and !args[0].isUndefined()) {
-            if (args[0].isSymbol()) return error.TypeError;
+            if (args[0].isSymbol()) return throwTypeErrorMessage(ctx, global, "cannot convert symbol to string");
             const string_value = try string_ops.toStringForAnnexB(ctx, output, global, args[0], null, null);
             defer string_value.free(rt);
             var buffer = std.ArrayList(u8).empty;
@@ -1669,9 +1674,17 @@ pub fn throwPrimitivePrototypeTypeError(
     ctx: *core.JSContext,
     global: *core.Object,
     function_object: *core.Object,
+    class_tag: i32,
 ) !core.JSValue {
     const error_global = objectRealmGlobal(function_object) orelse global;
-    const error_value = try exception_ops.createNamedError(ctx, error_global, "TypeError", "");
+    const message = switch (class_tag) {
+        2 => "not a boolean",
+        3 => "not a bigint",
+        4 => "not a symbol",
+        5 => "not a string",
+        else => "",
+    };
+    const error_value = try exception_ops.createNamedError(ctx, error_global, "TypeError", message);
     _ = ctx.throwValue(error_value);
     return error.JSException;
 }
@@ -5371,9 +5384,9 @@ pub fn getProxyProperty(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
-    const target_value = (proxy.proxyTarget() orelse return error.TypeError).dup();
+    const target_value = (proxy.proxyTarget() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy")).dup();
     defer target_value.free(ctx.runtime);
-    const handler_value = (proxy.proxyHandler() orelse return error.TypeError).dup();
+    const handler_value = (proxy.proxyHandler() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy")).dup();
     defer handler_value.free(ctx.runtime);
     const get_atom = try ctx.runtime.internAtom("get");
     defer ctx.runtime.atoms.free(get_atom);

@@ -102,10 +102,24 @@ const NanBox = struct {
     /// Dense 1-based tag index; index 0 is reserved so that no boxed encoding
     /// can collide with the canonical float range.
     fn indexOf(comptime tag: i32) u64 {
-        for (boxed_tags, 1..) |candidate, index| {
-            if (candidate == tag) return index;
-        }
-        @compileError("tag is not representable in the NaN-boxed encoding");
+        return switch (tag) {
+            Tag.big_int => 1,
+            Tag.symbol => 2,
+            Tag.string => 3,
+            Tag.string_rope => 4,
+            Tag.module => 5,
+            Tag.object => 6,
+            Tag.function_bytecode => 7,
+            Tag.int => 8,
+            Tag.boolean => 9,
+            Tag.null_value => 10,
+            Tag.undefined_value => 11,
+            Tag.uninitialized => 12,
+            Tag.catch_offset => 13,
+            Tag.exception => 14,
+            Tag.short_big_int => 15,
+            else => @compileError("tag is not representable in the NaN-boxed encoding"),
+        };
     }
 
     /// High 16 bits of a boxed encoding for `tag`.
@@ -144,7 +158,7 @@ pub const JSValue = extern struct {
         // i32 load at offset 8 from the 16-byte store only PARTIALLY overlaps and
         // stalls (no clean store-forwarding); a full 8-byte load forwards cleanly.
         // Widening i32+pad → i64 cut the int+float `s=s+i` loop's backend-stall
-        // cycles ~63% (713ms→566ms) with zero test262 change.
+        // cycles ~63% (713ms→566ms) with zero conformance-suite change.
         tag: i64,
     };
 

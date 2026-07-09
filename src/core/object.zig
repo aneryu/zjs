@@ -1275,8 +1275,8 @@ pub const Object = struct {
         const class_record = rt.classes.recordPtr(class_id);
         const inline_layout = inlineClassPayloadLayout(class_record);
         const self = if (inline_layout) |layout| blk: {
-            const bytes = try rt.allocRuntimeAlignedBytes(layout.total_size, layout.allocation_alignment);
-            break :blk @as(*Object, @ptrCast(@alignCast(bytes.ptr)));
+            const bytes = try rt.allocRuntimeAlignedBytes(layout.allocation_size, layout.allocation_alignment);
+            break :blk @as(*Object, @ptrFromInt(@intFromPtr(bytes.ptr) + layout.object_offset));
         } else try rt.createRuntime(Object);
         var initialized = false;
         errdefer {
@@ -1359,6 +1359,7 @@ pub const Object = struct {
             .shape_ref = shape_ref,
             .prop_values = property_storage.ptr,
         };
+        if (inline_layout != null) self.initInlineClassPayloadGcPrefix();
         property_storage_owned = false;
         reserved_class_payload_finalizer_slot = false;
         shape_owned = false;
@@ -1371,7 +1372,7 @@ pub const Object = struct {
         // Reuse the inline-layout size computed at the top of createInternal
         // instead of recomputing it inside registerObject (mirror of the free
         // path's unregisterObjectWithBytes). Same value allocationSize derives.
-        const alloc_size = if (inline_layout) |layout| layout.total_size else @sizeOf(Object);
+        const alloc_size = if (inline_layout) |layout| layout.object_size else @sizeOf(Object);
         try rt.registerObjectWithBytes(self, alloc_size);
         initialized = false;
         return self;
@@ -1513,8 +1514,10 @@ pub const Object = struct {
     }
 
     const InlineClassPayloadLayout = struct {
+        object_offset: usize,
         payload_offset: usize,
-        total_size: usize,
+        object_size: usize,
+        allocation_size: usize,
         allocation_alignment: std.mem.Alignment,
     };
 
@@ -1524,13 +1527,24 @@ pub const Object = struct {
         const payload_align = std.mem.Alignment.fromByteUnits(record.inline_payload_align);
         const object_align = std.mem.Alignment.of(Object);
         const allocation_alignment = if (payload_align.compare(.gt, object_align)) payload_align else object_align;
+        const object_offset = std.mem.alignForward(usize, 8, allocation_alignment.toByteUnits());
         const payload_offset = std.mem.alignForward(usize, @sizeOf(Object), payload_align.toByteUnits());
-        const total_size = std.math.add(usize, payload_offset, record.inline_payload_size) catch return null;
+        const object_size = std.math.add(usize, payload_offset, record.inline_payload_size) catch return null;
+        const allocation_size = std.math.add(usize, object_offset, object_size) catch return null;
         return .{
+            .object_offset = object_offset,
             .payload_offset = payload_offset,
-            .total_size = total_size,
+            .object_size = object_size,
+            .allocation_size = allocation_size,
             .allocation_alignment = allocation_alignment,
         };
+    }
+
+    fn initInlineClassPayloadGcPrefix(self: *Object) void {
+        const meta: [*]u8 = @ptrFromInt(@intFromPtr(self) - 8);
+        @memset(meta[0..8], 0);
+        meta[2] = Object.gc_kind_tag;
+        meta[4] = 1;
     }
 
     fn inlineClassPayloadPtr(self: *Object, layout: InlineClassPayloadLayout) *anyopaque {
@@ -1540,15 +1554,15 @@ pub const Object = struct {
 
     fn freeObjectAllocation(rt: *JSRuntime, self: *Object, inline_layout: ?InlineClassPayloadLayout) void {
         if (inline_layout) |layout| {
-            const bytes: [*]u8 = @ptrCast(self);
-            rt.memory.freeAlignedBytes(bytes[0..layout.total_size], layout.allocation_alignment);
+            const bytes: [*]u8 = @ptrFromInt(@intFromPtr(self) - layout.object_offset);
+            rt.memory.freeAlignedBytes(bytes[0..layout.allocation_size], layout.allocation_alignment);
             return;
         }
         rt.memory.destroy(Object, self);
     }
 
     pub fn allocationSize(self: *const Object, rt: *JSRuntime) usize {
-        if (inlineClassPayloadLayout(rt.classes.recordPtr(self.class_id))) |layout| return layout.total_size;
+        if (inlineClassPayloadLayout(rt.classes.recordPtr(self.class_id))) |layout| return layout.object_size;
         return @sizeOf(Object);
     }
 
@@ -1831,10 +1845,10 @@ pub const Object = struct {
         const class_record = rt.classes.recordPtr(self.class_id);
         const inline_layout = inlineClassPayloadLayout(class_record);
         // Size for GC free-accounting is the same value `allocationSize` derives
-        // from `inline_layout` (total_size for inline-payload classes, else
+        // from `inline_layout` (object_size for inline-payload classes, else
         // @sizeOf(Object)) — reuse the layout we just computed instead of a second
         // record-table lookup + inline-layout recompute inside unregisterObject.
-        const alloc_size = if (inline_layout) |layout| layout.total_size else @sizeOf(Object);
+        const alloc_size = if (inline_layout) |layout| layout.object_size else @sizeOf(Object);
         rt.unregisterObjectWithBytes(self, alloc_size);
         // qjs free_object keeps no borrowed-ref / std-file side tables, so the
         // plain-object hot free path must not call into either scan. Hoist each
@@ -4098,6 +4112,15 @@ pub const Object = struct {
         return 0;
     }
 
+    pub fn setNativeBuiltinIdAndRecord(self: *Object, rt: *JSRuntime, native_id: i32) void {
+        self.nativeFunctionIdSlot().* = native_id;
+        const record = if (function.decodeNativeBuiltinId(native_id)) |native_ref|
+            rt.internalBuiltinRecord(@intCast(@intFromEnum(native_ref.domain)), native_ref.id)
+        else
+            null;
+        self.nativeRecordSlot().* = record;
+    }
+
     // Divergence B: on-object memo of the resolved internal record. `Slot`
     // returns a mutable pointer to the payload field so the hot call site can
     // lazily populate it after its first DECODE+LOOKUP; the read-only accessor
@@ -6073,10 +6096,12 @@ pub const Object = struct {
         }
 
         // Pass B: now every garbage object's resources are gone AND every shape
-        // (whose teardown re-releases protos) has run, so no deferred struct can
-        // still be dereferenced. Free the parked struct memory (qjs gc_free_cycles
-        // second loop, quickjs.c:6797).
-        drainCycleDeferredFrees(rt);
+        // (whose teardown re-releases protos) has run. If class-payload
+        // finalizers were deferred, keep the resource-stripped object husks until
+        // those finalizers drain: payloads may still hold JSValues into the
+        // condemned cycle and must be able to release them without dereferencing
+        // freed object memory.
+        if (!rt.hasPendingDeferredClassPayloadFinalizers()) drainCycleDeferredFrees(rt);
 
         return freed;
     }
@@ -6084,7 +6109,7 @@ pub const Object = struct {
     /// Free the struct memory of every cycle-deferred GC object (objects /
     /// var_refs / function-bytecodes whose resources were torn down during the
     /// REMOVE_CYCLES resource pass). Mirrors qjs Pass B (quickjs.c:6797-6810).
-    fn drainCycleDeferredFrees(rt: *JSRuntime) void {
+    pub fn drainCycleDeferredFrees(rt: *JSRuntime) void {
         for (rt.gc.cycle_deferred_frees.items) |h| {
             switch (h.meta().kind) {
                 .object => {
@@ -7646,7 +7671,7 @@ pub const Object = struct {
         if (native_builtin_id != 0) {
             if (function_value.refHeader()) |header| {
                 const obj: *Object = @fieldParentPtr("header", header);
-                obj.nativeFunctionIdSlot().* = native_builtin_id;
+                obj.setNativeBuiltinIdAndRecord(info.rt, native_builtin_id);
             }
         }
         if (apply_markers) {
@@ -7911,7 +7936,7 @@ pub const Object = struct {
         defer getter.free(rt);
         if (getter.refHeader()) |getter_header| {
             const getter_object: *Object = @fieldParentPtr("header", getter_header);
-            getter_object.nativeFunctionIdSlot().* = function.nativeBuiltinId(.host, @intFromEnum(function.HostGlobalMethod.navigator_user_agent_get));
+            getter_object.setNativeBuiltinIdAndRecord(rt, function.nativeBuiltinId(.host, @intFromEnum(function.HostGlobalMethod.navigator_user_agent_get)));
         }
         const user_agent = rt.internAtom("userAgent") catch return null;
         defer rt.atoms.free(user_agent);
@@ -9808,22 +9833,17 @@ pub const Object = struct {
         // below. A second dup/free here just duplicated that root — qjs
         // add_property likewise relies on the single caller-held atom ref
         // through add_shape_property (which does the one owning JS_DupAtom).
-        // The shape is rc==1 here (made unique above / never shared), so the
-        // FAM grow inside reserveProperties/addProperty may relocate it; pass
-        // &self.shape_ref so the new address flows back (qjs resize_properties
-        // updates p->shape through `JSShape **psh`).
+        // Indexed properties mutate a unique sparse shape in place. Named
+        // properties go through the qjs-style transition cache even when the
+        // current shape is uniquely owned, so repeated objects with the same
+        // property sequence converge on the same final shape.
         if (is_array_index) {
             try self.ensureUniqueShapeForMutation(rt);
             try rt.shapes.reserveProperties(&self.shape_ref, property_capacity);
             try rt.shapes.addProperty(&self.shape_ref, atom_id, flags);
             return;
         }
-        if (!self.shapeNeedsMutationCopy()) {
-            try rt.shapes.reserveProperties(&self.shape_ref, property_capacity);
-            try rt.shapes.addProperty(&self.shape_ref, atom_id, flags);
-            return;
-        }
-        const next_shape = try rt.shapes.transitionProperty(self.shape_ref, atom_id, flags);
+        const next_shape = try rt.shapes.transitionProperty(self.shape_ref, atom_id, flags, property_capacity);
         const old_shape = self.shape_ref;
         self.shape_ref = next_shape;
         rt.shapes.release(old_shape);
@@ -10228,8 +10248,8 @@ fn isTypedArrayObjectForSetFastPath(object: *const Object) bool {
 // the VM consults directly. The element read/write *value coercion*
 // (ToNumber/ToBigInt over primitives, shared with the DataView and ArrayBuffer
 // paths) and the buffer storage operations live in `src/core/typed_array.zig`,
-// which imports these predicates. `src/builtins/buffer.zig` re-exports both
-// blocks under their original names.
+// which imports these predicates. `src/exec/buffer_ops.zig` owns the
+// JS-visible record surface that uses both blocks.
 
 fn typedArrayBackingBufferObject(object: *Object) !*Object {
     const value = object.typedArrayBuffer() orelse return error.TypeError;
@@ -10529,7 +10549,8 @@ fn indexKeyLessThan(_: void, lhs: IndexKey, rhs: IndexKey) bool {
 // `ownEntriesArray` builds the result array for the bare-runtime
 // Object.keys/values/entries fallback. Relocated to engine core in Phase 6b-3
 // STEP 2 (it is a pure property-iteration constructor with no exec/VM deps);
-// `builtins/object.zig` re-exports `EntriesMode`/`ownEntriesArray` unchanged.
+// `exec/object_builtin_ops.zig` re-exports `EntriesMode`/`ownEntriesArray`
+// unchanged for Object native records.
 
 /// Selects which projection `ownEntriesArray` produces.
 pub const EntriesMode = enum {
@@ -10633,7 +10654,7 @@ pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode) !JSVal
 // touches only core string/object/function primitives (no exec/VM deps and no
 // realm/global state). The produced iterator's `next` carries the
 // `(.string, iterator_next)` native id, so the actual `next` body still
-// dispatches through the record table into `builtins/string.zig`.
+// dispatches through the record table into `exec/string_builtin_ops.zig`.
 
 /// Extract the primitive string value from a string or String-wrapper receiver.
 fn stringIteratorPrimitiveValue(value: JSValue) !JSValue {
@@ -10667,7 +10688,7 @@ fn stringIteratorPrototype(rt: *JSRuntime, tag_name: []const u8) !*Object {
     const next_object = (next.refHeader() orelse return error.TypeError);
     if (!next.isObject()) return error.TypeError;
     const next_function: *Object = @fieldParentPtr("header", next_object);
-    next_function.nativeFunctionIdSlot().* = function.nativeBuiltinId(.string, @intFromEnum(host_function.builtin_method_ids.string.PrototypeMethod.iterator_next));
+    next_function.setNativeBuiltinIdAndRecord(rt, function.nativeBuiltinId(.string, @intFromEnum(host_function.builtin_method_ids.string.PrototypeMethod.iterator_next)));
     try specific.defineOwnProperty(rt, atom.predefinedId("next", .string).?, descriptor.Descriptor.data(next, true, false, true));
     return specific;
 }

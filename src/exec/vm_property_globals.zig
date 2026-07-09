@@ -157,6 +157,12 @@ fn getVarFromGlobalObject(
     atom_id: core.Atom,
 ) !Step {
     const value = value: {
+        if (function.flags.runtime_strict) {
+            if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| {
+                if (!lexical_value.isUninitialized()) break :value lexical_value;
+                lexical_value.free(ctx.runtime);
+            }
+        }
         if (global.getOwnDataPropertyValue(atom_id)) |global_data_value| {
             break :value global_data_value;
         }
@@ -1070,7 +1076,8 @@ fn defineGlobalVarDeclaration(
         const updated_frame_local = try call_runtime.setFrameLocalValue(ctx, function, frame, atom_id, local_value);
         if (!updated_frame_local) local_value.free(ctx.runtime);
         var frame_ref_value = func_val.dup();
-        if (!try call_runtime.setFrameVarRefValue(ctx, function, frame, atom_id, frame_ref_value)) frame_ref_value.free(ctx.runtime);
+        const updated_frame_ref = try call_runtime.setFrameVarRefValue(ctx, function, frame, atom_id, frame_ref_value);
+        if (!updated_frame_ref) frame_ref_value.free(ctx.runtime);
         var eval_local_value = func_val.dup();
         const updated_eval_local = try call_runtime.setNamedSlotValue(ctx, global, eval_local_names, eval_local_slots, atom_id, eval_local_value);
         if (!updated_eval_local) eval_local_value.free(ctx.runtime);
@@ -1078,7 +1085,19 @@ fn defineGlobalVarDeclaration(
         const updated_eval_ref = try call_runtime.setNamedVarRefValue(ctx, eval_var_ref_names, eval_var_refs, atom_id, eval_ref_value, function.flags.is_strict, true);
         if (!updated_eval_ref) eval_ref_value.free(ctx.runtime);
 
-        if (function.flags.runtime_strict and !is_eval_code) return;
+        if (function.flags.runtime_strict and !is_eval_code) {
+            if (!updated_frame_local and !updated_frame_ref and !updated_eval_local and !updated_eval_ref) {
+                if (!call_runtime.globalLexicalHasForGlobal(ctx, global, atom_id)) {
+                    try call_runtime.defineGlobalLexicalValue(ctx, atom_id, core.JSValue.uninitialized(), false);
+                }
+                var lexical_value = func_val.dup();
+                errdefer lexical_value.free(ctx.runtime);
+                const updated_global_lexical = try call_runtime.setGlobalLexicalValueForGlobal(ctx, global, atom_id, lexical_value);
+                lexical_value.free(ctx.runtime);
+                if (!updated_global_lexical) return error.InvalidBytecode;
+            }
+            return;
+        }
         try slot_ops.defineGlobalFunctionBindingValue(ctx.runtime, global, atom_id, func_val, gv.is_configurable);
         return;
     }

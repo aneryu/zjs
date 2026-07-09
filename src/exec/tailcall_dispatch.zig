@@ -218,15 +218,20 @@ fn next(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(
 /// Generator/eval stop-boundary (`stop_before_pc`): when frame.pc reaches the
 /// generator body start, suspend (save state) and return — the param-init phase
 /// runs `[0, generator_body_pc)` then stops. Mirrors zjs_vm.zig:921's stopBeforePc.
-inline fn maybeStop(vm: *Vm) ?Outcome {
-    if (vm.machine.depth == 0 and vm.l0.stop_before_pc != null) {
-        const r = gen_async_vm.stopBeforePc(vm.ctx, vm.stack, vm.frame, vm.l0.generator_state, vm.l0.stop_before_pc) catch |e| return vm.fail(e);
+inline fn maybeStop(vm: *Vm, out: *Outcome) bool {
+    if (vm.machine.depth == 0) {
+        const stop_before_pc = vm.l0.stop_before_pc orelse return false;
+        const r = gen_async_vm.stopBeforePc(vm.ctx, vm.stack, vm.frame, vm.l0.generator_state, stop_before_pc) catch |e| {
+            out.* = vm.fail(e);
+            return true;
+        };
         if (r) |v| {
             vm.return_value = v;
-            return .returned;
+            out.* = .returned;
+            return true;
         }
     }
-    return null;
+    return false;
 }
 
 /// End-of-code fall-through: the implicit completion value is the stack top.
@@ -243,7 +248,8 @@ inline fn falloffReturn(vm: *Vm) Outcome {
 
 inline fn coldNext(vb: [*]JSValue, vm: *Vm) Outcome {
     if (vm.frame.pc >= vm.function.code.len) return falloffReturn(vm);
-    if (maybeStop(vm)) |o| return o;
+    var stop_out: Outcome = undefined;
+    if (maybeStop(vm, &stop_out)) return stop_out;
     // A cold helper may have GROWN a heap stack (eval/generator/cold-call), which
     // reallocates stack.values.ptr. Refresh stack_base so the next handler's
     // `publish` (sp - stack_base) and falloff checks use the LIVE buffer base, not
@@ -309,10 +315,11 @@ fn op_falloff(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) cal
 }
 
 fn op_invalid(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    _ = pc;
     _ = sp;
     _ = var_buf;
-    const pc_off = @intFromPtr(pc) - @intFromPtr(vm.code_base);
-    std.debug.panic("tailcall: invalid opcode {d} at pc_off={d}", .{ pc[0], pc_off });
+    vm.pending_error = error.InvalidBytecode;
+    return .threw;
 }
 
 // ===========================================================================

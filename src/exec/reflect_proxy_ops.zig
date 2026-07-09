@@ -1,0 +1,122 @@
+const core = @import("../core/root.zig");
+const std = @import("std");
+const builtin_dispatch = @import("builtin_dispatch.zig");
+const call = @import("call.zig");
+const call_runtime = @import("call_runtime.zig");
+const exceptions = @import("exceptions.zig");
+const reflect_ops = @import("reflect_ops.zig");
+
+const HostError = exceptions.HostError;
+const InternalCall = core.host_function.InternalCall;
+
+pub const StaticMethod = core.host_function.builtin_method_ids.reflect.StaticMethod;
+
+pub fn methodId(name: []const u8) ?u32 {
+    if (std.mem.eql(u8, name, "defineProperty")) return @intFromEnum(StaticMethod.define_property);
+    if (std.mem.eql(u8, name, "getOwnPropertyDescriptor")) return @intFromEnum(StaticMethod.get_own_property_descriptor);
+    if (std.mem.eql(u8, name, "deleteProperty")) return @intFromEnum(StaticMethod.delete_property);
+    if (std.mem.eql(u8, name, "get")) return @intFromEnum(StaticMethod.get);
+    if (std.mem.eql(u8, name, "getPrototypeOf")) return @intFromEnum(StaticMethod.get_prototype_of);
+    if (std.mem.eql(u8, name, "set")) return @intFromEnum(StaticMethod.set);
+    if (std.mem.eql(u8, name, "setPrototypeOf")) return @intFromEnum(StaticMethod.set_prototype_of);
+    if (std.mem.eql(u8, name, "isExtensible")) return @intFromEnum(StaticMethod.is_extensible);
+    if (std.mem.eql(u8, name, "preventExtensions")) return @intFromEnum(StaticMethod.prevent_extensions);
+    if (std.mem.eql(u8, name, "has")) return @intFromEnum(StaticMethod.has);
+    if (std.mem.eql(u8, name, "ownKeys")) return @intFromEnum(StaticMethod.own_keys);
+    if (std.mem.eql(u8, name, "construct")) return @intFromEnum(StaticMethod.construct);
+    if (std.mem.eql(u8, name, "apply")) return @intFromEnum(StaticMethod.apply);
+    return null;
+}
+
+/// Declaration + dispatch table for the `.reflect` native-builtin domain
+/// (the `Reflect.*` statics plus the `Proxy.revocable` constructor helper and
+/// its revoke closure). One shared record handler `reflectCall` switches on the
+/// per-record `magic` (== domain-local `StaticMethod` id) and forwards to the
+/// reflective exec VM ops, which stay in exec because the proxy trap core and
+/// the object internal ops they call (`object.defineOwnProperty`, proxy trap
+/// dispatch, property lookups) are also reached from opcode handlers. `id`
+/// doubles as `magic`, so the record carries no extra selector.
+///
+/// Property installation still resolves names/lengths through the registry's
+/// `reflect_methods` Method table and `methodId` (the `proxy_revocable` binding
+/// and the dynamically materialized `proxy_revoke` closure are bound by the
+/// registry / `reflect_ops.proxyRevocable` directly); this array is consumed by
+/// the slow record-dispatch path (`rt.internal_builtins`). All records set
+/// `prepared_call_ok = false`: every Reflect method needs a realm global and/or
+/// the materialized function object, matching the prepared-call gate
+/// (`vm_call.nativeBuiltinSupportedWithoutFunctionObject` returns false for
+/// `.reflect`).
+pub const internal_entries = reflectEntries: {
+    const Entry = core.host_function.InternalEntry;
+    break :reflectEntries [_]Entry{
+        reflectEntry("apply", 3, @intFromEnum(StaticMethod.apply)),
+        reflectEntry("construct", 2, @intFromEnum(StaticMethod.construct)),
+        reflectEntry("defineProperty", 3, @intFromEnum(StaticMethod.define_property)),
+        reflectEntry("deleteProperty", 2, @intFromEnum(StaticMethod.delete_property)),
+        reflectEntry("get", 2, @intFromEnum(StaticMethod.get)),
+        reflectEntry("getOwnPropertyDescriptor", 2, @intFromEnum(StaticMethod.get_own_property_descriptor)),
+        reflectEntry("getPrototypeOf", 1, @intFromEnum(StaticMethod.get_prototype_of)),
+        reflectEntry("has", 2, @intFromEnum(StaticMethod.has)),
+        reflectEntry("isExtensible", 1, @intFromEnum(StaticMethod.is_extensible)),
+        reflectEntry("ownKeys", 1, @intFromEnum(StaticMethod.own_keys)),
+        reflectEntry("preventExtensions", 1, @intFromEnum(StaticMethod.prevent_extensions)),
+        reflectEntry("set", 3, @intFromEnum(StaticMethod.set)),
+        reflectEntry("setPrototypeOf", 2, @intFromEnum(StaticMethod.set_prototype_of)),
+        reflectEntry("revocable", 2, @intFromEnum(StaticMethod.proxy_revocable)),
+        reflectEntry("revoke", 0, @intFromEnum(StaticMethod.proxy_revoke)),
+    };
+};
+
+fn reflectEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .call = &reflectCall };
+}
+
+/// Shared record handler for the `.reflect` domain. Mirrors the retired
+/// `call.zig` `callReflectNativeFunctionRecord`: the `Proxy.revocable` helper
+/// and its revoke closure run their exec reflect ops, while the 13 `Reflect.*`
+/// statics route through `call_runtime.qjsReflectCallForNativeRecord` when a
+/// realm global is available and fall back to the primitive-only exec ops in
+/// the bare-runtime (no global) path.
+fn reflectCall(host_call: InternalCall) HostError!core.JSValue {
+    const ctx = host_call.ctx;
+    const output = host_call.output;
+    const global = host_call.global;
+    const globals = host_call.globals;
+    const id: u32 = host_call.magic;
+    const args = host_call.args;
+    const caller_function = builtin_dispatch.callerBytecode(host_call);
+    const caller_frame = builtin_dispatch.callerFrame(host_call);
+
+    if (id == @intFromEnum(StaticMethod.proxy_revoke)) {
+        const function_object = host_call.func_obj orelse return error.TypeError;
+        return reflect_ops.revokeProxy(ctx.runtime, function_object);
+    }
+    if (id == @intFromEnum(StaticMethod.proxy_revocable)) {
+        // qjs js_proxy_revocable (quickjs.c:51502) is a plain JS_CFUNC_DEF that
+        // never reads this_val: detached/rebound calls (`const {revocable} =
+        // Proxy; revocable(t, h)`) work. No receiver validation.
+        return reflect_ops.proxyRevocable(ctx.runtime, global, args);
+    }
+    if (global) |global_object| return try call_runtime.qjsReflectCallForNativeRecord(ctx, output, global_object, id, args, caller_function, caller_frame);
+    return switch (id) {
+        @intFromEnum(StaticMethod.define_property) => try reflect_ops.reflectDefineProperty(ctx.runtime, args),
+        @intFromEnum(StaticMethod.get) => try reflect_ops.reflectGet(ctx.runtime, args),
+        @intFromEnum(StaticMethod.set) => try reflect_ops.reflectSet(ctx, output, global, args),
+        @intFromEnum(StaticMethod.has) => try reflect_ops.reflectHas(ctx, output, global, globals, args),
+        @intFromEnum(StaticMethod.construct) => try reflect_ops.reflectConstruct(ctx, args, globals),
+        @intFromEnum(StaticMethod.apply) => try reflect_ops.reflectApply(ctx, output, global, globals, args),
+        else => error.TypeError,
+    };
+}
+
+pub fn ownKeys(rt: *core.JSRuntime, object: *core.Object) ![]core.Atom {
+    return object.ownKeys(rt);
+}
+
+pub const RevocableProxy = struct {
+    revoked: bool = false,
+
+    pub fn revoke(self: *RevocableProxy) void {
+        self.revoked = true;
+    }
+};

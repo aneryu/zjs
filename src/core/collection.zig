@@ -12,12 +12,11 @@
 //! borrowed-reference holder registry) and `libs` (`bigint`, `number_format`). There is
 //! zero exec/builtins/VM dependency: the weak-key GC interaction is entirely
 //! core-resident (`Object.weakIdentityFromValue*`, `rt.*BorrowedReferenceHolder`).
-//! The builtins collection method bodies (`builtins/collection.zig`) call these
+//! The collection native method bodies (`exec/collection_ops.zig`) call these
 //! backend entry points directly; the VM Map-fusion fast paths
 //! (`mapSetLatin1PrefixInt32Range` / `mapGetLatin1PrefixIntValue`, consumed by
 //! `exec/vm_property_locals.zig`) and the WeakMap test-support mutator
-//! (`setWeakMapEntry`, consumed by `exec/closure.zig`) live here too so neither
-//! consumer needs to import builtins.
+//! (`setWeakMapEntry`, consumed by `exec/closure.zig`) live here too.
 
 const std = @import("std");
 

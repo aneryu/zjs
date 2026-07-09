@@ -4,7 +4,7 @@ const stack_mod = @import("stack.zig");
 
 // RegExp construct record keyed by native-builtin ref: the `OP_regexp` literal
 // handler runs the builtin RegExp constructor body through the record table
-// (Phase 6b-3 STEP 4) rather than naming `builtins.regexp` directly. The
+// (Phase 6b-3 STEP 4) rather than naming the RegExp owner directly. The
 // `.construct` ref validates the (pattern, flags) value pair; the construct
 // branch reads only `args`/`new_target`, so no constructor function object or
 // caller frame is threaded.

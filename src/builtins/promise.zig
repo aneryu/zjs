@@ -8,23 +8,12 @@
 //! paths and keeps the name->id mapping used during global installation.
 
 const core = @import("../core/root.zig");
-const std = @import("std");
+const promise_ops = @import("../exec/promise_ops.zig");
 
 const core_promise = core.promise;
 
-pub const LegacyStaticMethod = core.host_function.builtin_method_ids.promise.LegacyStaticMethod;
-
-pub fn legacyStaticMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "resolve")) return @intFromEnum(LegacyStaticMethod.resolve);
-    if (std.mem.eql(u8, name, "all")) return @intFromEnum(LegacyStaticMethod.all);
-    if (std.mem.eql(u8, name, "race")) return @intFromEnum(LegacyStaticMethod.race);
-    if (std.mem.eql(u8, name, "reject")) return @intFromEnum(LegacyStaticMethod.reject);
-    if (std.mem.eql(u8, name, "allSettled")) return @intFromEnum(LegacyStaticMethod.all_settled);
-    if (std.mem.eql(u8, name, "any")) return @intFromEnum(LegacyStaticMethod.any);
-    if (std.mem.eql(u8, name, "try")) return @intFromEnum(LegacyStaticMethod.try_);
-    if (std.mem.eql(u8, name, "withResolvers")) return @intFromEnum(LegacyStaticMethod.with_resolvers);
-    return null;
-}
+pub const LegacyStaticMethod = promise_ops.LegacyStaticMethod;
+pub const legacyStaticMethodId = promise_ops.legacyStaticMethodId;
 
 // Engine-core primitives, re-exported from core/promise.zig.
 pub const construct = core_promise.construct;

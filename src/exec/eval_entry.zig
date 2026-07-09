@@ -42,6 +42,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         .filename = options.filename,
         .source_kind = parserSourceKind(options.source_kind),
         .strict = options.parse_strict,
+        .runtime_strict = options.runtime_strict,
         .return_completion = options.mode == .script and options.return_completion,
     });
     if (options.timing) |timing| timing.parse_ns += elapsedNanosSince(parse_start);

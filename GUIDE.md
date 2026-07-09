@@ -568,6 +568,11 @@ and the performance gate when runtime-sensitive performance changed.
 These rules remain active even though the historical detailed records have
 been retired:
 
+- Standard ECMAScript globals are engine bootstrap, not a separate builtins or
+  intrinsics layer. Match QuickJS with hand-written standard-global installation,
+  QJS-style function-list tables, and native function payloads carrying cproto /
+  magic / function-pointer dispatch. Do not introduce a generic descriptor
+  registry or facade to hide engine operations.
 - Start from a reproducing validation command, then repair from its output.
 - Interrupted or partial sweeps are not final validation evidence.
 - Broad green gates do not prove semantic completeness when parser, emitter,

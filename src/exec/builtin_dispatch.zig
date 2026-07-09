@@ -63,22 +63,30 @@ pub fn callInternalRecordDirect(
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
 ) HostError!core.JSValue {
-    const call_fn = record.call.?;
-    // Record implementations are declared with error sets contained in
-    // HostError and only widen to anyerror at the table boundary, so the
-    // narrowing cast cannot fail at runtime.
-    return call_fn(.{
-        .ctx = ctx,
-        .output = output,
-        .global = global,
-        .globals = globals,
-        .func_obj = func_obj,
-        .this_value = this_value,
-        .args = args,
-        .magic = record.magic,
-        .caller_function = caller_function,
-        .caller_frame = caller_frame,
-    }) catch |err| return @as(HostError, @errorCast(err));
+    switch (record.cproto) {
+        .zjs_internal_call => {
+            const call_fn = record.call orelse blk: {
+                const native = record.native_function orelse return error.TypeError;
+                break :blk native.zjs_internal_call;
+            };
+            // Record implementations are declared with error sets contained in
+            // HostError and only widen to anyerror at the table boundary, so the
+            // narrowing cast cannot fail at runtime.
+            return call_fn(.{
+                .ctx = ctx,
+                .output = output,
+                .global = global,
+                .globals = globals,
+                .func_obj = func_obj,
+                .this_value = this_value,
+                .args = args,
+                .magic = record.magic,
+                .caller_function = caller_function,
+                .caller_frame = caller_frame,
+            }) catch |err| return @as(HostError, @errorCast(err));
+        },
+        else => return error.TypeError,
+    }
 }
 
 /// Probe the internal-builtin table for `native_ref` and invoke the record on
@@ -113,7 +121,11 @@ pub fn callConstructRecord(
     // wrapper-primitive call entry) would otherwise run its call body, so
     // report a miss and let the caller fall through to its construct cascade.
     if (!record.constructor) return null;
-    const call_fn = record.call.?;
+    if (record.cproto != .zjs_internal_call) return error.TypeError;
+    const call_fn = record.call orelse blk: {
+        const native = record.native_function orelse return error.TypeError;
+        break :blk native.zjs_internal_call;
+    };
     return call_fn(.{
         .ctx = ctx,
         .output = output,

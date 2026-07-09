@@ -57,7 +57,7 @@ pub const ExternalRecord = struct {
 // It is pure: a function-pointer pair plus the realm global slots, with zero VM
 // dependence, so it lives in core beside the other host-function protocol
 // types. `src/exec/collection_adapter.zig` supplies the concrete `call`/`kind`
-// implementations that route into the VM, and `builtins/collection.zig`
+// implementations that route into the VM, and `exec/collection_ops.zig`
 // re-exports these names so its method bodies keep using them unchanged.
 
 /// Error set surfaced by collection callbacks. Mirrors the engine's host error
@@ -174,11 +174,11 @@ pub const CallbackHost = struct {
 // --- Internal builtin records -----------------------------------------------
 //
 // QuickJS source map: JSCFunctionListEntry (quickjs.h) + JS_CallInternal's
-// C-function dispatch. Builtins declare implementation+table side by side in
-// `src/builtins/*`; `src/builtins/internal_table.zig` materializes the static
-// per-domain record table at comptime, and `JSRuntime.internal_builtins`
-// points at it so exec dispatches through `rt.internalBuiltinRecord(...)`
-// with zero compile-time knowledge of individual builtins.
+// C-function dispatch. The target shape is engine-owned standard-global
+// bootstrap plus per-domain function-list tables near their implementations.
+// During migration, `src/builtins/*` still declares many tables/bodies and
+// `src/builtins/internal_table.zig` materializes the static per-domain record
+// table at comptime.
 
 /// Per-call selector flags (QuickJS C-function cproto analogue). `constructor`
 /// distinguishes the construct (`new X()`) path from a plain call: when set,
@@ -213,10 +213,75 @@ pub const InternalCall = struct {
     caller_frame: ?*anyopaque = null,
 };
 
-/// Record implementations are declared with concrete error sets in builtins
-/// and coerce to `anyerror` at the table boundary; the exec dispatch site
-/// narrows back to its host error set (same contract as `ExternalCallFn`).
+/// Record implementations are declared with concrete error sets and coerce to
+/// `anyerror` at the table boundary; the exec dispatch site narrows back to its
+/// host error set (same contract as `ExternalCallFn`).
 pub const InternalCallFn = *const fn (call: InternalCall) anyerror!JSValue;
+
+/// QuickJS `JSCFunctionEnum` analogue. Most existing zjs records start on the
+/// transitional `.zjs_internal_call` cproto; simpler domains can migrate to the
+/// QJS-style signatures without changing the native function object ABI again.
+pub const NativeCProto = enum(u8) {
+    zjs_internal_call,
+    generic,
+    generic_magic,
+    constructor,
+    constructor_magic,
+    constructor_or_func,
+    constructor_or_func_magic,
+    getter,
+    setter,
+    getter_magic,
+    setter_magic,
+    f_f,
+    f_f_f,
+    iterator_next,
+};
+
+pub const NativeGenericFn = *const fn (
+    ctx: *JSContext,
+    this_value: JSValue,
+    args: []const JSValue,
+) anyerror!JSValue;
+
+pub const NativeGenericMagicFn = *const fn (
+    ctx: *JSContext,
+    this_value: JSValue,
+    args: []const JSValue,
+    magic: i32,
+) anyerror!JSValue;
+
+pub const NativeGetterFn = *const fn (ctx: *JSContext, this_value: JSValue) anyerror!JSValue;
+pub const NativeSetterFn = *const fn (ctx: *JSContext, this_value: JSValue, value: JSValue) anyerror!JSValue;
+pub const NativeGetterMagicFn = *const fn (ctx: *JSContext, this_value: JSValue, magic: i32) anyerror!JSValue;
+pub const NativeSetterMagicFn = *const fn (ctx: *JSContext, this_value: JSValue, value: JSValue, magic: i32) anyerror!JSValue;
+pub const NativeF64Fn = *const fn (value: f64) f64;
+pub const NativeF64F64Fn = *const fn (lhs: f64, rhs: f64) f64;
+
+pub const NativeIteratorNextFn = *const fn (
+    ctx: *JSContext,
+    this_value: JSValue,
+    args: []const JSValue,
+    magic: i32,
+    done: *i32,
+) anyerror!JSValue;
+
+pub const NativeFunctionPtr = union(NativeCProto) {
+    zjs_internal_call: InternalCallFn,
+    generic: NativeGenericFn,
+    generic_magic: NativeGenericMagicFn,
+    constructor: NativeGenericFn,
+    constructor_magic: NativeGenericMagicFn,
+    constructor_or_func: NativeGenericFn,
+    constructor_or_func_magic: NativeGenericMagicFn,
+    getter: NativeGetterFn,
+    setter: NativeSetterFn,
+    getter_magic: NativeGetterMagicFn,
+    setter_magic: NativeSetterMagicFn,
+    f_f: NativeF64Fn,
+    f_f_f: NativeF64F64Fn,
+    iterator_next: NativeIteratorNextFn,
+};
 
 /// One dispatchable builtin. Slots whose `call` is null are unoccupied
 /// (unmigrated or gap ids); lookups treat them as missing.
@@ -237,13 +302,19 @@ pub const InternalRecord = struct {
     /// this set; other records report a miss so the caller falls through to
     /// its construct cascade.
     constructor: bool = false,
+    cproto: NativeCProto = .zjs_internal_call,
     call: ?InternalCallFn = null,
+    native_function: ?NativeFunctionPtr = null,
+
+    pub fn hasCallable(self: InternalRecord) bool {
+        return self.call != null or self.native_function != null;
+    }
 };
 
-/// Declaration-side entry: what a builtins file exports per method. The
-/// comptime table builder densifies these into `InternalRecord` slots indexed
-/// by `id`, and the install path consumes `name`/`length`/`id` directly
-/// (QuickJS declares the same data in its JSCFunctionListEntry arrays).
+/// Declaration-side entry: what a standard-global function-list table exports
+/// per method. The comptime table builder densifies these into `InternalRecord`
+/// slots indexed by `id`, and the install path consumes `name`/`length`/`id`
+/// directly (QuickJS declares the same data in its JSCFunctionListEntry arrays).
 pub const InternalEntry = struct {
     name: []const u8,
     length: u8,
@@ -254,7 +325,9 @@ pub const InternalEntry = struct {
     /// See `InternalRecord.constructor`: marks a construct-capable record so
     /// the construct dispatch path routes `new X()` here.
     constructor: bool = false,
-    call: InternalCallFn,
+    cproto: NativeCProto = .zjs_internal_call,
+    call: ?InternalCallFn = null,
+    native_function: ?NativeFunctionPtr = null,
 };
 
 // --- Builtin method-id enums ------------------------------------------------
@@ -1054,7 +1127,7 @@ pub const builtin_method_id_lookup = struct {
 
         /// Map a `PrototypeMethod` record id to the legacy decoded method id
         /// (1..34) the builtin date method bodies switch on. The record handler
-        /// (`builtins/date.zig` `dateCall`) uses this before delegating to the
+        /// (`exec/date_ops.zig` `dateCall`) uses this before delegating to the
         /// exec date dispatcher / pure body. Returns null for non-prototype ids
         /// (statics, constructor, the captured-setter internal selectors).
         pub fn decodePrototypeMethodId(id: u32) ?u32 {
@@ -1295,7 +1368,7 @@ pub const builtin_method_id_lookup = struct {
         /// Pure `.regexp` accessor/legacy-accessor id<->name(/kind) mappers
         /// (no VM state). Relocated to engine core in Phase 6b-3 STEP 5B so the
         /// RegExp accessor cascade in exec (`regexp_fastpath`, `call_runtime`)
-        /// dispatches by id without naming the builtin; `builtins/regexp.zig`
+        /// dispatches by id without naming the builtin; `exec/regexp_ops.zig`
         /// re-exports each under its original name. Returned values are
         /// load-bearing (baked into the `.regexp` record table and compiled
         /// bytecode native ids) and must not change here.
@@ -1394,8 +1467,8 @@ pub const builtin_method_id_lookup = struct {
     pub const bigint = struct {
         /// `BigInt.asIntN`/`asUintN` signedness selector: false => signed
         /// (asIntN), true => unsigned (asUintN). Pure name->bool dispatch;
-        /// relocated to engine core in Phase 6b-3 STEP 2. `builtins/bigint.zig`
-        /// re-exports it.
+        /// relocated to engine core in Phase 6b-3 STEP 2. `core.bigint`
+        /// consumes it directly.
         pub fn staticUnsignedMode(name: []const u8) ?bool {
             if (std.mem.eql(u8, name, "asIntN")) return false;
             if (std.mem.eql(u8, name, "asUintN")) return true;

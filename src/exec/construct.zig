@@ -8,7 +8,7 @@ const std = @import("std");
 
 // `new Object(stringPrimitive)` builds a String wrapper through the String
 // construct record (Phase 6b-3 STEP 4) rather than naming
-// `builtins.string.constructWithPrototype`; the record's construct branch is
+// `string_builtin_ops.constructWithPrototype`; the record's construct branch is
 // pure (reads only `args`/`new_target`).
 const string_construct_ref = core.function.NativeBuiltinRef{
     .domain = .string,
@@ -41,7 +41,7 @@ fn constructCollectionRecord(ctx: *core.JSContext, kind: u32, prototype: ?*core.
 /// construct iterable-fill) through the record table instead of naming the
 /// builtin. No function object and `global == null` reach the collection
 /// record handler's primitive path (`methodCallWithCallbackHost`), reproducing
-/// the retired `builtins.collection.methodCall(rt, value, id, args)`. `globals`
+/// the retired direct collection primitive call. `globals`
 /// is forwarded so a legacy-closure adder resolved by name keeps its callback
 /// host; the prepared set/add ids never consult it.
 fn collectionPrimitiveMethodCall(

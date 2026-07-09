@@ -213,45 +213,44 @@ Exception handling uses both Zig errors and VM-level catch handling:
 - backtrace source locations resolve through `source_loc_slots` and `pc2line_buf`
   where available.
 
-### 4.1 Builtins — QuickJS Client Model
+### 4.1 Standard Globals And Native Functions
 
-`src/builtins/` are **clients of the engine**, not a layer the engine depends on
-(QuickJS model: the `js_*_funcs` JSCFunctionListEntry arrays implement methods on
-top of the engine; `JS_CallInternal` dispatches to them by function pointer with
-zero compile-time knowledge of any specific builtin). The dependency direction is
-fixed and enforced:
+QuickJS has no separate builtin or intrinsic layer. Standard objects are engine
+bootstrap: `JS_AddIntrinsic*` hand-wires globals, constructors, prototypes, and
+namespaces; each domain owns `JSCFunctionListEntry` arrays beside the C method
+bodies; `JS_CallInternal` dispatches C functions through the function object's
+payload (`realm`, `cproto`, `magic`, and function pointer).
 
-- **`exec` must not import `builtins`** (`tools/architecture/check_deps.js`).
-  `builtins` import `exec` freely — they implement ECMAScript methods on top of
-  exec VM ops.
-- All builtin call/construct dispatch flows through a **core-owned comptime
-  record table**: `builtins/internal_table.zig` materializes a
-  `[NativeBuiltinDomain][id]` table of `core.host_function.InternalRecord`;
-  `JSRuntime.internal_builtins` points at it; `registry.installStandardGlobals`
-  wires it during context setup (inverted through `JSRuntime`'s
-  `install_standard_globals_cb` so exec never imports the installer). exec
-  dispatches via `exec/builtin_dispatch.zig` `callInternalRecord` /
-  `callConstructRecord` — one indirect call, the same shape QuickJS pays.
-- The VM caller pair (`?*const Bytecode`, `?*Frame`) is carried as opaque
-  pointers in `InternalCall` so core never names exec/bytecode types;
-  `builtin_dispatch` owns the typed erase/recover helpers.
+The zjs target mirrors that shape:
 
-Method implementations that are **pure builtin bodies** live in `builtins/*.zig`
-and are reached only through the table. Implementations that double as **VM ops**
-(directly invoked by opcode handlers — Array fast-array/map-fusion, property
-lookup, coercion, TypedArray element access) stay in `exec`/`core`; the builtin
-record is a thin entry that the table routes to. Engine-core primitives the
-migration had to relocate out of builtins live in `core/` (`core/typed_array.zig`,
-`core/promise.zig`, `core/collection.zig`, `core/json.zig`, `core/regexp.zig`,
-`core/number.zig`, `core/symbol.zig`, `core/uri.zig`,
-`core/{error,typed_array}_names.zig`, plus `sameValue`/`sameValueZero` /
-`stringIterator` / the builtin method-id enums in `core/object.zig` and
-`core/host_function.zig`).
+- `core/host_function.zig` owns the neutral native-function ABI:
+  `NativeCProto`, QJS-style function-pointer variants, `InternalRecord`, and
+  the transitional `.zjs_internal_call` cproto.
+- `exec/builtin_dispatch.zig` is the native C-function dispatch bridge. Today it
+  still invokes legacy `InternalCall` records; domains migrate toward QJS-style
+  `NativeCProto` entries without adding a facade.
+- Long term, standard-global installation belongs in exec (the
+  `JS_AddIntrinsic*` equivalent). It should be a hand-written installer with
+  helpers analogous to `JS_SetPropertyFunctionList`, `JS_NewCFunction3`, and
+  `JS_NewCConstructor`, not a generic descriptor registry.
+- Domain function-list tables should live beside the implementation they point
+  at (`exec/*_ops.zig` or `libs/*` for pure algorithms). Method bodies are placed
+  by role: VM/property/call/coercion/iterator behavior stays in exec; pure
+  algorithms stay in core/libs.
+- `src/builtins/` is transitional migration debt: it currently hosts the
+  standard-global installer, per-domain tables, and many record bodies. It is
+  not a desired architecture layer, and it should disappear once the installer
+  and domain tables have moved into the engine.
 
-`exec/call.zig`'s `HostFunction` enum is a **separate** mechanism: it dispatches
-the embedder/runtime host helpers (`print` output, destructuring runtime
-helpers, the external-host-function registry, disposable-stack throw glue) — not
-ECMAScript builtins. It is orthogonal to the builtin record table and stays.
+During the transition, `exec -> builtins` remains forbidden so the old directory
+cannot become an engine dependency. `builtins -> exec` is allowed because the old
+directory is acting as misplaced engine bootstrap/native-function code, not as a
+separate layer. `builtins -> bytecode/parser/runtime/cli` remains forbidden.
+
+`exec/call.zig`'s `HostFunction` enum is a separate mechanism: it dispatches
+embedder/runtime host helpers (`print` output, destructuring runtime helpers,
+the external-host-function registry, disposable-stack throw glue), not standard
+ECMAScript native functions.
 
 ## 5. Object Shapes And Property IC
 

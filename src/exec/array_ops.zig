@@ -3841,7 +3841,7 @@ pub fn qjsArrayFromCall(
             // Drain the Map/Set through its values/entries iterator. Route the
             // collection method body through the record table with no function
             // object and `global == null`, reproducing the bare primitive
-            // iterator the retired `builtins.collection.methodCall` produced
+            // iterator the retired direct collection primitive call produced
             // (ctx-less, fresh iterator prototype) so exec carries no
             // compile-time knowledge of the builtin.
             const collection_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = if (source_object.class_id == core.class.ids.set) 8 else 9 };

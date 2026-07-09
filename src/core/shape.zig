@@ -278,12 +278,12 @@ pub const Registry = struct {
         return shape;
     }
 
-    pub fn transitionProperty(self: *Registry, parent: *Shape, atom_id: atom.Atom, flags: u6) !*Shape {
-        if (self.findHashedShapeProperty(parent, atom_id, flags)) |shape| {
+    pub fn transitionProperty(self: *Registry, parent: *Shape, atom_id: atom.Atom, flags: u6, property_capacity: usize) !*Shape {
+        if (self.findHashedShapeProperty(parent, atom_id, flags, property_capacity)) |shape| {
             shape.retain();
             return shape;
         }
-        var child = try self.cloneShape(parent, parent.proto, propertyCapacityForNeeded(parent.prop_count + 1), true);
+        var child = try self.cloneShape(parent, parent.proto, @max(parent.prop_size, property_capacity), true);
         errdefer self.release(child);
         // appendProperty may relocate `child` (inline FAM grow moves the shape);
         // thread &child so the fresh pointer flows back before we hash it.
@@ -294,7 +294,7 @@ pub const Registry = struct {
         return child;
     }
 
-    fn findHashedShapeProperty(self: *Registry, parent: *Shape, atom_id: atom.Atom, flags: u6) ?*Shape {
+    fn findHashedShapeProperty(self: *Registry, parent: *Shape, atom_id: atom.Atom, flags: u6, property_capacity: usize) ?*Shape {
         if (!parent.is_hashed) return null;
         const expected_hash = transitionHash(parent.hash, atom_id, flags);
         const n = parent.prop_count;
@@ -304,6 +304,7 @@ pub const Registry = struct {
             if (candidate.hash != expected_hash) continue;
             if (candidate.proto != parent.proto) continue;
             if (candidate.prop_count != n + 1) continue;
+            if (candidate.prop_size != property_capacity) continue;
             const cand_props = candidate.props();
             var matched = true;
             for (0..n) |i| {

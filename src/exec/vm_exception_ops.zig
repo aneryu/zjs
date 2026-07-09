@@ -55,6 +55,20 @@ pub fn createNamedErrorWithoutStack(rt: *core.JSRuntime, global: *core.Object, n
     return buildNamedErrorObject(rt, ctor_value, name, message);
 }
 
+/// Build the runtime's preallocated OOM catch value. Unlike normal named
+/// errors, this stores an own `name`: the delivery path must remain
+/// allocation-free even if `InternalError.prototype.name` has not been
+/// materialized from its lazy builtin string placeholder.
+pub fn createPreallocatedOutOfMemoryError(rt: *core.JSRuntime, global: *core.Object) !core.JSValue {
+    const error_value = try createNamedErrorWithoutStack(rt, global, "InternalError", "out of memory");
+    errdefer error_value.free(rt);
+    const error_object = objectFromValue(error_value) orelse return error.TypeError;
+    const name_value = try value_ops.createStringValue(rt, "InternalError");
+    defer name_value.free(rt);
+    try defineNonEnumValueProperty(rt, error_object, "name", name_value);
+    return error_value;
+}
+
 fn buildNamedErrorObject(rt: *core.JSRuntime, ctor_value: core.JSValue, name: []const u8, message: []const u8) !core.JSValue {
     var rooted_ctor_value = ctor_value;
     var root_values = [_]core.runtime.ValueRootValue{

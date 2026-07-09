@@ -17,7 +17,7 @@ const value_ops = @import("value_ops.zig");
 const HostError = exceptions.HostError;
 const ValueSliceRoot = array_ops.ValueSliceRoot;
 
-// Static-method ids stay with the registration data in builtins/reflect_proxy.zig.
+// Static-method ids stay with the registration data in reflect_proxy_ops.zig.
 const StaticMethod = core.host_function.builtin_method_ids.reflect.StaticMethod;
 
 // `Reflect.construct(Array, ...)` routes through the Array construct record; the
@@ -320,7 +320,7 @@ pub fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const 
     const revoke = try core.function.nativeFunction(rt, "revoke", 0);
     defer revoke.free(rt);
     const revoke_object = thisObject(revoke) orelse return error.TypeError;
-    revoke_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.reflect, @intFromEnum(StaticMethod.proxy_revoke));
+    revoke_object.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.reflect, @intFromEnum(StaticMethod.proxy_revoke)));
     const empty_name = try core.string.String.createAscii(rt, "");
     const empty_name_value = empty_name.value();
     defer empty_name_value.free(rt);
@@ -336,7 +336,7 @@ pub fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const 
 /// Revoke closure for `Proxy.revocable`: clears the captured proxy's handler
 /// so subsequent trap lookups throw. Mirrors QuickJS `js_proxy_revoke`. Stays
 /// in exec with the rest of the proxy core; the `.reflect` record handler in
-/// builtins/reflect_proxy.zig forwards the `proxy_revoke` id here.
+/// reflect_proxy_ops.zig forwards the `proxy_revoke` id here.
 pub fn revokeProxy(rt: *core.JSRuntime, function_object: *core.Object) !core.JSValue {
     const proxy_slot = try function_object.functionProxyRevokeTargetSlot(rt);
     const proxy_value = function_object.takeOptionalValueSlot(proxy_slot) orelse return core.JSValue.undefinedValue();

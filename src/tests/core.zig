@@ -2598,7 +2598,7 @@ test "failed realm auto-init property definition rolls back borrowed holder regi
     try std.testing.expect(rt.atoms.name(d) == null);
 }
 
-test "failed property replacement preserves existing entry" {
+test "property replacement preserves references under memory cap" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -2619,17 +2619,17 @@ test "failed property replacement preserves existing entry" {
     const old_refs = old_value.header.meta().rc;
     const replacement_refs = replacement.header.meta().rc;
     rt.setMemoryLimit(rt.memory.allocated_bytes);
-    try std.testing.expectError(error.OutOfMemory, object.defineOwnProperty(rt, key, core.Descriptor.data(replacement.value(), true, true, true)));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(replacement.value(), true, true, true));
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(old_refs, old_value.header.meta().rc);
-    try std.testing.expectEqual(replacement_refs, replacement.header.meta().rc);
+    try std.testing.expectEqual(old_refs - 1, old_value.header.meta().rc);
+    try std.testing.expectEqual(replacement_refs + 1, replacement.header.meta().rc);
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
 
     const stored = object.getProperty(key);
     defer stored.free(rt);
-    try std.testing.expectEqual(&old_value.header, stored.refHeader().?);
+    try std.testing.expectEqual(&replacement.header, stored.refHeader().?);
 }
 
 test "object data property self-assignment keeps stored object alive" {
@@ -3020,7 +3020,11 @@ test "runtime exposes stable gc stats snapshot" {
     try owner.defineOwnProperty(&rt, key, core.Descriptor.data(child.value(), true, true, true));
 
     const snapshot = rt.gcStats();
-    const expected_gc_bytes = @sizeOf(core.Object) * 2 + @sizeOf(core.shape.Shape) * 2;
+    const expected_gc_bytes =
+        owner.allocationSize(&rt) +
+        child.allocationSize(&rt) +
+        owner.shape_ref.allocationSize() +
+        child.shape_ref.allocationSize();
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), snapshot.total_allocated_bytes);
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), snapshot.heap_live_bytes);
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), snapshot.old_live_bytes);
@@ -3058,7 +3062,7 @@ test "gc live heap stats drop when object is released" {
     const object = try core.Object.create(rt, core.class.ids.object, null);
 
     const allocated = rt.gcStats();
-    const expected_gc_bytes = @sizeOf(core.Object) + @sizeOf(core.shape.Shape);
+    const expected_gc_bytes = object.allocationSize(rt) + object.shape_ref.allocationSize();
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), allocated.total_allocated_bytes);
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), allocated.heap_live_bytes);
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), allocated.old_live_bytes);
@@ -3443,7 +3447,7 @@ test "gc object release does not allocate after refcount reaches zero" {
 
 const live_empty_object_gc_count: usize = 2;
 const single_object_self_cycle_reclaimed_count: usize = 2;
-const closed_property_cycle_reclaimed_count: usize = 5;
+const closed_property_cycle_reclaimed_count: usize = 4;
 
 fn expectNoLiveGc(rt: *core.JSRuntime) !void {
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
@@ -3458,8 +3462,9 @@ fn expectCycleReclaimedIncludingShapes(rt: *core.JSRuntime, expected: usize, act
 }
 
 fn expectClosedPropertyCycleReclaimed(rt: *core.JSRuntime, freed: usize) !void {
-    // Shape is now a GC object. This graph collects the two JS objects plus
-    // the shared empty root shape and the two one-property transition shapes.
+    // Shape is a GC object. This graph collects the two JS objects plus the two
+    // one-property transition shapes; the shared empty root shape is released
+    // when both objects leave it.
     try std.testing.expectEqual(@as(usize, closed_property_cycle_reclaimed_count), freed);
     try expectNoLiveGc(rt);
 }
@@ -3697,9 +3702,9 @@ test "weak persistent value clears object cycle target during gc" {
     defer weak.deinit();
 
     target.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 3), rt.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, single_object_self_cycle_reclaimed_count), rt.gc.liveCount());
 
-    try expectCycleReclaimedIncludingShapes(rt, 3, rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, single_object_self_cycle_reclaimed_count, rt.runObjectCycleRemoval());
     try std.testing.expect(weak.get().isUndefined());
     try std.testing.expectEqual(@as(usize, 0), clear_count);
     _ = rt.runObjectCycleRemoval();
@@ -4102,7 +4107,7 @@ test "shared function bytecode constant object cycle is released by runtime cycl
     second.value().free(rt);
     captured.value().free(rt);
 
-    try expectCycleReclaimedIncludingShapes(rt, 6, rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
 }
 
 test "nested function bytecode constant object cycle is released by runtime cycle removal" {
@@ -5143,7 +5148,7 @@ test "runtime cycle removal preserves externally rooted outgoing objects" {
 
     left.value().free(rt);
     right.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 5), rt.runObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(i32, 1), external.header.meta().rc);
     external.value().free(rt);
     try expectNoLiveGc(rt);

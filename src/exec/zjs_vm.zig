@@ -154,11 +154,9 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
         // `createNamedErrorWithoutStack`): a backtrace captured here would
         // describe startup, and the exhausted-heap delivery path
         // (`tryCatchInFrame`) must not allocate one.
-        ctx.runtime.preallocated_oom_error = exception_ops.createNamedErrorWithoutStack(
+        ctx.runtime.preallocated_oom_error = exception_ops.createPreallocatedOutOfMemoryError(
             ctx.runtime,
             global_object,
-            "InternalError",
-            "out of memory",
         ) catch null;
     }
     const next_eval = global_object.getProperty(core.atom.predefinedId("eval", .string).?);

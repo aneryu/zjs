@@ -23,12 +23,16 @@ pub const helpers = struct {
     /// through `rt.installStandardGlobals`, which needs the builtins installer
     /// registered first; exec source cannot name the builtins registry, so the
     /// test tree (which imports builtins) registers it here. Idempotent.
-    pub fn installHostGlobalsBare(rt: *core.JSRuntime, global: *core.Object) !void {
+    pub fn registerStandardGlobalsBare(rt: *core.JSRuntime) void {
         const registry = engine.builtins.registry;
-        const exec_call = engine.exec.call;
         registry.registerStandardGlobalsDefault();
         rt.install_standard_globals_cb = registry.installStandardGlobals;
         rt.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+    }
+
+    pub fn installHostGlobalsBare(rt: *core.JSRuntime, global: *core.Object) !void {
+        const exec_call = engine.exec.call;
+        registerStandardGlobalsBare(rt);
         try exec_call.installHostGlobals(rt, global);
     }
 
@@ -37,12 +41,26 @@ pub const helpers = struct {
         defer rt.atoms.free(name);
         var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
         errdefer function.deinit(rt);
+        try setCodeAndStackSize(&function, code);
+        return function;
+    }
+
+    pub fn makeUncheckedFunction(rt: *core.JSRuntime, code: []const u8) !engine.bytecode.Bytecode {
+        const name = try rt.internAtom("exec");
+        defer rt.atoms.free(name);
+        var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        errdefer function.deinit(rt);
         try function.setCode(code);
         return function;
     }
 
+    pub fn setCodeAndStackSize(function: *engine.bytecode.Bytecode, code: []const u8) !void {
+        try function.setCode(code);
+        function.stack_size = try engine.bytecode.pipeline.stack_size.compute(function.code, .{});
+    }
+
     pub fn runFunction(rt: *core.JSRuntime, ctx: *core.JSContext, function: *const engine.bytecode.Bytecode) !core.JSValue {
-        _ = rt;
+        registerStandardGlobalsBare(rt);
         var vm_instance = engine.exec.Vm.init(ctx);
         defer vm_instance.deinit();
         return vm_instance.run(function);
@@ -230,6 +248,8 @@ pub const helpers = struct {
                 .stack_size = options.limits.stack_bytes orelse core.runtime.default_stack_size,
             });
             errdefer rt.destroy();
+            registerStandardGlobalsBare(rt);
+            rt.setNativeStackSize(core.runtime.default_native_stack_size * 4);
             const ctx = try core.JSContext.create(rt);
             errdefer ctx.destroy();
             const event_loop = try options.allocator.create(engine.runtime.EventLoop);
@@ -591,6 +611,7 @@ pub const vm_helpers = struct {
         // put_var.
         try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
 
+        helpers.registerStandardGlobalsBare(rt);
         var vm = engine.exec.Vm.init(ctx);
         defer vm.deinit();
         return vm.run(&function);
@@ -610,6 +631,7 @@ pub const vm_helpers = struct {
 
         try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, rt);
 
+        helpers.registerStandardGlobalsBare(rt);
         var vm = engine.exec.Vm.init(ctx);
         defer vm.deinit();
         return vm.run(&function);
@@ -646,6 +668,7 @@ pub const vm_helpers = struct {
 
         try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
 
+        helpers.registerStandardGlobalsBare(rt);
         var vm = engine.exec.Vm.init(ctx);
         defer vm.deinit();
         return vm.run(&function);
@@ -670,6 +693,7 @@ pub const vm_helpers = struct {
 
         try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, rt);
 
+        helpers.registerStandardGlobalsBare(rt);
         var vm = engine.exec.Vm.init(ctx);
         defer vm.deinit();
         return vm.run(&function);
@@ -708,9 +732,7 @@ test "vm executes stack constants source locations and return_undef" {
     });
     defer function.deinit(rt);
 
-    var vm_instance = engine.exec.Vm.init(ctx);
-    defer vm_instance.deinit();
-    const result = try vm_instance.run(&function);
+    const result = try runFunction(rt, ctx, &function);
     defer result.free(rt);
     try std.testing.expect(result.isUndefined());
     try std.testing.expect(result.isUndefined());
@@ -755,7 +777,7 @@ test "VM roots frame this symbol before derived constructor var-ref allocation" 
     function.stack_size = 1;
     function.vardefs = try rt.memory.alloc(function_def.VarDef, 1);
     function.vardefs[0] = .{ .var_name = rt.atoms.dup(this_name), .scope_level = 0 };
-    try function.setCode(&.{ op.get_loc0, op.drop, op.return_undef });
+    try helpers.setCodeAndStackSize(&function, &.{ op.get_loc0, op.drop, op.return_undef });
 
     const this_symbol = try rt.atoms.newValueSymbol("gc-vm-frame-this-before-roots");
     rt.setGCThreshold(0);
@@ -813,7 +835,7 @@ test "constant pool execution retains returned constants" {
     const value = str.value();
     _ = try function.addConstant(value);
     value.free(rt);
-    try function.setCode(&.{ op.push_const, 0, 0, 0, 0 });
+    try helpers.setCodeAndStackSize(&function, &.{ op.push_const, 0, 0, 0, 0 });
 
     const result = try runFunction(rt, ctx, &function);
     defer result.free(rt);
@@ -918,7 +940,7 @@ test "value ops own primitive VM semantics" {
     var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer function.deinit(rt);
     _ = try function.addConstant(one_string);
-    try function.setCode(&.{
+    try helpers.setCodeAndStackSize(&function, &.{
         op.push_i32,   1, 0, 0, 0,
         op.push_const, 0, 0, 0, 0,
         op.eq,
@@ -3272,6 +3294,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
 test "vm collection constructors use registered prototype methods" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    helpers.registerStandardGlobalsBare(rt);
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
@@ -3281,14 +3304,15 @@ test "vm collection constructors use registered prototype methods" {
     defer function.deinit(rt);
     const map_atom = try rt.internAtom("Map");
     defer rt.atoms.free(map_atom);
-    var bytes: [6]u8 = undefined;
+    var bytes: [7]u8 = undefined;
     bytes[0] = op.get_var;
     std.mem.writeInt(u16, bytes[1..3], 0, .little);
-    bytes[3] = op.call_constructor;
-    std.mem.writeInt(u16, bytes[4..6], 0, .little);
+    bytes[3] = op.dup;
+    bytes[4] = op.call_constructor;
+    std.mem.writeInt(u16, bytes[5..7], 0, .little);
     function.var_ref_names = try rt.memory.alloc(core.Atom, 1);
     function.var_ref_names[0] = rt.atoms.dup(map_atom);
-    try function.setCode(&bytes);
+    try helpers.setCodeAndStackSize(&function, &bytes);
 
     var vm_instance = engine.exec.Vm.init(ctx);
     defer vm_instance.deinit();
@@ -3877,6 +3901,7 @@ test "Engine eval TypeError with evaluated arguments does not double free consta
 test "vm call handler accepts allocator-backed argument lists" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    helpers.registerStandardGlobalsBare(rt);
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
@@ -3902,7 +3927,7 @@ test "vm call handler accepts allocator-backed argument lists" {
     try bytes.append(rt.memory.allocator, op.call);
     const argc: u16 = 40;
     try bytes.appendSlice(rt.memory.allocator, std.mem.asBytes(&argc));
-    try function.setCode(bytes.items);
+    try helpers.setCodeAndStackSize(&function, bytes.items);
 
     var output_buffer: [256]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);

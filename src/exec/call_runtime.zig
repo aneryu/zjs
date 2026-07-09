@@ -437,8 +437,7 @@ fn uriGlobalRecordId(name: []const u8) ?u32 {
 /// Slow-path collection prototype methods reached by name without a baked
 /// native id (the id-carrying path already routed through
 /// `call_mod.callNativeFunctionRecord` above). Replaces the retired
-/// `builtins.collection.{qjsCollectionIteratorMethodCall, qjsCollectionForEachCall,
-/// qjsSetMethodCall}` triple: gate on the installed collection owner class and
+/// collection helper triple: gate on the installed collection owner class and
 /// the exact (method, owner) pairs those wrappers handled — keys/values/entries
 /// and forEach on Map|Set, the Set composition/comparison operators on Set —
 /// then route the body through the record table. Returns null (continue the
@@ -897,14 +896,10 @@ fn callValueOrBytecodeClassModeDispatch(
         if (std.mem.eql(u8, name, "throws")) return qjsAssertThrows(ctx, output, global, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "groupBy")) {
             // `Map.groupBy` static: route through the collection record table's
-            // `group_by` handler instead of naming the builtin. The handler runs
-            // the same Map-receiver gate + body the retired
-            // `builtins.collection.qjsMapGroupByCall` reached via the installed
-            // id; the only native `groupBy` is `Map.groupBy`, so this slow-path
-            // fallback always carries the Map constructor as receiver. The
-            // collection static-method id range (`group_by == 101`) is owned by
-            // `builtins/collection.zig`'s `StaticMethod`; exec keys the record by
-            // its stable value rather than naming the builtin enum.
+            // `group_by` handler instead of naming a JS-visible function body.
+            // The only native `groupBy` is `Map.groupBy`, so this slow-path
+            // fallback always carries the Map constructor as receiver. Exec keys
+            // the record by its stable value rather than importing the registry.
             const native_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = collection_group_by_static_id };
             if (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) |grouped| return grouped;
         }
@@ -1327,10 +1322,10 @@ const string_construct_id: u32 = @intFromEnum(core.host_function.builtin_method_
 const regexp_construct_id: u32 = @intFromEnum(core.host_function.builtin_method_ids.regexp.ConstructorMethod.construct);
 
 // `Map.groupBy` static-method record id. The collection static-method id range
-// lives in `builtins/collection.zig` (`StaticMethod.group_by == 101`, kept out
-// of the core `builtin_method_ids.collection.PrototypeMethod` 1..21 range so it
-// densifies into its own record slot); exec keys the slow-path `groupBy`
-// fallback by this stable value instead of naming the builtin enum.
+// is `StaticMethod.group_by == 101` in `exec/collection_ops.zig`, kept out of
+// the core `builtin_method_ids.collection.PrototypeMethod` 1..21 range so it
+// densifies into its own record slot. Exec keys the slow-path `groupBy`
+// fallback by this stable value instead of importing registry metadata.
 const collection_group_by_static_id: u32 = 101;
 
 // `new Array(...)` / `Array(...)` route through the Array construct record. The
@@ -1448,6 +1443,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
         if (std.mem.eql(u8, name, "AsyncFunction")) return promise_ops.constructAsyncFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "GeneratorFunction")) return constructGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "AsyncGeneratorFunction")) return promise_ops.constructAsyncGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
+        if (std.mem.eql(u8, name, "Symbol")) return exception_ops.throwTypeErrorMessage(ctx, global, "Symbol is not a constructor");
         if (array_ops.qjsTypedArrayConstructorName(name)) {
             if (try array_ops.qjsTypedArrayConstructFromIterable(ctx, output, global, func, args, caller_function, caller_frame)) |value| return value;
         }
@@ -1499,7 +1495,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
                             defer primitive.free(ctx.runtime);
                             // JS_ToFloat64Free on a bigint primitive throws
                             // (qjs js_date_constructor single-arg branch).
-                            if (primitive.isBigInt()) return error.TypeError;
+                            if (primitive.isBigInt()) return exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert bigint to number");
                             coerced_storage[0] = try value_ops.toNumberValue(ctx.runtime, primitive);
                         }
                     }
@@ -1507,7 +1503,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
                     coerced_owned = true;
                     date_args = coerced;
                 } else if (!args[0].isString()) {
-                    if (args[0].isBigInt()) return error.TypeError;
+                    if (args[0].isBigInt()) return exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert bigint to number");
                     coerced_storage[0] = try value_ops.toNumberValue(ctx.runtime, args[0]);
                     coerced = coerced_storage[0..1];
                     coerced_owned = true;
@@ -5176,7 +5172,7 @@ pub fn simpleEvalRegExpLiteral(ctx: *core.JSContext, global: *core.Object, sourc
     if (literal.end_offset != trimmed.len) return null;
     if (containsUtf8LineSeparator(literal.pattern)) return null;
     // Route the scanned pattern/flags through the RegExp construct record (the
-    // validating `.construct` branch) instead of naming `builtins.regexp`: the
+    // validating `.construct` branch) instead of naming `regexp_ops`: the
     // lexer scan does not fully validate the regex grammar, so the construct
     // record's validation is required, matching the retired `constructLiteral`.
     const pattern_value = try value_ops.createStringValue(ctx.runtime, literal.pattern);

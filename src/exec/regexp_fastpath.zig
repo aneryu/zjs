@@ -21,7 +21,7 @@ const string_ops = @import("string_ops.zig");
 // Native-builtin id of the RegExp constructor record. The construct fast path's
 // coercing terminals run the builtin RegExp constructor body through the record
 // table (`builtin_dispatch.callConstructRecord`) keyed on this ref rather than
-// importing `builtins.regexp.constructWithPrototype` directly, so the construct
+// importing `regexp_ops.constructWithPrototype` directly, so the construct
 // logic stays owned by the table (Phase 6b-3e). The pattern/flags are already
 // coerced and the instance prototype resolved at the call site, so the record
 // only runs the constructor body.

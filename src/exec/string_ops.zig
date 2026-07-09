@@ -2399,12 +2399,11 @@ pub fn unicodePropertyOnlyClassCodePointMatches(source: []const u8, code_point: 
 /// Route a reused String method *body* through the record table's
 /// func-object-free arm. `decoded_method_id` is the legacy selector the builtin
 /// string bodies switch on; it is re-encoded to its `PrototypeMethod` record id
-/// so the dispatch lands on `builtins/string.zig` `stringCall`, whose
+/// so the dispatch lands on `string_builtin_ops.zig` `stringCall`, whose
 /// `func_obj == null` arm runs the pure `methodCall` (or, for `charAt`,
 /// `charAtValue`) body directly. `string_value` is the resolved receiver and
 /// `args` are already coerced. This replaces the former direct
-/// `builtins.string.methodCall`/`charAtValue` calls so exec carries no
-/// compile-time String body knowledge.
+/// direct String body calls while the record owner was still outside exec.
 pub fn callStringBody(
     ctx: *core.JSContext,
     string_value: core.JSValue,
@@ -2479,7 +2478,8 @@ pub fn qjsStringPrototypeMethod(
         return qjsStringConcat(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
     // Pad / Html / Normalize / LocaleCompare / NumericArgs bodies live in this
-    // file (Phase 6b-3 STEP 3B moved them back from `builtins/string.zig`): they
+    // file (Phase 6b-3 STEP 3B moved them back from the transitional String
+    // owner): they
     // are exec-only, reachable solely through this dispatcher. The RegExp-coupled
     // bodies (search/match/split/replaceAll/matchAll and
     // `qjsStringSearchPositionMethod`, which observes RegExp via
@@ -3711,7 +3711,7 @@ pub fn qjsErrorToStringCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    _ = objectFromValue(this_value) orelse return error.TypeError;
+    _ = objectFromValue(this_value) orelse return exception_ops.throwTypeErrorMessage(ctx, global, "not an object");
 
     const name_value = try getValueProperty(ctx, output, global, this_value, core.atom.ids.name, caller_function, caller_frame);
     defer name_value.free(ctx.runtime);
@@ -4564,7 +4564,7 @@ pub fn isLowSurrogateUnit(unit: u16) bool {
 // `qjsStringPrototypeMethod` dispatcher above (the `.string` builtin record
 // handler `stringCall` routes every prototype method to it), never from a
 // builtin dispatch table entry, so they are exec-only. They were briefly hosted
-// in `builtins/string.zig` (Phase 6b-2) and were moved back here in Phase 6b-3
+// in the transitional String owner (Phase 6b-2) and were moved back here in Phase 6b-3
 // STEP 3B to keep the dependency edge exec -> builtins out of these bodies. They
 // reuse the file-local rope/UTF helpers (`toStringForAnnexB`,
 // `appendStringValueUnits`, `appendUtf32FromStringValue`, `appendUtf16CodePoint`,

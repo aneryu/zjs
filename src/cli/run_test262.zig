@@ -4,6 +4,7 @@ const zjs = test262_root.binding_root;
 const runtime_layer = test262_root.runtime;
 const parser = test262_root.parser;
 const unicode = test262_root.libs.unicode;
+const core_runtime = test262_root.core.runtime;
 
 extern "c" fn getpid() c_int;
 
@@ -4140,6 +4141,7 @@ test "test262 typed array iterator staging source parses after installing global
     {
         const rt = try zjs.JSRuntime.create(allocator);
         defer rt.destroy();
+        rt.setNativeStackSize(core_runtime.default_native_stack_size * 4);
         const ctx = try zjs.JSContext.create(rt);
         defer ctx.destroy();
         _ = try ctx.globalObject();
@@ -4155,6 +4157,7 @@ test "test262 typed array iterator staging source parses after installing global
     {
         const rt = try zjs.JSRuntime.create(allocator);
         defer rt.destroy();
+        rt.setNativeStackSize(core_runtime.default_native_stack_size * 4);
         const ctx = try zjs.JSContext.create(rt);
         defer ctx.destroy();
         const global = try ctx.globalObject();

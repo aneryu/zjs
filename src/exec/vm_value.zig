@@ -13,7 +13,7 @@ const op = bytecode.opcode.op;
 
 // `ToObject(string)` (the `with`-statement / Object coercion) builds its String
 // wrapper through the String construct record (Phase 6b-3 STEP 4) rather than
-// naming `builtins.string.constructWithPrototype`; the construct branch is pure
+// naming `string_builtin_ops.constructWithPrototype`; the construct branch is pure
 // (reads only `args`/`new_target`).
 const string_construct_ref = core.function.NativeBuiltinRef{
     .domain = .string,

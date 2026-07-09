@@ -30,7 +30,7 @@ pub const default_gc_threshold = 256 * 1024;
 /// catchable error. 1 MiB leaves ample headroom under the real thread stack
 /// (the main thread has only a few MiB free below the eval entry after the CLI
 /// call chain; worker threads have ~16 MiB) while sitting far above any
-/// legitimate nesting depth — the same value QuickJS passes test262 with.
+/// legitimate nesting depth — the same value QuickJS uses for conformance runs.
 pub const default_native_stack_size = 1024 * 1024;
 
 pub const InterruptHandler = *const fn (*JSRuntime, ?*anyopaque) bool;
@@ -907,7 +907,7 @@ pub const JSRuntime = struct {
         // shallow call level, so this baseline is valid. Outermost eval/module
         // entries additionally re-arm (JS_UpdateStackTop analogue) for a precise
         // per-thread base — required when execution runs on a different thread
-        // than construction (test262 workers).
+        // than construction (conformance worker runtimes).
         rt.native_stack_top = @frameAddress();
         rt.native_stack_limit = if (default_native_stack_size == 0) 0 else rt.native_stack_top -| default_native_stack_size;
         rt.vm_stack = .{};
@@ -1134,7 +1134,7 @@ pub const JSRuntime = struct {
 
     /// Same as `registerObject` but with the object's allocation size supplied by
     /// the caller. `createInternal` already computes the inline-class-payload
-    /// layout to size/place the allocation; reusing its `total_size` here avoids a
+    /// layout to size/place the allocation; reusing its `object_size` here avoids a
     /// second record-table lookup + inline-layout recompute on the object-creation
     /// hot path (mirror of `unregisterObjectWithBytes` on the free path). The
     /// stored value is identical to what `allocationSize` would recompute.
@@ -1151,7 +1151,7 @@ pub const JSRuntime = struct {
 
     /// Same as `unregisterObject` but with the object's allocation size supplied
     /// by the caller. `destroyFromHeader` already computes the inline-class-payload
-    /// layout (for the tail `freeObjectAllocation`); its `total_size` is bit-for-bit
+    /// layout (for the tail `freeObjectAllocation`); its `object_size` is bit-for-bit
     /// the value `allocationSize` would recompute here (both go through
     /// `inlineClassPayloadLayout(recordPtr(class_id))`, and `class_id` is unchanged
     /// between the two calls). Reusing it drops a redundant record-table lookup +
@@ -1724,7 +1724,7 @@ pub const JSRuntime = struct {
         const records = self.internal_builtins[domain_index];
         if (id >= records.len) return null;
         const record = &records[id];
-        if (record.call == null) return null;
+        if (!record.hasCallable()) return null;
         return record;
     }
 
@@ -2207,6 +2207,11 @@ pub const JSRuntime = struct {
         return self.stack_size;
     }
 
+    pub fn setNativeStackSize(self: *JSRuntime, size: usize) void {
+        self.native_stack_size = size;
+        self.updateNativeStackTop();
+    }
+
     /// Capture the current native frame pointer as the recursion base and derive
     /// the lower limit. Mirrors QuickJS `JS_UpdateStackTop` + `update_stack_limit`
     /// (quickjs.c:2841-2860). Must be called at the outermost JS entry on the
@@ -2419,6 +2424,10 @@ pub const JSRuntime = struct {
         return self.deferred_native_cleanups.len != 0 or self.deferred_class_payload_finalizers.len != 0;
     }
 
+    pub fn hasPendingDeferredClassPayloadFinalizers(self: JSRuntime) bool {
+        return self.deferred_class_payload_finalizers.len != 0;
+    }
+
     pub fn runDeferredNativeCleanupBudgeted(self: *JSRuntime, max_jobs: usize) usize {
         if (max_jobs == 0) return 0;
         if (self.draining_deferred_native_cleanups) return 0;
@@ -2460,6 +2469,7 @@ pub const JSRuntime = struct {
         }
 
         self.releaseEmptyDeferredClassPayloadFinalizerBuffer();
+        if (ran != 0 and self.deferred_class_payload_finalizers.len == 0) object_mod.Object.drainCycleDeferredFrees(self);
         return ran;
     }
 
