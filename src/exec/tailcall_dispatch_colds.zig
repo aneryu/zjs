@@ -780,6 +780,10 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     //     compiler can't devirtualize+inline it, so the fast handler stays a
     //     frameless leaf instead of carrying the cold 128B frame on its hot path). ---
     if (!fast) return t;
+    t[op.undefined] = td.op_undefined_fast;
+    t[op.null] = td.op_null_fast;
+    t[op.push_false] = td.op_push_false_fast;
+    t[op.push_true] = td.op_push_true_fast;
     t[op.push_i32] = td.op_push_i32;
     t[op.push_i16] = td.op_push_i16;
     t[op.push_i8] = td.op_push_i8;

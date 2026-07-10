@@ -1033,6 +1033,45 @@ pub fn op_push_i32(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
     sp[0] = JSValue.int32(readInt(i32, pc + 1));
     return cont(pc + 5, sp + 1, var_buf, vm);
 }
+
+/// Frameless primitive constant pushes. QuickJS's `CASE(OP_null)` is the direct
+/// `*sp++ = JS_NULL; BREAK;` form; undefined, booleans, and immediate integers
+/// are the same register-resident primitive stores. `pushSmallIntMaybeFuse` is a
+/// plain `JSValue.int32` push (vm_value.zig:58-75), so the small-int handlers do
+/// not omit a runtime fusion or bytecode-patching step.
+///
+/// Stack-capacity contract: zjs_vm.reserveEntryFrameCapacity reserves the verified
+/// `function.stack_size` before dispatch (zjs_vm.zig:469-480), matching opLoc's
+/// unchecked `sp[0]` write. The GC-traced `stack.values.len` stays stale until the
+/// next publish because these handlers advance only register `sp`; that window is
+/// safe here because null, undefined, booleans, and int32s are non-refcounted
+/// primitives, so the new slot needs no tracing. Refcounted constant pushes remain
+/// cold. The blocked guard is first because coldNext runs maybeStop at a generator
+/// parameter-init suspension boundary; cont would otherwise skip that boundary.
+pub fn op_undefined_fast(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    sp[0] = JSValue.undefinedValue();
+    return cont(pc + 1, sp + 1, var_buf, vm);
+}
+
+pub fn op_null_fast(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    sp[0] = JSValue.nullValue();
+    return cont(pc + 1, sp + 1, var_buf, vm);
+}
+
+pub fn op_push_false_fast(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    sp[0] = JSValue.boolean(false);
+    return cont(pc + 1, sp + 1, var_buf, vm);
+}
+
+pub fn op_push_true_fast(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    sp[0] = JSValue.boolean(true);
+    return cont(pc + 1, sp + 1, var_buf, vm);
+}
+
 pub fn op_push_i16(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     sp[0] = JSValue.int32(readInt(i16, pc + 1));
     return cont(pc + 3, sp + 1, var_buf, vm);
