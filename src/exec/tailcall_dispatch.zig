@@ -990,6 +990,42 @@ pub fn opLocCheck(comptime kind: LocKind) Handler {
     }.h;
 }
 
+/// TDZ state reset for a plain lexical local (qjs CASE(OP_set_loc_uninitialized),
+/// quickjs.c:18696-18702). The generator/eval stop-boundary and var-ref-cell guards
+/// keep the cold checkedLocVm path for the cases that must publish/rewrite through a
+/// cell; a plain slot is exactly qjs's store-then-JS_FreeValue sequence.
+pub fn op_set_loc_uninitialized(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const idx = readInt(u16, pc + 1);
+    const old_v = var_buf[idx];
+    if (slot_ops.varRefCellFromValue(old_v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // Store before freeing: a collection during old_v.free must not trace the dying
+    // value through the local slot (the same order as checkedLocVm and qjs).
+    var_buf[idx] = JSValue.uninitialized();
+    old_v.free(vm.ctx.runtime);
+    return cont(pc + 3, sp, var_buf, vm);
+}
+
+/// Initializing plain lexical locals (qjs CASE(OP_put_loc_check_init),
+/// quickjs.c:18755-18766). Derived constructors keep the cold path because its
+/// derived-`this` double-init check and this_value mirror are observable; cell slots
+/// (and the defensive cell operand case) keep setSlotValue's cell-write semantics.
+pub fn op_put_loc_check_init(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    if (vm.function.flags.is_derived_class_constructor) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const idx = readInt(u16, pc + 1);
+    const old_v = var_buf[idx];
+    if (slot_ops.varRefCellFromValue(old_v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const value = (sp - 1)[0];
+    if (slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // Mirror setSlotValue's plain-slot arm and opLoc(.put): move the popped value,
+    // then release the overwritten slot value. The inline free intentionally keeps
+    // the rc==1/destroy case here rather than paying a cold-table round trip.
+    var_buf[idx] = value;
+    old_v.free(vm.ctx.runtime);
+    return cont(pc + 3, sp - 1, var_buf, vm);
+}
+
 /// Closure/global var-ref read (qjs OP_get_var_ref0..3 distinct labels). The `fib`
 /// recursive self-reference is get_var_ref0 — fib's per-call hottest non-call op.
 /// Uninitialized (TDZ or deleted binding parked at UNINITIALIZED, qjs
@@ -1452,17 +1488,41 @@ pub fn op_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) c
 // prologue-free (a direct tail-call to a local slow shell got re-inlined, dragging in
 // its 64B frame + callee-saved spills, which pressured the store buffer and stalled
 // the boolean's store→load forward from opCompare). Booleans need no free / no call.
+// Plain objects take qjs JS_ToBoolFree's object leg inline (quickjs.c:11205-11211,
+// called by OP_if_{true,false}8 at 18881-18919); HTMLDDA objects stay cold because
+// `core.value_semantics.toBoolean` makes their is_html_dda flag falsy.
 pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if ((sp - 1)[0].asBool()) |b| {
+    const value = (sp - 1)[0];
+    if (value.asBool()) |b| {
         if (!b) return @call(.always_tail, next, .{ jump8Target(pc, vm), sp - 1, var_buf, vm });
         return cont(pc + 2, sp - 1, var_buf, vm);
+    }
+    if (value.isObject()) {
+        // Guard before mutation so the cold handler re-executes the HTMLDDA case
+        // from the original pc/sp; branch8 consumes its operand, so shrink the GC
+        // root window before the inline free just as stack.pop() does there.
+        if (core.value_semantics.isHTMLDDA(value)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        const nsp = sp - 1;
+        vm.stack.values = vm.stack_base[0 .. (@intFromPtr(nsp) - @intFromPtr(vm.stack_base)) / @sizeOf(JSValue)];
+        value.free(vm.ctx.runtime);
+        return cont(pc + 2, nsp, var_buf, vm);
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 pub fn op_if_true8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if ((sp - 1)[0].asBool()) |b| {
+    const value = (sp - 1)[0];
+    if (value.asBool()) |b| {
         if (b) return @call(.always_tail, next, .{ jump8Target(pc, vm), sp - 1, var_buf, vm });
         return cont(pc + 2, sp - 1, var_buf, vm);
+    }
+    if (value.isObject()) {
+        // See op_if_false8: non-HTMLDDA objects are truthy, and the consumed
+        // operand's root must be removed before its inline rc==1 destruction.
+        if (core.value_semantics.isHTMLDDA(value)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        const nsp = sp - 1;
+        vm.stack.values = vm.stack_base[0 .. (@intFromPtr(nsp) - @intFromPtr(vm.stack_base)) / @sizeOf(JSValue)];
+        value.free(vm.ctx.runtime);
+        return @call(.always_tail, next, .{ jump8Target(pc, vm), nsp, var_buf, vm });
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
