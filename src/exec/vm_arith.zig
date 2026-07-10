@@ -788,41 +788,6 @@ noinline fn addLocalStringAt(
     try slot_ops.setSlotValue(ctx, slot, updated);
 }
 
-/// Fuses `add; dup? put_var s; (put_locN | drop)?` when the add is a string
-/// append whose stack lhs *is* the global data slot's current value: the
-/// known references are that slot, the stack copy this fusion pops, and
-/// (when the previous statement's completion local still holds the
-/// accumulator) the completion slot — all aliases of the accumulator the
-/// pattern overwrites. The append then extends lhs storage in place (flat
-/// capacity append or rope tail append) instead of copying or chaining a
-/// rope node per iteration, keeping top-level `s += part` loops O(1) per
-/// step in nodes and bytes.
-fn canFuseGlobalDataWrite(
-    function: *const bytecode.Bytecode,
-    frame: *const frame_mod.Frame,
-    atom_id: core.Atom,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) bool {
-    if (!eval_with_object.isUndefined()) return false;
-    if (!frame.current_function.isUndefined()) return false;
-    if (frameHasVarRefBinding(function, frame, atom_id)) return false;
-    if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
-    if (frame.evalLocalNames().len != 0 or frame.evalVarRefNames().len != 0) return false;
-    return true;
-}
-
-fn frameHasVarRefBinding(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
-    const count = @min(frame.var_refs.len, function.varRefNamesLen());
-    var idx: usize = 0;
-    while (idx < count) : (idx += 1) {
-        const name = function.varRefName(idx);
-        if (name == atom_id) return true;
-    }
-    return false;
-}
-
 const ImmediateInt32 = struct {
     value: i32,
     next_pc: usize,

@@ -57,8 +57,6 @@ pub fn execGetLoc(
 
 pub noinline fn execPutLoc(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     idx: u16,
@@ -69,14 +67,11 @@ pub noinline fn execPutLoc(
     _ = opc;
     // idx < var_count == frame.locals.len by construction (see execGetLoc).
     const value = try stack.pop();
-    if (try assignDirectEvalGlobalVarLocalSlot(ctx, global, function, idx, &frame.locals[idx], value)) return;
     try setSlotValue(ctx, &frame.locals[idx], value);
 }
 
 pub fn execSetLoc(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     idx: u16,
@@ -88,30 +83,7 @@ pub fn execSetLoc(
     // idx < var_count == frame.locals.len by construction (see execGetLoc).
     const value = stack.peek() orelse return error.StackUnderflow;
     defer value.free(ctx.runtime);
-    if (try assignDirectEvalGlobalVarLocalSlot(ctx, global, function, idx, &frame.locals[idx], value.dup())) return;
     try setSlotValue(ctx, &frame.locals[idx], value.dup());
-}
-
-fn assignDirectEvalGlobalVarLocalSlot(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    function: *const bytecode.Bytecode,
-    idx: usize,
-    slot: *core.JSValue,
-    value: core.JSValue,
-) !bool {
-    const atom_id = call_runtime.directEvalGlobalVarLocalAtom(ctx.runtime, function, idx, slot.*) orelse return false;
-    defer value.free(ctx.runtime);
-
-    if (!try global.setOwnWritableDataProperty(ctx.runtime, atom_id, value)) {
-        if (!global.hasOwnProperty(atom_id)) {
-            try defineGlobalFunctionBindingValue(ctx.runtime, global, atom_id, value, true);
-        }
-    }
-
-    const next_value = global.getProperty(atom_id);
-    try setSlotValue(ctx, slot, next_value);
-    return true;
 }
 
 pub fn execGetArg(
@@ -331,7 +303,9 @@ pub fn publishTopLevelFunctionVarRef(
     // the global lexical environment record only — qjs never creates a global
     // object property for it (a top-level `class A{}` / `let f = function(){}`
     // must leave `globalThis.A` undefined; `language/global-code/decl-lex.js`).
-    if (function.varRefIsLexicalAt(idx)) return;
+    const eval_annex_b_function = is_eval_code and eval_global_var_bindings and idx < function.closure_var.len and
+        (function.closure_var[idx].var_kind == .function_decl or function.closure_var[idx].var_kind == .new_function_decl);
+    if (function.varRefIsLexicalAt(idx) and !eval_annex_b_function) return;
     if (!sameObjectIdentity(frame.this_value, global.value())) return;
     const object = property_ops.expectObject(value) catch return;
     if (!isFunctionLikeClass(object.class_id)) return;
@@ -411,18 +385,13 @@ pub fn varRefSlotIsUninitialized(slot: core.JSValue) bool {
 }
 
 /// A deleted eval-created binding: its deletable cell was parked at
-/// UNINITIALIZED by deleteVarRefSlot (qjs remove_global_object_property,
-/// quickjs.c:9289-9309). Distinct from a TDZ cell, which is uninitialized
-/// but NOT deletable.
+/// UNINITIALIZED by ordinary global property deletion (qjs
+/// remove_global_object_property, quickjs.c:9289-9309). Distinct from a TDZ
+/// cell, which is uninitialized but NOT deletable.
 pub fn varRefSlotIsDeletedEvalBinding(slot: core.JSValue) bool {
     const cell = varRefCellFromValue(slot) orelse return false;
     if (!cell.varRefIsDeletableSlot().*) return false;
     return cell.varRefValue().isUninitialized();
-}
-
-pub fn evalLocalSlotIsEvalVarCell(slot: core.JSValue) bool {
-    const cell = varRefCellFromValue(slot) orelse return false;
-    return cell.varRefIsDeletableSlot().*;
 }
 
 // inline, mirroring QuickJS `static inline set_value`: the common store where
@@ -456,7 +425,7 @@ noinline fn setSlotValueRefCounted(ctx: *core.JSContext, slot: *core.JSValue, va
 pub fn derivedConstructorThisLocalSlot(frame: *frame_mod.Frame) ?*core.JSValue {
     if (!frame.function.flags.is_derived_class_constructor) return null;
     for (frame.function.vardefs, 0..) |vd, idx| {
-        if (vd.var_name == 8 and idx < frame.locals.len) return &frame.locals[idx];
+        if (vd.var_name == core.atom.ids.this_ and idx < frame.locals.len) return &frame.locals[idx];
     }
     return null;
 }
@@ -523,17 +492,15 @@ pub inline fn varRefSlotCellUnchecked(frame: *const frame_mod.Frame, idx: usize)
     return frame.var_refs.ptr[idx];
 }
 
-/// Bounds-checked element read in JSValue form (the cell's value view) —
-/// boundary accessor for the JSValue-typed eval/name-table domains. Borrowed:
-/// callers dup for ownership, exactly as they did on the pre-typed slot.
+/// Bounds-checked element read in JSValue form (the cell's value view).
+/// Borrowed: callers dup when they need ownership.
 pub inline fn varRefSlot(frame: *const frame_mod.Frame, idx: usize) core.JSValue {
     return frame.var_refs[idx].valueRef();
 }
 
 /// Cell store — slot REBIND, not value write-through. The only users are the
-/// element-level replacement points (eval republish
-/// `replaceFrameVarRefBinding`, global-decl PASS2 cell surgery
-/// `defineGlobalDecl*Cell`, module prologue fill): the caller owns the
+/// element-level replacement points (global-decl PASS2 cell surgery and
+/// module prologue fill): the caller owns the
 /// refcount choreography for both the incoming cell and the displaced one.
 /// The JSValue parameter is the boundary form those callers hold (an owned
 /// ref to a cell by construction); the transfer keeps its refcount.

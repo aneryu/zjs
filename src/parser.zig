@@ -3495,10 +3495,12 @@ pub const parser_core = struct {
 
     const eval_class_field_initializer_flag: u16 = 0x8000;
     const eval_parameter_initializer_flag: u16 = 0x4000;
-    const atom_this: Atom = 8; // "this"
-    const atom_new_target: Atom = 115; // "new.target"
-    const atom_this_active_func: Atom = 116; // "this.active_func"
-    const atom_class_fields_init: Atom = 120; // "<class_fields_init>"
+    const atom_this: Atom = atom_module.ids.this_;
+    const atom_new_target: Atom = atom_module.ids.new_target;
+    const atom_this_active_func: Atom = atom_module.ids.this_active_func;
+    const atom_class_fields_init: Atom = atom_module.ids.class_fields_init;
+    const atom_var_object: Atom = atom_module.ids.var_object; // "<var>"
+    const atom_arg_var_object: Atom = atom_module.ids.arg_var_object; // "<arg_var>"
     const shared_iterator_close_marker: u8 = 255;
     const direct_iterator_close_marker: u8 = 254;
 
@@ -3851,6 +3853,7 @@ pub const parser_core = struct {
         top_level_lexical_as_global_ref: bool = false,
         top_level_functions_as_children: bool = false,
         eval_global_var_bindings: bool = false,
+        eval_in_parameter_initializer: bool = false,
         eval_annex_b_blocked_function_names: []const Atom = &.{},
         features: std.EnumSet(FeatureImpl) = .initEmpty(),
         in_namespace: bool = false,
@@ -3978,6 +3981,7 @@ pub const parser_core = struct {
                 .function_def = function_def_mod.FunctionDef.init(function.memory, function.atoms, function.name),
             };
             errdefer state.function_def.deinitInitFailure();
+            state.function_def.atoms.replace(&state.function_def.script_or_module, function.script_or_module);
             state.function_def.line_num = 1;
             state.function_def.col_num = 1;
             // Mirror `js_new_function_def` (`quickjs.c:31511`): scope 0
@@ -4236,6 +4240,15 @@ pub const parser_core = struct {
                 (!self.is_eval or self.eval_global_var_bindings);
         }
 
+        fn lexicalBodyDeclarationConflictsWithGlobalVar(self: *State, name: Atom) bool {
+            if (self.cur_func_stack.len != 0 or self.scope_level != 0) return false;
+            if (self.atGlobalLexicalBodyScope()) return self.findGlobalVar(name);
+            return self.is_eval and
+                !self.eval_global_var_bindings and
+                !self.eval_in_parameter_initializer and
+                self.findGlobalVar(name);
+        }
+
         fn ensureFunctionScopeVar(self: *State, name: Atom) Error!u16 {
             if (self.scopeHasVar(0, name)) {
                 if (self.findFunctionScopeVar(name)) |idx| return idx;
@@ -4283,6 +4296,19 @@ pub const parser_core = struct {
             }) catch return error.OutOfMemory;
         }
 
+        fn addDirectEvalVarObjectVar(self: *State, name: Atom) Error!void {
+            const fd = self.cur_func();
+            fd.appendGlobalVar(.{
+                .cpool_idx = -1,
+                .force_init = true,
+                .is_configurable = true,
+                .is_lexical = false,
+                .is_const = false,
+                .scope_level = 0,
+                .var_name = name,
+            }) catch return error.OutOfMemory;
+        }
+
         fn assignPendingGlobalFunctionVarCpool(self: *State, fd: *function_def_mod.FunctionDef, name: Atom, cpool_idx: u16) bool {
             _ = self;
             var idx = fd.global_vars.len;
@@ -4301,6 +4327,14 @@ pub const parser_core = struct {
             // function binding updates: bypass block/function locals and lower to
             // final `put_var`.
             try self.emitOpAtomU16(opcode.op.scope_put_var, atom_id, std.math.maxInt(u16));
+        }
+
+        fn emitEvalVarObjectScopePutVar(self: *State, atom_id: Atom) Error!void {
+            // Annex B's var-copy assignment bypasses the block lexical binding
+            // but must still traverse the eval declaration environment. Scope
+            // zero excludes the block-local function while retaining the
+            // compiler-seeded _var_/_arg_var_ and exact caller closure targets.
+            try self.emitOpAtomU16(opcode.op.scope_put_var, atom_id, 0);
         }
 
         fn currentBlockDecls(self: *State) ?*BlockScopeDecls {
@@ -4344,7 +4378,7 @@ pub const parser_core = struct {
         /// `JS_ATOM__ret_` / `<ret>` (`quickjs-atom.h:115`). Used as the
         /// var name for the synthetic local that captures every
         /// expression-statement result in eval mode.
-        pub const eval_ret_atom: Atom = 82;
+        pub const eval_ret_atom: Atom = atom_module.ids.ret;
 
         /// Switch the parser into eval mode and allocate the synthetic
         /// `<ret>` local that holds the result of the last evaluated
@@ -5026,6 +5060,20 @@ pub const parser_core = struct {
         // Direct byte writes into `function.code`. Keep these local until the
         // remaining legacy emitter callers are retired.
 
+        fn markDirectEvalCall(self: *State) Error!void {
+            const fd = self.cur_func();
+            fd.has_eval_call = true;
+            fd.needs_dynamic_lvalue_refs = true;
+            if (fd.parent != null and fd.func_type != .arrow and fd.func_type != .class_static_init) {
+                if (fd.has_parameter_expressions and !fd.is_strict_mode) {
+                    try ensureParameterArgumentsLocals(fd);
+                } else {
+                    _ = try State.ensureImplicitArgumentsLocal(fd);
+                }
+            }
+            if (!self.emit_to_function_def) self.function.flags.has_eval_call = true;
+        }
+
         fn emitOp(self: *State, op_id: u8) Error!void {
             try self.appendBytes(&[_]u8{op_id});
         }
@@ -5237,6 +5285,15 @@ pub const parser_core = struct {
             }
         }
 
+        fn emitScopeGetRef(self: *State, atom_id: Atom) Error!void {
+            try self.ensureClosureVar(atom_id);
+            if (self.emit_phase1_temp) {
+                try self.emitOpAtomU16(opcode.op.scope_get_ref, atom_id, @intCast(self.scope_level));
+            } else {
+                try self.emitGlobalVarOp(opcode.op.get_var, atom_id);
+            }
+        }
+
         fn emitScopeGetVarCheckThis(self: *State, atom_id: Atom) Error!void {
             try self.ensureClosureVar(atom_id);
             if (self.emit_phase1_temp) {
@@ -5252,6 +5309,25 @@ pub const parser_core = struct {
                 try self.emitOpAtomU16(opcode.op.scope_put_var, atom_id, @intCast(self.scope_level));
             } else {
                 try self.emitGlobalVarOp(opcode.op.put_var, atom_id);
+            }
+        }
+
+        fn emitScopePutVarNoDynamicEnv(self: *State, atom_id: Atom) Error!void {
+            try self.ensureClosureVar(atom_id);
+            if (self.emit_phase1_temp) {
+                if (self.scope_level < 0 or self.scope_level > @as(i32, opcode.scope_no_dynamic_env_max_level)) return Error.UnexpectedToken;
+                const scope_operand = @as(u16, @intCast(self.scope_level)) | opcode.scope_no_dynamic_env_flag;
+                try self.emitOpAtomU16(opcode.op.scope_put_var, atom_id, scope_operand);
+            } else {
+                try self.emitGlobalVarOp(opcode.op.put_var, atom_id);
+            }
+        }
+
+        fn emitScopeDeleteVar(self: *State, atom_id: Atom) Error!void {
+            if (self.emit_phase1_temp) {
+                try self.emitOpAtomU16(opcode.op.scope_delete_var, atom_id, @intCast(self.scope_level));
+            } else {
+                try self.emitOpAtom(opcode.op.delete_var, atom_id);
             }
         }
 
@@ -5313,8 +5389,13 @@ pub const parser_core = struct {
         }
 
         fn emitThisValue(self: *State) Error!void {
-            if (try self.ensureThisLocal()) |_| {
-                if (self.cur_func().is_derived_class_constructor) {
+            if (try self.ensureThisLocal()) |this_idx| {
+                if (self.in_parameter_initializer) {
+                    try self.emitOpU16(
+                        if (self.cur_func().is_derived_class_constructor) opcode.op.get_loc_checkthis else opcode.op.get_loc,
+                        this_idx,
+                    );
+                } else if (self.cur_func().is_derived_class_constructor) {
                     try self.emitScopeGetVarCheckThis(atom_this);
                 } else {
                     try self.emitScopeGetVar(atom_this);
@@ -5322,6 +5403,24 @@ pub const parser_core = struct {
             } else {
                 try self.emitOp(opcode.op.push_this);
             }
+        }
+
+        fn ensureImplicitArgumentsLocal(fd: *function_def_mod.FunctionDef) Error!?u16 {
+            if (fd.parent == null or fd.func_type == .arrow or fd.func_type == .class_static_init) return null;
+            if (fd.arguments_var_idx >= 0) return @intCast(fd.arguments_var_idx);
+
+            const arguments_atom = atom_module.ids.arguments;
+            if (fd.findVar(arguments_atom) >= 0 or fd.findArg(arguments_atom) >= 0) return null;
+
+            const idx = fd.addScopeVar(arguments_atom, .normal, 0, false, false) catch return error.OutOfMemory;
+            fd.arguments_var_idx = @intCast(idx);
+            return @intCast(idx);
+        }
+
+        fn isDynamicEnvironmentCaptureAtom(atom_id: Atom) bool {
+            return atom_id == atom_module.ids.with_object or
+                atom_id == atom_module.ids.var_object or
+                atom_id == atom_module.ids.arg_var_object;
         }
 
         fn ensureClosureVar(self: *State, atom_id: Atom) Error!void {
@@ -5334,10 +5433,11 @@ pub const parser_core = struct {
 
             var parent_index = self.cur_func_stack.len;
             var visible_scope_level = current.parent_scope_level;
+            var parameter_environment_only = current.parent_parameter_environment_only;
             while (parent_index > 0) {
                 parent_index -= 1;
                 const parent = self.funcAtVirtualIndex(parent_index);
-                if (findVisibleParentVar(parent, atom_id, visible_scope_level)) |parent_var| {
+                if (try self.findVisibleParentVarCapturingWith(parent_index, parent, atom_id, visible_scope_level)) |parent_var| {
                     try self.ensureClosureChain(parent_index, .{
                         .closure_type = .local,
                         .is_lexical = parent.vars[@intCast(parent_var)].is_lexical,
@@ -5360,8 +5460,50 @@ pub const parser_core = struct {
                     });
                     return;
                 }
+                if (atom_id == atom_module.ids.arguments) {
+                    if (parameter_environment_only and
+                        parent.has_parameter_expressions and
+                        parent.func_type != .arrow and
+                        parent.func_type != .class_static_init)
+                    {
+                        try ensureParameterArgumentsLocals(parent);
+                        const arguments_arg_idx: u16 = @intCast(parent.arguments_arg_idx);
+                        try self.ensureClosureChain(parent_index, .{
+                            .closure_type = .local,
+                            .is_lexical = true,
+                            .is_const = false,
+                            .var_kind = .normal,
+                            .var_idx = arguments_arg_idx,
+                            .var_name = atom_id,
+                        });
+                        return;
+                    }
+                    if (try State.ensureImplicitArgumentsLocal(parent)) |arguments_var_idx| {
+                        try self.ensureClosureChain(parent_index, .{
+                            .closure_type = .local,
+                            .is_lexical = false,
+                            .is_const = false,
+                            .var_kind = .normal,
+                            .var_idx = arguments_var_idx,
+                            .var_name = atom_id,
+                        });
+                        return;
+                    }
+                }
                 visible_scope_level = parent.parent_scope_level;
+                parameter_environment_only = parent.parent_parameter_environment_only;
                 for (parent.closure_var, 0..) |cv, idx| {
+                    if (isDynamicEnvironmentCaptureAtom(cv.var_name)) {
+                        try self.ensureClosureChain(parent_index, .{
+                            .closure_type = .ref,
+                            .is_lexical = cv.is_lexical,
+                            .is_const = cv.is_const,
+                            .var_kind = cv.var_kind,
+                            .var_idx = @intCast(idx),
+                            .var_name = cv.var_name,
+                        });
+                        continue;
+                    }
                     if (cv.var_name == atom_id) {
                         try self.ensureClosureChain(parent_index, .{
                             .closure_type = .ref,
@@ -5388,13 +5530,41 @@ pub const parser_core = struct {
             }
         }
 
-        fn findVisibleParentVar(parent: *const function_def_mod.FunctionDef, atom_id: Atom, visible_scope_level: i32) ?i32 {
+        fn findVisibleParentVarCapturingWith(
+            self: *State,
+            parent_index: usize,
+            parent: *const function_def_mod.FunctionDef,
+            atom_id: Atom,
+            visible_scope_level: i32,
+        ) Error!?i32 {
+            var scope_idx = visible_scope_level;
+            while (scope_idx >= 0 and @as(usize, @intCast(scope_idx)) < parent.scopes.len) {
+                var var_idx = parent.scopes[@intCast(scope_idx)].first;
+                while (var_idx >= 0) {
+                    const idx: usize = @intCast(var_idx);
+                    if (idx >= parent.vars.len) return Error.UnexpectedToken;
+                    const vd = parent.vars[idx];
+                    if (vd.var_name == atom_id and vd.var_kind != .eval_var_object) return var_idx;
+                    if (atom_id != atom_module.ids.with_object and vd.var_name == atom_module.ids.with_object) {
+                        try self.ensureClosureChain(parent_index, .{
+                            .closure_type = .local,
+                            .is_lexical = false,
+                            .is_const = false,
+                            .var_kind = .normal,
+                            .var_idx = @intCast(idx),
+                            .var_name = vd.var_name,
+                        });
+                    }
+                    var_idx = vd.scope_next;
+                }
+                scope_idx = parent.scopes[@intCast(scope_idx)].parent;
+            }
+
             var i: usize = parent.vars.len;
             while (i > 0) {
                 i -= 1;
                 const vd = parent.vars[i];
-                if (vd.var_name != atom_id) continue;
-                if (vd.var_kind == .function_name or scopeChainContains(parent, visible_scope_level, vd.scope_level)) return @intCast(i);
+                if (vd.var_name == atom_id and vd.var_kind == .function_name) return @intCast(i);
             }
             return null;
         }
@@ -5410,18 +5580,6 @@ pub const parser_core = struct {
             var child_index = source_index + 1;
             while (child_index <= self.cur_func_stack.len) : (child_index += 1) {
                 const child = self.funcAtVirtualIndex(child_index);
-                var existing: ?u16 = null;
-                for (child.closure_var, 0..) |cv, idx| {
-                    if (cv.var_name == source.var_name) {
-                        existing = @intCast(idx);
-                        break;
-                    }
-                }
-                if (existing) |idx| {
-                    parent_ref_idx = idx;
-                    continue;
-                }
-
                 const cv = if (child_index == source_index + 1) source else function_def_mod.ClosureVar{
                     .closure_type = .ref,
                     .is_lexical = source.is_lexical,
@@ -5430,6 +5588,22 @@ pub const parser_core = struct {
                     .var_idx = parent_ref_idx orelse return Error.UnexpectedToken,
                     .var_name = source.var_name,
                 };
+                var existing: ?u16 = null;
+                for (child.closure_var, 0..) |candidate, idx| {
+                    const same_capture = candidate.var_name == cv.var_name and
+                        candidate.closure_type == cv.closure_type and
+                        candidate.var_idx == cv.var_idx;
+                    if ((isDynamicEnvironmentCaptureAtom(source.var_name) and same_capture) or
+                        (!isDynamicEnvironmentCaptureAtom(source.var_name) and candidate.var_name == source.var_name))
+                    {
+                        existing = @intCast(idx);
+                        break;
+                    }
+                }
+                if (existing) |idx| {
+                    parent_ref_idx = idx;
+                    continue;
+                }
                 parent_ref_idx = @intCast(try child.addClosureVar(cv));
             }
         }
@@ -6197,21 +6371,12 @@ pub const parser_core = struct {
 
         if (logical_assign) |kind| {
             if (shape == .invalid_call) return Error.InvalidAssignmentTarget;
-            try emitLogicalAssign(s, flags, shape, kind, pre_lhs_atom_len);
+            try emitLogicalAssign(s, flags, shape, kind);
         } else if (assign_opcode) |op_byte| {
             // Compound: `a.b += v` etc. Keep the receiver/key using the
             // QuickJS lvalue-read shape, then emit rhs, the binop, and store.
-            var use_var_ref_snapshot = false;
             switch (shape) {
-                .var_ref => |v| {
-                    if (try rhsMayContainDirectEvalCall(s)) {
-                        try s.truncateCode(v.code_pos);
-                        try s.truncateAtomOperands(pre_lhs_atom_len);
-                        try s.emitScopeMakeRef(v.atom);
-                        try s.emitOp(opcode.op.get_ref_value);
-                        use_var_ref_snapshot = true;
-                    }
-                },
+                .var_ref => {},
                 .dotted, .indexed => try rewriteToGetForm2(s, shape),
                 .super_dotted => |d| {
                     try s.truncateCode(d.code_pos);
@@ -6231,9 +6396,7 @@ pub const parser_core = struct {
             const rhs_flags = ParseFlags{ .in_accepted = flags.in_accepted };
             try parseAssignExpr2(s, rhs_flags);
             try s.emitOp(op_byte);
-            if (use_var_ref_snapshot) {
-                try emitPutRefValue(s, flags.result_needed);
-            } else if (flags.result_needed) {
+            if (flags.result_needed) {
                 try emitPutLValueKeepTop(s, shape);
             } else {
                 // qjs stores a result-unused compound assignment with a plain
@@ -6252,8 +6415,7 @@ pub const parser_core = struct {
                     try s.truncateCode(v.code_pos);
                     try s.truncateAtomOperands(pre_lhs_atom_len);
                     const is_function_expr_name = isCurrentFunctionExpressionName(s, v.atom);
-                    const use_reference_snapshot = !is_function_expr_name and
-                        ((try rhsMayContainDirectEvalCall(s)) or shouldSnapshotStrictUnresolvedAssignment(s, v.atom));
+                    const use_reference_snapshot = !is_function_expr_name and shouldSnapshotStrictUnresolvedAssignment(s, v.atom);
                     if (use_reference_snapshot) {
                         try s.emitScopeMakeRef(v.atom);
                     }
@@ -6328,17 +6490,13 @@ pub const parser_core = struct {
                 .with_ref => {
                     try s.truncateCode(pre_lhs_code_len);
                     try s.truncateAtomOperands(pre_lhs_atom_len);
-                    try emitWithMakeRefFallback(s, s.active_with_atom orelse return Error.UnexpectedToken, shape.with_ref.atom);
+                    try s.emitScopeMakeRef(shape.with_ref.atom);
                     try parseAssignExpr2(s, rhs_flags);
                     if (direct_lhs_atom != null and s.last_anonymous_function_expr) {
                         try s.emitOpAtom(opcode.op.set_name, shape.with_ref.atom);
                         s.last_anonymous_function_expr = false;
                     }
-                    if (flags.result_needed) {
-                        try emitPutLValueKeepTop(s, shape);
-                    } else {
-                        try emitPutLValueDropResult(s, shape);
-                    }
+                    try emitPutRefValue(s, flags.result_needed);
                 },
                 .invalid_call => {
                     try s.emitOpAtomU8(opcode.op.throw_error, atom_module.null_atom, 2);
@@ -6403,19 +6561,9 @@ pub const parser_core = struct {
         flags: ParseFlags,
         shape: LhsShape,
         kind: LogicalAssignKind,
-        pre_lhs_atom_len: usize,
     ) Error!void {
-        var use_var_ref_snapshot = false;
         switch (shape) {
-            .var_ref => |v| {
-                if (try rhsMayContainDirectEvalCall(s)) {
-                    try s.truncateCode(v.code_pos);
-                    try s.truncateAtomOperands(pre_lhs_atom_len);
-                    try s.emitScopeMakeRef(v.atom);
-                    try s.emitOp(opcode.op.get_ref_value);
-                    use_var_ref_snapshot = true;
-                }
-            },
+            .var_ref => {},
             .dotted => try rewriteToGetForm2(s, shape),
             .super_dotted => {
                 try s.emitOp(opcode.op.perm4);
@@ -6444,9 +6592,7 @@ pub const parser_core = struct {
             try s.emitOpAtom(opcode.op.set_name, shape.var_ref.atom);
             s.last_anonymous_function_expr = false;
         }
-        if (use_var_ref_snapshot) {
-            try emitPutRefValue(s, flags.result_needed);
-        } else if (flags.result_needed) {
+        if (flags.result_needed) {
             try emitPutLValueKeepTop(s, shape);
         } else {
             try emitPutLValueConsume(s, shape);
@@ -6454,23 +6600,8 @@ pub const parser_core = struct {
         const end = try emitForwardJump(s, opcode.op.goto);
 
         try patchForwardJump(s, skip_assign);
-        if (use_var_ref_snapshot) {
-            try emitLogicalNoAssignRefCleanup(s, flags.result_needed);
-        } else {
-            try emitLogicalNoAssignCleanup(s, shape, flags.result_needed);
-        }
+        try emitLogicalNoAssignCleanup(s, shape, flags.result_needed);
         try patchForwardJump(s, end);
-    }
-
-    fn emitLogicalNoAssignRefCleanup(s: *State, result_needed: bool) Error!void {
-        if (result_needed) {
-            try s.emitOp(opcode.op.nip);
-            try s.emitOp(opcode.op.nip);
-        } else {
-            try s.emitOp(opcode.op.drop);
-            try s.emitOp(opcode.op.drop);
-            try s.emitOp(opcode.op.drop);
-        }
     }
 
     fn emitLogicalNoAssignCleanup(s: *State, shape: LhsShape, result_needed: bool) Error!void {
@@ -6553,6 +6684,14 @@ pub const parser_core = struct {
     ) LhsShape {
         const code = s.currentCode();
         if (saved_atom) |ident| {
+            if (code.len >= pre_lhs_code_len + 7) {
+                const pos = code.len - 7;
+                if (code[pos] == opcode.op.scope_get_ref and
+                    std.mem.readInt(u32, code[pos + 1 ..][0..4], .little) == ident)
+                {
+                    return .{ .with_ref = .{ .atom = ident } };
+                }
+            }
             var pos = pre_lhs_code_len;
             while (pos + 9 <= code.len) : (pos += 1) {
                 if (code[pos] != opcode.op.with_get_ref) continue;
@@ -6820,162 +6959,6 @@ pub const parser_core = struct {
         return true;
     }
 
-    /// Direct eval in an assignment RHS can introduce a same-name `var`
-    /// binding before PutValue runs, so identifier lvalues must preserve
-    /// the original Reference. This scanner advances only the lexer cursor;
-    /// it leaves `s.token` owned by the parser.
-    fn rhsMayContainDirectEvalCall(s: *State) Error!bool {
-        const saved_pos = s.lex.pos;
-        const saved_line = s.lex.line;
-        const saved_col = s.lex.col;
-        const saved_got_lf = s.lex.got_lf;
-        const saved_mark_pos = s.lex.mark_pos;
-        const saved_mark_line = s.lex.mark_line;
-        const saved_mark_col = s.lex.mark_col;
-        defer {
-            s.lex.pos = saved_pos;
-            s.lex.line = saved_line;
-            s.lex.col = saved_col;
-            s.lex.got_lf = saved_got_lf;
-            s.lex.mark_pos = saved_mark_pos;
-            s.lex.mark_line = saved_mark_line;
-            s.lex.mark_col = saved_mark_col;
-        }
-
-        var paren_depth: usize = 0;
-        var bracket_depth: usize = 0;
-        var brace_depth: usize = 0;
-        var expect_operand = true;
-
-        switch (try scanAssignmentRhsTokenForDirectEval(s, &s.token, &paren_depth, &bracket_depth, &brace_depth, &expect_operand)) {
-            .found => return true,
-            .boundary => return false,
-            .continue_scan => {},
-        }
-
-        while (true) {
-            var lookahead = try s.lex.next();
-            defer s.lex.freeToken(&lookahead);
-            if (lookahead.val == tok.TOK_EOF) return false;
-            switch (try scanAssignmentRhsTokenForDirectEval(s, &lookahead, &paren_depth, &bracket_depth, &brace_depth, &expect_operand)) {
-                .found => return true,
-                .boundary => return false,
-                .continue_scan => {},
-            }
-        }
-    }
-
-    fn assignmentRhsScanBoundary(kind: tok.TokenKind) bool {
-        return kind == @as(tok.TokenKind, @intCast(',')) or
-            kind == @as(tok.TokenKind, @intCast(';')) or
-            kind == @as(tok.TokenKind, @intCast(')')) or
-            kind == @as(tok.TokenKind, @intCast(']')) or
-            kind == @as(tok.TokenKind, @intCast('}'));
-    }
-
-    const RhsEvalScanResult = enum {
-        continue_scan,
-        found,
-        boundary,
-    };
-
-    fn scanAssignmentRhsTokenForDirectEval(
-        s: *State,
-        scan_token: *const tok.Token,
-        paren_depth: *usize,
-        bracket_depth: *usize,
-        brace_depth: *usize,
-        expect_operand: *bool,
-    ) Error!RhsEvalScanResult {
-        const kind = scan_token.val;
-        if (paren_depth.* == 0 and bracket_depth.* == 0 and brace_depth.* == 0 and assignmentRhsScanBoundary(kind)) {
-            return .boundary;
-        }
-        if (tokenCanStartSlashRegexp(kind) and expect_operand.*) {
-            try skipRegExpLiteralInRhsScan(s, scan_token);
-            expect_operand.* = false;
-            return .continue_scan;
-        }
-        if (kind == tok.TOK_TEMPLATE) {
-            const part = scan_token.payload.str.template orelse return Error.UnexpectedToken;
-            expect_operand.* = part != .no_substitution and part != .tail;
-            if (part != .no_substitution and part != .tail) return .found;
-        }
-        if (kind == tok.TOK_IDENT and
-            atomNameEquals(s, scan_token.payload.ident.atom, "eval") and
-            s.peekNextKind() == @as(tok.TokenKind, @intCast('(')))
-        {
-            return .found;
-        }
-
-        switch (kind) {
-            @as(tok.TokenKind, @intCast('(')) => {
-                paren_depth.* += 1;
-                expect_operand.* = true;
-            },
-            @as(tok.TokenKind, @intCast('[')) => {
-                bracket_depth.* += 1;
-                expect_operand.* = true;
-            },
-            @as(tok.TokenKind, @intCast('{')) => {
-                brace_depth.* += 1;
-                expect_operand.* = true;
-            },
-            @as(tok.TokenKind, @intCast(')')) => {
-                if (paren_depth.* == 0) return .boundary;
-                paren_depth.* -= 1;
-                expect_operand.* = false;
-            },
-            @as(tok.TokenKind, @intCast(']')) => {
-                if (bracket_depth.* == 0) return .boundary;
-                bracket_depth.* -= 1;
-                expect_operand.* = false;
-            },
-            @as(tok.TokenKind, @intCast('}')) => {
-                if (brace_depth.* == 0) return .boundary;
-                brace_depth.* -= 1;
-                expect_operand.* = false;
-            },
-            else => expect_operand.* = tokenForcesRhsOperandAfter(kind),
-        }
-        return .continue_scan;
-    }
-
-    fn skipRegExpLiteralInRhsScan(s: *State, rhs_token: *const tok.Token) Error!void {
-        var regexp_token = try s.lex.rescanRegexp(tokenStartOffset(s, rhs_token));
-        defer s.lex.freeToken(&regexp_token);
-    }
-
-    fn tokenStartOffset(s: *const State, rhs_token: *const tok.Token) usize {
-        const source_ptr = @intFromPtr(s.lex.source.ptr);
-        const token_ptr = @intFromPtr(rhs_token.ptr);
-        if (token_ptr <= source_ptr) return 0;
-        return @min(token_ptr - source_ptr, s.lex.source.len);
-    }
-
-    fn tokenForcesRhsOperandAfter(kind: tok.TokenKind) bool {
-        if (kind < 0) return switch (kind) {
-            tok.TOK_INC,
-            tok.TOK_DEC,
-            tok.TOK_NUMBER,
-            tok.TOK_STRING,
-            tok.TOK_TEMPLATE,
-            tok.TOK_IDENT,
-            tok.TOK_NULL,
-            tok.TOK_FALSE,
-            tok.TOK_TRUE,
-            tok.TOK_THIS,
-            tok.TOK_SUPER,
-            => false,
-            else => true,
-        };
-        return switch (@as(u8, @intCast(kind))) {
-            '+', '-', '*', '/', '%', '&', '|', '^', '!', '~', '?', ':', '=', ',' => true,
-            '.' => true,
-            else => false,
-        };
-    }
-
     fn hasCurrentFunctionBinding(s: *State, atom_id: Atom) bool {
         return s.cur_func().findVar(atom_id) >= 0 or s.cur_func().findArg(atom_id) >= 0;
     }
@@ -7183,8 +7166,13 @@ pub const parser_core = struct {
             .second => try s.emitOp(opcode.op.rot3l),
             .none => try s.emitOp(opcode.op.swap),
         }
-        const fallback = try s.emitOpAtomLabelU8(opcode.op.with_put_var, atom_id, 0, 1);
-        try s.emitScopePutVar(atom_id);
+        const fallback = try s.emitOpAtomLabelU8(
+            opcode.op.with_put_var,
+            atom_id,
+            0,
+            @intFromEnum(opcode.WithPutMode.selected_reference),
+        );
+        try s.emitScopePutVarNoDynamicEnv(atom_id);
         try patchAbsoluteTarget(s, fallback);
     }
 
@@ -7264,19 +7252,19 @@ pub const parser_core = struct {
     /// with-object lookup chain still runs and only the final fallback get
     /// is the non-throwing `undef` form.
     fn emitTypeofIdentRead(s: *State, ident: Atom) Error!void {
+        // Sloppy eval `var` bindings are configurable and may have been
+        // deleted earlier in the same eval. They are parser-known but still
+        // require the non-throwing unresolved fallback used by `typeof`.
+        if (hasEvalNonLexicalBinding(s, ident)) {
+            try s.emitScopeGetVarUndef(ident);
+            return;
+        }
         if (s.active_with_atom != null and s.active_with_func_depth != s.cur_func_stack.len and hasCurrentFunctionBinding(s, ident)) {
             try s.emitScopeGetVar(ident);
             return;
         }
-        if (s.active_with_atom) |with_atom| {
-            try s.emitScopeGetVar(with_atom);
-            const label_offset = try s.emitOpAtomLabelU8(opcode.op.with_get_var, ident, 0, 1);
-            if (hasKnownBinding(s, ident)) {
-                try s.emitScopeGetVar(ident);
-            } else {
-                try s.emitScopeGetVarUndef(ident);
-            }
-            try patchAbsoluteTarget(s, label_offset);
+        if (s.active_with_atom != null) {
+            if (hasKnownBinding(s, ident)) try s.emitScopeGetVar(ident) else try s.emitScopeGetVarUndef(ident);
             return;
         }
         if (hasKnownBinding(s, ident)) {
@@ -7287,28 +7275,18 @@ pub const parser_core = struct {
     }
 
     fn emitWithGetVarFallback(s: *State, with_atom: Atom, ident: Atom) Error!void {
-        try s.emitScopeGetVar(with_atom);
-        const label_offset = try s.emitOpAtomLabelU8(opcode.op.with_get_var, ident, 0, 1);
+        _ = with_atom;
         try s.emitScopeGetVar(ident);
-        try patchAbsoluteTarget(s, label_offset);
     }
 
     fn emitWithGetRefFallback(s: *State, with_atom: Atom, ident: Atom) Error!void {
-        try s.emitScopeGetVar(with_atom);
-        const label_offset = try s.emitOpAtomLabelU8(opcode.op.with_get_ref, ident, 0, 1);
-        try s.emitOp(opcode.op.undefined);
-        try s.emitScopeGetVar(ident);
-        try patchAbsoluteTarget(s, label_offset);
+        _ = with_atom;
+        try s.emitScopeGetRef(ident);
     }
 
     fn emitWithMakeRefFallback(s: *State, with_atom: Atom, ident: Atom) Error!void {
-        try s.emitScopeGetVar(with_atom);
-        const found_label = try s.emitOpAtomLabelU8(opcode.op.with_make_ref, ident, 0, 1);
-        try s.emitOp(opcode.op.undefined);
-        const end = try emitForwardJump(s, opcode.op.goto);
-        try patchAbsoluteTarget(s, found_label);
-        try s.emitOp(opcode.op.drop);
-        try patchForwardJump(s, end);
+        _ = with_atom;
+        try s.emitScopeMakeRef(ident);
     }
 
     fn emitDestructuringTargetBase(s: *State, ident: Atom) Error!void {
@@ -7319,24 +7297,39 @@ pub const parser_core = struct {
         }
     }
 
-    fn emitDestructuringVarBindingResolution(s: *State, atom_id: Atom) Error!void {
-        if (s.destructuring_binding_is_lexical) return;
-        const with_atom = s.active_with_atom orelse return;
+    const DestructuringBindingRef = struct {
+        base_tmp: u16,
+        key_tmp: u16,
+    };
+
+    fn captureDestructuringVarBindingRef(s: *State, atom_id: Atom) Error!?DestructuringBindingRef {
+        if (s.destructuring_binding_is_lexical) return null;
+        const with_atom = s.active_with_atom orelse return null;
         try emitWithMakeRefFallback(s, with_atom, atom_id);
-        try s.emitOp(opcode.op.drop);
+        const key_tmp = try appendTempLocal(s);
+        try s.emitOpU16(opcode.op.put_loc, key_tmp);
+        const base_tmp = try appendTempLocal(s);
+        try s.emitOpU16(opcode.op.put_loc, base_tmp);
+        return .{ .base_tmp = base_tmp, .key_tmp = key_tmp };
+    }
+
+    fn emitPutDestructuringBinding(
+        s: *State,
+        local_index: u16,
+        binding_ref: ?DestructuringBindingRef,
+    ) Error!void {
+        const ref = binding_ref orelse return emitPutBindingLocal(s, local_index);
+        const value_tmp = try appendTempLocal(s);
+        try s.emitOpU16(opcode.op.put_loc, value_tmp);
+        try s.emitOpU16(opcode.op.get_loc, ref.base_tmp);
+        try s.emitOpU16(opcode.op.get_loc, ref.key_tmp);
+        try s.emitOpU16(opcode.op.get_loc, value_tmp);
+        try s.emitOp(opcode.op.put_ref_value);
     }
 
     fn emitWithDeleteVarFallback(s: *State, with_atom: Atom, ident: Atom) Error!void {
-        try s.emitScopeGetVar(with_atom);
-        const label_offset = try s.emitOpAtomLabelU8(opcode.op.with_delete_var, ident, 0, 1);
-        if (hasEvalNonLexicalBinding(s, ident)) {
-            try s.emitOpAtom(opcode.op.delete_var, ident);
-        } else if (hasKnownBinding(s, ident) or atomNameEquals(s, ident, "arguments")) {
-            try s.emitOp(opcode.op.push_false);
-        } else {
-            try s.emitOpAtom(opcode.op.delete_var, ident);
-        }
-        try patchAbsoluteTarget(s, label_offset);
+        _ = with_atom;
+        try s.emitScopeDeleteVar(ident);
     }
 
     /// Emit the return for one pushed-down `return`-expression branch (see
@@ -7656,11 +7649,11 @@ pub const parser_core = struct {
                     if (s.active_with_atom) |with_atom| {
                         try emitWithDeleteVarFallback(s, with_atom, ident);
                     } else if (hasEvalNonLexicalBinding(s, ident)) {
-                        try s.emitOpAtom(opcode.op.delete_var, ident);
+                        try s.emitScopeDeleteVar(ident);
                     } else if (hasKnownBinding(s, ident) or atomNameEquals(s, ident, "arguments")) {
                         try s.emitOp(opcode.op.push_false);
                     } else {
-                        try s.emitOpAtom(opcode.op.delete_var, ident);
+                        try s.emitScopeDeleteVar(ident);
                     }
                     return;
                 }
@@ -8163,11 +8156,11 @@ pub const parser_core = struct {
                 try s.truncateCode(v.code_pos);
                 try s.truncateAtomOperands(pre_lhs_atom_len);
                 if (hasEvalNonLexicalBinding(s, v.atom)) {
-                    try s.emitOpAtom(opcode.op.delete_var, v.atom);
+                    try s.emitScopeDeleteVar(v.atom);
                 } else if (hasKnownBinding(s, v.atom) or atomNameEquals(s, v.atom, "arguments")) {
                     try s.emitOp(opcode.op.push_false);
                 } else {
-                    try s.emitOpAtom(opcode.op.delete_var, v.atom);
+                    try s.emitScopeDeleteVar(v.atom);
                 }
             },
             .dotted => |d| {
@@ -9059,6 +9052,7 @@ pub const parser_core = struct {
                 switch (shape) {
                     .direct => |argc| {
                         if (was_direct_eval) {
+                            try s.markDirectEvalCall();
                             var eval_scope: u16 = @intCast(s.scope_level);
                             if (s.class_field_initializer_depth > 0) eval_scope |= eval_class_field_initializer_flag;
                             if (s.in_parameter_initializer) eval_scope |= eval_parameter_initializer_flag;
@@ -9072,6 +9066,7 @@ pub const parser_core = struct {
                         // QuickJS rearranges to [func, undef, array] for apply
                         // (`quickjs.c:26699-26703`).
                         if (was_direct_eval) {
+                            try s.markDirectEvalCall();
                             var eval_scope: u16 = @intCast(s.scope_level);
                             if (s.class_field_initializer_depth > 0) eval_scope |= eval_class_field_initializer_flag;
                             if (s.in_parameter_initializer) eval_scope |= eval_parameter_initializer_flag;
@@ -9486,7 +9481,8 @@ pub const parser_core = struct {
                     s.return_depth > 0 and
                     s.cur_func().func_type != .arrow and
                     (s.in_parameter_initializer or !hasCurrentFunctionBinding(s, ident)) and
-                    !arguments_as_lvalue)
+                    !arguments_as_lvalue and
+                    (s.active_with_atom == null or s.active_with_func_depth != s.cur_func_stack.len))
                 {
                     const subtype: u8 = if ((s.is_strict or s.cur_func().is_strict_mode) or !s.cur_func().has_simple_parameter_list) 0 else 1;
                     try s.emitOpU8(opcode.op.special_object, subtype);
@@ -9514,6 +9510,12 @@ pub const parser_core = struct {
                         try emitWithGetVarFallback(s, with_atom, ident);
                         s.last_was_with_method_ref = false;
                     }
+                } else if (s.cur_func().needs_dynamic_lvalue_refs and
+                    !(s.is_strict or s.cur_func().is_strict_mode) and
+                    isAssignmentLikeToken(s.peekNextKind()))
+                {
+                    try s.emitScopeGetRef(ident);
+                    s.last_was_with_method_ref = false;
                 } else if (s.skip_next_ident_get) |skip_atom| {
                     if (skip_atom == ident) {
                         s.skip_next_ident_get = null;
@@ -10820,6 +10822,39 @@ pub const parser_core = struct {
         s.break_fixups.shrinkRetainingCapacity(start);
     }
 
+    const DirectEvalReferenceScan = struct {
+        previous_token_kind: ?tok.TokenKind = null,
+        reference_candidate: bool = false,
+
+        fn observe(self: *DirectEvalReferenceScan, s: *State, t: tok.Token) Error!void {
+            if (self.reference_candidate) {
+                if (t.val == @as(tok.TokenKind, @intCast('('))) {
+                    s.cur_func().needs_dynamic_lvalue_refs = true;
+                    _ = try State.ensureImplicitArgumentsLocal(s.cur_func());
+                    self.reference_candidate = false;
+                } else if (t.val != @as(tok.TokenKind, @intCast(')'))) {
+                    self.reference_candidate = false;
+                }
+            }
+
+            if (t.val == tok.TOK_IDENT and
+                !t.payload.ident.has_escape and
+                self.previous_token_kind != @as(tok.TokenKind, @intCast('.')) and
+                self.previous_token_kind != tok.TOK_QUESTION_MARK_DOT and
+                self.previous_token_kind != tok.TOK_NEW)
+            {
+                const name = s.lex.atoms.name(t.payload.ident.atom) orelse "";
+                self.reference_candidate = std.mem.eql(u8, name, "eval");
+            }
+            self.previous_token_kind = t.val;
+        }
+
+        fn reset(self: *DirectEvalReferenceScan, previous_token_kind: tok.TokenKind) void {
+            self.reference_candidate = false;
+            self.previous_token_kind = previous_token_kind;
+        }
+    };
+
     fn predeclareFunctionBodyVars(s: *State) Error!void {
         if (s.peekKind() != '{') return;
         const saved_pos = s.lex.pos;
@@ -10841,9 +10876,11 @@ pub const parser_core = struct {
 
         var body_depth: usize = 0;
         var previous_token_kind: ?tok.TokenKind = null;
+        var direct_eval_scan: DirectEvalReferenceScan = .{};
         while (true) {
-            var t = s.lex.next() catch return Error.UnexpectedToken;
+            var t = try s.lex.next();
             defer s.lex.freeToken(&t);
+            try direct_eval_scan.observe(s, t);
             switch (t.val) {
                 tok.TOK_EOF => return,
                 '{' => body_depth += 1,
@@ -10851,11 +10888,17 @@ pub const parser_core = struct {
                     if (body_depth == 0) return;
                     body_depth -= 1;
                 },
-                tok.TOK_FUNCTION => try skipFunctionInPredeclareScan(s),
-                tok.TOK_VAR => try predeclareVarDeclarators(s),
-                tok.TOK_TEMPLATE => try skipTemplateInPredeclareScan(s, t),
+                tok.TOK_FUNCTION => {
+                    direct_eval_scan.reset(tok.TOK_FUNCTION);
+                    try skipFunctionInPredeclareScan(s);
+                },
+                tok.TOK_VAR => try predeclareVarDeclarators(s, &direct_eval_scan),
+                tok.TOK_TEMPLATE => {
+                    try skipTemplateInPredeclareScanTrackingEval(s, t, &direct_eval_scan);
+                },
                 '/', tok.TOK_DIV_ASSIGN => {
                     if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
+                        direct_eval_scan.reset(tok.TOK_REGEXP);
                         previous_token_kind = tok.TOK_REGEXP;
                         continue;
                     }
@@ -10868,7 +10911,7 @@ pub const parser_core = struct {
 
     fn skipFunctionInPredeclareScan(s: *State) Error!void {
         while (true) {
-            var t = s.lex.next() catch return Error.UnexpectedToken;
+            var t = try s.lex.next();
             defer s.lex.freeToken(&t);
             if (t.val == tok.TOK_EOF) return;
             if (t.val == '{') break;
@@ -10876,7 +10919,7 @@ pub const parser_core = struct {
         var depth: usize = 1;
         var previous_token_kind: ?tok.TokenKind = '{';
         while (depth != 0) {
-            var t = s.lex.next() catch return Error.UnexpectedToken;
+            var t = try s.lex.next();
             defer s.lex.freeToken(&t);
             switch (t.val) {
                 tok.TOK_EOF => return,
@@ -10896,6 +10939,22 @@ pub const parser_core = struct {
     }
 
     fn skipTemplateInPredeclareScan(s: *State, first: tok.Token) Error!void {
+        return skipTemplateInPredeclareScanImpl(s, first, null);
+    }
+
+    fn skipTemplateInPredeclareScanTrackingEval(
+        s: *State,
+        first: tok.Token,
+        direct_eval_scan: *DirectEvalReferenceScan,
+    ) Error!void {
+        return skipTemplateInPredeclareScanImpl(s, first, direct_eval_scan);
+    }
+
+    fn skipTemplateInPredeclareScanImpl(
+        s: *State,
+        first: tok.Token,
+        maybe_direct_eval_scan: ?*DirectEvalReferenceScan,
+    ) Error!void {
         const first_part = first.payload.str.template orelse return Error.UnexpectedToken;
         switch (first_part) {
             .no_substitution, .tail => return,
@@ -10906,19 +10965,25 @@ pub const parser_core = struct {
             var expr_depth: usize = 0;
             var previous_token_kind: ?tok.TokenKind = '{';
             while (true) {
-                var t = s.lex.next() catch return Error.UnexpectedToken;
+                var t = try s.lex.next();
                 defer s.lex.freeToken(&t);
+                if (maybe_direct_eval_scan) |direct_eval_scan| try direct_eval_scan.observe(s, t);
                 switch (t.val) {
                     tok.TOK_EOF => {
                         return;
                     },
+                    tok.TOK_FUNCTION => {
+                        if (maybe_direct_eval_scan) |direct_eval_scan| direct_eval_scan.reset(tok.TOK_FUNCTION);
+                        try skipFunctionInPredeclareScan(s);
+                    },
                     tok.TOK_TEMPLATE => {
-                        try skipTemplateInPredeclareScan(s, t);
+                        try skipTemplateInPredeclareScanImpl(s, t, maybe_direct_eval_scan);
                         previous_token_kind = tok.TOK_TEMPLATE;
                         continue;
                     },
                     '/', tok.TOK_DIV_ASSIGN => {
                         if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
+                            if (maybe_direct_eval_scan) |direct_eval_scan| direct_eval_scan.reset(tok.TOK_REGEXP);
                             previous_token_kind = tok.TOK_REGEXP;
                             continue;
                         }
@@ -10935,8 +11000,9 @@ pub const parser_core = struct {
                 previous_token_kind = t.val;
             }
 
-            var next_part = s.lex.nextTemplatePartAfterBrace() catch return Error.UnexpectedToken;
+            var next_part = try s.lex.nextTemplatePartAfterBrace();
             defer s.lex.freeToken(&next_part);
+            if (maybe_direct_eval_scan) |direct_eval_scan| direct_eval_scan.reset(tok.TOK_TEMPLATE);
             const part = next_part.payload.str.template orelse return Error.UnexpectedToken;
             switch (part) {
                 .tail, .no_substitution => return,
@@ -10945,13 +11011,14 @@ pub const parser_core = struct {
         }
     }
 
-    fn predeclareVarDeclarators(s: *State) Error!void {
+    fn predeclareVarDeclarators(s: *State, direct_eval_scan: *DirectEvalReferenceScan) Error!void {
         var depth: usize = 0;
         var want_ident = true;
         var previous_token_kind: ?tok.TokenKind = tok.TOK_VAR;
         while (true) {
-            var t = s.lex.next() catch return Error.UnexpectedToken;
+            var t = try s.lex.next();
             defer s.lex.freeToken(&t);
+            try direct_eval_scan.observe(s, t);
             switch (t.val) {
                 tok.TOK_EOF, ';' => return,
                 ',' => {
@@ -10965,13 +11032,18 @@ pub const parser_core = struct {
                     if (depth == 0) return;
                     depth -= 1;
                 },
+                tok.TOK_FUNCTION => {
+                    direct_eval_scan.reset(tok.TOK_FUNCTION);
+                    try skipFunctionInPredeclareScan(s);
+                },
                 tok.TOK_TEMPLATE => {
-                    try skipTemplateInPredeclareScan(s, t);
+                    try skipTemplateInPredeclareScanTrackingEval(s, t, direct_eval_scan);
                     previous_token_kind = tok.TOK_TEMPLATE;
                     continue;
                 },
                 '/', tok.TOK_DIV_ASSIGN => {
                     if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
+                        direct_eval_scan.reset(tok.TOK_REGEXP);
                         previous_token_kind = tok.TOK_REGEXP;
                         continue;
                     }
@@ -11005,7 +11077,7 @@ pub const parser_core = struct {
         if (!predeclareSlashStartsRegexp(s, previous_token_kind)) return false;
 
         const slash_offset = s.lex.mark_pos;
-        var regexp_token = s.lex.rescanRegexp(slash_offset) catch return Error.UnexpectedToken;
+        var regexp_token = try s.lex.rescanRegexp(slash_offset);
         defer s.lex.freeToken(&regexp_token);
         return true;
     }
@@ -12561,7 +12633,7 @@ pub const parser_core = struct {
                                 return Error.UnexpectedToken;
                             }
                             catch_bound_atom = catch_atom;
-                            _ = try s.addScopeVar(catch_atom, .normal, false, false);
+                            _ = try s.addScopeVar(catch_atom, .catch_, false, false);
                             try s.advance();
                             try s.emitScopePutVar(catch_atom);
                         }
@@ -12678,7 +12750,7 @@ pub const parser_core = struct {
                 _ = try ensureTopLevelModuleDeclClosureVar(s, atom_id, true, true);
             } else {
                 if (findCurrentScopeVar(s, atom_id) != null) return Error.UnexpectedToken;
-                if (s.scope_level == 1 and s.cur_func().findArg(atom_id) >= 0) return Error.UnexpectedToken;
+                if (atFunctionBodyLexicalScope(s) and s.cur_func().findArg(atom_id) >= 0) return Error.UnexpectedToken;
                 const local_idx: u16 = @intCast(try s.addScopeVar(atom_id, .normal, true, true));
                 try s.retrofitForwardLocalFunctionCapture(s.cur_func(), atom_id, local_idx);
             }
@@ -13332,6 +13404,17 @@ pub const parser_core = struct {
     /// variable is attached at the function's var/arg scope (level 0)
     /// per QuickJS hoisting rules; for `let`/`const`, it attaches at the
     /// current lexical scope.
+    fn needVarReference(s: *State, var_tok: tok.TokenKind) bool {
+        if (var_tok != tok.TOK_VAR) return false;
+
+        const fd = s.cur_func();
+        if (!s.is_strict and !fd.is_strict_mode and !s.lex.is_module) return true;
+
+        const is_global_var = s.cur_func_stack.len == 0 and
+            (!s.is_eval or s.eval_global_var_bindings);
+        return is_global_var and !s.lex.is_module;
+    }
+
     fn parseVar(s: *State, var_tok: tok.TokenKind, export_decl: bool, parse_flags: ParseFlags) Error!void {
         const is_lexical = var_tok == tok.TOK_LET or var_tok == tok.TOK_CONST or s.in_namespace;
         const is_const = var_tok == tok.TOK_CONST;
@@ -13388,13 +13471,13 @@ pub const parser_core = struct {
                     // declaration colliding with any global_vars entry (top-level
                     // var, function declaration, or another lexical) is a
                     // SyntaxError ("invalid redefinition of global identifier").
-                    if (s.atGlobalLexicalBodyScope() and s.findGlobalVar(atom_id)) {
+                    if (s.lexicalBodyDeclarationConflictsWithGlobalVar(atom_id)) {
                         return Error.UnexpectedToken;
                     }
                     if (module_top_level_lexical and State.findClosureVarIndex(s.cur_func(), atom_id) != null) {
                         return Error.UnexpectedToken;
                     }
-                    if (s.scope_level == 1 and s.cur_func().findArg(atom_id) >= 0) {
+                    if (atFunctionBodyLexicalScope(s) and s.cur_func().findArg(atom_id) >= 0) {
                         return Error.UnexpectedToken;
                     }
                 }
@@ -13456,6 +13539,14 @@ pub const parser_core = struct {
                     if (s.emit_lexical_tdz_at_decl) {
                         s.cur_func().vars[local_lexical_idx.?].tdz_emitted_at_decl = true;
                     }
+                } else if (s.is_eval and
+                    !s.eval_global_var_bindings and
+                    !s.cur_func().is_strict_mode and
+                    s.cur_func_stack.len == 0)
+                {
+                    if (!s.findGlobalVar(atom_id)) {
+                        try s.addDirectEvalVarObjectVar(atom_id);
+                    }
                 } else if (s.cur_func_stack.len == 0 and (!s.is_eval or s.eval_global_var_bindings)) {
                     try s.addGlobalVar(atom_id, false, false);
                 } else {
@@ -13493,10 +13584,12 @@ pub const parser_core = struct {
                         s.pending_function_name = saved_pending_name;
                         s.pending_function_is_decl = saved_pending_decl;
                     }
-                    const with_initializer_binding = if (!is_lexical and s.active_with_func_depth == s.cur_func_stack.len) s.active_with_atom else null;
-                    if (with_initializer_binding) |with_atom| {
-                        try emitWithGetRefFallback(s, with_atom, atom_id);
-                        try s.emitOp(opcode.op.drop);
+                    const capture_reference = needVarReference(s, var_tok);
+                    if (capture_reference) {
+                        // qjs need_var_reference/js_parse_var captures the
+                        // declaration target before evaluating an RHS that can
+                        // mutate a with/global environment.
+                        try s.emitScopeMakeRef(atom_id);
                     }
                     try parseAssignExpr2(s, parse_flags);
                     if (s.last_anonymous_function_expr) {
@@ -13509,7 +13602,9 @@ pub const parser_core = struct {
                     // `put_loc` when the var resolves locally, or to
                     // `put_var_init` / `put_var` for global lexical /
                     // hoisted-global cases.
-                    if (top_level_var_ref_idx) |ref_idx| {
+                    if (capture_reference) {
+                        try s.emitOp(opcode.op.put_ref_value);
+                    } else if (top_level_var_ref_idx) |ref_idx| {
                         if (is_lexical) {
                             try s.emitScopePutVarInit(atom_id);
                         } else {
@@ -13519,8 +13614,6 @@ pub const parser_core = struct {
                         }
                     } else if (is_lexical) {
                         try s.emitScopePutVarInit(atom_id);
-                    } else if (with_initializer_binding != null) {
-                        try emitPutWithRefKeep(s, atom_id, .none);
                     } else {
                         try s.emitScopePutVar(atom_id);
                     }
@@ -13625,21 +13718,12 @@ pub const parser_core = struct {
         try parseExpr(s);
         try s.expectToken(')');
 
-        const with_name = try std.fmt.allocPrint(s.function.memory.allocator, "__with_obj_{d}", .{s.with_scope_id});
-        defer s.function.memory.allocator.free(with_name);
-        s.with_scope_id += 1;
-        const with_atom = try s.function.atoms.internString(with_name);
-        defer s.function.atoms.free(with_atom);
-        const with_idx = try appendBindingLocal(s, with_atom);
-        const active_with_name = try std.fmt.allocPrint(s.function.memory.allocator, "__active_with_obj_{d}", .{s.with_scope_id - 1});
-        defer s.function.memory.allocator.free(active_with_name);
-        const active_with_atom = try s.function.atoms.internString(active_with_name);
-        defer s.function.atoms.free(active_with_atom);
-        const active_with_idx = try appendBindingLocal(s, active_with_atom);
+        try s.pushScope();
+        errdefer s.popScope();
+        const with_atom = atom_module.ids.with_object;
+        const with_idx: u16 = @intCast(try s.addScopeVar(with_atom, .normal, false, false));
         try s.emitOp(opcode.op.to_object);
-        try s.emitOp(opcode.op.dup);
         try s.emitOpU16(opcode.op.put_loc, with_idx);
-        try s.emitOpU16(opcode.op.put_loc, active_with_idx);
 
         const saved_with_atom = s.active_with_atom;
         const saved_with_func_depth = s.active_with_func_depth;
@@ -13651,8 +13735,7 @@ pub const parser_core = struct {
         }
         try s.setEvalReturnUndefined();
         try parseStatementOrDecl(s, DeclMask{});
-        try s.emitOp(opcode.op.undefined);
-        try s.emitOpU16(opcode.op.put_loc, active_with_idx);
+        s.popScope();
     }
 
     fn validateForInOfGenericAssignmentTarget(s: *State, shape: LhsShape) Error!void {
@@ -13756,6 +13839,12 @@ pub const parser_core = struct {
                 }));
                 try s.retrofitForwardTopLevelModuleCapture(s.cur_func(), atom_id, ref_idx, false, false, .normal);
             }
+        } else if (s.is_eval and
+            !s.eval_global_var_bindings and
+            !s.cur_func().is_strict_mode and
+            s.cur_func_stack.len == 0)
+        {
+            if (!s.findGlobalVar(atom_id)) try s.addDirectEvalVarObjectVar(atom_id);
         } else if (s.cur_func_stack.len == 0 and (!s.is_eval or s.eval_global_var_bindings)) {
             try s.addGlobalVar(atom_id, false, false);
         } else if (s.cur_func().findVar(atom_id) < 0) {
@@ -15155,10 +15244,12 @@ pub const parser_core = struct {
             const child_name = s.pending_function_name orelse if (s.pending_function_is_decl) s.function.name else atom_module.ids.empty_string;
             child_fd.* = function_def_mod.FunctionDef.init(s.function.memory, s.function.atoms, child_name);
             child_fd.atoms.replace(&child_fd.filename, parent_fd.filename);
+            child_fd.atoms.replace(&child_fd.script_or_module, parent_fd.script_or_module);
             child_fd.line_num = @intCast(s.token.line_num);
             child_fd.col_num = @intCast(s.token.col_num);
             child_fd.parent = parent_fd;
-            child_fd.parent_scope_level = if (s.in_parameter_initializer) -1 else parent_fd.scope_level;
+            child_fd.parent_scope_level = parent_fd.scope_level;
+            child_fd.parent_parameter_environment_only = s.in_parameter_initializer;
             child_fd.is_strict_mode = parent_fd.is_strict_mode or s.is_strict or s.lex.is_strict_mode;
             child_fd.is_indirect_eval = parent_fd.is_indirect_eval;
             child_fd.use_short_opcodes = parent_fd.use_short_opcodes;
@@ -15193,10 +15284,10 @@ pub const parser_core = struct {
             _ = child_fd.appendScope(-1) catch return error.OutOfMemory;
             if (func_kind == .class_constructor or func_kind == .derived_class_constructor) {
                 if (func_kind == .derived_class_constructor) {
-                    child_fd.this_active_func_var_idx = try child_fd.addScopeVar(116, .normal, 0, false, false); // this.active_func
-                    child_fd.new_target_var_idx = try child_fd.addScopeVar(115, .normal, 0, false, false); // new.target
+                    child_fd.this_active_func_var_idx = try child_fd.addScopeVar(atom_this_active_func, .normal, 0, false, false);
+                    child_fd.new_target_var_idx = try child_fd.addScopeVar(atom_new_target, .normal, 0, false, false);
                 }
-                child_fd.this_var_idx = @intCast(try child_fd.addScopeVar(8, .normal, 0, func_kind == .derived_class_constructor, false));
+                child_fd.this_var_idx = @intCast(try child_fd.addScopeVar(atom_this, .normal, 0, func_kind == .derived_class_constructor, false));
                 if (func_kind == .derived_class_constructor) {
                     child_fd.vars[@intCast(child_fd.this_var_idx)].tdz_emitted_at_decl = true;
                 }
@@ -15243,9 +15334,16 @@ pub const parser_core = struct {
                         // shadowing the property, and caused a captured-cell staleness).
                         try s.addGlobalAnnexBFunctionVar(name, s.eval_global_var_bindings);
                         child_fd.child_decl_emit_global_inline = true;
+                    } else if (s.is_eval and !s.eval_global_var_bindings) {
+                        // Sloppy function/parameter eval declarations live solely in
+                        // `_var_` / `_arg_var_`. Keep the child flag so the cpool index
+                        // is attached to the GlobalVar record, but leave the closure
+                        // index absent: EDI installs the function into the variable
+                        // object and all references reach it through dynamic probes.
+                        try s.addDirectEvalVarObjectVar(name);
+                        child_fd.emit_top_level_closure_init = true;
                     } else {
-                        // Module (and direct-eval) top-level function decls are lexical
-                        // closure var_refs (qjs JS_CLOSURE_MODULE_DECL).
+                        // Module top-level functions use lexical closure var-refs.
                         const parent_ref_idx: u16 = if (State.findClosureVarIndex(parent_fd, name)) |idx| blk: {
                             parent_fd.closure_var[idx].var_kind = .function_decl;
                             parent_fd.closure_var[idx].is_lexical = true;
@@ -15294,9 +15392,12 @@ pub const parser_core = struct {
                         s.visibleLexicalScopeVar(name) != null or s.findLexicalGlobalVar(name);
                     const function_body_scope: i32 = if (s.cur_func_stack.len > 0) 1 else 0;
                     const is_block_level_function_decl = parent_fd.scope_level > function_body_scope;
+                    const arguments_blocks_annex_b = atomNameEquals(s, name, "arguments") and
+                        (!s.is_eval or
+                            (!s.eval_in_parameter_initializer and State.findClosureVarIndex(parent_fd, name) != null));
                     const name_blocks_annex_b_parameter_rule =
                         parent_fd.findArg(name) >= 0 or
-                        atomNameEquals(s, name, "arguments") or
+                        arguments_blocks_annex_b or
                         evalAnnexBBlockedFunctionName(s, name);
                     const annex_b_if_function_var = s.annex_b_if_function_decl_clause and
                         !parent_fd.is_strict_mode and
@@ -15317,8 +15418,8 @@ pub const parser_core = struct {
                             (parent_fd.scope_level > 0 and
                                 @as(usize, @intCast(parent_fd.scope_level)) < parent_fd.scopes.len and
                                 parent_fd.scopes[@intCast(parent_fd.scope_level)].parent == 0);
-                        const emit_global_annex_b_if = s.cur_func_stack.len == 0 and
-                            s.top_level_functions_as_children and
+                        const emit_global_annex_b_if = s.top_level_functions_as_children and
+                            s.cur_func_stack.len == 0 and
                             ((is_top_level_annex_b_if_scope and !s.is_eval) or s.eval_global_var_bindings);
                         if (emit_global_annex_b_if) {
                             try s.addGlobalAnnexBFunctionVar(name, s.eval_global_var_bindings);
@@ -15326,6 +15427,12 @@ pub const parser_core = struct {
                         if (emit_global_annex_b_if) {
                             child_fd.child_decl_emit_inline = true;
                             child_fd.child_decl_emit_global_inline = true;
+                            break :blk @intCast(try parent_fd.addScopeVar(name, .function_decl, parent_fd.scope_level, true, false));
+                        }
+                        if (s.is_eval and !s.eval_global_var_bindings and s.cur_func_stack.len == 0) {
+                            if (!s.findGlobalVar(name)) try s.addDirectEvalVarObjectVar(name);
+                            child_fd.child_decl_emit_inline = true;
+                            child_fd.child_decl_emit_eval_var_inline = true;
                             break :blk @intCast(try parent_fd.addScopeVar(name, .function_decl, parent_fd.scope_level, true, false));
                         }
                         const annex_b_var_idx = try s.ensureFunctionScopeVar(name);
@@ -15343,6 +15450,11 @@ pub const parser_core = struct {
                             try s.addGlobalAnnexBFunctionVar(name, s.eval_global_var_bindings);
                             child_fd.child_decl_emit_inline = true;
                             child_fd.child_decl_emit_global_inline = true;
+                            break :blk @intCast(try parent_fd.addScopeVar(name, .function_decl, parent_fd.scope_level, true, false));
+                        } else if (s.is_eval and !s.eval_global_var_bindings and s.cur_func_stack.len == 0) {
+                            if (!s.findGlobalVar(name)) try s.addDirectEvalVarObjectVar(name);
+                            child_fd.child_decl_emit_inline = true;
+                            child_fd.child_decl_emit_eval_var_inline = true;
                             break :blk @intCast(try parent_fd.addScopeVar(name, .function_decl, parent_fd.scope_level, true, false));
                         } else {
                             const annex_b_var_idx = try s.ensureFunctionScopeVar(name);
@@ -15434,7 +15546,15 @@ pub const parser_core = struct {
             s.reject_await_in_parameter_initializer = func_kind == .async or func_kind == .async_generator;
             defer s.reject_await_in_parameter_initializer = saved_reject_await_in_parameter_initializer;
             try s.expectToken('(');
-            all_param_names = try collectSimpleArrowParamNames(s);
+            var parameter_scan = try scanParameterList(s);
+            defer parameter_scan.names.deinit(s.function.memory.allocator);
+            all_param_names = parameter_scan.names;
+            parameter_scan.names = .empty;
+            if (capture_child) s.cur_func().has_parameter_expressions = parameter_scan.has_parameter_expressions;
+            const parameter_scope = if (capture_child and parameter_scan.has_parameter_expressions)
+                try enterParameterExpressionScope(s)
+            else
+                null;
 
             // Parse parameters, including default values, destructuring, and rest.
             while (s.peekKind() != ')' and s.peekKind() != tok.TOK_EOF) {
@@ -15476,6 +15596,9 @@ pub const parser_core = struct {
                     }
                     try simple_param_names.append(s.function.memory.allocator, param_atom);
                     if (capture_child) {
+                        if (parameter_scope != null) {
+                            try appendParameterExpressionBinding(s, param_atom);
+                        }
                         _ = try s.cur_func().appendArg(.{
                             .var_name = param_atom,
                             .scope_level = 0,
@@ -15516,13 +15639,16 @@ pub const parser_core = struct {
                             try s.emitOp(opcode.op.drop);
                         }
                     }
+                    if (parameter_scope != null) {
+                        try initializeParameterScopeBinding(s, param_atom, arg_index);
+                    }
                 } else if (s.peekKind() == '{') {
                     // Object destructuring parameter: {a, b}
                     has_simple_parameter_list = false;
                     const arg_index = param_count;
                     try collectParamPatternDupNames(s, .object, &simple_param_names, &pattern_param_names);
                     if (capture_child) try ensureDestructuringArgSlot(s, arg_index);
-                    try parseDestructuringParam(s, .object, if (capture_child) arg_index else null);
+                    try parseParameterDestructuring(s, .object, if (capture_child) arg_index else null, parameter_scope != null);
                     param_count += 1;
                 } else if (s.peekKind() == '[') {
                     // Array destructuring parameter: [a, b]
@@ -15530,7 +15656,7 @@ pub const parser_core = struct {
                     const arg_index = param_count;
                     try collectParamPatternDupNames(s, .array, &simple_param_names, &pattern_param_names);
                     if (capture_child) try ensureDestructuringArgSlot(s, arg_index);
-                    try parseDestructuringParam(s, .array, if (capture_child) arg_index else null);
+                    try parseParameterDestructuring(s, .array, if (capture_child) arg_index else null, parameter_scope != null);
                     param_count += 1;
                 } else if (s.peekKind() == tok.TOK_ELLIPSIS) {
                     // Rest parameter
@@ -15550,6 +15676,9 @@ pub const parser_core = struct {
                         }
                         try simple_param_names.append(s.function.memory.allocator, rest_atom);
                         if (capture_child) {
+                            if (parameter_scope != null) {
+                                try appendParameterExpressionBinding(s, rest_atom);
+                            }
                             const idx = try s.cur_func().appendArg(.{
                                 .var_name = rest_atom,
                                 .scope_level = 0,
@@ -15563,6 +15692,9 @@ pub const parser_core = struct {
                             try s.emitOp(opcode.op.drop);
                             s.cur_func().defined_arg_count = @intCast(arg_index);
                         }
+                        if (parameter_scope != null) {
+                            try initializeParameterScopeBinding(s, rest_atom, arg_index);
+                        }
                         try s.advance();
                     } else if (s.peekKind() == '[') {
                         try collectParamPatternDupNames(s, .array, &simple_param_names, &pattern_param_names);
@@ -15573,7 +15705,7 @@ pub const parser_core = struct {
                             try s.emitOp(opcode.op.drop);
                             s.cur_func().defined_arg_count = @intCast(arg_index);
                         }
-                        try parseDestructuringParam(s, .array, if (capture_child) arg_index else null);
+                        try parseParameterDestructuring(s, .array, if (capture_child) arg_index else null, parameter_scope != null);
                     } else if (s.peekKind() == '{') {
                         try collectParamPatternDupNames(s, .object, &simple_param_names, &pattern_param_names);
                         if (capture_child) {
@@ -15583,7 +15715,7 @@ pub const parser_core = struct {
                             try s.emitOp(opcode.op.drop);
                             s.cur_func().defined_arg_count = @intCast(arg_index);
                         }
-                        try parseDestructuringParam(s, .object, if (capture_child) arg_index else null);
+                        try parseParameterDestructuring(s, .object, if (capture_child) arg_index else null, parameter_scope != null);
                     } else {
                         return Error.UnexpectedToken;
                     }
@@ -15600,6 +15732,7 @@ pub const parser_core = struct {
             }
 
             try s.expectToken(')');
+            if (parameter_scope) |scope| try leaveParameterExpressionScope(s, scope);
         }
         if (func_kind == .get and (param_count != 0 or has_rest_parameter)) return Error.UnexpectedToken;
         if (func_kind == .set and (param_count != 1 or has_rest_parameter)) return Error.UnexpectedToken;
@@ -15708,6 +15841,7 @@ pub const parser_core = struct {
             const emit_child_decl_var_inline = child_ptr.child_decl_emit_var_inline;
             const child_decl_skip_init = child_ptr.child_decl_skip_init;
             const emit_child_decl_global_inline = child_ptr.child_decl_emit_global_inline;
+            const emit_child_decl_eval_var_inline = child_ptr.child_decl_emit_eval_var_inline;
             const child_decl_var_idx = child_ptr.child_decl_var_idx;
             const child_decl_annex_b_var_idx = child_ptr.child_decl_annex_b_var_idx;
             child_ptr.parent_cpool_idx = child_cpool_idx;
@@ -15729,6 +15863,7 @@ pub const parser_core = struct {
                 std.debug.assert(child_decl_var_idx >= 0);
                 try s.emitFClosure8(@intCast(child_cpool_idx));
                 if (emit_child_decl_global_inline) try s.emitOp(opcode.op.dup);
+                if (emit_child_decl_eval_var_inline) try s.emitOp(opcode.op.dup);
                 if (emit_child_decl_var_inline) {
                     try s.emitOpU16(opcode.op.put_loc, @intCast(child_decl_var_idx));
                 } else {
@@ -15741,6 +15876,10 @@ pub const parser_core = struct {
                 if (emit_child_decl_global_inline) {
                     const name = s.pending_function_name orelse s.function.name;
                     try s.emitGlobalScopePutVar(name);
+                }
+                if (emit_child_decl_eval_var_inline) {
+                    const name = s.pending_function_name orelse s.function.name;
+                    try s.emitEvalVarObjectScopePutVar(name);
                 }
             } else if (keep_child_value) {
                 s.skip_next_ident_get = s.pending_function_name;
@@ -15824,10 +15963,12 @@ pub const parser_core = struct {
             errdefer if (child_owned_before_push) s.discardFunctionDef(child_fd);
             child_fd.* = function_def_mod.FunctionDef.init(s.function.memory, s.function.atoms, atom_module.ids.empty_string);
             child_fd.atoms.replace(&child_fd.filename, parent_fd.filename);
+            child_fd.atoms.replace(&child_fd.script_or_module, parent_fd.script_or_module);
             child_fd.line_num = @intCast(s.token.line_num);
             child_fd.col_num = @intCast(s.token.col_num);
             child_fd.parent = parent_fd;
-            child_fd.parent_scope_level = if (s.in_parameter_initializer) -1 else parent_fd.scope_level;
+            child_fd.parent_scope_level = parent_fd.scope_level;
+            child_fd.parent_parameter_environment_only = s.in_parameter_initializer;
             child_fd.is_strict_mode = parent_fd.is_strict_mode or s.is_strict or s.lex.is_strict_mode;
             child_fd.is_indirect_eval = parent_fd.is_indirect_eval;
             child_fd.use_short_opcodes = parent_fd.use_short_opcodes;
@@ -15893,8 +16034,14 @@ pub const parser_core = struct {
             // Parse parameters, including default values, destructuring, and rest.
             var param_count: u32 = 0;
             var first_default_param: ?u32 = null;
-            var all_param_names = try collectSimpleArrowParamNames(s);
-            defer all_param_names.deinit(s.function.memory.allocator);
+            var parameter_scan = try scanParameterList(s);
+            defer parameter_scan.names.deinit(s.function.memory.allocator);
+            const all_param_names = parameter_scan.names.items;
+            if (capture_child) s.cur_func().has_parameter_expressions = parameter_scan.has_parameter_expressions;
+            const parameter_scope = if (capture_child and parameter_scan.has_parameter_expressions)
+                try enterParameterExpressionScope(s)
+            else
+                null;
             var param_names: std.ArrayList(Atom) = .empty;
             defer param_names.deinit(s.function.memory.allocator);
             while (s.peekKind() != ')' and s.peekKind() != tok.TOK_EOF) {
@@ -15904,6 +16051,9 @@ pub const parser_core = struct {
                     try appendArrowParamBindingName(s, &param_names, param_atom);
                     const arg_index = param_count;
                     if (capture_child) {
+                        if (parameter_scope != null) {
+                            try appendParameterExpressionBinding(s, param_atom);
+                        }
                         _ = try s.cur_func().appendArg(.{
                             .var_name = param_atom,
                             .scope_level = 0,
@@ -15925,7 +16075,7 @@ pub const parser_core = struct {
                             const saved_in_parameter_initializer = s.in_parameter_initializer;
                             s.in_parameter_initializer = true;
                             defer s.in_parameter_initializer = saved_in_parameter_initializer;
-                            if (defaultInitializerHitsParameterTdz(s, all_param_names.items, arg_index)) {
+                            if (defaultInitializerHitsParameterTdz(s, all_param_names, arg_index)) {
                                 try emitSyntheticTdzReference(s);
                                 try s.advance();
                             } else {
@@ -15942,13 +16092,16 @@ pub const parser_core = struct {
                             try s.emitOp(opcode.op.drop);
                         }
                     }
+                    if (parameter_scope != null) {
+                        try initializeParameterScopeBinding(s, param_atom, arg_index);
+                    }
                 } else if (s.peekKind() == '{') {
                     // Object destructuring parameter
                     const arg_index = param_count;
                     has_non_simple_params = true;
                     try collectArrowPatternBindingNamesSnapshot(s, .object, &param_names);
                     if (capture_child) try ensureDestructuringArgSlot(s, arg_index);
-                    try parseDestructuringParam(s, .object, if (capture_child) arg_index else null);
+                    try parseParameterDestructuring(s, .object, if (capture_child) arg_index else null, parameter_scope != null);
                     param_count += 1;
                 } else if (s.peekKind() == '[') {
                     // Array destructuring parameter
@@ -15956,7 +16109,7 @@ pub const parser_core = struct {
                     has_non_simple_params = true;
                     try collectArrowPatternBindingNamesSnapshot(s, .array, &param_names);
                     if (capture_child) try ensureDestructuringArgSlot(s, arg_index);
-                    try parseDestructuringParam(s, .array, if (capture_child) arg_index else null);
+                    try parseParameterDestructuring(s, .array, if (capture_child) arg_index else null, parameter_scope != null);
                     param_count += 1;
                 } else if (s.peekKind() == tok.TOK_ELLIPSIS) {
                     s.features.insert(.spread_rest);
@@ -15968,6 +16121,9 @@ pub const parser_core = struct {
                         const param_atom = identifierLikeAtom(s);
                         try appendArrowParamBindingName(s, &param_names, param_atom);
                         if (capture_child) {
+                            if (parameter_scope != null) {
+                                try appendParameterExpressionBinding(s, param_atom);
+                            }
                             const idx = try s.cur_func().appendArg(.{
                                 .var_name = param_atom,
                                 .scope_level = 0,
@@ -15981,6 +16137,9 @@ pub const parser_core = struct {
                             try s.emitOp(opcode.op.drop);
                             s.cur_func().defined_arg_count = @intCast(arg_index);
                         }
+                        if (parameter_scope != null) {
+                            try initializeParameterScopeBinding(s, param_atom, arg_index);
+                        }
                         try s.advance();
                     } else if (s.peekKind() == '[') {
                         try collectArrowPatternBindingNamesSnapshot(s, .array, &param_names);
@@ -15991,7 +16150,7 @@ pub const parser_core = struct {
                             try s.emitOp(opcode.op.drop);
                             s.cur_func().defined_arg_count = @intCast(arg_index);
                         }
-                        try parseDestructuringParam(s, .array, if (capture_child) arg_index else null);
+                        try parseParameterDestructuring(s, .array, if (capture_child) arg_index else null, parameter_scope != null);
                     } else if (s.peekKind() == '{') {
                         try collectArrowPatternBindingNamesSnapshot(s, .object, &param_names);
                         if (capture_child) {
@@ -16001,7 +16160,7 @@ pub const parser_core = struct {
                             try s.emitOp(opcode.op.drop);
                             s.cur_func().defined_arg_count = @intCast(arg_index);
                         }
-                        try parseDestructuringParam(s, .object, if (capture_child) arg_index else null);
+                        try parseParameterDestructuring(s, .object, if (capture_child) arg_index else null, parameter_scope != null);
                     } else {
                         return Error.UnexpectedToken;
                     }
@@ -16018,6 +16177,7 @@ pub const parser_core = struct {
             }
 
             try s.expectToken(')');
+            if (parameter_scope) |scope| try leaveParameterExpressionScope(s, scope);
             if (s.is_strict or s.cur_func().is_strict_mode) {
                 for (param_names.items) |param_name| {
                     if (isInvalidStrictFunctionBindingName(s, param_name)) return Error.UnexpectedToken;
@@ -16457,24 +16617,93 @@ pub const parser_core = struct {
         s.last_token_col_num = snapshot.last_token_col_num;
     }
 
-    fn collectSimpleArrowParamNames(s: *State) Error!std.ArrayList(?Atom) {
+    const ParameterListScan = struct {
+        names: std.ArrayList(?Atom) = .empty,
+        has_parameter_expressions: bool = false,
+    };
+
+    fn enterParameterExpressionScope(s: *State) Error!i32 {
+        const fd = s.cur_func();
+        const scope = fd.appendScope(-1) catch return error.OutOfMemory;
+        s.scope_level = scope;
+        fd.scope_level = scope;
+        return scope;
+    }
+
+    fn appendParameterExpressionBinding(s: *State, name: Atom) Error!void {
+        const idx: u16 = @intCast(try s.addScopeVar(name, .normal, true, false));
+        // A default initializer may have already parsed a child closure that
+        // references a later parameter. Rebind that forward reference to this
+        // parameter-scope cell now that its declaration exists.
+        try s.retrofitForwardLocalFunctionCapture(s.cur_func(), name, idx);
+    }
+
+    fn initializeParameterScopeBinding(s: *State, name: Atom, arg_index: u32) Error!void {
+        try s.emitOpU16(opcode.op.get_arg, @intCast(arg_index));
+        try s.emitScopePutVarInit(name);
+    }
+
+    fn parseParameterDestructuring(
+        s: *State,
+        kind: DestructuringKind,
+        arg_index: ?u32,
+        has_parameter_expressions: bool,
+    ) Error!void {
+        const saved_binding_is_lexical = s.destructuring_binding_is_lexical;
+        const saved_binding_is_const = s.destructuring_binding_is_const;
+        const saved_in_parameter_initializer = s.in_parameter_initializer;
+        if (has_parameter_expressions) {
+            s.destructuring_binding_is_lexical = true;
+            s.destructuring_binding_is_const = false;
+            s.in_parameter_initializer = true;
+        }
+        defer {
+            s.destructuring_binding_is_lexical = saved_binding_is_lexical;
+            s.destructuring_binding_is_const = saved_binding_is_const;
+            s.in_parameter_initializer = saved_in_parameter_initializer;
+        }
+        try parseDestructuringParam(s, kind, arg_index);
+    }
+
+    fn leaveParameterExpressionScope(s: *State, parameter_scope: i32) Error!void {
+        const fd = s.cur_func();
+        const parameter_var_count = fd.vars.len;
+        s.scope_level = 0;
+        fd.scope_level = 0;
+        fd.scope_first = if (fd.scopes.len != 0) fd.scopes[0].first else -1;
+
+        var idx: usize = 0;
+        while (idx < parameter_var_count) : (idx += 1) {
+            const vd = fd.vars[idx];
+            if (vd.scope_level != parameter_scope) continue;
+            if (fd.findArg(vd.var_name) >= 0) continue;
+
+            const body_idx: u16 = @intCast(try fd.addScopeVar(vd.var_name, .normal, 0, false, false));
+            try s.emitOpU16(opcode.op.get_loc_check, @intCast(idx));
+            try s.emitOpU16(opcode.op.put_loc, body_idx);
+        }
+    }
+
+    fn scanParameterList(s: *State) Error!ParameterListScan {
         const snapshot = takeParserSnapshot(s);
         defer restoreParserLexerSnapshot(s, snapshot);
 
-        var names: std.ArrayList(?Atom) = .empty;
-        errdefer names.deinit(s.function.memory.allocator);
+        var scan = ParameterListScan{};
+        errdefer scan.names.deinit(s.function.memory.allocator);
 
         while (s.peekKind() != ')' and s.peekKind() != tok.TOK_EOF) {
             if (s.peekKind() == tok.TOK_IDENT) {
-                try names.append(s.function.memory.allocator, s.token.payload.ident.atom);
+                try scan.names.append(s.function.memory.allocator, s.token.payload.ident.atom);
                 try s.advance();
                 if (s.peekKind() == '=') {
+                    scan.has_parameter_expressions = true;
                     try s.advance();
                     var depth: usize = 0;
                     var previous_token_kind: ?tok.TokenKind = '=';
                     while (s.peekKind() != tok.TOK_EOF) {
                         const k = s.peekKind();
                         if (depth == 0 and (k == ',' or k == ')')) break;
+                        if (k == '=') scan.has_parameter_expressions = true;
                         if (k == '(' or k == '[' or k == '{') depth += 1;
                         if ((k == ')' or k == ']' or k == '}') and depth > 0) depth -= 1;
                         try advanceRegexpAwareSpeculativeToken(s, &previous_token_kind);
@@ -16483,19 +16712,20 @@ pub const parser_core = struct {
             } else if (s.peekKind() == tok.TOK_ELLIPSIS) {
                 try s.advance();
                 if (s.peekKind() == tok.TOK_IDENT) {
-                    try names.append(s.function.memory.allocator, s.token.payload.ident.atom);
+                    try scan.names.append(s.function.memory.allocator, s.token.payload.ident.atom);
                     try s.advance();
                 } else {
-                    try names.append(s.function.memory.allocator, null);
+                    try scan.names.append(s.function.memory.allocator, null);
                 }
                 break;
             } else {
-                try names.append(s.function.memory.allocator, null);
+                try scan.names.append(s.function.memory.allocator, null);
                 var depth: usize = 0;
                 var previous_token_kind: ?tok.TokenKind = null;
                 while (s.peekKind() != tok.TOK_EOF) {
                     const k = s.peekKind();
                     if (depth == 0 and (k == ',' or k == ')')) break;
+                    if (k == '=') scan.has_parameter_expressions = true;
                     if (k == '(' or k == '[' or k == '{') depth += 1;
                     if ((k == ')' or k == ']' or k == '}') and depth > 0) depth -= 1;
                     try advanceRegexpAwareSpeculativeToken(s, &previous_token_kind);
@@ -16509,7 +16739,7 @@ pub const parser_core = struct {
             }
         }
 
-        return names;
+        return scan;
     }
 
     fn defaultInitializerHitsParameterTdz(s: *State, param_names: []const ?Atom, arg_index: u32) bool {
@@ -16618,6 +16848,12 @@ pub const parser_core = struct {
         return null;
     }
 
+    fn atFunctionBodyLexicalScope(s: *State) bool {
+        if (s.cur_func_stack.len == 0) return false;
+        const body_scope: i32 = if (s.cur_func().has_parameter_expressions) 2 else 1;
+        return s.scope_level == body_scope;
+    }
+
     fn findCurrentTopLevelLexicalClosureVar(s: *State, atom_id: Atom) ?u16 {
         if (s.scope_level != 0) return null;
         for (s.cur_func().closure_var, 0..) |cv, idx| {
@@ -16668,7 +16904,10 @@ pub const parser_core = struct {
             // qjs define_var JS_VAR_DEF_LET/CONST is_global_var branch
             // (quickjs.c:24352-24360): lexical destructuring at the global body
             // scope colliding with any global_vars entry is a SyntaxError.
-            if (s.atGlobalLexicalBodyScope() and s.findGlobalVar(atom_id)) {
+            if (s.lexicalBodyDeclarationConflictsWithGlobalVar(atom_id)) {
+                return Error.UnexpectedToken;
+            }
+            if (atFunctionBodyLexicalScope(s) and s.cur_func().findArg(atom_id) >= 0) {
                 return Error.UnexpectedToken;
             }
             const idx: u16 = @intCast(try s.addScopeVar(atom_id, .normal, true, s.destructuring_binding_is_const));
@@ -16700,22 +16939,33 @@ pub const parser_core = struct {
         if (s.cur_func_stack.len == 0 and s.findLexicalGlobalVar(atom_id)) {
             return Error.UnexpectedToken;
         }
+        const eval_var_object_binding = s.is_eval and
+            !s.eval_global_var_bindings and
+            !s.cur_func().is_strict_mode and
+            s.cur_func_stack.len == 0;
         const existing = s.cur_func().findVar(atom_id);
         if (existing >= 0) {
             const idx: usize = @intCast(existing);
             const entry = s.cur_func().vars[idx];
-            if (!entry.is_lexical and entry.scope_level == 0 and entry.var_kind == .normal) {
+            if (!entry.is_lexical and entry.scope_level == 0 and
+                (entry.var_kind == .normal or entry.var_kind == .eval_var_object))
+            {
                 return @intCast(idx);
             }
         }
-        const idx = try s.cur_func().appendVar(.{
-            .var_name = atom_id,
-            .scope_level = 0,
-            .is_lexical = false,
-            .is_const = false,
-            .var_kind = .normal,
-        });
-        try s.retrofitForwardLocalFunctionCapture(s.cur_func(), atom_id, @intCast(idx));
+        if (eval_var_object_binding and !s.findGlobalVar(atom_id)) {
+            try s.addDirectEvalVarObjectVar(atom_id);
+        }
+        const idx = s.cur_func().addScopeVar(
+            atom_id,
+            if (eval_var_object_binding) .eval_var_object else .normal,
+            0,
+            false,
+            false,
+        ) catch return error.OutOfMemory;
+        if (!eval_var_object_binding) {
+            try s.retrofitForwardLocalFunctionCapture(s.cur_func(), atom_id, @intCast(idx));
+        }
         if (s.collect_module_export_bindings) {
             try addModuleExportName(s, atom_id, atom_id);
             if (s.top_level_lexical_as_module_ref and s.scope_level == 0) {
@@ -16760,7 +17010,9 @@ pub const parser_core = struct {
             findCurrentTopLevelModuleDeclClosureVar(s, atom_id)
         else
             null;
-        if (s.destructuring_binding_is_lexical) {
+        if (idx < s.cur_func().vars.len and s.cur_func().vars[idx].var_kind == .eval_var_object) {
+            try s.emitScopePutVar(atom_id);
+        } else if (s.destructuring_binding_is_lexical) {
             try s.emitOpU16(opcode.op.put_loc_check_init, idx);
             if (module_ref_idx) |ref_idx| {
                 try s.emitOpU16(opcode.op.get_loc_check, idx);
@@ -17191,6 +17443,7 @@ pub const parser_core = struct {
                 if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
                 const rest_atom = s.token.payload.ident.atom;
                 var local_index: ?u16 = null;
+                var binding_ref: ?DestructuringBindingRef = null;
                 try s.advance();
                 if (s.destructuring_assignment_target_mode and s.peekKind() == @as(tok.TokenKind, @intCast('.'))) {
                     try s.advance();
@@ -17213,13 +17466,14 @@ pub const parser_core = struct {
                 } else {
                     if (source) |binding_source| {
                         local_index = try appendBindingLocal(s, rest_atom);
+                        binding_ref = try captureDestructuringVarBindingRef(s, rest_atom);
                         try emitRestObjectFromSource(s, binding_source, excluded_keys.items);
                     } else if (s.destructuring_predeclare_only) {
                         _ = try appendBindingLocal(s, rest_atom);
                     }
                 }
                 if (s.peekKind() != '}') return Error.UnexpectedToken;
-                if (local_index) |idx| try emitPutBindingLocal(s, idx);
+                if (local_index) |idx| try emitPutDestructuringBinding(s, idx, binding_ref);
             } else if (s.peekKind() == '[') {
                 try s.advance();
                 if (source) |binding_source| try emitPushBindingSource(s, binding_source);
@@ -17260,6 +17514,7 @@ pub const parser_core = struct {
                     if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
                     const target_atom = s.token.payload.ident.atom;
                     var local_index: ?u16 = null;
+                    var binding_ref: ?DestructuringBindingRef = null;
                     var assignment_atom: ?Atom = null;
                     try s.advance();
                     if (source == null and s.destructuring_assignment_target_mode and
@@ -17354,7 +17609,7 @@ pub const parser_core = struct {
                             assignment_atom = target_atom;
                         } else {
                             local_index = try appendBindingLocal(s, target_atom);
-                            try emitDestructuringVarBindingResolution(s, target_atom);
+                            binding_ref = try captureDestructuringVarBindingRef(s, target_atom);
                         }
                         try s.emitOp(opcode.op.get_array_el);
                     } else if (s.destructuring_predeclare_only) {
@@ -17377,7 +17632,7 @@ pub const parser_core = struct {
                             try s.emitOp(opcode.op.drop);
                         }
                     }
-                    if (local_index) |idx| try emitPutBindingLocal(s, idx);
+                    if (local_index) |idx| try emitPutDestructuringBinding(s, idx, binding_ref);
                     if (assignment_atom) |atom_id| try s.emitScopePutVar(atom_id);
                 }
             } else if (try parseObjectPropertyName(s)) |prop_name| {
@@ -17391,6 +17646,7 @@ pub const parser_core = struct {
                     if (s.peekKind() == tok.TOK_IDENT) {
                         const target_atom = s.token.payload.ident.atom;
                         var local_index: ?u16 = null;
+                        var binding_ref: ?DestructuringBindingRef = null;
                         var assignment_atom: ?Atom = null;
                         var member_base: ?Atom = null;
                         var member_prop: ?Atom = null;
@@ -17400,6 +17656,7 @@ pub const parser_core = struct {
                         if (source) |binding_source| {
                             if (!s.destructuring_assignment_target_mode) {
                                 local_index = try appendBindingLocal(s, target_atom);
+                                binding_ref = try captureDestructuringVarBindingRef(s, target_atom);
                             }
                             try emitBindingField(s, binding_source, prop_atom);
                         } else if (s.destructuring_predeclare_only) {
@@ -17461,7 +17718,7 @@ pub const parser_core = struct {
                                 try s.emitOp(opcode.op.drop);
                             }
                         }
-                        if (local_index) |idx| try emitPutBindingLocal(s, idx);
+                        if (local_index) |idx| try emitPutDestructuringBinding(s, idx, binding_ref);
                         if (assignment_atom) |atom_id| try s.emitScopePutVar(atom_id);
                         if (source != null and member_base != null) {
                             const base_atom = member_base.?;
@@ -17602,12 +17859,14 @@ pub const parser_core = struct {
                         return Error.UnexpectedToken;
                     }
                     var local_index: ?u16 = null;
+                    var binding_ref: ?DestructuringBindingRef = null;
                     var assignment_atom: ?Atom = null;
                     if (source) |binding_source| {
                         if (s.destructuring_assignment_target_mode) {
                             assignment_atom = prop_atom;
                         } else {
                             local_index = try appendBindingLocal(s, prop_atom);
+                            binding_ref = try captureDestructuringVarBindingRef(s, prop_atom);
                         }
                         try emitBindingField(s, binding_source, prop_atom);
                     } else if (s.destructuring_predeclare_only) {
@@ -17627,7 +17886,7 @@ pub const parser_core = struct {
                             try s.emitOp(opcode.op.drop);
                         }
                     }
-                    if (local_index) |idx| try emitPutBindingLocal(s, idx);
+                    if (local_index) |idx| try emitPutDestructuringBinding(s, idx, binding_ref);
                     if (assignment_atom) |atom_id| try s.emitScopePutVar(atom_id);
                 }
             } else {
@@ -17777,12 +18036,14 @@ pub const parser_core = struct {
                             return Error.UnexpectedToken;
                         }
                         var local_index: ?u16 = null;
+                        var binding_ref: ?DestructuringBindingRef = null;
                         var assignment_atom: ?Atom = null;
                         if (source) |binding_source| {
                             if (s.destructuring_assignment_target_mode) {
                                 assignment_atom = elem_atom;
                             } else {
                                 local_index = try appendBindingLocal(s, elem_atom);
+                                binding_ref = try captureDestructuringVarBindingRef(s, elem_atom);
                             }
                             try emitBindingIndex(s, binding_source, element_index);
                         }
@@ -17801,14 +18062,16 @@ pub const parser_core = struct {
                             }
                         }
                         if (local_index) |idx| {
-                            try emitPutBindingLocal(s, idx);
+                            try emitPutDestructuringBinding(s, idx, binding_ref);
                         }
                         if (assignment_atom) |atom_id| try s.emitScopePutVar(atom_id);
                     }
                 } else {
                     var local_index: ?u16 = null;
+                    var binding_ref: ?DestructuringBindingRef = null;
                     if (source) |binding_source| {
                         local_index = try appendBindingLocal(s, elem_atom);
+                        binding_ref = try captureDestructuringVarBindingRef(s, elem_atom);
                         try emitBindingIndex(s, binding_source, element_index);
                     } else if (s.destructuring_predeclare_only) {
                         _ = try appendBindingLocal(s, elem_atom);
@@ -17831,7 +18094,7 @@ pub const parser_core = struct {
                         }
                     }
                     if (local_index) |idx| {
-                        try emitPutBindingLocal(s, idx);
+                        try emitPutDestructuringBinding(s, idx, binding_ref);
                     }
                 }
             } else if (s.peekKind() == @as(tok.TokenKind, @intCast('{')) and
@@ -18022,12 +18285,14 @@ pub const parser_core = struct {
                         }
                     } else {
                         if (source) |binding_source| {
-                            try emitRestArrayFromSource(s, binding_source, element_index);
                             if (s.destructuring_assignment_target_mode) {
+                                try emitRestArrayFromSource(s, binding_source, element_index);
                                 try s.emitScopePutVar(rest_atom);
                             } else {
                                 const local_index = try appendBindingLocal(s, rest_atom);
-                                try emitPutBindingLocal(s, local_index);
+                                const binding_ref = try captureDestructuringVarBindingRef(s, rest_atom);
+                                try emitRestArrayFromSource(s, binding_source, element_index);
+                                try emitPutDestructuringBinding(s, local_index, binding_ref);
                             }
                         } else if (s.destructuring_predeclare_only) {
                             _ = try appendBindingLocal(s, rest_atom);
@@ -18434,7 +18699,7 @@ pub const parser_core = struct {
     fn emitStaticPublicFieldInitializer(s: *State, atom_id: Atom) Error!void {
         const this_atom = try classStaticBlockThisTempAtom(s);
         defer s.function.atoms.free(this_atom);
-        _ = try s.addScopeVar(this_atom, .normal, true, true);
+        _ = try s.addScopeVar(this_atom, .class_static_this, true, true);
 
         try s.emitOp(opcode.op.swap);
         try s.emitOp(opcode.op.dup);
@@ -18551,10 +18816,11 @@ pub const parser_core = struct {
 
         const parent_fd = s.cur_func();
         const child_fd = try s.function.memory.create(function_def_mod.FunctionDef);
-        child_fd.* = function_def_mod.FunctionDef.init(s.function.memory, s.function.atoms, 120); // <class_fields_init>
+        child_fd.* = function_def_mod.FunctionDef.init(s.function.memory, s.function.atoms, atom_class_fields_init);
         var child_moved = false;
         errdefer if (!child_moved) s.discardFunctionDef(child_fd);
         child_fd.atoms.replace(&child_fd.filename, parent_fd.filename);
+        child_fd.atoms.replace(&child_fd.script_or_module, parent_fd.script_or_module);
         child_fd.line_num = @intCast(s.token.line_num);
         child_fd.col_num = @intCast(s.token.col_num);
         child_fd.parent = parent_fd;
@@ -18865,7 +19131,7 @@ pub const parser_core = struct {
             try s.advance();
             const this_atom = try classStaticBlockThisTempAtom(s);
             defer s.function.atoms.free(this_atom);
-            _ = try s.addScopeVar(this_atom, .normal, true, true);
+            _ = try s.addScopeVar(this_atom, .class_static_this, true, true);
             try s.emitOp(opcode.op.swap);
             try s.emitOp(opcode.op.dup);
             try s.emitScopePutVarInit(this_atom);
@@ -19008,7 +19274,7 @@ pub const parser_core = struct {
     fn emitClassStaticBlock(s: *State) Error!void {
         const this_atom = try classStaticBlockThisTempAtom(s);
         defer s.function.atoms.free(this_atom);
-        _ = try s.addScopeVar(this_atom, .normal, true, true);
+        _ = try s.addScopeVar(this_atom, .class_static_this, true, true);
 
         try s.emitOp(opcode.op.swap);
         try s.emitOp(opcode.op.dup);
@@ -19206,7 +19472,7 @@ pub const parser_core = struct {
             // branch (quickjs.c:24352-24360) rejects a class declaration at the
             // global body scope that collides with any global_vars entry
             // (top-level var, function declaration, or lexical).
-            if (s.atGlobalLexicalBodyScope() and s.findGlobalVar(class_atom)) {
+            if (s.lexicalBodyDeclarationConflictsWithGlobalVar(class_atom)) {
                 return Error.UnexpectedToken;
             }
             // Script-mode top-level class declaration → single global VarRef cell
@@ -19227,7 +19493,7 @@ pub const parser_core = struct {
                 class_decl_local_idx = @intCast(try s.addScopeVar(class_atom, .normal, true, class_decl_is_const));
                 try s.retrofitForwardLocalFunctionCapture(s.cur_func(), class_atom, class_decl_local_idx.?);
             }
-            class_fields_init_local_idx = @intCast(try s.addScopeVar(120, .normal, true, true)); // <class_fields_init>
+            class_fields_init_local_idx = @intCast(try s.addScopeVar(atom_class_fields_init, .normal, true, true));
             s.cur_func().vars[class_fields_init_local_idx.?].tdz_emitted_at_decl = true;
             if (s.scope_level == 0) {
                 if (s.top_level_lexical_as_module_ref) {
@@ -19307,7 +19573,7 @@ pub const parser_core = struct {
         s.class_constructor_cpool_idx = null;
         s.class_fields_init_child_index = null;
         if (class_fields_init_local_idx == null) {
-            class_fields_init_local_idx = @intCast(try s.addScopeVar(120, .normal, true, true)); // <class_fields_init>
+            class_fields_init_local_idx = @intCast(try s.addScopeVar(atom_class_fields_init, .normal, true, true));
             s.cur_func().vars[class_fields_init_local_idx.?].tdz_emitted_at_decl = true;
         }
         s.class_fields_init_var_idx = class_fields_init_local_idx;
@@ -19454,6 +19720,7 @@ pub const parser_core = struct {
         var child_moved = false;
         errdefer if (!child_moved) s.discardFunctionDef(child_fd);
         child_fd.atoms.replace(&child_fd.filename, parent_fd.filename);
+        child_fd.atoms.replace(&child_fd.script_or_module, parent_fd.script_or_module);
         child_fd.line_num = @intCast(s.token.line_num);
         child_fd.col_num = @intCast(s.token.col_num);
         child_fd.parent = parent_fd;
@@ -19469,7 +19736,7 @@ pub const parser_core = struct {
         child_fd.super_allowed = true;
         child_fd.super_call_allowed = s.class_has_extends;
         _ = child_fd.appendScope(-1) catch return error.OutOfMemory;
-        child_fd.this_var_idx = @intCast(try child_fd.addScopeVar(8, .normal, 0, s.class_has_extends, false));
+        child_fd.this_var_idx = @intCast(try child_fd.addScopeVar(atom_this, .normal, 0, s.class_has_extends, false));
         if (s.class_has_extends) {
             child_fd.vars[@intCast(child_fd.this_var_idx)].tdz_emitted_at_decl = true;
         }
@@ -20111,6 +20378,321 @@ pub const parser_core = struct {
         try s.expectToken('}');
     }
 
+    fn findFunctionDefClosureVarIndex(fd: *const function_def_mod.FunctionDef, atom_id: Atom) ?u16 {
+        for (fd.closure_var, 0..) |cv, idx| {
+            if (cv.var_name == atom_id) return @intCast(idx);
+        }
+        return null;
+    }
+
+    fn isDirectEvalVarObjectAtom(atom_id: Atom) bool {
+        return atom_id == atom_var_object or atom_id == atom_arg_var_object;
+    }
+
+    fn isDirectEvalDynamicEnvAtom(atom_id: Atom) bool {
+        return isDirectEvalVarObjectAtom(atom_id) or atom_id == atom_module.ids.with_object;
+    }
+
+    fn closureVarSameCapture(a: function_def_mod.ClosureVar, b: function_def_mod.ClosureVar) bool {
+        return a.var_name == b.var_name and
+            a.closure_type == b.closure_type and
+            a.var_idx == b.var_idx;
+    }
+
+    fn findFunctionDefClosureVarCaptureIndex(fd: *const function_def_mod.FunctionDef, cv: function_def_mod.ClosureVar) ?u16 {
+        for (fd.closure_var, 0..) |existing, idx| {
+            if (closureVarSameCapture(existing, cv)) return @intCast(idx);
+        }
+        return null;
+    }
+
+    fn directEvalCaptureAlreadyResolved(fd: *const function_def_mod.FunctionDef, atom_id: Atom) bool {
+        return findFunctionDefClosureVarIndex(fd, atom_id) != null;
+    }
+
+    fn closureVarNeedsDirectEvalCapture(cv: function_def_mod.ClosureVar) bool {
+        return switch (cv.closure_type) {
+            .global, .global_ref => false,
+            else => true,
+        };
+    }
+
+    fn childOnPathToTarget(
+        source: *function_def_mod.FunctionDef,
+        target: *function_def_mod.FunctionDef,
+    ) ?*function_def_mod.FunctionDef {
+        var child: ?*function_def_mod.FunctionDef = null;
+        var cursor: ?*function_def_mod.FunctionDef = target;
+        while (cursor) |node| {
+            if (node == source) return child;
+            child = node;
+            cursor = node.parent;
+        }
+        return null;
+    }
+
+    fn addOrReuseClosureVar(
+        fd: *function_def_mod.FunctionDef,
+        cv: function_def_mod.ClosureVar,
+    ) Error!u16 {
+        if (isDirectEvalDynamicEnvAtom(cv.var_name)) {
+            if (findFunctionDefClosureVarCaptureIndex(fd, cv)) |existing| return existing;
+            return @intCast(fd.addClosureVar(cv) catch return error.OutOfMemory);
+        }
+        if (findFunctionDefClosureVarIndex(fd, cv.var_name)) |existing| return existing;
+        return @intCast(fd.addClosureVar(cv) catch return error.OutOfMemory);
+    }
+
+    fn ensureDirectEvalClosureChain(
+        target: *function_def_mod.FunctionDef,
+        source_owner: *function_def_mod.FunctionDef,
+        source: function_def_mod.ClosureVar,
+    ) Error!void {
+        if (source.closure_type == .local and source.var_idx < source_owner.vars.len) {
+            source_owner.vars[source.var_idx].is_captured = true;
+        }
+
+        var owner = source_owner;
+        var parent_ref_idx: ?u16 = null;
+        while (owner != target) {
+            const child = childOnPathToTarget(owner, target) orelse return Error.UnexpectedToken;
+            const cv = if (owner == source_owner) source else function_def_mod.ClosureVar{
+                .closure_type = .ref,
+                .is_lexical = source.is_lexical,
+                .is_const = source.is_const,
+                .var_kind = source.var_kind,
+                .var_idx = parent_ref_idx orelse return Error.UnexpectedToken,
+                .var_name = source.var_name,
+            };
+            parent_ref_idx = try addOrReuseClosureVar(child, cv);
+            owner = child;
+        }
+    }
+
+    fn captureDirectEvalParentBinding(
+        target: *function_def_mod.FunctionDef,
+        source_owner: *function_def_mod.FunctionDef,
+        source: function_def_mod.ClosureVar,
+    ) Error!void {
+        if (!isDirectEvalDynamicEnvAtom(source.var_name) and directEvalCaptureAlreadyResolved(target, source.var_name)) return;
+        try ensureDirectEvalClosureChain(target, source_owner, source);
+    }
+
+    fn captureVisibleParentVarsForDirectEval(
+        target: *function_def_mod.FunctionDef,
+        parent: *function_def_mod.FunctionDef,
+        visible_scope_level: i32,
+    ) Error!void {
+        var var_idx = parent.vars.len;
+        while (var_idx > 0) {
+            var_idx -= 1;
+            const vd = parent.vars[var_idx];
+            if (isDirectEvalVarObjectAtom(vd.var_name)) continue;
+            if (vd.var_kind == .eval_var_object) continue;
+            if (vd.var_kind != .function_name and !State.scopeChainContains(parent, visible_scope_level, vd.scope_level)) continue;
+            try captureDirectEvalParentBinding(target, parent, .{
+                .closure_type = .local,
+                .is_lexical = vd.is_lexical,
+                .is_const = vd.is_const,
+                .var_kind = vd.var_kind,
+                .var_idx = @intCast(var_idx),
+                .var_name = vd.var_name,
+            });
+        }
+
+        for (parent.args, 0..) |arg, arg_idx| {
+            try captureDirectEvalParentBinding(target, parent, .{
+                .closure_type = .arg,
+                .is_lexical = false,
+                .is_const = false,
+                .var_kind = arg.var_kind,
+                .var_idx = @intCast(arg_idx),
+                .var_name = arg.var_name,
+            });
+        }
+
+        if (!directEvalCaptureAlreadyResolved(target, atom_module.ids.arguments)) {
+            if (try State.ensureImplicitArgumentsLocal(parent)) |arguments_var_idx| {
+                try captureDirectEvalParentBinding(target, parent, .{
+                    .closure_type = .local,
+                    .is_lexical = false,
+                    .is_const = false,
+                    .var_kind = .normal,
+                    .var_idx = arguments_var_idx,
+                    .var_name = atom_module.ids.arguments,
+                });
+            }
+        }
+
+        for (parent.closure_var, 0..) |cv, idx| {
+            if (isDirectEvalVarObjectAtom(cv.var_name)) continue;
+            if (!closureVarNeedsDirectEvalCapture(cv)) continue;
+            try captureDirectEvalParentBinding(target, parent, .{
+                .closure_type = .ref,
+                .is_lexical = cv.is_lexical,
+                .is_const = cv.is_const,
+                .var_kind = cv.var_kind,
+                .var_idx = @intCast(idx),
+                .var_name = cv.var_name,
+            });
+        }
+    }
+
+    fn captureAllVisibleDirectEvalBindings(fd: *function_def_mod.FunctionDef) Error!void {
+        var maybe_parent = fd.parent;
+        var visible_scope_level = fd.parent_scope_level;
+        while (maybe_parent) |parent| {
+            try captureVisibleParentVarsForDirectEval(fd, parent, visible_scope_level);
+            visible_scope_level = parent.parent_scope_level;
+            maybe_parent = parent.parent;
+        }
+    }
+
+    fn localClosureVarForFunctionVar(fd: *function_def_mod.FunctionDef, var_idx: i32) function_def_mod.ClosureVar {
+        const vd = fd.vars[@intCast(var_idx)];
+        return .{
+            .closure_type = .local,
+            .is_lexical = vd.is_lexical,
+            .is_const = vd.is_const,
+            .var_kind = vd.var_kind,
+            .var_idx = @intCast(var_idx),
+            .var_name = vd.var_name,
+        };
+    }
+
+    fn captureDirectEvalVarObjectForDescendants(
+        owner: *function_def_mod.FunctionDef,
+        source_owner: *function_def_mod.FunctionDef,
+        source: function_def_mod.ClosureVar,
+        parameter_environment_only: bool,
+    ) Error!void {
+        for (owner.child_list) |child| {
+            const child_parameter_environment_only = parameter_environment_only or child.parent_parameter_environment_only;
+            const is_body_var_object = source.var_name == atom_var_object;
+            if (!is_body_var_object or !child_parameter_environment_only) {
+                try captureDirectEvalParentBinding(child, source_owner, source);
+            }
+            try captureDirectEvalVarObjectForDescendants(
+                child,
+                source_owner,
+                source,
+                child_parameter_environment_only,
+            );
+        }
+    }
+
+    fn findDirectEvalArgumentsLocal(
+        fd: *const function_def_mod.FunctionDef,
+        scope_level: i32,
+        is_lexical: bool,
+    ) ?i32 {
+        var index = fd.vars.len;
+        while (index > 0) {
+            index -= 1;
+            const vd = fd.vars[index];
+            if (vd.var_name != atom_module.ids.arguments or vd.scope_level != scope_level or vd.is_lexical != is_lexical) continue;
+            return @intCast(index);
+        }
+        return null;
+    }
+
+    fn ensureParameterArgumentsLocals(fd: *function_def_mod.FunctionDef) Error!void {
+        if (fd.func_type == .arrow or fd.func_type == .class_static_init) return;
+
+        if (fd.arguments_var_idx < 0) {
+            fd.arguments_var_idx = findDirectEvalArgumentsLocal(fd, 0, false) orelse
+                @as(i32, @intCast(fd.addScopeVar(atom_module.ids.arguments, .normal, 0, false, false) catch return error.OutOfMemory));
+        }
+
+        const argument_scope_level: i32 = 1;
+        if (@as(usize, @intCast(argument_scope_level)) >= fd.scopes.len) return error.UnexpectedToken;
+        if (fd.arguments_arg_idx < 0) {
+            fd.arguments_arg_idx = findDirectEvalArgumentsLocal(fd, argument_scope_level, true) orelse
+                @as(i32, @intCast(fd.addScopeVar(atom_module.ids.arguments, .normal, argument_scope_level, true, false) catch return error.OutOfMemory));
+        }
+    }
+
+    fn allocateDirectEvalPseudoLocals(fd: *function_def_mod.FunctionDef) Error!void {
+        if (fd.parent != null and
+            fd.has_eval_call and
+            !fd.is_eval and
+            fd.func_type != .arrow and
+            fd.func_type != .class_static_init)
+        {
+            if (fd.has_parameter_expressions and !fd.is_strict_mode) {
+                try ensureParameterArgumentsLocals(fd);
+            } else {
+                _ = try State.ensureImplicitArgumentsLocal(fd);
+            }
+        }
+
+        // The root FunctionDef is global script code: its direct eval var
+        // declarations target the global environment, never a private
+        // function variable object. Only real nested functions get _var_.
+        if (fd.parent != null and fd.has_eval_call and !fd.is_eval and !fd.is_strict_mode) {
+            if (fd.var_object_idx < 0) {
+                fd.var_object_idx = @intCast(fd.addScopeVar(atom_var_object, .normal, 0, false, false) catch return error.OutOfMemory);
+            }
+            if (fd.has_parameter_expressions and fd.arg_var_object_idx < 0) {
+                fd.arg_var_object_idx = @intCast(fd.addScopeVar(atom_arg_var_object, .normal, 0, false, false) catch return error.OutOfMemory);
+            }
+        }
+
+        for (fd.child_list) |child| {
+            try allocateDirectEvalPseudoLocals(child);
+        }
+    }
+
+    fn captureDirectEvalPreparedBindings(fd: *function_def_mod.FunctionDef) Error!void {
+        if (fd.has_eval_call) {
+            // Direct eval may close over any binding visible at a call site.
+            // Marking the owning slots captured makes enter_scope detach their
+            // cells on every re-entry, preserving per-iteration and repeated
+            // catch/block environment identity for eval-created closures.
+            for (fd.vars) |*vd| {
+                if (vd.var_kind != .eval_var_object) vd.is_captured = true;
+            }
+            try captureAllVisibleDirectEvalBindings(fd);
+        }
+        for (fd.child_list) |child| {
+            try captureDirectEvalPreparedBindings(child);
+        }
+        if (fd.var_object_idx >= 0) {
+            try captureDirectEvalVarObjectForDescendants(fd, fd, localClosureVarForFunctionVar(fd, fd.var_object_idx), false);
+        }
+        if (fd.arg_var_object_idx >= 0) {
+            try captureDirectEvalVarObjectForDescendants(fd, fd, localClosureVarForFunctionVar(fd, fd.arg_var_object_idx), false);
+        }
+    }
+
+    fn nextClosureSourceDepth(depth: u16) u16 {
+        if (depth == 0) return 1;
+        return if (depth == std.math.maxInt(u16)) depth else depth + 1;
+    }
+
+    fn annotateClosureSourceDepths(fd: *function_def_mod.FunctionDef) void {
+        for (fd.closure_var) |*cv| {
+            cv.source_depth = switch (cv.closure_type) {
+                .local, .arg => 1,
+                .ref => if (fd.parent) |parent|
+                    if (cv.var_idx < parent.closure_var.len)
+                        nextClosureSourceDepth(parent.closure_var[cv.var_idx].source_depth)
+                    else
+                        cv.source_depth
+                else
+                    cv.source_depth,
+                .global_ref, .global_decl, .global, .module_decl, .module_import => std.math.maxInt(u16),
+            };
+        }
+        for (fd.child_list) |child| annotateClosureSourceDepths(child);
+    }
+
+    pub fn prepareDirectEvalFunctionDefs(fd: *function_def_mod.FunctionDef) Error!void {
+        try allocateDirectEvalPseudoLocals(fd);
+        try captureDirectEvalPreparedBindings(fd);
+        annotateClosureSourceDepths(fd);
+    }
+
     pub const ParseState = State;
     pub const Feature = FeatureImpl;
 };
@@ -20162,20 +20744,35 @@ pub const compile_entry = struct {
         }
     };
 
+    const EvalClosureSeedImpl = struct {
+        var_name: atom.Atom,
+        closure_type: bytecode.function_def.ClosureType = .ref,
+        var_idx: ?u16 = null,
+        is_lexical: bool = false,
+        is_const: bool = false,
+        var_kind: bytecode.function_def.VarKind = .normal,
+        source_depth: u16 = 0,
+    };
+
     const OptionsImpl = struct {
         mode: ModeImpl = .script,
         filename: []const u8 = "<input>",
+        /// Borrowed stable ScriptOrModule identity. Direct eval supplies its
+        /// caller's owned atom while retaining "<eval>" as `filename`.
+        script_or_module: ?atom.Atom = null,
         source_kind: SourceKindImpl = .auto,
         strict: bool = false,
         runtime_strict: bool = false,
         return_completion: bool = false,
         eval_global_var_bindings: bool = false,
+        eval_in_parameter_initializer: bool = false,
         eval_in_class_field_initializer: bool = false,
         eval_allows_new_target: bool = false,
         eval_allows_super_property: bool = false,
         eval_class_static_field_this_atom: ?atom.Atom = null,
         eval_private_bound_names: []const atom.Atom = &.{},
         eval_annex_b_blocked_function_names: []const atom.Atom = &.{},
+        eval_closure_seed: []const EvalClosureSeedImpl = &.{},
     };
 
     pub fn compile(rt: *JSRuntime, source: []const u8, options: OptionsImpl) !ResultImpl {
@@ -20193,6 +20790,9 @@ pub const compile_entry = struct {
         var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, filename_atom);
         var function_owned = true;
         errdefer if (function_owned) function.deinit(rt);
+        if (options.script_or_module) |script_or_module| {
+            function.atoms.replace(&function.script_or_module, script_or_module);
+        }
         function.line_num = 1;
         function.col_num = 1;
         function.flags.is_strict = options.mode == .module or effective_strict;
@@ -20287,21 +20887,35 @@ pub const compile_entry = struct {
         state.is_strict = options.mode == .module or effective_strict;
         state.function_def.is_strict_mode = options.mode == .module or effective_strict;
         state.function_def.is_indirect_eval = options.mode == .eval_indirect;
+        state.function_def.needs_dynamic_lvalue_refs = options.mode == .eval_direct and !effective_strict;
         state.top_level_functions_as_children = true;
         // Script top-level let/const become global VarRef cells (qjs JS_CLOSURE_GLOBAL_DECL):
         // single-storage in ctx.lexicals, shared into frame.var_refs by pointer.
         state.top_level_lexical_as_global_ref = options.mode == .script;
         state.eval_global_var_bindings = (options.eval_global_var_bindings or options.mode == .eval_indirect) and
             !((options.mode == .eval_direct or options.mode == .eval_indirect) and effective_strict);
+        state.eval_in_parameter_initializer = options.eval_in_parameter_initializer;
         state.new_target_allowed = options.eval_allows_new_target;
         state.function_def.new_target_allowed = options.eval_allows_new_target;
         state.allow_super = options.eval_allows_super_property;
         state.function_def.super_allowed = options.eval_allows_super_property;
         state.class_static_field_this_atom = options.eval_class_static_field_this_atom;
         state.eval_annex_b_blocked_function_names = options.eval_annex_b_blocked_function_names;
+        for (options.eval_closure_seed) |seed| {
+            _ = try state.function_def.addClosureVar(.{
+                .closure_type = seed.closure_type,
+                .is_lexical = seed.is_lexical,
+                .is_const = seed.is_const,
+                .var_kind = seed.var_kind,
+                .var_idx = seed.var_idx orelse @as(u16, @intCast(state.function_def.closure_var.len)),
+                .var_name = seed.var_name,
+                .source_depth = seed.source_depth,
+            });
+        }
         if (options.eval_private_bound_names.len != 0) {
             state.in_class = true;
             for (options.eval_private_bound_names) |atom_id| {
+                try state.function_def.appendPrivateBoundName(atom_id);
                 const retained = rt.atoms.dup(atom_id);
                 errdefer rt.atoms.free(retained);
                 try state.class_private_bound_names.append(rt.memory.allocator, retained);
@@ -20346,6 +20960,7 @@ pub const compile_entry = struct {
             if (needs_return) try state.emitReturnUndefined();
         }
 
+        try parser_core.prepareDirectEvalFunctionDefs(&state.function_def);
         try bytecode.pipeline.finalize.runWithFunctionDefRuntime(function, &state.function_def, rt);
         features.* = state.features;
         function.flags.is_strict = function.flags.is_strict or state.function_def.is_strict_mode;
@@ -20416,10 +21031,13 @@ pub const compile_entry = struct {
         var pos = diagnostics_mod.Position{ .line = 1, .column = 1, .offset = 0 };
         var previous_token_kind: ?token_mod.TokenKind = null;
         while (true) {
-            var tok = nextFallbackSyntaxToken(&lex, previous_token_kind) catch |err| {
-                result.syntax_error = try diagnostics_mod.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, pos, @errorName(err));
-                result.parse_path = .syntax_error_guard;
-                return;
+            var tok = nextFallbackSyntaxToken(&lex, previous_token_kind) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => {
+                    result.syntax_error = try diagnostics_mod.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, pos, @errorName(err));
+                    result.parse_path = .syntax_error_guard;
+                    return;
+                },
             };
             pos = .{ .line = lex.line, .column = lex.col, .offset = lex.pos };
             if (tok.val == token_mod.TOK_EOF) {
@@ -20525,6 +21143,7 @@ pub const compile_entry = struct {
     pub const CompilePath = CompilePathImpl;
     pub const Result = ResultImpl;
     pub const Options = OptionsImpl;
+    pub const EvalClosureSeed = EvalClosureSeedImpl;
 };
 pub const Lexer = lexer.Lexer;
 pub const Token = token.Token;
@@ -20537,4 +21156,5 @@ pub const Feature = parser_core.Feature;
 pub const CompilePath = compile_entry.CompilePath;
 pub const Result = compile_entry.Result;
 pub const Options = compile_entry.Options;
+pub const EvalClosureSeed = compile_entry.EvalClosureSeed;
 pub const compile = compile_entry.compile;

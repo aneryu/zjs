@@ -127,8 +127,6 @@ pub inline fn initFrameLocals(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
-    eval_local_names: []const core.Atom,
-    eval_local_slots: []core.JSValue,
     use_inline_storage: bool,
     windows: frame_mod.FrameStorageWindows,
 ) !void {
@@ -149,9 +147,6 @@ pub inline fn initFrameLocals(
     @memset(locals, core.JSValue.undefinedValue());
     frame.locals = locals;
 
-    if (eval_local_names.len != 0 and value_ops.atomNameEql(ctx.runtime, function.name, "<eval>")) {
-        call_runtime.initializeEvalFrameLocals(ctx, function, frame, eval_local_names, eval_local_slots);
-    }
     if (function.flags.is_derived_class_constructor) {
         try linkDerivedConstructorThisLocal(ctx, function, frame);
     }
@@ -311,10 +306,6 @@ pub noinline fn closure(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     opc: u8,
-    eval_local_names: []const core.Atom,
-    eval_local_slots: []core.JSValue,
-    eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
 ) !Step {
     _ = output;
     _ = catch_target;
@@ -327,7 +318,7 @@ pub noinline fn closure(
         frame.pc += 1;
         break :blk value;
     };
-    try collection_vm.pushFunctionClosure(ctx, frame, stack, function, global, index, opc, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs);
+    try collection_vm.pushFunctionClosure(ctx, frame, stack, function, global, index, opc);
     return .done;
 }
 

@@ -112,7 +112,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         defer stack.deinit(rt);
         try stack.reserveAdditional(compiled.function.stack_size);
         // `.eval_direct`/`.eval_indirect` run through the EVAL runner contract
-        // (is_eval_code = true, sync_global_lexical_locals = false) — qjs
+        // (`is_eval_code = true` with eval declaration instantiation) — qjs
         // JS_EVAL_TYPE_DIRECT/INDIRECT — so a top-level let/const/class stays a
         // pure eval frame-local (no redundant ctx.lexicals property). `.script`
         // keeps the script runner (JS_EVAL_TYPE_GLOBAL → global_decl cell).

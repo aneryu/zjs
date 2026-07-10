@@ -60,6 +60,17 @@ pub const opcode = struct {
         fmt: Format,
     };
 
+    /// Phase-1 scope operand flag: the LHS reference has already selected its
+    /// environment, so the fallback put must resolve only the static chain.
+    pub const scope_no_dynamic_env_flag: u16 = 0x8000;
+    pub const scope_no_dynamic_env_max_level: u16 = 0x7ffe;
+
+    pub const WithPutMode = enum(u8) {
+        var_object_probe = 0,
+        selected_reference = 1,
+        with_probe = 2,
+    };
+
     pub const op = struct {
         pub const invalid: u8 = 0;
         pub const push_i32: u8 = 1;
@@ -635,7 +646,9 @@ pub const opcode = struct {
         pub const current_function: u8 = 2;
         pub const new_target: u8 = 3;
         pub const home_object_or_import_meta: u8 = 4;
-        // QuickJS reserves 5..7 for var object, import.meta, and null-proto.
+        pub const var_object: u8 = 5;
+        pub const import_meta: u8 = 6;
+        pub const null_proto: u8 = 7;
         pub const dstr_get: u8 = 8;
         pub const dstr_elide: u8 = 9;
         pub const dstr_rest: u8 = 10;
@@ -1207,6 +1220,8 @@ pub const function_bytecode = struct {
         new_function_decl, // lexical var with async/generator function declaration
         catch_,
         function_name, // function expression name
+        eval_var_object, // parser-only slot whose binding lives in _var_/_arg_var_
+        class_static_this, // synthetic binding carrying `this` for static field/block eval
         private_field,
         private_method,
         private_getter,
@@ -1234,6 +1249,19 @@ pub const function_bytecode = struct {
         var_kind: VarKind = .normal,
         var_idx: u16, // index to a normal variable of the parent function, or index to a closure variable
         var_name: atom.Atom,
+        /// Number of function-environment hops to the binding that owns this
+        /// capture. Direct-eval compilation preserves it because its root has
+        /// no parser parent pointer back to the live caller.
+        source_depth: u16 = 0,
+    };
+
+    /// Compile-time result of resolving an eval declaration's variable
+    /// environment. The index variants address the finalized closure_var table.
+    pub const EvalBindingTarget = union(enum(u8)) {
+        unresolved,
+        global,
+        closure: u16,
+        var_object: u16,
     };
 
     /// Mirrors `JSGlobalVar` (`quickjs.c:713`).
@@ -1245,6 +1273,10 @@ pub const function_bytecode = struct {
         is_const: bool = false,
         scope_level: i32,
         var_name: atom.Atom,
+        eval_target: EvalBindingTarget = .unresolved,
+        /// Annex B.3.5: a catch binding receives the initializer while the
+        /// enclosing variable environment still gets an ensured var binding.
+        eval_var_object_fallback: ?u16 = null,
     };
 
     /// Side allocation holding the class-field metadata that only class
@@ -1275,9 +1307,15 @@ pub const function_bytecode = struct {
         source_len: i32 = 0,
         pc2line_len: i32 = 0,
         arg_names_len: u32 = 0,
+        scope_parents_len: u32 = 0,
+        /// Stable ScriptOrModule identity used as the dynamic-import referrer.
+        /// This is intentionally independent from the diagnostic filename:
+        /// direct eval displays "<eval>" while retaining its caller's identity.
+        script_or_module: atom.Atom = atom.null_atom,
         pc2line_buf: [*]u8 = @ptrFromInt(@alignOf(u8)),
         source_ptr: ?[*]const u8 = null,
         arg_names: [*]atom.Atom = @ptrFromInt(@alignOf(atom.Atom)),
+        scope_parents: [*]i32 = @ptrFromInt(@alignOf(i32)),
         /// Lazily-built per-FB execution view (see `cachedBytecodeView`). Stored
         /// here in the out-of-line debug box so the 128B FunctionBytecode struct
         /// stays unchanged while restoring the `execution_view` cache the
@@ -1470,6 +1508,10 @@ pub const function_bytecode = struct {
             const dbg = self.debug orelse return &.{};
             return dbg.arg_names[0..dbg.arg_names_len];
         }
+        pub inline fn scopeParents(self: *const FunctionBytecodeImpl) []const i32 {
+            const dbg = self.debug orelse return &.{};
+            return dbg.scope_parents[0..dbg.scope_parents_len];
+        }
         pub inline fn varDefs(self: *const FunctionBytecodeImpl) []VarDef {
             return self.vardefs[0..self.vars_len];
         }
@@ -1519,6 +1561,11 @@ pub const function_bytecode = struct {
             const dbg = self.debug orelse return null;
             const ptr = dbg.source_ptr orelse return null;
             return ptr[0..@intCast(dbg.source_len)];
+        }
+
+        pub inline fn scriptOrModule(self: *const FunctionBytecodeImpl) atom.Atom {
+            const dbg = self.debug orelse return self.filename;
+            return if (dbg.script_or_module != atom.null_atom) dbg.script_or_module else self.filename;
         }
 
         /// `account` is accepted for call-site symmetry with the other GC-object
@@ -1623,11 +1670,13 @@ pub const function_bytecode = struct {
         /// storing its length. Only valid when `flags.from_block` is set.
         fn computeBlockSize(self: *const FunctionBytecodeImpl) usize {
             const arg_names_len: usize = if (self.debug) |dbg| dbg.arg_names_len else 0;
+            const scope_parents_len: usize = if (self.debug) |dbg| dbg.scope_parents_len else 0;
             var layout = BlockBuilder{};
             _ = layout.reserve(JSValue, @intCast(self.cpool_count));
             _ = layout.reserve(VarDef, self.vars_len);
             _ = layout.reserve(ClosureVar, self.var_refs_len);
             _ = layout.reserve(atom.Atom, arg_names_len);
+            _ = layout.reserve(i32, scope_parents_len);
             _ = layout.reserve(GlobalVar, self.global_vars_len);
             _ = layout.reserve(u8, @as(usize, @intCast(self.byte_code_len)) + 1);
             if (self.debug) |dbg| {
@@ -1677,6 +1726,10 @@ pub const function_bytecode = struct {
                 if (owned and arg_names.len != 0) mem.free(atom.Atom, arg_names);
                 dbg.arg_names = FunctionBytecodeImpl.noSlice(atom.Atom);
                 dbg.arg_names_len = 0;
+                const scope_parents = dbg.scope_parents[0..dbg.scope_parents_len];
+                if (owned and scope_parents.len != 0) mem.free(i32, scope_parents);
+                dbg.scope_parents = FunctionBytecodeImpl.noSlice(i32);
+                dbg.scope_parents_len = 0;
             }
 
             // vardefs owns `vars_len`. Each `vardefs[i]` carries the var name plus
@@ -1751,6 +1804,9 @@ pub const function_bytecode = struct {
             // the `DebugInfo` box itself is always a side allocation freed here.
             if (self.debug) |dbg| {
                 self.debug = null;
+                const script_or_module = dbg.script_or_module;
+                dbg.script_or_module = atom.null_atom;
+                if (script_or_module != atom.null_atom) atoms.free(script_or_module);
                 // The cached execution view is non-owning (its slices borrow the
                 // FB block), so freeing the struct allocation is all that's needed.
                 if (dbg.cached_view) |view| {
@@ -1782,6 +1838,7 @@ pub const function_bytecode = struct {
             if (self.flags.from_block) return addSaturating(bytes, self.computeBlockSize());
             bytes = addSliceBytes(bytes, u8, @intCast(self.byte_code_len));
             if (self.debug) |dbg| bytes = addSliceBytes(bytes, atom.Atom, dbg.arg_names_len);
+            if (self.debug) |dbg| bytes = addSliceBytes(bytes, i32, dbg.scope_parents_len);
             bytes = addSliceBytes(bytes, atom.Atom, self.var_refs_len);
             bytes = addSliceBytes(bytes, GlobalVar, self.global_vars_len);
             bytes = addSliceBytes(bytes, VarDef, self.vars_len);
@@ -1799,7 +1856,6 @@ pub const function_bytecode = struct {
             }
             return bytes;
         }
-
     };
 
     /// Alignment of the consolidated `FunctionBytecodeImpl.block` allocation. Must
@@ -1972,6 +2028,8 @@ pub const function_def = struct {
 
     pub const ClosureVar = function_bytecode_mod.ClosureVar;
 
+    pub const EvalBindingTarget = function_bytecode_mod.EvalBindingTarget;
+
     pub const GlobalVar = function_bytecode_mod.GlobalVar;
 
     /// Mirrors `RelocEntry` (`quickjs.c:21374`).
@@ -2111,6 +2169,7 @@ pub const function_def = struct {
         discard_next: ?*FunctionDefImpl = null,
         parent_cpool_idx: i32 = -1,
         parent_scope_level: i32 = 0,
+        parent_parameter_environment_only: bool = false,
 
         // Flags — packed as in QuickJS
         is_eval: bool = false,
@@ -2122,6 +2181,7 @@ pub const function_def = struct {
         has_parameter_expressions: bool = false,
         has_use_strict: bool = false,
         has_eval_call: bool = false,
+        needs_dynamic_lvalue_refs: bool = false,
         has_arguments_binding: bool = false,
         has_this_binding: bool = false,
         new_target_allowed: bool = false,
@@ -2221,6 +2281,9 @@ pub const function_def = struct {
 
         // pc2line table
         filename: atom.Atom,
+        /// Stable ScriptOrModule identity, separately owned from `filename` so
+        /// direct eval can retain its caller's referrer while displaying <eval>.
+        script_or_module: atom.Atom,
         line_num: i32 = 0,
         col_num: i32 = 0,
         source_text: ?[]const u8 = null,
@@ -2238,6 +2301,7 @@ pub const function_def = struct {
         child_decl_skip_init: bool = false,
         child_decl_force_local_init: bool = false,
         child_decl_emit_global_inline: bool = false,
+        child_decl_emit_eval_var_inline: bool = false,
 
         pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable, name: atom.Atom) FunctionDefImpl {
             return .{
@@ -2245,16 +2309,20 @@ pub const function_def = struct {
                 .atoms = atoms,
                 .func_name = atoms.dup(name),
                 .filename = atoms.dup(name),
+                .script_or_module = atoms.dup(name),
             };
         }
 
         pub fn deinitInitFailure(self: *FunctionDefImpl) void {
             const func_name = self.func_name;
             const filename = self.filename;
+            const script_or_module = self.script_or_module;
             self.func_name = atom.null_atom;
             self.filename = atom.null_atom;
+            self.script_or_module = atom.null_atom;
             self.atoms.free(func_name);
             self.atoms.free(filename);
+            self.atoms.free(script_or_module);
             freeGrowableSlice(VarScope, self.memory, &self.scopes, &self.scopes_capacity);
             self.scope_count = 0;
         }
@@ -2401,7 +2469,6 @@ pub const function_def = struct {
         /// bytecode emission during parsing.
         pub fn appendByteCode(self: *FunctionDefImpl, bytes: []const u8) !void {
             if (bytes.len == 0) return;
-            if (bytesMayContainEvalCall(bytes)) self.has_eval_call = true;
             const tail = try growSliceBy(u8, self.memory, &self.byte_code, &self.byte_code_capacity, bytes.len);
             @memcpy(tail, bytes);
         }
@@ -2459,10 +2526,13 @@ pub const function_def = struct {
         pub fn deinit(self: *FunctionDefImpl, rt: anytype) void {
             const func_name = self.func_name;
             const filename = self.filename;
+            const script_or_module = self.script_or_module;
             self.func_name = atom.null_atom;
             self.filename = atom.null_atom;
+            self.script_or_module = atom.null_atom;
             self.atoms.free(func_name);
             self.atoms.free(filename);
+            self.atoms.free(script_or_module);
 
             freeGrowableNamedSlice(VarDef, self.atoms, self.memory, &self.vars, &self.vars_capacity);
             if (self.vars_htab.len != 0) self.memory.free(u32, self.vars_htab);
@@ -2538,14 +2608,11 @@ pub const function_def = struct {
             self.child_decl_skip_init = false;
             self.child_decl_force_local_init = false;
             self.child_decl_emit_global_inline = false;
+            self.child_decl_emit_eval_var_inline = false;
             if (old_child_list_capacity != 0) self.memory.free(*FunctionDefImpl, old_child_list.ptr[0..old_child_list_capacity]);
         }
     };
 
-    fn bytesMayContainEvalCall(bytes: []const u8) bool {
-        return std.mem.indexOfScalar(u8, bytes, opcode.op.eval) != null or
-            std.mem.indexOfScalar(u8, bytes, opcode.op.apply_eval) != null;
-    }
     pub const FunctionDef = FunctionDefImpl;
 };
 
@@ -2896,7 +2963,25 @@ pub const pipeline_resolve_variables = struct {
     const function_def_mod = function_def;
 
     const EVAL_CLASS_FIELD_INITIALIZER_FLAG: u16 = 0x8000;
-    const EVAL_SCOPE_INDEX_MASK: u16 = 0x7fff;
+    const EVAL_SCOPE_INDEX_MASK: u16 = 0x3fff;
+    const APPLY_EVAL_SIZE: usize = opcode.sizeOfPhase1(opcode.op.apply_eval);
+    const atom_var_object: atom.Atom = atom.ids.var_object; // "<var>"
+
+    const ScopeOperand = struct {
+        level: i16,
+        no_dynamic_env: bool,
+    };
+
+    fn decodeScopeOperand(bytes: *const [2]u8) ScopeOperand {
+        const raw = std.mem.readInt(u16, bytes, .little);
+        if (raw == std.math.maxInt(u16)) {
+            return .{ .level = -1, .no_dynamic_env = false };
+        }
+        return .{
+            .level = @intCast(raw & ~opcode.scope_no_dynamic_env_flag),
+            .no_dynamic_env = (raw & opcode.scope_no_dynamic_env_flag) != 0,
+        };
+    }
 
     pub const Error = error{
         OutOfMemory,
@@ -3138,10 +3223,30 @@ pub const pipeline_resolve_variables = struct {
         };
     }
 
+    fn closureVarSourceIsDynamicGlobal(fd: *const function_def_mod.FunctionDef, start_idx: usize) bool {
+        var owner = fd;
+        var idx = start_idx;
+        var hops: usize = 0;
+        while (idx < owner.closure_var.len and hops < 64) : (hops += 1) {
+            const cv = owner.closure_var[idx];
+            switch (cv.closure_type) {
+                .global, .global_ref => return true,
+                .ref => {
+                    const parent = owner.parent orelse return false;
+                    owner = parent;
+                    idx = cv.var_idx;
+                },
+                .local, .arg, .global_decl, .module_decl, .module_import => return false,
+            }
+        }
+        return false;
+    }
+
     fn lookupClosureVar(ctx: *const JSContext, atom_id: u32) ?u16 {
         const fd = ctx.function_def orelse return null;
         for (fd.closure_var, 0..) |cv, idx| {
             if (!closureVarIsRuntimeVarRef(cv)) continue;
+            if (closureVarSourceIsDynamicGlobal(fd, idx)) continue;
             if (cv.var_name == atom_id) return @intCast(idx);
         }
         var maybe_parent = fd.parent;
@@ -3149,6 +3254,7 @@ pub const pipeline_resolve_variables = struct {
         while (maybe_parent) |parent| {
             for (parent.closure_var, 0..) |cv, idx| {
                 if (!closureVarIsRuntimeVarRef(cv)) continue;
+                if (closureVarSourceIsDynamicGlobal(parent, idx)) continue;
                 if (cv.var_name == atom_id) return @intCast(idx);
             }
             if (findVisibleParentVar(parent, atom_id, visible_scope_level)) |parent_var| {
@@ -3348,6 +3454,7 @@ pub const pipeline_resolve_variables = struct {
             i -= 1;
             const vd = fd.vars[i];
             if (vd.var_name != atom_id) continue;
+            if (vd.var_kind == .eval_var_object) continue;
             if (vd.var_kind == .function_name or scopeChainContains(fd, visible_scope_level, vd.scope_level)) return @intCast(i);
         }
         return null;
@@ -3506,7 +3613,7 @@ pub const pipeline_resolve_variables = struct {
             const vd = fd.vars[@intCast(idx)];
             if (vd.scope_level != scope) break;
             if (localIsCaptured(fd, @intCast(idx))) total += 3;
-            if (varNeedsTdzRearm(vd)) total += 3;
+            if (idx != fd.arguments_arg_idx and varNeedsTdzRearm(vd)) total += 3;
             idx = vd.scope_next;
         }
         return total;
@@ -3526,7 +3633,7 @@ pub const pipeline_resolve_variables = struct {
                 std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], loc_idx, .little);
                 out_idx.* += 3;
             }
-            if (varNeedsTdzRearm(vd)) {
+            if (idx != fd.arguments_arg_idx and varNeedsTdzRearm(vd)) {
                 output[out_idx.*] = opcode.op.set_loc_uninitialized;
                 std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], loc_idx, .little);
                 out_idx.* += 3;
@@ -3692,6 +3799,601 @@ pub const pipeline_resolve_variables = struct {
         return null;
     }
 
+    const EvalVarObjectProbe = union(enum) {
+        local: u16,
+        ref: u16,
+        with_local: u16,
+        with_ref: u16,
+    };
+
+    fn isEvalVarObjectAtom(atom_id: atom.Atom) bool {
+        return atom_id == atom.ids.arg_var_object or atom_id == atom_var_object;
+    }
+
+    fn isDynamicEnvObjectAtom(atom_id: atom.Atom) bool {
+        return isEvalVarObjectAtom(atom_id) or atom_id == atom.ids.with_object;
+    }
+
+    fn dynamicEnvObjectRank(atom_id: atom.Atom) u8 {
+        if (atom_id == atom.ids.with_object) return 0;
+        if (atom_id == atom_var_object) return 1;
+        if (atom_id == atom.ids.arg_var_object) return 2;
+        unreachable;
+    }
+
+    fn scopeUsesArgumentEnvironmentOnly(fd: *const function_def_mod.FunctionDef, scope_level: i32) bool {
+        if (!fd.has_parameter_expressions or scope_level <= 0) return false;
+        var scope_idx = scope_level;
+        while (scope_idx >= 0 and @as(usize, @intCast(scope_idx)) < fd.scopes.len) {
+            const parent = fd.scopes[@intCast(scope_idx)].parent;
+            if (parent < 0) return scope_idx != 0;
+            scope_idx = parent;
+        }
+        return false;
+    }
+
+    fn closureVarSourceDepth(fd: *const function_def_mod.FunctionDef, start_idx: usize) usize {
+        if (start_idx < fd.closure_var.len and fd.closure_var[start_idx].source_depth != 0) {
+            return fd.closure_var[start_idx].source_depth;
+        }
+        var owner = fd;
+        var idx = start_idx;
+        var depth: usize = 1;
+        while (idx < owner.closure_var.len) {
+            const cv = owner.closure_var[idx];
+            switch (cv.closure_type) {
+                .local, .arg => return depth,
+                .ref => {
+                    const parent = owner.parent orelse return depth;
+                    owner = parent;
+                    idx = cv.var_idx;
+                    depth += 1;
+                },
+                else => return depth,
+            }
+        }
+        return depth;
+    }
+
+    fn closureVarSourceEndsAtOpaqueRef(fd: *const function_def_mod.FunctionDef, start_idx: usize) bool {
+        var owner = fd;
+        var idx = start_idx;
+        while (idx < owner.closure_var.len) {
+            const cv = owner.closure_var[idx];
+            if (cv.closure_type != .ref) return false;
+            const parent = owner.parent orelse return true;
+            owner = parent;
+            idx = cv.var_idx;
+        }
+        return false;
+    }
+
+    fn closureVarSourceIsGlobalLike(fd: *const function_def_mod.FunctionDef, start_idx: usize) bool {
+        var owner = fd;
+        var idx = start_idx;
+        while (idx < owner.closure_var.len) {
+            const cv = owner.closure_var[idx];
+            switch (cv.closure_type) {
+                .global_ref, .global_decl, .global, .module_decl, .module_import => return true,
+                .ref => {
+                    const parent = owner.parent orelse return false;
+                    owner = parent;
+                    idx = cv.var_idx;
+                },
+                .local, .arg => return false,
+            }
+        }
+        return false;
+    }
+
+    const ClosureDynamicEnvProbeIterator = struct {
+        fd: ?*const function_def_mod.FunctionDef,
+        target_idx: ?usize,
+        target_depth: usize,
+        target_is_opaque_ref: bool,
+        depth: usize = 1,
+        max_depth: usize = 0,
+        rank: u8 = 0,
+        next_idx: usize = 0,
+
+        fn init(ctx: *const JSContext, atom_id: atom.Atom) ClosureDynamicEnvProbeIterator {
+            const fd = ctx.function_def orelse return .{
+                .fd = null,
+                .target_idx = null,
+                .target_depth = 0,
+                .target_is_opaque_ref = false,
+            };
+            var target_idx: ?usize = null;
+            for (fd.closure_var, 0..) |cv, idx| {
+                if (!closureVarIsRuntimeVarRef(cv) or isDynamicEnvObjectAtom(cv.var_name)) continue;
+                if (cv.var_name == atom_id) {
+                    target_idx = idx;
+                    break;
+                }
+            }
+            const target_depth = if (target_idx) |idx| closureVarSourceDepth(fd, idx) else std.math.maxInt(usize);
+            const target_is_opaque_ref = if (target_idx) |idx| closureVarSourceEndsAtOpaqueRef(fd, idx) else false;
+            var iter = ClosureDynamicEnvProbeIterator{
+                .fd = fd,
+                .target_idx = target_idx,
+                .target_depth = target_depth,
+                .target_is_opaque_ref = target_is_opaque_ref,
+            };
+            for (fd.closure_var, 0..) |cv, idx| {
+                if (!iter.precedesTarget(cv, idx)) continue;
+                iter.max_depth = @max(iter.max_depth, closureVarSourceDepth(fd, idx));
+            }
+            return iter;
+        }
+
+        fn precedesTarget(self: *const ClosureDynamicEnvProbeIterator, cv: function_def_mod.ClosureVar, idx: usize) bool {
+            const fd = self.fd orelse return false;
+            if (!closureVarIsRuntimeVarRef(cv) or !isDynamicEnvObjectAtom(cv.var_name)) return false;
+            const target_idx = self.target_idx orelse return true;
+            if (closureVarSourceIsGlobalLike(fd, target_idx)) return true;
+            const source_depth = closureVarSourceDepth(fd, idx);
+            if (source_depth != self.target_depth) return source_depth < self.target_depth;
+            if (cv.var_name == atom.ids.with_object or self.target_is_opaque_ref) return idx < target_idx;
+            return false;
+        }
+
+        fn next(self: *ClosureDynamicEnvProbeIterator) ?usize {
+            const fd = self.fd orelse return null;
+            while (self.depth <= self.max_depth) {
+                while (self.rank < 3) {
+                    while (self.next_idx < fd.closure_var.len) {
+                        const idx = self.next_idx;
+                        self.next_idx += 1;
+                        const cv = fd.closure_var[idx];
+                        if (!self.precedesTarget(cv, idx)) continue;
+                        if (closureVarSourceDepth(fd, idx) != self.depth) continue;
+                        if (dynamicEnvObjectRank(cv.var_name) == self.rank) return idx;
+                    }
+                    self.rank += 1;
+                    self.next_idx = 0;
+                }
+                self.depth += 1;
+                self.rank = 0;
+                self.next_idx = 0;
+            }
+            return null;
+        }
+    };
+
+    const LocalWithProbeIterator = struct {
+        fd: ?*const function_def_mod.FunctionDef,
+        atom_id: atom.Atom,
+        scope_idx: i32,
+        next_var_idx: i32,
+
+        fn init(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) LocalWithProbeIterator {
+            const fd = ctx.function_def;
+            const first = if (fd) |def|
+                if (scope_level >= 0 and @as(usize, @intCast(scope_level)) < def.scopes.len)
+                    def.scopes[@intCast(scope_level)].first
+                else
+                    -1
+            else
+                -1;
+            return .{ .fd = fd, .atom_id = atom_id, .scope_idx = scope_level, .next_var_idx = first };
+        }
+
+        fn next(self: *LocalWithProbeIterator) ?u16 {
+            const fd = self.fd orelse return null;
+            while (self.scope_idx >= 0 and @as(usize, @intCast(self.scope_idx)) < fd.scopes.len) {
+                if (self.next_var_idx < 0) {
+                    self.scope_idx = fd.scopes[@intCast(self.scope_idx)].parent;
+                    self.next_var_idx = if (self.scope_idx >= 0 and @as(usize, @intCast(self.scope_idx)) < fd.scopes.len)
+                        fd.scopes[@intCast(self.scope_idx)].first
+                    else
+                        -1;
+                    continue;
+                }
+                const idx = self.next_var_idx;
+                if (@as(usize, @intCast(idx)) >= fd.vars.len) return null;
+                const vd = fd.vars[@intCast(idx)];
+                self.next_var_idx = vd.scope_next;
+                if (vd.var_name == self.atom_id) {
+                    self.scope_idx = -1;
+                    return null;
+                }
+                if (vd.var_name == atom.ids.with_object) return @intCast(idx);
+            }
+            return null;
+        }
+    };
+
+    fn staticBindingStopsDynamicEnvProbes(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) bool {
+        if (lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level) != null) return true;
+        const binding = resolveLocalOrArg(ctx, atom_id, scope_level) orelse return false;
+        return switch (binding) {
+            .arg => true,
+            .local => |loc_idx| !isEvalNonLexicalLocal(ctx, loc_idx),
+        };
+    }
+
+    const EvalVarObjectProbeKind = enum {
+        read,
+        delete,
+        put,
+        get_ref,
+        make_ref,
+
+        fn matches(self: EvalVarObjectProbeKind, op_id: u8) bool {
+            return switch (self) {
+                .read => op_id == opcode.op.scope_get_var or op_id == opcode.op.scope_get_var_undef,
+                .delete => op_id == opcode.op.scope_delete_var,
+                .put => op_id == opcode.op.scope_put_var,
+                .get_ref => op_id == opcode.op.scope_get_ref,
+                .make_ref => op_id == opcode.op.scope_make_ref,
+            };
+        }
+
+        fn probeOpcode(self: EvalVarObjectProbeKind) u8 {
+            return switch (self) {
+                .read => opcode.op.with_get_var,
+                .delete => opcode.op.with_delete_var,
+                .put => opcode.op.with_put_var,
+                .get_ref => opcode.op.with_get_ref,
+                .make_ref => opcode.op.with_make_ref,
+            };
+        }
+    };
+
+    const EvalVarObjectProbePlan = struct {
+        count: usize = 0,
+        prefix_size: usize = 0,
+    };
+
+    fn evalVarObjectProbePlan(
+        ctx: *const JSContext,
+        atom_id: atom.Atom,
+        scope_level: i32,
+        op_id: u8,
+        kind: EvalVarObjectProbeKind,
+    ) ?EvalVarObjectProbePlan {
+        if (!kind.matches(op_id) or scope_level < 0 or isDynamicEnvObjectAtom(atom_id)) return null;
+        // Eval completion is an implementation-local frame slot. It must never
+        // consult with/Proxy or a variable object, even when those environments
+        // precede ordinary user bindings at the call site.
+        if (atom_id == atom.ids.ret) return null;
+        const fd = ctx.function_def orelse return null;
+        const probe_op = kind.probeOpcode();
+        var plan = EvalVarObjectProbePlan{};
+        var with_iter = LocalWithProbeIterator.init(ctx, atom_id, scope_level);
+        while (with_iter.next()) |idx| {
+            plan.count += 1;
+            plan.prefix_size += evalVarObjectProbeAccessorSize(ctx, .{ .with_local = idx }) + opcode.sizeOf(probe_op);
+        }
+        if (staticBindingStopsDynamicEnvProbes(ctx, atom_id, scope_level)) {
+            return if (plan.count == 0) null else plan;
+        }
+        // A variable object may acquire any free name from a later direct eval;
+        // probe eligibility therefore depends on environment order, not on the
+        // current eval unit's hoisted-name list.
+        if (!scopeUsesArgumentEnvironmentOnly(fd, scope_level) and fd.var_object_idx >= 0) {
+            plan.count += 1;
+            plan.prefix_size += evalVarObjectProbeAccessorSize(ctx, .{ .local = @intCast(fd.var_object_idx) }) + opcode.sizeOf(probe_op);
+        }
+        if (fd.arg_var_object_idx >= 0) {
+            plan.count += 1;
+            plan.prefix_size += evalVarObjectProbeAccessorSize(ctx, .{ .local = @intCast(fd.arg_var_object_idx) }) + opcode.sizeOf(probe_op);
+        }
+        var closure_iter = ClosureDynamicEnvProbeIterator.init(ctx, atom_id);
+        while (closure_iter.next()) |idx| {
+            plan.count += 1;
+            plan.prefix_size += evalVarObjectProbeAccessorSize(ctx, evalVarObjectClosureProbe(fd.closure_var[idx], idx)) + opcode.sizeOf(probe_op);
+        }
+        return if (plan.count == 0) null else plan;
+    }
+
+    fn evalVarObjectProbeAccessorSize(ctx: *const JSContext, probe: EvalVarObjectProbe) usize {
+        return switch (probe) {
+            .local, .with_local => |idx| selectLocForm(ctx, opcode.op.get_loc, idx).size,
+            .ref, .with_ref => |idx| selectVarRefForm(ctx, opcode.op.get_var_ref, idx).size,
+        };
+    }
+
+    fn evalVarObjectProbeIsWith(probe: EvalVarObjectProbe) bool {
+        return switch (probe) {
+            .with_local, .with_ref => true,
+            .local, .ref => false,
+        };
+    }
+
+    fn evalVarObjectPutProbeMode(probe: EvalVarObjectProbe) opcode.WithPutMode {
+        return if (evalVarObjectProbeIsWith(probe)) .with_probe else .var_object_probe;
+    }
+
+    fn evalVarObjectClosureProbe(cv: function_def_mod.ClosureVar, idx: usize) EvalVarObjectProbe {
+        return if (cv.var_name == atom.ids.with_object)
+            .{ .with_ref = @intCast(idx) }
+        else
+            .{ .ref = @intCast(idx) };
+    }
+
+    fn loweredScopeDeleteVarSize(ctx: *const JSContext, atom_id: u32, scope_level: i32) usize {
+        if (resolveScopeVar(ctx, atom_id, scope_level)) |loc_idx| {
+            return if (isEvalNonLexicalLocal(ctx, loc_idx)) 5 else 1;
+        }
+        if (lookupArg(ctx, atom_id) != null or lookupClosureVar(ctx, atom_id) != null) return 1;
+        return 5;
+    }
+
+    fn loweredScopeGetRefSize(ctx: *const JSContext, atom_id: u32, scope_level: i32) usize {
+        if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| return switch (binding) {
+            .arg => |arg_idx| 1 + selectArgForm(ctx, opcode.op.get_arg, arg_idx).size,
+            .local => |loc_idx| if (isEvalNonLexicalLocal(ctx, loc_idx))
+                1 + 3
+            else if (isLexicalLocal(ctx, loc_idx))
+                1 + 3
+            else
+                1 + selectLocForm(ctx, opcode.op.get_loc, loc_idx).size,
+        };
+        if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
+            return 1 + selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx).size;
+        }
+        return 1 + 3;
+    }
+
+    fn loweredScopeMakeRefSize(ctx: *const JSContext, atom_id: u32, scope_level: i32) usize {
+        if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| return switch (binding) {
+            .arg => 7,
+            .local => |loc_idx| if (isEvalNonLexicalLocal(ctx, loc_idx)) 5 else 7,
+        };
+        if (lookupClosureVar(ctx, atom_id) != null) {
+            return if (closureVarWriteThrowsReadOnly(ctx, atom_id)) throw_error_instr_size else 7;
+        }
+        return 5;
+    }
+
+    fn evalVarObjectProbeFallbackSize(ctx: *const JSContext, atom_id: u32, scope_level: i32, op_id: u8) Error!usize {
+        if (scope_level < 0) return 3;
+        if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| switch (binding) {
+            .local => |loc_idx| if (isEvalNonLexicalLocal(ctx, loc_idx)) return 3,
+            .arg => {},
+        };
+        if (lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level)) |ref_idx| {
+            if (op_id == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, atom_id)) return throw_error_instr_size;
+            const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op_id);
+            return selectVarRefForm(ctx, ref_op, ref_idx).size;
+        }
+        if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
+            if (op_id == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, atom_id)) return throw_error_instr_size;
+            const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op_id);
+            return selectVarRefForm(ctx, ref_op, ref_idx).size;
+        }
+        return 3;
+    }
+
+    fn writeEvalVarObjectProbeAccessor(ctx: *const JSContext, output: []u8, out_idx: *usize, probe: EvalVarObjectProbe) Error!void {
+        switch (probe) {
+            .local, .with_local => |idx| {
+                const form = selectLocForm(ctx, opcode.op.get_loc, idx);
+                if (out_idx.* + form.size > output.len) return error.InvalidBytecode;
+                output[out_idx.*] = form.op_id;
+                switch (form.operand_size) {
+                    0 => {},
+                    1 => output[out_idx.* + 1] = @intCast(idx),
+                    2 => std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], idx, .little),
+                    else => unreachable,
+                }
+                out_idx.* += form.size;
+            },
+            .ref, .with_ref => |idx| {
+                const form = selectVarRefForm(ctx, opcode.op.get_var_ref, idx);
+                if (out_idx.* + form.size > output.len) return error.InvalidBytecode;
+                output[out_idx.*] = form.op_id;
+                switch (form.operand_size) {
+                    0 => {},
+                    2 => std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], idx, .little),
+                    else => unreachable,
+                }
+                out_idx.* += form.size;
+            },
+        }
+    }
+
+    fn writeDynamicEnvProbe(
+        ctx: *const JSContext,
+        func: *bytecode_function.Bytecode,
+        output: []u8,
+        out_idx: *usize,
+        output_atoms: []atom.Atom,
+        out_atom_idx: *usize,
+        atom_id: u32,
+        probe: EvalVarObjectProbe,
+        probe_op: u8,
+        done_pc: usize,
+    ) Error!void {
+        try writeEvalVarObjectProbeAccessor(ctx, output, out_idx, probe);
+        if (out_idx.* + opcode.sizeOf(probe_op) > output.len) return error.InvalidBytecode;
+        if (done_pc > std.math.maxInt(u32)) return error.InvalidBytecode;
+        if (out_atom_idx.* >= output_atoms.len) return error.InvalidBytecode;
+        output[out_idx.*] = probe_op;
+        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+        std.mem.writeInt(u32, output[out_idx.* + 5 ..][0..4], @intCast(done_pc), .little);
+        output[out_idx.* + 9] = if (probe_op == opcode.op.with_put_var)
+            @intFromEnum(evalVarObjectPutProbeMode(probe))
+        else
+            @intFromBool(evalVarObjectProbeIsWith(probe));
+        output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+        out_atom_idx.* += 1;
+        out_idx.* += opcode.sizeOf(probe_op);
+    }
+
+    fn writeDynamicEnvProbes(
+        ctx: *const JSContext,
+        func: *bytecode_function.Bytecode,
+        output: []u8,
+        out_idx: *usize,
+        output_atoms: []atom.Atom,
+        out_atom_idx: *usize,
+        atom_id: u32,
+        scope_level: i32,
+        probe_op: u8,
+        done_pc: usize,
+    ) Error!void {
+        const fd = ctx.function_def orelse return;
+        var with_iter = LocalWithProbeIterator.init(ctx, atom_id, scope_level);
+        while (with_iter.next()) |idx| {
+            try writeDynamicEnvProbe(ctx, func, output, out_idx, output_atoms, out_atom_idx, atom_id, .{ .with_local = idx }, probe_op, done_pc);
+        }
+        if (staticBindingStopsDynamicEnvProbes(ctx, atom_id, scope_level)) return;
+        if (!scopeUsesArgumentEnvironmentOnly(fd, scope_level) and fd.var_object_idx >= 0) {
+            try writeDynamicEnvProbe(ctx, func, output, out_idx, output_atoms, out_atom_idx, atom_id, .{ .local = @intCast(fd.var_object_idx) }, probe_op, done_pc);
+        }
+        if (fd.arg_var_object_idx >= 0) {
+            try writeDynamicEnvProbe(ctx, func, output, out_idx, output_atoms, out_atom_idx, atom_id, .{ .local = @intCast(fd.arg_var_object_idx) }, probe_op, done_pc);
+        }
+        var closure_iter = ClosureDynamicEnvProbeIterator.init(ctx, atom_id);
+        while (closure_iter.next()) |idx| {
+            const cv = fd.closure_var[idx];
+            try writeDynamicEnvProbe(ctx, func, output, out_idx, output_atoms, out_atom_idx, atom_id, evalVarObjectClosureProbe(cv, idx), probe_op, done_pc);
+        }
+    }
+
+    fn writeLoweredScopeDeleteVar(
+        ctx: *const JSContext,
+        func: *bytecode_function.Bytecode,
+        output: []u8,
+        out_idx: *usize,
+        output_atoms: []atom.Atom,
+        out_atom_idx: *usize,
+        atom_id: u32,
+        scope_level: i32,
+    ) Error!void {
+        if (resolveScopeVar(ctx, atom_id, scope_level)) |loc_idx| {
+            if (isEvalNonLexicalLocal(ctx, loc_idx)) {
+                output[out_idx.*] = opcode.op.delete_var;
+                std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+                output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+                out_idx.* += 5;
+                out_atom_idx.* += 1;
+            } else {
+                output[out_idx.*] = opcode.op.push_false;
+                out_idx.* += 1;
+            }
+        } else if (lookupArg(ctx, atom_id) != null or lookupClosureVar(ctx, atom_id) != null) {
+            output[out_idx.*] = opcode.op.push_false;
+            out_idx.* += 1;
+        } else {
+            output[out_idx.*] = opcode.op.delete_var;
+            std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+            output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+            out_idx.* += 5;
+            out_atom_idx.* += 1;
+        }
+    }
+
+    fn writeLoweredScopeGetRef(
+        ctx: *JSContext,
+        output: []u8,
+        out_idx: *usize,
+        atom_id: u32,
+        scope_level: i32,
+    ) Error!void {
+        output[out_idx.*] = opcode.op.undefined;
+        out_idx.* += 1;
+        if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| switch (binding) {
+            .arg => |arg_idx| {
+                const form = selectArgForm(ctx, opcode.op.get_arg, arg_idx);
+                output[out_idx.*] = form.op_id;
+                switch (form.operand_size) {
+                    0 => {},
+                    2 => std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], arg_idx, .little),
+                    else => unreachable,
+                }
+                out_idx.* += form.size;
+            },
+            .local => |loc_idx| {
+                if (isEvalNonLexicalLocal(ctx, loc_idx)) {
+                    try emitGlobalVarOp(ctx, output, out_idx, opcode.op.get_var, atom_id);
+                } else if (isLexicalLocal(ctx, loc_idx)) {
+                    output[out_idx.*] = opcode.op.get_loc_check;
+                    std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], loc_idx, .little);
+                    out_idx.* += 3;
+                } else {
+                    const form = selectLocForm(ctx, opcode.op.get_loc, loc_idx);
+                    output[out_idx.*] = form.op_id;
+                    switch (form.operand_size) {
+                        0 => {},
+                        1 => output[out_idx.* + 1] = @intCast(loc_idx),
+                        2 => std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], loc_idx, .little),
+                        else => unreachable,
+                    }
+                    out_idx.* += form.size;
+                }
+            },
+        } else if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
+            const form = selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx);
+            output[out_idx.*] = form.op_id;
+            switch (form.operand_size) {
+                0 => {},
+                2 => std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], ref_idx, .little),
+                else => unreachable,
+            }
+            out_idx.* += form.size;
+        } else {
+            try emitGlobalVarOp(ctx, output, out_idx, opcode.op.get_var, atom_id);
+        }
+    }
+
+    fn writeLoweredScopeMakeRef(
+        ctx: *const JSContext,
+        func: *bytecode_function.Bytecode,
+        output: []u8,
+        out_idx: *usize,
+        output_atoms: []atom.Atom,
+        out_atom_idx: *usize,
+        atom_id: u32,
+        scope_level: i32,
+    ) Error!void {
+        if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| switch (binding) {
+            .arg => |arg_idx| {
+                output[out_idx.*] = opcode.op.make_arg_ref;
+                std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+                std.mem.writeInt(u16, output[out_idx.* + 5 ..][0..2], arg_idx, .little);
+                output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+                out_idx.* += 7;
+                out_atom_idx.* += 1;
+            },
+            .local => |loc_idx| {
+                if (isEvalNonLexicalLocal(ctx, loc_idx)) {
+                    output[out_idx.*] = opcode.op.make_var_ref;
+                    std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+                    output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+                    out_idx.* += 5;
+                    out_atom_idx.* += 1;
+                } else {
+                    output[out_idx.*] = opcode.op.make_loc_ref;
+                    std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+                    std.mem.writeInt(u16, output[out_idx.* + 5 ..][0..2], loc_idx, .little);
+                    output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+                    out_idx.* += 7;
+                    out_atom_idx.* += 1;
+                }
+            },
+        } else if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
+            if (closureVarWriteThrowsReadOnly(ctx, atom_id)) {
+                writeThrowVarReadOnly(func, output, out_idx, output_atoms, out_atom_idx, atom_id);
+            } else {
+                output[out_idx.*] = opcode.op.make_var_ref_ref;
+                std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+                std.mem.writeInt(u16, output[out_idx.* + 5 ..][0..2], ref_idx, .little);
+                output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+                out_idx.* += 7;
+                out_atom_idx.* += 1;
+            }
+        } else {
+            output[out_idx.*] = opcode.op.make_var_ref;
+            std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+            output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+            out_idx.* += 5;
+            out_atom_idx.* += 1;
+        }
+    }
+
     /// True iff the local at `loc_idx` is a lexical (`let`/`const`) var
     /// — these need TDZ check variants. `var` slots return false (var
     /// is hoisted and starts as `undefined`, no TDZ).
@@ -3704,8 +4406,19 @@ pub const pipeline_resolve_variables = struct {
     fn isEvalNonLexicalLocal(ctx: *const JSContext, loc_idx: u16) bool {
         const fd = ctx.function_def orelse return false;
         if (!fd.is_eval and !bytecodeFunctionIsEval(ctx)) return false;
+        if (fd.is_strict_mode or ctx.function.flags.is_strict) return false;
         if (loc_idx >= fd.vars.len) return false;
-        return !fd.vars[loc_idx].is_lexical;
+        const vd = fd.vars[loc_idx];
+        // `<ret>` is the eval engine's private completion slot, not a
+        // user-declared `var`. It must remain frame-local even in sloppy eval;
+        // publishing it as a global/eval binding makes direct eval depend on
+        // whether its caller happened to request a script completion value.
+        if (vd.var_name == atom.ids.ret) return false;
+        if (vd.scope_level != 0 or vd.is_lexical) return false;
+        return vd.var_kind == .normal or
+            vd.var_kind == .function_decl or
+            vd.var_kind == .new_function_decl or
+            vd.var_kind == .eval_var_object;
     }
 
     fn bytecodeFunctionIsEval(ctx: *const JSContext) bool {
@@ -3917,6 +4630,48 @@ pub const pipeline_resolve_variables = struct {
         return !functionIsStrict(ctx) or functionDeclaresGlobalVar(ctx, atom_id);
     }
 
+    fn closureVarIsEvalDeclarationBinding(cv: function_def_mod.ClosureVar) bool {
+        return switch (cv.closure_type) {
+            .local, .arg, .ref => true,
+            .global, .global_ref, .global_decl, .module_decl, .module_import => false,
+        };
+    }
+
+    /// Resolve each eval hoist against the finalized closure order. Dynamic
+    /// environment objects and real bindings deliberately share one ordered
+    /// walk: the first applicable entry is the declaration environment.
+    fn resolveEvalGlobalVarTargets(fd: *function_def_mod.FunctionDef) Error!void {
+        for (fd.global_vars) |*gv| {
+            gv.eval_var_object_fallback = null;
+            if (!fd.is_eval) {
+                gv.eval_target = .global;
+                continue;
+            }
+
+            gv.eval_target = .global;
+            var matched_catch_binding = false;
+            for (fd.closure_var, 0..) |cv, idx| {
+                if (cv.var_name == atom.ids.with_object) continue;
+                if (!matched_catch_binding and cv.var_name == gv.var_name and closureVarIsEvalDeclarationBinding(cv)) {
+                    if (idx > std.math.maxInt(u16)) return error.InvalidBytecode;
+                    gv.eval_target = .{ .closure = @intCast(idx) };
+                    if (cv.var_kind != .catch_) break;
+                    matched_catch_binding = true;
+                    continue;
+                }
+                if (isEvalVarObjectAtom(cv.var_name) and closureVarIsRuntimeVarRef(cv)) {
+                    if (idx > std.math.maxInt(u16)) return error.InvalidBytecode;
+                    if (matched_catch_binding) {
+                        gv.eval_var_object_fallback = @intCast(idx);
+                    } else {
+                        gv.eval_target = .{ .var_object = @intCast(idx) };
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     pub fn run(ctx: *JSContext) !void {
         const func = ctx.function;
 
@@ -3991,15 +4746,15 @@ pub const pipeline_resolve_variables = struct {
                     if (pc + 5 > func.code.len) return error.InvalidBytecode;
                     pc += 5;
                 } else if (op == opcode.op.apply_eval) {
-                    if (pc + 2 > func.code.len) return error.InvalidBytecode;
-                    pc += 2;
+                    if (pc + APPLY_EVAL_SIZE > func.code.len) return error.InvalidBytecode;
+                    pc += APPLY_EVAL_SIZE;
                 } else if (op == opcode.op.line_num) {
                     if (pc + 5 > func.code.len) return error.InvalidBytecode;
                     pc += 5;
                 } else if (isScopeVarOp(op)) {
                     if (pc + 7 > func.code.len) return error.InvalidBytecode;
                     const atom_id = std.mem.readInt(u32, func.code[pc + 1 ..][0..4], .little);
-                    const scope_level = std.mem.readInt(i16, func.code[pc + 5 ..][0..2], .little);
+                    const scope_level = decodeScopeOperand(func.code[pc + 5 ..][0..2]).level;
                     if (op == opcode.op.scope_put_var_init) {
                         if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| switch (binding) {
                             .local => |loc_idx| {
@@ -4050,7 +4805,7 @@ pub const pipeline_resolve_variables = struct {
                 if (op == opcode.op.eval) {
                     size = 5;
                 } else if (op == opcode.op.apply_eval) {
-                    size = 2;
+                    size = APPLY_EVAL_SIZE;
                 } else if (op == opcode.op.line_num) {
                     size = 5;
                 } else if (isScopeVarOp(op)) {
@@ -4125,7 +4880,9 @@ pub const pipeline_resolve_variables = struct {
                 i += (decodeGlobalRefPutTail(func.code, i) orelse return error.InvalidBytecode).original_size;
                 continue;
             }
-            // Handle OP_eval and OP_apply_eval scope_idx rewrite (mirrors quickjs.c:33690-33702)
+            // Validate OP_eval and OP_apply_eval scope_idx while preserving the
+            // parser's call-site scope. zjs keeps scope parent metadata on the
+            // finalized bytecode so eval_ops can filter visible locals precisely.
             if (op == opcode.op.eval) {
                 if (i + 5 > func.code.len) return error.InvalidBytecode;
                 // Format: call_argc (u16) + scope_idx (u16)
@@ -4133,7 +4890,6 @@ pub const pipeline_resolve_variables = struct {
                 const raw_scope_idx = std.mem.readInt(u16, func.code[i + 3 ..][0..2], .little);
                 const scope_idx = raw_scope_idx & EVAL_SCOPE_INDEX_MASK;
 
-                // Rewrite scope_idx to s->scopes[scope].first + 1
                 const fd = ctx.function_def orelse {
                     // If no FunctionDef, copy through as-is
                     output_size += 5;
@@ -4141,9 +4897,6 @@ pub const pipeline_resolve_variables = struct {
                     continue;
                 };
                 if (@as(usize, @intCast(scope_idx)) < fd.scopes.len) {
-                    // Direct-eval-visible bindings are materialized by the parser
-                    // and VM eval overlay; this pass only remaps the scope index.
-                    _ = fd.scopes[@intCast(scope_idx)].first + 1; // new_scope_idx
                     output_size += 5;
                     i += 5;
                     continue;
@@ -4154,29 +4907,25 @@ pub const pipeline_resolve_variables = struct {
                     continue;
                 }
             } else if (op == opcode.op.apply_eval) {
-                if (i + 2 > func.code.len) return error.InvalidBytecode;
+                if (i + APPLY_EVAL_SIZE > func.code.len) return error.InvalidBytecode;
                 // Format: scope_idx (u16)
                 const raw_scope_idx = std.mem.readInt(u16, func.code[i + 1 ..][0..2], .little);
                 const scope_idx = raw_scope_idx & EVAL_SCOPE_INDEX_MASK;
 
-                // Rewrite scope_idx to s->scopes[scope].first + 1
                 const fd = ctx.function_def orelse {
                     // If no FunctionDef, copy through as-is
-                    output_size += 2;
-                    i += 2;
+                    output_size += APPLY_EVAL_SIZE;
+                    i += APPLY_EVAL_SIZE;
                     continue;
                 };
                 if (@as(usize, @intCast(scope_idx)) < fd.scopes.len) {
-                    // Direct-eval-visible bindings are materialized by the parser
-                    // and VM eval overlay; this pass only remaps the scope index.
-                    _ = fd.scopes[@intCast(scope_idx)].first + 1; // new_scope_idx
-                    output_size += 2;
-                    i += 2;
+                    output_size += APPLY_EVAL_SIZE;
+                    i += APPLY_EVAL_SIZE;
                     continue;
                 } else {
                     // Invalid scope_idx, copy through as-is
-                    output_size += 2;
-                    i += 2;
+                    output_size += APPLY_EVAL_SIZE;
+                    i += APPLY_EVAL_SIZE;
                     continue;
                 }
             } else if (op == opcode.op.line_num) {
@@ -4186,7 +4935,18 @@ pub const pipeline_resolve_variables = struct {
             } else if (isScopeVarOp(op)) {
                 if (i + 7 > func.code.len) return error.InvalidBytecode;
                 const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
-                const scope_level = std.mem.readInt(i16, func.code[i + 5 ..][0..2], .little);
+                const scope_operand = decodeScopeOperand(func.code[i + 5 ..][0..2]);
+                const scope_level = scope_operand.level;
+                if (!scope_operand.no_dynamic_env) {
+                    if (evalVarObjectProbePlan(ctx, atom_id, scope_level, op, .put)) |probe| {
+                        output_size += probe.prefix_size;
+                        output_atom_count += probe.count;
+                    }
+                }
+                if (evalVarObjectProbePlan(ctx, atom_id, scope_level, op, .read)) |probe| {
+                    output_size += probe.prefix_size;
+                    output_atom_count += probe.count;
+                }
                 if (scope_level < 0) {
                     output_size += 3;
                 } else if (lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level)) |ref_idx| {
@@ -4206,7 +4966,9 @@ pub const pipeline_resolve_variables = struct {
                         output_size += form.size;
                     },
                     .local => |loc_idx| {
-                        if (preferTopLevelModuleClassBinding(ctx, atom_id, loc_idx)) |ref_idx| {
+                        if (isEvalNonLexicalLocal(ctx, loc_idx)) {
+                            output_size += 3;
+                        } else if (preferTopLevelModuleClassBinding(ctx, atom_id, loc_idx)) |ref_idx| {
                             const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op);
                             const form = selectVarRefForm(ctx, ref_op, ref_idx);
                             output_size += form.size;
@@ -4270,7 +5032,9 @@ pub const pipeline_resolve_variables = struct {
                 if (i + 11 > func.code.len) return error.InvalidBytecode;
                 const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
                 const scope_level = std.mem.readInt(i16, func.code[i + 9 ..][0..2], .little);
-                if (canOptimizeGlobalRefPutTail(ctx, atom_id) and scopeMakeRefResolvesToGlobal(ctx, atom_id, scope_level)) {
+                const eval_probe = evalVarObjectProbePlan(ctx, atom_id, scope_level, op, .make_ref);
+                const needs_eval_probe = eval_probe != null;
+                if (!needs_eval_probe and canOptimizeGlobalRefPutTail(ctx, atom_id) and scopeMakeRefResolvesToGlobal(ctx, atom_id, scope_level)) {
                     if (findGlobalRefPutTail(func.code, i)) |tail| {
                         if (tail.pc < global_ref_tail_kinds.len and global_ref_tail_kinds[tail.pc] == GLOBAL_REF_TAIL_NONE) {
                             global_ref_tail_atoms[tail.pc] = atom_id;
@@ -4281,25 +5045,12 @@ pub const pipeline_resolve_variables = struct {
                         }
                     }
                 }
-                if (resolveLocalOrArg(ctx, atom_id, scope_level) != null) {
-                    output_size += 7;
-                    output_atom_count += 1;
-                } else if (lookupClosureVar(ctx, atom_id) != null) {
-                    if (closureVarWriteThrowsReadOnly(ctx, atom_id)) {
-                        // qjs resolve_scope_var has_idx also covers
-                        // OP_scope_make_ref (quickjs.c:33301-33306): a
-                        // reference to a const closure var compiles to the
-                        // read-only throw.
-                        output_size += throw_error_instr_size;
-                        output_atom_count += 1;
-                    } else {
-                        output_size += 7;
-                        output_atom_count += 1;
-                    }
-                } else {
-                    output_size += 5;
-                    output_atom_count += 1;
+                if (eval_probe) |probe| {
+                    output_size += probe.prefix_size;
+                    output_atom_count += probe.count;
                 }
+                output_size += loweredScopeMakeRefSize(ctx, atom_id, scope_level);
+                output_atom_count += 1;
                 scan_atom_idx += 1;
                 i += 11;
             } else if (isScopeRefOp(op)) {
@@ -4308,49 +5059,19 @@ pub const pipeline_resolve_variables = struct {
                 const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
                 const scope_level = std.mem.readInt(i16, func.code[i + 5 ..][0..2], .little);
                 if (op == opcode.op.scope_delete_var) {
-                    if (resolveScopeVar(ctx, atom_id, scope_level)) |loc_idx| {
-                        if (isEvalNonLexicalLocal(ctx, loc_idx)) {
-                            // Eval-created `var` bindings are deletable environment
-                            // bindings; keep a dynamic delete so the VM can remove
-                            // the var-ref cell.
-                            output_size += 5;
-                            output_atom_count += 1;
-                        } else {
-                            // Local var: delete returns false (1 byte).
-                            output_size += 1;
-                        }
-                    } else if (lookupArg(ctx, atom_id) != null or lookupClosureVar(ctx, atom_id) != null) {
-                        // Local / arg / closure var: delete returns false (1 byte).
-                        output_size += 1;
-                    } else {
-                        // Global: OP_delete_var <atom> (5 bytes + 1 atom).
-                        output_size += 5;
-                        output_atom_count += 1;
+                    if (evalVarObjectProbePlan(ctx, atom_id, scope_level, op, .delete)) |probe| {
+                        output_size += probe.prefix_size;
+                        output_atom_count += probe.count;
                     }
+                    const delete_size = loweredScopeDeleteVarSize(ctx, atom_id, scope_level);
+                    output_size += delete_size;
+                    if (delete_size == 5) output_atom_count += 1;
                 } else if (op == opcode.op.scope_get_ref) {
-                    if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| switch (binding) {
-                        .arg => |arg_idx| {
-                            // OP_undefined (1) + OP_get_arg/short (1-3).
-                            const form = selectArgForm(ctx, opcode.op.get_arg, arg_idx);
-                            output_size += 1 + form.size;
-                        },
-                        .local => |loc_idx| {
-                            // OP_undefined (1) + OP_get_loc/short (1-3).
-                            if (isLexicalLocal(ctx, loc_idx)) {
-                                output_size += 1 + 3; // undefined + get_loc_check
-                            } else {
-                                const form = selectLocForm(ctx, opcode.op.get_loc, loc_idx);
-                                output_size += 1 + form.size;
-                            }
-                        },
-                    } else if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
-                        // OP_undefined (1) + OP_get_var_ref (1-3).
-                        const form = selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx);
-                        output_size += 1 + form.size;
-                    } else {
-                        // Global: OP_undefined (1) + OP_get_var (3).
-                        output_size += 1 + 3;
+                    if (evalVarObjectProbePlan(ctx, atom_id, scope_level, op, .get_ref)) |probe| {
+                        output_size += probe.prefix_size;
+                        output_atom_count += probe.count;
                     }
+                    output_size += loweredScopeGetRefSize(ctx, atom_id, scope_level);
                 }
                 scan_atom_idx += 1;
                 i += 7;
@@ -4426,7 +5147,7 @@ pub const pipeline_resolve_variables = struct {
             while (var_idx > 0) {
                 var_idx -= 1;
                 const v = fd.vars[var_idx];
-                if (!v.is_lexical or v.tdz_emitted_at_decl) continue;
+                if (!v.is_lexical or v.tdz_emitted_at_decl or var_idx == fd.arguments_arg_idx) continue;
                 output[out_idx] = opcode.op.set_loc_uninitialized;
                 std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], @intCast(var_idx), .little);
                 out_idx += 3;
@@ -4507,7 +5228,10 @@ pub const pipeline_resolve_variables = struct {
                 i += (decodeGlobalRefPutTail(func.code, i) orelse return error.InvalidBytecode).original_size;
                 continue;
             }
-            // Handle OP_eval and OP_apply_eval scope_idx rewrite (mirrors quickjs.c:33690-33702)
+            // Preserve OP_eval / OP_apply_eval's call-site scope index. QuickJS
+            // rewrites this operand to a var-chain head; zjs keeps the scope index
+            // and stores scope parent metadata on FunctionBytecode so eval_ops can
+            // seed exactly the environments visible at the actual call site.
             if (op == opcode.op.eval) {
                 if (i + 5 > func.code.len) return error.InvalidBytecode;
                 const call_argc = std.mem.readInt(u16, func.code[i + 1 ..][0..2], .little);
@@ -4523,12 +5247,9 @@ pub const pipeline_resolve_variables = struct {
                     continue;
                 };
                 if (@as(usize, @intCast(scope_idx)) < fd.scopes.len) {
-                    // Direct-eval-visible bindings are materialized by the parser
-                    // and VM eval overlay; this pass only remaps the scope index.
-                    const new_scope_idx: u16 = @intCast(fd.scopes[@intCast(scope_idx)].first + 1);
                     output[out_idx] = opcode.op.eval;
                     std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], call_argc, .little);
-                    std.mem.writeInt(u16, output[out_idx + 3 ..][0..2], new_scope_idx | scope_flags, .little);
+                    std.mem.writeInt(u16, output[out_idx + 3 ..][0..2], scope_idx | scope_flags, .little);
                     out_idx += 5;
                     i += 5;
                     continue;
@@ -4540,32 +5261,29 @@ pub const pipeline_resolve_variables = struct {
                     continue;
                 }
             } else if (op == opcode.op.apply_eval) {
-                if (i + 2 > func.code.len) return error.InvalidBytecode;
+                if (i + APPLY_EVAL_SIZE > func.code.len) return error.InvalidBytecode;
                 const raw_scope_idx = std.mem.readInt(u16, func.code[i + 1 ..][0..2], .little);
                 const scope_idx = raw_scope_idx & EVAL_SCOPE_INDEX_MASK;
                 const scope_flags = raw_scope_idx & ~EVAL_SCOPE_INDEX_MASK;
 
                 const fd = ctx.function_def orelse {
                     // If no FunctionDef, copy through as-is
-                    @memcpy(output[out_idx .. out_idx + 2], func.code[i .. i + 2]);
-                    out_idx += 2;
-                    i += 2;
+                    @memcpy(output[out_idx .. out_idx + APPLY_EVAL_SIZE], func.code[i .. i + APPLY_EVAL_SIZE]);
+                    out_idx += APPLY_EVAL_SIZE;
+                    i += APPLY_EVAL_SIZE;
                     continue;
                 };
                 if (@as(usize, @intCast(scope_idx)) < fd.scopes.len) {
-                    // Direct-eval-visible bindings are materialized by the parser
-                    // and VM eval overlay; this pass only remaps the scope index.
-                    const new_scope_idx: u16 = @intCast(fd.scopes[@intCast(scope_idx)].first + 1);
                     output[out_idx] = opcode.op.apply_eval;
-                    std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], new_scope_idx | scope_flags, .little);
-                    out_idx += 2;
-                    i += 2;
+                    std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], scope_idx | scope_flags, .little);
+                    out_idx += APPLY_EVAL_SIZE;
+                    i += APPLY_EVAL_SIZE;
                     continue;
                 } else {
                     // Invalid scope_idx, copy through as-is
-                    @memcpy(output[out_idx .. out_idx + 2], func.code[i .. i + 2]);
-                    out_idx += 2;
-                    i += 2;
+                    @memcpy(output[out_idx .. out_idx + APPLY_EVAL_SIZE], func.code[i .. i + APPLY_EVAL_SIZE]);
+                    out_idx += APPLY_EVAL_SIZE;
+                    i += APPLY_EVAL_SIZE;
                     continue;
                 }
             } else if (op == opcode.op.line_num) {
@@ -4575,7 +5293,20 @@ pub const pipeline_resolve_variables = struct {
             } else if (isScopeVarOp(op)) {
                 if (i + 7 > func.code.len) return error.InvalidBytecode;
                 const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
-                const scope_level = std.mem.readInt(i16, func.code[i + 5 ..][0..2], .little);
+                const scope_operand = decodeScopeOperand(func.code[i + 5 ..][0..2]);
+                const scope_level = scope_operand.level;
+                if (!scope_operand.no_dynamic_env) {
+                    if (evalVarObjectProbePlan(ctx, atom_id, scope_level, op, .put)) |probe| {
+                        const fallback_size = try evalVarObjectProbeFallbackSize(ctx, atom_id, scope_level, op);
+                        const done_pc = out_idx + probe.prefix_size + fallback_size;
+                        try writeDynamicEnvProbes(ctx, func, output, &out_idx, output_atoms, &out_atom_idx, atom_id, scope_level, opcode.op.with_put_var, done_pc);
+                    }
+                }
+                if (evalVarObjectProbePlan(ctx, atom_id, scope_level, op, .read)) |probe| {
+                    const fallback_size = try evalVarObjectProbeFallbackSize(ctx, atom_id, scope_level, op);
+                    const done_pc = out_idx + probe.prefix_size + fallback_size;
+                    try writeDynamicEnvProbes(ctx, func, output, &out_idx, output_atoms, &out_atom_idx, atom_id, scope_level, opcode.op.with_get_var, done_pc);
+                }
                 if (scope_level < 0) {
                     try emitGlobalVarOp(ctx, output, &out_idx, lowerScopeVarOpGlobal(op), atom_id);
                     in_atom_idx += 1;
@@ -4610,7 +5341,9 @@ pub const pipeline_resolve_variables = struct {
                         in_atom_idx += 1;
                     },
                     .local => |loc_idx| {
-                        if (preferTopLevelModuleClassBinding(ctx, atom_id, loc_idx)) |ref_idx| {
+                        if (isEvalNonLexicalLocal(ctx, loc_idx)) {
+                            try emitGlobalVarOp(ctx, output, &out_idx, lowerScopeVarOpGlobal(op), atom_id);
+                        } else if (preferTopLevelModuleClassBinding(ctx, atom_id, loc_idx)) |ref_idx| {
                             const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op);
                             const form = selectVarRefForm(ctx, ref_op, ref_idx);
                             output[out_idx] = form.op_id;
@@ -4699,7 +5432,9 @@ pub const pipeline_resolve_variables = struct {
                 if (i + 11 > func.code.len) return error.InvalidBytecode;
                 const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
                 const scope_level = std.mem.readInt(i16, func.code[i + 9 ..][0..2], .little);
-                if (canOptimizeGlobalRefPutTail(ctx, atom_id) and scopeMakeRefResolvesToGlobal(ctx, atom_id, scope_level)) {
+                const eval_probe = evalVarObjectProbePlan(ctx, atom_id, scope_level, op, .make_ref);
+                const needs_eval_probe = eval_probe != null;
+                if (!needs_eval_probe and canOptimizeGlobalRefPutTail(ctx, atom_id) and scopeMakeRefResolvesToGlobal(ctx, atom_id, scope_level)) {
                     if (findGlobalRefPutTail(func.code, i)) |tail| {
                         if (tail.pc < global_ref_tail_kinds.len and
                             global_ref_tail_kinds[tail.pc] != GLOBAL_REF_TAIL_NONE and
@@ -4711,43 +5446,12 @@ pub const pipeline_resolve_variables = struct {
                         }
                     }
                 }
-                if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| switch (binding) {
-                    .arg => |arg_idx| {
-                        output[out_idx] = opcode.op.make_arg_ref;
-                        std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], atom_id, .little);
-                        std.mem.writeInt(u16, output[out_idx + 5 ..][0..2], arg_idx, .little);
-                        output_atoms[out_atom_idx] = func.atoms.dup(atom_id);
-                        out_idx += 7;
-                        out_atom_idx += 1;
-                    },
-                    .local => |loc_idx| {
-                        output[out_idx] = opcode.op.make_loc_ref;
-                        std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], atom_id, .little);
-                        std.mem.writeInt(u16, output[out_idx + 5 ..][0..2], loc_idx, .little);
-                        output_atoms[out_atom_idx] = func.atoms.dup(atom_id);
-                        out_idx += 7;
-                        out_atom_idx += 1;
-                    },
-                } else if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
-                    if (closureVarWriteThrowsReadOnly(ctx, atom_id)) {
-                        // qjs resolve_scope_var has_idx also covers
-                        // OP_scope_make_ref (quickjs.c:33301-33306).
-                        writeThrowVarReadOnly(func, output, &out_idx, output_atoms, &out_atom_idx, atom_id);
-                    } else {
-                        output[out_idx] = opcode.op.make_var_ref_ref;
-                        std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], atom_id, .little);
-                        std.mem.writeInt(u16, output[out_idx + 5 ..][0..2], ref_idx, .little);
-                        output_atoms[out_atom_idx] = func.atoms.dup(atom_id);
-                        out_idx += 7;
-                        out_atom_idx += 1;
-                    }
-                } else {
-                    output[out_idx] = opcode.op.make_var_ref;
-                    std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], atom_id, .little);
-                    output_atoms[out_atom_idx] = func.atoms.dup(atom_id);
-                    out_idx += 5;
-                    out_atom_idx += 1;
+                if (eval_probe) |probe| {
+                    const fallback_size = loweredScopeMakeRefSize(ctx, atom_id, scope_level);
+                    const done_pc = out_idx + probe.prefix_size + fallback_size;
+                    try writeDynamicEnvProbes(ctx, func, output, &out_idx, output_atoms, &out_atom_idx, atom_id, scope_level, opcode.op.with_make_ref, done_pc);
                 }
+                try writeLoweredScopeMakeRef(ctx, func, output, &out_idx, output_atoms, &out_atom_idx, atom_id, scope_level);
                 in_atom_idx += 1;
                 i += 11;
             } else if (isScopeRefOp(op)) {
@@ -4755,72 +5459,20 @@ pub const pipeline_resolve_variables = struct {
                 const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
                 const scope_level = std.mem.readInt(i16, func.code[i + 5 ..][0..2], .little);
                 if (op == opcode.op.scope_delete_var) {
-                    if (resolveScopeVar(ctx, atom_id, scope_level)) |loc_idx| {
-                        if (isEvalNonLexicalLocal(ctx, loc_idx)) {
-                            output[out_idx] = opcode.op.delete_var;
-                            std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], atom_id, .little);
-                            output_atoms[out_atom_idx] = func.atoms.dup(atom_id);
-                            out_idx += 5;
-                            out_atom_idx += 1;
-                        } else {
-                            output[out_idx] = opcode.op.push_false;
-                            out_idx += 1;
-                        }
-                    } else if (lookupArg(ctx, atom_id) != null or lookupClosureVar(ctx, atom_id) != null) {
-                        output[out_idx] = opcode.op.push_false;
-                        out_idx += 1;
-                    } else {
-                        output[out_idx] = opcode.op.delete_var;
-                        std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], atom_id, .little);
-                        output_atoms[out_atom_idx] = func.atoms.dup(atom_id);
-                        out_idx += 5;
-                        out_atom_idx += 1;
+                    if (evalVarObjectProbePlan(ctx, atom_id, scope_level, op, .delete)) |probe| {
+                        const fallback_size = loweredScopeDeleteVarSize(ctx, atom_id, scope_level);
+                        const done_pc = out_idx + probe.prefix_size + fallback_size;
+                        try writeDynamicEnvProbes(ctx, func, output, &out_idx, output_atoms, &out_atom_idx, atom_id, scope_level, opcode.op.with_delete_var, done_pc);
                     }
+                    try writeLoweredScopeDeleteVar(ctx, func, output, &out_idx, output_atoms, &out_atom_idx, atom_id, scope_level);
                     in_atom_idx += 1;
                 } else {
-                    // scope_get_ref: emit OP_undefined + get accessor.
-                    output[out_idx] = opcode.op.undefined;
-                    out_idx += 1;
-                    if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| switch (binding) {
-                        .arg => |arg_idx| {
-                            const form = selectArgForm(ctx, opcode.op.get_arg, arg_idx);
-                            output[out_idx] = form.op_id;
-                            switch (form.operand_size) {
-                                0 => {},
-                                2 => std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], arg_idx, .little),
-                                else => unreachable,
-                            }
-                            out_idx += form.size;
-                        },
-                        .local => |loc_idx| {
-                            if (isLexicalLocal(ctx, loc_idx)) {
-                                output[out_idx] = opcode.op.get_loc_check;
-                                std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], loc_idx, .little);
-                                out_idx += 3;
-                            } else {
-                                const form = selectLocForm(ctx, opcode.op.get_loc, loc_idx);
-                                output[out_idx] = form.op_id;
-                                switch (form.operand_size) {
-                                    0 => {},
-                                    1 => output[out_idx + 1] = @intCast(loc_idx),
-                                    2 => std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], loc_idx, .little),
-                                    else => unreachable,
-                                }
-                                out_idx += form.size;
-                            }
-                        },
-                    } else if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
-                        const form = selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx);
-                        output[out_idx] = form.op_id;
-                        switch (form.operand_size) {
-                            0 => {},
-                            2 => std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], ref_idx, .little),
-                            else => unreachable,
-                        }
-                        out_idx += form.size;
-                    } else {
-                        try emitGlobalVarOp(ctx, output, &out_idx, opcode.op.get_var, atom_id);
+                    if (evalVarObjectProbePlan(ctx, atom_id, scope_level, op, .get_ref)) |probe| {
+                        const fallback_size = loweredScopeGetRefSize(ctx, atom_id, scope_level);
+                        const done_pc = out_idx + probe.prefix_size + fallback_size;
+                        try writeDynamicEnvProbes(ctx, func, output, &out_idx, output_atoms, &out_atom_idx, atom_id, scope_level, opcode.op.with_get_ref, done_pc);
                     }
+                    try writeLoweredScopeGetRef(ctx, output, &out_idx, atom_id, scope_level);
                     in_atom_idx += 1;
                 }
                 i += 7;
@@ -4881,6 +5533,8 @@ pub const pipeline_resolve_variables = struct {
                 old_target;
             std.mem.writeInt(u32, output[site.operand_pos..][0..4], new_target, .little);
         }
+
+        if (ctx.function_def) |fd| try resolveEvalGlobalVarTargets(fd);
 
         // Build exact-fit buffers before mutating the function. Either trim
         // allocation may fail, and the original temporary buffers must remain
@@ -6378,7 +7032,7 @@ pub const pipeline_finalize = struct {
         fb.flags.arguments_allowed = fd.arguments_allowed;
         fb.flags.backtrace_barrier = fd.backtrace_barrier;
         fb.flags.is_indirect_eval = fd.is_indirect_eval;
-        fb.flags.has_eval_call = bytecodeHasEvalCall(lowered.code);
+        fb.flags.has_eval_call = fd.has_eval_call;
 
         // Pack all read-only artifact slices into a single block allocation.
         // Segments are reserved largest-alignment-first to minimize padding;
@@ -6390,6 +7044,7 @@ pub const pipeline_finalize = struct {
         const vardefs_off = layout.reserve(function_def_mod.VarDef, fd.vars.len);
         const closure_var_off = layout.reserve(function_def_mod.ClosureVar, fd.closure_var.len);
         const arg_names_off = layout.reserve(atom.Atom, fd.args.len);
+        const scope_parents_off = layout.reserve(i32, fd.scopes.len);
         const global_vars_off = layout.reserve(function_def_mod.GlobalVar, fd.global_vars.len);
         // Class-field metadata is stored out-of-line (side `ClassMeta`), not in
         // this block; class constructors are rare so the extra small allocations
@@ -6408,6 +7063,7 @@ pub const pipeline_finalize = struct {
         // try to free a block that was never allocated.
         const dbg = try fd.memory.alloc(fb_mod.DebugInfo, 1);
         dbg[0] = .{};
+        dbg[0].script_or_module = fd.atoms.dup(fd.script_or_module);
         fb.debug = &dbg[0];
 
         const block = try fd.memory.allocAlignedBytes(layout.size, fb_mod.block_alignment);
@@ -6443,6 +7099,12 @@ pub const pipeline_finalize = struct {
             for (fd.args, arg_names) |arg, *out| out.* = fd.atoms.dup(arg.var_name);
             dbg[0].arg_names = arg_names.ptr;
             dbg[0].arg_names_len = @intCast(arg_names.len);
+        }
+        if (fd.scopes.len > 0) {
+            const scope_parents = fb_mod.blockSlice(block, i32, scope_parents_off, fd.scopes.len);
+            for (fd.scopes, scope_parents) |scope, *out| out.* = scope.parent;
+            dbg[0].scope_parents = scope_parents.ptr;
+            dbg[0].scope_parents_len = @intCast(scope_parents.len);
         }
 
         // Copy vardefs (sized by fd.vars.len, recorded once in `vars_len`). Each
@@ -6637,8 +7299,10 @@ pub const pipeline_finalize = struct {
                 function.arg_count = @intCast(def.arg_count);
             }
             try syncBytecodeVarNames(function, def);
+            try syncBytecodeScopeParents(function, def);
             try syncBytecodeVarRefNames(function, def);
             try syncBytecodeGlobalVarNames(function, def);
+            try syncBytecodePrivateBoundNames(function, def);
             try removeUncapturedCloseLoc(function, def);
         }
 
@@ -7069,6 +7733,19 @@ pub const pipeline_finalize = struct {
         function.vardefs = vardefs;
     }
 
+    fn syncBytecodeScopeParents(function: *bytecode_function.Bytecode, fd: *const function_def_mod.FunctionDef) !void {
+        if (function.scope_parents.len != 0) {
+            const scope_parents = function.scope_parents;
+            function.scope_parents = &.{};
+            function.memory.free(i32, @constCast(scope_parents));
+        }
+        if (fd.scopes.len == 0) return;
+
+        const scope_parents = try function.memory.alloc(i32, fd.scopes.len);
+        for (fd.scopes, scope_parents) |scope, *out| out.* = scope.parent;
+        function.scope_parents = scope_parents;
+    }
+
     fn syncBytecodeVarRefNames(function: *bytecode_function.Bytecode, fd: *const function_def_mod.FunctionDef) !void {
         if (function.var_ref_names.len != 0) {
             const var_ref_names = function.var_ref_names;
@@ -7126,6 +7803,28 @@ pub const pipeline_finalize = struct {
         }
     }
 
+    fn syncBytecodePrivateBoundNames(function: *bytecode_function.Bytecode, fd: *const function_def_mod.FunctionDef) !void {
+        if (function.private_bound_names.len != 0) {
+            const names = function.private_bound_names;
+            function.private_bound_names = &.{};
+            for (names) |atom_id| function.atoms.free(atom_id);
+            function.memory.free(atom.Atom, names);
+        }
+        if (fd.private_bound_names.len == 0) return;
+
+        const names = try function.memory.alloc(atom.Atom, fd.private_bound_names.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (names[0..initialized]) |atom_id| function.atoms.free(atom_id);
+            function.memory.free(atom.Atom, names);
+        }
+        for (fd.private_bound_names, names) |atom_id, *out| {
+            out.* = function.atoms.dup(atom_id);
+            initialized += 1;
+        }
+        function.private_bound_names = names;
+    }
+
     fn installChildFunctionBytecodes(fd: *function_def_mod.FunctionDef, rt: anytype) FinalizeError!void {
         for (fd.child_list) |child| {
             const cpool_idx = child.parent_cpool_idx;
@@ -7161,18 +7860,6 @@ pub const pipeline_finalize = struct {
                 rt.memory.destroy(JSValue, stored);
             }
         }
-    }
-
-    fn bytecodeHasEvalCall(code: []const u8) bool {
-        var pc: usize = 0;
-        while (pc < code.len) {
-            const op_id = code[pc];
-            const size = opcode.sizeOf(op_id);
-            if (size == 0 or pc + size > code.len) return true;
-            if (op_id == opcode.op.eval or op_id == opcode.op.apply_eval) return true;
-            pc += size;
-        }
-        return false;
     }
 
     fn functionBytecodeFromValueMutable(value: JSValue) ?*fb_mod.FunctionBytecode {
@@ -7308,8 +7995,9 @@ const function_mod = struct {
         is_module: bool = false,
         is_indirect_eval: bool = false,
         has_eval_call: bool = false,
+        is_arrow_function: bool = false,
         backtrace_barrier: bool = false,
-        reserved: u3 = 0,
+        reserved: u2 = 0,
     };
 
     /// Compatibility aliases for finalized runtime function bytecode.
@@ -7331,6 +8019,9 @@ const function_mod = struct {
         atoms: *atom.AtomTable,
         name: atom.Atom,
         filename: atom.Atom,
+        /// Stable ScriptOrModule identity used for host referrer resolution.
+        /// It is separately owned because eval keeps filename "<eval>".
+        script_or_module: atom.Atom,
         line_num: i32 = 1,
         col_num: i32 = 1,
         pc2line_buf: []u8 = &.{},
@@ -7380,6 +8071,7 @@ const function_mod = struct {
         // name with a top-level `let`/`const` must NOT (qjs: a block `let` is a
         // pure frame local with no tie to the global_decl cell).
         vardefs: []function_bytecode_mod.VarDef = &.{},
+        scope_parents: []const i32 = &.{},
         var_ref_names: []atom.Atom = &.{},
         // Lexical / const / top-level-global-decl (closure_type == .global_decl,
         // qjs JS_CLOSURE_GLOBAL_DECL) status per var-ref is derived on access
@@ -7400,6 +8092,7 @@ const function_mod = struct {
                 .atoms = atoms,
                 .name = atoms.dup(name),
                 .filename = atoms.dup(name),
+                .script_or_module = atoms.dup(name),
                 .constants = constant.Pool.init(account, atoms),
             };
         }
@@ -7407,13 +8100,19 @@ const function_mod = struct {
         pub fn deinit(self: *BytecodeImpl, rt: anytype) void {
             const name = self.name;
             const filename = self.filename;
+            const script_or_module = self.script_or_module;
             self.name = atom.null_atom;
             self.filename = atom.null_atom;
+            self.script_or_module = atom.null_atom;
             self.atoms.free(name);
             self.atoms.free(filename);
+            self.atoms.free(script_or_module);
             freeGrowableAtomSlice(self.atoms, self.memory, &self.atom_operands, &self.atom_operands_capacity);
             freeOwnedAtomSlice(self.atoms, self.memory, &self.arg_names);
             freeOwnedVarDefSlice(self.atoms, self.memory, &self.vardefs);
+            const scope_parents = self.scope_parents;
+            self.scope_parents = &.{};
+            if (scope_parents.len != 0) self.memory.free(i32, @constCast(scope_parents));
             freeOwnedAtomSlice(self.atoms, self.memory, &self.var_ref_names);
             freeOwnedClosureVarSlice(self.atoms, self.memory, &self.closure_var);
             freeOwnedGlobalVarSlice(self.atoms, self.memory, &self.global_vars);
@@ -7437,10 +8136,8 @@ const function_mod = struct {
 
         // Var-ref lexical/const/global-decl metadata is derived on access from
         // `closure_var[idx]` rather than stored in parallel `[]bool` arrays,
-        // mirroring qjs (which keeps only `JSClosureVar`). For indices past
-        // `closure_var.len` (eval-synthesised var-refs that have no backing
-        // closure var) these default to `false`, matching the historical
-        // bounds-guarded reads of the removed parallel arrays.
+        // mirroring qjs (which keeps only `JSClosureVar`). Synthetic fixture
+        // indices past `closure_var.len` retain conservative false defaults.
         pub inline fn varRefIsLexicalAt(self: *const BytecodeImpl, idx: usize) bool {
             if (idx >= self.closure_var.len) return false;
             return self.closure_var[idx].is_lexical;
@@ -7454,14 +8151,10 @@ const function_mod = struct {
             return self.closure_var[idx].closure_type == .global_decl;
         }
 
-        // Var-ref names. The finalized FunctionBytecode no longer stores a
-        // separate `var_ref_names` atom array (it was a redundant mirror of
-        // `closure_var[i].var_name`); normal views leave `var_ref_names` empty
-        // and derive names from `closure_var`. Direct-eval overlays install a
-        // MERGED `var_ref_names` array (closure names ++ eval-synthesised names)
-        // that also covers indices past `closure_var.len`; those accessors then
-        // read the merged array. Callers that iterated `var_ref_names[i]` now go
-        // through `varRefNamesLen()`/`varRefName(i)`.
+        // Finalized FunctionBytecode stores names only in `closure_var`; normal
+        // execution views therefore leave `var_ref_names` empty and derive them
+        // there. Mutable compile-time views and synthetic fixtures may still own
+        // an explicit mirror, so callers use these accessors for both forms.
         pub inline fn varRefNamesLen(self: *const BytecodeImpl) usize {
             return if (self.var_ref_names.len != 0) self.var_ref_names.len else self.closure_var.len;
         }
@@ -7498,7 +8191,6 @@ const function_mod = struct {
         /// the current size, while reallocations are amortised O(1).
         pub fn appendCode(self: *BytecodeImpl, bytes: []const u8) !void {
             if (bytes.len == 0) return;
-            if (bytesMayContainEvalCall(bytes)) self.flags.has_eval_call = true;
             const tail = try growSliceBy(u8, self.memory, &self.code, &self.code_capacity, bytes.len);
             @memcpy(tail, bytes);
         }
@@ -7672,6 +8364,7 @@ const function_mod = struct {
             .atoms = atoms,
             .name = fb.func_name,
             .filename = fb.filename,
+            .script_or_module = fb.scriptOrModule(),
             .line_num = fb.lineNum(),
             .col_num = fb.colNum(),
             .pc2line_buf = fb.pc2lineBuf(),
@@ -7688,12 +8381,13 @@ const function_mod = struct {
                 .runtime_strict = fb.flags.runtime_strict_mode,
                 .is_indirect_eval = fb.flags.is_indirect_eval,
                 .has_eval_call = fb.flags.has_eval_call,
+                .is_arrow_function = fb.flags.is_arrow_function,
                 .backtrace_barrier = fb.flags.backtrace_barrier,
             },
             .simple_inline_eligible = fb.flags.func_kind == .normal and
                 !fb.flags.is_class_constructor and !fb.flags.is_derived_class_constructor and
                 !fb.flags.is_arrow_function and !fb.flags.is_strict_mode and !fb.flags.runtime_strict_mode and
-                fb.flags.has_simple_parameter_list and !fb.flags.has_eval_call and fb.global_vars_len == 0,
+                fb.flags.has_simple_parameter_list and fb.global_vars_len == 0,
             .locals_never_boxed = computeLocalsNeverBoxed(fb),
             .arg_count = fb.arg_count,
             .var_count = fb.var_count,
@@ -7705,12 +8399,10 @@ const function_mod = struct {
             // atoms walk `code` directly (see `atomOperandIterator`).
             .arg_names = fb.argNames(),
             .vardefs = fb.varDefs(),
-            // Normal (non-eval) calls carry no separate var-ref name array; the
-            // names are derived from `closure_var[i].var_name` via the
-            // `varRefName`/`varRefNamesLen` accessors. Direct-eval overlays
-            // (mergeEvalBindings / the indirect-eval overlay in call_runtime)
-            // set `var_ref_names` to a merged array covering closure + eval
-            // synthesized refs; those accessors then read the merged array.
+            .scope_parents = fb.scopeParents(),
+            // Finalized execution views derive var-ref names directly from
+            // `closure_var[i].var_name`; mutable compile-time copies may still
+            // populate their compatibility mirror separately.
             .var_ref_names = &.{},
             .closure_var = fb.closureVar(),
             .global_vars = fb.globalVars(),
@@ -7732,8 +8424,8 @@ const function_mod = struct {
     /// (fixture/synthetic FBs) — the caller rebuilds per-call in that rare case.
     ///
     /// Behaviour-identical to `makeBytecodeView`: the returned view is copied by
-    /// value into the per-call `InlineTarget`/`Entry.view_storage`, so any later
-    /// eval-overlay mutation lands on the copy, never the shared cache.
+    /// value into the per-call `InlineTarget`/`Entry.view_storage`, while the
+    /// cached slices continue to borrow immutable FunctionBytecode storage.
     ///
     /// `inline` + the out-of-line build leg keep the per-call cost at the two
     /// cache-hit loads (`fb.debug` -> `dbg.cached_view`): the resolve path in
@@ -7755,11 +8447,6 @@ const function_mod = struct {
         slot[0] = function_mod.makeBytecodeView(fb, mem, atoms);
         dbg.cached_view = &slot[0];
         return &slot[0];
-    }
-
-    fn bytesMayContainEvalCall(bytes: []const u8) bool {
-        return std.mem.indexOfScalar(u8, bytes, opcode.op.eval) != null or
-            std.mem.indexOfScalar(u8, bytes, opcode.op.apply_eval) != null;
     }
 
     pub const destroyFunctionBytecode = function_bytecode_mod.destroyFunctionBytecode;

@@ -625,11 +625,8 @@ pub fn fastGlobalDataValueForAtomAtPc(
     frame: *frame_mod.Frame,
     site_pc: usize,
     atom_id: core.Atom,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
 ) ?core.JSValue {
-    if (!canUseFastGlobalVarLookup(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return null;
+    if (!canUseFastGlobalVarLookup(function, atom_id, frame)) return null;
     if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
@@ -644,11 +641,8 @@ pub fn fastInstalledGlobalDataValueForAtomAtPc(
     frame: *frame_mod.Frame,
     site_pc: usize,
     atom_id: core.Atom,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
 ) ?core.JSValue {
-    if (!canUseInstalledGlobalDataIc(ctx, function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object, global)) return null;
+    if (!canUseInstalledGlobalDataIc(ctx, function, atom_id, frame, global)) return null;
     if (!frame.current_function.isUndefined() and functionFrameBindingShadowsGlobal(ctx.runtime, function, frame, atom_id)) return null;
     if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
@@ -985,16 +979,10 @@ pub fn canUseFastGlobalVarLookup(
     function: *const bytecode.Bytecode,
     atom_id: core.Atom,
     frame: *const frame_mod.Frame,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
 ) bool {
     if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return false;
-    if (!eval_with_object.isUndefined()) return false;
     if (!frame.current_function.isUndefined()) return false;
     if (frameHasVarRefBinding(function, frame, atom_id)) return false;
-    if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
-    if (frame.evalLocalNames().len != 0 or frame.evalVarRefNames().len != 0) return false;
     return true;
 }
 
@@ -1003,16 +991,10 @@ pub fn canUseInstalledGlobalDataIc(
     function: *const bytecode.Bytecode,
     atom_id: core.Atom,
     frame: *const frame_mod.Frame,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
     global: *const core.Object,
 ) bool {
     if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return false;
-    if (!eval_with_object.isUndefined()) return false;
     if (frameHasVarRefBinding(function, frame, atom_id)) return false;
-    if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
-    if (frame.evalLocalNames().len != 0 or frame.evalVarRefNames().len != 0) return false;
     _ = global;
     if (ctx.lexicals) |env| {
         if (env.hasOwnProperty(atom_id)) return false;
@@ -1024,7 +1006,6 @@ pub fn functionFrameBindingShadowsGlobal(rt: *core.JSRuntime, function: *const b
     if (call_runtime.atomIdOrNameEql(rt, function.name, atom_id)) return true;
     if (functionHasDynamicScopeBindings(function, frame)) return true;
     if (functionLocalOrArgBindingShadowsGlobal(rt, function, frame, atom_id)) return true;
-    if (parentFunctionEvalBindingShadowsGlobal(rt, frame, atom_id)) return true;
     return false;
 }
 
@@ -1032,8 +1013,6 @@ fn functionHasDynamicScopeBindings(function: *const bytecode.Bytecode, frame: *c
     if (function.varRefNamesLen() != 0 or frame.var_refs.len != 0) return true;
     const function_object = objectFromValue(frame.current_function) orelse return false;
     if (function_object.functionCapturesSlot().*.len != 0) return true;
-    if (function_object.functionEvalLocalNames().len != 0) return true;
-    if (function_object.functionEvalParentFunction() != null) return true;
     return false;
 }
 
@@ -1049,53 +1028,13 @@ fn functionLocalOrArgBindingShadowsGlobal(rt: *core.JSRuntime, function: *const 
     return false;
 }
 
-/// Cheap per-frame-constant precondition for parentFunctionEvalBindingShadowsGlobal:
-/// only a closure created inside a direct eval carries an eval-parent link. The
-/// var_ref fast lanes call this first — fully inlined (one tag test + one header
-/// deref + one field load, no call to objectFromValue) so the common case
-/// (top-level code, ordinary closures) short-circuits to a single register test
-/// before resolving the atom or making the heavier name-comparison call.
-pub inline fn frameClosureHasEvalParent(frame: *const frame_mod.Frame) bool {
-    const cf = frame.current_function;
-    if (!cf.isObject()) return false;
-    const header = cf.refHeader() orelse return false;
-    const function_object: *core.Object = @fieldParentPtr("header", header);
-    return function_object.functionEvalParentFunction() != null;
-}
-
-/// True when this closure's enclosing (eval-containing) function introduced a
-/// runtime `var` binding with the same name — qjs's var_object_test
-/// (quickjs.c:33158-33167): a free var captured from a parent fd that owns a
-/// `_var_`/`_arg_var_` object resolves to that dynamic binding BEFORE the global
-/// cell. The global var_ref fast lane must defer to the slow scope-walk
-/// (lookupParentFunctionEvalBindingValue) whenever this holds. Gate calls behind
-/// frameClosureHasEvalParent so non-eval frames never reach the name walk.
-pub fn parentFunctionEvalBindingShadowsGlobal(rt: *core.JSRuntime, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
-    const function_object = objectFromValue(frame.current_function) orelse return false;
-    const parent_value = function_object.functionEvalParentFunction() orelse return false;
-    const parent_object = objectFromValue(parent_value) orelse return false;
-    const names = parent_object.functionEvalLocalNames();
-    const refs = parent_object.functionEvalLocalRefs();
-    const count = @min(names.len, refs.len);
-    for (names[0..count]) |name| {
-        if (call_runtime.atomIdOrNameEql(rt, name, atom_id)) return true;
-    }
-    return false;
-}
-
 pub fn canFuseGlobalDataWrite(
     function: *const bytecode.Bytecode,
     frame: *const frame_mod.Frame,
     atom_id: core.Atom,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
 ) bool {
     if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return false;
-    if (!eval_with_object.isUndefined()) return false;
     if (frameHasVarRefBinding(function, frame, atom_id)) return false;
-    if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
-    if (frame.evalLocalNames().len != 0 or frame.evalVarRefNames().len != 0) return false;
     return true;
 }
 

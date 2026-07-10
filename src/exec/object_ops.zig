@@ -48,10 +48,7 @@ const addCollectionEntriesFromIterator = builtin_glue.addCollectionEntriesFromIt
 const aggregateErrorsIterableToArray = array_ops.aggregateErrorsIterableToArray;
 const anchoredBinaryPropertyMatches = string_ops.anchoredBinaryPropertyMatches;
 const appendDecodedRegExpGroupName = regexp_fastpath.appendDecodedRegExpGroupName;
-const appendFunctionEvalLocal = eval_ops.appendFunctionEvalLocal;
 const appendOwnedAtom = core.atom.appendOwnedAtom;
-const appendPrivateBoundName = call_runtime.appendPrivateBoundName;
-const atomIdOrNameEql = call_runtime.atomIdOrNameEql;
 const arrayLengthAssignmentValue = array_ops.arrayLengthAssignmentValue;
 const arrayLengthDefineValue = array_ops.arrayLengthDefineValue;
 const arrayPrototypeFromGlobal = array_ops.arrayPrototypeFromGlobal;
@@ -65,7 +62,6 @@ const callSiteFunctionNameValue = error_stack_ops.callSiteFunctionNameValue;
 const callValueOrBytecode = call_runtime.callValueOrBytecode;
 const captureErrorStack = error_stack_ops.captureErrorStack;
 const closeIteratorForFromEntriesAbrupt = call_runtime.closeIteratorForFromEntriesAbrupt;
-const closureVarIsNonLexicalGlobalSentinel = call_runtime.closureVarIsNonLexicalGlobalSentinel;
 const constructValueOrBytecode = call_runtime.constructValueOrBytecode;
 const createArrayFromArgs = array_ops.createArrayFromArgs;
 const createIteratorResult = call_runtime.createIteratorResult;
@@ -82,14 +78,9 @@ const ensureVarRefCell = slot_ops.ensureVarRefCell;
 const ensureVarRefSlotCell = slot_ops.ensureVarRefSlotCell;
 const ensureVarRefsCapacity = frame_mod.ensureVarRefsCapacity;
 const varRefSlot = slot_ops.varRefSlot;
-const evalBytecodeHasVarDeclarations = eval_ops.evalBytecodeHasVarDeclarations;
-const evalLocalSlotIsEvalVarCell = slot_ops.evalLocalSlotIsEvalVarCell;
 const findPropertyEscapeMatch = string_ops.findPropertyEscapeMatch;
 const findUnicodePropertyOnlyClassMatch = string_ops.findUnicodePropertyOnlyClassMatch;
 const functionBytecodeFromValue = call_runtime.functionBytecodeFromValue;
-const functionBytecodeHasClosureVarName = eval_ops.functionBytecodeHasClosureVarName;
-const functionBytecodeHasDirectEval = eval_ops.functionBytecodeHasDirectEval;
-const functionBytecodeUsesAtom = eval_ops.functionBytecodeUsesAtom;
 const functionBytecodeUsesImportMeta = eval_ops.functionBytecodeUsesImportMeta;
 const functionConstructorFromGlobal = builtin_glue.functionConstructorFromGlobal;
 const functionNameValueFromAtom = call_runtime.functionNameValueFromAtom;
@@ -104,9 +95,6 @@ const isCallableValue = call_runtime.isCallableValue;
 const isConstructorLike = call_runtime.isConstructorLike;
 const isFunctionLikeClass = call_runtime.isFunctionLikeClass;
 const lengthIndexValue = array_ops.lengthIndexValue;
-const lookupFrameFirstEvalBindingValue = call_runtime.lookupFrameFirstEvalBindingValue;
-const lookupNamedSlotValue = call_runtime.lookupNamedSlotValue;
-const lookupNamedVarRef = call_runtime.lookupNamedVarRef;
 const mappedArgumentsValue = call_runtime.mappedArgumentsValue;
 const ordinarySetWithReceiver = call_runtime.ordinarySetWithReceiver;
 const qjsBigIntPrototypeToString = string_ops.qjsBigIntPrototypeToString;
@@ -127,8 +115,6 @@ const remapPrivateAtomForOperation = call_runtime.remapPrivateAtomForOperation;
 const runGeneratorParameterInit = call_runtime.runGeneratorParameterInit;
 const setFailureShouldThrow = call_runtime.setFailureShouldThrow;
 const setMappedArgumentsValue = call_runtime.setMappedArgumentsValue;
-const shouldSkipDirectEvalLocalCapture = eval_ops.shouldSkipDirectEvalLocalCapture;
-const shouldSkipDirectEvalScopeCaptureName = eval_ops.shouldSkipDirectEvalScopeCaptureName;
 const slotValueDup = slot_ops.slotValueDup;
 const storeRealmValue = builtin_glue.storeRealmValue;
 const stringObjectHasIndexProperty = string_ops.stringObjectHasIndexProperty;
@@ -284,49 +270,6 @@ fn createGlobalClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: byt
     return cell_value;
 }
 
-fn directEvalClosureBindingCapture(
-    ctx: *core.JSContext,
-    caller_function: *const bytecode.Bytecode,
-    atom_id: core.Atom,
-    eval_local_names: []const core.Atom,
-    eval_local_slots: []core.JSValue,
-    eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []core.JSValue,
-) !?core.JSValue {
-    for (eval_local_names, 0..) |name, idx| {
-        if (!atomIdOrNameEql(ctx.runtime, name, atom_id) or idx >= eval_local_slots.len) continue;
-        if (directEvalLocalSlotIsGlobalVarCell(ctx.runtime, caller_function, name, eval_local_slots[idx])) continue;
-        return try ensureVarRefCell(ctx, &eval_local_slots[idx]);
-    }
-    for (eval_var_ref_names, 0..) |name, idx| {
-        if (!atomIdOrNameEql(ctx.runtime, name, atom_id) or idx >= eval_var_refs.len) continue;
-        // Boundary cellify (VARREFS-SLOT-TYPING-BLUEPRINT §3 source ④): the
-        // eval name table may hold raw snapshots (e.g. appendFunctionEvalLocal
-        // `arguments`); the capture must hand the closure a real cell — qjs
-        // js_closure2 slots are always JSVarRef* (quickjs.c:17297-17331).
-        // `eval_var_refs` here is the rooted per-call copy
-        // (eval_var_refs_buffer.values), so the in-place rebind shares one
-        // cell across every capture of this createBytecodeFunctionObject
-        // call; the table itself stays []JSValue (Step 4 domain).
-        return try ensureVarRefCell(ctx, &eval_var_refs[idx]);
-    }
-    return null;
-}
-
-fn directEvalLocalSlotIsGlobalVarCell(
-    rt: *core.JSRuntime,
-    caller_function: *const bytecode.Bytecode,
-    atom_id: core.Atom,
-    slot: core.JSValue,
-) bool {
-    if (!evalLocalSlotIsEvalVarCell(slot)) return false;
-    for (caller_function.global_vars) |gv| {
-        if (gv.is_lexical) continue;
-        if (atomIdOrNameEql(rt, gv.var_name, atom_id)) return true;
-    }
-    return false;
-}
-
 pub fn createBytecodeFunctionObject(
     ctx: *core.JSContext,
     frame: *frame_mod.Frame,
@@ -336,35 +279,15 @@ pub fn createBytecodeFunctionObject(
     name_atom: core.Atom,
     opc: u8,
     create_prototype: bool,
-    eval_local_names: []const core.Atom,
-    input_eval_local_slots: []core.JSValue,
-    eval_var_ref_names: []const core.Atom,
-    input_eval_var_refs: []const core.JSValue,
-    input_skip_direct_eval_capture_values: []const core.JSValue,
 ) !core.JSValue {
     if (!value.isFunctionBytecode()) return error.InvalidBytecode;
     var rooted_value = value;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
     };
-    var eval_local_slots = input_eval_local_slots;
-    const capture_eval_var_ref_names = if (frame.evalVarRefsRepublished()) frame.evalVarRefNames() else eval_var_ref_names;
-    const capture_eval_var_refs_source = if (frame.evalVarRefsRepublished()) frame.evalVarRefs() else input_eval_var_refs;
-    var eval_var_refs_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, capture_eval_var_refs_source);
-    defer eval_var_refs_buffer.deinit(ctx.runtime);
-    const eval_var_refs = eval_var_refs_buffer.values;
-    var skip_direct_eval_capture_values_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, input_skip_direct_eval_capture_values);
-    defer skip_direct_eval_capture_values_buffer.deinit(ctx.runtime);
-    const skip_direct_eval_capture_values = skip_direct_eval_capture_values_buffer.values;
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        .{ .mutable = &eval_local_slots },
-        eval_var_refs_buffer.slice(),
-        skip_direct_eval_capture_values_buffer.slice(),
-    };
     const root_frame = core.runtime.ValueRootFrame{
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
-        .slices = &root_slices,
     };
     ctx.runtime.active_value_roots = &root_frame;
     defer ctx.runtime.active_value_roots = root_frame.previous;
@@ -386,9 +309,6 @@ pub fn createBytecodeFunctionObject(
     try object.setFunctionRealmGlobalPtr(ctx.runtime, global);
     try object.setOptionalValueSlot(ctx.runtime, object.functionBytecodeSlot(), rooted_value.dup());
     if (objectFromValue(frame.current_function)) |parent_function_object| {
-        if (parent_function_object.functionEvalLocalNames().len != 0) {
-            try object.setOptionalValueSlot(ctx.runtime, try object.functionEvalParentFunctionSlot(ctx.runtime), frame.current_function.dup());
-        }
         if (parent_function_object.functionImportMeta()) |import_meta| {
             try object.setOptionalValueSlot(ctx.runtime, try object.functionImportMetaSlot(ctx.runtime), import_meta.dup());
         }
@@ -400,7 +320,7 @@ pub fn createBytecodeFunctionObject(
     try installLexicalPrivateNameRemap(ctx.runtime, object, frame, fb.privateBoundNames());
     if (fb.class_fields_init) |init_bytecode_box| {
         const init_bytecode = init_bytecode_box.*;
-        const init_value = try createBytecodeFunctionObject(ctx, frame, caller_function, global, init_bytecode, core.atom.ids.empty_string, opc, false, eval_local_names, eval_local_slots, capture_eval_var_ref_names, eval_var_refs, &.{});
+        const init_value = try createBytecodeFunctionObject(ctx, frame, caller_function, global, init_bytecode, core.atom.ids.empty_string, opc, false);
         try object.setOptionalValueSlot(ctx.runtime, try object.functionClassFieldsInitSlot(ctx.runtime), init_value);
     }
     if (fb.flags.is_arrow_function) {
@@ -421,12 +341,6 @@ pub fn createBytecodeFunctionObject(
         if (!frame.new_target.isUndefined()) {
             try object.setOptionalValueSlot(ctx.runtime, try object.functionArrowNewTargetSlot(ctx.runtime), frame.new_target.dup());
         }
-        if (functionBytecodeUsesAtom(ctx.runtime, fb, core.atom.ids.arguments) or functionBytecodeUsesArgumentsSpecialObject(fb)) {
-            const arguments_value = lookupFrameFirstEvalBindingValue(ctx.runtime, eval_local_names, eval_local_slots, capture_eval_var_ref_names, eval_var_refs, frame, core.atom.ids.arguments) orelse
-                try frameArgumentsObject(ctx, global, frame);
-            defer arguments_value.free(ctx.runtime);
-            try appendFunctionEvalLocal(ctx, object, core.atom.ids.arguments, arguments_value);
-        }
     }
     const effective_name = if (fb.func_name != core.atom.ids.empty_string and ctx.runtime.atoms.kind(fb.func_name) != null)
         fb.func_name
@@ -444,9 +358,9 @@ pub fn createBytecodeFunctionObject(
         // js_closure2 capture loop (quickjs.c:17297-17331): every arm yields a
         // live JSVarRef* — the slot-typed captures array is the qjs
         // `JSVarRef **var_refs` alloc (17277). The helper arms hand back owned
-        // cell refs in JSValue form (the boundary type of the locals / eval
-        // tables / global machinery); the conversion is a type assertion, not
-        // a refcount event.
+        // cell refs in JSValue form (the boundary type of locals and global
+        // machinery); the conversion is a type assertion, not a refcount
+        // event.
         const captures = try ctx.runtime.memory.alloc(*core.VarRef, fb.closureVar().len);
         var captures_transferred = false;
         errdefer if (!captures_transferred) ctx.runtime.memory.free(*core.VarRef, captures);
@@ -470,30 +384,19 @@ pub fn createBytecodeFunctionObject(
                     break :blk try ensureFrameVarRefCell(ctx, frame, &frame.args[cv.var_idx]);
                 },
                 .ref => blk: {
-                    if (try directEvalClosureBindingCapture(ctx, caller_function, cv.var_name, eval_local_names, eval_local_slots, capture_eval_var_ref_names, eval_var_refs)) |captured| {
-                        break :blk captured;
-                    }
                     try ensureVarRefsCapacity(ctx, frame, cv.var_idx);
                     // qjs JS_CLOSURE_REF (quickjs.c:17322-17324): pure pointer
                     // copy + rc++ of the parent slot's cell (type-guaranteed).
                     break :blk try ensureVarRefSlotCell(ctx, frame, cv.var_idx);
                 },
                 .global_ref => blk: {
-                    if (try directEvalClosureBindingCapture(ctx, caller_function, cv.var_name, eval_local_names, eval_local_slots, capture_eval_var_ref_names, eval_var_refs)) |captured| {
-                        break :blk captured;
-                    }
                     if (cv.var_idx >= frame.var_refs.len) return error.InvalidBytecode;
                     // qjs JS_CLOSURE_GLOBAL_REF (quickjs.c:17322-17324): pure
                     // pointer copy + rc++ — the slot type guarantees the cell,
                     // the pre-typed bridge cellify is gone (phase D).
                     break :blk try ensureVarRefSlotCell(ctx, frame, cv.var_idx);
                 },
-                .global, .global_decl => blk: {
-                    if (try directEvalClosureBindingCapture(ctx, caller_function, cv.var_name, eval_local_names, eval_local_slots, capture_eval_var_ref_names, eval_var_refs)) |captured| {
-                        break :blk captured;
-                    }
-                    break :blk try createGlobalClosureVarRef(ctx, global, cv);
-                },
+                .global, .global_decl => try createGlobalClosureVarRef(ctx, global, cv),
                 .module_decl, .module_import => blk: {
                     try ensureVarRefsCapacity(ctx, frame, cv.var_idx);
                     break :blk try ensureVarRefSlotCell(ctx, frame, cv.var_idx);
@@ -528,145 +431,6 @@ pub fn createBytecodeFunctionObject(
         captures_transferred = true;
         object.setFunctionCaptures(ctx.runtime, captures);
     }
-    const function_has_direct_eval = functionBytecodeHasDirectEval(fb, ctx.runtime);
-    const captures_eval_var_scope =
-        value_ops.atomNameEql(ctx.runtime, caller_function.name, "<eval>") and
-        !frame.current_function.isUndefined() and
-        fb.func_name == core.atom.ids.empty_string and
-        evalBytecodeHasVarDeclarations(ctx.runtime, caller_function);
-    const captures_direct_eval_scope = function_has_direct_eval or captures_eval_var_scope;
-    const captures_eval_frame_scope = captures_direct_eval_scope;
-    if (eval_local_names.len > 0 or capture_eval_var_ref_names.len > 0 or
-        (captures_eval_frame_scope and caller_function.vardefs.len > 0) or
-        (captures_eval_frame_scope and caller_function.arg_names.len > 0) or
-        (captures_direct_eval_scope and caller_function.varRefNamesLen() > 0))
-    {
-        var used_count: usize = 0;
-        for (eval_local_names, 0..) |atom_id, idx| {
-            if (shouldSkipDirectEvalScopeCaptureName(ctx.runtime, captures_direct_eval_scope, fb, atom_id)) continue;
-            if (idx < eval_local_slots.len and directEvalLocalSlotIsGlobalVarCell(ctx.runtime, caller_function, atom_id, eval_local_slots[idx])) continue;
-            const capture_eval_var_cell = captures_eval_var_scope and idx < eval_local_slots.len and evalLocalSlotIsEvalVarCell(eval_local_slots[idx]);
-            if (captures_direct_eval_scope or capture_eval_var_cell or functionBytecodeUsesAtom(ctx.runtime, fb, atom_id)) used_count += 1;
-        }
-        for (capture_eval_var_ref_names) |atom_id| {
-            if (shouldSkipDirectEvalScopeCaptureName(ctx.runtime, captures_direct_eval_scope, fb, atom_id)) continue;
-            if (functionBytecodeHasClosureVarName(ctx.runtime, fb, atom_id)) continue;
-            if (captures_direct_eval_scope or captures_eval_var_scope or functionBytecodeUsesAtom(ctx.runtime, fb, atom_id)) used_count += 1;
-        }
-        if (captures_eval_frame_scope) {
-            const local_count = @min(caller_function.vardefs.len, frame.locals.len);
-            for (frame.locals[0..local_count], 0..) |slot, idx| {
-                if (idx < caller_function.vardefs.len and caller_function.vardefs[idx].is_lexical) continue;
-                if (slot_ops.varRefSlotIsUninitialized(slot)) continue;
-                if (shouldSkipDirectEvalLocalCapture(fb, slot, skip_direct_eval_capture_values)) continue;
-                used_count += 1;
-            }
-            const arg_count = @min(caller_function.arg_names.len, frame.args.len);
-            for (caller_function.arg_names[0..arg_count], 0..) |atom_id, idx| {
-                if (atom_id == core.atom.null_atom) continue;
-                if (functionBytecodeHasClosureVarName(ctx.runtime, fb, atom_id)) continue;
-                if (shouldSkipDirectEvalLocalCapture(fb, frame.args[idx], skip_direct_eval_capture_values)) continue;
-                used_count += 1;
-            }
-            if (captures_direct_eval_scope) {
-                const ref_count = @min(caller_function.varRefNamesLen(), frame.var_refs.len);
-                for (0..ref_count) |idx| {
-                    if (closureVarIsNonLexicalGlobalSentinel(caller_function, idx)) continue;
-                    used_count += 1;
-                }
-            }
-        }
-        if (used_count > 0) {
-            const names = try ctx.runtime.memory.alloc(core.Atom, used_count);
-            var eval_bindings_transferred = false;
-            errdefer if (!eval_bindings_transferred) ctx.runtime.memory.free(core.Atom, names);
-            const refs = try ctx.runtime.memory.alloc(core.JSValue, used_count);
-            errdefer if (!eval_bindings_transferred) ctx.runtime.memory.free(core.JSValue, refs);
-            var rooted_refs: []core.JSValue = refs[0..0];
-            var refs_root = ValueSliceRoot{};
-            refs_root.init(ctx.runtime, &rooted_refs);
-            defer refs_root.deinit();
-            var initialized: usize = 0;
-            var initialized_names: usize = 0;
-            errdefer if (!eval_bindings_transferred) {
-                for (names[0..initialized_names]) |atom_id| ctx.runtime.atoms.free(atom_id);
-            };
-            errdefer if (!eval_bindings_transferred) {
-                for (refs[0..initialized]) |*stored| {
-                    stored.free(ctx.runtime);
-                    stored.* = core.JSValue.undefinedValue();
-                }
-                rooted_refs = &.{};
-            };
-            for (eval_local_names, 0..) |atom_id, idx| {
-                if (shouldSkipDirectEvalScopeCaptureName(ctx.runtime, captures_direct_eval_scope, fb, atom_id)) continue;
-                if (idx < eval_local_slots.len and directEvalLocalSlotIsGlobalVarCell(ctx.runtime, caller_function, atom_id, eval_local_slots[idx])) continue;
-                const capture_eval_var_cell = captures_eval_var_scope and idx < eval_local_slots.len and evalLocalSlotIsEvalVarCell(eval_local_slots[idx]);
-                if (!captures_direct_eval_scope and !capture_eval_var_cell and !functionBytecodeUsesAtom(ctx.runtime, fb, atom_id)) continue;
-                names[initialized] = ctx.runtime.atoms.dup(atom_id);
-                initialized_names += 1;
-                refs[initialized] = if (idx < eval_local_slots.len)
-                    try ensureVarRefCell(ctx, &eval_local_slots[idx])
-                else
-                    core.JSValue.undefinedValue();
-                initialized += 1;
-                rooted_refs = refs[0..initialized];
-            }
-            for (capture_eval_var_ref_names, 0..) |atom_id, idx| {
-                if (shouldSkipDirectEvalScopeCaptureName(ctx.runtime, captures_direct_eval_scope, fb, atom_id)) continue;
-                if (functionBytecodeHasClosureVarName(ctx.runtime, fb, atom_id)) continue;
-                if (!captures_direct_eval_scope and !captures_eval_var_scope and !functionBytecodeUsesAtom(ctx.runtime, fb, atom_id)) continue;
-                names[initialized] = ctx.runtime.atoms.dup(atom_id);
-                initialized_names += 1;
-                refs[initialized] = if (idx < eval_var_refs.len)
-                    eval_var_refs[idx].dup()
-                else
-                    core.JSValue.undefinedValue();
-                initialized += 1;
-                rooted_refs = refs[0..initialized];
-            }
-            if (captures_eval_frame_scope) {
-                const local_count = @min(caller_function.vardefs.len, frame.locals.len);
-                for (caller_function.vardefs[0..local_count], 0..) |vd, idx| {
-                    if (vd.is_lexical) continue;
-                    if (slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) continue;
-                    if (shouldSkipDirectEvalLocalCapture(fb, frame.locals[idx], skip_direct_eval_capture_values)) continue;
-                    names[initialized] = ctx.runtime.atoms.dup(vd.var_name);
-                    initialized_names += 1;
-                    refs[initialized] = try ensureFrameVarRefCell(ctx, frame, &frame.locals[idx]);
-                    initialized += 1;
-                    rooted_refs = refs[0..initialized];
-                }
-                const arg_count = @min(caller_function.arg_names.len, frame.args.len);
-                for (caller_function.arg_names[0..arg_count], 0..) |atom_id, idx| {
-                    if (atom_id == core.atom.null_atom) continue;
-                    if (functionBytecodeHasClosureVarName(ctx.runtime, fb, atom_id)) continue;
-                    if (shouldSkipDirectEvalLocalCapture(fb, frame.args[idx], skip_direct_eval_capture_values)) continue;
-                    names[initialized] = ctx.runtime.atoms.dup(atom_id);
-                    initialized_names += 1;
-                    refs[initialized] = try ensureFrameVarRefCell(ctx, frame, &frame.args[idx]);
-                    initialized += 1;
-                    rooted_refs = refs[0..initialized];
-                }
-            }
-            if (captures_direct_eval_scope) {
-                const ref_count = @min(caller_function.varRefNamesLen(), frame.var_refs.len);
-                var idx: usize = 0;
-                while (idx < ref_count) : (idx += 1) {
-                    const atom_id = caller_function.varRefName(idx);
-                    if (closureVarIsNonLexicalGlobalSentinel(caller_function, idx)) continue;
-                    names[initialized] = ctx.runtime.atoms.dup(atom_id);
-                    initialized_names += 1;
-                    refs[initialized] = try ensureVarRefSlotCell(ctx, frame, idx);
-                    initialized += 1;
-                    rooted_refs = refs[0..initialized];
-                }
-            }
-            eval_bindings_transferred = true;
-            (try object.functionEvalLocalNamesSlot(ctx.runtime)).* = names;
-            (try object.functionEvalLocalRefsSlot(ctx.runtime)).* = refs;
-        }
-    }
     if (create_prototype and fb.flags.has_prototype) {
         if (fb.flags.func_kind == .normal and !fb.flags.is_class_constructor) {
             // qjs-faithful lazy `prototype` (JS_AUTOINIT_ID_PROTOTYPE): install a
@@ -700,14 +464,6 @@ pub fn createBytecodeFunctionObject(
         }
     }
     return object.value();
-}
-
-pub fn functionBytecodeUsesArgumentsSpecialObject(fb: *const bytecode.FunctionBytecode) bool {
-    var index: usize = 0;
-    while (index + 1 < fb.byteCode().len) : (index += 1) {
-        if (fb.byteCode()[index] == op.special_object and (fb.byteCode()[index + 1] == 0 or fb.byteCode()[index + 1] == 1)) return true;
-    }
-    return false;
 }
 
 pub fn constructPrimitiveWrapperWithPrototype(
@@ -2311,36 +2067,6 @@ pub fn withObjectBindingValue(
     return try getValueProperty(ctx, output, global, with_object_value, atom_id, function, frame);
 }
 
-pub fn directEvalWithObject(
-    rt: *core.JSRuntime,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) core.JSValue {
-    const function = caller_function orelse return core.JSValue.undefinedValue();
-    const frame = caller_frame orelse return core.JSValue.undefinedValue();
-    const count = @min(function.vardefs.len, frame.locals.len);
-    var idx = count;
-    while (idx > 0) {
-        idx -= 1;
-        const name = rt.atoms.name(function.vardefs[idx].var_name) orelse continue;
-        if (!std.mem.startsWith(u8, name, "__active_with_obj_")) continue;
-        const value = slotValueDup(frame.locals[idx]);
-        if (objectFromValue(value) != null) return value;
-        value.free(rt);
-    }
-    return core.JSValue.undefinedValue();
-}
-
-pub fn appendPrivateBoundNamesFromObject(
-    rt: *core.JSRuntime,
-    atoms: *std.ArrayList(core.Atom),
-    object: *core.Object,
-) !void {
-    for (object.shapeProps()) |prop| {
-        try appendPrivateBoundName(rt, atoms, prop.atom_id);
-    }
-}
-
 pub fn directEvalCallerAllowsSuperProperty(caller_frame: ?*frame_mod.Frame, eval_in_class_field_initializer: bool) bool {
     if (eval_in_class_field_initializer) return true;
     const outer_frame = caller_frame orelse return false;
@@ -2363,8 +2089,6 @@ pub fn createGeneratorObject(
     input_var_refs: []const *core.VarRef,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    eval_var_ref_names: []const core.Atom,
-    input_eval_var_refs: []const core.JSValue,
     is_async: bool,
 ) !core.JSValue {
     var rooted_func = func;
@@ -2385,13 +2109,9 @@ pub fn createGeneratorObject(
     var var_refs_buffer = try core.runtime.CellRootBuffer.initCopy(ctx.runtime, input_var_refs);
     defer var_refs_buffer.deinit(ctx.runtime);
     const var_refs = var_refs_buffer.cells;
-    var eval_var_refs_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, input_eval_var_refs);
-    defer eval_var_refs_buffer.deinit(ctx.runtime);
-    const eval_var_refs = eval_var_refs_buffer.values;
     var root_slices = [_]core.runtime.ValueRootSlice{
         args_buffer.slice(),
         var_refs_buffer.slice(),
-        eval_var_refs_buffer.slice(),
     };
     const root_frame = core.runtime.ValueRootFrame{
         .previous = ctx.runtime.active_value_roots,
@@ -2455,45 +2175,6 @@ pub fn createGeneratorObject(
         }
         generator_args_owned = false;
         try object.setValueSlice(ctx.runtime, object.generatorArgsSlot(), generator_args);
-    }
-
-    if (eval_var_ref_names.len > 0) {
-        const names = try ctx.runtime.memory.alloc(core.Atom, eval_var_ref_names.len);
-        var locals_transferred = false;
-        var refs_allocated = false;
-        errdefer if (!refs_allocated and !locals_transferred) ctx.runtime.memory.free(core.Atom, names);
-        const refs = try ctx.runtime.memory.alloc(core.JSValue, eval_var_ref_names.len);
-        refs_allocated = true;
-        var rooted_refs: []core.JSValue = refs[0..0];
-        var refs_root = ValueSliceRoot{};
-        refs_root.init(ctx.runtime, &rooted_refs);
-        defer refs_root.deinit();
-        var initialized: usize = 0;
-        var initialized_names: usize = 0;
-        errdefer if (!locals_transferred) {
-            for (names[0..initialized_names]) |atom_id| ctx.runtime.atoms.free(atom_id);
-            for (refs[0..initialized]) |*stored| {
-                stored.free(ctx.runtime);
-                stored.* = core.JSValue.undefinedValue();
-            }
-            rooted_refs = &.{};
-            ctx.runtime.memory.free(core.Atom, names);
-            ctx.runtime.memory.free(core.JSValue, refs);
-        };
-        for (eval_var_ref_names, 0..) |atom_id, idx| {
-            names[idx] = ctx.runtime.atoms.dup(atom_id);
-            initialized_names += 1;
-            if (idx < eval_var_refs.len) {
-                refs[idx] = eval_var_refs[idx].dup();
-            } else {
-                refs[idx] = core.JSValue.undefinedValue();
-            }
-            initialized += 1;
-            rooted_refs = refs[0..initialized];
-        }
-        locals_transferred = true;
-        (try object.functionEvalLocalNamesSlot(ctx.runtime)).* = names;
-        (try object.functionEvalLocalRefsSlot(ctx.runtime)).* = refs;
     }
 
     if (fb.generatorBodyPc() != 0) {
@@ -4254,23 +3935,6 @@ pub fn deleteValueProperty(
     return true;
 }
 
-pub fn capturedArgumentsObject(
-    rt: *core.JSRuntime,
-    eval_local_names: []const core.Atom,
-    eval_local_slots: []core.JSValue,
-    eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
-    frame: *frame_mod.Frame,
-) ?core.JSValue {
-    if (lookupNamedSlotValue(rt, eval_local_names, eval_local_slots, core.atom.ids.arguments)) |value| return value;
-    if (!frame.evalVarRefsRepublished()) {
-        if (lookupNamedVarRef(rt, eval_var_ref_names, eval_var_refs, core.atom.ids.arguments)) |value| return value;
-    }
-    if (lookupNamedSlotValue(rt, frame.evalLocalNames(), frame.evalLocalSlots(), core.atom.ids.arguments)) |value| return value;
-    if (lookupNamedVarRef(rt, frame.evalVarRefNames(), frame.evalVarRefs(), core.atom.ids.arguments)) |value| return value;
-    return null;
-}
-
 pub fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
@@ -4627,10 +4291,6 @@ pub noinline fn defineClass(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
-    eval_local_names: []const core.Atom,
-    eval_local_slots: []core.JSValue,
-    eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
     is_computed_name: bool,
 ) !Step {
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
@@ -4688,7 +4348,7 @@ pub noinline fn defineClass(
             return error.TypeError;
         }
     }
-    ctor = try createBytecodeFunctionObject(ctx, frame, function, global, ctor_source, atom_id, op.define_class, false, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, &.{});
+    ctor = try createBytecodeFunctionObject(ctx, frame, function, global, ctor_source, atom_id, op.define_class, false);
     const ctor_object = try property_ops.expectObject(ctor);
     if (is_computed_name) {
         computed_key = try stackValueFromTop(stack, 0);

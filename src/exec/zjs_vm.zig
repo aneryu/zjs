@@ -49,16 +49,15 @@ pub fn runWithOutput(
 ) !core.JSValue {
     const global_object = try contextGlobal(ctx);
     const this_value = if (function.flags.is_module or function.flags.runtime_strict) core.JSValue.undefinedValue() else global_object.value();
-    return runWithArgs(ctx, stack, function, this_value, &.{}, &.{}, output, global_object, true, false, false, &.{}, &.{}, &.{}, &.{});
+    return runWithArgs(ctx, stack, function, this_value, &.{}, &.{}, output, global_object, true, false, false);
 }
 
 /// Host eval-mode entry (`ctx.eval(.eval_direct/.eval_indirect)`). Runs the
-/// compiled eval source through the EVAL runner contract — `is_eval_code = true`,
-/// `sync_global_lexical_locals = false` — exactly as the in-VM `eval()` builtin
+/// compiled eval source through the EVAL runner contract — `is_eval_code = true`
+/// with eval-specific declaration instantiation — exactly as the in-VM `eval()` builtin
 /// (`eval_ops.zig` runWithCallEnv site). The script runner (`runWithOutput`)
-/// hardcodes `is_eval_code = false` + `sync = true`, which is the SCRIPT contract
-/// and is wrong for eval code: it materialises a redundant `ctx.lexicals`
-/// property next to the eval frame-local. qjs keeps top-level `let`/`const`/`class`
+/// uses the SCRIPT contract, which would materialise a `ctx.lexicals` property
+/// instead of the eval frame-local. qjs keeps top-level `let`/`const`/`class`
 /// in a `JS_EVAL_TYPE_DIRECT`/`INDIRECT` eval as `add_scope_var` frame locals
 /// (discarded with the eval frame; no global cell, no env property —
 /// `quickjs.c:24362-24372` requires GLOBAL/MODULE for the cell). With
@@ -100,7 +99,7 @@ pub fn runWithOutputAndVarRefs(
 ) !core.JSValue {
     const global_object = try contextGlobal(ctx);
     const this_value = if (function.flags.is_module or function.flags.runtime_strict) core.JSValue.undefinedValue() else global_object.value();
-    return runWithArgs(ctx, stack, function, this_value, &.{}, var_refs, output, global_object, false, false, false, &.{}, &.{}, &.{}, &.{});
+    return runWithArgs(ctx, stack, function, this_value, &.{}, var_refs, output, global_object, false, false, false);
 }
 
 pub fn runModuleWithOutputAndVarRefsState(
@@ -179,10 +178,6 @@ pub fn runWithArgs(
     break_var_ref_cycles_on_exit: bool,
     strict_unresolved_get_var: bool,
     stop_on_yield: bool,
-    eval_local_names: []const core.Atom,
-    eval_local_slots: []core.JSValue,
-    eval_var_ref_names: []const core.Atom,
-    input_eval_var_refs: []const core.JSValue,
 ) !core.JSValue {
     return runWithCallEnv(.{
         .ctx = ctx,
@@ -196,10 +191,6 @@ pub fn runWithArgs(
         .break_var_ref_cycles_on_exit = break_var_ref_cycles_on_exit,
         .strict_unresolved_get_var = strict_unresolved_get_var,
         .stop_on_yield = stop_on_yield,
-        .eval_local_names = eval_local_names,
-        .eval_local_slots = eval_local_slots,
-        .eval_var_ref_names = eval_var_ref_names,
-        .eval_var_refs = input_eval_var_refs,
     }) catch |err| {
         if (!ctx.preserve_uncaught_exception and err != error.JSException and ctx.hasException()) ctx.clearException();
         return err;
@@ -222,14 +213,6 @@ pub const CallEnv = struct {
     break_var_ref_cycles_on_exit: bool = false,
     strict_unresolved_get_var: bool = false,
     stop_on_yield: bool = false,
-    eval_local_names: []const core.Atom = &.{},
-    eval_local_slots: []core.JSValue = &.{},
-    eval_var_ref_names: []const core.Atom = &.{},
-    eval_var_refs: []const core.JSValue = &.{},
-    inherited_eval_local_names: []const core.Atom = &.{},
-    inherited_eval_local_slots: []core.JSValue = &.{},
-    inherited_eval_var_ref_names: []const core.Atom = &.{},
-    inherited_eval_var_refs: []const core.JSValue = &.{},
     generator_state: ?*core.Object = null,
     resume_value: ?core.JSValue = null,
     stop_before_pc: ?usize = null,
@@ -238,8 +221,6 @@ pub const CallEnv = struct {
     constructor_this_value: core.JSValue = core.JSValue.undefinedValue(),
     eval_global_var_bindings: bool = false,
     is_eval_code: bool = false,
-    eval_with_object: core.JSValue = core.JSValue.undefinedValue(),
-    eval_caller_frame: ?*frame_mod.Frame = null,
     suspend_on_module_await: bool = false,
 };
 
@@ -256,14 +237,6 @@ pub fn runWithCallEnv(env: CallEnv) HostError!core.JSValue {
         env.break_var_ref_cycles_on_exit,
         env.strict_unresolved_get_var,
         env.stop_on_yield,
-        env.eval_local_names,
-        env.eval_local_slots,
-        env.eval_var_ref_names,
-        env.eval_var_refs,
-        env.inherited_eval_local_names,
-        env.inherited_eval_local_slots,
-        env.inherited_eval_var_ref_names,
-        env.inherited_eval_var_refs,
         env.generator_state,
         env.resume_value,
         env.stop_before_pc,
@@ -272,8 +245,6 @@ pub fn runWithCallEnv(env: CallEnv) HostError!core.JSValue {
         env.constructor_this_value,
         env.eval_global_var_bindings,
         env.is_eval_code,
-        env.eval_with_object,
-        env.eval_caller_frame,
         env.suspend_on_module_await,
     );
 }
@@ -290,14 +261,6 @@ fn runWithArgsState(
     break_var_ref_cycles_on_exit: bool,
     entry_strict_unresolved_get_var: bool,
     entry_stop_on_yield: bool,
-    entry_eval_local_names: []const core.Atom,
-    entry_eval_local_slots: []core.JSValue,
-    input_eval_var_ref_names: []const core.Atom,
-    input_eval_var_refs: []const core.JSValue,
-    inherited_eval_local_names: []const core.Atom,
-    inherited_eval_local_slots: []core.JSValue,
-    inherited_eval_var_ref_names: []const core.Atom,
-    inherited_eval_var_refs: []const core.JSValue,
     entry_generator_state: ?*core.Object,
     resume_value: ?core.JSValue,
     entry_stop_before_pc: ?usize,
@@ -306,8 +269,6 @@ fn runWithArgsState(
     constructor_this_value: core.JSValue,
     entry_eval_global_var_bindings: bool,
     entry_is_eval_code: bool,
-    entry_eval_with_object: core.JSValue,
-    entry_eval_caller_frame: ?*frame_mod.Frame,
     entry_suspend_on_module_await: bool,
 ) HostError!core.JSValue {
     const call_depth_guard = try call_vm.enterCallDepth(ctx, global);
@@ -337,31 +298,12 @@ fn runWithArgsState(
     };
     ctx.pushActiveBacktraceFrame(&active_backtrace_frame);
     defer ctx.popActiveBacktraceFrame(&active_backtrace_frame);
-    var frame_eval_var_refs = try frame_storage.initCallBindings(ctx.runtime, .{
+    try frame_storage.initCallBindings(ctx.runtime, .{
         .initial_this_value = initial_this_value,
         .current_function_value = current_function_value,
         .new_target_value = new_target_value,
         .constructor_this_value = constructor_this_value,
-        .eval_local_names = entry_eval_local_names,
-        .eval_local_slots = entry_eval_local_slots,
-        .input_eval_var_ref_names = input_eval_var_ref_names,
-        .input_eval_var_refs = input_eval_var_refs,
-        .inherited_eval_local_names = inherited_eval_local_names,
-        .inherited_eval_local_slots = inherited_eval_local_slots,
-        .inherited_eval_var_ref_names = inherited_eval_var_ref_names,
-        .inherited_eval_var_refs = inherited_eval_var_refs,
     });
-    defer frame_eval_var_refs.deinit(ctx.runtime);
-    // Direct-eval frames record the caller's live frame so publication can
-    // walk enclosing direct-eval scopes up to the function frame owning the
-    // variable environment — the zjs adaptation of qjs's eval closure
-    // containing all enclosing variables (`_var_` forwarded transitively,
-    // resolve_scope_var quickjs.c:33216-33235).
-    if (entry_eval_caller_frame) |eval_caller| {
-        const frame_cold = try frame_storage.ensureCold(&ctx.runtime.memory);
-        frame_cold.eval_caller_frame = eval_caller;
-    }
-
     const use_inline_frame_storage = entry_generator_state == null and !entry_function.flags.is_generator and !entry_function.flags.is_async;
     const frame_arena: ?*core.VmStackArena = if (use_inline_frame_storage) &ctx.runtime.vm_stack else null;
     const need_original_args = argumentsNeedsOriginalSnapshot(entry_function);
@@ -429,7 +371,7 @@ fn runWithArgsState(
         if (entry_stack.capacity == 0 and slab.stack.len != 0) {
             entry_stack.* = stack_mod.Stack.initArenaWindow(&ctx.runtime.memory, ctx.runtime.stack_size, slab.stack);
         }
-        try call_vm.initFrameLocals(ctx, entry_function, &frame_storage, entry_eval_local_names, entry_eval_local_slots, use_inline_frame_storage, frame_windows);
+        try call_vm.initFrameLocals(ctx, entry_function, &frame_storage, use_inline_frame_storage, frame_windows);
         try frame_storage.initArguments(&ctx.runtime.memory, frame_arena, args, use_inline_frame_storage, need_original_args, frame_windows);
         if (frame_windows.open_var_refs) |open_refs| frame_storage.installOpenVarRefSlots(open_refs) else if (open_var_ref_count != 0) try frame_storage.ensureOpenVarRefSlots(&ctx.runtime.memory, frame_arena, use_inline_frame_storage);
         try call_vm.initFrameVarRefs(ctx, global, entry_function, &frame_storage, var_refs, use_inline_frame_storage, frame_windows);
@@ -440,7 +382,7 @@ fn runWithArgsState(
         frame_storage.actual_arg_count = args.len;
     }
     if (entry_generator_state == null) {
-        try vm_property_globals.instantiateGlobalVarDeclarations(ctx, global, entry_function, &frame_storage, entry_is_eval_code, entry_eval_local_names, entry_eval_local_slots, frame_storage.evalVarRefNames(), frame_storage.evalVarRefs());
+        try vm_property_globals.instantiateGlobalVarDeclarations(ctx, global, entry_function, &frame_storage, entry_is_eval_code, entry_eval_global_var_bindings);
     }
 
     const resume_state = try gen_async_vm.resumeExecutionState(ctx, entry_stack, entry_function, &frame_storage, entry_generator_state, resume_value);
@@ -463,9 +405,6 @@ fn runWithArgsState(
         .entry_stack = entry_stack,
         .frame_storage = &frame_storage,
         .catch_target_storage = &catch_target_storage,
-        .entry_eval_local_names = entry_eval_local_names,
-        .entry_eval_local_slots = entry_eval_local_slots,
-        .entry_eval_with_object = entry_eval_with_object,
         .entry_eval_global_var_bindings = entry_eval_global_var_bindings,
         .entry_is_eval_code = entry_is_eval_code,
         .entry_strict_unresolved_get_var = entry_strict_unresolved_get_var,
@@ -516,9 +455,6 @@ fn runTC(loop_state: *LoopState) HostError!core.JSValue {
         .poller = .init(loop_state.ctx.runtime),
         .l0 = .{
             .is_eval_code = loop_state.entry_is_eval_code,
-            .eval_local_names = loop_state.entry_eval_local_names,
-            .eval_local_slots = loop_state.entry_eval_local_slots,
-            .eval_with_object = loop_state.entry_eval_with_object,
             .eval_global_var_bindings = loop_state.entry_eval_global_var_bindings,
             .strict_unresolved_get_var = loop_state.entry_strict_unresolved_get_var,
             .generator_state = loop_state.entry_generator_state,
@@ -556,9 +492,6 @@ const LoopState = struct {
     entry_stack: *stack_mod.Stack,
     frame_storage: *frame_mod.Frame,
     catch_target_storage: *?usize,
-    entry_eval_local_names: []const core.Atom,
-    entry_eval_local_slots: []core.JSValue,
-    entry_eval_with_object: core.JSValue,
     entry_eval_global_var_bindings: bool,
     entry_is_eval_code: bool,
     entry_strict_unresolved_get_var: bool,

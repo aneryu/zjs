@@ -2238,12 +2238,6 @@ test "native function state uses payload storage" {
     const captures = try rt.memory.alloc(*core.VarRef, 1);
     captures[0] = try core.VarRef.createClosed(rt, core.JSValue.int32(55));
     function.functionCapturesSlot().* = captures;
-    const names = try rt.memory.alloc(core.Atom, 1);
-    names[0] = try rt.internAtom("evalLocal");
-    (try function.functionEvalLocalNamesSlot(rt)).* = names;
-    const refs = try rt.memory.alloc(core.JSValue, 1);
-    refs[0] = core.JSValue.int32(66);
-    (try function.functionEvalLocalRefsSlot(rt)).* = refs;
     (try function.functionLexicalThisSlot(rt)).* = core.JSValue.int32(77);
     try function.setFunctionHomeObject(rt, home);
     const remap_from = try rt.memory.alloc(core.Atom, 1);
@@ -2261,8 +2255,6 @@ test "native function state uses payload storage" {
     try std.testing.expectEqual(@as(?i32, 33), function.functionBytecode().?.asInt32());
     try std.testing.expectEqual(@as(?i32, 44), function.functionClassFieldsInit().?.asInt32());
     try std.testing.expectEqual(@as(?i32, 55), function.functionCaptures()[0].varRefValue().asInt32());
-    try std.testing.expectEqual(@as(usize, 1), function.functionEvalLocalNames().len);
-    try std.testing.expectEqual(@as(?i32, 66), function.functionEvalLocalRefs()[0].asInt32());
     try std.testing.expectEqual(@as(?i32, 77), function.functionLexicalThis().?.asInt32());
     try std.testing.expectEqual(home, function.functionHomeObject().?);
     try std.testing.expectEqual(@as(usize, 1), function.privateRemapFrom().len);

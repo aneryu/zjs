@@ -27,13 +27,6 @@ pub const DropResult = union(enum) {
 
 pub const Step = enum { done, continue_loop };
 
-pub const GlobalFastPathEnv = struct {
-    global: *core.Object,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-};
-
 pub fn pushInt32Operand(stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
     const value = readInt(i32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
@@ -50,18 +43,6 @@ pub fn pushI16Operand(stack: *stack_mod.Stack, function: *const bytecode.Bytecod
     const value = readInt(i16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
     try pushImmediateInt32MaybeFuse(stack, function, frame, value);
-}
-
-pub fn pushI16OperandVm(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    fast_paths: GlobalFastPathEnv,
-) !void {
-    _ = ctx;
-    _ = fast_paths;
-    try pushI16Operand(stack, function, frame);
 }
 
 pub fn pushI8Operand(stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {

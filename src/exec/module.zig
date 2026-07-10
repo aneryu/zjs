@@ -334,7 +334,7 @@ pub fn initializeModuleFunctionDeclarations(
 
         const value = function.constants.get(constant_index) orelse return error.InvalidBytecode;
         defer value.free(ctx.runtime);
-        const function_value = try object_ops.createBytecodeFunctionObject(ctx, &frame, function, global, value, function.name, op.fclosure8, true, &.{}, &.{}, &.{}, &.{}, &.{});
+        const function_value = try object_ops.createBytecodeFunctionObject(ctx, &frame, function, global, value, function.name, op.fclosure8, true);
         try slot_ops.setVarRefSlotValue(ctx, &frame, ref_idx, function_value);
     }
 }

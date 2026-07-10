@@ -744,6 +744,112 @@ test "short BigInt induction add range preserves completion" {
     try std.testing.expectEqualStrings("6\n6\nundefined\n", stream.buffered());
 }
 
+const EscapedEvalImportHost = struct {
+    expected_referrer: []const u8,
+    saw_expected_referrer: bool = false,
+};
+
+fn escapedEvalImportResolve(
+    ptr: *anyopaque,
+    specifier: []const u8,
+    referrer: ?[]const u8,
+    allocator: std.mem.Allocator,
+) anyerror!engine.harness.Engine.HostHooks.ResolvedModule {
+    const host: *EscapedEvalImportHost = @ptrCast(@alignCast(ptr));
+    const dep_path = "/fixture/scripts/dep.js";
+    if (std.mem.eql(u8, specifier, "./dep.js")) {
+        host.saw_expected_referrer = if (referrer) |path|
+            std.mem.eql(u8, path, host.expected_referrer)
+        else
+            false;
+    } else if (!std.mem.eql(u8, specifier, dep_path)) {
+        return error.ModuleNotFound;
+    }
+    return .{
+        .specifier = try allocator.dupe(u8, specifier),
+        .path = try allocator.dupe(u8, dep_path),
+        .kind = .esm,
+    };
+}
+
+fn escapedEvalImportLoad(
+    _: *anyopaque,
+    resolved: engine.harness.Engine.HostHooks.ResolvedModule,
+    allocator: std.mem.Allocator,
+) anyerror!engine.harness.Engine.HostHooks.LoadedModule {
+    const dep_path = "/fixture/scripts/dep.js";
+    if (!std.mem.eql(u8, resolved.path, dep_path)) return error.ModuleNotFound;
+    return .{
+        .source = "export const answer = 42;",
+        .path = try allocator.dupe(u8, dep_path),
+        .kind = .esm,
+        .owned = false,
+    };
+}
+
+test "escaped direct eval function keeps script referrer for dynamic import" {
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const root_path = "/fixture/scripts/main.mjs";
+    var host = EscapedEvalImportHost{ .expected_referrer = root_path };
+    const hooks = engine.harness.Engine.HostHooks{
+        .ptr = &host,
+        .resolveModule = escapedEvalImportResolve,
+        .loadModule = escapedEvalImportLoad,
+    };
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileModuleGraphWithHostHooks(
+        \\var escaped;
+        \\function createLoader() {
+        \\  escaped = eval("eval(\"(function load(){ return import('./dep.js'); })\")");
+        \\}
+        \\createLoader();
+        \\escaped().then(
+        \\  function(namespace) { print(namespace.answer); },
+        \\  function(error) { print(error.name); }
+        \\);
+    ,
+        &stream,
+        root_path,
+        hooks,
+        std.testing.allocator,
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(host.saw_expected_referrer);
+    try std.testing.expectEqualStrings("42\n", stream.buffered());
+}
+
+test "escaped direct eval function keeps eval stack filename" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [1]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileWithOutputMode(
+        \\function createThrower() {
+        \\  return eval("(function evalThrower(){ throw new Error('boom'); })");
+        \\}
+        \\var escaped = createThrower();
+        \\var stack;
+        \\try { escaped(); } catch (error) { stack = error.stack; }
+        \\assert.sameValue(typeof stack, "string");
+        \\assert.sameValue(stack.indexOf("<eval>") >= 0, true);
+    ,
+        &stream,
+        .script,
+        "/fixture/scripts/original.js",
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("", stream.buffered());
+}
+
 test "Engine eval executes simple direct eval strings" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -883,7 +989,7 @@ test "Engine parenthesized eval preserves only grouping directness" {
     try std.testing.expectEqualStrings("local\nglobal\nglobal\nglobal\nglobal\nglobal\nglobal\n", stream.buffered());
 }
 
-test "Engine direct eval RHS keeps initial assignment reference" {
+test "Engine direct eval RHS preserves the pre-eval identifier reference" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -924,7 +1030,7 @@ test "Engine direct eval RHS keeps initial assignment reference" {
     try std.testing.expectEqualStrings("undefined 1\n2 12\nundefined 1\n", stream.buffered());
 }
 
-test "Engine direct eval RHS scanner preserves regexp literals" {
+test "Engine assignment RHS regexp and division follow eval reference timing" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -1011,6 +1117,122 @@ test "Engine strict direct eval updates visible parameter refs" {
     try std.testing.expectEqualStrings("2\n17\n2\n17\n", stream.buffered());
 }
 
+test "Engine direct eval captures outer names only mentioned in eval source" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function outer(a) {
+        \\  let x = 3;
+        \\  var y = 4;
+        \\  return function() {
+        \\    return eval("a + x + y");
+        \\  };
+        \\}
+        \\print(outer(2)());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("9\n", stream.buffered());
+}
+
+test "Engine direct eval closures bind visible caller metadata" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function localLexical() {
+        \\  let x = 1;
+        \\  const y = 2;
+        \\  var read = eval("(function(){ return x + y; })");
+        \\  x = 10;
+        \\  return read();
+        \\}
+        \\function parameter(p) {
+        \\  var read = eval("(function(){ return p; })");
+        \\  p = 3;
+        \\  return read();
+        \\}
+        \\function callerClosureRef() {
+        \\  let x = 5;
+        \\  return function() {
+        \\    var read = eval("(function(){ return x; })");
+        \\    x = 6;
+        \\    return read();
+        \\  };
+        \\}
+        \\function callerClosureWrite() {
+        \\  let x = 1;
+        \\  return function() {
+        \\    eval("x = 8");
+        \\    return x;
+        \\  };
+        \\}
+        \\function hiddenSibling() {
+        \\  var keep;
+        \\  { const hidden = 1; keep = function(){ return hidden; }; }
+        \\  {
+        \\    let visible = 2;
+        \\    var read = eval("(function(){ return typeof hidden + ':' + visible; })");
+        \\    return read() + ':' + keep();
+        \\  }
+        \\}
+        \\print(localLexical());
+        \\print(parameter(1));
+        \\print(callerClosureRef()());
+        \\print(callerClosureWrite()());
+        \\print(hiddenSibling());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("12\n3\n6\n8\nundefined:2:1\n", stream.buffered());
+}
+
+test "Engine direct eval only exposes lexicals visible at call site" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function afterBlock() {
+        \\  { let hidden = 1; }
+        \\  return eval("typeof hidden");
+        \\}
+        \\function siblingBlock() {
+        \\  { let a = 1; }
+        \\  { let b = 2; return eval("typeof a + String.fromCharCode(58) + b"); }
+        \\}
+        \\function currentAndOuterBlock() {
+        \\  let outer = 3;
+        \\  { let inner = 4; return eval("outer + inner"); }
+        \\}
+        \\function readAfterBlock() {
+        \\  { let hidden = 1; }
+        \\  try { return eval("hidden"); } catch (e) { return e.name; }
+        \\}
+        \\var arrowAfterBlock = () => {
+        \\  { let hidden = 1; }
+        \\  return eval("typeof hidden");
+        \\};
+        \\print(afterBlock());
+        \\print(siblingBlock());
+        \\print(currentAndOuterBlock());
+        \\print(readAfterBlock());
+        \\print(arrowAfterBlock());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("undefined\nundefined:2\n7\nReferenceError\nundefined\n", stream.buffered());
+}
+
 test "Engine eval executes control-flow smoke fixtures" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -1042,6 +1264,33 @@ test "Engine eval executes control-flow smoke fixtures" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("10\n3\nneg zero pos\ntwo\n", stream.buffered());
+}
+
+test "Engine direct eval private names require lexical class scope" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function evil() { return eval("this.#x"); }
+        \\class C {
+        \\  #x = 7;
+        \\  good() { return eval("this.#x"); }
+        \\  bad(fn) { return fn.call(this); }
+        \\}
+        \\var c = new C();
+        \\print(c.good());
+        \\try {
+        \\  print(c.bad(evil));
+        \\} catch (e) {
+        \\  print(e.name);
+        \\}
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("7\nSyntaxError\n", stream.buffered());
 }
 
 test "Engine eval boxes primitive with objects and catches nullish with" {
@@ -1101,6 +1350,310 @@ test "Engine eval assigns through with object references" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("2\nReferenceError\n0 a 1 true\n3\n", stream.buffered());
+}
+
+test "Engine dynamic environment nested with resolves outer object" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var nestedWithValue = "global";
+        \\var outer = { nestedWithValue: "outer" };
+        \\var inner = {};
+        \\with (outer) {
+        \\  with (inner) {
+        \\    print(nestedWithValue);
+        \\  }
+        \\}
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("outer\n", stream.buffered());
+}
+
+test "Engine dynamic environment direct eval inside with resolves active object" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var evalWithValue = "global";
+        \\function readEvalWithValue() {
+        \\  var evalWithValue = "local";
+        \\  var object = { evalWithValue: "with" };
+        \\  with (object) {
+        \\    return eval("evalWithValue");
+        \\  }
+        \\}
+        \\print(readEvalWithValue());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("with\n", stream.buffered());
+}
+
+test "Engine ordered dynamic environment closure tracks nested with objects" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function makeOrderedWithState() {
+        \\  var outer = { orderedWithValue: "outer" };
+        \\  var inner = { orderedWithValue: "inner" };
+        \\  var read;
+        \\  with (outer) {
+        \\    with (inner) {
+        \\      read = function() { return orderedWithValue; };
+        \\    }
+        \\  }
+        \\  return { read: read, inner: inner };
+        \\}
+        \\var state = makeOrderedWithState();
+        \\print(state.read());
+        \\state.inner.orderedWithValue = "mutated";
+        \\print(state.read());
+        \\delete state.inner.orderedWithValue;
+        \\print(state.read());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("inner\nmutated\nouter\n", stream.buffered());
+}
+
+test "Engine ordered dynamic environment eval closure tracks nested with objects" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var outer = { orderedEvalWithValue: "outer" };
+        \\var inner = { orderedEvalWithValue: "inner" };
+        \\function makeOrderedEvalWithReader() {
+        \\  with (outer) {
+        \\    with (inner) {
+        \\      return eval("(function() { return orderedEvalWithValue; })");
+        \\    }
+        \\  }
+        \\}
+        \\var readOrderedEvalWithValue = makeOrderedEvalWithReader();
+        \\print(readOrderedEvalWithValue());
+        \\inner.orderedEvalWithValue = "mutated";
+        \\print(readOrderedEvalWithValue());
+        \\delete inner.orderedEvalWithValue;
+        \\print(readOrderedEvalWithValue());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("inner\nmutated\nouter\n", stream.buffered());
+}
+
+test "Engine direct eval keeps internal completion slots out of with objects" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var withTarget = { value: 1 };
+        \\with (withTarget) { print(eval("value")); }
+        \\print(Object.keys(withTarget).join(","), withTarget["<ret>"]);
+        \\var proxyTarget = { value: 2 };
+        \\var withProxy = new Proxy(proxyTarget, {
+        \\  has: function(target, key) {
+        \\    if (key === "<ret>") throw new Error("internal binding leaked");
+        \\    return Reflect.has(target, key);
+        \\  },
+        \\  set: function(target, key, value, receiver) {
+        \\    if (key === "<ret>") throw new Error("internal binding leaked");
+        \\    return Reflect.set(target, key, value, receiver);
+        \\  }
+        \\});
+        \\with (withProxy) { print(eval("value")); }
+        \\print(Object.keys(proxyTarget).join(","));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1\nvalue undefined\n2\nvalue\n", stream.buffered());
+}
+
+test "Engine ordered dynamic environment later eval captures earlier eval var" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function makeEarlierEvalVarReader() {
+        \\  eval("var earlierEvalValue = 'earlier';");
+        \\  return eval("(function() { return earlierEvalValue; })");
+        \\}
+        \\var readEarlierEvalValue = makeEarlierEvalVarReader();
+        \\print(readEarlierEvalValue());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("earlier\n", stream.buffered());
+}
+
+test "Engine ordered dynamic environment eval var shadows captured outer lexical" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function grand() {
+        \\  let x = "grand";
+        \\  return function parent() {
+        \\    var child = function() { return x; };
+        \\    eval("var x = 'eval';");
+        \\    return child;
+        \\  };
+        \\}
+        \\print(grand()()());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("eval\n", stream.buffered());
+}
+
+test "Engine parameter dynamic environment ordinary closure prefers body eval var" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function makeBodyEvalOrdinaryReader(_ = eval("var x = 'arg';")) {
+        \\  eval("var x = 'body';");
+        \\  var read = function() { return x; };
+        \\  return read;
+        \\}
+        \\var readBodyEvalOrdinary = makeBodyEvalOrdinaryReader();
+        \\print(readBodyEvalOrdinary());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("body\n", stream.buffered());
+}
+
+test "Engine parameter dynamic environment eval closure prefers body eval var" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function makeBodyEvalDirectReader(_ = eval("var x = 'arg';")) {
+        \\  eval("var x = 'body';");
+        \\  return eval("(function() { return x; })");
+        \\}
+        \\var readBodyEvalDirect = makeBodyEvalDirectReader();
+        \\print(readBodyEvalDirect());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("body\n", stream.buffered());
+}
+
+test "Engine parameter dynamic environment closures retain argument eval var" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function makeArgumentEvalReaders(_ = eval("var x = 'arg';")) {
+        \\  var ordinary = function() { return x; };
+        \\  var direct = eval("(function() { return x; })");
+        \\  return [ordinary, direct];
+        \\}
+        \\var argumentEvalReaders = makeArgumentEvalReaders();
+        \\print(argumentEvalReaders[0](), argumentEvalReaders[1]());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("arg arg\n", stream.buffered());
+}
+
+test "Engine parameter dynamic environment delete removes argument eval var" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function deleteArgumentEvalVar(
+        \\  _ = eval("var x = 'arg'; print(delete x, typeof x);")
+        \\) {
+        \\  print(typeof x);
+        \\}
+        \\deleteArgumentEvalVar();
+        \\print(typeof x);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("true undefined\nundefined\nundefined\n", stream.buffered());
+}
+
+test "Engine dynamic environment eval var object yields to nearer lexical closure" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function makeEscapingReader() {
+        \\  eval("var evalShadowValue = 'eval';");
+        \\  print(evalShadowValue);
+        \\  return (function() {
+        \\    let evalShadowValue = "lexical";
+        \\    return function() { return evalShadowValue; };
+        \\  })();
+        \\}
+        \\var readEscapingValue = makeEscapingReader();
+        \\print(readEscapingValue());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("eval\nlexical\n", stream.buffered());
+}
+
+test "Engine dynamic environment nested no-op eval preserves function binding" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function readRetainedEvalFunction() {
+        \\  eval("function retainedEvalFunction() { return 'retained'; } eval('');");
+        \\  return retainedEvalFunction();
+        \\}
+        \\print(readRetainedEvalFunction());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("retained\n", stream.buffered());
 }
 
 test "Engine direct eval after with uses global var binding" {
@@ -1194,6 +1747,562 @@ test "Engine direct eval var bindings stay in caller function scope" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("ordinary inside outside\nordinaryAfter outside\nparam inside inside inside outside\n", stream.buffered());
+}
+
+test "Engine direct eval catch bindings do not escape their scopes" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\print(eval("try { throw 1; } catch (caughtSimple) {} typeof caughtSimple"));
+        \\print(eval("try { throw [1]; } catch ([caughtPattern]) {} typeof caughtPattern"));
+        \\print(eval("try { throw 1; } catch (sameName) { var sameName = 2; } typeof sameName"));
+        \\print(eval("try { throw 1; } catch (caughtOther) { var hoistedOther = 2; } hoistedOther"));
+        \\print(eval("var readCaught; try { throw 3; } catch (capturedCaught) { readCaught = function() { return capturedCaught; }; } readCaught()"));
+        \\print((function() { try { throw 4; } catch (callerCaught) {} return eval("typeof callerCaught"); }()));
+        \\print((function() { try { throw 5; } catch (visibleCaught) { return eval("visibleCaught"); } }()));
+        \\print((function() { try { throw 1; } catch (sameCatchVar) { eval("var sameCatchVar = 2"); return sameCatchVar; } }()));
+        \\print((function() { try { throw 1; } catch (sameCatchFn) { eval("{ function sameCatchFn() {} }"); return typeof sameCatchFn; } }()));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("undefined\nundefined\nundefined\n2\n3\nundefined\n5\n2\nfunction\n", stream.buffered());
+}
+
+test "Engine strict eval declarations stay inside the eval environment" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\eval('"use strict"; var strictGlobalVar = 1;');
+        \\print(typeof strictGlobalVar);
+        \\(0, eval)('"use strict"; var strictIndirectVar = 1;');
+        \\print(typeof strictIndirectVar);
+        \\eval('"use strict"; function strictGlobalFn() {}');
+        \\print(typeof strictGlobalFn);
+        \\eval('"use strict"; { function strictBlockFn() {} }');
+        \\print(typeof strictBlockFn);
+        \\print((function(outer) { eval('"use strict"; var outer = 2;'); return outer; }(1)));
+        \\print(eval('"use strict"; var strictResult = 3; strictResult'));
+        \\print(typeof strictEvalGhost, eval('"use strict"; typeof strictEvalGhost'));
+        \\print(typeof sloppyEvalGhost, eval('typeof sloppyEvalGhost'));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("undefined\nundefined\nundefined\nundefined\n1\n3\nundefined undefined\nundefined undefined\n", stream.buffered());
+}
+
+test "Engine direct eval ignores popped shadows when capturing outer bindings" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function outer() {
+        \\  let x = "outer";
+        \\  return function() {
+        \\    var values = [];
+        \\    { let x = "inner"; values.push(eval("x")); }
+        \\    values.push(eval("x"));
+        \\    return values.join(" ");
+        \\  };
+        \\}
+        \\print(outer()());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("inner outer\n", stream.buffered());
+}
+
+test "Engine direct eval closures preserve dynamic scope instances" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var iterationReaders = [];
+        \\for (let iterationValue = 0; iterationValue < 3; iterationValue++) {
+        \\  iterationReaders.push(eval("() => iterationValue"));
+        \\}
+        \\print(iterationReaders.map(function(read) { return read(); }).join(","));
+        \\var catchReaders = [];
+        \\for (var catchIndex = 0; catchIndex < 3; catchIndex++) {
+        \\  try { throw catchIndex; } catch (caughtIteration) {
+        \\    catchReaders.push(eval("() => caughtIteration"));
+        \\  }
+        \\}
+        \\print(catchReaders.map(function(read) { return read(); }).join(","));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("0,1,2\n0,1,2\n", stream.buffered());
+}
+
+test "Engine direct eval selects the nearest private environment" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\class OuterPrivateEnvironment {
+        \\  #value = 1;
+        \\  readNested() {
+        \\    class InnerPrivateEnvironment {
+        \\      #value = 2;
+        \\      read() { return eval("this.#value"); }
+        \\    }
+        \\    return new InnerPrivateEnvironment().read();
+        \\  }
+        \\}
+        \\print(new OuterPrivateEnvironment().readNested());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("2\n", stream.buffered());
+}
+
+test "Engine direct eval var hoist in parameter initializer uses arg var object" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var paramEvalVar = "global";
+        \\function scenario(
+        \\  _ = eval("var paramEvalVar = 'eval';"),
+        \\  later = paramEvalVar
+        \\) {
+        \\  print("later", later);
+        \\  print("body", paramEvalVar);
+        \\  return function() { return paramEvalVar; };
+        \\}
+        \\var read = scenario();
+        \\print("closure", read());
+        \\print("global", globalThis.paramEvalVar);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("later eval\nbody eval\nclosure eval\nglobal global\n", stream.buffered());
+}
+
+test "Engine direct eval function hoist in parameter initializer uses arg var object" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var paramEvalFn = "global";
+        \\function scenario(
+        \\  _ = eval("function paramEvalFn() { return 'eval'; }"),
+        \\  later = paramEvalFn()
+        \\) {
+        \\  print("later", later);
+        \\  print("body", paramEvalFn());
+        \\  return function() { return paramEvalFn(); };
+        \\}
+        \\var read = scenario();
+        \\print("closure", read());
+        \\print("global", globalThis.paramEvalFn);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("later eval\nbody eval\nclosure eval\nglobal global\n", stream.buffered());
+}
+
+test "Engine parameter eval seed orders lexical parameter before arg var object" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var orderedParameter = "global";
+        \\var bodyRan = false;
+        \\function scenario(
+        \\  _ = eval("var orderedParameter;"),
+        \\  orderedParameter
+        \\) {
+        \\  bodyRan = true;
+        \\}
+        \\try { scenario(); print("no error"); } catch (error) { print(error.name); }
+        \\print(bodyRan, globalThis.orderedParameter);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("SyntaxError\nfalse global\n", stream.buffered());
+}
+
+test "Engine sloppy direct eval var closures survive and reuse redeclare binding" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var readEvalVar, writeEvalVar;
+        \\function scenario() {
+        \\  eval('var hoistedEvalVar = 1; readEvalVar = function() { return hoistedEvalVar; }; writeEvalVar = function(value) { hoistedEvalVar = value; return hoistedEvalVar; };');
+        \\  print("first", readEvalVar(), writeEvalVar(2), readEvalVar());
+        \\  eval('var hoistedEvalVar; hoistedEvalVar = 5;');
+        \\  print("second", hoistedEvalVar, readEvalVar());
+        \\}
+        \\scenario();
+        \\print("after", readEvalVar(), writeEvalVar(9), readEvalVar());
+        \\try { print(hoistedEvalVar); } catch (e) { print(e.name); }
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("first 1 2 2\nsecond 5 5\nafter 5 9 9\nReferenceError\n", stream.buffered());
+}
+
+test "Engine nested direct eval reuses caller eval var object" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function f() {
+        \\  eval("var x = 1; eval('var y = 2; print(\"inner\", y); y = 3'); print(\"outer\", y)");
+        \\  print("body", typeof x, y);
+        \\}
+        \\f();
+        \\function g() {
+        \\  var y = 0;
+        \\  eval("eval('var y = 2; print(\"existing inner\", y)'); print(\"existing outer\", y)");
+        \\  print("existing body", y);
+        \\}
+        \\g();
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "inner 2\nouter 3\nbody number 3\n" ++
+            "existing inner 2\nexisting outer 2\nexisting body 2\n",
+        stream.buffered(),
+    );
+}
+
+test "Engine nested direct eval inherits private name environment" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [32]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\class NestedPrivateEval {
+        \\  #value = 42;
+        \\  read() { return eval("eval('this.#value')"); }
+        \\}
+        \\print(new NestedPrivateEval().read());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("42\n", stream.buffered());
+}
+
+test "Engine parameter initializer closures capture the parameter environment" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function split(a, b = () => a) { var a = 2; return [b(), a].join(","); }
+        \\function update(a, b = (a = 7, () => a)) { return b(); }
+        \\function forward(read = () => value, value = 10) { return read(); }
+        \\print(split(1));
+        \\print(update(1));
+        \\print(forward());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1,2\n7\n10\n", stream.buffered());
+}
+
+test "Engine global eval nested Annex B declarations stay function local" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\eval("function outerAnnexB(){ { function leakedAnnexB(){} } }");
+        \\outerAnnexB();
+        \\print(typeof globalThis.leakedAnnexB);
+        \\var preservedAnnexB = 1;
+        \\eval("function overwriteAnnexB(){ { function preservedAnnexB(){} } }");
+        \\overwriteAnnexB();
+        \\print(typeof preservedAnnexB);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("undefined\nnumber\n", stream.buffered());
+}
+
+test "Engine with object arguments property shadows implicit arguments" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [16]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function withArguments() {
+        \\  with ({ arguments: "object" }) return arguments;
+        \\}
+        \\print(withArguments(5));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("object\n", stream.buffered());
+}
+
+test "Engine direct eval in parameter initializer observes parameter TDZ" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function later(a = eval("b"), b = 1) {}
+        \\function self(a = eval("a")) {}
+        \\try { later(); } catch (error) { print(error.name); }
+        \\try { self(); } catch (error) { print(error.name); }
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("ReferenceError\nReferenceError\n", stream.buffered());
+}
+
+test "Engine direct eval callback passed to assert.throws keeps eval var scope" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function scenario() {
+        \\  eval("var evalAssertVar = 42; var callback = function() { if (eval('evalAssertVar') !== 42) throw new RangeError('bad value'); throw new TypeError('expected'); };");
+        \\  assert.throws(TypeError, callback);
+        \\}
+        \\scenario();
+        \\assert.sameValue(typeof evalAssertVar, "undefined");
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Engine generator created by direct eval keeps eval var scope across resume" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function scenario() {
+        \\  eval("var evalGenVar = 3; var make = function*() { yield evalGenVar; evalGenVar += 4; yield eval('evalGenVar'); return evalGenVar; };");
+        \\  var it = make();
+        \\  var first = it.next();
+        \\  assert.sameValue(first.value, 3);
+        \\  assert.sameValue(first.done, false);
+        \\  var second = it.next();
+        \\  assert.sameValue(second.value, 7);
+        \\  assert.sameValue(second.done, false);
+        \\  var third = it.next();
+        \\  assert.sameValue(third.value, 7);
+        \\  assert.sameValue(third.done, true);
+        \\  eval("evalGenVar = 11;");
+        \\  var again = make();
+        \\  assert.sameValue(again.next().value, 11);
+        \\}
+        \\scenario();
+        \\assert.sameValue(typeof evalGenVar, "undefined");
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Engine sloppy direct eval deleted var can be redeclared" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function deleteScenario() {
+        \\  eval('var deletedEvalVar = 1;');
+        \\  print("made", deletedEvalVar);
+        \\  print("delete", delete deletedEvalVar);
+        \\  try { print("read", deletedEvalVar); } catch (e) { print("read", e.name); }
+        \\  print("typeof", typeof deletedEvalVar);
+        \\  print("redeclare", eval('var deletedEvalVar = 2; deletedEvalVar'));
+        \\  print("after", deletedEvalVar);
+        \\}
+        \\deleteScenario();
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("made 1\ndelete true\nread ReferenceError\ntypeof undefined\nredeclare 2\nafter 2\n", stream.buffered());
+}
+
+test "Engine direct eval declaration forms share the variable object" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\globalThis.evalDestructFallback = "global";
+        \\function destructScenario() {
+        \\  eval("var { evalDestructFallback } = { evalDestructFallback: 1 }; globalThis.readDestructFallback = () => evalDestructFallback");
+        \\  print(readDestructFallback());
+        \\  eval("delete evalDestructFallback");
+        \\  print(readDestructFallback());
+        \\}
+        \\destructScenario();
+        \\globalThis.evalForOfFallback = "global";
+        \\function forOfScenario() {
+        \\  eval("for (var evalForOfFallback of [1]) {} globalThis.readForOfFallback = () => evalForOfFallback");
+        \\  print(readForOfFallback());
+        \\  eval("delete evalForOfFallback");
+        \\  print(readForOfFallback());
+        \\}
+        \\forOfScenario();
+        \\globalThis.evalAnnexFallback = "global";
+        \\function annexScenario() {
+        \\  eval("{ function evalAnnexFallback() { return 1; } } globalThis.readAnnexFallback = () => evalAnnexFallback");
+        \\  print(typeof readAnnexFallback());
+        \\  eval("delete evalAnnexFallback");
+        \\  print(readAnnexFallback());
+        \\}
+        \\annexScenario();
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1\nglobal\n1\nglobal\nfunction\nglobal\n", stream.buffered());
+}
+
+test "Engine parameter and body eval variable objects stay distinct" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function splitEvalEnvironments(
+        \\  _ = eval("var splitEvalValue = 1; function readParameterEvalValue() { return splitEvalValue; }"),
+        \\  readParameterClosure = () => splitEvalValue
+        \\) {
+        \\  print("parameter", splitEvalValue, readParameterEvalValue(), readParameterClosure());
+        \\  eval("var splitEvalValue = 2");
+        \\  print("body", splitEvalValue, readParameterEvalValue(), readParameterClosure());
+        \\}
+        \\splitEvalEnvironments();
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("parameter 1 1 1\nbody 2 1 1\n", stream.buffered());
+}
+
+test "Engine sloppy direct eval function declarations conflict with body lexicals" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function check(source) {
+        \\  try {
+        \\    eval(source);
+        \\    print("no error");
+        \\  } catch (e) {
+        \\    print(e.name);
+        \\  }
+        \\}
+        \\check("function directEvalConflict(){}; let directEvalConflict");
+        \\check("function directEvalConflict(){}; class directEvalConflict{}");
+        \\check("function directEvalConflict(){}; let { directEvalConflict } = { directEvalConflict: 1 }");
+        \\check("var directEvalConflict; class directEvalConflict{}");
+        \\check("var directEvalConflict; let { directEvalConflict } = { directEvalConflict: 1 }");
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("SyntaxError\nSyntaxError\nSyntaxError\nSyntaxError\nSyntaxError\n", stream.buffered());
+}
+
+test "Engine Annex B eval function hoist respects enclosing lexical bindings" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\eval("{ let blockedAnnexB = 1; { function blockedAnnexB() {} } }");
+        \\print(typeof blockedAnnexB);
+        \\eval("{ function allowedAnnexB() { return 1; } }");
+        \\print(typeof allowedAnnexB, allowedAnnexB());
+        \\eval("if (true) { function arguments() { return 3; } }");
+        \\print(typeof arguments, arguments());
+        \\delete globalThis.arguments;
+        \\try {
+        \\  (function(_ = eval("if (false) { function arguments() {} }")) {})();
+        \\  print("no error");
+        \\} catch (error) {
+        \\  print(error.name);
+        \\}
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("undefined\nfunction 1\nfunction 3\nSyntaxError\n", stream.buffered());
+}
+
+test "Engine sloppy direct eval function hoist uses var object binding" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var directEvalFn = "global";
+        \\function scenario() {
+        \\  eval("function directEvalFn(){ return 'first'; } function directEvalFn(){ return 'second'; }");
+        \\  print(directEvalFn());
+        \\  print(globalThis.directEvalFn);
+        \\}
+        \\scenario();
+        \\print(directEvalFn);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("second\nglobal\nglobal\n", stream.buffered());
 }
 
 test "Engine direct eval var refs do not shadow global callees" {

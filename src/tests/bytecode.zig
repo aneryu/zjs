@@ -126,6 +126,54 @@ test "function bytecode owns code constants module and debug metadata" {
     try std.testing.expectEqual(@as(?u32, 2), dbg.lineForPc(4));
 }
 
+test "script or module metadata owns each bytecode transfer" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const display_filename = try rt.internAtom("<eval>");
+    const referrer = try rt.internAtom("/fixture/scripts/main.mjs");
+    defer rt.atoms.free(display_filename);
+    defer rt.atoms.free(referrer);
+    const base_ref_count = rt.atoms.refCount(referrer).?;
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, display_filename);
+    var function_alive = true;
+    defer if (function_alive) function.deinit(rt);
+    function.atoms.replace(&function.script_or_module, referrer);
+    try std.testing.expectEqual(base_ref_count + 1, rt.atoms.refCount(referrer).?);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, display_filename);
+    var fd_alive = true;
+    defer if (fd_alive) fd.deinit(rt);
+    fd.atoms.replace(&fd.script_or_module, referrer);
+    try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
+    try std.testing.expectEqual(base_ref_count + 2, rt.atoms.refCount(referrer).?);
+
+    const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+    const fb = &fb_slice[0];
+    var fb_alive = true;
+    defer if (fb_alive) core.JSValue.functionBytecode(&fb.header).free(rt);
+    try std.testing.expectEqual(display_filename, fb.filename);
+    try std.testing.expectEqual(referrer, fb.scriptOrModule());
+    try std.testing.expectEqual(base_ref_count + 3, rt.atoms.refCount(referrer).?);
+
+    const view = bytecode.asBytecodeView(fb, rt);
+    try std.testing.expectEqual(display_filename, view.filename);
+    try std.testing.expectEqual(referrer, view.script_or_module);
+
+    core.JSValue.functionBytecode(&fb.header).free(rt);
+    fb_alive = false;
+    try std.testing.expectEqual(base_ref_count + 2, rt.atoms.refCount(referrer).?);
+
+    fd.deinit(rt);
+    fd_alive = false;
+    try std.testing.expectEqual(base_ref_count + 1, rt.atoms.refCount(referrer).?);
+
+    function.deinit(rt);
+    function_alive = false;
+    try std.testing.expectEqual(base_ref_count, rt.atoms.refCount(referrer).?);
+}
+
 test "bytecode setCode skips zero-length allocation" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -149,6 +197,24 @@ test "bytecode setCode skips zero-length allocation" {
     try std.testing.expectEqual(@as(usize, 0), function_bc.code_capacity);
     try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(base_allocations, rt.memory.allocation_count);
+}
+
+test "bytecode appendCode does not infer direct eval from atom operand bytes" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function_bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function_bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var instruction = [_]u8{ op.push_atom_value, 0, 0, 0, 0 };
+    const synthetic_atom = @as(u32, op.eval) | (@as(u32, op.apply_eval) << 8);
+    std.mem.writeInt(u32, instruction[1..5], synthetic_atom, .little);
+
+    try std.testing.expectEqual(op.eval, instruction[1]);
+    try std.testing.expectEqual(op.apply_eval, instruction[2]);
+    try function_bc.appendCode(&instruction);
+    try std.testing.expect(!function_bc.flags.has_eval_call);
 }
 
 test "bytecode module record add failure releases duplicated atom references" {
@@ -180,6 +246,33 @@ const pc2line = pipeline.pc2line;
 const stack_size = pipeline.stack_size;
 const function_def = bytecode.function_def;
 
+fn resolveEvalDeclarationTarget(
+    rt: *core.JSRuntime,
+    name: core.Atom,
+    declaration_name: core.Atom,
+    is_eval: bool,
+    closure_vars: []const function_def.ClosureVar,
+) !function_def.EvalBindingTarget {
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.is_eval = is_eval;
+    _ = try fd.appendScope(-1);
+    for (closure_vars) |cv| _ = try fd.addClosureVar(cv);
+    try fd.appendGlobalVar(.{
+        .cpool_idx = -1,
+        .scope_level = 0,
+        .var_name = declaration_name,
+    });
+
+    const input = [_]u8{bytecode.opcode.op.return_undef};
+    try bc.setCode(&input);
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+    return fd.global_vars[0].eval_target;
+}
+
 test "FunctionDef: init/deinit" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -200,6 +293,27 @@ test "FunctionDef: init/deinit" {
     try std.testing.expectEqual(@as(i32, 0), fd.global_var_count);
     try std.testing.expectEqual(@as(i32, 0), fd.source_loc_count);
     try std.testing.expectEqual(@as(i32, 0), fd.child_list.len);
+}
+
+test "FunctionDef appendByteCode does not infer direct eval from atom operand bytes" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("operand-bytes");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var instruction = [_]u8{ op.push_atom_value, 0, 0, 0, 0 };
+    const synthetic_atom = @as(u32, op.eval) | (@as(u32, op.apply_eval) << 8);
+    std.mem.writeInt(u32, instruction[1..5], synthetic_atom, .little);
+
+    try std.testing.expectEqual(op.eval, instruction[1]);
+    try std.testing.expectEqual(op.apply_eval, instruction[2]);
+    try fd.appendByteCode(&instruction);
+    try std.testing.expect(!fd.has_eval_call);
 }
 
 test "FunctionDef: cpool transfers refcounted owned values" {
@@ -410,6 +524,704 @@ test "resolve_variables: scope_get_var → get_var" {
     try std.testing.expectEqual(@as(usize, 1), fd.closure_var.len);
     try std.testing.expectEqual(x_atom, fd.closure_var[0].var_name);
     try std.testing.expectEqual(function_def.ClosureType.global, fd.closure_var[0].closure_type);
+}
+
+test "resolve_variables preserves three-byte apply_eval with nonzero scope high byte" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("apply-eval-size");
+    defer rt.atoms.free(name);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    const raw_scope_idx = @as(u16, op.eval) << 8;
+    var input = [_]u8{ op.apply_eval, 0, 0, op.return_undef };
+    std.mem.writeInt(u16, input[1..3], raw_scope_idx, .little);
+
+    try bc.setCode(&input);
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqualSlices(u8, &input, bc.code);
+    try std.testing.expectEqual(raw_scope_idx, std.mem.readInt(u16, bc.code[1..3], .little));
+}
+
+test "resolve_variables: eval declarations resolve ordered binding targets" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("eval-target-order");
+    const x_atom = try rt.internAtom("x");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(x_atom);
+
+    const exact_then_var = [_]function_def.ClosureVar{
+        .{ .closure_type = .ref, .var_idx = 0, .var_name = x_atom },
+        .{ .closure_type = .ref, .var_idx = 1, .var_name = core.atom.ids.var_object },
+    };
+    switch (try resolveEvalDeclarationTarget(rt, name, x_atom, true, &exact_then_var)) {
+        .closure => |idx| try std.testing.expectEqual(@as(u16, 0), idx),
+        else => try std.testing.expect(false),
+    }
+
+    const global_then_var = [_]function_def.ClosureVar{
+        .{ .closure_type = .global, .var_idx = 0, .var_name = x_atom },
+        .{ .closure_type = .ref, .var_idx = 1, .var_name = core.atom.ids.var_object },
+    };
+    switch (try resolveEvalDeclarationTarget(rt, name, x_atom, true, &global_then_var)) {
+        .var_object => |idx| try std.testing.expectEqual(@as(u16, 1), idx),
+        else => try std.testing.expect(false),
+    }
+
+    const with_then_var = [_]function_def.ClosureVar{
+        .{ .closure_type = .ref, .var_idx = 0, .var_name = core.atom.ids.with_object },
+        .{ .closure_type = .ref, .var_idx = 1, .var_name = core.atom.ids.var_object },
+    };
+    switch (try resolveEvalDeclarationTarget(rt, name, x_atom, true, &with_then_var)) {
+        .var_object => |idx| try std.testing.expectEqual(@as(u16, 1), idx),
+        else => try std.testing.expect(false),
+    }
+    const with_only = [_]function_def.ClosureVar{
+        .{ .closure_type = .ref, .var_idx = 0, .var_name = core.atom.ids.with_object },
+    };
+    switch (try resolveEvalDeclarationTarget(rt, name, x_atom, true, &with_only)) {
+        .global => {},
+        else => try std.testing.expect(false),
+    }
+
+    const arg_then_body = [_]function_def.ClosureVar{
+        .{ .closure_type = .ref, .var_idx = 0, .var_name = core.atom.ids.arg_var_object },
+        .{ .closure_type = .ref, .var_idx = 1, .var_name = core.atom.ids.var_object },
+    };
+    switch (try resolveEvalDeclarationTarget(rt, name, x_atom, true, &arg_then_body)) {
+        .var_object => |idx| try std.testing.expectEqual(@as(u16, 0), idx),
+        else => try std.testing.expect(false),
+    }
+    const body_then_arg = [_]function_def.ClosureVar{
+        .{ .closure_type = .ref, .var_idx = 0, .var_name = core.atom.ids.var_object },
+        .{ .closure_type = .ref, .var_idx = 1, .var_name = core.atom.ids.arg_var_object },
+    };
+    switch (try resolveEvalDeclarationTarget(rt, name, x_atom, true, &body_then_arg)) {
+        .var_object => |idx| try std.testing.expectEqual(@as(u16, 0), idx),
+        else => try std.testing.expect(false),
+    }
+
+    switch (try resolveEvalDeclarationTarget(rt, name, x_atom, false, &exact_then_var)) {
+        .global => {},
+        else => try std.testing.expect(false),
+    }
+}
+
+test "resolve_variables: direct eval var object probes unresolved reads" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    const x_atom = try rt.internAtom("x");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(x_atom);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    fd.var_object_idx = try fd.addScopeVar(core.atom.ids.var_object, .normal, 0, false, false);
+
+    const op = bytecode.opcode.op;
+
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_get_var;
+    std.mem.writeInt(u32, input[1..5], x_atom, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(x_atom);
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 17), bc.code.len);
+    try std.testing.expectEqual(op.get_loc, bc.code[0]);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[1..3], .little));
+    try std.testing.expectEqual(op.with_get_var, bc.code[3]);
+    try std.testing.expectEqual(x_atom, std.mem.readInt(u32, bc.code[4..8], .little));
+    try std.testing.expectEqual(@as(u32, 16), std.mem.readInt(u32, bc.code[8..12], .little));
+    try std.testing.expectEqual(@as(u8, 0), bc.code[12]);
+    try std.testing.expectEqual(op.get_var, bc.code[13]);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[14..16], .little));
+    try std.testing.expectEqual(op.return_undef, bc.code[16]);
+    try std.testing.expectEqual(@as(usize, 1), bc.atom_operands.len);
+    try std.testing.expectEqual(x_atom, bc.atom_operands[0]);
+    try std.testing.expectEqual(@as(usize, 1), fd.closure_var.len);
+    try std.testing.expectEqual(x_atom, fd.closure_var[0].var_name);
+    try std.testing.expectEqual(function_def.ClosureType.global, fd.closure_var[0].closure_type);
+}
+
+test "resolve_variables: direct eval var object probes before arg var object" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    const x_atom = try rt.internAtom("x");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(x_atom);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    fd.arg_var_object_idx = try fd.addScopeVar(core.atom.ids.arg_var_object, .normal, 0, false, false);
+    fd.var_object_idx = try fd.addScopeVar(core.atom.ids.var_object, .normal, 0, false, false);
+
+    const op = bytecode.opcode.op;
+
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_get_var;
+    std.mem.writeInt(u32, input[1..5], x_atom, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(x_atom);
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 30), bc.code.len);
+    try std.testing.expectEqual(op.get_loc, bc.code[0]);
+    try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, bc.code[1..3], .little));
+    try std.testing.expectEqual(op.with_get_var, bc.code[3]);
+    try std.testing.expectEqual(x_atom, std.mem.readInt(u32, bc.code[4..8], .little));
+    try std.testing.expectEqual(@as(u32, 29), std.mem.readInt(u32, bc.code[8..12], .little));
+    try std.testing.expectEqual(@as(u8, 0), bc.code[12]);
+    try std.testing.expectEqual(op.get_loc, bc.code[13]);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[14..16], .little));
+    try std.testing.expectEqual(op.with_get_var, bc.code[16]);
+    try std.testing.expectEqual(x_atom, std.mem.readInt(u32, bc.code[17..21], .little));
+    try std.testing.expectEqual(@as(u32, 29), std.mem.readInt(u32, bc.code[21..25], .little));
+    try std.testing.expectEqual(@as(u8, 0), bc.code[25]);
+    try std.testing.expectEqual(op.get_var, bc.code[26]);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[27..29], .little));
+    try std.testing.expectEqual(op.return_undef, bc.code[29]);
+    try std.testing.expectEqual(@as(usize, 2), bc.atom_operands.len);
+    try std.testing.expectEqual(x_atom, bc.atom_operands[0]);
+    try std.testing.expectEqual(x_atom, bc.atom_operands[1]);
+}
+
+test "resolve_variables: direct eval var object probes closure reads" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    const x_atom = try rt.internAtom("x");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(x_atom);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    fd.var_object_idx = try fd.addScopeVar(core.atom.ids.var_object, .normal, 0, false, false);
+    _ = try fd.addClosureVar(.{
+        .closure_type = .ref,
+        .is_lexical = false,
+        .is_const = false,
+        .var_kind = .normal,
+        .var_idx = 0,
+        .var_name = x_atom,
+    });
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_get_var;
+    std.mem.writeInt(u32, input[1..5], x_atom, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(x_atom);
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 17), bc.code.len);
+    try std.testing.expectEqual(op.get_loc, bc.code[0]);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[1..3], .little));
+    try std.testing.expectEqual(op.with_get_var, bc.code[3]);
+    try std.testing.expectEqual(x_atom, std.mem.readInt(u32, bc.code[4..8], .little));
+    try std.testing.expectEqual(@as(u32, 16), std.mem.readInt(u32, bc.code[8..12], .little));
+    try std.testing.expectEqual(@as(u8, 0), bc.code[12]);
+    try std.testing.expectEqual(op.get_var_ref, bc.code[13]);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[14..16], .little));
+    try std.testing.expectEqual(op.return_undef, bc.code[16]);
+    try std.testing.expectEqual(@as(usize, 1), bc.atom_operands.len);
+    try std.testing.expectEqual(x_atom, bc.atom_operands[0]);
+    try std.testing.expectEqual(@as(usize, 1), fd.closure_var.len);
+    try std.testing.expectEqual(x_atom, fd.closure_var[0].var_name);
+}
+
+test "resolve_variables: nearer closure binding stops later eval var object probe" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    const x_atom = try rt.internAtom("x");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(x_atom);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    _ = try fd.addClosureVar(.{
+        .closure_type = .ref,
+        .is_lexical = true,
+        .is_const = false,
+        .var_kind = .normal,
+        .var_idx = 0,
+        .var_name = x_atom,
+    });
+    _ = try fd.addClosureVar(.{
+        .closure_type = .ref,
+        .is_lexical = false,
+        .is_const = false,
+        .var_kind = .normal,
+        .var_idx = 1,
+        .var_name = core.atom.ids.var_object,
+    });
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_get_var;
+    std.mem.writeInt(u32, input[1..5], x_atom, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(x_atom);
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 4), bc.code.len);
+    try std.testing.expectEqual(op.get_var_ref_check, bc.code[0]);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[1..3], .little));
+    try std.testing.expectEqual(op.return_undef, bc.code[3]);
+    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+}
+
+test "resolve_variables: direct eval var object probes unresolved deletes" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    const x_atom = try rt.internAtom("x");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(x_atom);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    fd.var_object_idx = try fd.addScopeVar(core.atom.ids.var_object, .normal, 0, false, false);
+
+    const op = bytecode.opcode.op;
+
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_delete_var;
+    std.mem.writeInt(u32, input[1..5], x_atom, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(x_atom);
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 19), bc.code.len);
+    try std.testing.expectEqual(op.get_loc, bc.code[0]);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[1..3], .little));
+    try std.testing.expectEqual(op.with_delete_var, bc.code[3]);
+    try std.testing.expectEqual(x_atom, std.mem.readInt(u32, bc.code[4..8], .little));
+    try std.testing.expectEqual(@as(u32, 18), std.mem.readInt(u32, bc.code[8..12], .little));
+    try std.testing.expectEqual(@as(u8, 0), bc.code[12]);
+    try std.testing.expectEqual(op.delete_var, bc.code[13]);
+    try std.testing.expectEqual(x_atom, std.mem.readInt(u32, bc.code[14..18], .little));
+    try std.testing.expectEqual(op.return_undef, bc.code[18]);
+    try std.testing.expectEqual(@as(usize, 2), bc.atom_operands.len);
+    try std.testing.expectEqual(x_atom, bc.atom_operands[0]);
+    try std.testing.expectEqual(x_atom, bc.atom_operands[1]);
+}
+
+test "resolve_variables: direct eval var object probes unresolved writes" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    const x_atom = try rt.internAtom("x");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(x_atom);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    fd.var_object_idx = try fd.addScopeVar(core.atom.ids.var_object, .normal, 0, false, false);
+
+    const op = bytecode.opcode.op;
+
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_put_var;
+    std.mem.writeInt(u32, input[1..5], x_atom, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(x_atom);
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 17), bc.code.len);
+    try std.testing.expectEqual(op.get_loc, bc.code[0]);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[1..3], .little));
+    try std.testing.expectEqual(op.with_put_var, bc.code[3]);
+    try std.testing.expectEqual(x_atom, std.mem.readInt(u32, bc.code[4..8], .little));
+    try std.testing.expectEqual(@as(u32, 16), std.mem.readInt(u32, bc.code[8..12], .little));
+    try std.testing.expectEqual(
+        @intFromEnum(bytecode.opcode.WithPutMode.var_object_probe),
+        bc.code[12],
+    );
+    try std.testing.expectEqual(op.put_var, bc.code[13]);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[14..16], .little));
+    try std.testing.expectEqual(op.return_undef, bc.code[16]);
+    try std.testing.expectEqual(@as(usize, 1), bc.atom_operands.len);
+    try std.testing.expectEqual(x_atom, bc.atom_operands[0]);
+    try std.testing.expectEqual(@as(usize, 1), fd.closure_var.len);
+    try std.testing.expectEqual(x_atom, fd.closure_var[0].var_name);
+    try std.testing.expectEqual(function_def.ClosureType.global, fd.closure_var[0].closure_type);
+}
+
+test "resolve_variables: scope put operand preserves global sentinel and no-dynamic flag" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("scope-put-operands");
+    const x_atom = try rt.internAtom("x");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(x_atom);
+
+    const op = bytecode.opcode.op;
+    const operands = [_]u16{
+        std.math.maxInt(u16),
+        bytecode.opcode.scope_no_dynamic_env_flag,
+    };
+    for (operands) |scope_operand| {
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+        defer fd.deinit(rt);
+        _ = try fd.appendScope(-1);
+        fd.var_object_idx = try fd.addScopeVar(core.atom.ids.var_object, .normal, 0, false, false);
+
+        var input = [_]u8{0} ** 8;
+        input[0] = op.scope_put_var;
+        std.mem.writeInt(u32, input[1..5], x_atom, .little);
+        std.mem.writeInt(u16, input[5..7], scope_operand, .little);
+        input[7] = op.return_undef;
+        try bc.setCode(&input);
+        try bc.retainAtomOperand(x_atom);
+
+        var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+        try pipeline.resolve_variables.run(&ctx);
+
+        try std.testing.expectEqual(@as(usize, 4), bc.code.len);
+        try std.testing.expectEqual(op.put_var, bc.code[0]);
+        try std.testing.expectEqual(op.return_undef, bc.code[3]);
+        try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+    }
+}
+
+test "resolve_variables: with put probes carry with mode" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("with-put-mode");
+    const x_atom = try rt.internAtom("x");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(x_atom);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    _ = try fd.addScopeVar(core.atom.ids.with_object, .normal, 0, false, false);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_put_var;
+    std.mem.writeInt(u32, input[1..5], x_atom, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(x_atom);
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqual(op.with_put_var, bc.code[3]);
+    try std.testing.expectEqual(
+        @intFromEnum(bytecode.opcode.WithPutMode.with_probe),
+        bc.code[12],
+    );
+}
+
+test "resolve_variables: direct eval var object probes unresolved get refs" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    const x_atom = try rt.internAtom("x");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(x_atom);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    fd.var_object_idx = try fd.addScopeVar(core.atom.ids.var_object, .normal, 0, false, false);
+
+    const op = bytecode.opcode.op;
+
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_get_ref;
+    std.mem.writeInt(u32, input[1..5], x_atom, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(x_atom);
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 18), bc.code.len);
+    try std.testing.expectEqual(op.get_loc, bc.code[0]);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[1..3], .little));
+    try std.testing.expectEqual(op.with_get_ref, bc.code[3]);
+    try std.testing.expectEqual(x_atom, std.mem.readInt(u32, bc.code[4..8], .little));
+    try std.testing.expectEqual(@as(u32, 17), std.mem.readInt(u32, bc.code[8..12], .little));
+    try std.testing.expectEqual(@as(u8, 0), bc.code[12]);
+    try std.testing.expectEqual(op.undefined, bc.code[13]);
+    try std.testing.expectEqual(op.get_var, bc.code[14]);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[15..17], .little));
+    try std.testing.expectEqual(op.return_undef, bc.code[17]);
+    try std.testing.expectEqual(@as(usize, 1), bc.atom_operands.len);
+    try std.testing.expectEqual(x_atom, bc.atom_operands[0]);
+    try std.testing.expectEqual(@as(usize, 1), fd.closure_var.len);
+    try std.testing.expectEqual(x_atom, fd.closure_var[0].var_name);
+    try std.testing.expectEqual(function_def.ClosureType.global, fd.closure_var[0].closure_type);
+}
+
+test "resolve_variables: direct eval var object probes unresolved make refs" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    const x_atom = try rt.internAtom("x");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(x_atom);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    fd.var_object_idx = try fd.addScopeVar(core.atom.ids.var_object, .normal, 0, false, false);
+
+    const op = bytecode.opcode.op;
+
+    var input = [_]u8{0} ** 18;
+    input[0] = op.scope_make_ref;
+    std.mem.writeInt(u32, input[1..5], x_atom, .little);
+    std.mem.writeInt(u32, input[5..9], 0, .little);
+    std.mem.writeInt(u16, input[9..11], 0, .little);
+    input[11] = op.push_i32;
+    std.mem.writeInt(i32, input[12..16], 1, .little);
+    input[16] = op.put_ref_value;
+    input[17] = op.return_undef;
+
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(x_atom);
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 25), bc.code.len);
+    try std.testing.expectEqual(op.get_loc, bc.code[0]);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[1..3], .little));
+    try std.testing.expectEqual(op.with_make_ref, bc.code[3]);
+    try std.testing.expectEqual(x_atom, std.mem.readInt(u32, bc.code[4..8], .little));
+    try std.testing.expectEqual(@as(u32, 18), std.mem.readInt(u32, bc.code[8..12], .little));
+    try std.testing.expectEqual(@as(u8, 0), bc.code[12]);
+    try std.testing.expectEqual(op.make_var_ref, bc.code[13]);
+    try std.testing.expectEqual(x_atom, std.mem.readInt(u32, bc.code[14..18], .little));
+    try std.testing.expectEqual(op.push_i32, bc.code[18]);
+    try std.testing.expectEqual(@as(i32, 1), std.mem.readInt(i32, bc.code[19..23], .little));
+    try std.testing.expectEqual(op.put_ref_value, bc.code[23]);
+    try std.testing.expectEqual(op.return_undef, bc.code[24]);
+    try std.testing.expectEqual(@as(usize, 2), bc.atom_operands.len);
+    try std.testing.expectEqual(x_atom, bc.atom_operands[0]);
+    try std.testing.expectEqual(x_atom, bc.atom_operands[1]);
+}
+
+test "resolve_variables: all dynamic reference forms probe var before arg var object" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("dynamic-reference-order");
+    const x_atom = try rt.internAtom("x");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(x_atom);
+
+    const op = bytecode.opcode.op;
+    const cases = [_]struct {
+        scope_op: u8,
+        probe_op: u8,
+        input_len: usize,
+    }{
+        .{ .scope_op = op.scope_put_var, .probe_op = op.with_put_var, .input_len = 8 },
+        .{ .scope_op = op.scope_delete_var, .probe_op = op.with_delete_var, .input_len = 8 },
+        .{ .scope_op = op.scope_get_ref, .probe_op = op.with_get_ref, .input_len = 8 },
+        .{ .scope_op = op.scope_make_ref, .probe_op = op.with_make_ref, .input_len = 18 },
+    };
+
+    for (cases) |case| {
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+        defer fd.deinit(rt);
+        _ = try fd.appendScope(-1);
+        fd.arg_var_object_idx = try fd.addScopeVar(core.atom.ids.arg_var_object, .normal, 0, false, false);
+        fd.var_object_idx = try fd.addScopeVar(core.atom.ids.var_object, .normal, 0, false, false);
+
+        var input = [_]u8{0} ** 18;
+        input[0] = case.scope_op;
+        std.mem.writeInt(u32, input[1..5], x_atom, .little);
+        if (case.scope_op == op.scope_make_ref) {
+            std.mem.writeInt(u32, input[5..9], 0, .little);
+            std.mem.writeInt(u16, input[9..11], 0, .little);
+            input[11] = op.push_i32;
+            std.mem.writeInt(i32, input[12..16], 1, .little);
+            input[16] = op.put_ref_value;
+            input[17] = op.return_undef;
+        } else {
+            std.mem.writeInt(u16, input[5..7], 0, .little);
+            input[7] = op.return_undef;
+        }
+
+        try bc.setCode(input[0..case.input_len]);
+        try bc.retainAtomOperand(x_atom);
+
+        var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+        try pipeline.resolve_variables.run(&ctx);
+
+        try std.testing.expectEqual(op.get_loc, bc.code[0]);
+        try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, bc.code[1..3], .little));
+        try std.testing.expectEqual(case.probe_op, bc.code[3]);
+        try std.testing.expectEqual(op.get_loc, bc.code[13]);
+        try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[14..16], .little));
+        try std.testing.expectEqual(case.probe_op, bc.code[16]);
+    }
+}
+
+test "resolve_variables: typeof probes dynamic environment before undef fallback" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("dynamic-typeof-order");
+    const x_atom = try rt.internAtom("x");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(x_atom);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    fd.var_object_idx = try fd.addScopeVar(core.atom.ids.var_object, .normal, 0, false, false);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_get_var_undef;
+    std.mem.writeInt(u32, input[1..5], x_atom, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(x_atom);
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 17), bc.code.len);
+    try std.testing.expectEqual(op.get_loc, bc.code[0]);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[1..3], .little));
+    try std.testing.expectEqual(op.with_get_var, bc.code[3]);
+    try std.testing.expectEqual(@as(u8, 0), bc.code[12]);
+    try std.testing.expectEqual(op.get_var_undef, bc.code[13]);
+    try std.testing.expectEqual(op.return_undef, bc.code[16]);
+}
+
+test "resolve_variables: declaration init bypasses dynamic environment probes" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("declaration-init-order");
+    const x_atom = try rt.internAtom("x");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(x_atom);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    fd.arg_var_object_idx = try fd.addScopeVar(core.atom.ids.arg_var_object, .normal, 0, false, false);
+    fd.var_object_idx = try fd.addScopeVar(core.atom.ids.var_object, .normal, 0, false, false);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_put_var_init;
+    std.mem.writeInt(u32, input[1..5], x_atom, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(x_atom);
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 4), bc.code.len);
+    try std.testing.expectEqual(op.put_var_init, bc.code[0]);
+    try std.testing.expectEqual(op.return_undef, bc.code[3]);
+    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
 }
 
 test "resolve_variables InvalidBytecode releases retained output atoms" {

@@ -759,6 +759,33 @@ test "frame setLocal handles self-assignment without dropping object" {
     try std.testing.expectEqual(&object.header, frame.locals[0].refHeader().?);
 }
 
+test "lookupFrameVarRef tolerates synthetic var-ref name mirrors" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+    defer global.value().free(rt);
+
+    const binding_name = try rt.internAtom("synthetic-var-ref");
+    defer rt.atoms.free(binding_name);
+    var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+    function.var_ref_names = try rt.memory.alloc(core.Atom, 1);
+    function.var_ref_names[0] = rt.atoms.dup(binding_name);
+
+    const cell = try core.VarRef.createClosed(rt, core.JSValue.uninitialized());
+    var var_refs = [_]*core.VarRef{cell};
+    var frame = engine.exec.frame.Frame.init(&function);
+    frame.var_refs = &var_refs;
+    defer frame.deinit(&rt.memory, rt);
+
+    const result = engine.exec.call_runtime.lookupFrameVarRef(ctx, global, &function, &frame, binding_name);
+    defer if (result) |value| value.free(rt);
+    try std.testing.expect(result == null);
+}
+
 test "VM roots frame this symbol before derived constructor var-ref allocation" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -1406,7 +1433,7 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     defer stack.deinit(rt);
     var output_buffer: [16]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("8\n", output.buffered());
@@ -2023,7 +2050,7 @@ test "number native builtin records cover static and prototype dispatch" {
     defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("false\n1.25\n", output.buffered());
@@ -2074,7 +2101,7 @@ test "string static native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [8]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("B\n", output.buffered());
@@ -2131,7 +2158,7 @@ test "string prototype native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [8]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("4\n", output.buffered());
@@ -2181,7 +2208,7 @@ test "date static native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("1704067200000\n", output.buffered());
@@ -2246,7 +2273,7 @@ test "date constructor native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [64]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("true\n2\ntrue\n3\n", output.buffered());
@@ -2327,7 +2354,7 @@ test "date prototype native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [48]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("1704067200000\n1704067200000\n", output.buffered());
@@ -2402,7 +2429,7 @@ test "array static native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("true\n7,8\n", output.buffered());
@@ -2505,7 +2532,7 @@ test "array prototype native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("2,3\n9\n", output.buffered());
@@ -2630,7 +2657,7 @@ test "collection native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("aa\n1\na:1\n1,2\n", output.buffered());
@@ -2795,7 +2822,7 @@ test "buffer native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [40]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("true\n3\n6\n2\n77\n6\n", output.buffered());
@@ -2889,7 +2916,7 @@ test "typed array accessor native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("4\n4\nUint8Array\nundefined\n", output.buffered());
@@ -2943,7 +2970,7 @@ test "regexp static native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("\\.\n\\x61\\+b\n", output.buffered());
@@ -3059,7 +3086,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("a:1\ntrue\n/a/\n", output.buffered());
@@ -3201,7 +3228,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [48]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("1\na\na\ncot\nc|t\n", output.buffered());
@@ -3285,7 +3312,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("a\\/b\ntrue\n", output.buffered());
@@ -4109,6 +4136,264 @@ test "Engine eval preserves global lexical write fast path semantics" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("3\nTypeError 1\nchanged global\n3 11\n", stream.buffered());
+}
+
+test "Engine eval preserves selected with references during updates" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function updateDeletedProperty() {
+        \\  var x = 0;
+        \\  var scope = { get x() { delete this.x; return 2; } };
+        \\  with (scope) { x *= 3; }
+        \\  print(scope.x, x);
+        \\}
+        \\updateDeletedProperty();
+        \\var probes = 0, outer = { x: 7 }, inner, flag = true;
+        \\with (outer) {
+        \\  with (inner = {
+        \\    x: 4,
+        \\    get [Symbol.unscopables]() {
+        \\      probes++;
+        \\      return { x: flag = !flag };
+        \\    }
+        \\  }) { x++; }
+        \\}
+        \\print(probes, outer.x, inner.x, flag);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("6 0\n1 7 5 false\n", stream.buffered());
+}
+
+test "Engine destructuring snapshots with binding references before property reads" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var log = [];
+        \\var sourceKey = { toString: function() { log.push('sourceKey'); return 'p'; } };
+        \\var source = { get p() { log.push('get source'); return undefined; } };
+        \\var env = new Proxy({}, { has: function(_, key) { log.push('binding::' + key); return false; } });
+        \\var defaultValue = 0;
+        \\var varTarget;
+        \\with (env) { var { [sourceKey]: varTarget = defaultValue } = source; }
+        \\print(varTarget, log.join('|'));
+        \\log = [];
+        \\var target = { selected: 'old' };
+        \\var selected = 'local';
+        \\var selectedSource = { get p() { log.push('get selected'); return 9; } };
+        \\var selectedEnv = new Proxy(target, {
+        \\  has: function(_, key) { log.push('has:' + key); return key === 'selected'; }
+        \\});
+        \\with (selectedEnv) { var { p: selected } = selectedSource; }
+        \\print(selected, target.selected, log.join('|'));
+        \\(function() {
+        \\  var [x, readX] = [1, function() { return x; }];
+        \\  print(x, readX());
+        \\})();
+        \\(function() {
+        \\  var [readY, { p: y }] = [function() { return y; }, { p: 13 }];
+        \\  print(y, readY());
+        \\})();
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "0 binding::source|binding::sourceKey|sourceKey|binding::varTarget|get source|binding::defaultValue\n" ++
+            "local 9 has:selectedSource|has:selected|get selected|has:selected\n" ++
+            "1 1\n13 13\n",
+        stream.buffered(),
+    );
+}
+
+test "Engine eval preserves assignment references across direct eval" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function simpleAssignment() {
+        \\  var x = 0;
+        \\  var inner = (function() {
+        \\    x = (eval("var x;"), 1);
+        \\    return x;
+        \\  })();
+        \\  print(inner, x);
+        \\}
+        \\function compoundAssignment() {
+        \\  var x = 3;
+        \\  var inner = (function() {
+        \\    x *= (eval("var x = 2;"), 4);
+        \\    return x;
+        \\  })();
+        \\  print(inner, x);
+        \\}
+        \\function initializerAssignment() {
+        \\  var x = 0;
+        \\  var inner = (function() {
+        \\    var value = (x = (eval("var x;"), 1));
+        \\    return [x, value];
+        \\  })();
+        \\  print(inner[0], inner[1], x);
+        \\}
+        \\function templateAssignment() {
+        \\  var x = 3;
+        \\  var inner = (function() {
+        \\    x += `${eval("var x = 2;")}`;
+        \\    return x;
+        \\  })();
+        \\  print(inner, x);
+        \\}
+        \\simpleAssignment();
+        \\compoundAssignment();
+        \\initializerAssignment();
+        \\templateAssignment();
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "undefined 1\n2 12\nundefined 1 1\n2 3undefined\n",
+        stream.buffered(),
+    );
+}
+
+test "Engine direct eval captures the caller arguments binding" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function direct(value) { return eval("arguments[0]"); }
+        \\function throughArrow(value) { return (() => eval("arguments[0]"))(); }
+        \\function replace(value) {
+        \\  var old = arguments;
+        \\  var read = eval("arguments[0]");
+        \\  eval("arguments = ['replaced']");
+        \\  return [read, arguments[0], old === arguments];
+        \\}
+        \\function parameterShadow(arguments) {
+        \\  eval("arguments = 'updated'");
+        \\  return arguments;
+        \\}
+        \\function parameterClosure(h = () => arguments) {
+        \\  var arguments = 0;
+        \\  return arguments === h();
+        \\}
+        \\function parameterClosureNoInit(h = () => arguments) {
+        \\  var arguments;
+        \\  var before = [void 0 === arguments, h() === arguments];
+        \\  arguments = 0;
+        \\  return [before[0], before[1], arguments === h()];
+        \\}
+        \\var closed1, closed2, closedBody;
+        \\function parameterEvalClosed(
+        \\  _ = (eval("var scoped = 'inside'"), closed1 = function() { return scoped; }),
+        \\  __ = closed2 = function() { return scoped; }
+        \\) { closedBody = function() { return scoped; }; }
+        \\var open1, open2;
+        \\function parameterEvalOpen(
+        \\  _ = open1 = function() { return opened; },
+        \\  __ = (eval("var opened = 'inside'"), open2 = function() { return opened; })
+        \\) {}
+        \\var replaced = replace(41);
+        \\parameterEvalClosed();
+        \\parameterEvalOpen();
+        \\print(direct(41), throughArrow(42));
+        \\print(replaced[0], replaced[1], replaced[2], parameterShadow('old'));
+        \\print(closed1(), closed2(), closedBody());
+        \\print(open1(), open2());
+        \\var noInit = parameterClosureNoInit();
+        \\print(parameterClosure(), noInit[0], noInit[1], noInit[2]);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "41 42\n41 replaced false updated\ninside inside inside\ninside inside\nfalse false true false\n",
+        stream.buffered(),
+    );
+}
+
+test "Engine direct eval shares top-level lexical cells across nested closures" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let x = 500;
+        \\function direct() { return eval("x"); }
+        \\function write() { eval("x = 501"); }
+        \\var nested = eval("() => eval('x')");
+        \\var env = { x: 9000, [Symbol.unscopables]: { x: true } };
+        \\function makeAdder() {
+        \\  with (env) return eval("y => eval('x + y')");
+        \\}
+        \\var catchValue = 'global';
+        \\var catchLog = '';
+        \\function catchEval() {
+        \\  try { throw 8; } catch (catchValue) {
+        \\    eval("var catchValue = 42");
+        \\    catchLog += catchValue;
+        \\  }
+        \\  catchValue = 'local';
+        \\  catchLog += catchValue;
+        \\}
+        \\function preserveEvalVar() {
+        \\  eval("var saved = 1");
+        \\  eval("var saved");
+        \\  return saved;
+        \\}
+        \\print(direct(), nested());
+        \\write();
+        \\print(x, makeAdder()(10));
+        \\catchEval();
+        \\print(catchValue, catchLog);
+        \\print(preserveEvalVar());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("500 500\n501 511\nglobal 42local\n1\n", stream.buffered());
+}
+
+test "Engine constructor parameter defaults use the initialized this binding" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\class A {
+        \\  #x = 'hello';
+        \\  constructor(value = this.#x) { this.value = value; }
+        \\}
+        \\var a = new A();
+        \\print(a.value);
+        \\class B extends A {
+        \\  constructor() { super(); print('value' in this, this.value); }
+        \\}
+        \\new B();
+        \\class C extends A {
+        \\  constructor(value = this) { super(value); }
+        \\}
+        \\try { new C(); } catch (error) { print(error.name); }
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("hello\ntrue hello\nReferenceError\n", stream.buffered());
 }
 
 test "Engine eval assigns contextual await bindings in sloppy scripts" {

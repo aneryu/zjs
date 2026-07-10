@@ -1,8 +1,8 @@
 {
-  "total_failed": 0,
+  "total_failed": 13,
   "buckets": {
     "SyntaxError": 0,
-    "TypeError": 0,
+    "TypeError": 13,
     "Test262Error": 0,
     "RangeError": 0,
     "ReferenceError": 0,

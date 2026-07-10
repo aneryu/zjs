@@ -987,6 +987,22 @@ fn countOpcode(code: []const u8, opcode: u8) usize {
     return count;
 }
 
+fn countVarOpcodeForAtom(function: *const engine.bytecode.Bytecode, opcode: u8, atom_id: core.Atom) usize {
+    var count: usize = 0;
+    var pc: usize = 0;
+    while (pc < function.code.len) {
+        const opcode_id = function.code[pc];
+        if (opcode_id == opcode and pc + 3 <= function.code.len) {
+            const ref_idx = readU16AtOpcode(function.code, pc);
+            if (ref_idx < function.closure_var.len and function.closure_var[ref_idx].var_name == atom_id) count += 1;
+        }
+        const size = engine.bytecode.opcode.sizeOf(opcode_id);
+        if (size == 0) break;
+        pc += size;
+    }
+    return count;
+}
+
 fn hasAnyOpcode(code: []const u8, opcodes: []const u8) bool {
     for (opcodes) |opcode_id| {
         if (countOpcode(code, opcode_id) > 0) return true;
@@ -2635,6 +2651,49 @@ test "F5: var declaration with initializer" {
     try std.testing.expectEqual(op.put_var, fn_bc.code[fn_bc.code.len - 3]);
 }
 
+test "F5: sloppy var initializer captures dynamic reference before RHS" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const name = try env.rt.internAtom("test");
+    const x_atom = try env.rt.internAtom("x");
+    defer env.rt.atoms.free(name);
+    defer env.rt.atoms.free(x_atom);
+
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "with (obj) { var x = 1; }");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    var make_ref_pc: ?usize = null;
+    var rhs_pc: ?usize = null;
+    var put_ref_pc: ?usize = null;
+    var pc: usize = 0;
+    while (pc < function.code.len) {
+        const opcode_id = function.code[pc];
+        if (opcode_id == op.scope_make_ref and
+            std.mem.readInt(u32, function.code[pc + 1 ..][0..4], .little) == x_atom)
+        {
+            make_ref_pc = pc;
+        } else if (opcode_id == op.push_1 or
+            (opcode_id == op.push_i32 and std.mem.readInt(i32, function.code[pc + 1 ..][0..4], .little) == 1))
+        {
+            rhs_pc = pc;
+        } else if (opcode_id == op.put_ref_value) {
+            put_ref_pc = pc;
+        }
+        const size = engine.bytecode.opcode.sizeOfPhase1(opcode_id);
+        try std.testing.expect(size != 0);
+        pc += size;
+    }
+
+    try std.testing.expect((make_ref_pc orelse return error.TestExpectedEqual) < (rhs_pc orelse return error.TestExpectedEqual));
+    try std.testing.expect(rhs_pc.? < (put_ref_pc orelse return error.TestExpectedEqual));
+}
+
 test "F5: module-ref var initializer consumes value unless next statement reuses binding" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -3224,6 +3283,157 @@ test "F7: private name in uses scope temp before resolver" {
     try expectOpcodeRecursive(&function, op.private_in);
 }
 
+test "direct eval pseudo var objects propagate to descendants inside-out" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms,
+        \\function outer() {
+        \\  eval("");
+        \\  function middle() {
+        \\    eval("");
+        \\    return function inner() { return missing; };
+        \\  }
+        \\}
+    );
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+    state.top_level_functions_as_children = true;
+
+    try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.prepareDirectEvalFunctionDefs(&state.function_def);
+
+    try std.testing.expectEqual(@as(usize, 1), state.function_def.child_list.len);
+    const outer = state.function_def.child_list[0];
+    try std.testing.expect(outer.var_object_idx >= 0);
+    try std.testing.expectEqual(@as(usize, 1), outer.child_list.len);
+    const middle = outer.child_list[0];
+    try std.testing.expect(middle.var_object_idx >= 0);
+    try std.testing.expectEqual(@as(usize, 1), middle.child_list.len);
+    const inner = middle.child_list[0];
+
+    var middle_var_capture_idx: ?u16 = null;
+    for (middle.closure_var, 0..) |cv, idx| {
+        if (cv.var_name == atom.ids.var_object and cv.closure_type == .local and cv.var_idx == @as(u16, @intCast(outer.var_object_idx))) {
+            middle_var_capture_idx = @intCast(idx);
+            break;
+        }
+    }
+    const outer_ref_idx = middle_var_capture_idx orelse return error.TestExpectedEqual;
+
+    var object_capture_count: usize = 0;
+    for (inner.closure_var) |cv| {
+        if (cv.var_name == atom.ids.var_object) object_capture_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), object_capture_count);
+    try std.testing.expectEqual(atom.ids.var_object, inner.closure_var[0].var_name);
+    try std.testing.expectEqual(function_def_mod.ClosureType.local, inner.closure_var[0].closure_type);
+    try std.testing.expectEqual(@as(u16, @intCast(middle.var_object_idx)), inner.closure_var[0].var_idx);
+    try std.testing.expectEqual(@as(u16, 1), inner.closure_var[0].source_depth);
+    try std.testing.expectEqual(atom.ids.var_object, inner.closure_var[1].var_name);
+    try std.testing.expectEqual(function_def_mod.ClosureType.ref, inner.closure_var[1].closure_type);
+    try std.testing.expectEqual(outer_ref_idx, inner.closure_var[1].var_idx);
+    try std.testing.expectEqual(@as(u16, 2), inner.closure_var[1].source_depth);
+}
+
+test "direct eval pseudo var objects follow eval and parameter-expression gates" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms,
+        \\function defaults(a = eval("")) { eval(""); }
+        \\function pattern({ a = eval("") }) { eval(""); }
+        \\function rest(...values) { eval(""); }
+    );
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+    state.top_level_functions_as_children = true;
+
+    try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.prepareDirectEvalFunctionDefs(&state.function_def);
+
+    try std.testing.expectEqual(@as(usize, 3), state.function_def.child_list.len);
+    const defaults = state.function_def.child_list[0];
+    try std.testing.expect(defaults.has_parameter_expressions);
+    try std.testing.expect(defaults.var_object_idx >= 0);
+    try std.testing.expect(defaults.arg_var_object_idx >= 0);
+
+    const pattern = state.function_def.child_list[1];
+    try std.testing.expect(pattern.has_parameter_expressions);
+    try std.testing.expect(pattern.var_object_idx >= 0);
+    try std.testing.expect(pattern.arg_var_object_idx >= 0);
+
+    const rest = state.function_def.child_list[2];
+    try std.testing.expect(!rest.has_parameter_expressions);
+    try std.testing.expect(rest.var_object_idx >= 0);
+    try std.testing.expectEqual(@as(i32, -1), rest.arg_var_object_idx);
+
+    const eval_name = try env.rt.internAtom("eval-test");
+    defer env.rt.atoms.free(eval_name);
+    var eval_function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, eval_name);
+    defer eval_function.deinit(env.rt);
+    var eval_lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "eval('')");
+    var eval_state = try ParseState.init(&eval_lex, &eval_function);
+    defer eval_state.deinit(env.rt);
+    try eval_state.enableEvalReturn();
+    try parser_core.parseProgramStatements(&eval_state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.prepareDirectEvalFunctionDefs(&eval_state.function_def);
+
+    try std.testing.expect(eval_state.function_def.is_eval);
+    try std.testing.expect(eval_state.function_def.has_eval_call);
+    try std.testing.expectEqual(@as(i32, -1), eval_state.function_def.var_object_idx);
+    try std.testing.expectEqual(@as(i32, -1), eval_state.function_def.arg_var_object_idx);
+}
+
+test "parameter initializer direct eval emits active var object hoist metadata" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const x_atom = try rt.internAtom("parameterEvalHoist");
+    defer rt.atoms.free(x_atom);
+    const cases = [_]struct {
+        source: []const u8,
+        function_declaration: bool,
+    }{
+        .{ .source = "var parameterEvalHoist = 1;", .function_declaration = false },
+        .{ .source = "function parameterEvalHoist() {}", .function_declaration = true },
+    };
+
+    for (cases) |case| {
+        var parsed = try parser.compile(rt, case.source, .{
+            .mode = .eval_direct,
+            .filename = "<eval>",
+            .eval_in_parameter_initializer = true,
+        });
+        defer parsed.deinit();
+
+        var hoist: ?engine.bytecode.function_def.GlobalVar = null;
+        for (parsed.function.global_vars) |global_var| {
+            if (global_var.var_name == x_atom) {
+                hoist = global_var;
+                break;
+            }
+        }
+        const metadata = hoist orelse return error.TestExpectedEqual;
+        try std.testing.expect(metadata.force_init);
+        try std.testing.expect(metadata.is_configurable);
+        try std.testing.expect(!metadata.is_lexical);
+        if (case.function_declaration) {
+            try std.testing.expect(metadata.cpool_idx >= 0);
+        } else {
+            try std.testing.expectEqual(@as(i32, -1), metadata.cpool_idx);
+        }
+    }
+}
+
 test "F7: class with extends (derived constructor)" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -3734,6 +3944,35 @@ test "F10.1a FunctionDef: let in nested block attaches to inner scope" {
     try std.testing.expectEqual(@as(i32, 2), state.function_def.vars[1].scope_level);
 }
 
+test "F10.1a FunctionDef: simple catch binding keeps catch provenance" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    const caught_atom = try env.rt.internAtom("caught");
+    defer env.rt.atoms.free(caught_atom);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "try {} catch (caught) {}");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    var catch_var: ?function_def_mod.VarDef = null;
+    for (state.function_def.vars) |vd| {
+        if (vd.var_name == caught_atom) catch_var = vd;
+    }
+    try std.testing.expect(catch_var != null);
+    const vd = catch_var.?;
+    try std.testing.expectEqual(function_def_mod.VarKind.catch_, vd.var_kind);
+    try std.testing.expect(!vd.is_lexical);
+    try std.testing.expect(vd.scope_level > 0);
+    try std.testing.expectEqual(@as(i32, 0), state.function_def.scopes[@intCast(vd.scope_level)].parent);
+}
+
 test "F10.1a FunctionDef: findVar locates by name" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -4191,6 +4430,49 @@ test "source positions and syntax errors carry filename line and column" {
     try std.testing.expectEqualStrings("bad.js", rt.atoms.name(parsed.syntax_error.?.filename).?);
 }
 
+test "direct eval propagates script or module identity without changing display filename" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const referrer = try rt.internAtom("/fixture/scripts/main.mjs");
+    var owns_referrer = true;
+    defer if (owns_referrer) rt.atoms.free(referrer);
+
+    var parsed = try parser.compile(
+        rt,
+        "function outer(){ return function inner(){}; } outer;",
+        .{
+            .mode = .eval_direct,
+            .filename = "<eval>",
+            .script_or_module = referrer,
+        },
+    );
+    defer parsed.deinit();
+
+    rt.atoms.free(referrer);
+    owns_referrer = false;
+    try std.testing.expectEqualStrings("<eval>", rt.atoms.name(parsed.function.filename).?);
+    try std.testing.expectEqualStrings("/fixture/scripts/main.mjs", rt.atoms.name(parsed.function.script_or_module).?);
+
+    const outer = blk: {
+        for (parsed.function.constants.values) |value| {
+            if (functionBytecodeFromValue(value)) |fb| break :blk fb;
+        }
+        return error.TestExpectedEqual;
+    };
+    try std.testing.expectEqualStrings("<eval>", rt.atoms.name(outer.filename).?);
+    try std.testing.expectEqualStrings("/fixture/scripts/main.mjs", rt.atoms.name(outer.scriptOrModule()).?);
+
+    const inner = blk: {
+        for (outer.cpoolSlice()) |value| {
+            if (functionBytecodeFromValue(value)) |fb| break :blk fb;
+        }
+        return error.TestExpectedEqual;
+    };
+    try std.testing.expectEqualStrings("<eval>", rt.atoms.name(inner.filename).?);
+    try std.testing.expectEqualStrings("/fixture/scripts/main.mjs", rt.atoms.name(inner.scriptOrModule()).?);
+}
+
 test "script parse mode emits bytecode metadata without AST execution" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -4449,6 +4731,9 @@ test "quick parser retrofits forward var captures into nested closures" {
         \\  return getTarget;
         \\}
     ;
+    // Debug parser frames are substantially larger than ReleaseFast frames;
+    // use the same test-runtime stack budget as TestEngine.
+    rt.setNativeStackSize(core.runtime.default_native_stack_size * 4);
     var parsed = try parser.compile(rt, source, .{ .mode = .script, .filename = "forward-var-capture.js" });
     defer parsed.deinit();
 
@@ -5264,6 +5549,74 @@ test "module parser hoists block var declarations to module var refs" {
         }
     }
     try std.testing.expect(found);
+}
+
+test "direct eval closure seed lowers unresolved read to var ref" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const x_atom = try rt.internAtom("x");
+    defer rt.atoms.free(x_atom);
+    const seed = [_]parser.EvalClosureSeed{.{
+        .var_name = x_atom,
+        .closure_type = .arg,
+        .var_idx = 7,
+        .is_lexical = true,
+        .is_const = false,
+        .var_kind = .normal,
+        .source_depth = 5,
+    }};
+    var parsed = try parser.compile(rt, "x", .{ .mode = .eval_direct, .filename = "<eval>", .eval_closure_seed = &seed });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    var x_cv: ?function_def.ClosureVar = null;
+    for (parsed.function.closure_var) |cv| {
+        if (cv.var_name == x_atom) x_cv = cv;
+        try std.testing.expect(cv.var_name != atom.ids.ret);
+    }
+    const resolved_x = x_cv orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(function_def.ClosureType.arg, resolved_x.closure_type);
+    try std.testing.expectEqual(@as(u16, 7), resolved_x.var_idx);
+    try std.testing.expectEqual(@as(u16, 1), resolved_x.source_depth);
+    const var_ref_reads =
+        countOpcode(parsed.function.code, op.get_var_ref) +
+        countOpcode(parsed.function.code, op.get_var_ref_check) +
+        countOpcode(parsed.function.code, op.get_var_ref0) +
+        countOpcode(parsed.function.code, op.get_var_ref1) +
+        countOpcode(parsed.function.code, op.get_var_ref2) +
+        countOpcode(parsed.function.code, op.get_var_ref3);
+    try std.testing.expect(var_ref_reads > 0);
+    try std.testing.expectEqual(@as(usize, 0), countVarOpcodeForAtom(&parsed.function, op.get_var, x_atom));
+}
+
+test "direct eval ref closure seed preserves source depth" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const x_atom = try rt.internAtom("x");
+    defer rt.atoms.free(x_atom);
+    const seed = [_]parser.EvalClosureSeed{.{
+        .var_name = x_atom,
+        .closure_type = .ref,
+        .var_idx = 8,
+        .is_lexical = false,
+        .is_const = false,
+        .var_kind = .normal,
+        .source_depth = 5,
+    }};
+    var parsed = try parser.compile(rt, "", .{ .mode = .eval_direct, .filename = "<eval>", .eval_closure_seed = &seed });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    for (parsed.function.closure_var) |cv| {
+        if (cv.var_name != x_atom) continue;
+        try std.testing.expectEqual(function_def.ClosureType.ref, cv.closure_type);
+        try std.testing.expectEqual(@as(u16, 8), cv.var_idx);
+        try std.testing.expectEqual(@as(u16, 5), cv.source_depth);
+        return;
+    }
+    return error.TestExpectedEqual;
 }
 
 test "parser accepts dynamic import call expressions" {

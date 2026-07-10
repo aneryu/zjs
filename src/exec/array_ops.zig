@@ -190,14 +190,10 @@ pub fn pushFunctionClosure(
     global: *core.Object,
     index: usize,
     opc: u8,
-    eval_local_names: []const core.Atom,
-    eval_local_slots: []core.JSValue,
-    eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
 ) !void {
     const value = function.constants.get(index) orelse return error.InvalidBytecode;
     defer value.free(ctx.runtime);
-    const object_value = try createBytecodeFunctionObject(ctx, frame, function, global, value, function.name, opc, true, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, stack.values);
+    const object_value = try createBytecodeFunctionObject(ctx, frame, function, global, value, function.name, opc, true);
     defer object_value.free(ctx.runtime);
     try stack.push(object_value);
 }

@@ -29,7 +29,6 @@ const coercion_ops = @import("coercion_ops.zig");
 const error_stack_ops = @import("error_stack_ops.zig");
 const object_ops = @import("object_ops.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
-const slot_ops = @import("slot_ops.zig");
 const RegExpCapture = call_runtime.RegExpCapture;
 const ValueSliceRoot = array_ops.ValueSliceRoot;
 const anchoredBinaryPropertyName = object_ops.anchoredBinaryPropertyName;
@@ -46,7 +45,6 @@ const arrayPrototypeFromGlobal = array_ops.arrayPrototypeFromGlobal;
 const arrayPrototypeRecordId = array_ops.arrayPrototypeRecordId;
 const arraySpeciesCreate = array_ops.arraySpeciesCreate;
 const arraySpeciesOriginalIsArray = array_ops.arraySpeciesOriginalIsArray;
-const atomIdOrNameEql = call_runtime.atomIdOrNameEql;
 const backtraceFunctionNameEql = error_stack_ops.backtraceFunctionNameEql;
 const bytecodeFunctionObjectTag = object_ops.bytecodeFunctionObjectTag;
 const callObjectToPrimitiveMethod = object_ops.callObjectToPrimitiveMethod;
@@ -4092,20 +4090,6 @@ pub const KeywordMatch = struct {
     index: usize,
     keyword: []const u8,
 };
-
-pub fn replaceFrameVarRefBinding(rt: *core.JSRuntime, frame: *frame_mod.Frame, atom_id: core.Atom, value: core.JSValue) void {
-    const count = @min(frame.function.varRefNamesLen(), frame.var_refs.len);
-    var idx: usize = 0;
-    while (idx < count) : (idx += 1) {
-        const name = frame.function.varRefName(idx);
-        if (!atomIdOrNameEql(rt, name, atom_id)) continue;
-        const next = value.dup();
-        const old_value = slot_ops.varRefSlot(frame, idx);
-        slot_ops.storeVarRefSlot(frame, idx, next);
-        old_value.free(rt);
-        return;
-    }
-}
 
 pub fn appendSourceStringUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const string_value = value.asStringBody() orelse return error.TypeError;

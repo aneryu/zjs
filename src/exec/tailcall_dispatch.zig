@@ -145,9 +145,6 @@ pub const Vm = struct {
 
     pub const L0Entry = struct {
         is_eval_code: bool = false,
-        eval_local_names: []const core.Atom = &.{},
-        eval_local_slots: []JSValue = &.{},
-        eval_with_object: JSValue = JSValue.undefinedValue(),
         eval_global_var_bindings: bool = false,
         strict_unresolved_get_var: bool = false,
         generator_state: ?*core.Object = null,
@@ -292,14 +289,18 @@ pub fn coldGen(comptime body: fn (vm: *Vm, pc: [*]const u8) HostError!?JSValue) 
 }
 
 // ---- d==0 entry-guard accessors (mirror the dispatchLoop `(if depth==0 ...)`) ----
-inline fn evLocalNames(vm: *Vm) []const core.Atom {
-    return if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{};
-}
-inline fn evWithObject(vm: *Vm) JSValue {
-    return if (vm.machine.depth == 0) vm.l0.eval_with_object else JSValue.undefinedValue();
-}
-inline fn evIsEval(vm: *Vm) bool {
+pub inline fn isEvalCode(vm: *Vm) bool {
     return if (vm.machine.depth == 0) vm.l0.is_eval_code else false;
+}
+pub inline fn evalGlobalVarBindings(vm: *Vm) bool {
+    return if (vm.machine.depth == 0) vm.l0.eval_global_var_bindings else false;
+}
+pub inline fn strictUnresolvedGetVar(vm: *Vm) bool {
+    return if (vm.machine.depth == 0) vm.l0.strict_unresolved_get_var else (vm.function.flags.is_strict or vm.function.flags.runtime_strict);
+}
+
+inline fn evIsEval(vm: *Vm) bool {
+    return isEvalCode(vm);
 }
 
 // ===========================================================================
@@ -1008,10 +1009,8 @@ pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
                 .c0, .c1, .c2, .c3 => 1,
                 .half => 3,
             };
-            // Bounds check stays: zjs still grows var_refs dynamically for
-            // eval-introduced refs (ensureVarRefsCapacity; qjs sizes once at
-            // 17277 and reads unchecked, 18627) — deletion is phase-E gated
-            // on construction-fixed length.
+            // Keep Zig's boundary check for synthetic/legacy bytecode; normal
+            // parser output has construction-fixed length like qjs.
             if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             // Slot is a cell by type (`[]*core.VarRef`): the pre-typed
             // "is this slot a cell" header load (guard #4) is deleted —
@@ -1547,21 +1546,14 @@ pub fn op_add_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
 }
 
 // Global var read (2-byte var-ref index). qjs OP_get_var_ref-backed global cell read
-// — the per-call `fib` lookup in recursive code. Any dynamic-overlay / shadow /
-// uninitialized (TDZ or deleted binding parked at UNINITIALIZED, qjs
+// — the per-call `fib` lookup in recursive code. Any shadow / uninitialized
+// (TDZ or deleted binding parked at UNINITIALIZED, qjs
 // remove_global_object_property) condition falls back to the cold getVar resolver.
 pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    if (vm_property_globals.hasDynamicGlobalOverlay(vm.frame, evLocalNames(vm), vm.frame.evalVarRefNames(), evWithObject(vm))) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    // A closure created inside direct eval may have parent eval bindings that
-    // shadow global names. qjs keeps OP_get_var as a direct var-ref cell read;
-    // zjs's frame model resolves this through the cold scope walker. The
-    // frame-level check avoids a hot per-name walk without caching mutable
-    // eval/with state.
-    if (property_vm.frameClosureHasEvalParent(vm.frame)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
-    // Bounds check stays (dynamic eval growth; phase-E deletion is gated on
-    // construction-fixed length — qjs reads unchecked, 18461).
+    // Keep Zig's boundary check for synthetic/legacy bytecode; normal parser
+    // output has construction-fixed length (qjs reads unchecked, 18461).
     if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     // Slot is a cell by type: guard #4 (slot header load) deleted — qjs
     // OP_get_var is `*var_refs[idx]->pvalue` + one uninitialized check
@@ -1690,8 +1682,6 @@ comptime {
     _ = &coldStd;
     _ = &coldNext;
     _ = &evIsEval;
-    _ = &evLocalNames;
-    _ = &evWithObject;
     _ = &op_falloff;
     _ = &run;
     _ = dispatch_table;

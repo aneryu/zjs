@@ -2819,13 +2819,11 @@ pub fn qjsAsyncFunctionStart(
     var_refs: []const *core.VarRef,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
 ) HostError!core.JSValue {
     const promise = try core.promise.constructWithPrototype(ctx.runtime, promisePrototypeFromGlobal(ctx.runtime, global));
     errdefer promise.free(ctx.runtime);
 
-    const continuation_value = try createGeneratorObject(ctx, func, current_function_value, this_value, args, var_refs, output, global, eval_var_ref_names, eval_var_refs, false);
+    const continuation_value = try createGeneratorObject(ctx, func, current_function_value, this_value, args, var_refs, output, global, false);
     defer continuation_value.free(ctx.runtime);
     const continuation = objectFromValue(continuation_value) orelse return error.TypeError;
     try continuation.setOptionalValueSlot(ctx.runtime, continuation.generatorAsyncPromiseSlot(), promise.dup());
@@ -2867,8 +2865,6 @@ pub fn qjsAsyncFunctionRunState(
         .output = output,
         .global = async_global,
         .strict_unresolved_get_var = fb_runtime_strict,
-        .eval_var_ref_names = continuation.functionEvalLocalNames(),
-        .eval_var_refs = continuation.functionEvalLocalRefs(),
         .generator_state = continuation,
         .resume_value = resume_value,
         .current_function_value = current_function_value,

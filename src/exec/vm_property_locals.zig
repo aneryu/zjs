@@ -96,31 +96,24 @@ const atom_string = core.atom.predefinedId("String", .string).?;
 pub noinline fn loc(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
-    global: *core.Object,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     opc: u8,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
 ) !void {
-    _ = eval_local_names;
-    _ = eval_var_ref_names;
-    _ = eval_with_object;
     switch (opc) {
         op.get_loc => {
             const idx = readInt(u16, function.code[frame.pc..][0..2]);
             try slot_ops.execGetLoc(ctx, frame, stack, idx, 2, opc);
         },
-        op.put_loc => try slot_ops.execPutLoc(ctx, function, global, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
-        op.set_loc => try slot_ops.execSetLoc(ctx, function, global, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
+        op.put_loc => try slot_ops.execPutLoc(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
+        op.set_loc => try slot_ops.execSetLoc(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
 
         op.get_loc8 => {
             const idx = function.code[frame.pc];
             try slot_ops.execGetLoc(ctx, frame, stack, idx, 1, opc);
         },
-        op.put_loc8 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, function.code[frame.pc], 1, opc),
-        op.set_loc8 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, function.code[frame.pc], 1, opc),
+        op.put_loc8 => try slot_ops.execPutLoc(ctx, frame, stack, function.code[frame.pc], 1, opc),
+        op.set_loc8 => try slot_ops.execSetLoc(ctx, frame, stack, function.code[frame.pc], 1, opc),
 
         op.get_loc0 => {
             try slot_ops.execGetLoc(ctx, frame, stack, 0, 0, opc);
@@ -134,14 +127,14 @@ pub noinline fn loc(
         op.get_loc3 => {
             try slot_ops.execGetLoc(ctx, frame, stack, 3, 0, opc);
         },
-        op.put_loc0 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, 0, 0, opc),
-        op.put_loc1 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, 1, 0, opc),
-        op.put_loc2 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, 2, 0, opc),
-        op.put_loc3 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, 3, 0, opc),
-        op.set_loc0 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, 0, 0, opc),
-        op.set_loc1 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, 1, 0, opc),
-        op.set_loc2 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, 2, 0, opc),
-        op.set_loc3 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, 3, 0, opc),
+        op.put_loc0 => try slot_ops.execPutLoc(ctx, frame, stack, 0, 0, opc),
+        op.put_loc1 => try slot_ops.execPutLoc(ctx, frame, stack, 1, 0, opc),
+        op.put_loc2 => try slot_ops.execPutLoc(ctx, frame, stack, 2, 0, opc),
+        op.put_loc3 => try slot_ops.execPutLoc(ctx, frame, stack, 3, 0, opc),
+        op.set_loc0 => try slot_ops.execSetLoc(ctx, frame, stack, 0, 0, opc),
+        op.set_loc1 => try slot_ops.execSetLoc(ctx, frame, stack, 1, 0, opc),
+        op.set_loc2 => try slot_ops.execSetLoc(ctx, frame, stack, 2, 0, opc),
+        op.set_loc3 => try slot_ops.execSetLoc(ctx, frame, stack, 3, 0, opc),
         else => unreachable,
     }
 }
@@ -181,13 +174,7 @@ pub noinline fn checkedLocVm(
     stack: *stack_mod.Stack,
     opc: u8,
     catch_target: *?usize,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
 ) !Step {
-    _ = eval_local_names;
-    _ = eval_var_ref_names;
-    _ = eval_with_object;
     const idx = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
     if (idx >= frame.locals.len) return error.InvalidBytecode;
@@ -241,7 +228,7 @@ pub noinline fn checkedLocVm(
         op.put_loc_check_init => {
             const is_derived_this = function.flags.is_derived_class_constructor and
                 idx < function.vardefs.len and
-                function.vardefs[idx].var_name == 8;
+                function.vardefs[idx].var_name == core.atom.ids.this_;
             if (is_derived_this and !slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
@@ -272,13 +259,7 @@ pub fn varRef(
     catch_target: *?usize,
     eval_global_var_bindings: bool,
     is_eval_code: bool,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
 ) !Step {
-    _ = eval_local_names;
-    _ = eval_var_ref_names;
-    _ = eval_with_object;
     switch (opc) {
         op.get_var_ref, op.get_var_ref_check => {
             if (frame.pc + 2 > function.code.len) return error.TypeError;
@@ -288,7 +269,8 @@ pub fn varRef(
         },
         op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init => {
             if (frame.pc + 2 > function.code.len) return error.TypeError;
-            try slot_ops.execPutVarRef(ctx, function, global, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc, eval_global_var_bindings, is_eval_code);
+            const idx = readInt(u16, function.code[frame.pc..][0..2]);
+            try slot_ops.execPutVarRef(ctx, function, global, frame, stack, idx, 2, opc, eval_global_var_bindings, is_eval_code);
         },
         op.set_var_ref => {
             if (frame.pc + 2 > function.code.len) return error.TypeError;
@@ -334,11 +316,8 @@ pub noinline fn varRefVm(
     catch_target: *?usize,
     eval_global_var_bindings: bool,
     is_eval_code: bool,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
 ) !Step {
-    return varRef(ctx, function, global, frame, stack, opc, catch_target, eval_global_var_bindings, is_eval_code, eval_local_names, eval_var_ref_names, eval_with_object) catch |err| {
+    return varRef(ctx, function, global, frame, stack, opc, catch_target, eval_global_var_bindings, is_eval_code) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
@@ -879,34 +858,6 @@ fn denseArrayMulAndMaskFormulaFromBytecode(code: []const u8, pc: usize) ?DenseAr
         .mask = mask.value,
         .next_pc = mask.next_pc + 1,
     };
-}
-
-fn fastGlobalDataValueForRange(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *const frame_mod.Frame,
-    atom_id: core.Atom,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) ?core.JSValue {
-    if (!eval_with_object.isUndefined()) return null;
-    if (frameHasVarRefBinding(function, frame, atom_id)) return null;
-    if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return null;
-    if (frame.evalLocalNames().len != 0 or frame.evalVarRefNames().len != 0) return null;
-    if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| {
-        lexical_value.free(ctx.runtime);
-        return null;
-    }
-    if (globalOwnDataPropertyValue(global, atom_id)) |value| return value;
-    if (global.hasExoticMethods()) return null;
-
-    const desc = global.getOwnProperty(ctx.runtime, atom_id) orelse return null;
-    defer desc.destroy(ctx.runtime);
-    if (desc.kind != .data or !desc.value_present) return null;
-
-    return globalOwnDataPropertyValue(global, atom_id);
 }
 
 fn fitsI64(value: i128) bool {

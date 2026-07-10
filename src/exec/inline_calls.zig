@@ -9,7 +9,7 @@
 //! looking for catch targets before the error escapes the loop.
 //!
 //! Only the common fast shape is inlined (normal function kind, no class
-//! constructor, no arrow, no eval bindings, same realm, no pending special
+//! constructor, no arrow, same realm, no pending special
 //! `this`). Everything else keeps using the recursive slow path, which stays
 //! fully supported; the two paths share all frame setup primitives.
 
@@ -73,9 +73,8 @@ pub const InlineTarget = struct {
 /// `callValueOrBytecodeClassModeDispatch`; any condition that path
 /// special-cases (class constructors, cross-realm calls, async/generator kinds)
 /// disqualifies the target so the slow
-/// path keeps handling it. Direct-eval bindings on the function object are
-/// supported: `pushFrame` merges them into the frame's var-ref view like
-/// `callFunctionBytecodeModeState` does.
+/// path keeps handling it. Direct eval captures use the ordinary indexed
+/// var-ref cells and need no function-object binding overlay.
 ///
 /// Arrow targets ARE eligible: an arrow has no own `this` / `new.target`, so
 /// the resolved `this_value` / `new_target` come from the lexical values
@@ -155,45 +154,22 @@ noinline fn resolveArrowBindings(function_object: *core.Object) ArrowBindings {
 /// the dispatch loop and backtrace pc borrows while the
 /// level is alive.
 pub const Entry = struct {
-    /// The live execution view: the pointer-stable per-FB cache (common),
-    /// `owned_view` for a cache-less FB, or `eval_function_view` when
-    /// direct-eval bindings overlay it. qjs dispatches straight from
-    /// `JSFunctionBytecode*`; this is the analogous single pointer — no
-    /// per-Entry `Bytecode` backing store.
+    /// The live execution view: the pointer-stable per-FB cache (common), or
+    /// `owned_view` for a cache-less FB. qjs dispatches straight from
+    /// `JSFunctionBytecode*`; this is the analogous single pointer.
     function: *const bytecode.Bytecode,
     /// Heap box for the per-call view rebuilt when the FB has no cache slot
     /// (fixture/synthetic, no debug box). Null on the common cached path;
     /// freed at teardown.
     owned_view: ?*bytecode.Bytecode,
-    /// Eval-only side view used when direct-eval bindings extend
-    /// `function.var_ref_names`. Common calls point `function` at `view_storage`.
-    eval_function_view: ?*bytecode.Bytecode,
     frame: frame_mod.Frame,
-    eval_snapshot: frame_mod.EvalVarRefSnapshot,
     stack: stack_mod.Stack,
     catch_target: ?usize,
     arena_mark: core.VmStackArena.Mark,
     profile_guard: vm_call.CallProfileGuard,
-    /// Owned merged slices backing `view.var_ref_names` / the frame's
-    /// var-ref initialization when the callee carries direct-eval bindings
-    /// (mirrors `callFunctionBytecodeModeState`'s combined slices). The
-    /// contents are borrowed (atoms from the function bytecode and the
-    /// function object's eval-binding slots stay alive via the frame's
-    /// `current_function` reference); only the slice storage is owned.
-    merged_var_ref_names: []core.Atom,
-    merged_var_refs: []*core.VarRef,
-    /// True when the callee carries no direct-eval bindings: `eval_snapshot`
-    /// stays the empty default, `merged_*` stay empty, and `eval_function_view`
-    /// stays null. Teardown then skips `eval_snapshot.deinit` / `freeEvalResources`
-    /// entirely — both are provably no-ops for such a frame, but each is a
-    /// non-inlined call paid on every plain call. Mirrors qjs's `done:` epilogue
-    /// (quickjs.c:20698) freeing only what the frame actually allocated.
-    simple_frame: bool,
     /// True ONLY for a `setupSimpleInlineEntry` frame (borrowed this/args/
     /// var_refs, no owned view): the STATIC half of the `teardownSimpleEntry`
-    /// eligibility. A general-path frame may share `simple_frame == true`
-    /// (no eval) while still owning its `this` box, a var_refs copy, or a
-    /// rebuilt view — those need the full teardown.
+    /// eligibility. General-path frames still need the full teardown.
     fast_teardown: bool,
     /// Caller's Entry, or null when the caller is the L0 frame — qjs
     /// `JSStackFrame.prev_frame` (quickjs.c:408, "NULL if first stack
@@ -379,24 +355,22 @@ pub const Machine = struct {
 
     /// True when the frame takes the straight-line `setupSimpleInlineEntry` path:
     /// a sloppy, non-arrow plain call (no receiver, undefined `this` → global)
-    /// with simple parameters (no original-args snapshot), no direct-eval bindings
-    /// / eval-call / global-var rebinds, args that can be borrowed in place, and
+    /// with simple parameters (no original-args snapshot), no global-var rebinds,
+    /// args that can be borrowed in place, and
     /// all-cell closure captures (borrowable as `var_refs`). Each rejected
     /// condition is exactly a branch the lean path elides; the general
     /// `setupInlineEntry` stays the authority for everything else (strict, arrow,
-    /// method receiver, eval, arity pad, non-cell captures).
+    /// method receiver, arity pad, non-cell captures).
     fn isSimpleInlineFrame(target: *const InlineTarget, source: ArgsSource) bool {
         // A cache-less FB (view == null) needs the general path's per-call
         // view rebuild.
         const function = target.view orelse return false;
         // fb-derived half (normal, non-arrow, sloppy, simple params, no
-        // eval-call, no global-var rebinds) is precomputed at view build:
+        // global-var rebinds) is precomputed at view build:
         // one byte test instead of ~6 scattered FunctionBytecode bool loads
         // (the `ldrb [fb,#…]` cluster that dominated op_call). The remaining
         // checks below depend on the call site, not the bytecode.
         if (!function.simple_inline_eligible) return false;
-        if (target.function_object.functionEvalLocalNames().len != 0) return false;
-        if (target.function_object.functionEvalLocalRefs().len != 0) return false;
         switch (source) {
             .stack_region => |region| if (region.has_receiver) return false,
             .moved => return false, // tail-call reuse keeps the general path
@@ -417,7 +391,7 @@ pub const Machine = struct {
     /// field exactly once. No shared-primitive calls, no `Frame.init`
     /// default-then-overwrite pass, no by-value `FrameSlab` /
     /// `FrameStorageWindows` round-trips. Every simple-case branch is resolved
-    /// at compile time: no eval merge/snapshot, `this = global` (borrowed), no
+    /// at compile time: `this = global` (borrowed), no
     /// original-args snapshot, borrowed args, borrowed all-cell var_refs. Lives
     /// in its OWN function so its register allocation is not coupled to the
     /// general path (whose register pressure spilled the hot fields). Ownership
@@ -434,12 +408,7 @@ pub const Machine = struct {
         entry.function = function;
         entry.owned_view = null;
         entry.catch_target = null;
-        entry.eval_function_view = null;
-        entry.merged_var_ref_names = &.{};
-        entry.merged_var_refs = &.{};
-        entry.simple_frame = true;
         entry.fast_teardown = true;
-        entry.eval_snapshot = .{};
         entry.profile_guard = vm_call.enterCallProfile(rt);
         errdefer entry.profile_guard.deinit();
 
@@ -534,8 +503,8 @@ pub const Machine = struct {
     }
 
     /// Optimized inline-call frame setup, factored out of `pushFrame` so the
-    /// Machine shares the zero-copy arg move (`initArgumentsMoved`), eval-binding
-    /// merge, this-boxing and arena carve — NOT the dup-heavy
+    /// Machine shares the zero-copy arg move (`initArgumentsMoved`), this-boxing
+    /// and arena carve — NOT the dup-heavy
     /// `callFunctionBytecodeModeState` path.
     /// The caller owns depth accounting (enterInlineCallDepth / enterCallDepth)
     /// and any push/pop bookkeeping; on error every partially-initialized
@@ -545,8 +514,7 @@ pub const Machine = struct {
         // Point at the pointer-stable per-FB cached view (no copy); a
         // cache-less FB (fixture/synthetic, no debug box) gets a fresh
         // per-call view in an Entry-owned heap box — the old
-        // rebuild-per-call semantics. The eval-overlay branch below builds
-        // its own mutable copy, so a shared cache is never mutated.
+        // rebuild-per-call semantics.
         if (target.view) |cached| {
             entry.function = cached;
             entry.owned_view = null;
@@ -558,32 +526,12 @@ pub const Machine = struct {
         }
         errdefer freeOwnedView(rt, entry);
         entry.catch_target = null;
-        entry.eval_function_view = null;
-        entry.merged_var_ref_names = &.{};
-        entry.merged_var_refs = &.{};
-        entry.simple_frame = true;
         entry.fast_teardown = false;
         entry.profile_guard = vm_call.enterCallProfile(rt);
         errdefer entry.profile_guard.deinit();
-        errdefer freeEvalResources(rt, entry);
 
         const callable_slot = sourceCallableSlot(source);
-        const callable = callable_slot.*;
-
-        // Direct-eval bindings extend the callee's var-ref view, mirroring
-        // the combined slices `callFunctionBytecodeModeState` builds on the
-        // recursive path. Contents are borrowed; storage is entry-owned.
-        const eval_names = target.function_object.functionEvalLocalNames();
-        const eval_refs = target.function_object.functionEvalLocalRefs();
-        var frame_var_refs: []const *core.VarRef = target.function_object.functionCapturesSlot().*;
-        if (eval_names.len > 0 and eval_refs.len > 0) {
-            const eval_view = try rt.memory.create(bytecode.Bytecode);
-            eval_view.* = entry.function.*;
-            entry.eval_function_view = eval_view;
-            entry.function = eval_view;
-            try mergeEvalBindings(rt, entry, frame_var_refs, eval_names, eval_refs);
-            frame_var_refs = entry.merged_var_refs;
-        }
+        const frame_var_refs: []const *core.VarRef = target.function_object.functionCapturesSlot().*;
 
         entry.arena_mark = rt.vm_stack.mark();
         errdefer rt.vm_stack.restore(entry.arena_mark);
@@ -647,36 +595,24 @@ pub const Machine = struct {
             entry.frame.this_value_owned = false;
         }
 
-        entry.eval_snapshot = .{};
         const argc = sourceArgCount(source);
         const frame_arg_count = frame_mod.frameArgCount(entry.function, argc);
         const need_original_snapshot = frame_mod.argumentsNeedsOriginalSnapshot(entry.function);
         const borrow_source_args = canBorrowSourceArgs(entry.function, source);
         const storage_arg_count: usize = if (borrow_source_args) 0 else frame_arg_count;
-        const need_eval_var_refs = eval_names.len != 0 or eval_refs.len != 0;
-        // `eval_function_view` is only built when BOTH eval_names and eval_refs
-        // are non-empty, so `!need_eval_var_refs` (the OR) already implies the
-        // view is null and no merged slices exist — exactly the precondition
-        // under which `eval_snapshot.deinit` / `freeEvalResources` are no-ops.
-        entry.simple_frame = !need_eval_var_refs;
         // qjs `var_refs = p->u.func.var_refs` (quickjs.c:17844): borrow the callee's
         // closure captures array directly instead of carving + dup-ing a per-frame
         // copy. Only when every mutation of `frame.var_refs` is provably routed
         // through a cell (never the array element) and the shared array is never
-        // realloced. The conjuncts gate exactly those escapes:
-        //   simple_frame        — branch-1 captures (no merged eval var-ref view)
-        //   !has_eval_call      — no `replaceFrameVarRefBinding` direct element write,
-        //                         no eval-introduced refs growing the array
-        //   global_vars.len==0  — no `defineGlobalDecl{Var,Lexical}Cell` rebind
+        // realloced. Global declarations are the remaining element-rebinding
+        // escape; direct eval captures only alias the existing indexed cells.
         // "All captures are cells" is now the `[]*core.VarRef` type invariant
         // (phase-D flip; qjs js_closure2, quickjs.c:17297-17331), so writes
         // always go through the cell — the former allVarRefCells scan is gone.
         // Captures.len == closure_var.len ≥ every bytecode var_ref idx, so
         // `ensureVarRefsCapacity` never fires either. Teardown skips the per-element
         // free (the still-live function object owns the cells).
-        const borrow_var_refs = entry.simple_frame and
-            !entry.function.flags.has_eval_call and
-            entry.function.global_vars.len == 0 and
+        const borrow_var_refs = entry.function.global_vars.len == 0 and
             frame_var_refs.len > 0;
         const var_ref_storage_count: usize = if (borrow_var_refs) 0 else frame_mod.frameVarRefStorageCount(entry.function, frame_var_refs);
         const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(entry.function, frame_arg_count);
@@ -712,30 +648,7 @@ pub const Machine = struct {
         entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.stack_size, slab.stack);
         errdefer entry.stack.deinit(rt);
 
-        // Direct-eval bindings are COLD: only build the snapshot when the callee
-        // actually carries eval-introduced var refs. The common call leaves
-        // `eval_snapshot` empty (its deinit is a no-op) and the frame's eval_*
-        // fields keep their empty Frame.init defaults — byte-identical to what
-        // the old unconditional initCallEvalBindings produced for no-eval.
-        if (need_eval_var_refs) {
-            entry.eval_snapshot = try entry.frame.initCallEvalBindings(rt, .{
-                .initial_this_value = effective_this,
-                .current_function_value = callable,
-                .new_target_value = target.new_target,
-                .constructor_this_value = core.JSValue.undefinedValue(),
-                .eval_local_names = &.{},
-                .eval_local_slots = &.{},
-                .input_eval_var_ref_names = eval_names,
-                .input_eval_var_refs = eval_refs,
-                .inherited_eval_local_names = &.{},
-                .inherited_eval_local_slots = &.{},
-                .inherited_eval_var_ref_names = &.{},
-                .inherited_eval_var_refs = &.{},
-            });
-        }
-        errdefer entry.eval_snapshot.deinit(rt);
-
-        try vm_call.initFrameLocals(ctx, entry.function, &entry.frame, &.{}, &.{}, true, frame_windows);
+        try vm_call.initFrameLocals(ctx, entry.function, &entry.frame, true, frame_windows);
         if (borrow_source_args) {
             try entry.frame.initArgumentsBorrowedSlots(
                 &rt.memory,
@@ -764,8 +677,8 @@ pub const Machine = struct {
             try entry.frame.ensureOpenVarRefSlots(&rt.memory, &rt.vm_stack, true);
         }
         if (borrow_var_refs) {
-            // Alias the closure's captures (mutable slice; `simple_frame` guarantees
-            // no merge replaced it). The function object stays alive via
+            // Alias the closure's captures (mutable slice; no merge replaced it).
+            // The function object stays alive via
             // `frame.current_function`, so the cells outlive the frame.
             entry.frame.var_refs = target.function_object.functionCapturesSlot().*;
             entry.frame.var_refs_borrowed = true;
@@ -866,61 +779,6 @@ pub const Machine = struct {
         value.free(rt);
     }
 
-    /// Build the entry-owned merged `var_ref_names` / var_refs slices for a
-    /// callee with direct-eval bindings. On success ownership of both
-    /// slices is with `entry` (released by `freeMergedSlices`).
-    fn mergeEvalBindings(
-        rt: *core.JSRuntime,
-        entry: *Entry,
-        captures: []const *core.VarRef,
-        eval_names: []const core.Atom,
-        eval_refs: []core.JSValue,
-    ) HostError!void {
-        const add_len = @min(eval_names.len, eval_refs.len);
-        const old_len = entry.function.varRefNamesLen();
-        // Boundary cellify (VARREFS-SLOT-TYPING-BLUEPRINT §3 aux source): the
-        // merged view lands in frame.var_refs (initFrameVarRefs path-1 dup),
-        // so every element must be a live cell (qjs js_closure2 slots are
-        // always JSVarRef*, quickjs.c:17297-17331). In place: the function
-        // object's eval-local table keeps ownership — the raw value's ref
-        // moves into the fresh closed cell, the table slot now holds the cell.
-        for (eval_refs[0..add_len]) |*slot| {
-            if (core.VarRef.fromValue(slot.*) == null) {
-                const cell = try core.VarRef.createClosed(rt, slot.*);
-                slot.* = cell.valueRef();
-            }
-        }
-        const names = try rt.memory.alloc(core.Atom, old_len + add_len);
-        errdefer rt.memory.free(core.Atom, names);
-        var i: usize = 0;
-        while (i < old_len) : (i += 1) names[i] = entry.function.varRefName(i);
-        @memcpy(names[old_len..], eval_names[0..add_len]);
-        // Contents stay borrowed (captures pointers + eval-table cells); only
-        // the slice storage is entry-owned, exactly as pre-flip.
-        const refs = try rt.memory.alloc(*core.VarRef, captures.len + add_len);
-        @memcpy(refs[0..captures.len], captures);
-        for (eval_refs[0..add_len], 0..) |slot, idx| {
-            refs[captures.len + idx] = core.VarRef.fromValue(slot) orelse unreachable;
-        }
-        entry.merged_var_ref_names = names;
-        entry.merged_var_refs = refs;
-        entry.eval_function_view.?.var_ref_names = names;
-    }
-
-    fn freeMergedSlices(rt: *core.JSRuntime, entry: *Entry) void {
-        if (entry.merged_var_ref_names.len != 0) rt.memory.free(core.Atom, entry.merged_var_ref_names);
-        if (entry.merged_var_refs.len != 0) rt.memory.free(*core.VarRef, entry.merged_var_refs);
-        entry.merged_var_ref_names = &.{};
-        entry.merged_var_refs = &.{};
-    }
-
-    fn freeEvalFunctionView(rt: *core.JSRuntime, entry: *Entry) void {
-        if (entry.eval_function_view) |view| {
-            rt.memory.destroy(bytecode.Bytecode, view);
-            entry.eval_function_view = null;
-        }
-    }
-
     /// Free the per-call rebuilt view of a cache-less FB. The view is
     /// non-owning (its slices borrow the FB), so only the box is freed.
     fn freeOwnedView(rt: *core.JSRuntime, entry: *Entry) void {
@@ -928,11 +786,6 @@ pub const Machine = struct {
             rt.memory.destroy(bytecode.Bytecode, view);
             entry.owned_view = null;
         }
-    }
-
-    fn freeEvalResources(rt: *core.JSRuntime, entry: *Entry) void {
-        freeMergedSlices(rt, entry);
-        freeEvalFunctionView(rt, entry);
     }
 
     /// Push an inline call frame for `target` whose operand region starts at
@@ -1001,8 +854,7 @@ pub const Machine = struct {
 
     /// Tear down the top inline frame. Mirrors the defer chain of the
     /// recursive `runWithArgsState` + `callFunctionBytecodeModeState` exit
-    /// path (eval snapshot, frame, operand stack, arena watermark,
-    /// backtrace, profile scope, call depth).
+    /// path (frame, operand stack, arena watermark, profile scope, call depth).
     inline fn popTeardown(self: *Machine) void {
         const dying = self.topEntry();
         teardownInlineEntry(self.ctx, dying);
@@ -1019,8 +871,8 @@ pub const Machine = struct {
     /// close the frame's own open var refs, free locals + args, release the
     /// callable, restore the arena watermark. Every simple-frame gate is
     /// pre-resolved; the CALLER must have checked the dynamic escapes
-    /// (`simple_frame`, `frame.cold == null`, `!frame.storage_on_heap`,
-    /// `stack.arena_window`) — execution can grow the stack to the heap or
+    /// (`frame.cold == null`, `!frame.storage_on_heap`, `stack.arena_window`)
+    /// — execution can grow the stack to the heap or
     /// materialize the cold box (arguments object), which needs the general
     /// teardown below.
     pub inline fn teardownSimpleEntry(ctx: *core.JSContext, entry: *Entry) void {
@@ -1036,18 +888,14 @@ pub const Machine = struct {
         entry.profile_guard.deinit();
     }
 
-    /// Release every resource `setupInlineEntry` acquired for `entry` (eval
-    /// snapshot, frame, operand stack, merged slices, arena watermark,
-    /// backtrace, profile scope). The caller owns depth accounting + push/pop
-    /// bookkeeping. Shared by the Machine (popTeardown) and the recursion path.
+    /// Release every resource `setupInlineEntry` acquired for `entry` (frame,
+    /// operand stack, arena watermark, and profile scope). The caller owns
+    /// depth accounting + push/pop bookkeeping. Shared by the Machine
+    /// (popTeardown) and the recursion path.
     pub fn teardownInlineEntry(ctx: *core.JSContext, entry: *Entry) void {
         const rt = ctx.runtime;
-        // For a simple frame (no direct-eval bindings) the snapshot and eval
-        // resources are the empty defaults — skip both non-inlined calls.
-        if (!entry.simple_frame) entry.eval_snapshot.deinit(rt);
         entry.stack.deinit(rt);
         entry.frame.deinitInlineCall(&rt.memory, rt);
-        if (!entry.simple_frame) freeEvalResources(rt, entry);
         if (entry.owned_view != null) freeOwnedView(rt, entry);
         rt.vm_stack.restore(entry.arena_mark);
         entry.profile_guard.deinit();

@@ -323,8 +323,6 @@ fn resumeBodyValue(
         gen.functionCapturesSlot().*,
         output,
         global,
-        gen.functionEvalLocalNames(),
-        gen.functionEvalLocalRefs(),
         false,
         gen,
         resume_value,

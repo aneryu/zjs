@@ -36,17 +36,17 @@ const vm_property_private = @import("vm_property_private.zig");
 // ---- Shared handlers (op groups sharing helper+args) ----
 pub const h_varref = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
-        _ = try vm_property_locals.varRefVm(vm.ctx, vm.function, vm.global, vm.frame, vm.stack, pc[0], vm.catch_target, (if (vm.machine.depth == 0) vm.l0.eval_global_var_bindings else false), (if (vm.machine.depth == 0) vm.l0.is_eval_code else false), (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), vm.frame.evalVarRefNames(), (if (vm.machine.depth == 0) vm.l0.eval_with_object else core.JSValue.undefinedValue()));
+        _ = try vm_property_locals.varRefVm(vm.ctx, vm.function, vm.global, vm.frame, vm.stack, pc[0], vm.catch_target, td.evalGlobalVarBindings(vm), td.isEvalCode(vm));
     }
 }.b);
 pub const h_checkedloc = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
-        _ = try vm_property_locals.checkedLocVm(vm.ctx, vm.function, vm.global, vm.frame, vm.stack, pc[0], vm.catch_target, (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), vm.frame.evalVarRefNames(), (if (vm.machine.depth == 0) vm.l0.eval_with_object else core.JSValue.undefinedValue()));
+        _ = try vm_property_locals.checkedLocVm(vm.ctx, vm.function, vm.global, vm.frame, vm.stack, pc[0], vm.catch_target);
     }
 }.b);
 pub const h_loc = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
-        try vm_property_locals.loc(vm.ctx, vm.function, vm.global, vm.frame, vm.stack, pc[0], (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), vm.frame.evalVarRefNames(), (if (vm.machine.depth == 0) vm.l0.eval_with_object else core.JSValue.undefinedValue()));
+        try vm_property_locals.loc(vm.ctx, vm.function, vm.frame, vm.stack, pc[0]);
     }
 }.b);
 pub const h_arg = coldStd(struct {
@@ -86,13 +86,13 @@ pub const h_array_element = coldStd(struct {
 }.b);
 pub const h_get_var = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
-        _ = try vm_property_globals.getVar(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, pc[0], (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), (if (vm.machine.depth == 0) vm.l0.eval_local_slots else &.{}), vm.frame.evalVarRefNames(), vm.frame.evalVarRefs(), (if (vm.machine.depth == 0) vm.l0.eval_with_object else core.JSValue.undefinedValue()));
+        _ = try vm_property_globals.getVar(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, pc[0]);
     }
 }.b);
 pub const h_put_var = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
         _ = pc;
-        _ = try vm_property_globals.putVar(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, (if (vm.machine.depth == 0) vm.l0.strict_unresolved_get_var else (vm.function.flags.is_strict or vm.function.flags.runtime_strict)), (if (vm.machine.depth == 0) vm.l0.eval_global_var_bindings else false), (if (vm.machine.depth == 0) vm.l0.is_eval_code else false), (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), (if (vm.machine.depth == 0) vm.l0.eval_local_slots else &.{}), vm.frame.evalVarRefNames(), vm.frame.evalVarRefs(), (if (vm.machine.depth == 0) vm.l0.eval_with_object else core.JSValue.undefinedValue()));
+        _ = try vm_property_globals.putVar(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, td.strictUnresolvedGetVar(vm), td.evalGlobalVarBindings(vm), td.isEvalCode(vm));
     }
 }.b);
 pub const h_with_get_or_delete = coldStd(struct {
@@ -107,7 +107,7 @@ pub const h_make_slot_ref = coldStd(struct {
 }.b);
 pub const h_define_class = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
-        _ = try class_vm.defineClass(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), (if (vm.machine.depth == 0) vm.l0.eval_local_slots else &.{}), vm.frame.evalVarRefNames(), vm.frame.evalVarRefs(), pc[0] == op.define_class_computed);
+        _ = try class_vm.defineClass(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, pc[0] == op.define_class_computed);
     }
 }.b);
 pub const h_for_of_start = coldStd(struct {
@@ -160,7 +160,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }.b);
     t[op.push_i16] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            try value_vm.pushI16OperandVm(vm.ctx, vm.stack, vm.function, vm.frame, .{ .global = vm.global, .eval_local_names = (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), .eval_var_ref_names = vm.frame.evalVarRefNames(), .eval_with_object = (if (vm.machine.depth == 0) vm.l0.eval_with_object else core.JSValue.undefinedValue()) });
+            try value_vm.pushI16Operand(vm.stack, vm.function, vm.frame);
         }
     }.b);
     t[op.push_i8] = h(struct {
@@ -190,7 +190,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }.b);
     t[op.fclosure] = coldStd(struct {
         fn b(vm: *Vm, pc: [*]const u8) HostError!void {
-            _ = try call_vm.closure(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, pc[0], (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), (if (vm.machine.depth == 0) vm.l0.eval_local_slots else &.{}), vm.frame.evalVarRefNames(), vm.frame.evalVarRefs());
+            _ = try call_vm.closure(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, pc[0]);
         }
     }.b);
     t[op.fclosure8] = t[op.fclosure];
@@ -363,7 +363,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     inline for ([_]u8{ op.make_loc_ref, op.make_arg_ref, op.make_var_ref_ref }) |o| t[o] = h_make_slot_ref;
     t[op.make_var_ref] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            _ = try vm_property_ref.makeVarRefVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), (if (vm.machine.depth == 0) vm.l0.eval_local_slots else &.{}), vm.frame.evalVarRefNames(), vm.frame.evalVarRefs());
+            _ = try vm_property_ref.makeVarRefVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
         }
     }.b);
     t[op.get_ref_value] = h(struct {
@@ -491,7 +491,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.put_var_init] = h_putvarinit(op.put_var_init);
     t[op.special_object] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            try literal_vm.specialObject(vm.ctx, vm.stack, vm.function, vm.frame, vm.global, (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), (if (vm.machine.depth == 0) vm.l0.eval_local_slots else &.{}), vm.frame.evalVarRefNames(), vm.frame.evalVarRefs());
+            try literal_vm.specialObject(vm.ctx, vm.stack, vm.function, vm.frame, vm.global);
         }
     }.b);
     t[op.rest] = h(struct {
@@ -673,7 +673,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }.b);
     t[op.delete_var] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            try vm_property_ref.deleteVar(vm.ctx, vm.global, vm.stack, vm.function, vm.frame, (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), (if (vm.machine.depth == 0) vm.l0.eval_local_slots else &.{}), vm.frame.evalVarRefNames(), vm.frame.evalVarRefs());
+            try vm_property_ref.deleteVar(vm.ctx, vm.global, vm.stack, vm.function, vm.frame);
         }
     }.b);
     t[op.delete] = h(struct {

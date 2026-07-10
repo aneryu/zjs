@@ -736,8 +736,6 @@ pub const GeneratorPayload = struct {
     // Slot-typed closure captures (`JSVarRef **`, qjs JSObject.u.func.var_refs
     // quickjs.c:17277; VARREFS-SLOT-TYPING-BLUEPRINT phase D).
     captures: []*var_ref_mod.VarRef = &.{},
-    eval_local_names: []atom.Atom = &.{},
-    eval_local_refs: []JSValue = &.{},
     home_object: ?*Object = null,
     realm_global_ptr: ?*Object = null,
     this_value: ?JSValue = null,
@@ -774,8 +772,6 @@ pub const GeneratorPayload = struct {
     pub fn destroy(self: *GeneratorPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.bytecode);
         destroyVarRefCellSlice(rt, &self.captures);
-        destroyAtomSlice(rt, &self.eval_local_names);
-        destroyValueSlice(rt, &self.eval_local_refs);
         destroyOptionalObjectRef(rt, &self.home_object);
         destroyOptionalValue(rt, &self.this_value);
         destroyValueSlice(rt, &self.args);
@@ -876,9 +872,6 @@ pub const FunctionRarePayload = struct {
     async_from_sync_unwrap_done: u8 = 0,
     primitive_prototypes: [primitive_prototype_slot_count]?JSValue = @splat(null),
     class_fields_init: ?JSValue = null,
-    eval_local_names: []atom.Atom = &.{},
-    eval_local_refs: []JSValue = &.{},
-    eval_parent_function: ?JSValue = null,
     import_meta: ?JSValue = null,
     lexical_this: ?JSValue = null,
     arrow_constructor_this: ?JSValue = null,
@@ -921,9 +914,6 @@ pub const FunctionRarePayload = struct {
     pub fn destroy(self: *FunctionRarePayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.source);
         destroyOptionalValue(rt, &self.class_fields_init);
-        destroyAtomSlice(rt, &self.eval_local_names);
-        destroyValueSlice(rt, &self.eval_local_refs);
-        destroyOptionalValue(rt, &self.eval_parent_function);
         destroyOptionalValue(rt, &self.import_meta);
         destroyOptionalValue(rt, &self.lexical_this);
         destroyOptionalValue(rt, &self.arrow_constructor_this);
@@ -4315,11 +4305,10 @@ pub const Object = struct {
         return true;
     }
 
-    pub fn addThrowTypeErrorIntrinsicFunction(self: *Object, rt: *JSRuntime) bool {
-        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+    pub fn addThrowTypeErrorIntrinsicFunction(self: *Object, rt: *JSRuntime) !void {
+        const payload = try self.ensureFunctionRarePayload(rt);
         payload.throw_type_error_intrinsic = true;
         payload.internal_callable_tag = .throw_type_error_intrinsic;
-        return true;
     }
 
     pub fn addAsyncIteratorAsyncDisposeFunction(self: *Object, rt: *JSRuntime) bool {
@@ -4432,15 +4421,6 @@ pub const Object = struct {
 
     pub fn functionClassFieldsInit(self: *const Object) ?JSValue {
         if (self.functionRarePayloadConst()) |payload| return payload.class_fields_init;
-        return null;
-    }
-
-    pub fn functionEvalParentFunctionSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).eval_parent_function;
-    }
-
-    pub fn functionEvalParentFunction(self: *const Object) ?JSValue {
-        if (self.functionRarePayloadConst()) |payload| return payload.eval_parent_function;
         return null;
     }
 
@@ -4733,32 +4713,6 @@ pub const Object = struct {
         const slot = self.functionCapturesSlot();
         destroyVarRefCellSlice(rt, slot);
         slot.* = next_cells;
-    }
-
-    pub fn functionEvalLocalNamesSlot(self: *Object, rt: *JSRuntime) !*[]atom.Atom {
-        if (self.class_payload_kind == .function) return &(try self.ensureFunctionRarePayload(rt)).eval_local_names;
-        if (self.generatorPayload()) |payload| return &payload.eval_local_names;
-        std.debug.assert(self.class_payload_kind == .function or self.class_payload_kind == .generator);
-        unreachable;
-    }
-
-    pub fn functionEvalLocalNames(self: *const Object) []atom.Atom {
-        if (self.functionRarePayloadConst()) |payload| return payload.eval_local_names;
-        if (self.generatorPayloadConst()) |payload| return payload.eval_local_names;
-        return &.{};
-    }
-
-    pub fn functionEvalLocalRefsSlot(self: *Object, rt: *JSRuntime) !*[]JSValue {
-        if (self.class_payload_kind == .function) return &(try self.ensureFunctionRarePayload(rt)).eval_local_refs;
-        if (self.generatorPayload()) |payload| return &payload.eval_local_refs;
-        std.debug.assert(self.class_payload_kind == .function or self.class_payload_kind == .generator);
-        unreachable;
-    }
-
-    pub fn functionEvalLocalRefs(self: *const Object) []JSValue {
-        if (self.functionRarePayloadConst()) |payload| return payload.eval_local_refs;
-        if (self.generatorPayloadConst()) |payload| return payload.eval_local_refs;
-        return &.{};
     }
 
     pub fn functionLexicalThisSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
@@ -6498,8 +6452,6 @@ pub const Object = struct {
             if (payload.rare) |rare| {
                 try Helper.traceOptValue(visitor, &rare.source);
                 try Helper.traceOptValue(visitor, &rare.class_fields_init);
-                for (rare.eval_local_refs) |*stored| try Helper.callVisitValue(visitor, stored);
-                try Helper.traceOptValue(visitor, &rare.eval_parent_function);
                 try Helper.traceOptValue(visitor, &rare.import_meta);
                 try Helper.traceOptValue(visitor, &rare.lexical_this);
                 try Helper.traceOptValue(visitor, &rare.arrow_constructor_this);
@@ -6588,7 +6540,6 @@ pub const Object = struct {
                 var cell_value = cell.valueRef();
                 try Helper.callVisitValue(visitor, &cell_value);
             }
-            for (payload.eval_local_refs) |*stored| try Helper.callVisitValue(visitor, stored);
             try Helper.traceOptValue(visitor, &payload.this_value);
             for (payload.args) |*stored| try Helper.callVisitValue(visitor, stored);
             for (payload.stack) |*stored| try Helper.callVisitValue(visitor, stored);
@@ -7058,8 +7009,6 @@ pub const Object = struct {
         count += countOptionalFunctionBytecodeRef(self.functionBytecode(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionClassFieldsInit(), function_bytecode);
         for (self.functionCaptures()) |cell| count += countFunctionBytecodeValueRef(cell.valueRef(), function_bytecode);
-        for (self.functionEvalLocalRefs()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionEvalParentFunction(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionImportMeta(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionLexicalThis(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionArrowConstructorThis(), function_bytecode);

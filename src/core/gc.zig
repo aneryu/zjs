@@ -676,18 +676,29 @@ pub const Registry = struct {
     pub fn deinit(self: *Registry, rt: anytype) void {
         self.phase = .deinit;
 
-        // Phase 1: free every non-shape GC object. Shapes are spliced out of the
-        // GC list into a holding stack (reusing their now-unused `next` link) so
-        // they outlive every object that still owns a shape_ref — destroying a
-        // shape early would have those object destructors release freed memory.
+        // Phase 1: free objects and function bytecode. Shapes and VarRefs are
+        // spliced into holding stacks (reusing their now-unused `next` link).
+        // Shapes must outlive objects that own shape_ref. VarRef structs must
+        // outlive object properties and bytecode capture arrays that still own
+        // cell pointers; release their owned values now, while those values'
+        // GC headers are still structurally valid.
         // (qjs avoids the ordering hazard via its mark/decref cycle collector;
-        // we keep zjs's explicit teardown but defer shapes to a second pass.)
+        // we keep zjs's explicit teardown but defer these structs.)
         var held_shapes: ?*GCObjectHeader = null;
+        var held_var_refs: ?*GCObjectHeader = null;
         while (self.gc_object_tail) |h| {
             if (h.meta().kind == .shape) {
                 self.removeGcObject(h);
                 h.next = held_shapes;
                 held_shapes = h;
+                continue;
+            }
+            if (h.meta().kind == .var_ref) {
+                self.removeGcObject(h);
+                h.meta().flags.finalizing = true;
+                var_ref.VarRef.prepareForRuntimeDeinit(rt, h);
+                h.next = held_var_refs;
+                held_var_refs = h;
                 continue;
             }
             self.removeGcObject(h);
@@ -701,7 +712,18 @@ pub const Registry = struct {
             }
         }
 
-        // Phase 2: now every object is gone, so destroying the held shapes can no
+        // Phase 2: every cell owner is gone. Their releases were suppressed by
+        // the deinit phase/finalizing bit, so reclaim each prepared cell struct
+        // exactly once regardless of its residual refcount.
+        while (held_var_refs) |h| {
+            const next = h.next;
+            h.next = null;
+            self.recordHeapFreeWithBytes(h, heapByteSizeFromHeader(rt, h));
+            var_ref.VarRef.freeCycleDeferredStruct(rt, h);
+            held_var_refs = next;
+        }
+
+        // Phase 3: now every object is gone, so destroying the held shapes can no
         // longer dangle a shape_ref. `destroyShape` self-removes from the GC list
         // (guarded no-op here) and frees property storage + bucket links.
         while (held_shapes) |h| {

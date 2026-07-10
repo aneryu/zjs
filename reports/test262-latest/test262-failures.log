@@ -1,0 +1,13 @@
+test262/test/built-ins/AsyncGeneratorPrototype/return/return-suspendedYield-try-finally-throw.js	TypeError	TypeError: $DONE() not called
+test262/test/language/expressions/dynamic-import/assignment-expression/arrow-function.js	TypeError	TypeError: $DONE() not called
+test262/test/language/expressions/dynamic-import/import-attributes/2nd-param-with-type-text.js	TypeError	TypeError: $DONE() not called
+test262/test/language/module-code/top-level-await/dynamic-import-of-waiting-module.js	TypeError	TypeError: $DONE() not called
+test262/test/language/module-code/top-level-await/fulfillment-order.js	TypeError	TypeError: $DONE() not called
+test262/test/language/module-code/top-level-await/rejection-order.js	TypeError	TypeError: $DONE() not called
+test262/test/language/module-code/top-level-await/top-level-ticks-2.js	TypeError	TypeError: $DONE() not called
+test262/test/language/module-code/top-level-await/top-level-ticks.js	TypeError	TypeError: $DONE() not called
+test262/test/language/module-code/top-level-await/unobservable-global-async-evaluation-count-reset.js	TypeError	TypeError: $DONE() not called
+test262/test/language/module-code/verify-dfs.js	TypeError	TypeError: $DONE() not called
+test262/test/language/statements/await-using/await-using-does-not-imply-await-if-not-evaluated.js	TypeError	TypeError: $DONE() not called
+test262/test/language/statements/for-await-of/async-func-decl-dstr-obj-id-init-simple-no-strict.js	TypeError	TypeError: $DONE() not called
+test262/test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-simple-no-strict.js	TypeError	TypeError: $DONE() not called
