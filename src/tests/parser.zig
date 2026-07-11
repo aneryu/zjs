@@ -2724,12 +2724,12 @@ test "F5: let declaration" {
     // FunctionBytecode, then initializes its local lexical slot:
     //   set_loc_uninitialized 0  (3 bytes - TDZ prologue)
     //   undefined                 (1 byte)
-    //   put_loc_check_init 0      (clears TDZ flag)
+    //   put_loc0                  (QuickJS uses bare put_loc for ordinary init)
     try std.testing.expectEqual(@as(usize, 1), fn_bc.global_vars.len);
     try std.testing.expect(fn_bc.global_vars[0].is_lexical);
     try std.testing.expectEqual(op.set_loc_uninitialized, fn_bc.code[0]);
     try std.testing.expectEqual(op.undefined, fn_bc.code[3]);
-    try std.testing.expectEqual(op.put_loc_check_init, fn_bc.code[4]);
+    try std.testing.expectEqual(op.put_loc0, fn_bc.code[4]);
 }
 
 test "F5: let declaration with initializer" {
@@ -2741,12 +2741,12 @@ test "F5: let declaration with initializer" {
     // F10.1c + TDZ: `let x = 1;` lowers to declaration metadata plus:
     //   set_loc_uninitialized 0  (TDZ prologue)
     //   push_i32 1
-    //   put_loc_check_init 0
+    //   put_loc0
     try std.testing.expectEqual(@as(usize, 1), fn_bc.global_vars.len);
     try std.testing.expect(fn_bc.global_vars[0].is_lexical);
     try std.testing.expectEqual(op.set_loc_uninitialized, fn_bc.code[0]);
     try std.testing.expectEqual(op.push_1, fn_bc.code[3]);
-    try std.testing.expectEqual(op.put_loc_check_init, fn_bc.code[fn_bc.code.len - 3]);
+    try std.testing.expectEqual(op.put_loc0, fn_bc.code[fn_bc.code.len - 1]);
 }
 
 test "F5: const declaration without initializer should fail" {
@@ -2762,13 +2762,13 @@ test "F5: const declaration with initializer" {
     defer fn_bc.deinit(env.rt);
 
     // F10.1c + TDZ: const lowers same as let with init, except the
-    // final store keeps the TDZ checked-init form.
+    // Ordinary lexical initialization matches QuickJS's bare put_loc form.
     try std.testing.expectEqual(@as(usize, 1), fn_bc.global_vars.len);
     try std.testing.expect(fn_bc.global_vars[0].is_lexical);
     try std.testing.expect(fn_bc.global_vars[0].is_const);
     try std.testing.expectEqual(op.set_loc_uninitialized, fn_bc.code[0]);
     try std.testing.expectEqual(op.push_1, fn_bc.code[3]);
-    try std.testing.expectEqual(op.put_loc_check_init, fn_bc.code[fn_bc.code.len - 3]);
+    try std.testing.expectEqual(op.put_loc0, fn_bc.code[fn_bc.code.len - 1]);
 }
 
 test "F5: multiple var declarations" {
@@ -3152,6 +3152,7 @@ test "F7: derived constructor this read lowers to get_loc_checkthis" {
 
     const ctor = try expectFunctionConstant(&fn_bc, 0);
     try std.testing.expect(ctor.flags.is_derived_class_constructor);
+    try expectOpcode(ctor.byteCode(), op.put_loc_check_init);
     try expectOpcode(ctor.byteCode(), op.get_loc_checkthis);
     try std.testing.expectEqual(@as(usize, 1), countOpcode(ctor.byteCode(), op.@"return"));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(ctor.byteCode(), op.return_undef));

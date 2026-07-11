@@ -229,8 +229,8 @@ pub const Registry = struct {
 
     fn createShape(self: *Registry, proto: ?*Object) !*Shape {
         // Single GC allocation = struct + inline FAM (qjs js_new_shape).
-        // createWithFam's prefix init already set {kind=.shape, rc=1}; addWithSize
-        // below resets rc/flags/size_class once the FAM is populated.
+        // createWithFam initializes metadata once; the constructor initializes
+        // the intrusive links before registration below.
         const fam_bytes = famRegionBytes(initial_prop_size, initial_hash_size);
         const shape = try self.memory.createWithFam(Shape, fam_bytes);
         errdefer self.memory.destroyWithFam(Shape, shape, fam_bytes);
@@ -245,7 +245,7 @@ pub const Registry = struct {
         @memset(shape.props(), .{});
         try self.link(shape, true);
         errdefer self.unlink(shape);
-        try self.gc_registry.addWithSize(&shape.header, shape.allocationSize());
+        try self.gc_registry.addInitializedWithSize(&shape.header, shape.allocationSize());
         if (proto) |object| gc.retain(&object.header);
         return shape;
     }
@@ -273,25 +273,55 @@ pub const Registry = struct {
         }
         try self.link(shape, true);
         errdefer self.unlink(shape);
-        try self.gc_registry.addWithSize(&shape.header, shape.allocationSize());
+        try self.gc_registry.addInitializedWithSize(&shape.header, shape.allocationSize());
         if (proto) |object| gc.retain(&object.header);
         return shape;
     }
 
-    pub fn transitionProperty(self: *Registry, parent: *Shape, atom_id: atom.Atom, flags: u6, property_capacity: usize) !*Shape {
+    /// Apply a named-property transition to the shape owned by one object.
+    ///
+    /// Mirrors qjs `add_property`: reuse a cached transition when present,
+    /// clone a shared miss, and append an rc==1 miss in place. `shape_ptr` is
+    /// threaded through the operation because either the cache/clone branch or
+    /// inline-FAM growth can replace the allocation. This function owns every
+    /// old-shape release required by a replacement; the in-place branch never
+    /// releases the shape whose ownership merely moved during relocation.
+    pub fn transitionProperty(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6, property_capacity: usize) !void {
+        const parent = shape_ptr.*;
         if (self.findHashedShapeProperty(parent, atom_id, flags, property_capacity)) |shape| {
             shape.retain();
-            return shape;
+            shape_ptr.* = shape;
+            self.release(parent);
+            return;
         }
-        var child = try self.cloneShape(parent, parent.proto, @max(parent.prop_size, property_capacity), true);
-        errdefer self.release(child);
-        // appendProperty may relocate `child` (inline FAM grow moves the shape);
-        // thread &child so the fresh pointer flows back before we hash it.
-        try self.appendProperty(&child, atom_id, flags);
-        const old_hash = child.hash;
-        child.hash = transitionHash(parent.hash, atom_id, flags);
-        self.rehashShape(child, old_hash);
-        return child;
+        if (parent.header.meta().rc != 1) {
+            var child = try self.cloneShape(parent, parent.proto, @max(parent.prop_size, property_capacity), true);
+            var child_owned = true;
+            errdefer if (child_owned) self.release(child);
+            // appendProperty may relocate `child` (inline FAM grow moves the
+            // shape); thread &child so the fresh pointer flows back before hash.
+            try self.appendProperty(&child, atom_id, flags);
+            const old_hash = child.hash;
+            child.hash = transitionHash(parent.hash, atom_id, flags);
+            self.rehashShape(child, old_hash);
+            shape_ptr.* = child;
+            child_owned = false;
+            self.release(parent);
+            return;
+        }
+
+        // A unique miss is safe to mutate directly. Reserve the final property
+        // and deleted-inclusive hash layout in one relocation: after that
+        // succeeds appendProperty has no fallible step that could leave a moved
+        // shape committed while the owning object's value buffer rolls back.
+        const old_hash = parent.hash;
+        try self.reservePropertyAppend(shape_ptr, property_capacity);
+        try self.appendProperty(shape_ptr, atom_id, flags);
+        const shape = shape_ptr.*;
+        if (shape.is_hashed) {
+            shape.hash = transitionHash(old_hash, atom_id, flags);
+            self.rehashShape(shape, old_hash);
+        }
     }
 
     fn findHashedShapeProperty(self: *Registry, parent: *Shape, atom_id: atom.Atom, flags: u6, property_capacity: usize) ?*Shape {
@@ -416,8 +446,8 @@ pub const Registry = struct {
         // Splice the new block into the registries in the old shape's place.
         if (old.is_hashed) self.removeShapeHash(old);
         self.gc_registry.unlinkObjectWithBytes(&old.header, old_allocation_size);
-        // addWithSize only sets pointers/accounting for tracked kinds — infallible.
-        self.gc_registry.addWithSize(&new_shape.header, new_shape.allocationSize()) catch unreachable;
+        // Registration only links/accountes the already initialized header.
+        self.gc_registry.addInitializedWithSize(&new_shape.header, new_shape.allocationSize()) catch unreachable;
         if (new_shape.is_hashed) self.insertShapeHash(new_shape);
 
         // Free the OLD block's raw memory only — proto + atoms have moved.
@@ -509,7 +539,7 @@ pub const Registry = struct {
         // Swap registries old->new (no more fallible / GC-triggering ops below).
         if (old.is_hashed) self.removeShapeHash(old);
         self.gc_registry.unlinkObjectWithBytes(&old.header, old.allocationSize());
-        self.gc_registry.addWithSize(&new_shape.header, new_shape.allocationSize()) catch unreachable;
+        self.gc_registry.addInitializedWithSize(&new_shape.header, new_shape.allocationSize()) catch unreachable;
         if (new_shape.is_hashed) self.insertShapeHash(new_shape);
 
         // Discard the OLD layout: free its prop atoms (NOT carried over) + block.
@@ -532,6 +562,26 @@ pub const Registry = struct {
         // quickjs.c:5354-5356) so bucket_count >= prop_size continues to hold and
         // a subsequent appendProperty needs no hash rebuild.
         try self.relocateShape(shape_ptr, @intCast(next_capacity), lockstepBucketCount(shape.bucketCount(), next_capacity));
+    }
+
+    /// Preflight one property append as a single transactional relocation.
+    /// `deleted_prop_count` participates in hash capacity even though tombstone
+    /// slots remain in `prop_count`; otherwise a property-FAM grow can commit and
+    /// a second hash-only grow can fail after the owner has already changed size.
+    fn reservePropertyAppend(self: *Registry, shape_ptr: **Shape, requested_property_capacity: usize) !void {
+        const shape = shape_ptr.*;
+        const post_append_count = @as(usize, shape.prop_count) + 1;
+        const needed_properties = @max(requested_property_capacity, post_append_count);
+
+        var property_capacity: usize = if (shape.prop_size == 0) initial_prop_size else shape.prop_size;
+        while (property_capacity < needed_properties) : (property_capacity *= 2) {}
+
+        const minimum_hash_capacity = post_append_count + @as(usize, shape.deleted_prop_count);
+        var bucket_count = lockstepBucketCount(shape.bucketCount(), property_capacity);
+        while (bucket_count < minimum_hash_capacity) : (bucket_count *= 2) {}
+
+        if (property_capacity == shape.prop_size and bucket_count == shape.bucketCount()) return;
+        try self.relocateShape(shape_ptr, @intCast(property_capacity), bucket_count);
     }
 
     pub fn reservePropertyHash(self: *Registry, shape_ptr: **Shape, needed: usize) !void {
@@ -636,26 +686,19 @@ pub const Registry = struct {
         }
         try self.link(shape, hashed);
         errdefer self.unlink(shape);
-        try self.gc_registry.addWithSize(&shape.header, shape.allocationSize());
+        try self.gc_registry.addInitializedWithSize(&shape.header, shape.allocationSize());
         if (proto) |object| gc.retain(&object.header);
         return shape;
     }
 
     inline fn appendProperty(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6) !void {
+        // All allocation happens before the atom/property commit. Callers that
+        // already preflight a larger owner capacity hit this as a no-op.
+        try self.reservePropertyAppend(shape_ptr, @as(usize, shape_ptr.*.prop_count) + 1);
+
         const retained_atom = self.atoms.dup(atom_id);
         var retained_atom_owned = true;
         errdefer if (retained_atom_owned) self.atoms.free(retained_atom);
-
-        // Grow the prop array if full — this relocates the whole shape (inline
-        // FAM cannot grow in place; qjs add_shape_property -> resize_properties).
-        // resize_properties grows the hash table in lockstep with the prop array
-        // (quickjs.c:5354-5356), so pass a bucket count that covers the new
-        // prop_size instead of the old one; that keeps bucket_count >= prop_size
-        // and lets the post-append hash-capacity check below stay a fast no-op.
-        if (shape_ptr.*.prop_count == shape_ptr.*.prop_size) {
-            const grown_prop_size = shape_ptr.*.prop_size * 2;
-            try self.relocateShape(shape_ptr, grown_prop_size, lockstepBucketCount(shape_ptr.*.bucketCount(), grown_prop_size));
-        }
 
         const shape = shape_ptr.*;
         const index = shape.prop_count;
@@ -666,33 +709,10 @@ pub const Registry = struct {
         };
         retained_atom_owned = false;
         shape.prop_count += 1;
-        var appended = true;
-        errdefer if (appended) {
-            // ensurePropertyHash may have relocated the shape; roll back the
-            // pending append on whatever pointer is now current.
-            const s = shape_ptr.*;
-            s.prop_count -= 1;
-            const appended_atom = s.props()[index].atom_id;
-            s.props()[index] = .{};
-            if (appended_atom != atom.null_atom) self.atoms.free(appended_atom);
-        };
-        // With bucket_count >= prop_size maintained at every grow / clone, a
-        // freshly appended property (index < prop_size <= bucket_count) already
-        // fits the existing hash table UNLESS deleted-but-retained slots push
-        // prop_count + deleted_prop_count past the bucket count. Only then can the
-        // table need a rebuild, so gate the capacity re-check on deleted slots —
-        // qjs add_shape_property likewise never rechecks after resize_properties
-        // (quickjs.c:5494-5508), since qjs keeps hash_size >= prop_size and folds
-        // deletions into prop_count. The common (no-deletion) append links directly.
-        if (shape.deleted_prop_count == 0) {
-            if (shape.hasPropertyHash()) self.linkPropertyHash(shape, index);
-            appended = false;
-            return;
-        }
-        const rebuilt = try self.ensurePropertyHash(shape_ptr);
-        const final_shape = shape_ptr.*;
-        if (final_shape.hasPropertyHash() and !rebuilt) self.linkPropertyHash(final_shape, index);
-        appended = false;
+        // reservePropertyAppend guarantees the deleted-inclusive hash capacity,
+        // so linking is infallible and the shape/value-storage commit is atomic.
+        std.debug.assert(@as(usize, shape.prop_count) + @as(usize, shape.deleted_prop_count) <= shape.bucketCount());
+        if (shape.hasPropertyHash()) self.linkPropertyHash(shape, index);
     }
 
     fn freePropertyAtoms(self: *Registry, props: []const Property) void {

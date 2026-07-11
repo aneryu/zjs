@@ -36,38 +36,38 @@ pub const sum_precise_method_id: u32 = 37;
 pub const internal_entries = [_]core.host_function.InternalEntry{
     mathOpEntry("min", 2, 7),
     mathOpEntry("max", 2, 8),
-    mathOpEntry("abs", 1, 1),
-    mathOpEntry("floor", 1, 2),
-    mathOpEntry("ceil", 1, 3),
-    mathOpEntry("round", 1, 4),
-    mathOpEntry("sqrt", 1, 5),
-    mathOpEntry("acos", 1, 14),
-    mathOpEntry("asin", 1, 15),
-    mathOpEntry("atan", 1, 16),
-    mathOpEntry("atan2", 2, 17),
-    mathOpEntry("cos", 1, 12),
-    mathOpEntry("exp", 1, 10),
-    mathOpEntry("log", 1, 21),
-    mathOpEntry("pow", 2, 6),
-    mathOpEntry("sin", 1, 11),
-    mathOpEntry("tan", 1, 13),
-    mathOpEntry("trunc", 1, 22),
-    mathOpEntry("sign", 1, 34),
-    mathOpEntry("cosh", 1, 25),
-    mathOpEntry("sinh", 1, 35),
-    mathOpEntry("tanh", 1, 36),
-    mathOpEntry("acosh", 1, 18),
-    mathOpEntry("asinh", 1, 19),
-    mathOpEntry("atanh", 1, 20),
-    mathOpEntry("expm1", 1, 26),
-    mathOpEntry("log1p", 1, 31),
-    mathOpEntry("log2", 1, 32),
-    mathOpEntry("log10", 1, 33),
-    mathOpEntry("cbrt", 1, 23),
+    mathUnaryEntry("abs", 1),
+    mathUnaryEntry("floor", 2),
+    mathUnaryEntry("ceil", 3),
+    mathUnaryEntry("round", 4),
+    mathUnaryEntry("sqrt", 5),
+    mathUnaryEntry("acos", 14),
+    mathUnaryEntry("asin", 15),
+    mathUnaryEntry("atan", 16),
+    mathBinaryEntry("atan2", 17),
+    mathUnaryEntry("cos", 12),
+    mathUnaryEntry("exp", 10),
+    mathUnaryEntry("log", 21),
+    mathBinaryEntry("pow", 6),
+    mathUnaryEntry("sin", 11),
+    mathUnaryEntry("tan", 13),
+    mathUnaryEntry("trunc", 22),
+    mathUnaryEntry("sign", 34),
+    mathUnaryEntry("cosh", 25),
+    mathUnaryEntry("sinh", 35),
+    mathUnaryEntry("tanh", 36),
+    mathUnaryEntry("acosh", 18),
+    mathUnaryEntry("asinh", 19),
+    mathUnaryEntry("atanh", 20),
+    mathUnaryEntry("expm1", 26),
+    mathUnaryEntry("log1p", 31),
+    mathUnaryEntry("log2", 32),
+    mathUnaryEntry("log10", 33),
+    mathUnaryEntry("cbrt", 23),
     mathOpEntry("hypot", 2, 29),
     mathOpEntry("random", 0, 9),
-    mathOpEntry("f16round", 1, 27),
-    mathOpEntry("fround", 1, 28),
+    mathUnaryEntry("f16round", 27),
+    mathUnaryEntry("fround", 28),
     mathOpEntry("imul", 2, 30),
     mathOpEntry("clz32", 1, 24),
     .{ .name = "sumPrecise", .length = 1, .id = sum_precise_method_id, .prepared_call_ok = true, .call = &mathSumPreciseCall },
@@ -75,6 +75,82 @@ pub const internal_entries = [_]core.host_function.InternalEntry{
 
 fn mathOpEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
     return .{ .name = name, .length = length, .id = id, .magic = id, .prepared_call_ok = true, .call = &mathOpCall };
+}
+
+fn mathUnaryEntry(comptime name: []const u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = 1,
+        .id = id,
+        .magic = id,
+        .prepared_call_ok = true,
+        .cproto = .f_f,
+        .call = &mathOpCall,
+        .native_function = .{ .f_f = mathUnaryNative(id) },
+    };
+}
+
+fn mathBinaryEntry(comptime name: []const u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = 2,
+        .id = id,
+        .magic = id,
+        .prepared_call_ok = true,
+        .cproto = .f_f_f,
+        .call = &mathOpCall,
+        .native_function = .{ .f_f_f = mathBinaryNative(id) },
+    };
+}
+
+fn mathUnaryNative(comptime id: u32) core.host_function.NativeF64Fn {
+    return &struct {
+        fn invoke(value: f64) f64 {
+            return switch (id) {
+                1 => @abs(value),
+                2 => @floor(value),
+                3 => @ceil(value),
+                4 => qjsMathRound(value),
+                5 => @sqrt(value),
+                10 => exp(value),
+                11 => @sin(value),
+                12 => @cos(value),
+                13 => @tan(value),
+                14 => std.math.acos(value),
+                15 => std.math.asin(value),
+                16 => std.math.atan(value),
+                18 => std.math.acosh(value),
+                19 => std.math.asinh(value),
+                20 => std.math.atanh(value),
+                21 => @log(value),
+                22 => if (std.math.isNan(value) or value == 0 or !std.math.isFinite(value)) value else if (value < 0) -@floor(@abs(value)) else @floor(value),
+                23 => std.math.cbrt(value),
+                25 => std.math.cosh(value),
+                26 => std.math.expm1(value),
+                27 => @as(f64, @floatCast(@as(f16, @floatCast(value)))),
+                28 => @as(f64, @floatCast(@as(f32, @floatCast(value)))),
+                31 => std.math.log1p(value),
+                32 => log2(value),
+                33 => @log10(value),
+                34 => qjsMathSign(value),
+                35 => std.math.sinh(value),
+                36 => std.math.tanh(value),
+                else => @compileError("unsupported unary Math cproto id"),
+            };
+        }
+    }.invoke;
+}
+
+fn mathBinaryNative(comptime id: u32) core.host_function.NativeF64F64Fn {
+    return &struct {
+        fn invoke(lhs: f64, rhs: f64) f64 {
+            return switch (id) {
+                6 => qjsMathPow(lhs, rhs),
+                17 => std.math.atan2(lhs, rhs),
+                else => @compileError("unsupported binary Math cproto id"),
+            };
+        }
+    }.invoke;
 }
 
 /// Shared record handler for the numeric `Math.*` methods (ids 1..36).

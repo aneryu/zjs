@@ -315,17 +315,24 @@ pub const BlockFlags = packed struct(u8) {
     /// the `mark` bit (ScanIncrefVisitor clears `mark` on reachable objects, so they
     /// never get `cycle_visited` set); there is no separate "preserved" bit.
     cycle_visited: bool = false,
-    _reserved: u3 = 0,
+    /// The metadata occupies the small-object slab's allocator header. In that
+    /// layout Metadata.size_class is the allocator's block index and must not be
+    /// overwritten by GC accounting.
+    metadata_in_slab: bool = false,
+    /// The allocation has been added to the live-byte accounts. Kept separate
+    /// from size_class because slab-overlaid metadata reserves that field.
+    heap_accounted: bool = false,
+    _reserved: u1 = 0,
 };
 
-/// Z-GE v1.0 block header metadata. Phase 1: grouped into a sub-struct so a
-/// later phase can relocate it to an allocator prefix. Layout/size unchanged.
 /// qjs-style block-prefix metadata. Mirrors `JSMallocBlockHeader`
-/// (quickjs.c:270): refcount + gc type + GC mark/cycle bits + heap-byte size
-/// live in an 8-byte prefix that the allocator places immediately BEFORE the
-/// object (at `objectPtr - 8`), so the in-object `BlockHeader` is just the
-/// intrusive GC list links (= qjs `JSGCObjectHeader`, 16 bytes).
+/// (quickjs.c:270): refcount + gc type + GC mark/cycle bits live immediately
+/// before the object. For slab-backed objects these 8 bytes ARE the allocator
+/// block header; persistent/over-aligned objects keep a standalone prefix.
 pub const Metadata = extern struct {
+    /// Standalone prefix: encoded heap bytes. Slab overlay: allocator block
+    /// index (or free-list link while free). Check flags.metadata_in_slab before
+    /// interpreting this field as a heap size.
     size_class: u16 align(8) = 0,
     kind: GcKind = .object,
     flags: BlockFlags = .{},
@@ -337,13 +344,15 @@ pub const metadata_prefix_size: usize = @sizeOf(Metadata);
 
 comptime {
     // The allocator initializes the prefix by raw byte writes (memory.zig has no
-    // gc import); these offsets must hold: kind at byte 2, rc (i32) at byte 4.
+    // gc import); these offsets and flag bit must remain stable.
     std.debug.assert(@offsetOf(Metadata, "kind") == 2);
+    std.debug.assert(@offsetOf(Metadata, "flags") == 3);
     std.debug.assert(@offsetOf(Metadata, "rc") == 4);
+    std.debug.assert(@as(u8, @bitCast(BlockFlags{ .metadata_in_slab = true })) == 1 << 5);
 }
 
 /// In-object GC header = intrusive list links only (qjs `JSGCObjectHeader`,
-/// 16 bytes). The refcount / kind / flags / heap-size live in the `Metadata`
+/// 16 bytes). The refcount / kind / flags / optional heap-size live in Metadata
 /// prefix 8 bytes before this header; reach them via `meta()`.
 pub const BlockHeader = extern struct {
     prev: ?*BlockHeader = null,
@@ -1090,14 +1099,31 @@ pub const Registry = struct {
     }
 
     pub fn addWithSize(self: *Registry, h: *GCObjectHeader, bytes: usize) !void {
-        const is_large = self.isLargeAllocation(bytes);
-        const tracked = isCycleCandidate(h);
-
+        const metadata_in_slab = h.meta().flags.metadata_in_slab;
         h.meta().rc = 1;
-        h.meta().flags = .{};
+        h.meta().flags = .{ .metadata_in_slab = metadata_in_slab };
         h.prev = null;
         h.next = null;
-        h.meta().size_class = encodeHeapBytes(bytes);
+        try self.addInitializedWithSize(h, bytes);
+    }
+
+    /// Register a freshly allocated header whose prefix and intrusive links are
+    /// already initialized. Typed MemoryAccount allocations plus their owning
+    /// constructors provide this invariant, avoiding duplicate hot-path stores.
+    pub fn addInitializedWithSize(self: *Registry, h: *GCObjectHeader, bytes: usize) !void {
+        std.debug.assert(h.meta().rc == 1);
+        std.debug.assert(!h.meta().flags.mark);
+        std.debug.assert(!h.meta().flags.in_cycle_list);
+        std.debug.assert(!h.meta().flags.finalizing);
+        std.debug.assert(!h.meta().flags.is_pinned);
+        std.debug.assert(!h.meta().flags.cycle_visited);
+        std.debug.assert(!h.meta().flags.heap_accounted);
+        std.debug.assert(h.prev == null and h.next == null);
+
+        const is_large = self.isLargeAllocation(bytes);
+        const tracked = isCycleCandidate(h);
+        if (!h.meta().flags.metadata_in_slab) h.meta().size_class = encodeHeapBytes(bytes);
+        h.meta().flags.heap_accounted = true;
         self.recordHeapAlloc(is_large, bytes);
 
         if (tracked) self.appendGcObject(h);
@@ -1123,6 +1149,7 @@ pub const Registry = struct {
     }
 
     fn storedHeapBytes(h: *const GCObjectHeader) ?usize {
+        if (h.metaConst().flags.metadata_in_slab) return null;
         if (h.metaConst().size_class == 0) return 0;
         if (h.metaConst().size_class == large_heap_size_class) return null;
         return h.metaConst().size_class;
@@ -1186,13 +1213,14 @@ pub const Registry = struct {
     }
 
     fn recordHeapFreeWithBytes(self: *Registry, header: *GCObjectHeader, bytes: usize) void {
-        if (header.meta().size_class == 0 or bytes == 0) return;
+        if (!header.meta().flags.heap_accounted or bytes == 0) return;
         const is_large = self.isLargeAllocation(bytes);
         // Live-bytes bookkeeping lives entirely in the space accounts now (see
         // recordHeapAlloc); the free path just decrements live_bytes. Page
         // geometry is derived lazily in refreshPageState, not trimmed here.
         self.recordSpaceFree(is_large, bytes);
-        header.meta().size_class = 0;
+        header.meta().flags.heap_accounted = false;
+        if (!header.meta().flags.metadata_in_slab) header.meta().size_class = 0;
     }
 
     pub fn pinHeader(self: *Registry, header: *GCObjectHeader) !void {
@@ -1452,6 +1480,7 @@ pub const Registry = struct {
 
         var iterator = self.objectIterator();
         while (iterator.next()) |header| {
+            if (!header.metaConst().flags.heap_accounted) return error.MissingHeapAllocation;
             const bytes = heapByteSizeFromHeader(rt, header);
             if (bytes == 0) return error.MissingHeapAllocation;
             heap_live_bytes = std.math.add(usize, heap_live_bytes, bytes) catch std.math.maxInt(usize);

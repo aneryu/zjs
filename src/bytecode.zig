@@ -4139,7 +4139,12 @@ pub const pipeline_resolve_variables = struct {
     fn loweredScopeMakeRefSize(ctx: *const JSContext, atom_id: u32, scope_level: i32) usize {
         if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| return switch (binding) {
             .arg => 7,
-            .local => |loc_idx| if (isEvalNonLexicalLocal(ctx, loc_idx)) 5 else 7,
+            .local => |loc_idx| if (isEvalNonLexicalLocal(ctx, loc_idx))
+                5
+            else if (localWriteThrowsReadOnly(ctx, loc_idx))
+                throw_error_instr_size
+            else
+                7,
         };
         if (lookupClosureVar(ctx, atom_id) != null) {
             return if (closureVarWriteThrowsReadOnly(ctx, atom_id)) throw_error_instr_size else 7;
@@ -4365,6 +4370,8 @@ pub const pipeline_resolve_variables = struct {
                     output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
                     out_idx.* += 5;
                     out_atom_idx.* += 1;
+                } else if (localWriteThrowsReadOnly(ctx, loc_idx)) {
+                    writeThrowVarReadOnly(func, output, out_idx, output_atoms, out_atom_idx, atom_id);
                 } else {
                     output[out_idx.*] = opcode.op.make_loc_ref;
                     std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
@@ -4432,15 +4439,15 @@ pub const pipeline_resolve_variables = struct {
         return fd.vars[loc_idx].is_const;
     }
 
-    fn localTdzEmittedAtDecl(ctx: *const JSContext, loc_idx: u16) bool {
+    /// QuickJS resolves writes/references to const locals directly to
+    /// OP_throw_error. Function-expression names are the exception in zjs:
+    /// their sloppy silent-ignore / strict throw behavior is carried by the
+    /// runtime function-name cell (see closureVarWriteThrowsReadOnly).
+    fn localWriteThrowsReadOnly(ctx: *const JSContext, loc_idx: u16) bool {
         const fd = ctx.function_def orelse return false;
         if (loc_idx >= fd.vars.len) return false;
-        return fd.vars[loc_idx].tdz_emitted_at_decl;
-    }
-
-    fn useUncheckedLexicalLocals(ctx: *const JSContext) bool {
-        const fd = ctx.function_def orelse return false;
-        return fd.use_short_opcodes;
+        const vd = fd.vars[loc_idx];
+        return vd.is_const and vd.var_kind != .function_name;
     }
 
     /// Promote a Phase-1 var op to its TDZ-checked counterpart for
@@ -4449,8 +4456,8 @@ pub const pipeline_resolve_variables = struct {
     ///   (throws ReferenceError if slot is uninitialised).
     /// - `scope_put_var` → `put_loc_check` (throws ReferenceError if
     ///   uninitialised, then stores).
-    /// - `scope_put_var_init` → `put_loc_check_init` (stores and
-    ///   clears the uninitialised flag).
+    /// - derived-constructor `this` initialization → `put_loc_check_init`
+    ///   (the only lexical initialization QuickJS checks for re-entry).
     ///
     /// All check variants are 3-byte u16 forms (no short variants in
     /// QuickJS), so callers must NOT run `selectShortLoc` on the result.
@@ -4463,6 +4470,15 @@ pub const pipeline_resolve_variables = struct {
             opcode.op.scope_put_var_init => opcode.op.put_loc_check_init,
             else => unreachable,
         };
+    }
+
+    /// QuickJS keeps ordinary lexical reads/writes TDZ-checked, but lowers an
+    /// ordinary `scope_put_var_init` to bare `put_loc`; only the derived
+    /// constructor's `this` binding uses `put_loc_check_init` so `super()`
+    /// cannot initialize it twice (quickjs.c:33068-33087).
+    fn localLexicalAccessNeedsCheck(ctx: *const JSContext, atom_id: atom.Atom, loc_idx: u16, op_id: u8) bool {
+        if (!isLexicalLocal(ctx, loc_idx)) return false;
+        return op_id != opcode.op.scope_put_var_init or atom_id == atom.ids.this_;
     }
 
     /// Returns true if `op_id`'s table format carries a leading atom
@@ -4490,11 +4506,19 @@ pub const pipeline_resolve_variables = struct {
     const GLOBAL_REF_TAIL_NONE: u8 = 0;
     const GLOBAL_REF_TAIL_PUT: u8 = 1;
     const GLOBAL_REF_TAIL_DUP_PUT: u8 = 2;
+    const LOCAL_REF_TAIL_PUT: u8 = 3;
+    const LOCAL_REF_TAIL_DUP_PUT: u8 = 4;
 
     const GlobalRefPutTail = struct {
         pc: usize,
         original_size: usize,
         kind: u8,
+    };
+
+    const LocalRefPutTailPlan = struct {
+        loc_idx: u16,
+        tail: GlobalRefPutTail,
+        reads_value: bool,
     };
 
     /// Returns the byte offset within this opcode of the absolute u32
@@ -4517,6 +4541,35 @@ pub const pipeline_resolve_variables = struct {
             GLOBAL_REF_TAIL_DUP_PUT => 4,
             else => 0,
         };
+    }
+
+    fn localRefPutTailKind(kind: u8) u8 {
+        return if (kind == GLOBAL_REF_TAIL_DUP_PUT) LOCAL_REF_TAIL_DUP_PUT else LOCAL_REF_TAIL_PUT;
+    }
+
+    fn localRefGetForm(ctx: *const JSContext, loc_idx: u16) ShortLocForm {
+        const op_id = if (isLexicalLocal(ctx, loc_idx)) opcode.op.get_loc_check else opcode.op.get_loc;
+        return selectLocForm(ctx, op_id, loc_idx);
+    }
+
+    fn localRefPutForm(ctx: *const JSContext, loc_idx: u16) ShortLocForm {
+        const op_id = if (isLexicalLocal(ctx, loc_idx)) opcode.op.put_loc_check else opcode.op.put_loc;
+        return selectLocForm(ctx, op_id, loc_idx);
+    }
+
+    fn localRefPutTailReplacementSize(ctx: *const JSContext, kind: u8, loc_idx: u16) usize {
+        return localRefPutForm(ctx, loc_idx).size + @intFromBool(kind == LOCAL_REF_TAIL_DUP_PUT);
+    }
+
+    fn writeSelectedLocForm(output: []u8, out_idx: *usize, form: ShortLocForm, loc_idx: u16) void {
+        output[out_idx.*] = form.op_id;
+        switch (form.operand_size) {
+            0 => {},
+            1 => output[out_idx.* + 1] = @intCast(loc_idx),
+            2 => std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], loc_idx, .little),
+            else => unreachable,
+        }
+        out_idx.* += form.size;
     }
 
     fn decodeGlobalRefPutTail(code: []const u8, pc: usize) ?GlobalRefPutTail {
@@ -4595,6 +4648,33 @@ pub const pipeline_resolve_variables = struct {
             pc += size;
         }
         return null;
+    }
+
+    fn localRefPutTailPlan(
+        ctx: *const JSContext,
+        code: []const u8,
+        make_ref_pc: usize,
+        atom_id: atom.Atom,
+        scope_level: i16,
+        needs_eval_probe: bool,
+    ) ?LocalRefPutTailPlan {
+        if (needs_eval_probe) return null;
+        const binding = resolveLocalOrArg(ctx, atom_id, scope_level) orelse return null;
+        const loc_idx = switch (binding) {
+            .local => |idx| idx,
+            .arg => return null,
+        };
+        if (isEvalNonLexicalLocal(ctx, loc_idx) or isConstLocal(ctx, loc_idx)) return null;
+        if (preferTopLevelModuleClassBinding(ctx, atom_id, loc_idx) != null) return null;
+        const fd = ctx.function_def orelse return null;
+        if (loc_idx >= fd.vars.len or fd.vars[loc_idx].var_kind == .function_name) return null;
+        const tail = findGlobalRefPutTail(code, make_ref_pc) orelse return null;
+        const value_pc = make_ref_pc + 11;
+        return .{
+            .loc_idx = loc_idx,
+            .tail = tail,
+            .reads_value = value_pc < code.len and code[value_pc] == opcode.op.get_ref_value,
+        };
     }
 
     fn scopeMakeRefResolvesToGlobal(ctx: *const JSContext, atom_id: u32, scope_level: i16) bool {
@@ -4724,138 +4804,6 @@ pub const pipeline_resolve_variables = struct {
             }
         }
 
-        const init_bypassed = if (ctx.function_def) |fd| blk: {
-            const bytes = try ctx.memory.alloc(bool, fd.vars.len);
-            // The block below allocates and can fail with InvalidBytecode; the
-            // owning `defer` only binds after `break :blk`, so error exits inside
-            // the block must release `bytes` here (found by test-oom injection).
-            errdefer if (bytes.len != 0) ctx.memory.free(bool, bytes);
-            @memset(bytes, false);
-
-            // Pre-pass: find init_pc for each var and check if any forward jump bypasses it
-            const init_pc = try ctx.memory.alloc(?usize, fd.vars.len);
-            @memset(init_pc, null);
-            defer ctx.memory.free(?usize, init_pc);
-
-            // First scan to find init_pc
-            var pc: usize = 0;
-            var scan_atom_idx: usize = 0;
-            while (pc < func.code.len) {
-                const op = func.code[pc];
-                if (op == opcode.op.eval) {
-                    if (pc + 5 > func.code.len) return error.InvalidBytecode;
-                    pc += 5;
-                } else if (op == opcode.op.apply_eval) {
-                    if (pc + APPLY_EVAL_SIZE > func.code.len) return error.InvalidBytecode;
-                    pc += APPLY_EVAL_SIZE;
-                } else if (op == opcode.op.line_num) {
-                    if (pc + 5 > func.code.len) return error.InvalidBytecode;
-                    pc += 5;
-                } else if (isScopeVarOp(op)) {
-                    if (pc + 7 > func.code.len) return error.InvalidBytecode;
-                    const atom_id = std.mem.readInt(u32, func.code[pc + 1 ..][0..4], .little);
-                    const scope_level = decodeScopeOperand(func.code[pc + 5 ..][0..2]).level;
-                    if (op == opcode.op.scope_put_var_init) {
-                        if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| switch (binding) {
-                            .local => |loc_idx| {
-                                if (loc_idx < fd.vars.len) {
-                                    if (init_pc[loc_idx] == null) {
-                                        init_pc[loc_idx] = pc;
-                                    }
-                                }
-                            },
-                            else => {},
-                        };
-                    }
-                    scan_atom_idx += 1;
-                    pc += 7;
-                } else if (isScopePrivateFieldAt(func, pc, scan_atom_idx)) {
-                    if (pc + 7 > func.code.len) return error.InvalidBytecode;
-                    scan_atom_idx += 1;
-                    pc += 7;
-                } else if (op == opcode.op.scope_make_ref) {
-                    if (pc + 11 > func.code.len) return error.InvalidBytecode;
-                    scan_atom_idx += 1;
-                    pc += 11;
-                } else if (isScopeRefOp(op)) {
-                    if (pc + 7 > func.code.len) return error.InvalidBytecode;
-                    scan_atom_idx += 1;
-                    pc += 7;
-                } else if (op == opcode.op.enter_scope or op == opcode.op.leave_scope) {
-                    if (pc + 3 > func.code.len) return error.InvalidBytecode;
-                    pc += 3;
-                } else {
-                    const size = instrSize(op);
-                    if (pc + size > func.code.len) return error.InvalidBytecode;
-                    if (hasAtomOperand(op)) {
-                        scan_atom_idx += 1;
-                    }
-                    pc += size;
-                }
-            }
-
-            // Second scan to check for bypassing forward jumps
-            pc = 0;
-            scan_atom_idx = 0;
-            while (pc < func.code.len) {
-                const op = func.code[pc];
-                var size: usize = undefined;
-                var is_scope_var = false;
-
-                if (op == opcode.op.eval) {
-                    size = 5;
-                } else if (op == opcode.op.apply_eval) {
-                    size = APPLY_EVAL_SIZE;
-                } else if (op == opcode.op.line_num) {
-                    size = 5;
-                } else if (isScopeVarOp(op)) {
-                    size = 7;
-                    is_scope_var = true;
-                } else if (isScopePrivateFieldAt(func, pc, scan_atom_idx)) {
-                    size = 7;
-                    scan_atom_idx += 1;
-                } else if (op == opcode.op.scope_make_ref) {
-                    size = 11;
-                    scan_atom_idx += 1;
-                } else if (isScopeRefOp(op)) {
-                    size = 7;
-                    scan_atom_idx += 1;
-                } else if (op == opcode.op.enter_scope or op == opcode.op.leave_scope) {
-                    size = 3;
-                } else {
-                    size = instrSize(op);
-                    if (hasAtomOperand(op)) {
-                        scan_atom_idx += 1;
-                    }
-                }
-
-                if (pc + size > func.code.len) return error.InvalidBytecode;
-
-                if (labelOperandOffset(op)) |offset| {
-                    if (pc + offset + 4 <= func.code.len) {
-                        const old_target = std.mem.readInt(u32, func.code[pc + offset ..][0..4], .little);
-                        if (old_target > pc) { // forward jump
-                            for (fd.vars, 0..) |_, loc_idx| {
-                                if (init_pc[loc_idx]) |ipc| {
-                                    if (pc < ipc and old_target > ipc) {
-                                        bytes[loc_idx] = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (is_scope_var) {
-                    scan_atom_idx += 1;
-                }
-                pc += size;
-            }
-
-            break :blk bytes;
-        } else @as([]bool, &.{});
-        defer if (init_bypassed.len != 0) ctx.memory.free(bool, init_bypassed);
-
         var output_size: usize = top_level_closure_init_size + child_decl_init_size + prologue_size;
         var output_atom_count: usize = 0;
         var jump_count: usize = 0;
@@ -4865,18 +4813,22 @@ pub const pipeline_resolve_variables = struct {
         defer if (global_ref_tail_atoms.len != 0) ctx.memory.free(atom.Atom, global_ref_tail_atoms);
         var global_ref_tail_kinds: []u8 = if (func.code.len == 0) &.{} else try ctx.memory.alloc(u8, func.code.len);
         defer if (global_ref_tail_kinds.len != 0) ctx.memory.free(u8, global_ref_tail_kinds);
+        var local_ref_tail_indices: []u16 = if (func.code.len == 0) &.{} else try ctx.memory.alloc(u16, func.code.len);
+        defer if (local_ref_tail_indices.len != 0) ctx.memory.free(u16, local_ref_tail_indices);
         if (global_ref_tail_atoms.len != 0) @memset(global_ref_tail_atoms, atom.null_atom);
         if (global_ref_tail_kinds.len != 0) @memset(global_ref_tail_kinds, GLOBAL_REF_TAIL_NONE);
-        const var_initialized = if (ctx.function_def) |fd| blk: {
-            const bytes = try ctx.memory.alloc(bool, fd.vars.len);
-            @memset(bytes, false);
-            break :blk bytes;
-        } else @as([]bool, &.{});
-        defer if (var_initialized.len != 0) ctx.memory.free(bool, var_initialized);
+        if (local_ref_tail_indices.len != 0) @memset(local_ref_tail_indices, std.math.maxInt(u16));
         while (i < func.code.len) {
             const op = func.code[i];
             if (global_ref_tail_kinds.len != 0 and global_ref_tail_kinds[i] != GLOBAL_REF_TAIL_NONE) {
-                output_size += globalRefPutTailReplacementSize(global_ref_tail_kinds[i]);
+                const kind = global_ref_tail_kinds[i];
+                if (kind == LOCAL_REF_TAIL_PUT or kind == LOCAL_REF_TAIL_DUP_PUT) {
+                    const loc_idx = local_ref_tail_indices[i];
+                    if (loc_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
+                    output_size += localRefPutTailReplacementSize(ctx, kind, loc_idx);
+                } else {
+                    output_size += globalRefPutTailReplacementSize(kind);
+                }
                 i += (decodeGlobalRefPutTail(func.code, i) orelse return error.InvalidBytecode).original_size;
                 continue;
             }
@@ -4972,21 +4924,10 @@ pub const pipeline_resolve_variables = struct {
                             const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op);
                             const form = selectVarRefForm(ctx, ref_op, ref_idx);
                             output_size += form.size;
-                        } else if (blk: {
-                            if (!isLexicalLocal(ctx, loc_idx)) break :blk false;
-                            if (op == opcode.op.scope_get_var_checkthis) break :blk true;
-                            if (!useUncheckedLexicalLocals(ctx)) break :blk true;
-                            if (op == opcode.op.scope_put_var_init) {
-                                break :blk isConstLocal(ctx, loc_idx);
-                            } else if (op == opcode.op.scope_put_var) {
-                                if (isConstLocal(ctx, loc_idx)) break :blk true;
-                                const init_safe = var_initialized[loc_idx] and !init_bypassed[loc_idx];
-                                break :blk !init_safe and localTdzEmittedAtDecl(ctx, loc_idx);
-                            } else {
-                                const init_safe = var_initialized[loc_idx] and !init_bypassed[loc_idx];
-                                break :blk !init_safe and (isConstLocal(ctx, loc_idx) or localTdzEmittedAtDecl(ctx, loc_idx));
-                            }
-                        }) {
+                        } else if (op == opcode.op.scope_put_var and localWriteThrowsReadOnly(ctx, loc_idx)) {
+                            output_size += throw_error_instr_size;
+                            output_atom_count += 1;
+                        } else if (localLexicalAccessNeedsCheck(ctx, atom_id, loc_idx, op)) {
                             // Lexical: 3-byte TDZ-check variant.
                             output_size += 3;
                         } else {
@@ -4994,9 +4935,6 @@ pub const pipeline_resolve_variables = struct {
                             const local_op = lowerScopeVarOpLocal(op);
                             const form = selectLocForm(ctx, local_op, loc_idx);
                             output_size += form.size;
-                        }
-                        if (op == opcode.op.scope_put_var_init and loc_idx < var_initialized.len) {
-                            var_initialized[loc_idx] = true;
                         }
                     },
                 } else if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
@@ -5034,6 +4972,16 @@ pub const pipeline_resolve_variables = struct {
                 const scope_level = std.mem.readInt(i16, func.code[i + 9 ..][0..2], .little);
                 const eval_probe = evalVarObjectProbePlan(ctx, atom_id, scope_level, op, .make_ref);
                 const needs_eval_probe = eval_probe != null;
+                if (localRefPutTailPlan(ctx, func.code, i, atom_id, scope_level, needs_eval_probe)) |plan| {
+                    if (plan.tail.pc < global_ref_tail_kinds.len and global_ref_tail_kinds[plan.tail.pc] == GLOBAL_REF_TAIL_NONE) {
+                        global_ref_tail_kinds[plan.tail.pc] = localRefPutTailKind(plan.tail.kind);
+                        local_ref_tail_indices[plan.tail.pc] = plan.loc_idx;
+                        if (plan.reads_value) output_size += localRefGetForm(ctx, plan.loc_idx).size;
+                        scan_atom_idx += 1;
+                        i += 11 + @as(usize, @intFromBool(plan.reads_value));
+                        continue;
+                    }
+                }
                 if (!needs_eval_probe and canOptimizeGlobalRefPutTail(ctx, atom_id) and scopeMakeRefResolvesToGlobal(ctx, atom_id, scope_level)) {
                     if (findGlobalRefPutTail(func.code, i)) |tail| {
                         if (tail.pc < global_ref_tail_kinds.len and global_ref_tail_kinds[tail.pc] == GLOBAL_REF_TAIL_NONE) {
@@ -5204,13 +5152,6 @@ pub const pipeline_resolve_variables = struct {
             }
         }
 
-        const var_initialized_pass2 = if (ctx.function_def) |fd| blk: {
-            const bytes = try ctx.memory.alloc(bool, fd.vars.len);
-            @memset(bytes, false);
-            break :blk bytes;
-        } else @as([]bool, &.{});
-        defer if (var_initialized_pass2.len != 0) ctx.memory.free(bool, var_initialized_pass2);
-
         i = 0;
         while (i < func.code.len) {
             // pc_map for input pc i maps to output pc out_idx (after the
@@ -5219,12 +5160,18 @@ pub const pipeline_resolve_variables = struct {
             pc_map[i] = out_idx;
             const op = func.code[i];
             if (global_ref_tail_kinds.len != 0 and global_ref_tail_kinds[i] != GLOBAL_REF_TAIL_NONE) {
-                const atom_id = global_ref_tail_atoms[i];
-                if (global_ref_tail_kinds[i] == GLOBAL_REF_TAIL_DUP_PUT) {
+                const kind = global_ref_tail_kinds[i];
+                if (kind == GLOBAL_REF_TAIL_DUP_PUT or kind == LOCAL_REF_TAIL_DUP_PUT) {
                     output[out_idx] = opcode.op.dup;
                     out_idx += 1;
                 }
-                try emitGlobalVarOp(ctx, output, &out_idx, opcode.op.put_var, atom_id);
+                if (kind == LOCAL_REF_TAIL_PUT or kind == LOCAL_REF_TAIL_DUP_PUT) {
+                    const loc_idx = local_ref_tail_indices[i];
+                    if (loc_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
+                    writeSelectedLocForm(output, &out_idx, localRefPutForm(ctx, loc_idx), loc_idx);
+                } else {
+                    try emitGlobalVarOp(ctx, output, &out_idx, opcode.op.put_var, global_ref_tail_atoms[i]);
+                }
                 i += (decodeGlobalRefPutTail(func.code, i) orelse return error.InvalidBytecode).original_size;
                 continue;
             }
@@ -5353,21 +5300,9 @@ pub const pipeline_resolve_variables = struct {
                                 else => unreachable,
                             }
                             out_idx += form.size;
-                        } else if (blk: {
-                            if (!isLexicalLocal(ctx, loc_idx)) break :blk false;
-                            if (op == opcode.op.scope_get_var_checkthis) break :blk true;
-                            if (!useUncheckedLexicalLocals(ctx)) break :blk true;
-                            if (op == opcode.op.scope_put_var_init) {
-                                break :blk isConstLocal(ctx, loc_idx);
-                            } else if (op == opcode.op.scope_put_var) {
-                                if (isConstLocal(ctx, loc_idx)) break :blk true;
-                                const init_safe = var_initialized_pass2[loc_idx] and !init_bypassed[loc_idx];
-                                break :blk !init_safe and localTdzEmittedAtDecl(ctx, loc_idx);
-                            } else {
-                                const init_safe = var_initialized_pass2[loc_idx] and !init_bypassed[loc_idx];
-                                break :blk !init_safe and (isConstLocal(ctx, loc_idx) or localTdzEmittedAtDecl(ctx, loc_idx));
-                            }
-                        }) {
+                        } else if (op == opcode.op.scope_put_var and localWriteThrowsReadOnly(ctx, loc_idx)) {
+                            writeThrowVarReadOnly(func, output, &out_idx, output_atoms, &out_atom_idx, atom_id);
+                        } else if (localLexicalAccessNeedsCheck(ctx, atom_id, loc_idx, op)) {
                             output[out_idx] = lowerScopeVarOpLexical(op);
                             std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], loc_idx, .little);
                             out_idx += 3;
@@ -5382,9 +5317,6 @@ pub const pipeline_resolve_variables = struct {
                                 else => unreachable,
                             }
                             out_idx += form.size;
-                        }
-                        if (op == opcode.op.scope_put_var_init and loc_idx < var_initialized_pass2.len) {
-                            var_initialized_pass2[loc_idx] = true;
                         }
                         in_atom_idx += 1;
                     },
@@ -5434,6 +5366,21 @@ pub const pipeline_resolve_variables = struct {
                 const scope_level = std.mem.readInt(i16, func.code[i + 9 ..][0..2], .little);
                 const eval_probe = evalVarObjectProbePlan(ctx, atom_id, scope_level, op, .make_ref);
                 const needs_eval_probe = eval_probe != null;
+                if (localRefPutTailPlan(ctx, func.code, i, atom_id, scope_level, needs_eval_probe)) |plan| {
+                    if (plan.tail.pc < global_ref_tail_kinds.len and
+                        (global_ref_tail_kinds[plan.tail.pc] == LOCAL_REF_TAIL_PUT or
+                            global_ref_tail_kinds[plan.tail.pc] == LOCAL_REF_TAIL_DUP_PUT) and
+                        local_ref_tail_indices[plan.tail.pc] == plan.loc_idx)
+                    {
+                        if (plan.reads_value) {
+                            pc_map[i + 11] = out_idx;
+                            writeSelectedLocForm(output, &out_idx, localRefGetForm(ctx, plan.loc_idx), plan.loc_idx);
+                        }
+                        in_atom_idx += 1;
+                        i += 11 + @as(usize, @intFromBool(plan.reads_value));
+                        continue;
+                    }
+                }
                 if (!needs_eval_probe and canOptimizeGlobalRefPutTail(ctx, atom_id) and scopeMakeRefResolvesToGlobal(ctx, atom_id, scope_level)) {
                     if (findGlobalRefPutTail(func.code, i)) |tail| {
                         if (tail.pc < global_ref_tail_kinds.len and
@@ -5820,6 +5767,46 @@ pub const pipeline_resolve_labels = struct {
             fmt == .atom_label_u8 or fmt == .atom_label_u16;
     }
 
+    fn countFinalAtomOperands(code: []const u8) !usize {
+        var count: usize = 0;
+        var pc: usize = 0;
+        while (pc < code.len) {
+            const size = instrSize(code[pc]);
+            if (size == 0 or pc + size > code.len) return error.InvalidBytecode;
+            if (hasAtomOperand(code[pc])) {
+                if (size < 5) return error.InvalidBytecode;
+                count += 1;
+            }
+            pc += size;
+        }
+        return count;
+    }
+
+    fn duplicateFinalAtomOperands(ctx: *const JSContext, code: []const u8, count: usize) ![]atom.Atom {
+        if (count == 0) return &.{};
+        const owned = try ctx.memory.alloc(atom.Atom, count);
+        var initialized: usize = 0;
+        errdefer {
+            for (owned[0..initialized]) |atom_id| ctx.atoms.free(atom_id);
+            ctx.memory.free(atom.Atom, owned);
+        }
+
+        var pc: usize = 0;
+        while (pc < code.len) {
+            const size = instrSize(code[pc]);
+            if (size == 0 or pc + size > code.len) return error.InvalidBytecode;
+            if (hasAtomOperand(code[pc])) {
+                if (size < 5 or initialized >= owned.len) return error.InvalidBytecode;
+                const atom_id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+                owned[initialized] = ctx.atoms.dup(atom_id);
+                initialized += 1;
+            }
+            pc += size;
+        }
+        if (initialized != owned.len) return error.InvalidBytecode;
+        return owned;
+    }
+
     fn hasJumpTargetInRange(code: []const u8, start_pc: usize, end_pc: usize) bool {
         var scan_pc: usize = 0;
         while (scan_pc < code.len) {
@@ -5874,17 +5861,36 @@ pub const pipeline_resolve_labels = struct {
         return .{ .value = -value, .total_size = 6 };
     }
 
-    fn deadCodePastGotoSize(code: []const u8, pc: usize) ?usize {
-        if (pc >= code.len or code[pc] != opcode.op.goto) return null;
-        const goto_size = instrSize(opcode.op.goto);
-        var scan_pc = pc + goto_size;
+    fn canSkipDeadCodeAfter(op_id: u8) bool {
+        return switch (op_id) {
+            opcode.op.goto,
+            opcode.op.tail_call,
+            opcode.op.tail_call_method,
+            opcode.op.@"return",
+            opcode.op.return_undef,
+            opcode.op.throw,
+            opcode.op.throw_error,
+            opcode.op.ret,
+            => true,
+            else => false,
+        };
+    }
+
+    fn deadCodePastTerminalSize(code: []const u8, pc: usize) ?usize {
+        if (pc >= code.len or !canSkipDeadCodeAfter(code[pc])) return null;
+        const terminal_size = instrSize(code[pc]);
+        var scan_pc = pc + terminal_size;
         var skipped: usize = 0;
         while (scan_pc < code.len) {
             if (hasJumpTargetTo(code, scan_pc)) break;
             const op_id = code[scan_pc];
+            // Generator return-through-finally discovery treats the synthetic
+            // rethrow opcode as an implicit control-flow marker (it is found by
+            // scanning from the catch target, not by a bytecode jump).  Never
+            // erase that marker merely because a preceding finally arm returns.
+            if (op_id == opcode.op.throw) break;
             const size = if (op_id == opcode.op.label) 5 else instrSize(op_id);
             if (size == 0 or scan_pc + size > code.len) return null;
-            if (hasAtomOperand(op_id)) return null;
             scan_pc += size;
             skipped += size;
         }
@@ -5895,6 +5901,181 @@ pub const pipeline_resolve_labels = struct {
         if (pc + 2 > code.len) return null;
         if (code[pc] == opcode.op.undefined and code[pc + 1] == opcode.op.drop) return 2;
         return null;
+    }
+
+    const DupPutPeephole = struct {
+        set_op: u8,
+        idx: u16,
+        total_size: usize,
+    };
+
+    const LogicalChainPeephole = struct {
+        branch_op: u8,
+        target: usize,
+        total_size: usize,
+    };
+
+    const NullishTestPeephole = struct {
+        test_op: u8,
+        branch_op: ?u8,
+        target: usize,
+        total_size: usize,
+    };
+
+    const TypeofTestPeephole = struct {
+        test_op: u8,
+        branch_op: ?u8,
+        target: usize,
+        total_size: usize,
+    };
+
+    fn matchUndefinedReturnPeephole(code: []const u8, pc: usize) ?usize {
+        if (pc + 2 > code.len or
+            code[pc] != opcode.op.undefined or
+            code[pc + 1] != opcode.op.@"return" or
+            hasJumpTargetTo(code, pc + 1))
+        {
+            return null;
+        }
+        return 2 + (deadCodePastTerminalSize(code, pc + 1) orelse 0);
+    }
+
+    /// QuickJS short-opcode folds for `value === null/undefined` and for the
+    /// branch form of `value !== null/undefined`.  The latter inverts the
+    /// following branch because `is_null` / `is_undefined` express equality.
+    fn matchNullishTestPeephole(code: []const u8, pc: usize, use_short_opcodes: bool) ?NullishTestPeephole {
+        if (!use_short_opcodes or pc >= code.len) return null;
+        const test_op: u8 = switch (code[pc]) {
+            opcode.op.null => opcode.op.is_null,
+            opcode.op.undefined => opcode.op.is_undefined,
+            else => return null,
+        };
+
+        if (pc + 2 <= code.len and code[pc + 1] == opcode.op.strict_eq) {
+            if (hasJumpTargetInRange(code, pc + 1, pc + 2)) return null;
+            return .{
+                .test_op = test_op,
+                .branch_op = null,
+                .target = 0,
+                .total_size = 2,
+            };
+        }
+
+        if (pc + 7 > code.len or code[pc + 1] != opcode.op.strict_neq) return null;
+        const old_branch = code[pc + 2];
+        if (old_branch != opcode.op.if_false and old_branch != opcode.op.if_true) return null;
+        if (hasJumpTargetInRange(code, pc + 1, pc + 7)) return null;
+        const target = resolvedJumpTarget(code, pc + 2) catch return null;
+        return .{
+            .test_op = test_op,
+            .branch_op = if (old_branch == opcode.op.if_false) opcode.op.if_true else opcode.op.if_false,
+            .target = target,
+            .total_size = 7,
+        };
+    }
+
+    /// Fold the two predefined `typeof` result strings that QuickJS gives
+    /// dedicated short opcodes.  Removing `push_atom_value` also removes one
+    /// entry from Bytecode.atom_operands; `run` rebuilds that ownership list
+    /// from the final code before installing it.
+    fn matchTypeofTestPeephole(code: []const u8, pc: usize, use_short_opcodes: bool) ?TypeofTestPeephole {
+        if (!use_short_opcodes or pc + 7 > code.len or code[pc] != opcode.op.typeof) return null;
+        if (code[pc + 1] != opcode.op.push_atom_value) return null;
+        const atom_id = std.mem.readInt(u32, code[pc + 2 ..][0..4], .little);
+        const test_op: u8 = if (atom_id == atom.ids.undefined_)
+            opcode.op.typeof_is_undefined
+        else if (atom_id == atom.ids.type_function)
+            opcode.op.typeof_is_function
+        else
+            return null;
+
+        const compare_op = code[pc + 6];
+        if (compare_op == opcode.op.strict_eq or compare_op == opcode.op.eq) {
+            if (hasJumpTargetInRange(code, pc + 1, pc + 7)) return null;
+            return .{
+                .test_op = test_op,
+                .branch_op = null,
+                .target = 0,
+                .total_size = 7,
+            };
+        }
+
+        if (compare_op != opcode.op.strict_neq and compare_op != opcode.op.neq) return null;
+        if (pc + 12 > code.len or code[pc + 7] != opcode.op.if_false) return null;
+        if (hasJumpTargetInRange(code, pc + 1, pc + 12)) return null;
+        const target = resolvedJumpTarget(code, pc + 7) catch return null;
+        return .{
+            .test_op = test_op,
+            .branch_op = opcode.op.if_true,
+            .target = target,
+            .total_size = 12,
+        };
+    }
+
+    /// Collapse the prefix of a chained logical expression:
+    ///
+    ///   dup if_false(l1) drop ... l1: if_false(l2)
+    ///     -> if_false(l2) ... l1: if_false(l2)
+    ///
+    /// and likewise for `if_true`.  This mirrors QuickJS's resolve-labels
+    /// peephole.  The branch and drop must not be independent control-flow
+    /// entry points because both are removed from this occurrence.
+    fn matchLogicalChainPeephole(code: []const u8, pc: usize) ?LogicalChainPeephole {
+        if (pc + 7 > code.len or code[pc] != opcode.op.dup) return null;
+        const branch_op = code[pc + 1];
+        if (branch_op != opcode.op.if_false and branch_op != opcode.op.if_true) return null;
+        if (code[pc + 6] != opcode.op.drop) return null;
+        if (hasJumpTargetInRange(code, pc + 1, pc + 7)) return null;
+
+        var target = jumpTarget(code, pc + 1) catch return null;
+        var depth: usize = 0;
+        while (depth < 32) : (depth += 1) {
+            const target_pc = skipLabels(code, target) catch return null;
+            if (target_pc >= code.len) return null;
+
+            if (code[target_pc] == branch_op) {
+                const final_target = resolvedJumpTarget(code, target_pc) catch return null;
+                return .{
+                    .branch_op = branch_op,
+                    .target = final_target,
+                    .total_size = 7,
+                };
+            }
+
+            if (target_pc + 7 > code.len or
+                code[target_pc] != opcode.op.dup or
+                code[target_pc + 1] != branch_op or
+                code[target_pc + 6] != opcode.op.drop)
+            {
+                return null;
+            }
+            target = jumpTarget(code, target_pc + 1) catch return null;
+        }
+        return null;
+    }
+
+    fn matchDupPutPeephole(code: []const u8, pc: usize) ?DupPutPeephole {
+        if (pc + 4 > code.len or code[pc] != opcode.op.dup) return null;
+        const set_op = switch (code[pc + 1]) {
+            opcode.op.put_loc => opcode.op.set_loc,
+            opcode.op.put_arg => opcode.op.set_arg,
+            opcode.op.put_var_ref => opcode.op.set_var_ref,
+            opcode.op.put_loc_check => opcode.op.set_loc_check,
+            else => return null,
+        };
+        if (hasJumpTargetInRange(code, pc + 1, pc + 4)) return null;
+        return .{
+            .set_op = set_op,
+            .idx = std.mem.readInt(u16, code[pc + 2 ..][0..2], .little),
+            .total_size = 4,
+        };
+    }
+
+    fn loweredSlotInstructionSize(op_id: u8, idx: u16, use_short_opcodes: bool) usize {
+        if (use_short_opcodes) {
+            if (selectShortSlot(op_id, idx)) |form| return form.size;
+        }
+        return instrSize(op_id);
     }
 
     const AddLocPeephole = struct {
@@ -5956,6 +6137,8 @@ pub const pipeline_resolve_labels = struct {
             opcode.op.tail_call,
             opcode.op.tail_call_method,
             opcode.op.throw,
+            opcode.op.throw_error,
+            opcode.op.ret,
             => true,
             else => false,
         };
@@ -6085,6 +6268,27 @@ pub const pipeline_resolve_labels = struct {
         out_idx.* += size;
     }
 
+    fn emitSlotInstruction(op_id: u8, idx: u16, output: []u8, out_idx: *usize, use_short_opcodes: bool) !void {
+        if (use_short_opcodes) {
+            if (selectShortSlot(op_id, idx)) |form| {
+                output[out_idx.*] = form.op_id;
+                switch (form.operand_size) {
+                    0 => {},
+                    1 => output[out_idx.* + 1] = @intCast(idx),
+                    2 => std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], idx, .little),
+                    else => return error.InvalidBytecode,
+                }
+                out_idx.* += form.size;
+                return;
+            }
+        }
+        const size = instrSize(op_id);
+        if (size != 3) return error.InvalidBytecode;
+        output[out_idx.*] = op_id;
+        std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], idx, .little);
+        out_idx.* += size;
+    }
+
     fn computeLayout(ctx: *const JSContext, positions: []usize, sizes: []usize, use_short_opcodes: bool, initial_pc: usize) !usize {
         const code = ctx.function.code;
         @memset(positions, 0);
@@ -6112,8 +6316,26 @@ pub const pipeline_resolve_labels = struct {
                     0
                 else if (undefinedDropPairSize(code, pc) != null)
                     0
+                else if (matchUndefinedReturnPeephole(code, pc) != null)
+                    1
                 else if (redundantReturnUndefSize(code, pc) != null)
                     0
+                else if (matchNullishTestPeephole(code, pc, use_short_opcodes)) |p| blk: {
+                    const branch_op = p.branch_op orelse break :blk 1;
+                    const target_pc = positions[p.target];
+                    const diff = relOffset(out_pc + 1, target_pc);
+                    break :blk 1 + jumpSizeForOffset(branch_op, diff, use_short_opcodes);
+                } else if (matchTypeofTestPeephole(code, pc, use_short_opcodes)) |p| blk: {
+                    const branch_op = p.branch_op orelse break :blk 1;
+                    const target_pc = positions[p.target];
+                    const diff = relOffset(out_pc + 1, target_pc);
+                    break :blk 1 + jumpSizeForOffset(branch_op, diff, use_short_opcodes);
+                } else if (matchLogicalChainPeephole(code, pc)) |p| blk: {
+                    const target_pc = positions[p.target];
+                    const diff = relOffset(out_pc, target_pc);
+                    break :blk jumpSizeForOffset(p.branch_op, diff, use_short_opcodes);
+                } else if (matchDupPutPeephole(code, pc)) |p|
+                    loweredSlotInstructionSize(p.set_op, p.idx, use_short_opcodes)
                 else if (matchAddLocPeephole(code, pc)) |_|
                     loweredInstrSize(code, pc + 3, use_short_opcodes) + 2
                 else if (matchConstantTestPeephole(code, pc)) |p| blk: {
@@ -6135,7 +6357,7 @@ pub const pipeline_resolve_labels = struct {
 
                 sizes[pc] = new_size;
                 if (old_size != new_size) changed = true;
-                const next_pc = pc + (undefinedDropPairSize(code, pc) orelse (redundantReturnUndefSize(code, pc) orelse (if (matchAddLocPeephole(code, pc)) |p| p.total_size else if (matchConstantTestPeephole(code, pc)) |p| p.total_size else if (matchPushI32NegPeephole(code, pc)) |p| p.total_size else in_size + (deadCodePastGotoSize(code, pc) orelse 0))));
+                const next_pc = pc + (undefinedDropPairSize(code, pc) orelse (matchUndefinedReturnPeephole(code, pc) orelse (redundantReturnUndefSize(code, pc) orelse (if (matchNullishTestPeephole(code, pc, use_short_opcodes)) |p| p.total_size else if (matchTypeofTestPeephole(code, pc, use_short_opcodes)) |p| p.total_size else if (matchLogicalChainPeephole(code, pc)) |p| p.total_size else if (matchDupPutPeephole(code, pc)) |p| p.total_size else if (matchAddLocPeephole(code, pc)) |p| p.total_size else if (matchConstantTestPeephole(code, pc)) |p| p.total_size else if (matchPushI32NegPeephole(code, pc)) |p| p.total_size else in_size + (deadCodePastTerminalSize(code, pc) orelse 0)))));
                 var boundary_pc = pc + 1;
                 while (boundary_pc <= next_pc and boundary_pc < positions.len) : (boundary_pc += 1) {
                     positions[boundary_pc] = out_pc + new_size;
@@ -6342,8 +6564,35 @@ pub const pipeline_resolve_labels = struct {
                 i += 5;
             } else if (undefinedDropPairSize(func.code, i)) |pair_size| {
                 i += pair_size;
+            } else if (matchUndefinedReturnPeephole(func.code, i)) |return_size| {
+                output[out_idx] = opcode.op.return_undef;
+                out_idx += 1;
+                i += return_size;
             } else if (redundantReturnUndefSize(func.code, i)) |return_size| {
                 i += return_size;
+            } else if (matchNullishTestPeephole(func.code, i, use_short_opcodes)) |p| {
+                output[out_idx] = p.test_op;
+                out_idx += 1;
+                if (p.branch_op) |branch_op| {
+                    const branch_size = sizes[i] - 1;
+                    try emitJumpToTarget(branch_op, p.target, output, &out_idx, positions, branch_size);
+                }
+                i += p.total_size;
+            } else if (matchTypeofTestPeephole(func.code, i, use_short_opcodes)) |p| {
+                output[out_idx] = p.test_op;
+                out_idx += 1;
+                if (p.branch_op) |branch_op| {
+                    const branch_size = sizes[i] - 1;
+                    try emitJumpToTarget(branch_op, p.target, output, &out_idx, positions, branch_size);
+                }
+                i += p.total_size;
+            } else if (matchLogicalChainPeephole(func.code, i)) |p| {
+                const size = sizes[i];
+                try emitJumpToTarget(p.branch_op, p.target, output, &out_idx, positions, size);
+                i += p.total_size;
+            } else if (matchDupPutPeephole(func.code, i)) |p| {
+                try emitSlotInstruction(p.set_op, p.idx, output, &out_idx, use_short_opcodes);
+                i += p.total_size;
             } else if (matchAddLocPeephole(func.code, i)) |p| {
                 try emitLoweredInstruction(func.code, i + 3, output, &out_idx, use_short_opcodes);
                 output[out_idx] = opcode.op.add_loc;
@@ -6363,7 +6612,7 @@ pub const pipeline_resolve_labels = struct {
             } else if (isJumpOp(op)) {
                 const size = sizes[i];
                 try emitJump(func.code, i, output, &out_idx, positions, size);
-                i += instrSize(op) + (deadCodePastGotoSize(func.code, i) orelse 0);
+                i += instrSize(op) + (deadCodePastTerminalSize(func.code, i) orelse 0);
             } else if (isAtomLabelU8Op(op)) {
                 try emitAtomLabelU8(func.code, i, output, &out_idx, positions);
                 i += instrSize(op);
@@ -6371,22 +6620,47 @@ pub const pipeline_resolve_labels = struct {
                 const size = instrSize(op);
                 if (i + size > func.code.len) return error.InvalidBytecode;
                 try emitLoweredInstruction(func.code, i, output, &out_idx, use_short_opcodes);
-                i += size;
+                i += size + (deadCodePastTerminalSize(func.code, i) orelse 0);
             }
         }
 
-        // Replace the old code. `output` is sized to `output_size`, the
-        // worst-case post-lowering layout; trim it to `out_idx` before
-        // installing so capacity tracking stays accurate.
-        func.remapSourceLocs(positions);
-        func.remapDirectCallSites(positions);
-        if (out_idx < output.len) {
+        // Prepare exact-fit code and any changed atom ownership before
+        // mutating the function.  Typeof folds and terminal dead-code removal
+        // can delete atom-bearing instructions, so the side list must stay in
+        // the same order as atom operands in the installed bytecode.
+        const code_was_trimmed = out_idx < output.len;
+        const code_to_install: []u8 = if (!code_was_trimmed)
+            output
+        else if (out_idx == 0)
+            &.{}
+        else blk: {
             const trimmed = try ctx.memory.alloc(u8, out_idx);
             @memcpy(trimmed, output[0..out_idx]);
-            ctx.memory.free(u8, output);
-            func.installCode(trimmed);
-        } else {
-            func.installCode(output);
+            break :blk trimmed;
+        };
+        var trimmed_code_owned = code_was_trimmed and code_to_install.len != 0;
+        errdefer if (trimmed_code_owned) ctx.memory.free(u8, code_to_install);
+
+        const final_atom_count = try countFinalAtomOperands(code_to_install);
+        var remapped_atoms: ?[]atom.Atom = null;
+        if (final_atom_count != func.atom_operands.len) {
+            remapped_atoms = try duplicateFinalAtomOperands(ctx, code_to_install, final_atom_count);
+        }
+        errdefer if (remapped_atoms) |owned| {
+            for (owned) |atom_id| ctx.atoms.free(atom_id);
+            if (owned.len != 0) ctx.memory.free(atom.Atom, owned);
+        };
+
+        func.remapSourceLocs(positions);
+        func.remapDirectCallSites(positions);
+        if (code_was_trimmed and output.len != 0) ctx.memory.free(u8, output);
+        func.installCode(code_to_install);
+        trimmed_code_owned = false;
+
+        if (remapped_atoms) |owned| {
+            for (func.atom_operands) |old_atom| func.atoms.free(old_atom);
+            func.installAtomOperands(owned);
+            remapped_atoms = null;
         }
     }
 };
@@ -7198,7 +7472,7 @@ pub const pipeline_finalize = struct {
             std.debug.print("{s}\n", .{diswriter.buffered()});
         }
 
-        try rt.gc.addWithSize(&fb.header, fb.heapByteSize());
+        try rt.gc.addInitializedWithSize(&fb.header, fb.heapByteSize());
         registered = true;
 
         committed = true;

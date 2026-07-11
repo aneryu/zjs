@@ -214,6 +214,7 @@ pub const OrdinaryPayload = struct {
     callsite_line: i32 = 1,
     callsite_column: i32 = 1,
     is_callsite: bool = false,
+    callsite_is_native: bool = false,
     promise_already_resolved: bool = false,
     promise_combinator_remaining: i32 = 0,
     realm_global_ptr: ?*Object = null,
@@ -4795,6 +4796,7 @@ pub const Object = struct {
         function_name: JSValue,
         line: i32,
         column: i32,
+        is_native: bool,
     ) !void {
         const payload = try self.ensureOrdinaryPayload(rt);
         const next_file = file.dup();
@@ -4808,6 +4810,7 @@ pub const Object = struct {
         payload.callsite_line = line;
         payload.callsite_column = column;
         payload.is_callsite = true;
+        payload.callsite_is_native = is_native;
         if (old_file) |stored| stored.free(rt);
         if (old_function) |stored| stored.free(rt);
     }
@@ -4835,6 +4838,11 @@ pub const Object = struct {
     pub fn callSiteColumn(self: *const Object) i32 {
         if (self.ordinaryPayloadConst()) |payload| return payload.callsite_column;
         return 1;
+    }
+
+    pub fn callSiteIsNative(self: *const Object) bool {
+        if (self.ordinaryPayloadConst()) |payload| return payload.is_callsite and payload.callsite_is_native;
+        return false;
     }
 
     pub fn setErrorStack(self: *Object, rt: *JSRuntime, stack_value: JSValue) !void {
@@ -9783,19 +9791,15 @@ pub const Object = struct {
         // add_property likewise relies on the single caller-held atom ref
         // through add_shape_property (which does the one owning JS_DupAtom).
         // Indexed properties mutate a unique sparse shape in place. Named
-        // properties go through the qjs-style transition cache even when the
-        // current shape is uniquely owned, so repeated objects with the same
-        // property sequence converge on the same final shape.
+        // properties use the qjs transition triage: cache hit, shared clone, or
+        // rc==1 in-place append. transitionProperty owns replacement releases
+        // and threads relocation back through self.shape_ref.
         if (is_array_index) {
             try self.ensureUniqueShapeForMutation(rt);
-            try rt.shapes.reserveProperties(&self.shape_ref, property_capacity);
             try rt.shapes.addProperty(&self.shape_ref, atom_id, flags);
             return;
         }
-        const next_shape = try rt.shapes.transitionProperty(self.shape_ref, atom_id, flags, property_capacity);
-        const old_shape = self.shape_ref;
-        self.shape_ref = next_shape;
-        rt.shapes.release(old_shape);
+        try rt.shapes.transitionProperty(&self.shape_ref, atom_id, flags, property_capacity);
     }
 
     fn ensurePropertyCapacity(self: *Object, rt: *JSRuntime, needed: usize) !void {

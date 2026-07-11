@@ -578,7 +578,7 @@ pub fn addLocal(
         // stops them from inflating the hot number path's spill set — LLVM does
         // not coalesce the two branches' spill slots, so an inline string block
         // makes every float `s = s + i` iteration pay its stack frame.
-        return addLocalString(ctx, output, global, frame, idx, rhs, cell_opt == null);
+        return addLocalString(ctx, output, global, frame, idx, rhs);
     }
 
     // Dup the local so user coercion (Symbol.toPrimitive/valueOf) cannot free it
@@ -647,7 +647,6 @@ noinline fn addLocalString(
     frame: *frame_mod.Frame,
     idx: u16,
     rhs: core.JSValue,
-    cell_is_null: bool,
 ) !void {
     const lhs = slot_ops.slotValueDup(frame.locals[idx]);
     defer lhs.free(ctx.runtime);
@@ -655,12 +654,12 @@ noinline fn addLocalString(
     const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
     defer rhs_primitive.free(ctx.runtime);
 
-    // QuickJS OP_add_loc appends into the local's string storage when the
-    // accumulator is unshared. Reference accounting: the local slot plus our dup
-    // hold exactly two references to the accumulator. This keeps `s += part`
-    // loops on a flat growable buffer instead of chaining rope nodes per
-    // iteration.
-    if (cell_is_null and rhs_primitive.isString()) {
+    // QuickJS OP_add_loc appends into the binding's string storage when the
+    // accumulator is unshared. Whether the binding is a raw local or a VarRef
+    // cell, it owns one string reference and `lhs` owns the second. Captured
+    // closures share the cell rather than duplicating its string; an actual
+    // independent string snapshot raises rc above 2 and makes the append bail.
+    if (rhs_primitive.isString()) {
         if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs_primitive, 2)) {
             return;
         }
@@ -717,7 +716,7 @@ pub fn addLocalAt(
     const cell_opt = slot_ops.varRefCellFromValue(slot.*);
     const lhs_borrowed = if (cell_opt) |cell| cell.varRefValue() else slot.*;
     if (lhs_borrowed.isString()) {
-        return addLocalStringAt(ctx, output, global, slot, rhs, cell_opt == null);
+        return addLocalStringAt(ctx, output, global, slot, rhs);
     }
 
     const lhs = slot_ops.slotValueDup(slot.*);
@@ -766,7 +765,6 @@ noinline fn addLocalStringAt(
     global: *core.Object,
     slot: *core.JSValue,
     rhs: core.JSValue,
-    cell_is_null: bool,
 ) !void {
     const lhs = slot_ops.slotValueDup(slot.*);
     defer lhs.free(ctx.runtime);
@@ -774,7 +772,7 @@ noinline fn addLocalStringAt(
     const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
     defer rhs_primitive.free(ctx.runtime);
 
-    if (cell_is_null and rhs_primitive.isString()) {
+    if (rhs_primitive.isString()) {
         if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs_primitive, 2)) {
             return;
         }

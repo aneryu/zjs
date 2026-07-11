@@ -1389,7 +1389,7 @@ test "resolve_variables: strict global scope_make_ref keeps original reference" 
     try std.testing.expectEqual(global_atom, bc.atom_operands[0]);
 }
 
-test "resolve_variables: local scope_make_ref assignment keeps reference path" {
+test "resolve_variables: local scope_make_ref assignment lowers safe reference tail" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -1430,15 +1430,13 @@ test "resolve_variables: local scope_make_ref assignment keeps reference path" {
     var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_variables.run(&ctx);
 
-    try std.testing.expectEqual(op.make_loc_ref, bc.code[0]);
-    try std.testing.expectEqual(local_target, std.mem.readInt(u32, bc.code[1..5], .little));
-    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[5..7], .little));
-    try std.testing.expectEqual(op.get_loc1, bc.code[7]);
-    try std.testing.expectEqual(op.insert3, bc.code[8]);
-    try std.testing.expectEqual(op.put_ref_value, bc.code[9]);
-    try std.testing.expectEqual(op.return_undef, bc.code[10]);
-    try std.testing.expectEqual(@as(usize, 1), bc.atom_operands.len);
-    try std.testing.expectEqual(local_target, bc.atom_operands[0]);
+    try std.testing.expectEqualSlices(u8, &.{
+        op.get_loc1,
+        op.dup,
+        op.put_loc0,
+        op.return_undef,
+    }, bc.code);
+    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
 }
 
 test "resolve_variables: drops enter_scope/leave_scope" {
@@ -1928,6 +1926,47 @@ test "resolve_variables: scope_put_var → put_loc when var is local" {
     try std.testing.expectEqual(op.return_undef, bc.code[1]);
 }
 
+test "resolve_variables: const local write lowers to throw_error" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    const x_atom = try rt.internAtom("x");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(x_atom);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    _ = try fd.addScopeVar(x_atom, .normal, 0, true, true);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_put_var;
+    std.mem.writeInt(u32, input[1..5], x_atom, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(x_atom);
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    // Lexical prologue arms TDZ, then the write itself is a compile-time
+    // read-only throw (old behavior emitted put_loc_check here).
+    try std.testing.expectEqual(@as(usize, 10), bc.code.len);
+    try std.testing.expectEqual(op.set_loc_uninitialized, bc.code[0]);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[1..3], .little));
+    try std.testing.expectEqual(op.throw_error, bc.code[3]);
+    try std.testing.expectEqual(x_atom, std.mem.readInt(u32, bc.code[4..8], .little));
+    try std.testing.expectEqual(op.return_undef, bc.code[9]);
+    try std.testing.expectEqualSlices(core.Atom, &.{x_atom}, bc.atom_operands);
+}
+
 test "resolve_variables: unknown atom falls back to global get_var" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -2328,6 +2367,419 @@ test "F10.2: resolve_labels shortens direct loc arg and var_ref slot ops" {
     try std.testing.expectEqual(op.get_var_ref, bc.code[9]);
     try std.testing.expectEqual(@as(u16, 4), std.mem.readInt(u16, bc.code[10..12], .little));
     try std.testing.expectEqual(op.@"return", bc.code[12]);
+}
+
+test "resolve_labels folds dup put slot families to set" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 17;
+    var i: usize = 0;
+    inline for (.{
+        .{ op.put_loc, @as(u16, 0) },
+        .{ op.put_arg, @as(u16, 1) },
+        .{ op.put_var_ref, @as(u16, 2) },
+        .{ op.put_loc_check, @as(u16, 3) },
+    }) |put| {
+        input[i] = op.dup;
+        input[i + 1] = put[0];
+        std.mem.writeInt(u16, input[i + 2 ..][0..2], put[1], .little);
+        i += 4;
+    }
+    input[i] = op.@"return";
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqualSlices(u8, &.{
+        op.set_loc0,
+        op.set_arg1,
+        op.set_var_ref2,
+        op.set_loc_check,
+        3,
+        0,
+        op.@"return",
+    }, bc.code);
+}
+
+test "resolve_labels collapses chained logical branch prefix" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 14;
+    input[0] = op.dup;
+    input[1] = op.if_false;
+    std.mem.writeInt(u32, input[2..6], 8, .little);
+    input[6] = op.drop;
+    input[7] = op.get_loc0;
+    input[8] = op.if_false;
+    std.mem.writeInt(u32, input[9..13], 13, .little);
+    input[13] = op.return_undef;
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqualSlices(u8, &.{
+        op.if_false8,
+        4,
+        op.get_loc0,
+        op.if_false8,
+        1,
+        op.return_undef,
+    }, bc.code);
+}
+
+test "resolve_labels preserves logical prefix with an interior jump target" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 19;
+    input[0] = op.if_true;
+    std.mem.writeInt(u32, input[1..5], 6, .little);
+    input[5] = op.dup;
+    input[6] = op.if_false;
+    std.mem.writeInt(u32, input[7..11], 13, .little);
+    input[11] = op.drop;
+    input[12] = op.get_loc0;
+    input[13] = op.if_false;
+    std.mem.writeInt(u32, input[14..18], 18, .little);
+    input[18] = op.return_undef;
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 10), bc.code.len);
+    try std.testing.expectEqual(op.dup, bc.code[2]);
+}
+
+test "resolve_labels folds null and undefined comparison families" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    const op = bytecode.opcode.op;
+    const cases = [_]struct {
+        input: []const u8,
+        expected: []const u8,
+    }{
+        .{
+            .input = &.{ op.get_loc0, op.null, op.strict_eq, op.@"return" },
+            .expected = &.{ op.get_loc0, op.is_null, op.@"return" },
+        },
+        .{
+            .input = &.{ op.get_loc0, op.undefined, op.strict_eq, op.@"return" },
+            .expected = &.{ op.get_loc0, op.is_undefined, op.@"return" },
+        },
+        .{
+            .input = &.{ op.undefined, op.@"return" },
+            .expected = &.{op.return_undef},
+        },
+    };
+
+    for (cases) |case| {
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        try bc.setCode(case.input);
+
+        var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+        try pipeline.resolve_labels.run(&ctx);
+        try std.testing.expectEqualSlices(u8, case.expected, bc.code);
+    }
+}
+
+test "resolve_labels folds nullish strict_neq branches by inverting the jump" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    const op = bytecode.opcode.op;
+    const nullish_ops = [_]struct { push: u8, test_op: u8 }{
+        .{ .push = op.null, .test_op = op.is_null },
+        .{ .push = op.undefined, .test_op = op.is_undefined },
+    };
+    for (nullish_ops) |nullish| {
+        var input = [_]u8{0} ** 9;
+        input[0] = op.get_loc0;
+        input[1] = nullish.push;
+        input[2] = op.strict_neq;
+        input[3] = op.if_false;
+        std.mem.writeInt(u32, input[4..8], 8, .little);
+        input[8] = op.return_undef;
+
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        try bc.setCode(&input);
+
+        var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+        try pipeline.resolve_labels.run(&ctx);
+        try std.testing.expectEqualSlices(u8, &.{
+            op.get_loc0,
+            nullish.test_op,
+            op.if_true8,
+            1,
+            op.return_undef,
+        }, bc.code);
+    }
+}
+
+test "resolve_labels folds typeof tests and remaps retained atom operands" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+    const keep_atom = try rt.internAtom("keep-operand");
+    defer rt.atoms.free(keep_atom);
+    const type_atom = try rt.internAtom("undefined");
+    defer rt.atoms.free(type_atom);
+    const keep_base = rt.atoms.refCount(keep_atom).?;
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 15;
+    input[0] = op.push_atom_value;
+    std.mem.writeInt(u32, input[1..5], keep_atom, .little);
+    input[5] = op.drop;
+    input[6] = op.get_loc0;
+    input[7] = op.typeof;
+    input[8] = op.push_atom_value;
+    std.mem.writeInt(u32, input[9..13], type_atom, .little);
+    input[13] = op.strict_eq;
+    input[14] = op.@"return";
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(keep_atom);
+    try bc.retainAtomOperand(type_atom);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    var expected = [_]u8{0} ** 9;
+    expected[0] = op.push_atom_value;
+    std.mem.writeInt(u32, expected[1..5], keep_atom, .little);
+    expected[5] = op.drop;
+    expected[6] = op.get_loc0;
+    expected[7] = op.typeof_is_undefined;
+    expected[8] = op.@"return";
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+    try std.testing.expectEqualSlices(core.Atom, &.{keep_atom}, bc.atom_operands);
+    try std.testing.expectEqual(keep_base + 1, rt.atoms.refCount(keep_atom).?);
+}
+
+test "resolve_labels removes atom-bearing dead code after a terminal opcode" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+    const dead_atom = try rt.internAtom("dead-operand");
+    defer rt.atoms.free(dead_atom);
+    const base_ref_count = rt.atoms.refCount(dead_atom).?;
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 9;
+    input[0] = op.get_loc0;
+    input[1] = op.@"return";
+    input[2] = op.push_atom_value;
+    std.mem.writeInt(u32, input[3..7], dead_atom, .little);
+    input[7] = op.drop;
+    input[8] = op.return_undef;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(dead_atom);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqualSlices(u8, &.{ op.get_loc0, op.@"return" }, bc.code);
+    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+    try std.testing.expectEqual(base_ref_count, rt.atoms.refCount(dead_atom).?);
+}
+
+test "resolve_labels folds typeof function inequality branches" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+    const function_atom = try rt.internAtom("function");
+    defer rt.atoms.free(function_atom);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 14;
+    input[0] = op.get_loc0;
+    input[1] = op.typeof;
+    input[2] = op.push_atom_value;
+    std.mem.writeInt(u32, input[3..7], function_atom, .little);
+    input[7] = op.neq;
+    input[8] = op.if_false;
+    std.mem.writeInt(u32, input[9..13], 13, .little);
+    input[13] = op.return_undef;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(function_atom);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqualSlices(u8, &.{
+        op.get_loc0,
+        op.typeof_is_function,
+        op.if_true8,
+        1,
+        op.return_undef,
+    }, bc.code);
+    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+}
+
+test "resolve_labels keeps short-only comparison folds disabled" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+    const type_atom = try rt.internAtom("undefined");
+    defer rt.atoms.free(type_atom);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = false;
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 12;
+    input[0] = op.get_loc;
+    std.mem.writeInt(u16, input[1..3], 0, .little);
+    input[3] = op.null;
+    input[4] = op.strict_eq;
+    input[5] = op.typeof;
+    input[6] = op.push_atom_value;
+    std.mem.writeInt(u32, input[7..11], type_atom, .little);
+    input[11] = op.strict_eq;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(type_atom);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqualSlices(u8, &input, bc.code);
+    try std.testing.expectEqualSlices(core.Atom, &.{type_atom}, bc.atom_operands);
+}
+
+test "resolve_labels preserves dead code reached by an external jump" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+    const live_atom = try rt.internAtom("jump-target-operand");
+    defer rt.atoms.free(live_atom);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 15;
+    input[0] = op.get_loc0;
+    input[1] = op.if_true;
+    std.mem.writeInt(u32, input[2..6], 8, .little);
+    input[6] = op.get_loc0;
+    input[7] = op.@"return";
+    input[8] = op.push_atom_value;
+    std.mem.writeInt(u32, input[9..13], live_atom, .little);
+    input[13] = op.drop;
+    input[14] = op.return_undef;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(live_atom);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 12), bc.code.len);
+    try std.testing.expectEqual(op.push_atom_value, bc.code[5]);
+    try std.testing.expectEqualSlices(core.Atom, &.{live_atom}, bc.atom_operands);
+}
+
+test "resolve_labels preserves implicit generator rethrow markers" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    const op = bytecode.opcode.op;
+    const input = [_]u8{ op.get_loc0, op.@"return", op.throw };
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+    try std.testing.expectEqualSlices(u8, &input, bc.code);
 }
 
 test "M1.1: resolve_variables lowers private-field temp opcodes" {

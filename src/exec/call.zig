@@ -1511,6 +1511,20 @@ pub fn callNativeFunctionRecord(
     caller_function: ?*const function_bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
+    if (function_object.nativeRecord()) |record| {
+        return try builtin_dispatch.callInternalRecordDirect(
+            ctx,
+            output,
+            global,
+            globals,
+            function_object,
+            this_value,
+            record,
+            args,
+            caller_function,
+            caller_frame,
+        );
+    }
     const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return null;
     if (try builtin_dispatch.callInternalRecord(ctx, output, global, globals, function_object, this_value, native_ref, args, caller_function, caller_frame)) |value| return value;
     return switch (native_ref.domain) {

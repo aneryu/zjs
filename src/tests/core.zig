@@ -2455,6 +2455,51 @@ test "ordinary object additions reuse transition shapes" {
     try std.testing.expectEqual(@as(?i32, 4), second.getProperty(b).asInt32());
 }
 
+test "unique transition shape appends in place across FAM relocation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // A fresh prototype identity guarantees that this object's empty root shape
+    // has no other owner. QuickJS mutates such rc==1 transition misses in place.
+    const prototype = try core.Object.create(rt, core.class.ids.object, null);
+    defer prototype.value().free(rt);
+    const object = try core.Object.create(rt, core.class.ids.object, prototype);
+    defer object.value().free(rt);
+
+    const names = [_][]const u8{ "unique_0", "unique_1", "unique_2", "unique_3", "unique_4" };
+    var atoms: [names.len]core.Atom = undefined;
+    for (names, 0..) |name, index| atoms[index] = try rt.internAtom(name);
+    defer for (atoms) |name| rt.atoms.free(name);
+
+    const initial_shape = object.shape_ref;
+    const initial_hashed_count = rt.shapes.shape_hash_count;
+    for (atoms[0..4], 0..) |name, index| {
+        try object.defineOwnProperty(
+            rt,
+            name,
+            core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true),
+        );
+        try std.testing.expectEqual(initial_shape, object.shape_ref);
+    }
+    try std.testing.expectEqual(initial_hashed_count, rt.shapes.shape_hash_count);
+
+    // The fifth append grows the inline FAM, so the allocation moves while the
+    // logical shape ownership and hashed/live registry counts stay unchanged.
+    const before_relocation = object.shape_ref;
+    try object.defineOwnProperty(
+        rt,
+        atoms[4],
+        core.Descriptor.data(core.JSValue.int32(4), true, true, true),
+    );
+    try std.testing.expect(before_relocation != object.shape_ref);
+    try std.testing.expectEqual(initial_hashed_count, rt.shapes.shape_hash_count);
+    try std.testing.expectEqual(@as(u32, atoms.len), object.shape_ref.prop_count);
+    for (atoms, 0..) |name, index| {
+        try std.testing.expectEqual(@as(?i32, @intCast(index)), object.getProperty(name).asInt32());
+        try std.testing.expect(object.shape_ref.firstPropertyIndex(name) != core.shape.no_property_index);
+    }
+}
+
 test "failed new property definition rolls back retained entry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -2468,30 +2513,83 @@ test "failed new property definition rolls back retained entry" {
     const b = try rt.internAtom("rollback_b");
     const c = try rt.internAtom("rollback_c");
     const d = try rt.internAtom("rollback_d");
+    const e = try rt.internAtom("rollback_e");
     defer rt.atoms.free(a);
     defer rt.atoms.free(b);
     defer rt.atoms.free(c);
+    defer rt.atoms.free(d);
 
     try object.defineOwnProperty(rt, a, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     try object.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
     try object.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(3), true, true, true));
+    try object.defineOwnProperty(rt, d, core.Descriptor.data(core.JSValue.int32(4), true, true, true));
 
-    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
+    try std.testing.expectEqual(@as(usize, 4), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 4), object.shape_ref.props().len);
-    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
 
     const retained_refs = retained.header.meta().rc;
     rt.setMemoryLimit(rt.memory.allocated_bytes);
-    try std.testing.expectError(error.OutOfMemory, object.defineOwnProperty(rt, d, core.Descriptor.data(retained.value(), true, true, true)));
+    try std.testing.expectError(error.OutOfMemory, object.defineOwnProperty(rt, e, core.Descriptor.data(retained.value(), true, true, true)));
     rt.setMemoryLimit(null);
 
     try std.testing.expectEqual(retained_refs, retained.header.meta().rc);
-    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
-    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
-    try std.testing.expect(!object.hasOwnProperty(d));
+    try std.testing.expectEqual(@as(usize, 4), object.shape_ref.prop_count);
+    try std.testing.expect(!object.hasOwnProperty(e));
 
-    rt.atoms.free(d);
-    try std.testing.expect(rt.atoms.name(d) == null);
+    rt.atoms.free(e);
+    try std.testing.expect(rt.atoms.name(e) == null);
+}
+
+test "unique shape append OOM rolls back shape and value storage together" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // A unique prototype keeps the named-property transition on the rc==1
+    // in-place path. Four tombstones force the fifth append to grow both the
+    // property FAM and its deleted-inclusive hash table.
+    const prototype = try core.Object.create(rt, core.class.ids.object, null);
+    defer prototype.value().free(rt);
+    const object = try core.Object.create(rt, core.class.ids.object, prototype);
+    defer object.value().free(rt);
+
+    const names = [_][]const u8{ "oom_shape_a", "oom_shape_b", "oom_shape_c", "oom_shape_d", "oom_shape_e" };
+    var atoms: [names.len]core.Atom = undefined;
+    for (names, 0..) |name, index| atoms[index] = try rt.internAtom(name);
+    defer for (atoms) |name| rt.atoms.free(name);
+
+    for (atoms[0..4], 0..) |name, index| {
+        try object.defineOwnProperty(rt, name, core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
+    }
+    for (atoms[0..4]) |name| try std.testing.expect(object.deleteProperty(rt, name));
+
+    try std.testing.expectEqual(@as(u32, 4), object.shape_ref.prop_count);
+    try std.testing.expectEqual(@as(u32, 4), object.shape_ref.prop_size);
+    try std.testing.expectEqual(@as(u32, 4), object.shape_ref.deleted_prop_count);
+
+    // Permit the value-buffer grow and the old two-step implementation's first
+    // (8 props / 8 buckets) shape relocation, but not its second (16 buckets).
+    // The fixed implementation requests the final shape layout in one fallible
+    // allocation, so either implementation must report OOM without committing
+    // only one side of the object layout.
+    const grown_value_bytes = @sizeOf(core.property.Entry) * 8;
+    const first_shape_bytes = @sizeOf(core.shape.Shape) +
+        @sizeOf(u32) * 8 + @sizeOf(core.shape.Property) * 8;
+    rt.setMemoryLimit(rt.memory.allocated_bytes + grown_value_bytes + first_shape_bytes);
+    defer rt.setMemoryLimit(null);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        object.defineOwnProperty(rt, atoms[4], core.Descriptor.data(core.JSValue.int32(4), true, true, true)),
+    );
+    rt.setMemoryLimit(null);
+
+    try std.testing.expectEqual(@as(u32, 4), object.shape_ref.prop_count);
+    try std.testing.expectEqual(@as(u32, 4), object.shape_ref.prop_size);
+    try std.testing.expect(!object.hasOwnProperty(atoms[4]));
+
+    // A retry on the same object proves its value buffer still agrees with the
+    // shape capacity and catches the former out-of-bounds write on index four.
+    try object.defineOwnProperty(rt, atoms[4], core.Descriptor.data(core.JSValue.int32(5), true, true, true));
+    try std.testing.expectEqual(@as(?i32, 5), object.getProperty(atoms[4]).asInt32());
 }
 
 test "context lexicals property alias releases context strong reference" {
@@ -2524,31 +2622,32 @@ test "failed auto-init property definition rolls back retained entry" {
     const b = try rt.internAtom("auto_rollback_b");
     const c = try rt.internAtom("auto_rollback_c");
     const d = try rt.internAtom("auto_rollback_d");
+    const e = try rt.internAtom("auto_rollback_e");
     defer rt.atoms.free(a);
     defer rt.atoms.free(b);
     defer rt.atoms.free(c);
+    defer rt.atoms.free(d);
 
     try object.defineOwnProperty(rt, a, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     try object.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
     try object.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(3), true, true, true));
+    try object.defineOwnProperty(rt, d, core.Descriptor.data(core.JSValue.int32(4), true, true, true));
 
-    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
+    try std.testing.expectEqual(@as(usize, 4), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 4), object.shape_ref.props().len);
-    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     try std.testing.expectError(
         error.OutOfMemory,
-        object.defineAutoInitProperty(rt, d, "auto_rollback_d", 0, core.property.Flags.data(true, false, true)),
+        object.defineAutoInitProperty(rt, e, "auto_rollback_e", 0, core.property.Flags.data(true, false, true)),
     );
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
-    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
-    try std.testing.expect(!object.hasOwnProperty(d));
+    try std.testing.expectEqual(@as(usize, 4), object.shape_ref.prop_count);
+    try std.testing.expect(!object.hasOwnProperty(e));
 
-    rt.atoms.free(d);
-    try std.testing.expect(rt.atoms.name(d) == null);
+    rt.atoms.free(e);
+    try std.testing.expect(rt.atoms.name(e) == null);
 }
 
 test "failed realm auto-init property definition rolls back borrowed holder registration" {
@@ -2565,29 +2664,31 @@ test "failed realm auto-init property definition rolls back borrowed holder regi
     const b = try rt.internAtom("realm_auto_rollback_b");
     const c = try rt.internAtom("realm_auto_rollback_c");
     const d = try rt.internAtom("realm_auto_rollback_d");
+    const e = try rt.internAtom("realm_auto_rollback_e");
     defer rt.atoms.free(a);
     defer rt.atoms.free(b);
     defer rt.atoms.free(c);
+    defer rt.atoms.free(d);
 
     try object.defineOwnProperty(rt, a, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     try object.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
     try object.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(3), true, true, true));
+    try object.defineOwnProperty(rt, d, core.Descriptor.data(core.JSValue.int32(4), true, true, true));
 
     const old_holder_count = rt.borrowed_reference_holders.len;
     rt.setMemoryLimit(rt.memory.allocated_bytes + borrowedHolderInitialAllocationBytes());
     try std.testing.expectError(
         error.OutOfMemory,
-        object.definePerformanceAutoInitProperty(rt, d, core.property.Flags.data(true, false, true), global),
+        object.definePerformanceAutoInitProperty(rt, e, core.property.Flags.data(true, false, true), global),
     );
     rt.setMemoryLimit(null);
 
     try std.testing.expectEqual(old_holder_count, rt.borrowed_reference_holders.len);
-    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
-    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
-    try std.testing.expect(!object.hasOwnProperty(d));
+    try std.testing.expectEqual(@as(usize, 4), object.shape_ref.prop_count);
+    try std.testing.expect(!object.hasOwnProperty(e));
 
-    rt.atoms.free(d);
-    try std.testing.expect(rt.atoms.name(d) == null);
+    rt.atoms.free(e);
+    try std.testing.expect(rt.atoms.name(e) == null);
 }
 
 test "property replacement preserves references under memory cap" {
@@ -3340,10 +3441,9 @@ test "gc heap accounting verifier catches missing allocation entries" {
     defer obj.value().free(rt);
     try rt.gc.verifyHeapAccounting(rt);
 
-    const old_size_class = obj.header.meta().size_class;
-    obj.header.meta().size_class = 0;
+    obj.header.meta().flags.heap_accounted = false;
     try std.testing.expectError(error.MissingHeapAllocation, rt.gc.verifyHeapAccounting(rt));
-    obj.header.meta().size_class = old_size_class;
+    obj.header.meta().flags.heap_accounted = true;
     try rt.gc.verifyHeapAccounting(rt);
 }
 

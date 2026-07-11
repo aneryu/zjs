@@ -124,7 +124,7 @@ pub fn constructBuiltinSuperConstructor(
     }
 
     if (std.mem.eql(u8, name, "RegExp")) {
-        return try qjsRegExpConstructCall(ctx, output, global, new_target, args, caller_function, caller_frame);
+        return try qjsRegExpConstructCall(ctx, output, global, object_ops.objectFromValue(constructor), new_target, args, caller_function, caller_frame);
     }
 
     const prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
@@ -133,8 +133,11 @@ pub fn constructBuiltinSuperConstructor(
         const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
         return instance.value();
     }
-    if (std.mem.eql(u8, name, "Array")) return builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, null, array_construct_ref, prototype, args, caller_function, caller_frame) catch |err| switch (err) {
-        error.RangeError => return @as(?core.JSValue, try throwRangeErrorMessage(ctx, global, "invalid array length")),
+    if (std.mem.eql(u8, name, "Array")) return builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, object_ops.objectFromValue(constructor), array_construct_ref, prototype, args, caller_function, caller_frame) catch |err| switch (err) {
+        error.RangeError => {
+            if (exception_ops.pendingExceptionMatchesError(ctx, err)) return err;
+            return @as(?core.JSValue, try throwRangeErrorMessage(ctx, global, "invalid array length"));
+        },
         else => return err,
     };
     if (std.mem.eql(u8, name, "String")) return try qjsStringConstructWithPrototype(ctx, output, global, prototype, args, caller_function, caller_frame);

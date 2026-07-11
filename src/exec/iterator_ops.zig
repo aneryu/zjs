@@ -53,87 +53,27 @@ pub fn forOfStart(
         }
     }
 
-    var iterator_value: core.JSValue = undefined;
-    var owns_iterator_value = false;
-    const iterable_object = property_ops.expectObject(iterable) catch null;
-    if (iterable.isString()) {
-        const iterator = try core.object.stringIterator(ctx.runtime, iterable);
-        var iterator_owned = true;
-        errdefer if (iterator_owned) iterator.free(ctx.runtime);
-        if (is_async) {
-            const wrapper = try createAsyncFromSyncIterator(ctx, output, global, iterator, function, frame, object_ops.getValueProperty, call_runtime.isCallableValue);
-            iterator_owned = false;
-            defer iterator.free(ctx.runtime);
-            defer wrapper.free(ctx.runtime);
-            const next_method = try iteratorNextMethod(ctx, output, global, wrapper, function, frame, object_ops.getValueProperty, call_runtime.isCallableValue);
-            defer next_method.free(ctx.runtime);
-            try pushForAwaitRecord(ctx, stack, wrapper, next_method);
-            return;
-        } else {
-            iterator_value = iterator;
-            owns_iterator_value = true;
-        }
-    } else if (iterable_object != null and iterable_object.?.class_id == core.class.ids.string) {
-        const iterator = try core.object.stringIterator(ctx.runtime, iterable);
-        var iterator_owned = true;
-        errdefer if (iterator_owned) iterator.free(ctx.runtime);
-        if (is_async) {
-            const wrapper = try createAsyncFromSyncIterator(ctx, output, global, iterator, function, frame, object_ops.getValueProperty, call_runtime.isCallableValue);
-            iterator_owned = false;
-            defer iterator.free(ctx.runtime);
-            defer wrapper.free(ctx.runtime);
-            const next_method = try iteratorNextMethod(ctx, output, global, wrapper, function, frame, object_ops.getValueProperty, call_runtime.isCallableValue);
-            defer next_method.free(ctx.runtime);
-            try pushForAwaitRecord(ctx, stack, wrapper, next_method);
-            return;
-        } else {
-            iterator_value = iterator;
-            owns_iterator_value = true;
-        }
-    } else if (iterable_object != null and
-        (iterable_object.?.class_id == core.class.ids.array_iterator or
-            iterable_object.?.class_id == core.class.ids.string_iterator or
-            iterable_object.?.class_id == core.class.ids.generator or
-            iterable_object.?.class_id == core.class.ids.async_generator))
-    {
-        if (is_async) {
-            const wrapper = try createAsyncFromSyncIterator(ctx, output, global, iterable, function, frame, object_ops.getValueProperty, call_runtime.isCallableValue);
-            defer wrapper.free(ctx.runtime);
-            const next_method = try iteratorNextMethod(ctx, output, global, wrapper, function, frame, object_ops.getValueProperty, call_runtime.isCallableValue);
-            defer next_method.free(ctx.runtime);
-            try pushForAwaitRecord(ctx, stack, wrapper, next_method);
-            return;
-        } else {
-            iterator_value = iterable.dup();
-            owns_iterator_value = true;
-        }
-    } else {
-        const iterator_method = try call_runtime.getIteratorMethod(ctx, output, global, iterable);
-        defer iterator_method.free(ctx.runtime);
-        if (!call_runtime.isCallableValue(iterator_method)) {
-            _ = exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable") catch |err| return err;
-            return error.TypeError;
-        }
-        iterator_value = try call_runtime.callValueOrBytecode(ctx, output, global, iterable, iterator_method, &.{}, function, frame);
-        var iterator_value_owned = true;
-        errdefer if (iterator_value_owned) iterator_value.free(ctx.runtime);
-        _ = try property_ops.expectObject(iterator_value);
-        if (is_async) {
-            const wrapper = try createAsyncFromSyncIterator(ctx, output, global, iterator_value, function, frame, object_ops.getValueProperty, call_runtime.isCallableValue);
-            iterator_value.free(ctx.runtime);
-            iterator_value_owned = false;
-            defer wrapper.free(ctx.runtime);
-            const next_method = try iteratorNextMethod(ctx, output, global, wrapper, function, frame, object_ops.getValueProperty, call_runtime.isCallableValue);
-            defer next_method.free(ctx.runtime);
-            try pushForAwaitRecord(ctx, stack, wrapper, next_method);
-            return;
-        } else {
-            owns_iterator_value = true;
-        }
+    const iterator_method = try call_runtime.getIteratorMethod(ctx, output, global, iterable);
+    defer iterator_method.free(ctx.runtime);
+    if (!call_runtime.isCallableValue(iterator_method)) {
+        _ = exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable") catch |err| return err;
+        return error.TypeError;
     }
-
+    const iterator_value = try call_runtime.callValueOrBytecode(ctx, output, global, iterable, iterator_method, &.{}, function, frame);
+    var owns_iterator_value = true;
     errdefer if (owns_iterator_value) iterator_value.free(ctx.runtime);
     _ = try property_ops.expectObject(iterator_value);
+    if (is_async) {
+        const wrapper = try createAsyncFromSyncIterator(ctx, output, global, iterator_value, function, frame, object_ops.getValueProperty, call_runtime.isCallableValue);
+        iterator_value.free(ctx.runtime);
+        owns_iterator_value = false;
+        defer wrapper.free(ctx.runtime);
+        const next_method = try iteratorNextMethod(ctx, output, global, wrapper, function, frame, object_ops.getValueProperty, call_runtime.isCallableValue);
+        defer next_method.free(ctx.runtime);
+        try pushForAwaitRecord(ctx, stack, wrapper, next_method);
+        return;
+    }
+
     const next_method = try iteratorNextMethod(ctx, output, global, iterator_value, function, frame, object_ops.getValueProperty, call_runtime.isCallableValue);
     defer next_method.free(ctx.runtime);
     try stack.pushOwned(iterator_value);

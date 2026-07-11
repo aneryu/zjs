@@ -5,6 +5,7 @@ const bignum = @import("../libs/bigint.zig");
 const std = @import("std");
 const builtin_glue = @import("builtin_glue.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
+const exception_ops = @import("vm_exception_ops.zig");
 
 const HostError = @import("exceptions.zig").HostError;
 const InternalCall = core.host_function.InternalCall;
@@ -261,7 +262,13 @@ fn arrayCall(host_call: InternalCall) HostError!core.JSValue {
             arrayPrototypeFromGlobal(global)
         else
             null;
-        return constructConstructorWithPrototype(host_call.ctx.runtime, host_call.args, prototype);
+        return constructConstructorWithPrototype(host_call.ctx.runtime, host_call.args, prototype) catch |err| switch (err) {
+            error.RangeError => if (host_call.global) |global|
+                exception_ops.throwRangeErrorMessage(host_call.ctx, global, "invalid array length")
+            else
+                error.RangeError,
+            else => return err,
+        };
     }
     const global = host_call.global orelse return error.TypeError;
     if (try builtin_glue.qjsArrayNativeRecord(

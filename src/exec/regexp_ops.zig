@@ -207,7 +207,7 @@ fn regexpCall(host_call: InternalCall) HostError!core.JSValue {
             return constructWithPrototype(rt, pattern, flags, host_call.new_target);
         }
         const active_global = host_call.global orelse return error.TypeError;
-        return regexp_fastpath.qjsRegExpFunctionCall(ctx, output, active_global, args, caller_function, caller_frame);
+        return regexp_fastpath.qjsRegExpFunctionCall(ctx, output, active_global, host_call.func_obj, args, caller_function, caller_frame);
     }
 
     const function_object = host_call.func_obj orelse return error.TypeError;

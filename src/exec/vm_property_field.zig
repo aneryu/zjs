@@ -466,6 +466,21 @@ pub noinline fn arrayElement(
                 };
                 unreachable;
             }
+            if (cachedStringAtom(key)) |atom_id| {
+                // String.atom_id is a weak cache. A Proxy getter can re-enter,
+                // destroy the last shape that owns this atom, and intern a new
+                // key that reuses the id before invariant validation resumes.
+                // Retain it across the complete (potentially re-entrant) lookup.
+                const retained_atom = ctx.runtime.atoms.dup(atom_id);
+                defer ctx.runtime.atoms.free(retained_atom);
+                const value = object_ops.getValueProperty(ctx, output, global, obj, retained_atom, function, frame) catch |err| {
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                    return err;
+                };
+                errdefer value.free(ctx.runtime);
+                try stack.pushOwned(value);
+                return .done;
+            }
             if (fastDenseArrayElementValue(obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
                 try stack.pushOwned(value);
@@ -630,6 +645,12 @@ pub noinline fn arrayElement(
         else => unreachable,
     }
     return .done;
+}
+
+inline fn cachedStringAtom(value: core.JSValue) ?core.Atom {
+    const string = value.asStringBody() orelse return null;
+    if (string.atom_id == core.string.String.no_atom_id) return null;
+    return string.atom_id;
 }
 
 // Inline typed-array element read for `obj[int]`, mirroring qjs's

@@ -38,9 +38,9 @@ pub const VarRef = struct {
             .header = .{},
             .value = initial_value,
         };
-        self.header.meta().* = .{ .kind = .var_ref };
+        std.debug.assert(self.header.meta().kind == .var_ref);
         self.pvalue = &self.value;
-        try rt.gc.addWithSize(&self.header, @sizeOf(VarRef));
+        try rt.gc.addInitializedWithSize(&self.header, @sizeOf(VarRef));
         return self;
     }
 
@@ -53,8 +53,8 @@ pub const VarRef = struct {
             .pvalue = slot,
             .is_open = true,
         };
-        self.header.meta().* = .{ .kind = .var_ref };
-        try rt.gc.addWithSize(&self.header, @sizeOf(VarRef));
+        std.debug.assert(self.header.meta().kind == .var_ref);
+        try rt.gc.addInitializedWithSize(&self.header, @sizeOf(VarRef));
         return self;
     }
 

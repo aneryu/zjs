@@ -233,10 +233,6 @@ pub const Machine = struct {
     /// Maintained in lockstep with `depth` by pushFrame/popTeardown (and
     /// the dispatch loop's fused popAndResume).
     top: ?*Entry = null,
-    /// Set whenever the current execution level changed (push, pop, unwind);
-    /// tells the dispatch loop to refresh its cached per-level locals.
-    switched: bool = false,
-
     pub fn init(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, l0_frame: *frame_mod.Frame, l0_stack: *stack_mod.Stack, l0_catch_target: *?usize) Machine {
         return .{
             .ctx = ctx,
@@ -349,7 +345,6 @@ pub const Machine = struct {
         entry.prev = self.top;
         self.top = entry;
         self.depth += 1;
-        self.switched = true;
         return entry;
     }
 
@@ -863,7 +858,6 @@ pub const Machine = struct {
         // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
         // done: epilogue (quickjs.c:20709).
         self.top = dying.prev;
-        self.switched = true;
     }
 
     /// Straight-line teardown for the common simple frame — qjs's `done:`

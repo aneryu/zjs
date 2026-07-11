@@ -6426,7 +6426,7 @@ pub const parser_core = struct {
                     }
                     if (is_function_expr_name) {
                         if (s.is_strict or s.cur_func().is_strict_mode) {
-                            try s.emitOpAtomU8(opcode.op.throw_error, atom_module.null_atom, 4);
+                            try s.emitOpAtomU8(opcode.op.throw_error, v.atom, 0);
                         }
                         return;
                     }
@@ -13567,7 +13567,7 @@ pub const parser_core = struct {
                 }
 
                 if (local_lexical_idx) |idx| {
-                    if (s.cur_func().use_short_opcodes and s.emit_lexical_tdz_at_decl) {
+                    if (s.emit_lexical_tdz_at_decl) {
                         try s.emitOpU16(opcode.op.set_loc_uninitialized, idx);
                     }
                 }

@@ -1139,7 +1139,7 @@ pub const JSRuntime = struct {
     /// hot path (mirror of `unregisterObjectWithBytes` on the free path). The
     /// stored value is identical to what `allocationSize` would recompute.
     pub fn registerObjectWithBytes(self: *JSRuntime, object: *Object, bytes: usize) !void {
-        try self.gc.addWithSize(&object.header, bytes);
+        try self.gc.addInitializedWithSize(&object.header, bytes);
         if (self.gc.hasPendingMajorRequest()) {
             _ = self.pollGC(null, .normal) catch {};
         }

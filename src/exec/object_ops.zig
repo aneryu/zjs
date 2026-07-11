@@ -871,7 +871,10 @@ pub fn createCallSiteObject(ctx: *core.JSContext, global: *core.Object, entry: c
     const object = try core.Object.create(ctx.runtime, core.class.ids.object, try callSitePrototypeFromGlobal(ctx.runtime, global));
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
     const location = entry.location();
-    const filename = try value_ops.createStringValue(ctx.runtime, ctx.runtime.atoms.name(entry.filename) orelse "<anonymous>");
+    const filename = if (entry.is_native)
+        core.JSValue.nullValue()
+    else
+        try value_ops.createStringValue(ctx.runtime, ctx.runtime.atoms.name(entry.filename) orelse "<anonymous>");
     defer filename.free(ctx.runtime);
     const function_name_value = try callSiteFunctionNameValue(ctx, entry);
     defer function_name_value.free(ctx.runtime);
@@ -879,8 +882,9 @@ pub fn createCallSiteObject(ctx: *core.JSContext, global: *core.Object, entry: c
         ctx.runtime,
         filename,
         function_name_value,
-        if (location.line_num > 0) location.line_num else 1,
-        if (location.col_num > 0) location.col_num else 1,
+        if (entry.is_native) 0 else if (location.line_num > 0) location.line_num else 1,
+        if (entry.is_native) 0 else if (location.col_num > 0) location.col_num else 1,
+        entry.is_native,
     );
 
     return object.value();

@@ -328,21 +328,25 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.if_false] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try control_vm.branch32(vm.ctx, vm.stack, vm.function, vm.frame, false);
+            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
         }
     }.b);
     t[op.if_true] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try control_vm.branch32(vm.ctx, vm.stack, vm.function, vm.frame, true);
+            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
         }
     }.b);
     t[op.if_false8] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try control_vm.branch8(vm.ctx, vm.stack, vm.function, vm.frame, false);
+            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
         }
     }.b);
     t[op.if_true8] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try control_vm.branch8(vm.ctx, vm.stack, vm.function, vm.frame, true);
+            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
         }
     }.b);
     t[op.gosub] = h(struct {

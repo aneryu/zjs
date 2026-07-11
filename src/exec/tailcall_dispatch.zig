@@ -423,7 +423,6 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
     // — the caller's Entry address comes from the chain, not from re-deriving
     // entryAt(depth-1) chunk arithmetic; reloadTop below reads it back.
     machine.top = dying.prev;
-    machine.switched = true;
     var pc2: [*]const u8 = undefined;
     var sp2: [*]JSValue = undefined;
     var vb2: [*]JSValue = undefined;
@@ -941,7 +940,8 @@ pub fn opLoc(comptime kind: LocKind, comptime idx_src: LocIdx) Handler {
 /// `opLoc` plus qjs's `JS_IsUninitialized(var_buf[idx])` TDZ guard:
 ///   - a var-ref cell slot (captured binding) → cold: checkedLocVm unwraps the cell,
 ///   - an uninitialized plain slot → cold: checkedLocVm throws the TDZ ReferenceError,
-///   - (put) a `const` slot → cold: checkedLocVm throws the const-reassign TypeError.
+/// Const writes never reach this handler: resolve_variables emits throw_error
+/// directly, matching qjs resolve_scope_var.
 /// The checked encodings only exist in the u16 operand form (no short variants —
 /// bytecode.zig:442-445), so one handler per kind covers them.
 pub fn opLocCheck(comptime kind: LocKind) Handler {
@@ -970,7 +970,6 @@ pub fn opLocCheck(comptime kind: LocKind) Handler {
                     return cont(pc + 3, sp + 1, var_buf, vm);
                 },
                 .put => {
-                    if (idx < vm.function.vardefs.len and vm.function.vardefs[idx].is_const) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
                     const value = (sp - 1)[0];
                     if (may_box and slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
                     var_buf[idx] = value;
@@ -1462,10 +1461,10 @@ pub fn op_swap(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) ca
 // Control flow (8-bit displacement). The displacement is relative to the operand
 // byte (pc+1), matching dispatchLoop's `operand_pc = reg_ip - code.ptr`. Jumping to
 // a target ≥ code_end (forward branch-to-end) is handled by `next`'s own fall-off
-// check, so no explicit branch-to-end test is needed here. NOTE: the interrupt poll
-// dispatchLoop runs on backward jumps is intentionally omitted — this dispatcher
-// does not poll anywhere yet (a runtime-wide faithfulness follow-up, irrelevant to
-// test262 which installs no interrupt handler).
+// check, so no explicit branch-to-end test is needed here. When an interrupt
+// handler is installed, the conditional fast paths route to their cold handlers;
+// those consume the condition, update the pc, and then poll in the same order as
+// QuickJS OP_if_{true,false}{,8}.
 inline fn jump8Target(pc: [*]const u8, vm: *Vm) [*]const u8 {
     const operand_pc = @intFromPtr(pc + 1) - @intFromPtr(vm.code_base);
     const diff: i8 = @bitCast(pc[1]);
@@ -1492,6 +1491,10 @@ pub fn op_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) c
 // called by OP_if_{true,false}8 at 18881-18919); HTMLDDA objects stay cold because
 // `core.value_semantics.toBoolean` makes their is_html_dda flag falsy.
 pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.poller.active) {
+        @branchHint(.unlikely);
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    }
     const value = (sp - 1)[0];
     if (value.asBool()) |b| {
         if (!b) return @call(.always_tail, next, .{ jump8Target(pc, vm), sp - 1, var_buf, vm });
@@ -1510,6 +1513,10 @@ pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 pub fn op_if_true8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.poller.active) {
+        @branchHint(.unlikely);
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    }
     const value = (sp - 1)[0];
     if (value.asBool()) |b| {
         if (b) return @call(.always_tail, next, .{ jump8Target(pc, vm), sp - 1, var_buf, vm });

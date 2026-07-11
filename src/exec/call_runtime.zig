@@ -484,7 +484,8 @@ fn collectionPrototypeMethodByName(
 
 const VmNativeCallableDispatch = union(enum) {
     bound_function,
-    native_record: core.function.NativeBuiltinRef,
+    resolved_record: *const core.host_function.InternalRecord,
+    native_ref: core.function.NativeBuiltinRef,
     host_function,
     internal: core.host_function.InternalCallableTag,
     name_dispatch,
@@ -494,8 +495,11 @@ fn vmNativeCallableDispatch(function_object: *core.Object) VmNativeCallableDispa
     return switch (function_object.class_id) {
         core.class.ids.bound_function => .bound_function,
         else => blk: {
+            if (function_object.nativeRecord()) |record| {
+                break :blk .{ .resolved_record = record };
+            }
             if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*)) |native_ref| {
-                break :blk .{ .native_record = native_ref };
+                break :blk .{ .native_ref = native_ref };
             }
             if (function_object.hostFunctionKindSlot().* != 0) break :blk .host_function;
             const tag = function_object.internalCallableTag();
@@ -601,7 +605,26 @@ fn callValueOrBytecodeClassModeDispatch(
     if (object_ops.callableObjectFromValue(func)) |function_object| {
         switch (vmNativeCallableDispatch(function_object)) {
             .bound_function => return callBoundFunction(ctx, output, global, function_object, args, caller_function, caller_frame),
-            .native_record => |native_ref| {
+            .resolved_record => |record| {
+                const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
+                const native_result = builtin_dispatch.callInternalRecordDirect(
+                    ctx,
+                    output,
+                    function_global,
+                    &.{},
+                    function_object,
+                    this_value,
+                    record,
+                    args,
+                    caller_function,
+                    caller_frame,
+                ) catch |err| {
+                    try throwRuntimeErrorForGlobal(ctx, function_global, err);
+                    return err;
+                };
+                return native_result;
+            },
+            .native_ref => |native_ref| {
                 const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
                 const native_result = callNativeBuiltinRecordForVm(ctx, output, function_global, func, this_value, function_object, native_ref, args, caller_function, caller_frame) catch |err| {
                     try throwRuntimeErrorForGlobal(ctx, function_global, err);
@@ -678,7 +701,7 @@ fn callValueOrBytecodeClassModeDispatch(
         if (name.len != 0) {
             switch (name[0]) {
                 'A' => if (std.mem.eql(u8, name, "Array")) {
-                    return constructArrayNativeRecordVm(ctx, output, global, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global), args, caller_function, caller_frame);
+                    return constructArrayNativeRecordVm(ctx, output, global, function_object, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global), args, caller_function, caller_frame);
                 },
                 'B' => if (std.mem.eql(u8, name, "BigInt")) {
                     return builtin_glue.qjsBigIntFunctionCall(ctx, output, global, args);
@@ -719,7 +742,7 @@ fn callValueOrBytecodeClassModeDispatch(
         if (std.mem.eql(u8, name, "GeneratorFunction")) return constructGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "AsyncGeneratorFunction")) return promise_ops.constructAsyncGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "Object")) return construct_mod.constructValue(ctx, func, args, &.{});
-        if (std.mem.eql(u8, name, "Array")) return constructArrayNativeRecordVm(ctx, output, global, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global), args, caller_function, caller_frame);
+        if (std.mem.eql(u8, name, "Array")) return constructArrayNativeRecordVm(ctx, output, global, function_object, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global), args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "String")) return string_ops.qjsStringFunctionCall(ctx, output, global, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "Number")) return builtin_glue.qjsNumberFunctionCall(ctx, output, global, args);
         if (std.mem.eql(u8, name, "BigInt")) return builtin_glue.qjsBigIntFunctionCall(ctx, output, global, args);
@@ -730,7 +753,15 @@ fn callValueOrBytecodeClassModeDispatch(
         if (core.host_function.builtin_method_id_lookup.bigint.staticUnsignedMode(name)) |unsigned| {
             return builtin_glue.qjsBigIntAsN(ctx, output, global, args, unsigned, caller_function, caller_frame);
         }
-        if (std.mem.eql(u8, name, "RegExp")) return regexp_fastpath.qjsRegExpFunctionCall(ctx, output, global, args, caller_function, caller_frame);
+        if (std.mem.eql(u8, name, "RegExp")) {
+            var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
+            native_scope.push();
+            defer native_scope.deinit();
+            return regexp_fastpath.qjsRegExpFunctionCall(ctx, output, global, function_object, args, caller_function, caller_frame) catch |err| {
+                try builtin_dispatch.materializeRuntimeError(ctx, global, err);
+                return err;
+            };
+        }
         if (std.mem.eql(u8, name, "DisposableStack")) return error.TypeError;
         if (std.mem.eql(u8, name, "AsyncDisposableStack")) return error.TypeError;
         if (std.mem.eql(u8, name, "AggregateError")) {
@@ -760,7 +791,19 @@ fn callValueOrBytecodeClassModeDispatch(
             if (try qjsGeneratorNext(ctx, output, global, this_value, args)) |value| return value;
             if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
             if (try string_ops.qjsRegExpStringIteratorNext(ctx, output, global, this_value, caller_function, caller_frame)) |value| return value;
-            if (try array_ops.qjsArrayIteratorNext(ctx, output, global, this_value, function_object)) |value| return value;
+            {
+                // Array Iterator `next` is still marker/name-dispatched rather
+                // than table-dispatched. Give this legacy terminal the same
+                // native-frame/error-materialization boundary as a record call.
+                var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
+                native_scope.push();
+                defer native_scope.deinit();
+                const next_result = array_ops.qjsArrayIteratorNext(ctx, output, global, this_value, function_object) catch |err| {
+                    try builtin_dispatch.materializeRuntimeError(ctx, global, err);
+                    return err;
+                };
+                if (next_result) |value| return value;
+            }
         }
         if (std.mem.eql(u8, name, "throw")) {
             if (try promise_ops.qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
@@ -814,29 +857,10 @@ fn callValueOrBytecodeClassModeDispatch(
             return value;
         }
         if (std.mem.eql(u8, name, "apply")) {
-            if (!isCallableValue(this_value)) return throwFunctionRealmTypeError(ctx, global, function_object);
-            const this_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            const arg_array = if (args.len >= 2 and !args[1].isNull() and !args[1].isUndefined()) args[1] else {
-                return callValueOrBytecode(ctx, output, global, this_arg, this_value, &.{}, caller_function, caller_frame);
-            };
-            if (!arg_array.isObject()) return throwFunctionRealmTypeError(ctx, global, function_object);
-            if (object_ops.callableObjectFromValue(this_value)) |target_object| {
-                const target_name = try call_mod.nativeFunctionNameForVm(ctx.runtime, target_object);
-                defer ctx.runtime.memory.allocator.free(target_name);
-                if (std.mem.eql(u8, target_name, "fromCodePoint")) return string_ops.qjsStringFromCodePointArray(ctx, output, global, arg_array);
-            }
-            var apply_args = try array_ops.argsFromArrayLike(ctx, output, global, arg_array, caller_function, caller_frame);
-            defer freeArgs(ctx.runtime, apply_args);
-            var apply_args_root = array_ops.ValueSliceRoot{};
-            apply_args_root.init(ctx.runtime, &apply_args);
-            defer apply_args_root.deinit();
-            return callValueOrBytecode(ctx, output, global, this_arg, this_value, apply_args, caller_function, caller_frame);
+            return qjsFunctionApplyCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame);
         }
         if (std.mem.eql(u8, name, "call")) {
-            if (!isCallableValue(this_value)) return throwFunctionRealmTypeError(ctx, global, function_object);
-            const this_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            const call_args = if (args.len >= 1) args[1..] else &.{};
-            return callValueOrBytecode(ctx, output, global, this_arg, this_value, call_args, caller_function, caller_frame);
+            return qjsFunctionCallCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame);
         }
         if (std.mem.eql(u8, name, "get __proto__")) return object_ops.qjsObjectProtoGetterCall(ctx, output, global, this_value, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "set __proto__")) {
@@ -1288,6 +1312,58 @@ pub fn throwFunctionRealmTypeError(ctx: *core.JSContext, global: *core.Object, f
     return throwFunctionRealmTypeErrorMessage(ctx, global, function_object, "not a function");
 }
 
+/// Function.prototype.call body shared by the native-record owner and the
+/// transitional name-dispatch fallback. Keeping the VM caller pair preserves
+/// nested callsite/property-access context while the native record contributes
+/// the surrounding `call (native)` frame.
+pub fn qjsFunctionCallCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    function_object: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    if (!isCallableValue(this_value)) return throwFunctionRealmTypeError(ctx, global, function_object);
+    const this_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const call_args = if (args.len >= 1) args[1..] else &.{};
+    return callValueOrBytecode(ctx, output, global, this_arg, this_value, call_args, caller_function, caller_frame);
+}
+
+/// Function.prototype.apply body. `argsFromArrayLike` is the shared
+/// CreateListFromArrayLike implementation used by Reflect.apply/construct;
+/// its returned owned values stay rooted for the complete target invocation.
+pub fn qjsFunctionApplyCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    function_object: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    if (!isCallableValue(this_value)) return throwFunctionRealmTypeError(ctx, global, function_object);
+    const this_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const arg_array = if (args.len >= 2 and !args[1].isNull() and !args[1].isUndefined()) args[1] else {
+        return callValueOrBytecode(ctx, output, global, this_arg, this_value, &.{}, caller_function, caller_frame);
+    };
+    if (!arg_array.isObject()) return throwFunctionRealmTypeError(ctx, global, function_object);
+    if (object_ops.callableObjectFromValue(this_value)) |target_object| {
+        const target_name = try call_mod.nativeFunctionNameForVm(ctx.runtime, target_object);
+        defer ctx.runtime.memory.allocator.free(target_name);
+        if (std.mem.eql(u8, target_name, "fromCodePoint")) return string_ops.qjsStringFromCodePointArray(ctx, output, global, arg_array);
+    }
+    var apply_args = try array_ops.argsFromArrayLike(ctx, output, global, arg_array, caller_function, caller_frame);
+    defer freeArgs(ctx.runtime, apply_args);
+    var apply_args_root = array_ops.ValueSliceRoot{};
+    apply_args_root.init(ctx.runtime, &apply_args);
+    defer apply_args_root.deinit();
+    return callValueOrBytecode(ctx, output, global, this_arg, this_value, apply_args, caller_function, caller_frame);
+}
+
 pub fn throwFunctionRealmTypeErrorMessage(ctx: *core.JSContext, global: *core.Object, function_object: *core.Object, message: []const u8) !core.JSValue {
     const error_global = object_ops.objectRealmGlobal(function_object) orelse global;
     const error_value = try exception_ops.createNamedError(ctx, error_global, "TypeError", message);
@@ -1346,13 +1422,17 @@ fn constructArrayNativeRecordVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
+    function_object: ?*core.Object,
     prototype: ?*core.Object,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
-    return (builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, null, array_construct_ref, prototype, args, caller_function, caller_frame) catch |err| switch (err) {
-        error.RangeError => return exception_ops.throwRangeErrorMessage(ctx, global, "invalid array length"),
+    return (builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, function_object, array_construct_ref, prototype, args, caller_function, caller_frame) catch |err| switch (err) {
+        error.RangeError => {
+            if (exception_ops.pendingExceptionMatchesError(ctx, err)) return err;
+            return exception_ops.throwRangeErrorMessage(ctx, global, "invalid array length");
+        },
         else => return err,
     }) orelse error.TypeError;
 }
@@ -1364,13 +1444,131 @@ fn constructBuiltinNativeRecordVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
+    function_object: ?*core.Object,
     native_ref: core.function.NativeBuiltinRef,
     prototype: ?*core.Object,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
-    return builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, null, native_ref, prototype, args, caller_function, caller_frame);
+    return builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, function_object, native_ref, prototype, args, caller_function, caller_frame);
+}
+
+fn constructStringBuiltinNativeVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    function_object: *core.Object,
+    native_ref: core.function.NativeBuiltinRef,
+    new_target: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!?core.JSValue {
+    var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
+    native_scope.push();
+    defer native_scope.deinit();
+
+    return constructStringBuiltinNativeInScope(ctx, output, global, function_object, native_ref, new_target, args, caller_function, caller_frame) catch |err| {
+        try builtin_dispatch.materializeRuntimeError(ctx, global, err);
+        return err;
+    };
+}
+
+fn constructStringBuiltinNativeInScope(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    function_object: *core.Object,
+    native_ref: core.function.NativeBuiltinRef,
+    new_target: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!?core.JSValue {
+    const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
+    const string_value = if (args.len == 0)
+        try value_ops.createStringValue(ctx.runtime, "")
+    else
+        try string_ops.toStringForAnnexB(ctx, output, global, args[0], caller_function, caller_frame);
+    defer string_value.free(ctx.runtime);
+    return builtin_dispatch.callConstructRecordInNativeScope(ctx, output, global, &.{}, function_object, native_ref, prototype, &.{string_value}, caller_function, caller_frame);
+}
+
+fn constructDateBuiltinNativeVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    function_object: *core.Object,
+    native_ref: core.function.NativeBuiltinRef,
+    new_target: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!?core.JSValue {
+    var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
+    native_scope.push();
+    defer native_scope.deinit();
+
+    return constructDateBuiltinNativeInScope(ctx, output, global, function_object, native_ref, new_target, args, caller_function, caller_frame) catch |err| {
+        try builtin_dispatch.materializeRuntimeError(ctx, global, err);
+        return err;
+    };
+}
+
+fn constructDateBuiltinNativeInScope(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    function_object: *core.Object,
+    native_ref: core.function.NativeBuiltinRef,
+    new_target: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!?core.JSValue {
+    const prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "Date", new_target, caller_function, caller_frame);
+    var coerced_storage: [7]core.JSValue = undefined;
+    var coerced: []core.JSValue = coerced_storage[0..0];
+    var coerced_owned = false;
+    defer if (coerced_owned) {
+        for (coerced) |value| value.free(ctx.runtime);
+    };
+    var date_args: []const core.JSValue = args;
+    if (args.len == 1) {
+        if (object_ops.objectFromValue(args[0])) |object| {
+            if (object.class_id == core.class.ids.date) {
+                coerced_storage[0] = try date_vm.callDateBody(ctx, args[0], 1, &.{});
+            } else {
+                const primitive = try coercion_ops.toPrimitiveForAddition(ctx, output, global, args[0]);
+                if (primitive.isString()) {
+                    coerced_storage[0] = primitive;
+                } else {
+                    defer primitive.free(ctx.runtime);
+                    if (primitive.isBigInt()) return @as(?core.JSValue, try exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert bigint to number"));
+                    coerced_storage[0] = try value_ops.toNumberValue(ctx.runtime, primitive);
+                }
+            }
+            coerced = coerced_storage[0..1];
+            coerced_owned = true;
+            date_args = coerced;
+        } else if (!args[0].isString()) {
+            if (args[0].isBigInt()) return @as(?core.JSValue, try exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert bigint to number"));
+            coerced_storage[0] = try value_ops.toNumberValue(ctx.runtime, args[0]);
+            coerced = coerced_storage[0..1];
+            coerced_owned = true;
+            date_args = coerced;
+        }
+    } else if (args.len >= 2) {
+        var coerced_len: usize = 0;
+        while (coerced_len < args.len and coerced_len < coerced_storage.len) : (coerced_len += 1) {
+            coerced_storage[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, global, args[coerced_len], caller_function, caller_frame);
+            coerced = coerced_storage[0 .. coerced_len + 1];
+            coerced_owned = true;
+        }
+        date_args = coerced;
+    }
+    return builtin_dispatch.callConstructRecordInNativeScope(ctx, output, global, &.{}, function_object, native_ref, prototype, date_args, caller_function, caller_frame);
 }
 
 pub fn constructValueOrBytecodeWithNewTarget(
@@ -1458,17 +1656,10 @@ pub fn constructValueOrBytecodeWithNewTarget(
                 // VM context (so a user `toString`/`Symbol.toPrimitive` runs with
                 // the caller frame), then run the builtin String constructor body
                 // through the record table with the resolved wrapper prototype.
-                const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
-                const string_value = if (args.len == 0)
-                    try value_ops.createStringValue(ctx.runtime, "")
-                else
-                    try string_ops.toStringForAnnexB(ctx, output, global, args[0], caller_function, caller_frame);
-                defer string_value.free(ctx.runtime);
-                if (try constructBuiltinNativeRecordVm(ctx, output, global, native_ref, prototype, &.{string_value}, caller_function, caller_frame)) |value| return value;
+                return (try constructStringBuiltinNativeVm(ctx, output, global, function_object, native_ref, new_target, args, caller_function, caller_frame)) orelse error.TypeError;
             }
         }
         if (construct_native_ref) |native_ref| if (native_ref.domain == .date and native_ref.id == date_construct_id) {
-            const prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "Date", new_target, caller_function, caller_frame);
             // `new Date(...)`: coerce the arguments in VM context exactly as the
             // retired `qjsDateConstructWithPrototype` inline path did (so user
             // `valueOf`/`toString`/`Symbol.toPrimitive` run with the caller
@@ -1476,53 +1667,11 @@ pub fn constructValueOrBytecodeWithNewTarget(
             // constructor body through the record table with the resolved
             // prototype. The single-arg date-copy and string fast paths pass the
             // argument through unchanged.
-            var coerced_storage: [7]core.JSValue = undefined;
-            var coerced: []core.JSValue = coerced_storage[0..0];
-            var coerced_owned = false;
-            defer if (coerced_owned) {
-                for (coerced) |value| value.free(ctx.runtime);
-            };
-            var date_args: []const core.JSValue = args;
-            if (args.len == 1) {
-                if (object_ops.objectFromValue(args[0])) |object| {
-                    if (object.class_id == core.class.ids.date) {
-                        coerced_storage[0] = try date_vm.callDateBody(ctx, args[0], 1, &.{});
-                    } else {
-                        const primitive = try coercion_ops.toPrimitiveForAddition(ctx, output, global, args[0]);
-                        if (primitive.isString()) {
-                            coerced_storage[0] = primitive;
-                        } else {
-                            defer primitive.free(ctx.runtime);
-                            // JS_ToFloat64Free on a bigint primitive throws
-                            // (qjs js_date_constructor single-arg branch).
-                            if (primitive.isBigInt()) return exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert bigint to number");
-                            coerced_storage[0] = try value_ops.toNumberValue(ctx.runtime, primitive);
-                        }
-                    }
-                    coerced = coerced_storage[0..1];
-                    coerced_owned = true;
-                    date_args = coerced;
-                } else if (!args[0].isString()) {
-                    if (args[0].isBigInt()) return exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert bigint to number");
-                    coerced_storage[0] = try value_ops.toNumberValue(ctx.runtime, args[0]);
-                    coerced = coerced_storage[0..1];
-                    coerced_owned = true;
-                    date_args = coerced;
-                }
-            } else if (args.len >= 2) {
-                var coerced_len: usize = 0;
-                while (coerced_len < args.len and coerced_len < coerced_storage.len) : (coerced_len += 1) {
-                    coerced_storage[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, global, args[coerced_len], caller_function, caller_frame);
-                    coerced = coerced_storage[0 .. coerced_len + 1];
-                    coerced_owned = true;
-                }
-                date_args = coerced;
-            }
-            if (try constructBuiltinNativeRecordVm(ctx, output, global, native_ref, prototype, date_args, caller_function, caller_frame)) |value| return value;
+            return (try constructDateBuiltinNativeVm(ctx, output, global, function_object, native_ref, new_target, args, caller_function, caller_frame)) orelse error.TypeError;
         };
         if (std.mem.eql(u8, name, "Array")) {
             const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
-            return constructArrayNativeRecordVm(ctx, output, global, prototype, args, caller_function, caller_frame);
+            return constructArrayNativeRecordVm(ctx, output, global, function_object, prototype, args, caller_function, caller_frame);
         }
         if (std.mem.eql(u8, name, "Promise")) return promise_ops.qjsPromiseConstruct(ctx, output, global, new_target, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "DisposableStack")) {
@@ -1539,7 +1688,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
             // prototype after it (matching QuickJS `js_regexp_constructor` ->
             // `js_regexp_constructor_internal`); its terminal construct runs the
             // builtin RegExp constructor body through the record table.
-            return regexp_fastpath.qjsRegExpConstructCall(ctx, output, global, new_target, args, caller_function, caller_frame);
+            return regexp_fastpath.qjsRegExpConstructCall(ctx, output, global, function_object, new_target, args, caller_function, caller_frame);
         };
         if (core.host_function.builtin_method_id_lookup.collection.constructorId(name)) |kind| return builtin_glue.constructCollectionFromVm(ctx, output, global, func, kind, args);
         if (std.mem.eql(u8, name, "ArrayBuffer") or std.mem.eql(u8, name, "SharedArrayBuffer")) {
@@ -4255,7 +4404,7 @@ pub fn simpleEvalRegExpLiteral(ctx: *core.JSContext, global: *core.Object, sourc
     defer flags_value.free(ctx.runtime);
     const regexp_args = [_]core.JSValue{ pattern_value, flags_value };
     const regexp_construct_ref = core.function.NativeBuiltinRef{ .domain = .regexp, .id = regexp_construct_id };
-    return try constructBuiltinNativeRecordVm(ctx, null, global, regexp_construct_ref, object_ops.constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"), &regexp_args, null, null);
+    return try constructBuiltinNativeRecordVm(ctx, null, global, null, regexp_construct_ref, object_ops.constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"), &regexp_args, null, null);
 }
 
 pub fn containsUtf8LineSeparator(bytes: []const u8) bool {
@@ -6528,7 +6677,7 @@ pub fn qjsReflectConstructGenericCallable(
         defer if (target_name.len != 0) ctx.runtime.memory.allocator.free(target_name);
         if (std.mem.eql(u8, target_name, "Array")) {
             const prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "Array", resolved.new_target, caller_function, caller_frame);
-            return try constructArrayNativeRecordVm(ctx, output, global, prototype, resolved_args, caller_function, caller_frame);
+            return try constructArrayNativeRecordVm(ctx, output, global, target_object, prototype, resolved_args, caller_function, caller_frame);
         }
     }
 
@@ -6945,11 +7094,10 @@ pub fn inOp(
     };
     const key = try object_ops.toPropertyKeyAtom(ctx, output, global, lhs, caller_function, caller_frame);
     defer ctx.runtime.atoms.free(key);
-    const has_builtin_object_proto = value_ops.atomNameEql(ctx.runtime, key, "toString") and (object.class_id == core.class.ids.object or object.flags.is_array);
     const found = if (object.proxyTarget() != null)
         try object_ops.hasValueProperty(ctx, output, global, rhs, object, key, caller_function, caller_frame)
     else
-        try object_ops.ordinaryHasValueProperty(ctx, output, global, object, key, has_builtin_object_proto, caller_function, caller_frame);
+        try object_ops.ordinaryHasValueProperty(ctx, output, global, object, key, false, caller_function, caller_frame);
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(found));
 }
 
@@ -6965,7 +7113,7 @@ pub fn instanceofOp(
     defer rhs.free(ctx.runtime);
     const lhs = try stack.pop();
     defer lhs.free(ctx.runtime);
-    const ctor = property_ops.expectObject(rhs) catch {
+    _ = property_ops.expectObject(rhs) catch {
         _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid 'instanceof' right operand") catch |err| return err;
         return error.TypeError;
     };
@@ -6987,10 +7135,6 @@ pub fn instanceofOp(
         return;
     }
     const object = try property_ops.expectObject(lhs);
-    if (try constructorNameEqlLocal(ctx.runtime, ctor, "Array")) {
-        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(object.flags.is_array));
-        return;
-    }
     const proto_value = try object_ops.getValueProperty(ctx, output, global, rhs, core.atom.ids.prototype, caller_function, caller_frame);
     defer proto_value.free(ctx.runtime);
     if (!proto_value.isObject()) {

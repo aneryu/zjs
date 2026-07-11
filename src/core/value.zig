@@ -363,10 +363,12 @@ pub const JSValue = extern struct {
             const p = NanBox.prefixBits(self.repr.bits);
             return p >= NanBox.refcount_min and p <= NanBox.refcount_max;
         }
-        switch (self.tagOf()) {
-            Tag.big_int, Tag.symbol, Tag.string, Tag.string_rope, Tag.object, Tag.module, Tag.function_bytecode => return true,
-            else => return false,
-        }
+        // QuickJS deliberately uses one unsigned range comparison here:
+        // negative refcounted tags [-9..-1] (including the unreachable -5/-4
+        // holes) compare above every non-negative immediate tag.
+        const tag: u64 = @bitCast(self.repr.tag);
+        const first: u64 = @bitCast(@as(i64, Tag.first));
+        return tag >= first;
     }
 
     pub fn asInt32(self: JSValue) ?i32 {
@@ -592,7 +594,9 @@ pub const JSValue = extern struct {
             // deinit-phase skip for {module, object, function_bytecode} — the
             // contiguous tail [deinit_skip_min, refcount_max].
             if (rt.gc.phase == .deinit and p >= NanBox.deinit_skip_min) return;
-            if (rt.opcode_profile) |prof| prof.recordValueFree();
+            if (comptime build_options.zjs_enable_opcode_profile) {
+                if (rt.opcode_profile) |prof| prof.recordValueFree();
+            }
             if (p == NanBox.prefixOf(Tag.string_rope)) {
                 releaseRopeValue(rt, self);
             } else if (p == NanBox.prefixOf(Tag.symbol) or p == NanBox.prefixOf(Tag.string)) {
@@ -609,7 +613,9 @@ pub const JSValue = extern struct {
                 else => {},
             }
         }
-        if (rt.opcode_profile) |prof| prof.recordValueFree();
+        if (comptime build_options.zjs_enable_opcode_profile) {
+            if (rt.opcode_profile) |prof| prof.recordValueFree();
+        }
         switch (self.tagOf()) {
             Tag.string_rope => {
                 releaseRopeValue(rt, self);

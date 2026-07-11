@@ -215,7 +215,14 @@ pub noinline fn typeOfIsUndefined(rt: *core.JSRuntime, stack: *stack_mod.Stack) 
 pub noinline fn typeOfIsFunction(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(rt);
-    const is_func = value.isFunctionBytecode() or functionObjectFromValue(value) != null;
+    // Keep the short comparison opcode exactly aligned with `typeOf`: native
+    // c_functions, external host functions, and callable proxies all report
+    // "function", not only bytecode function objects.
+    const is_func = !value_ops.isHTMLDDA(value) and
+        (value.isFunctionBytecode() or
+            functionObjectFromValue(value) != null or
+            callableObjectFromValue(value) != null or
+            proxyTargetIsCallable(value));
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(is_func));
 }
 

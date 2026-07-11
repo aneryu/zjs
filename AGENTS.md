@@ -50,6 +50,22 @@ Prior phase plans, percentage-gate plans, snapshot ledgers, one-off analyses,
 and detailed error catalogs were removed from the active tree and remain
 available only through git history.
 
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked as local Markdown under `.scratch/<feature>/`. See
+`docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five canonical local status strings. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository. See `docs/agents/domain.md`.
+
 ## Repository Layout
 
 - `src/root.zig`: public engine entrypoint.

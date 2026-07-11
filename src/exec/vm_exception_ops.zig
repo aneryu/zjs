@@ -368,9 +368,9 @@ pub fn qjsCallSiteMethodById(rt: *core.JSRuntime, object: *core.Object, id: core
         .callsite_get_function => core.JSValue.nullValue(),
         .callsite_get_function_name => if (object.callSiteFunctionName()) |value| value.dup() else core.JSValue.nullValue(),
         .callsite_get_file_name => if (object.callSiteFile()) |value| value.dup() else core.JSValue.nullValue(),
-        .callsite_get_line_number => core.JSValue.int32(object.callSiteLine()),
-        .callsite_get_column_number => core.JSValue.int32(object.callSiteColumn()),
-        .callsite_is_native => core.JSValue.boolean(false),
+        .callsite_get_line_number => if (object.callSiteIsNative()) core.JSValue.nullValue() else core.JSValue.int32(object.callSiteLine()),
+        .callsite_get_column_number => if (object.callSiteIsNative()) core.JSValue.nullValue() else core.JSValue.int32(object.callSiteColumn()),
+        .callsite_is_native => core.JSValue.boolean(object.callSiteIsNative()),
         else => null,
     };
 }

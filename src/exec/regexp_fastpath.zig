@@ -30,14 +30,11 @@ const regexp_construct_ref = core.function.NativeBuiltinRef{
     .id = @intFromEnum(core.host_function.builtin_method_ids.regexp.ConstructorMethod.construct),
 };
 
-/// Run the builtin RegExp constructor body for already-coerced `(pattern,
-/// flags)` and a resolved instance `prototype` through the record table. The
-/// RegExp construct record reads only `args`/`new_target`, so no constructor
-/// function object is threaded.
-fn constructRegExpRecord(
+fn constructRegExpRecordInNativeScope(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
+    constructor: ?*core.Object,
     prototype: ?*core.Object,
     pattern: core.JSValue,
     flags: core.JSValue,
@@ -45,7 +42,7 @@ fn constructRegExpRecord(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const args = [_]core.JSValue{ pattern, flags };
-    return (try builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, null, regexp_construct_ref, prototype, &args, caller_function, caller_frame)) orelse error.TypeError;
+    return (try builtin_dispatch.callConstructRecordInNativeScope(ctx, output, global, &.{}, constructor, regexp_construct_ref, prototype, &args, caller_function, caller_frame)) orelse error.TypeError;
 }
 
 // Helpers that remain in call_runtime.zig (generic utilities and RegExp helpers
@@ -101,6 +98,7 @@ pub fn qjsRegExpFunctionCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
+    constructor: ?*core.Object,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
@@ -180,13 +178,34 @@ pub fn qjsRegExpFunctionCall(
         flags = string_value;
     }
 
-    return constructRegExpRecord(ctx, output, global, constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"), pattern, flags, caller_function, caller_frame);
+    return constructRegExpRecordInNativeScope(ctx, output, global, constructor, constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"), pattern, flags, caller_function, caller_frame);
 }
 
 pub fn qjsRegExpConstructCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
+    constructor: ?*core.Object,
+    new_target: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, constructor);
+    native_scope.push();
+    defer native_scope.deinit();
+
+    return qjsRegExpConstructCallInNativeScope(ctx, output, global, constructor, new_target, args, caller_function, caller_frame) catch |err| {
+        try builtin_dispatch.materializeRuntimeError(ctx, global, err);
+        return err;
+    };
+}
+
+fn qjsRegExpConstructCallInNativeScope(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    constructor: ?*core.Object,
     new_target: core.JSValue,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
@@ -204,7 +223,7 @@ pub fn qjsRegExpConstructCall(
         // inputs and is subsumed here now that the construct logic is owned by
         // the record.)
         const prototype = try reflectConstructPrototypeVm(ctx, output, global, "RegExp", new_target, caller_function, caller_frame);
-        return constructRegExpRecord(ctx, output, global, prototype, input_pattern, input_flags, caller_function, caller_frame);
+        return constructRegExpRecordInNativeScope(ctx, output, global, constructor, prototype, input_pattern, input_flags, caller_function, caller_frame);
     }
     const pattern_is_regexp = try isRegExpObservable(ctx, output, global, input_pattern, caller_function, caller_frame);
 
@@ -278,7 +297,7 @@ pub fn qjsRegExpConstructCall(
         owned_flags = string_value;
         flags = string_value;
     }
-    return constructRegExpRecord(ctx, output, global, prototype, pattern, flags, caller_function, caller_frame);
+    return constructRegExpRecordInNativeScope(ctx, output, global, constructor, prototype, pattern, flags, caller_function, caller_frame);
 }
 
 pub fn qjsRegExpExecMethod(

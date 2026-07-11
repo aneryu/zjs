@@ -51,7 +51,9 @@ fn denseRecords(comptime entries: []const InternalEntry) []const InternalRecord 
                 if (entry.call == null) @compileError("zjs_internal_call entry missing call: " ++ entry.name);
             } else {
                 if (entry.native_function == null) @compileError("native cproto entry missing function: " ++ entry.name);
-                if (entry.call != null) @compileError("native cproto entry must not also set call: " ++ entry.name);
+                if (entry.call != null and entry.cproto != .f_f and entry.cproto != .f_f_f) {
+                    @compileError("only numeric cproto entries may set a coercion fallback: " ++ entry.name);
+                }
             }
             records[entry.id] = .{
                 .length = entry.length,

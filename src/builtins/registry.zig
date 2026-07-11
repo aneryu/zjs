@@ -2438,6 +2438,8 @@ fn installDatePrototypeAliases(rt: *core.JSRuntime, global: *core.Object, ctor: 
 fn installFunctionPrototypeExtras(rt: *core.JSRuntime, ctor: *core.Object) !void {
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + 1);
+    try bindNativeRecordByName(rt, proto, "call", .function, @intFromEnum(function_ops.PrototypeMethod.call));
+    try bindNativeRecordByName(rt, proto, "apply", .function, @intFromEnum(function_ops.PrototypeMethod.apply));
     try bindNativeRecordByName(rt, proto, "toString", .function, @intFromEnum(function_ops.PrototypeMethod.to_string));
     try bindNativeRecordByName(rt, proto, "bind", .function, @intFromEnum(function_ops.PrototypeMethod.bind));
 

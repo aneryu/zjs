@@ -336,8 +336,8 @@ pub const String = struct {
     /// reuses the same cached string with zero conversion.
     /// Rope-backed strings are flattened by the content read.
     pub fn internAtom(self: *String, rt: *JSRuntime) !u32 {
-        _ = self.contentHash();
         if (self.atom_id != no_atom_id) return rt.atoms.dup(self.atom_id);
+        _ = self.contentHash();
         var utf8 = std.ArrayList(u8).empty;
         defer utf8.deinit(rt.memory.allocator);
         const atom_id = switch (self.resolveData()) {

@@ -303,6 +303,9 @@ pub const InternalRecord = struct {
     /// its construct cascade.
     constructor: bool = false,
     cproto: NativeCProto = .zjs_internal_call,
+    /// Primary handler for `.zjs_internal_call`; optional cold coercion
+    /// fallback for typed cprotos such as `.f_f`/`.f_f_f` when their arguments
+    /// are not already primitive numbers.
     call: ?InternalCallFn = null,
     native_function: ?NativeFunctionPtr = null,
 
@@ -326,6 +329,8 @@ pub const InternalEntry = struct {
     /// the construct dispatch path routes `new X()` here.
     constructor: bool = false,
     cproto: NativeCProto = .zjs_internal_call,
+    /// See `InternalRecord.call`: typed cproto entries may retain a slow
+    /// InternalCall fallback for observable coercion cases.
     call: ?InternalCallFn = null,
     native_function: ?NativeFunctionPtr = null,
 };

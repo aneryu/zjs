@@ -834,6 +834,11 @@ pub fn buildErrorStackStringValue(ctx: *core.JSContext, global: *core.Object, sk
         if (bytes.items.len != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
         try bytes.appendSlice(ctx.runtime.memory.allocator, "    at ");
         try appendBacktraceFunctionName(ctx, &bytes, entry.function_name, entry.filename);
+        if (entry.is_native) {
+            try bytes.appendSlice(ctx.runtime.memory.allocator, " (native)");
+            emitted += 1;
+            continue;
+        }
         const filename = ctx.runtime.atoms.name(entry.filename) orelse "<anonymous>";
         const location = entry.location();
         const line_num = if (location.line_num > 0) location.line_num else 1;
@@ -866,6 +871,11 @@ pub fn formatCapturedErrorStackStringValue(ctx: *core.JSContext, sites_value: co
         if (bytes.items.len != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
         try bytes.appendSlice(ctx.runtime.memory.allocator, "    at ");
         try appendCallSiteFunctionName(ctx.runtime, &bytes, site);
+        if (site.callSiteIsNative()) {
+            try bytes.appendSlice(ctx.runtime.memory.allocator, " (native)");
+            emitted += 1;
+            continue;
+        }
 
         var filename_bytes: std.ArrayList(u8) = .empty;
         defer filename_bytes.deinit(ctx.runtime.memory.allocator);
@@ -2693,7 +2703,7 @@ pub fn qjsStringRegExpCreateAndInvoke(
     defer ctx.runtime.atoms.free(regexp_key);
     const constructor = global.getProperty(regexp_key);
     defer constructor.free(ctx.runtime);
-    const rx = try qjsRegExpConstructCall(ctx, output, global, constructor, &.{regexp}, caller_function, caller_frame);
+    const rx = try qjsRegExpConstructCall(ctx, output, global, objectFromValue(constructor), constructor, &.{regexp}, caller_function, caller_frame);
     defer rx.free(ctx.runtime);
     if (try callStringWellKnownMethod(ctx, output, global, string_value, rx, symbol_name, caller_function, caller_frame)) |value| return value;
     // Mirrors js_string_match (quickjs.c:45881): the tail is
