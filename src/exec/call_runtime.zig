@@ -569,7 +569,7 @@ fn callValueOrBytecodeClassModeDispatch(
         return callFunctionBytecode(ctx, func, func, this_value, args, &.{}, output, global);
     }
     if (object_ops.functionObjectFromValue(func)) |function_object| {
-        const function_value = function_object.functionBytecodeSlot().* orelse return error.TypeError;
+        const function_value = function_object.functionBytecode() orelse return error.TypeError;
         const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
         if (allow_class_constructor_call and !fb.flags.is_class_constructor) {
             if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) return error.TypeError;
@@ -1751,7 +1751,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
         return instance;
     }
     if (object_ops.functionObjectFromValue(func)) |function_object| {
-        const function_value = function_object.functionBytecodeSlot().* orelse return error.TypeError;
+        const function_value = function_object.functionBytecode() orelse return error.TypeError;
         const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
         if (fb.flags.is_class_constructor) {
             // Special handling for class constructors (published via top-level script/module binding or direct define_class).
@@ -4263,7 +4263,7 @@ pub fn directEvalCallerAllowsNewTarget(caller_frame: ?*frame_mod.Frame, eval_in_
     if (outer_frame.current_function.isUndefined()) return false;
     if (functionBytecodeFromValue(outer_frame.current_function)) |fb| return fb.flags.new_target_allowed;
     if (object_ops.objectFromValue(outer_frame.current_function)) |function_object| {
-        const stored = function_object.functionBytecodeSlot().* orelse return false;
+        const stored = function_object.functionBytecode() orelse return false;
         const fb = functionBytecodeFromValue(stored) orelse return false;
         return fb.flags.new_target_allowed;
     }
@@ -4833,7 +4833,7 @@ pub fn qjsGeneratorNext(
         defer step.value.free(ctx.runtime);
         return try createIteratorResult(ctx.runtime, generator_global, step.value, step.done);
     }
-    const function_value = object.functionBytecodeSlot().* orelse return error.TypeError;
+    const function_value = object.functionBytecode() orelse return error.TypeError;
     const stored_current_function = if (object.generatorCurrentFunction()) |value| value.dup() else null;
     defer if (stored_current_function) |value| value.free(ctx.runtime);
     const current_function_value = stored_current_function orelse receiver;
@@ -4901,7 +4901,7 @@ pub fn qjsSyncGeneratorStep(
     // fall back to the generic protocol, whose .next() call lands in qjsGeneratorNext
     // and threads the completion through the finally.
     if (object.generatorResumeCompletionType() == 1) return null;
-    const function_value = object.functionBytecodeSlot().* orelse return error.TypeError;
+    const function_value = object.functionBytecode() orelse return error.TypeError;
     const stored_current_function = if (object.generatorCurrentFunction()) |value| value.dup() else null;
     defer if (stored_current_function) |value| value.free(ctx.runtime);
     const current_function_value = stored_current_function orelse receiver;
@@ -4974,7 +4974,7 @@ pub fn resumeGeneratorYieldStarCompletion(
     resume_value: core.JSValue,
     completion_type: i32,
 ) !core.JSValue {
-    const function_value = object.functionBytecodeSlot().* orelse return error.TypeError;
+    const function_value = object.functionBytecode() orelse return error.TypeError;
     try setGeneratorResumeCompletionType(ctx.runtime, object, completion_type);
     object.generatorExecutingSlot().* = true;
     defer object.generatorExecutingSlot().* = false;
@@ -5079,7 +5079,7 @@ fn resumeGeneratorPendingReturnStep(
 ) !GeneratorValueDone {
     const pending_value = pending.value;
     defer pending_value.free(ctx.runtime);
-    const function_value = object.functionBytecodeSlot().* orelse return error.TypeError;
+    const function_value = object.functionBytecode() orelse return error.TypeError;
     const stored_current_function = if (object.generatorCurrentFunction()) |value| value.dup() else null;
     defer if (stored_current_function) |value| value.free(ctx.runtime);
     const current_function_value = stored_current_function orelse receiver;
@@ -5162,7 +5162,7 @@ pub fn qjsGeneratorReturn(
         }
     }
     if (object.generatorPc() != 0) {
-        const function_value = object.functionBytecodeSlot().* orelse return error.TypeError;
+        const function_value = object.functionBytecode() orelse return error.TypeError;
         const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
         if (findGeneratorReturnFinallyTarget(fb, @intCast(object.generatorPc()))) |finally_range| {
             object.generatorPcSlot().* = finally_range.start;
@@ -5217,7 +5217,7 @@ pub fn resumeGeneratorCatchForRuntimeError(
 ) !?core.JSValue {
     if (object.class_id == core.class.ids.async_generator) return null;
     if (object.generatorPc() == 0 or !object.generatorStarted()) return null;
-    const function_value = object.functionBytecodeSlot().* orelse return null;
+    const function_value = object.functionBytecode() orelse return null;
     const fb = functionBytecodeFromValue(function_value) orelse return null;
     const catch_target = findEnclosingCatchTarget(fb, @intCast(object.generatorPc())) orelse return null;
     const thrown = try exception_ops.runtimeErrorValueForGeneratorCatch(ctx, global, err);
@@ -5416,7 +5416,7 @@ pub fn qjsGeneratorThrow(
             .yield_result => |result| return result,
             .complete => |value| {
                 defer value.free(ctx.runtime);
-                const function_value = object.functionBytecodeSlot().* orelse return error.TypeError;
+                const function_value = object.functionBytecode() orelse return error.TypeError;
                 const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
                 object.generatorPcSlot().* = generatorPcAfterYieldStar(fb, object.generatorPc()) orelse return error.InvalidBytecode;
                 object.generatorJustYieldedSlot().* = false;
@@ -5448,7 +5448,7 @@ pub fn qjsGeneratorThrow(
     }
 
     if (object.generatorPc() != 0 and object.generatorStarted()) {
-        const function_value = object.functionBytecodeSlot().* orelse return error.TypeError;
+        const function_value = object.functionBytecode() orelse return error.TypeError;
         const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
         if (findEnclosingCatchTarget(fb, @intCast(object.generatorPc()))) |catch_target| {
             object.generatorPcSlot().* = catch_target;
@@ -5514,7 +5514,7 @@ pub fn findGeneratorReturnFinallyTarget(fb: *const bytecode.FunctionBytecode, st
             const diff = readInt(i32, fb.byteCode()[operand_pc..][0..4]);
             const target = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
             if (target > start_pc and target <= fb.byteCode().len) {
-                if (findGeneratorReturnFinallyTargetFromCatch(fb, @intCast(target))) |candidate| {
+                if (findGeneratorReturnFinallyTargetFromCatch(fb, pc + 5, @intCast(target))) |candidate| {
                     if (found == null or candidate.stop > found.?.stop) {
                         found = candidate;
                     }
@@ -5528,7 +5528,28 @@ pub fn findGeneratorReturnFinallyTarget(fb: *const bytecode.FunctionBytecode, st
     return found;
 }
 
-pub fn findGeneratorReturnFinallyTargetFromCatch(fb: *const bytecode.FunctionBytecode, catch_target: usize) ?GeneratorReturnFinallyRange {
+pub fn findGeneratorReturnFinallyTargetFromCatch(
+    fb: *const bytecode.FunctionBytecode,
+    protected_start: usize,
+    catch_target: usize,
+) ?GeneratorReturnFinallyRange {
+    // A compiled try/finally has a normal-completion jump at the end of the
+    // protected range. Its target is the duplicated normal finally body, and
+    // the instruction immediately before that target is the synthetic rethrow
+    // terminating the exceptional copy. Use that structural marker instead of
+    // the first throw in the exceptional copy: an explicit throw inside the
+    // finally body must execute and override a pending generator return.
+    if (findForwardGotoTargetInRange(fb, protected_start, catch_target)) |normal_finally_target| {
+        if (normal_finally_target > catch_target and
+            normal_finally_target <= fb.byteCode().len and
+            normal_finally_target > 0 and
+            normal_finally_target - 1 > catch_target and
+            fb.byteCode()[normal_finally_target - 1] == op.throw)
+        {
+            return .{ .start = catch_target, .stop = normal_finally_target - 1 };
+        }
+    }
+
     const rethrow_pc = findThrowFrom(fb, catch_target) orelse return null;
     if (rethrow_pc <= catch_target) return null;
     if (findForwardGotoTargetInRange(fb, catch_target, rethrow_pc)) |normal_finally_target| {
@@ -6318,7 +6339,7 @@ pub fn currentFrameFunctionIsStrict(frame: *frame_mod.Frame) bool {
     const fb = if (functionBytecodeFromValue(frame.current_function)) |bytecode_value|
         bytecode_value
     else if (object_ops.objectFromValue(frame.current_function)) |function_object|
-        if (function_object.functionBytecodeSlot().*) |stored| functionBytecodeFromValue(stored) else null
+        if (function_object.functionBytecode()) |stored| functionBytecodeFromValue(stored) else null
     else
         null;
     if (fb) |function_bytecode| return function_bytecode.flags.is_strict_mode or function_bytecode.flags.runtime_strict_mode;
@@ -6344,7 +6365,7 @@ pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) error{OutOfM
         return !fb.flags.is_arrow_function and fb.flags.has_prototype and fb.flags.func_kind != .generator and fb.flags.func_kind != .async_generator;
     }
     if (object_ops.functionObjectFromValue(value)) |function_object| {
-        const function_value = function_object.functionBytecodeSlot().* orelse return false;
+        const function_value = function_object.functionBytecode() orelse return false;
         const fb = functionBytecodeFromValue(function_value) orelse return false;
         return !fb.flags.is_arrow_function and fb.flags.has_prototype and fb.flags.func_kind != .generator and fb.flags.func_kind != .async_generator;
     }
@@ -6712,7 +6733,7 @@ pub fn qjsReflectConstructGenericCallable(
     }
 
     if (object_ops.functionObjectFromValue(resolved.target)) |function_object| {
-        const function_value = function_object.functionBytecodeSlot().* orelse return error.TypeError;
+        const function_value = function_object.functionBytecode() orelse return error.TypeError;
         const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
         if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) {
             return error.TypeError;

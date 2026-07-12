@@ -1306,10 +1306,7 @@ fn bigIntParts(value: core.JSValue, scratch: *[2]bignum.Limb) ?BigIntParts {
 }
 
 fn compareStringValues(a: core.JSValue, b: core.JSValue) ?i32 {
-    if (!a.isString() or !b.isString()) return null;
-    const a_string = a.asStringBody() orelse return null;
-    const b_string = b.asStringBody() orelse return null;
-    return a_string.compare(b_string);
+    return core.string.compareStringValues(a, b, false);
 }
 
 fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {

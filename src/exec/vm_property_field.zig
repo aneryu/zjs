@@ -796,10 +796,9 @@ fn fastStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, key: core.JSVa
     if (!value.isString() or !key.isInt()) return null;
     const index_i32 = key.asInt32().?;
     if (index_i32 < 0) return null;
-    const string_value = value.asStringBody() orelse return null;
     const index: usize = @intCast(index_i32);
-    if (index >= string_value.len()) return null;
-    const unit = string_value.codeUnitAt(index);
+    if (index >= core.string.stringValueLenUnchecked(value)) return null;
+    const unit = core.string.stringValueCodeUnitAtUnchecked(value, index);
     if (unit <= 0x7f) {
         const cached = rt.cachedSingleByteString(@intCast(unit)) orelse return null;
         return cached.value().dup();

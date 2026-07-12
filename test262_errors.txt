@@ -1,13 +1,2 @@
-test262/test/built-ins/AsyncGeneratorPrototype/return/return-suspendedYield-try-finally-throw.js
-test262/test/language/expressions/dynamic-import/assignment-expression/arrow-function.js
 test262/test/language/expressions/dynamic-import/import-attributes/2nd-param-with-type-text.js
-test262/test/language/module-code/top-level-await/dynamic-import-of-waiting-module.js
-test262/test/language/module-code/top-level-await/fulfillment-order.js
-test262/test/language/module-code/top-level-await/rejection-order.js
-test262/test/language/module-code/top-level-await/top-level-ticks-2.js
-test262/test/language/module-code/top-level-await/top-level-ticks.js
-test262/test/language/module-code/top-level-await/unobservable-global-async-evaluation-count-reset.js
-test262/test/language/module-code/verify-dfs.js
 test262/test/language/statements/await-using/await-using-does-not-imply-await-if-not-evaluated.js
-test262/test/language/statements/for-await-of/async-func-decl-dstr-obj-id-init-simple-no-strict.js
-test262/test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-simple-no-strict.js

@@ -5641,6 +5641,22 @@ test "parser accepts dynamic import call expressions" {
     try std.testing.expect(import_in_arg.syntax_error == null);
 }
 
+test "dynamic import arguments do not leak anonymous function named evaluation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "const direct = () => {}; async function fn() { const ns = await import(() => {}); }",
+        .{ .mode = .script, .filename = "dynamic-import-name.js" },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(@as(usize, 1), countOpcodeRecursive(&parsed.function, op.set_name));
+    try std.testing.expectEqual(@as(usize, 1), countOpcodeRecursive(&parsed.function, op.import));
+}
+
 test "parser rejects invalid dynamic import call syntax" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

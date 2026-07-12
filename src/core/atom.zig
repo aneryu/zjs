@@ -1109,6 +1109,26 @@ pub const AtomTable = struct {
         return isPublicSymbolKind(atom_kind);
     }
 
+    /// QJS `OP_push_atom_value` indexes `atom_array[atom]` and duplicates the
+    /// already-materialized JSString directly. zjs keeps atoms and strings in
+    /// separate structures, but after the first conversion the dynamic entry
+    /// has the same direct pointer. Inline that steady-state lookup so a string
+    /// literal push does not repeat tagged/const/name/liveness/cache dispatch
+    /// on every loop iteration. The slow path preserves tagged-int, predefined,
+    /// symbol-description and first-materialization behavior.
+    pub inline fn toStringValueForPush(self: *AtomTable, rt: anytype, atom_id: Atom) !JSValue {
+        if (atom_id >= first_dynamic_atom and atom_id < tagged_int_bit) {
+            const idx: usize = @intCast(atom_id - first_dynamic_atom);
+            if (idx < self.entries.len) {
+                const entry = &self.entries[idx];
+                if (entry.kind == .string) {
+                    if (entry.str) |cached| return cached.value().dup();
+                }
+            }
+        }
+        return self.toStringValue(rt, atom_id);
+    }
+
     pub fn toStringValue(self: *AtomTable, rt: anytype, atom_id: Atom) !JSValue {
         if (isTaggedInt(atom_id)) {
             var buf: [10]u8 = undefined;
@@ -1120,18 +1140,48 @@ pub const AtomTable = struct {
             const cached = try rt.recentAtomString(atom_id, text);
             return cached.value().dup();
         }
-        const text = self.name(atom_id) orelse return JSValue.undefinedValue();
+        if (atom_id == null_atom) return JSValue.undefinedValue();
+
+        // QJS atom ids index an array whose entry is itself the string body.
+        // Keep zjs's split Atom/String storage, but resolve the entry only once
+        // on this hot OP_push_atom_value path instead of repeating name(),
+        // kind(), cachedString(), and cacheString() table lookups.
+        if (isConst(atom_id)) {
+            const predefined = predefinedById(atom_id) orelse return JSValue.undefinedValue();
+            const text = predefined.name;
+            if (text.len == 1 and text[0] <= 0x7f) {
+                const cached = (try rt.singleByteString(text[0])).?;
+                return cached.value().dup();
+            }
+            if (predefined.kind != .string) {
+                const created = try string.String.createUtf8(rt, text);
+                return created.value();
+            }
+            const slot = &self.predefined_str[atom_id - 1];
+            if (slot.*) |cached| return cached.value().dup();
+            const created = try string.String.createUtf8(rt, text);
+            created.atom_id = atom_id;
+            slot.* = created;
+            gc.retain(created.header());
+            return created.value();
+        }
+
+        const entry = self.findDynamic(atom_id) orelse return JSValue.undefinedValue();
+        if (!entry.isLive()) return JSValue.undefinedValue();
+        const text = entry.bytes;
         if (text.len == 1 and text[0] <= 0x7f) {
             const cached = (try rt.singleByteString(text[0])).?;
             return cached.value().dup();
         }
-        if (self.kind(atom_id) != .string) {
+        if (entry.kind != .string) {
             const created = try string.String.createUtf8(rt, text);
             return created.value();
         }
-        if (self.cachedString(atom_id)) |cached| return cached.value().dup();
+        if (entry.str) |cached| return cached.value().dup();
         const created = try string.String.createUtf8(rt, text);
-        self.cacheString(atom_id, created);
+        entry.str = created;
+        gc.retain(created.header());
+        created.atom_id = atom_id;
         return created.value();
     }
 

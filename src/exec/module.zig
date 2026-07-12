@@ -271,6 +271,7 @@ pub fn initializeModuleFunctionDeclarations(
     function: *const bytecode.Bytecode,
 ) !void {
     if (!function.flags.is_module) return;
+    const record = ctx.runtime.modules.find(module_name) orelse return error.ModuleNotFound;
 
     var module_var_refs = try buildModuleVarRefs(ctx, module_name, function);
     defer freeModuleVarRefs(ctx.runtime, module_var_refs);
@@ -337,6 +338,29 @@ pub fn initializeModuleFunctionDeclarations(
         const function_value = try object_ops.createBytecodeFunctionObject(ctx, &frame, function, global, value, function.name, op.fclosure8, true);
         try slot_ops.setVarRefSlotValue(ctx, &frame, ref_idx, function_value);
     }
+    record.function_declarations_initialized = true;
+}
+
+/// First byte after the module function-declaration instantiation prefix.
+/// `initializeModuleFunctionDeclarations` has already executed these pairs;
+/// evaluating them again would replace the live-binding function identity.
+pub fn moduleFunctionDeclarationBodyStart(function: *const bytecode.Bytecode) !usize {
+    var pc: usize = moduleFunctionDeclarationPrologueEnd(function);
+    while (pc < function.code.len and function.code[pc] == op.fclosure8) {
+        const pair_start = pc;
+        if (pc + 2 > function.code.len) return error.InvalidBytecode;
+        pc += 2;
+        if (pc >= function.code.len) return error.InvalidBytecode;
+        switch (function.code[pc]) {
+            op.put_var_ref0, op.put_var_ref1, op.put_var_ref2, op.put_var_ref3 => pc += 1,
+            op.put_var_ref => {
+                if (pc + 3 > function.code.len) return error.InvalidBytecode;
+                pc += 3;
+            },
+            else => return pair_start,
+        }
+    }
+    return pc;
 }
 
 fn moduleFunctionDeclarationPrologueEnd(function: *const bytecode.Bytecode) usize {

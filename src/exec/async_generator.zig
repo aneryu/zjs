@@ -308,7 +308,7 @@ fn resumeBodyValue(
     resume_value: ?core.JSValue,
     stop_before_pc: ?usize,
 ) HostError!core.JSValue {
-    const function_value = gen.functionBytecodeSlot().* orelse return error.TypeError;
+    const function_value = gen.functionBytecode() orelse return error.TypeError;
     const stored_current = if (gen.generatorCurrentFunction()) |value| value.dup() else null;
     defer if (stored_current) |value| value.free(ctx.runtime);
     const current_function_value = stored_current orelse gen.value();
@@ -475,7 +475,7 @@ fn runReturnCompletion(
     const rt = ctx.runtime;
     // A fresh return replaces any pending return completion stashed earlier.
     if (call_runtime.takeGeneratorPendingReturn(gen)) |p| p.value.free(rt);
-    const function_value = gen.functionBytecodeSlot().* orelse return error.TypeError;
+    const function_value = gen.functionBytecode() orelse return error.TypeError;
     const fb = call_runtime.functionBytecodeFromValue(function_value) orelse return error.TypeError;
     if (gen.generatorPc() != 0 and gen.generatorStarted()) {
         if (call_runtime.findGeneratorReturnFinallyTarget(fb, @intCast(gen.generatorPc()))) |finally_range| {

@@ -306,7 +306,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const jobs_start = monotonicNanos();
-    _ = try runtime.event_loop.runUntilIdle();
+    try dynamic_import_state.runJobs();
     // Post-eval jobs (module-mode microtasks in particular) print into the
     // buffered stdout writer; flush before any exit path so their output is
     // not dropped (qjs.c main: js_std_loop writes unbuffered per job).
@@ -355,6 +355,7 @@ pub fn main(init: std.process.Init) !void {
     // and return normally so all defers (including those for source_text and options) execute,
     // allowing the GeneralPurposeAllocator to perform full validation.
     if (runtime_options.leak_check) {
+        dynamic_import_state.deinit();
         runtime.deinit();
         return;
     }

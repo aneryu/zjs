@@ -268,7 +268,7 @@ pub fn initializeCurrentConstructorClassInstanceElements(
 ) !void {
     if (caller_frame.this_value.isUninitialized()) return;
     if (functionObjectFromValue(caller_frame.current_function)) |function_object| {
-        const function_value = function_object.functionBytecodeSlot().* orelse return;
+        const function_value = function_object.functionBytecode() orelse return;
         const fb = functionBytecodeFromValue(function_value) orelse return;
         try initializeClassInstanceElements(ctx, output, global, caller_frame.current_function, caller_frame.this_value, fb, caller_function, caller_frame);
         return;

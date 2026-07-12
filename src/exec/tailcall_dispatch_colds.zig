@@ -259,6 +259,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
 
     // --- arith / compare / unary ---
     inline for ([_]u8{ op.add, op.sub, op.mul, op.div, op.mod, op.pow, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor }) |o| t[o] = h_binary;
+    t[op.mod] = td.op_mod_cold;
     // Register-resident cold compare (no publish round-trip) — falls back to the
     // publishing h_compare path internally at a generator stop boundary. Reached via
     // the same indirect cold_table dispatch the compare fast handlers always used
@@ -825,6 +826,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.set_loc_uninitialized] = td.op_set_loc_uninitialized;
     t[op.put_loc_check_init] = td.op_put_loc_check_init;
     inline for ([_]u8{ op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3 }) |o| t[o] = td.op_get_arg_short;
+    t[op.push_atom_value] = td.op_push_atom_value;
     // Per-op binary handlers (qjs CASE(OP_add)/…/CASE(OP_xor) are distinct labels,
     // quickjs.c:19696-20227; op.pow keeps the cold h_binary — qjs OP_pow:19916 has
     // no fast leg and falls straight to js_binary_arith_slow).

@@ -87,12 +87,19 @@ pub fn enterCallDepth(ctx: *core.JSContext, global: *core.Object) !CallDepthGuar
 /// Depth accounting for inline (same interpreter loop) call frames.
 pub fn enterInlineCallDepth(ctx: *core.JSContext, global: *core.Object) !void {
     if (ctx.call_depth >= maxLogicalJsCallDepth(ctx)) {
-        // QuickJS JS_CallInternal stack guard -> InternalError "stack overflow"
-        // (quickjs.c:17837, 7789-7791).
-        _ = exception_ops.throwInternalErrorMessage(ctx, global, "stack overflow") catch |err| return err;
-        return error.StackOverflow;
+        return inlineCallDepthOverflow(ctx, global);
     }
     ctx.call_depth += 1;
+}
+
+/// Stack exhaustion is exceptional and constructs a JS error.  Keep it out of
+/// the same-native-stack inline-call prologue: otherwise LLVM couples the
+/// thrower's large error-union frame and callee-saved register set to every
+/// ordinary JS call.  QJS likewise keeps this behind the unlikely
+/// `js_check_stack_overflow` arm of `JS_CallInternal`.
+noinline fn inlineCallDepthOverflow(ctx: *core.JSContext, global: *core.Object) !void {
+    _ = exception_ops.throwInternalErrorMessage(ctx, global, "stack overflow") catch |err| return err;
+    return error.StackOverflow;
 }
 
 pub fn enterCallProfile(rt: *core.JSRuntime) CallProfileGuard {

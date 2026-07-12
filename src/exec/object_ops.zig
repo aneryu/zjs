@@ -307,7 +307,7 @@ pub fn createBytecodeFunctionObject(
         try object.setPrototype(ctx.runtime, prototype);
     }
     try object.setFunctionRealmGlobalPtr(ctx.runtime, global);
-    try object.setOptionalValueSlot(ctx.runtime, object.functionBytecodeSlot(), rooted_value.dup());
+    try object.setFunctionBytecodeValue(ctx.runtime, rooted_value.dup());
     if (objectFromValue(frame.current_function)) |parent_function_object| {
         if (parent_function_object.functionImportMeta()) |import_meta| {
             try object.setOptionalValueSlot(ctx.runtime, try object.functionImportMetaSlot(ctx.runtime), import_meta.dup());
@@ -932,7 +932,7 @@ pub fn defineDataProperty(
 
 pub fn currentArrowFunctionObject(frame: *frame_mod.Frame) ?*core.Object {
     const current_object = objectFromValue(frame.current_function) orelse return null;
-    const function_value = current_object.functionBytecodeSlot().* orelse return null;
+    const function_value = current_object.functionBytecode() orelse return null;
     const fb = functionBytecodeFromValue(function_value) orelse return null;
     if (!fb.flags.is_arrow_function) return null;
     return current_object;
@@ -2077,7 +2077,7 @@ pub fn directEvalCallerAllowsSuperProperty(caller_frame: ?*frame_mod.Frame, eval
     if (outer_frame.current_function.isUndefined()) return false;
     if (functionBytecodeFromValue(outer_frame.current_function)) |fb| return fb.flags.super_allowed;
     if (objectFromValue(outer_frame.current_function)) |function_object| {
-        const stored = function_object.functionBytecodeSlot().* orelse return false;
+        const stored = function_object.functionBytecode() orelse return false;
         const fb = functionBytecodeFromValue(stored) orelse return false;
         return fb.flags.super_allowed;
     }
@@ -2129,7 +2129,7 @@ pub fn createGeneratorObject(
     const class_id = if (is_async) core.class.ids.async_generator else core.class.ids.generator;
     const object = try core.Object.create(ctx.runtime, class_id, null);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
-    try object.setOptionalValueSlot(ctx.runtime, object.functionBytecodeSlot(), rooted_func.dup());
+    try object.setOptionalValueSlot(ctx.runtime, object.generatorBytecodeSlot(), rooted_func.dup());
     if (property_ops.expectObject(rooted_current)) |function_object| {
         try object.setOptionalValueSlot(ctx.runtime, object.generatorCurrentFunctionSlot(), rooted_current.dup());
         try object.setFunctionHomeObject(ctx.runtime, function_object.functionHomeObject());
@@ -3098,7 +3098,7 @@ pub fn setWithOwnDescriptor(
 }
 
 pub fn bytecodeFunctionObjectTag(object: *core.Object) []const u8 {
-    const function_value = object.functionBytecodeSlot().* orelse return "Function";
+    const function_value = object.functionBytecode() orelse return "Function";
     const function_bytecode = functionBytecodeFromValue(function_value) orelse return "Function";
     if (function_bytecode.flags.func_kind == .async or function_bytecode.flags.func_kind == .async_generator) return "AsyncFunction";
     if (function_bytecode.flags.func_kind == .generator) return "GeneratorFunction";
@@ -4157,7 +4157,7 @@ pub noinline fn setHomeObject(
         const func_object = try property_ops.expectObject(func_value);
         var can_set_home_object = true;
         var is_arrow_function = false;
-        if (func_object.functionBytecodeSlot().*) |function_bytecode_value| {
+        if (func_object.functionBytecode()) |function_bytecode_value| {
             if (functionBytecodeFromValue(function_bytecode_value)) |fb| {
                 can_set_home_object = !fb.flags.is_class_constructor;
                 is_arrow_function = fb.flags.is_arrow_function;
@@ -4519,7 +4519,7 @@ fn defineObjectMethodValue(
     if (rooted_value.isObject()) {
         const function_object = try property_ops.expectObject(rooted_value);
         try function_object.setFunctionHomeObject(rt, object);
-        if (function_object.functionBytecodeSlot().*) |function_bytecode_value| {
+        if (function_object.functionBytecode()) |function_bytecode_value| {
             if (functionBytecodeFromValue(function_bytecode_value)) |fb| {
                 try installLexicalPrivateNameRemap(rt, object, caller_frame, fb.privateBoundNames());
             }

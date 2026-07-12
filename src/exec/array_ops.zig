@@ -4848,7 +4848,7 @@ pub fn isConstructorForArrayOf(rt: *core.JSRuntime, value: core.JSValue) !bool {
         return !fb.flags.is_arrow_function and fb.flags.has_prototype and fb.flags.func_kind != .generator and fb.flags.func_kind != .async_generator;
     }
     if (functionObjectFromValue(value)) |function_object| {
-        const function_value = function_object.functionBytecodeSlot().* orelse return false;
+        const function_value = function_object.functionBytecode() orelse return false;
         const fb = functionBytecodeFromValue(function_value) orelse return false;
         return !fb.flags.is_arrow_function and fb.flags.has_prototype and fb.flags.func_kind != .generator and fb.flags.func_kind != .async_generator;
     }

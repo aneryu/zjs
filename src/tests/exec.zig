@@ -1512,8 +1512,8 @@ test "cell-backed add_loc retains string snapshots while using a rope tail" {
     const text = global.getProperty(probe_atom);
     defer text.free(js.runtime);
     const rope = text.ropeBody() orelse return error.TypeError;
-    try std.testing.expectEqual(@as(usize, 8192), rope.len);
-    try std.testing.expect(rope.tail_len >= 2048);
+    try std.testing.expectEqual(@as(usize, 8192), rope.len_());
+    try std.testing.expect(rope.tailLen() >= 2048);
     var chain_depth: usize = 1;
     var cursor = rope;
     while (cursor.left.ropeBody()) |left| {
@@ -1522,6 +1522,47 @@ test "cell-backed add_loc retains string snapshots while using a rope tail" {
         cursor = left;
     }
     try std.testing.expect(chain_depth <= 4);
+}
+
+test "checked lexical string accumulation keeps rope depth bounded" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function build() {
+        \\  let text = "";
+        \\  let snapshot;
+        \\  for (var i = 0; i < 8192; i++) {
+        \\    if (i === 4096) snapshot = text;
+        \\    text += "ab";
+        \\  }
+        \\  if (snapshot.length !== 8192) throw new Error("snapshot mutated");
+        \\  return text;
+        \\}
+        \\globalThis.__checked_lexical_rope_probe = build();
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    const global = js.context.global orelse return error.TypeError;
+    const probe_atom = try js.runtime.internAtom("__checked_lexical_rope_probe");
+    defer js.runtime.atoms.free(probe_atom);
+    const text = global.getProperty(probe_atom);
+    defer text.free(js.runtime);
+    const rope = text.ropeBody() orelse return error.TypeError;
+    try std.testing.expectEqual(@as(usize, 16384), rope.len_());
+
+    // QJS caps rope depth and rebalances; zjs may use its private growable tail,
+    // but must likewise avoid retaining one wrapper node per `+=` iteration.
+    var left_depth: usize = 1;
+    var cursor = rope;
+    while (cursor.left.ropeBody()) |left| {
+        left_depth += 1;
+        if (left_depth > 64) break;
+        cursor = left;
+    }
+    try std.testing.expect(left_depth <= 64);
 }
 
 test "computed reads with cached string atoms preserve exotic and prototype semantics" {
@@ -4733,6 +4774,49 @@ test "Engine direct eval captures the caller arguments binding" {
     );
 }
 
+test "Engine arguments writes prefer the current function binding over outer lexical bindings" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let arguments = 'outer';
+        \\function ordinary() {
+        \\  arguments = 'ordinary';
+        \\  return arguments;
+        \\}
+        \\function parameterDefault(value = (arguments = 'parameter')) {
+        \\  return value + ' ' + arguments;
+        \\}
+        \\function parameterArrow(value = () => (arguments = 'parameter-arrow')) {
+        \\  return value() + ' ' + arguments;
+        \\}
+        \\function explicitParameter(arguments = 'old', value = (arguments = 'new')) {
+        \\  return arguments;
+        \\}
+        \\function destructuredParameter({ arguments } = { arguments: 'old' }, value = (arguments = 'new')) {
+        \\  return arguments;
+        \\}
+        \\var arrow = () => {
+        \\  arguments = 'arrow';
+        \\  return arguments;
+        \\};
+        \\print(ordinary(), arguments);
+        \\print(parameterDefault(), arguments);
+        \\print(parameterArrow(), arguments);
+        \\print(explicitParameter(), destructuredParameter());
+        \\print(arrow(), arguments);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "ordinary outer\nparameter parameter outer\nparameter-arrow parameter-arrow outer\nold new\narrow arrow\n",
+        stream.buffered(),
+    );
+}
+
 test "Engine direct eval shares top-level lexical cells across nested closures" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -5550,6 +5634,72 @@ test "Engine eval preserves local string substring host output semantics" {
     try std.testing.expectEqualStrings("bcd\ncdef\nabcdef\ncustom:abcdef:4:1\n", stream.buffered());
 }
 
+test "String index-read native records preserve primitive fast paths and observable coercion" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [1024]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let log = "";
+        \\const receiver = { toString() { log += "s"; return "A😀Z"; } };
+        \\const index = { valueOf() { log += "i"; return 1; } };
+        \\print(String.prototype.charCodeAt.call(receiver, index));
+        \\print(String.prototype.at.call(receiver, -1));
+        \\print(String.prototype.codePointAt.call(receiver, index));
+        \\print(log);
+        \\for (const method of ["charCodeAt", "at", "codePointAt"]) {
+        \\  try { String.prototype[method].call(null, 0); }
+        \\  catch (error) { print(method, error.name); }
+        \\  try { String.prototype[method].call("x", Symbol()); }
+        \\  catch (error) { print(method + "-index", error.name); }
+        \\}
+        \\print(String.prototype.charCodeAt.call(42, 1));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "55357\nZ\n128512\nsissi\n" ++
+            "charCodeAt TypeError\ncharCodeAt-index TypeError\n" ++
+            "at TypeError\nat-index TypeError\n" ++
+            "codePointAt TypeError\ncodePointAt-index TypeError\n50\n",
+        stream.buffered(),
+    );
+}
+
+test "mod cold handler preserves fmod and ToNumeric fallbacks" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\const out = [];
+        \\const show = value => Object.is(value, -0) ? "-0" : String(value);
+        \\for (const pair of [[5.5, 2], [5, 2.5], [-4, 2], [4, -2],
+        \\                       [1, 0], [Infinity, 2], [2, Infinity], [NaN, 2]]) {
+        \\  out.push(show(pair[0] % pair[1]));
+        \\}
+        \\let log = "";
+        \\const left = { valueOf() { log += "l"; return 8.5; } };
+        \\const right = { valueOf() { log += "r"; return 3; } };
+        \\out.push(show(left % right), log, String(12345678901234567890n % 97n));
+        \\function* generator() { yield "pause"; return 9.5 % 2; }
+        \\const iterator = generator();
+        \\out.push(iterator.next().value, show(iterator.next().value));
+        \\try { 1 % Symbol(); } catch (error) { out.push(error.name); }
+        \\print(out.join("|"));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "1.5|0|-0|0|NaN|NaN|2|NaN|2.5|lr|3|pause|1.5|TypeError\n",
+        stream.buffered(),
+    );
+}
+
 test "Engine eval preserves ASCII string integer literal concat semantics" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -5615,6 +5765,50 @@ test "Engine generator return keeps finally rethrow control marker" {
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
+}
+
+test "Engine generator return propagates an explicit finally throw" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var syncError = new Error('sync');
+        \\function* syncGenerator() {
+        \\  try { yield 1; } finally { throw syncError; }
+        \\}
+        \\var syncIterator = syncGenerator();
+        \\syncIterator.next();
+        \\try {
+        \\  syncIterator.return('sent');
+        \\  print('sync-resolved');
+        \\} catch (error) {
+        \\  print('sync-rejected', error === syncError);
+        \\}
+        \\var asyncError = new Error('async');
+        \\async function* asyncGenerator() {
+        \\  try { yield 1; } finally { throw asyncError; }
+        \\}
+        \\var asyncIterator = asyncGenerator();
+        \\asyncIterator.next().then(function() {
+        \\  return asyncIterator.return('sent');
+        \\}).then(function() {
+        \\  print('async-resolved');
+        \\}, function(error) {
+        \\  print('async-rejected', error === asyncError);
+        \\  return asyncIterator.next();
+        \\}).then(function(result) {
+        \\  print('async-closed', result.value, result.done);
+        \\});
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "sync-rejected true\nasync-rejected true\nasync-closed undefined true\n",
+        stream.buffered(),
+    );
 }
 
 test "Engine eval preserves simple for-in mutation semantics" {
@@ -5764,6 +5958,158 @@ test "module graph evaluates block var declarations as module bindings" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("object\ntrue\n", output.buffered());
+}
+
+test "module evaluation does not skip a body-leading function expression" {
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+    const registry = engine.builtins.registry;
+    registry.registerStandardGlobalsDefault();
+    js.runtime.install_standard_globals_cb = registry.installStandardGlobals;
+    js.runtime.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileModuleGraphWithOutput(
+        \\print((function () { return 42; })());
+    ,
+        &output,
+        "module-leading-function-expression.mjs",
+        std.testing.io,
+        std.testing.allocator,
+        2048,
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings("42\n", output.buffered());
+}
+
+test "module top-level await resumes in Promise reaction FIFO order" {
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+    const registry = engine.builtins.registry;
+    registry.registerStandardGlobalsDefault();
+    js.runtime.install_standard_globals_cb = registry.installStandardGlobals;
+    js.runtime.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+
+    var output_buffer: [256]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileModuleGraphWithOutput(
+        \\var actual = [];
+        \\Promise.resolve(0)
+        \\  .then(() => actual.push("tick 1"))
+        \\  .then(() => actual.push("tick 2"))
+        \\  .then(() => actual.push("tick 3"))
+        \\  .then(() => actual.push("tick 4"))
+        \\  .then(() => print("done:" + actual.join(",")));
+        \\await 1;
+        \\actual.push("await 1");
+        \\await 2;
+        \\actual.push("await 2");
+        \\await 3;
+        \\actual.push("await 3");
+        \\await 4;
+        \\actual.push("await 4");
+    ,
+        &output,
+        "module-tla-promise-fifo.mjs",
+        std.testing.io,
+        std.testing.allocator,
+        4096,
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings(
+        "done:tick 1,await 1,tick 2,await 2,tick 3,await 3,tick 4,await 4\n",
+        output.buffered(),
+    );
+}
+
+test "module await reaction keeps its position on the awaited Promise" {
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+    const registry = engine.builtins.registry;
+    registry.registerStandardGlobalsDefault();
+    js.runtime.install_standard_globals_cb = registry.installStandardGlobals;
+    js.runtime.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+
+    var output_buffer: [128]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileModuleGraphWithOutput(
+        \\let resolveAwaited;
+        \\const awaited = new Promise((resolve) => resolveAwaited = resolve);
+        \\const actual = [];
+        \\awaited.then(() => actual.push("before"));
+        \\Promise.resolve().then(() => {
+        \\  awaited.then(() => actual.push("after"));
+        \\  resolveAwaited();
+        \\});
+        \\await awaited;
+        \\actual.push("module");
+        \\Promise.resolve().then(() => print(actual.join(",")));
+    ,
+        &output,
+        "module-await-reaction-position.mjs",
+        std.testing.io,
+        std.testing.allocator,
+        4096,
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings("before,module,after\n", output.buffered());
+}
+
+test "async module dependency does not preempt an independent sibling" {
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+    const registry = engine.builtins.registry;
+    registry.registerStandardGlobalsDefault();
+    js.runtime.install_standard_globals_cb = registry.installStandardGlobals;
+    js.runtime.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+
+    const dir = ".zig-cache/module-async-sibling-order-test";
+    const main_path = dir ++ "/main.mjs";
+    std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, dir);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = dir ++ "/b.mjs",
+        .data = "globalThis.__moduleOrder = globalThis.__moduleOrder || [];\n" ++
+            "globalThis.__moduleOrder.push('b-start');\n" ++
+            "await 0;\n" ++
+            "globalThis.__moduleOrder.push('b-end');\n",
+    });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = dir ++ "/a.mjs",
+        .data = "import './b.mjs';\nglobalThis.__moduleOrder.push('a');\n",
+    });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = dir ++ "/c.mjs",
+        .data = "globalThis.__moduleOrder = globalThis.__moduleOrder || [];\n" ++
+            "globalThis.__moduleOrder.push('c');\n",
+    });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = main_path,
+        .data = "import './a.mjs';\n" ++
+            "import './c.mjs';\n" ++
+            "print(globalThis.__moduleOrder.join(','));\n",
+    });
+
+    const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, main_path, std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(source);
+    var output_buffer: [128]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileModuleGraphWithOutput(
+        source,
+        &output,
+        main_path,
+        std.testing.io,
+        std.testing.allocator,
+        4096,
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings("b-start,c,b-end,a\n", output.buffered());
 }
 
 test "import bytes module creates immutable ArrayBuffer backing store" {

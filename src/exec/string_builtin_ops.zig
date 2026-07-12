@@ -91,9 +91,9 @@ pub const internal_entries = stringEntries: {
         stringEntry("trimEnd", 0, @intFromEnum(PrototypeMethod.trim_end), false),
         stringEntry("split", 2, @intFromEnum(PrototypeMethod.split), false),
         stringEntry("lastIndexOf", 1, @intFromEnum(PrototypeMethod.last_index_of), false),
-        stringEntry("charCodeAt", 1, @intFromEnum(PrototypeMethod.char_code_at), false),
-        stringEntry("at", 1, @intFromEnum(PrototypeMethod.at), false),
-        stringEntry("codePointAt", 1, @intFromEnum(PrototypeMethod.code_point_at), false),
+        stringDirectEntry("charCodeAt", 1, @intFromEnum(PrototypeMethod.char_code_at), &stringCharCodeAtCall),
+        stringDirectEntry("at", 1, @intFromEnum(PrototypeMethod.at), &stringAtCall),
+        stringDirectEntry("codePointAt", 1, @intFromEnum(PrototypeMethod.code_point_at), &stringCodePointAtCall),
         stringEntry("slice", 2, @intFromEnum(PrototypeMethod.slice), false),
         stringEntry("repeat", 1, @intFromEnum(PrototypeMethod.repeat), false),
         stringEntry("padStart", 1, @intFromEnum(PrototypeMethod.pad_start), false),
@@ -116,6 +116,15 @@ fn stringEntry(comptime name: []const u8, comptime length: u8, comptime id: u32,
     return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = prepared, .call = &stringCall };
 }
 
+fn stringDirectEntry(
+    comptime name: []const u8,
+    comptime length: u8,
+    comptime id: u32,
+    comptime call: core.host_function.InternalCallFn,
+) core.host_function.InternalEntry {
+    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .call = call };
+}
+
 /// The String constructor record: construct-capable so `new String(...)`
 /// routes through the construct dispatch path into `stringCall`'s construct
 /// branch (it still serves `String(...)` as a function on the call path).
@@ -128,52 +137,40 @@ fn stringConstructorEntry(comptime name: []const u8, comptime length: u8, compti
 /// the `from*`/constructor statics run their own helpers, while the prototype
 /// methods (and `String.raw`) delegate to the exec VM ops, which stay in exec
 /// because the string opcode handlers and `regexp_fastpath.zig` also call them.
-/// Self-contained String.prototype index-read body, mirroring qjs's per-method
-/// `js_string_{charCodeAt,charAt(at),codePointAt}` (quickjs.c:45445/45470/45500):
-/// `JS_ToStringCheckObject(this)` + `JS_ToInt32Sat(argv[0])` + the bounded read, all
-/// inline in one function reached directly by the record — no generic re-dispatch and
-/// no exec `qjsStringPrototypeMethod` coercion tower (a Phase-6 modularity artifact the
-/// qjs monolith never had). The `this`/index coercions carry qjs's own fast paths
-/// (string tag → dup; int/number tag → `stringInteger`) and only fall to the full
-/// realm-aware `ToString`/`ToNumber` (valueOf-observable) for other tags — identical
-/// observable order to the tower (this coerced before the index). `mid` is a decoded
-/// PrototypeMethod id: 29 charCodeAt, 30 at, 31 codePointAt.
-fn stringIndexReadMethod(host_call: InternalCall, mid: u32) !core.JSValue {
-    const ctx = host_call.ctx;
-    const rt = ctx.runtime;
-    const global = host_call.global.?;
+///
+/// QJS gives `at`, `charCodeAt`, and `codePointAt` their own function-list
+/// entries. Their zjs entries likewise land in the small functions below. The
+/// already-string/immediate-index path stays local; values requiring observable
+/// ToString/ToNumber coercion tail into this shared handler. Keeping that rare
+/// path out of the direct functions avoids cloning the whole coercion tower into
+/// each hot native entry.
+inline fn stringPrimitiveIndexRead(host_call: InternalCall, comptime mid: u32) HostError!?core.JSValue {
+    const string_value = host_call.this_value;
+    if (!string_value.isString()) return null;
     const args = host_call.args;
-    const string_value = if (host_call.this_value.isString())
-        host_call.this_value.dup()
-    else
-        try string_ops.toStringCheckObject(ctx, host_call.output, global, host_call.this_value, builtin_dispatch.callerBytecode(host_call), builtin_dispatch.callerFrame(host_call));
-    defer string_value.free(rt);
-    const body = string_value.asStringBody() orelse return error.TypeError;
     const idx: i64 = if (args.len == 0)
         0
-    else if (args[0].isNumber())
-        try stringInteger(rt, args[0])
+    else if (stringPrimitiveInt32Sat(args[0])) |index|
+        index
     else
-        try stringInteger(rt, try builtin_glue.toNumberLikeArgument(ctx, host_call.output, global, args[0]));
-    const len: i64 = @intCast(body.len());
+        return null;
+    const rt = host_call.ctx.runtime;
+    const len: i64 = @intCast(core.string.stringValueLenUnchecked(string_value));
     switch (mid) {
-        29 => { // charCodeAt
+        29 => {
             if (idx < 0 or idx >= len) return core.JSValue.float64(std.math.nan(f64));
-            try body.ensureFlat(rt);
-            return core.JSValue.int32(body.codeUnitAt(@intCast(idx)));
+            return core.JSValue.int32(core.string.stringValueCodeUnitAtUnchecked(string_value, @intCast(idx)));
         },
-        30 => { // at (relative index → string char or undefined)
+        30 => {
             const index = if (idx < 0) len + idx else idx;
             if (index < 0 or index >= len) return core.JSValue.undefinedValue();
-            try body.ensureFlat(rt);
-            return try codeUnitStringValue(rt, body.codeUnitAt(@intCast(index)));
+            return codeUnitStringValue(rt, core.string.stringValueCodeUnitAtUnchecked(string_value, @intCast(index))) catch |err| return @as(HostError, @errorCast(err));
         },
-        else => { // 31 codePointAt (surrogate-pair aware)
+        else => {
             if (idx < 0 or idx >= len) return core.JSValue.undefinedValue();
-            try body.ensureFlat(rt);
-            const unit = body.codeUnitAt(@intCast(idx));
+            const unit = core.string.stringValueCodeUnitAtUnchecked(string_value, @intCast(idx));
             if (isHighSurrogateUnit(unit) and idx + 1 < len) {
-                const next = body.codeUnitAt(@intCast(idx + 1));
+                const next = core.string.stringValueCodeUnitAtUnchecked(string_value, @intCast(idx + 1));
                 if (isLowSurrogateUnit(next)) return core.JSValue.int32(@intCast(unicode.codePointFromSurrogatePair(unit, next)));
             }
             return core.JSValue.int32(unit);
@@ -181,41 +178,42 @@ fn stringIndexReadMethod(host_call: InternalCall, mid: u32) !core.JSValue {
     }
 }
 
+/// QJS `JS_ToInt32SatFree`'s immediate-value leg. String index methods use a
+/// saturated i32 because strings cannot reach `INT32_MAX` code units, so every
+/// larger positive/negative index has the same out-of-range result. Returning
+/// null preserves the observable ToNumber fallback for objects, strings,
+/// Symbols and BigInts.
+inline fn stringPrimitiveInt32Sat(value: core.JSValue) ?i32 {
+    if (value.asInt32()) |integer| return integer;
+    if (value.asBool()) |boolean| return @intFromBool(boolean);
+    if (value.isNull() or value.isUndefined()) return 0;
+    const number = value.asNumber() orelse return null;
+    if (std.math.isNan(number)) return 0;
+    if (number < @as(f64, @floatFromInt(std.math.minInt(i32)))) return std.math.minInt(i32);
+    if (number > @as(f64, @floatFromInt(std.math.maxInt(i32)))) return std.math.maxInt(i32);
+    return @intFromFloat(number);
+}
+
+fn stringCharCodeAtCall(host_call: InternalCall) HostError!core.JSValue {
+    if (try stringPrimitiveIndexRead(host_call, 29)) |value| return value;
+    return stringCall(host_call);
+}
+
+fn stringAtCall(host_call: InternalCall) HostError!core.JSValue {
+    if (try stringPrimitiveIndexRead(host_call, 30)) |value| return value;
+    return stringCall(host_call);
+}
+
+fn stringCodePointAtCall(host_call: InternalCall) HostError!core.JSValue {
+    if (try stringPrimitiveIndexRead(host_call, 31)) |value| return value;
+    return stringCall(host_call);
+}
+
 fn stringCall(host_call: InternalCall) HostError!core.JSValue {
     const ctx = host_call.ctx;
     const id: u32 = host_call.magic;
     const args = host_call.args;
     const this_value = host_call.this_value;
-
-    // Faithful self-contained dispatch for the string index reads (charCodeAt id 29 /
-    // at id 30 / codePointAt id 31), mirroring qjs's per-method js_string_{charCodeAt,
-    // charAt,codePointAt}: JS_ToStringCheckObject(this) then the body's own
-    // JS_ToInt32Sat(idx), reaching the body directly. qjs has no re-dispatch and no exec
-    // coercion round-trip — its JSCFunctionListEntry points straight at the body; zjs's
-    // generic stringCall + exec `qjsStringPrototypeMethod` tower is a Phase-6 modularity
-    // artifact a monolith never needed. `global != null` selects the coercion-bearing
-    // entries (the real method call and the prepared-call fast path, which thread the
-    // realm and RAW args); the engine-internal reuse arm (global == null, args already
-    // coerced) still falls through to `methodCall` below. This does the FULL ToString(this)
-    // for every receiver (object/number/bool coerced, null/undefined thrown in the callee
-    // realm), so it REPLACES the coercion tower for these methods rather than special-
-    // casing a primitive-string subset.
-    if (!host_call.flags.constructor and host_call.global != null) {
-        // Raw record-id range check, skipping the ~30-arm decodePrototypeMethodId
-        // switch: the encoded ids char_code_at/at/code_point_at are contiguous
-        // (129/130/131, comptime-asserted below) and decode to exactly id-100
-        // (29/30/31, the value stringIndexReadMethod switches on — host_function.zig:838).
-        // Mirrors qjs's direct JSCFunctionListEntry->body dispatch (its call reads a
-        // function pointer, never re-decodes a method id).
-        comptime {
-            std.debug.assert(@intFromEnum(PrototypeMethod.char_code_at) == 129);
-            std.debug.assert(@intFromEnum(PrototypeMethod.at) == 130);
-            std.debug.assert(@intFromEnum(PrototypeMethod.code_point_at) == 131);
-        }
-        if (id >= @intFromEnum(PrototypeMethod.char_code_at) and id <= @intFromEnum(PrototypeMethod.code_point_at)) {
-            return stringIndexReadMethod(host_call, id - 100) catch |err| return @as(HostError, @errorCast(err));
-        }
-    }
 
     if (id == @intFromEnum(PrototypeMethod.iterator_next)) {
         const receiver = thisObject(this_value) orelse return error.TypeError;
@@ -360,16 +358,16 @@ pub fn iteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
     const iterator_object = try expectObject(receiver);
     if (iterator_object.class_id != core.class.ids.string_iterator) return error.TypeError;
     const target = (iterator_object.iteratorTargetSlot().*) orelse return iteratorResult(rt, core.JSValue.undefinedValue(), true);
-    const string_value = target.asStringBody() orelse return error.TypeError;
-    try string_value.ensureFlat(rt);
-    if ((iterator_object.iteratorIndexSlot().*) >= string_value.len()) {
+    if (!target.isString()) return error.TypeError;
+    const target_len = core.string.stringValueLenUnchecked(target);
+    if ((iterator_object.iteratorIndexSlot().*) >= target_len) {
         const done_result = try iteratorResult(rt, core.JSValue.undefinedValue(), true);
         iterator_object.clearOptionalValueSlot(rt, iterator_object.iteratorTargetSlot());
         return done_result;
     }
 
     const index: usize = @intCast((iterator_object.iteratorIndexSlot().*));
-    const first = string_value.codeUnitAt(index);
+    const first = core.string.stringValueCodeUnitAtUnchecked(target, index);
 
     // Single code unit (`c <= 0xffff`, non-surrogate-pair): qjs routes these
     // through js_new_string_char (quickjs.c:3953-3962), which takes the latin1
@@ -388,8 +386,8 @@ pub fn iteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
         return iteratorResult(rt, out.value(), false);
     }
 
-    if (isHighSurrogateUnit(first) and index + 1 < string_value.len()) {
-        const second = string_value.codeUnitAt(index + 1);
+    if (isHighSurrogateUnit(first) and index + 1 < target_len) {
+        const second = core.string.stringValueCodeUnitAtUnchecked(target, index + 1);
         if (isLowSurrogateUnit(second)) {
             iterator_object.iteratorIndexSlot().* += 2;
             const units: [2]u16 = .{ first, second };
@@ -465,10 +463,9 @@ pub fn fromCodePoint(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSVa
 /// `string_char_at` bytecode.
 pub fn charAtValue(rt: *core.JSRuntime, receiver: core.JSValue, index_value: core.JSValue) !core.JSValue {
     const index = try stringInteger(rt, index_value);
-    if (stringValueFromReceiver(receiver)) |string_value| {
-        if (index < 0 or index >= @as(i64, @intCast(string_value.len()))) return createStringValue(rt, "");
-        try string_value.ensureFlat(rt);
-        return codeUnitStringValue(rt, string_value.codeUnitAt(@intCast(index)));
+    if (stringValueFromReceiverRaw(receiver)) |string_value| {
+        if (index < 0 or index >= @as(i64, @intCast(core.string.stringValueLenUnchecked(string_value)))) return createStringValue(rt, "");
+        return codeUnitStringValue(rt, core.string.stringValueCodeUnitAtUnchecked(string_value, @intCast(index)));
     }
 
     var bytes = std.ArrayList(u8).empty;
@@ -1312,23 +1309,20 @@ fn lastIndexOfReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []cons
 fn charCodeAtReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const primitive = try stringPrimitiveValue(receiver);
     defer primitive.free(rt);
-    const string_value = primitive.asStringBody() orelse return error.TypeError;
     const index = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
-    if (index < 0 or index >= @as(i64, @intCast(string_value.len()))) return core.JSValue.float64(std.math.nan(f64));
-    try string_value.ensureFlat(rt);
-    return core.JSValue.int32(string_value.codeUnitAt(@intCast(index)));
+    if (index < 0 or index >= @as(i64, @intCast(core.string.stringValueLenUnchecked(primitive)))) return core.JSValue.float64(std.math.nan(f64));
+    return core.JSValue.int32(core.string.stringValueCodeUnitAtUnchecked(primitive, @intCast(index)));
 }
 
 fn codePointAtReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const primitive = try stringPrimitiveValue(receiver);
     defer primitive.free(rt);
-    const string_value = primitive.asStringBody() orelse return error.TypeError;
     const index = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
-    if (index < 0 or index >= @as(i64, @intCast(string_value.len()))) return core.JSValue.undefinedValue();
-    try string_value.ensureFlat(rt);
-    const unit = string_value.codeUnitAt(@intCast(index));
-    if (isHighSurrogateUnit(unit) and index + 1 < string_value.len()) {
-        const next = string_value.codeUnitAt(@intCast(index + 1));
+    const primitive_len = core.string.stringValueLenUnchecked(primitive);
+    if (index < 0 or index >= @as(i64, @intCast(primitive_len))) return core.JSValue.undefinedValue();
+    const unit = core.string.stringValueCodeUnitAtUnchecked(primitive, @intCast(index));
+    if (isHighSurrogateUnit(unit) and index + 1 < primitive_len) {
+        const next = core.string.stringValueCodeUnitAtUnchecked(primitive, @intCast(index + 1));
         if (isLowSurrogateUnit(next)) {
             return core.JSValue.int32(@intCast(unicode.codePointFromSurrogatePair(unit, next)));
         }
@@ -1345,13 +1339,12 @@ fn at(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.
 }
 
 fn atReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
-    if (stringValueFromReceiver(receiver)) |string_value| {
+    if (stringValueFromReceiverRaw(receiver)) |string_value| {
         const relative = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
-        const len: i64 = @intCast(string_value.len());
+        const len: i64 = @intCast(core.string.stringValueLenUnchecked(string_value));
         const index = if (relative < 0) len + relative else relative;
         if (index < 0 or index >= len) return core.JSValue.undefinedValue();
-        try string_value.ensureFlat(rt);
-        return codeUnitStringValue(rt, string_value.codeUnitAt(@intCast(index)));
+        return codeUnitStringValue(rt, core.string.stringValueCodeUnitAtUnchecked(string_value, @intCast(index)));
     }
 
     var bytes = std.ArrayList(u8).empty;
@@ -1698,6 +1691,11 @@ fn stringPrimitiveValue(value: core.JSValue) !core.JSValue {
 }
 
 pub fn stringValueFromReceiver(value: core.JSValue) ?*core.string.String {
+    const string_value = stringValueFromReceiverRaw(value) orelse return null;
+    return string_value.asStringBody();
+}
+
+fn stringValueFromReceiverRaw(value: core.JSValue) ?core.JSValue {
     const string_value = if (value.isString())
         value
     else if (value.isObject()) blk: {
@@ -1705,7 +1703,7 @@ pub fn stringValueFromReceiver(value: core.JSValue) ?*core.string.String {
         if (object.class_id != core.class.ids.string) return null;
         break :blk object.objectData() orelse return null;
     } else return null;
-    return string_value.asStringBody();
+    return string_value;
 }
 
 fn iteratorResult(rt: *core.JSRuntime, value: core.JSValue, done: bool) !core.JSValue {

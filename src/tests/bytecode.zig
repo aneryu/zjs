@@ -2782,6 +2782,41 @@ test "resolve_labels preserves implicit generator rethrow markers" {
     try std.testing.expectEqualSlices(u8, &input, bc.code);
 }
 
+test "resolve_labels preserves a try-finally normal jump after a terminal" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 14;
+    input[0] = op.@"catch";
+    std.mem.writeInt(u32, input[1..5], 12, .little);
+    input[5] = op.throw;
+    input[6] = op.drop;
+    input[7] = op.goto;
+    std.mem.writeInt(u32, input[8..12], 13, .little);
+    input[12] = op.throw;
+    input[13] = op.return_undef;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 10), bc.code.len);
+    try std.testing.expectEqual(op.throw, bc.code[5]);
+    try std.testing.expectEqual(op.goto8, bc.code[6]);
+    try std.testing.expectEqual(op.throw, bc.code[8]);
+    try std.testing.expectEqual(op.return_undef, bc.code[9]);
+}
+
 test "M1.1: resolve_variables lowers private-field temp opcodes" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

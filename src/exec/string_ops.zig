@@ -2303,10 +2303,9 @@ pub fn advanceStringIndexNumber(
         return value_ops.numberToValue(index_number + 1);
     }
     const index: usize = @intFromFloat(index_number);
-    const string_object = string_value.asStringBody() orelse return value_ops.numberToValue(index_number + 1);
-    if (index + 1 >= string_object.len()) return value_ops.numberToValue(index_number + 1);
-    const first = string_object.codeUnitAt(index);
-    const second = string_object.codeUnitAt(index + 1);
+    if (!string_value.isString() or index + 1 >= core.string.stringValueLenUnchecked(string_value)) return value_ops.numberToValue(index_number + 1);
+    const first = core.string.stringValueCodeUnitAtUnchecked(string_value, index);
+    const second = core.string.stringValueCodeUnitAtUnchecked(string_value, index + 1);
     if (isHighSurrogateUnit(first) and isLowSurrogateUnit(second)) {
         return value_ops.numberToValue(index_number + 2);
     }
@@ -2332,9 +2331,8 @@ pub fn nativeFunctionMatcherUnicodeClassAsciiResult(source: []const u8, flags: [
     const is_id_start = std.mem.startsWith(u8, source, "(?:[A-Za-z");
     const is_id_continue = std.mem.startsWith(u8, source, "(?:[0-9A-Z_a-z");
     if (!is_id_start and !is_id_continue) return null;
-    const string_object = string_value.asStringBody() orelse return null;
-    if (string_object.len() != 1) return null;
-    const unit = string_object.codeUnitAt(0);
+    if (!string_value.isString() or core.string.stringValueLenUnchecked(string_value) != 1) return null;
+    const unit = core.string.stringValueCodeUnitAtUnchecked(string_value, 0);
     if (unit > 0x7f) return null;
     const byte: u8 = @intCast(unit);
     if (unicode_lib.isAsciiAlphaByte(byte)) return true;
@@ -4288,10 +4286,9 @@ pub fn defineStringWrapperIndexProperty(rt: *core.JSRuntime, object: *core.Objec
 
 pub fn getStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) !?core.JSValue {
     const index = core.array.arrayIndexFromAtom(&rt.atoms, atom_id) orelse return null;
-    const string_value = value.asStringBody() orelse return null;
-    if (index >= string_value.len()) return core.JSValue.undefinedValue();
-    try string_value.ensureFlat(rt);
-    const unit = string_value.codeUnitAt(index);
+    if (!value.isString()) return null;
+    if (index >= core.string.stringValueLenUnchecked(value)) return core.JSValue.undefinedValue();
+    const unit = core.string.stringValueCodeUnitAtUnchecked(value, index);
     if (unit <= 0x7f) {
         // ASCII fast path: reuse the runtime's cached single-byte
         // strings. Hot loops like `decimalToPercentHexString` in URI sweeps

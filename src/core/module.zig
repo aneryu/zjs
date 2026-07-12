@@ -91,6 +91,11 @@ pub const ModuleRecord = struct {
     import_meta_main: bool = false,
     synthetic_kind: SyntheticKind = .none,
     has_top_level_await: bool = false,
+    /// ModuleDeclarationInstantiation creates top-level function objects before
+    /// evaluation. Once installed, the evaluator must skip the matching
+    /// fclosure/put_var_ref bytecode prefix so cyclic importers and the module
+    /// body observe the same function identity (QuickJS js_create_module_function).
+    function_declarations_initialized: bool = false,
     /// Cached evaluation exception: a module whose evaluation threw stays
     /// `.errored` and every later import rethrows this value instead of
     /// re-running the body (mirrors qjs `JSModuleDef.eval_has_exception` /
@@ -280,6 +285,7 @@ pub const ModuleRecord = struct {
     fn clearLinkArtifacts(self: *ModuleRecord, rt: anytype) void {
         self.clearResolvedImports();
         self.clearLocalBindings(rt);
+        self.function_declarations_initialized = false;
     }
 
     fn addResolvedImport(self: *ModuleRecord, local_name: atom.Atom, binding: ResolvedBinding) !void {

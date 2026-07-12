@@ -39,7 +39,11 @@ pub const RegionLayout = enum {
 };
 
 pub const InlineTarget = struct {
-    function_object: *core.Object,
+    /// Pointer to the bytecode function payload's stable captures slice. QJS
+    /// carries `p->u.func.var_refs` from target resolution into frame setup;
+    /// retaining this field instead of the enclosing object avoids redispatching
+    /// its payload kind on every call without increasing InlineTarget's size.
+    captures: *const []*core.VarRef,
     /// The callable closure value (becomes `frame.current_function`).
     callable: core.JSValue,
     fb: *const bytecode.FunctionBytecode,
@@ -83,8 +87,8 @@ pub const InlineTarget = struct {
 /// as the recursive path — the boxing rules stay in one place.
 pub inline fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, func: core.JSValue) ?InlineTarget {
     const function_object = object_ops.functionObjectFromValue(func) orelse return null;
-    const function_value = function_object.functionBytecodeSlot().* orelse return null;
-    const fb = call_runtime.functionBytecodeFromValue(function_value) orelse return null;
+    const function_payload = function_object.bytecodeFunctionPayloadPtr();
+    const fb = function_payload.functionBytecodePtr();
     if (fb.flags.func_kind != .normal) return null;
     if (fb.flags.is_class_constructor or fb.flags.is_derived_class_constructor) return null;
     // Realm gate. qjs's callee prologue reads the realm as ONE unconditional
@@ -97,7 +101,7 @@ pub inline fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, re
     // pointer falls back to the rare JSValue-slot resolution out of line,
     // which re-runs the same null ptr check and then the rare-payload leg —
     // bit-identical to the old `objectRealmGlobal(function_object)` result.
-    const function_global = function_object.bytecodeFunctionRealmGlobalPtr() orelse
+    const function_global = function_payload.realm_global_ptr orelse
         (object_ops.objectRealmGlobal(function_object) orelse global);
     if (function_global != global) return null;
     // Arrow bindings are resolved OUT OF LINE: qjs's callee prologue has no
@@ -123,7 +127,7 @@ pub inline fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, re
     // rebuild-per-call semantics without a by-value `Bytecode` riding through
     // the call machinery.
     return .{
-        .function_object = function_object,
+        .captures = &function_payload.captures,
         .callable = func,
         .fb = fb,
         .view = bytecode.cachedBytecodeView(fb, &rt.memory, &rt.atoms),
@@ -281,6 +285,15 @@ pub const Machine = struct {
     fn acquireSlot(self: *Machine, global: *core.Object) HostError!*Entry {
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
+        if (chunk_index < self.chunk_count) return self.entryAt(index);
+        return self.acquireSlotSlow(global, index, chunk_index);
+    }
+
+    /// Allocate the first slot in a new chunk, or report logical stack
+    /// exhaustion.  Once a depth has been visited, `acquireSlot` stays entirely
+    /// on its pointer-arithmetic fast arm; keeping allocation/error construction
+    /// here prevents their register pressure from entering every call frame.
+    noinline fn acquireSlotSlow(self: *Machine, global: *core.Object, index: usize, chunk_index: usize) HostError!*Entry {
         if (chunk_index >= max_chunks) {
             // QuickJS throws InternalError "stack overflow" for call-depth
             // exhaustion (JS_ThrowStackOverflow at the JS_CallInternal guard,
@@ -288,14 +301,13 @@ pub const Machine = struct {
             _ = exception_ops.throwInternalErrorMessage(self.ctx, global, "stack overflow") catch |err| return err;
             return error.StackOverflow;
         }
-        if (chunk_index == self.chunk_count) {
-            if (self.chunks.len == 0) {
-                self.chunks = try self.ctx.runtime.memory.alloc(*[entries_per_chunk]Entry, max_chunks);
-            }
-            const chunk = try self.ctx.runtime.memory.create([entries_per_chunk]Entry);
-            self.chunks[chunk_index] = chunk;
-            self.chunk_count += 1;
+        std.debug.assert(chunk_index == self.chunk_count);
+        if (self.chunks.len == 0) {
+            self.chunks = try self.ctx.runtime.memory.alloc(*[entries_per_chunk]Entry, max_chunks);
         }
+        const chunk = try self.ctx.runtime.memory.create([entries_per_chunk]Entry);
+        self.chunks[chunk_index] = chunk;
+        self.chunk_count += 1;
         return self.entryAt(index);
     }
 
@@ -474,7 +486,7 @@ pub const Machine = struct {
         @memset(locals, core.JSValue.undefinedValue()); // 17859-17860
         if (open_var_refs.len != 0) @memset(open_var_refs, null); // 17866-17867
 
-        const captures = target.function_object.functionCapturesSlot().*;
+        const captures = target.captures.*;
         // Bind the frame in ONE shot — qjs sets sf's handful of fields
         // (17838-17845) with no default-init-then-overwrite pass. Sloppy
         // plain-call receiver coerces to the global object, borrowed
@@ -526,7 +538,7 @@ pub const Machine = struct {
         errdefer entry.profile_guard.deinit();
 
         const callable_slot = sourceCallableSlot(source);
-        const frame_var_refs: []const *core.VarRef = target.function_object.functionCapturesSlot().*;
+        const frame_var_refs: []const *core.VarRef = target.captures.*;
 
         entry.arena_mark = rt.vm_stack.mark();
         errdefer rt.vm_stack.restore(entry.arena_mark);
@@ -675,7 +687,7 @@ pub const Machine = struct {
             // Alias the closure's captures (mutable slice; no merge replaced it).
             // The function object stays alive via
             // `frame.current_function`, so the cells outlive the frame.
-            entry.frame.var_refs = target.function_object.functionCapturesSlot().*;
+            entry.frame.var_refs = target.captures.*;
             entry.frame.var_refs_borrowed = true;
         } else if (frame_var_refs.len != 0 or entry.function.var_ref_names.len != 0) {
             try vm_call.initFrameVarRefs(ctx, global, entry.function, &entry.frame, frame_var_refs, true, frame_windows);
@@ -728,7 +740,6 @@ pub const Machine = struct {
 
     fn canBorrowSourceArgs(function: *const bytecode.Bytecode, source: ArgsSource) bool {
         const argc = sourceArgCount(source);
-        if (argc == 0) return false;
         if (@max(argc, @as(usize, @intCast(function.arg_count))) != argc) return false;
         return switch (source) {
             .stack_region => true,

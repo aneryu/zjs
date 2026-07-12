@@ -102,6 +102,14 @@ pub const VmStackArena = struct {
                 return self.chunks[self.active][used .. used + n];
             }
         }
+        return self.carveSlow(account, n);
+    }
+
+    /// Switch to or allocate another arena chunk.  The active chunk satisfies
+    /// virtually every ordinary call after the first one; keeping backing
+    /// allocation and its memory-accounting/error machinery out of `carve`
+    /// lets that steady arm remain a leaf, like QJS's `alloca` bump.
+    noinline fn carveSlow(self: *VmStackArena, account: *memory.MemoryAccount, n: usize) ?[]JSValue {
         const next_index = if (self.chunk_count == 0) 0 else self.active + 1;
         if (next_index >= max_chunks) return null;
         if (next_index >= self.chunk_count) {
@@ -1113,6 +1121,19 @@ pub const JSRuntime = struct {
         return self.memory.allocAlignedBytesNoTrigger(byte_count, alignment);
     }
 
+    /// QJS runs its allocation-threshold GC trigger from object creation, not
+    /// from JSString/JSStringRope allocation. Production string churn therefore
+    /// bypasses the per-allocation threshold bookkeeping. Test builds must keep
+    /// the injected allocation callback, and force-GC builds must still collect
+    /// before every runtime allocation, so those comptime modes retain the full
+    /// request path.
+    pub inline fn allocStringAlignedBytes(self: *JSRuntime, byte_count: usize, alignment: std.mem.Alignment) ![]u8 {
+        if (comptime builtin.is_test or memory.force_gc_on_allocation_enabled) {
+            if (byte_count != 0) self.requestGCForAllocation(byte_count);
+        }
+        return self.memory.allocAlignedBytesNoTrigger(byte_count, alignment);
+    }
+
     pub inline fn freeRuntimeAlignedBytes(self: *JSRuntime, bytes: []u8, alignment: std.mem.Alignment) void {
         self.memory.freeAlignedBytes(bytes, alignment);
     }
@@ -1165,7 +1186,9 @@ pub const JSRuntime = struct {
 
     pub fn registerBorrowedReferenceHolder(self: *JSRuntime, object: *Object) !void {
         if (object.flags.is_borrowed_reference_holder) return;
+        const index = self.borrowed_reference_holders.len;
         try appendRuntimeObject(&self.memory, &self.borrowed_reference_holders, &self.borrowed_reference_holders_capacity, object);
+        object.setBorrowedReferenceHolderIndex(index);
         object.flags.is_borrowed_reference_holder = true;
         object.flags.needs_slow_property = true;
     }
@@ -1177,10 +1200,11 @@ pub const JSRuntime = struct {
 
     pub fn unregisterBorrowedReferenceHolder(self: *JSRuntime, object: *Object) void {
         if (!object.flags.is_borrowed_reference_holder) return;
-        if (self.borrowed_reference_holders.len != 0 and self.borrowed_reference_holders[self.borrowed_reference_holders.len - 1] == object) {
-            self.borrowed_reference_holders = self.borrowed_reference_holders[0 .. self.borrowed_reference_holders.len - 1];
-            object.flags.is_borrowed_reference_holder = false;
-            return;
+        if (object.borrowedReferenceHolderIndex()) |cached_index| {
+            if (cached_index < self.borrowed_reference_holders.len and self.borrowed_reference_holders[cached_index] == object) {
+                self.removeBorrowedReferenceHolderAt(cached_index);
+                return;
+            }
         }
         var found: ?usize = null;
         for (self.borrowed_reference_holders, 0..) |candidate, index| {
@@ -1190,11 +1214,21 @@ pub const JSRuntime = struct {
             }
         }
         const index = found orelse return;
-        if (index + 1 < self.borrowed_reference_holders.len) {
-            std.mem.copyForwards(*Object, self.borrowed_reference_holders[index .. self.borrowed_reference_holders.len - 1], self.borrowed_reference_holders[index + 1 ..]);
+        self.removeBorrowedReferenceHolderAt(index);
+    }
+
+    fn removeBorrowedReferenceHolderAt(self: *JSRuntime, index: usize) void {
+        std.debug.assert(index < self.borrowed_reference_holders.len);
+        const removed = self.borrowed_reference_holders[index];
+        const last_index = self.borrowed_reference_holders.len - 1;
+        if (index != last_index) {
+            const moved = self.borrowed_reference_holders[last_index];
+            self.borrowed_reference_holders[index] = moved;
+            moved.setBorrowedReferenceHolderIndex(index);
         }
-        self.borrowed_reference_holders = self.borrowed_reference_holders[0 .. self.borrowed_reference_holders.len - 1];
-        object.flags.is_borrowed_reference_holder = false;
+        self.borrowed_reference_holders = self.borrowed_reference_holders[0..last_index];
+        removed.setBorrowedReferenceHolderIndex(null);
+        removed.flags.is_borrowed_reference_holder = false;
     }
 
     pub fn registerRootProvider(self: *JSRuntime, provider: RootProvider) !void {

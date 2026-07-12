@@ -966,7 +966,20 @@ pub const FunctionPayload = struct {
     native_dispatch_name: atom.Atom = atom.null_atom,
     typed_array_element_size: u32 = 0,
     typed_array_kind: u8 = 0,
-    bytecode: ?JSValue = null,
+    /// Dense-index cache for the runtime's borrowed-reference-holder registry.
+    /// Stored as a little-endian 24-bit index+1 so zero is the uncached
+    /// sentinel. Three byte fields consume FunctionPayload's existing tail
+    /// padding without making Zig round a `u24` field up to a larger payload.
+    /// Registries beyond 16M entries fall back to the generic lookup without
+    /// truncating the index.
+    borrowed_holder_index_lo: u8 = 0,
+    borrowed_holder_index_mid: u8 = 0,
+    borrowed_holder_index_hi: u8 = 0,
+    /// Owning function-bytecode edge. Undefined is the construction-time empty
+    /// value; a live bytecode-function object carries the tagged pointer
+    /// directly, matching qjs `p->u.func.function_bytecode` without Zig's 16B
+    /// optional wrapper or a second memo pointer.
+    bytecode: JSValue = JSValue.undefinedValue(),
     // Slot-typed closure captures — qjs `JSVarRef **var_refs`
     // (JSObject.u.func.var_refs, quickjs.c:17277). Every element is a live
     // cell by construction (js_closure2, 17297-17331), so the former
@@ -977,8 +990,17 @@ pub const FunctionPayload = struct {
     realm_global_ptr: ?*Object = null,
     rare: ?*FunctionRarePayload = null,
 
+    pub inline fn functionBytecodePtr(self: *const FunctionPayload) *const FunctionBytecode {
+        const header = self.bytecode.objectHeader() orelse unreachable;
+        std.debug.assert(header.meta().kind == .function_bytecode);
+        const aligned: *align(16) @TypeOf(header.*) = @alignCast(header);
+        return @fieldParentPtr("header", aligned);
+    }
+
     pub fn destroy(self: *FunctionPayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.bytecode);
+        const bytecode_value = self.bytecode;
+        self.bytecode = JSValue.undefinedValue();
+        bytecode_value.free(rt);
         const native_dispatch_name = self.native_dispatch_name;
         self.native_dispatch_name = atom.null_atom;
         rt.atoms.free(native_dispatch_name);
@@ -2067,9 +2089,11 @@ pub const Object = struct {
             const current = rt.borrowed_reference_holders[read_index];
             if (current.header.meta().rc != 0) {
                 if (write_index != read_index) rt.borrowed_reference_holders[write_index] = current;
+                current.setBorrowedReferenceHolderIndex(write_index);
                 write_index += 1;
                 continue;
             }
+            current.setBorrowedReferenceHolderIndex(null);
             current.flags.is_borrowed_reference_holder = false;
         }
         rt.borrowed_reference_holders = rt.borrowed_reference_holders.ptr[0..write_index];
@@ -2077,8 +2101,14 @@ pub const Object = struct {
 
     fn runtimeBorrowedReferenceHolderIndex(rt: *JSRuntime, object: *Object) ?usize {
         if (!object.flags.is_borrowed_reference_holder) return null;
+        if (object.borrowedReferenceHolderIndex()) |cached_index| {
+            if (cached_index < rt.borrowed_reference_holders.len and rt.borrowed_reference_holders[cached_index] == object) return cached_index;
+        }
         for (rt.borrowed_reference_holders, 0..) |candidate, index| {
-            if (candidate == object) return index;
+            if (candidate == object) {
+                object.setBorrowedReferenceHolderIndex(index);
+                return index;
+            }
         }
         return null;
     }
@@ -4403,15 +4433,41 @@ pub const Object = struct {
         return class.invalid_class_id;
     }
 
-    pub fn functionBytecodeSlot(self: *Object) *?JSValue {
+    pub fn functionBytecodeSlot(self: *Object) *JSValue {
         if (self.functionPayload()) |payload| return &payload.bytecode;
-        if (self.generatorPayload()) |payload| return &payload.bytecode;
-        std.debug.assert(self.class_payload_kind == .function or self.class_payload_kind == .generator);
+        std.debug.assert(self.class_payload_kind == .function);
         unreachable;
     }
 
+    pub fn generatorBytecodeSlot(self: *Object) *?JSValue {
+        if (self.generatorPayload()) |payload| return &payload.bytecode;
+        std.debug.assert(self.class_payload_kind == .generator);
+        unreachable;
+    }
+
+    pub fn setFunctionBytecodeValue(self: *Object, rt: *JSRuntime, next_value: JSValue) !void {
+        errdefer next_value.free(rt);
+        if (!next_value.isFunctionBytecode()) return error.InvalidBytecode;
+        const slot = self.functionBytecodeSlot();
+        const old_value = slot.*;
+        slot.* = next_value;
+        old_value.free(rt);
+    }
+
+    /// Direct payload for a proven bytecode-function object. QJS keeps the
+    /// function bytecode, closure var_refs and realm in the same `u.func`
+    /// union; exposing that already-proven payload lets call entry load it once
+    /// and reuse all three fields.
+    pub inline fn bytecodeFunctionPayloadPtr(self: *Object) *FunctionPayload {
+        std.debug.assert(self.class_id == class.ids.bytecode_function);
+        std.debug.assert(self.class_payload_kind == .function);
+        return @ptrCast(@alignCast(self.u.payload.?));
+    }
+
     pub fn functionBytecode(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.bytecode;
+        if (self.functionPayloadConst()) |payload| {
+            return if (payload.bytecode.isUndefined()) null else payload.bytecode;
+        }
         if (self.generatorPayloadConst()) |payload| return payload.bytecode;
         return null;
     }
@@ -5138,6 +5194,34 @@ pub const Object = struct {
             slot.* = realm_global;
             if (realm_global == null) self.pruneBorrowedReferenceHolderIfEmpty(rt);
         }
+    }
+
+    pub fn borrowedReferenceHolderIndex(self: *const Object) ?usize {
+        const payload = self.functionPayloadConst() orelse return null;
+        const encoded = @as(u32, payload.borrowed_holder_index_lo) |
+            (@as(u32, payload.borrowed_holder_index_mid) << 8) |
+            (@as(u32, payload.borrowed_holder_index_hi) << 16);
+        return if (encoded == 0) null else @as(usize, encoded - 1);
+    }
+
+    pub fn setBorrowedReferenceHolderIndex(self: *Object, index: ?usize) void {
+        const payload = self.functionPayload() orelse return;
+        const holder_index = index orelse {
+            payload.borrowed_holder_index_lo = 0;
+            payload.borrowed_holder_index_mid = 0;
+            payload.borrowed_holder_index_hi = 0;
+            return;
+        };
+        if (holder_index >= std.math.maxInt(u24)) {
+            payload.borrowed_holder_index_lo = 0;
+            payload.borrowed_holder_index_mid = 0;
+            payload.borrowed_holder_index_hi = 0;
+            return;
+        }
+        const encoded: u32 = @intCast(holder_index + 1);
+        payload.borrowed_holder_index_lo = @truncate(encoded);
+        payload.borrowed_holder_index_mid = @truncate(encoded >> 8);
+        payload.borrowed_holder_index_hi = @truncate(encoded >> 16);
     }
 
     /// Realm-global pointer for a PROVEN bytecode-function object (the caller
@@ -6447,7 +6531,7 @@ pub const Object = struct {
             try Helper.traceOptValue(visitor, &payload.data);
         }
         if (self.functionPayload()) |payload| {
-            try Helper.traceOptValue(visitor, &payload.bytecode);
+            try Helper.callVisitValue(visitor, &payload.bytecode);
             // Slot-typed captures: visit each cell through its JSValue view —
             // same header edge as qjs `mark_func(rt, &var_refs[i]->header)`
             // (js_bytecode_function_mark, quickjs.c:16211) and bit-identical

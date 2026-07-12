@@ -4,12 +4,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const zjs_enable_opcode_profile = b.option(bool, "zjs_enable_opcode_profile", "Enable per-opcode profiling scopes") orelse false;
-    // Default: the 16-byte (payload+tag) JSValue layout — the portable
-    // reference representation that does not assume a 48-bit virtual address
-    // space. The 8-byte NaN-boxed layout stays selectable (and guarded by the
-    // test-altrepr step); it is lower-RSS / faster on this host but relies on
-    // pointer-tagging assumptions, so it is no longer the default.
-    const zjs_nan_boxing = b.option(bool, "zjs_nan_boxing", "Use the 8-byte NaN-boxed JSValue representation") orelse false;
+    // Default: the 8-byte NaN-boxed JSValue layout. It has compute parity with
+    // the portable 16-byte representation and materially lower RSS on
+    // value-dense heaps. The 16-byte payload+tag layout remains the reference
+    // alternate representation guarded by `test-altrepr`.
+    const zjs_nan_boxing = b.option(bool, "zjs_nan_boxing", "Use the 8-byte NaN-boxed JSValue representation") orelse true;
     // OOM-injection coverage instrumentation (v1): records deduplicated
     // allocation call sites in core/memory.zig. Default off and comptime
     // gated, so the default build's allocation hot path is unchanged.
@@ -570,15 +569,15 @@ pub fn build(b: *std.Build) void {
     };
     const run_oom_cap_tests = b.addRunArtifact(oom_cap_tests);
 
-    // Alternate JSValue representation guard: runs the unified suite in a
-    // nested build with the non-default representation (a full second build
+    // Alternate JSValue representation guard: runs the unified suite in the
+    // non-default 16-byte representation (a full second build
     // graph, so the plugin fixtures recompile with a matching ABI
     // fingerprint). Required for any change touching core/value.zig or
     // value-representation semantics.
     const altrepr_tests = b.addSystemCommand(&.{
-        b.graph.zig_exe, "build", "test", "-Dzjs_nan_boxing=true", "--summary", "all",
+        b.graph.zig_exe, "build", "test", "-Dzjs_nan_boxing=false", "--summary", "all",
     });
-    const altrepr_step = b.step("test-altrepr", "Run the unified tests with the non-default (8-byte NaN-boxed) JSValue representation");
+    const altrepr_step = b.step("test-altrepr", "Run the unified tests with the non-default 16-byte JSValue representation");
     altrepr_step.dependOn(&altrepr_tests.step);
 
     // User-facing steps to expose

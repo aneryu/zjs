@@ -104,8 +104,8 @@ fn hashNumber(number: f64) u64 {
 }
 
 fn hashStringValue(value: core.JSValue) u64 {
-    const string = stringFromValue(value) orelse return hashRefPointer(value);
-    return mix64(@as(u64, string.contentHash()) ^ (@as(u64, string.len()) << 32));
+    const hash = core.string.stringValueContentHash(value) orelse return hashRefPointer(value);
+    return mix64(@as(u64, hash) ^ (@as(u64, core.string.stringValueLen(value)) << 32));
 }
 
 pub fn strongEntryHashLatin1Concat(prefix: []const u8, digits: []const u8) u64 {

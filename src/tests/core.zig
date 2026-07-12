@@ -723,6 +723,15 @@ test "flat strings store characters inline in a single fixed-size allocation" {
     try std.testing.expectEqual(growable_allocations + 1, rt.memory.allocation_count);
 }
 
+test "ordinary rope nodes keep accumulator state out of line" {
+    // QJS's node is just u32/u8/u8 plus two JSValues. zjs additionally needs
+    // one runtime pointer for its context-free borrowed-string API; generic
+    // ropes must not regress to embedding the private tail pointer/union,
+    // cached-flat/hash, or destroy link.
+    const compact_limit = 2 * @sizeOf(core.JSValue) + @sizeOf(*anyopaque) + 8;
+    try std.testing.expect(@sizeOf(core.string.StringRope) <= compact_limit);
+}
+
 test "rope tail append extends an unmaterialized rope in place" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -731,7 +740,7 @@ test "rope tail append extends an unmaterialized rope in place" {
     const right = try core.string.String.createLatin1(rt, "def");
     // A rope is a standalone `StringRope` reached through a `Tag.string_rope`
     // value; createRope retains its children, so drop our own references.
-    const rope = try core.string.String.createRope(rt, left.value(), right.value());
+    const rope = try core.string.String.createAccumulatorRope(rt, left.value(), right.value());
     left.value().free(rt);
     right.value().free(rt);
     const rope_value = rope.value();
@@ -740,7 +749,7 @@ test "rope tail append extends an unmaterialized rope in place" {
     try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "ghi" }, 1));
     try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "jkl" }, 1));
     try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "" }, 1));
-    try std.testing.expectEqual(@as(usize, 12), rope.len);
+    try std.testing.expectEqual(@as(usize, 12), rope.len_());
     try std.testing.expect(!rope.isWide());
 
     // Length growth in a loop exercises the amortized-doubling regrowth.
@@ -748,7 +757,7 @@ test "rope tail append extends an unmaterialized rope in place" {
     while (round < 100) : (round += 1) {
         try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "0123456789" }, 1));
     }
-    try std.testing.expectEqual(@as(usize, 1012), rope.len);
+    try std.testing.expectEqual(@as(usize, 1012), rope.len_());
 
     // Content reads flatten the rope including the tail segment.
     const flat = try rope.flatten();
@@ -759,12 +768,12 @@ test "rope tail append extends an unmaterialized rope in place" {
 
     // Materialized ropes refuse tail appends: their content is captured.
     try std.testing.expect(!try core.string.appendRopeTail(rope, rt, .{ .latin1 = "nope" }, 1));
-    try std.testing.expectEqual(@as(usize, 1012), rope.len);
+    try std.testing.expectEqual(@as(usize, 1012), rope.len_());
 
     // An unflattened rope destroyed with a pending tail releases it.
     const l2 = try core.string.String.createLatin1(rt, "xy");
     const r2 = try core.string.String.createLatin1(rt, "z");
-    const dropped = try core.string.String.createRope(rt, l2.value(), r2.value());
+    const dropped = try core.string.String.createAccumulatorRope(rt, l2.value(), r2.value());
     l2.value().free(rt);
     r2.value().free(rt);
     try std.testing.expect(try core.string.appendRopeTail(dropped, rt, .{ .latin1 = "tail" }, 1));
@@ -777,7 +786,7 @@ test "rope tail append widens for utf16 suffixes" {
 
     const left = try core.string.String.createLatin1(rt, "ab");
     const right = try core.string.String.createLatin1(rt, "cd");
-    const rope = try core.string.String.createRope(rt, left.value(), right.value());
+    const rope = try core.string.String.createAccumulatorRope(rt, left.value(), right.value());
     left.value().free(rt);
     right.value().free(rt);
     const rope_value = rope.value();
@@ -790,7 +799,7 @@ test "rope tail append widens for utf16 suffixes" {
     try std.testing.expect(rope.isWide());
     // Narrow content keeps landing in the widened tail.
     try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "z" }, 1));
-    try std.testing.expectEqual(@as(usize, 8), rope.len);
+    try std.testing.expectEqual(@as(usize, 8), rope.len_());
 
     const expected = try core.string.String.createUtf16(rt, &.{ 'a', 'b', 'c', 'd', '1', '2', 0x0100, 'z' });
     defer expected.value().free(rt);
@@ -799,13 +808,51 @@ test "rope tail append widens for utf16 suffixes" {
     try std.testing.expectEqual(expected.contentHash(), rope.contentHash());
 }
 
+test "rope index compare and hash traverse nested leaves without flattening" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const left = try core.string.String.createLatin1(rt, "ab");
+    const right = try core.string.String.createUtf16(rt, &.{ 0x0100, 'c' });
+    const inner = try core.string.String.createAccumulatorRope(rt, left.value(), right.value());
+    left.value().free(rt);
+    right.value().free(rt);
+    const inner_value = inner.value();
+    defer inner_value.free(rt);
+    try std.testing.expect(try core.string.appendRopeTail(inner, rt, .{ .latin1 = "xy" }, 1));
+
+    const suffix = try core.string.String.createLatin1(rt, "!");
+    const outer = try core.string.String.createRope(rt, inner_value, suffix.value());
+    suffix.value().free(rt);
+    const outer_value = outer.value();
+    defer outer_value.free(rt);
+
+    const expected = try core.string.String.createUtf16(rt, &.{ 'a', 'b', 0x0100, 'c', 'x', 'y', '!' });
+    defer expected.value().free(rt);
+
+    try std.testing.expectEqual(@as(?u16, 'a'), core.string.stringValueCodeUnitAt(outer_value, 0));
+    try std.testing.expectEqual(@as(?u16, 0x0100), core.string.stringValueCodeUnitAt(outer_value, 2));
+    try std.testing.expectEqual(@as(?u16, 'x'), core.string.stringValueCodeUnitAt(outer_value, 4));
+    try std.testing.expectEqual(@as(?u16, '!'), core.string.stringValueCodeUnitAt(outer_value, 6));
+    try std.testing.expectEqual(@as(?u16, null), core.string.stringValueCodeUnitAt(outer_value, 7));
+
+    try std.testing.expectEqual(@as(?i32, 0), core.string.compareStringValues(outer_value, expected.value(), false));
+    try std.testing.expectEqual(@as(?i32, 0), core.string.compareStringValues(outer_value, expected.value(), true));
+    try std.testing.expectEqual(expected.contentHash(), core.string.stringValueContentHash(outer_value).?);
+    try std.testing.expectEqual(expected.contentHash(), outer.contentHash());
+
+    // These QJS-style readers must leave both levels as ropes.
+    try std.testing.expect(!inner.isLinearized());
+    try std.testing.expect(!outer.isLinearized());
+}
+
 test "rope child snapshots content: shared child refuses tail appends" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const left = try core.string.String.createLatin1(rt, "abc");
     const right = try core.string.String.createLatin1(rt, "def");
-    const inner = try core.string.String.createRope(rt, left.value(), right.value());
+    const inner = try core.string.String.createAccumulatorRope(rt, left.value(), right.value());
     left.value().free(rt);
     right.value().free(rt);
     const inner_value = inner.value();
@@ -857,6 +904,13 @@ test "atom table retains its cached string until the atom dies" {
     const again = try core.string.String.createAtomBacked(rt, atom_id);
     try std.testing.expect(again == atom_string);
     again.value().free(rt);
+    // OP_push_atom_value's QJS-like direct entry path returns the same cached
+    // body and performs no allocation after the first materialization.
+    const allocations = rt.memory.allocation_count;
+    const pushed = try rt.atoms.toStringValueForPush(rt, atom_id);
+    try std.testing.expect(pushed.asStringBodyRaw() == atom_string);
+    try std.testing.expectEqual(allocations, rt.memory.allocation_count);
+    pushed.free(rt);
     // Releasing the string does not release the atom: `atom_id` is a weak
     // back-pointer, and the table keeps its own string reference.
     atom_string.value().free(rt);
@@ -4427,6 +4481,43 @@ test "cleared realm pointer unregisters empty borrowed holder" {
     try holder.setFunctionRealmGlobalPtr(rt, null);
     try std.testing.expectEqual(@as(?*core.Object, null), holder.functionRealmGlobalPtr());
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+}
+
+test "function borrowed holder cache follows swap removal" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+    defer global.value().free(rt);
+    global.flags.is_global = true;
+
+    const first = try core.Object.create(rt, core.class.ids.bytecode_function, null);
+    const second = try core.Object.create(rt, core.class.ids.bytecode_function, null);
+    const third = try core.Object.create(rt, core.class.ids.bytecode_function, null);
+
+    try first.setFunctionRealmGlobalPtr(rt, global);
+    try second.setFunctionRealmGlobalPtr(rt, global);
+    try third.setFunctionRealmGlobalPtr(rt, global);
+    try std.testing.expectEqual(@as(?usize, 0), first.borrowedReferenceHolderIndex());
+    try std.testing.expectEqual(@as(?usize, 1), second.borrowedReferenceHolderIndex());
+    try std.testing.expectEqual(@as(?usize, 2), third.borrowedReferenceHolderIndex());
+
+    // Removing the first entry swaps the tail into its slot and must repair the
+    // moved function's cached index. Removing that moved entry repeats the same
+    // edge, exercising the FIFO teardown shape that used to be quadratic.
+    first.value().free(rt);
+    try std.testing.expectEqual(@as(usize, 2), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(?usize, 0), third.borrowedReferenceHolderIndex());
+    try std.testing.expectEqual(@as(?usize, 1), second.borrowedReferenceHolderIndex());
+
+    try third.setFunctionRealmGlobalPtr(rt, null);
+    try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(?usize, 0), second.borrowedReferenceHolderIndex());
+    third.value().free(rt);
+
+    try second.setFunctionRealmGlobalPtr(rt, null);
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    second.value().free(rt);
 }
 
 test "replaced realm auto-init unregisters empty borrowed holder" {

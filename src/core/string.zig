@@ -3,6 +3,7 @@ const gc = @import("gc.zig");
 const unicode = @import("../libs/unicode.zig");
 const JSRuntime = @import("runtime.zig").JSRuntime;
 const JSValue = @import("value.zig").JSValue;
+const ValueTag = @import("value.zig").Tag;
 
 pub const StringError = error{
     InvalidUtf8,
@@ -19,46 +20,44 @@ pub const max_length: usize = (1 << 30) - 1;
 /// STANDALONE refcounted heap object reached through a `JSValue` tagged
 /// `Tag.string_rope` (never a `*String`). It owns its `left`/`right` children
 /// as `JSValue`s (each may itself be a flat `Tag.string` or another
-/// `Tag.string_rope`, so rope-of-rope chains are handled), plus a private
-/// growable tail buffer.
+/// `Tag.string_rope`, so rope-of-rope chains are handled). Generic ropes keep
+/// only the QJS-like tree state plus the runtime needed by the infallible
+/// borrowed-string API. The zjs-only growable accumulator tail lives in an
+/// optional sidecar, so ordinary QJS-style rope nodes do not pay for its
+/// buffer union and bookkeeping.
 ///
 /// The first content read MATERIALIZES the rope into a flat `*String`
 /// (`flatten`, mirroring qjs `js_linearize_string_rope`) and caches it in
-/// `flat`, releasing the children and the tail. All borrowed slices returned to
-/// readers point into that owned flat string, so they stay valid for as long as
-/// the rope object is alive. The refcount lives in a 4-byte `gc.StringHeader`
+/// `left` with `depth == 0`, releasing the former children and the tail. This
+/// mirrors qjs's linearized `left=flat, right=empty` representation without a
+/// separate flat/hash payload. All borrowed slices returned to readers point
+/// into that owned flat string, so they stay valid for as long as the rope
+/// object is alive. The refcount lives in a 4-byte `gc.StringHeader`
 /// prefix at `ropePtr - 4` (see `String` below), reached through `header()`, so
 /// a `Tag.string_rope` value's payload is that prefix pointer, exactly like a
 /// flat string.
 pub const StringRope = struct {
     left: JSValue,
     right: JSValue,
-    /// Total length in code units, including the tail buffer's used units.
-    len: usize,
-    wide: bool,
+    /// `asStringBody()` has no context/runtime argument, so zjs retains this
+    /// one pointer for on-demand linearization. QJS receives `JSContext *` at
+    /// its linearization call site and therefore does not need it in the node.
     rt: *JSRuntime,
-    hash: u32 = 0,
-    hash_ready: bool = false,
-    /// Materialized flat string (qjs linearized rope). Owned: the rope holds one
-    /// reference and releases it on destroy. Non-null once flattened.
-    flat: ?*String = null,
-    /// Growable private append buffer so `s += x` loops extend the rope in
-    /// place instead of chaining one ~150-byte node per concatenation.
-    /// Logically the tail's content sits after `right`. The slices keep the
-    /// full allocated capacity; `tail_len` is the used unit count. Flattening
-    /// merges the tail into `flat` and releases it, so a materialized rope
-    /// never carries a tail.
-    tail: Tail = .none,
-    tail_len: usize = 0,
-    /// Intrusive link used only by the iterative destroy path so arbitrarily
-    /// deep rope chains never recurse the native stack.
-    chain_next: ?*StringRope = null,
+    /// Total length in code units, including the tail sidecar's used units.
+    /// QJS uses uint32_t and caps strings below 2^30; keep the same width.
+    len: u32,
+    /// Maximum child depth plus one, matching QuickJS `JSStringRope.depth`.
+    /// Generic concatenation rebalances once this exceeds
+    /// `String.rope_max_depth`, keeping reads and recursive destruction
+    /// bounded. Zero is reserved for an already-linearized rope.
+    depth: u8,
+    wide: bool,
+    /// The trailing tail-state slot exists only on the larger accumulator-node
+    /// allocation. Ordinary QJS-style nodes keep this flag clear and end at
+    /// `@sizeOf(StringRope)`.
+    flags: u8 = 0,
 
-    pub const Tail = union(enum) {
-        none,
-        latin1: []u8,
-        utf16: []u16,
-    };
+    const accumulator_tail_slot_flag: u8 = 1 << 0;
 
     /// Size of the refcount prefix reserved ahead of a `StringRope` node. The
     /// node holds pointers (`@alignOf(StringRope) == 8`), so the 4-byte rc word
@@ -98,43 +97,82 @@ pub const StringRope = struct {
     }
 
     pub fn len_(self: *const StringRope) usize {
-        return self.len;
+        return @intCast(self.len);
+    }
+
+    /// QJS recognizes a linearized rope by an empty-string right child. zjs
+    /// reserves depth zero for the same state, avoiding another field and an
+    /// empty-string retain in every materialized rope.
+    pub fn isLinearized(self: *const StringRope) bool {
+        return self.depth == 0;
+    }
+
+    pub fn supportsTail(self: *const StringRope) bool {
+        return self.flags & accumulator_tail_slot_flag != 0;
+    }
+
+    fn tailStateSlot(self: *const StringRope) ?*?*RopeTailState {
+        if (!self.supportsTail()) return null;
+        const tail_address = @intFromPtr(self) + @sizeOf(StringRope);
+        return @ptrFromInt(tail_address);
+    }
+
+    pub fn hasTail(self: *const StringRope) bool {
+        const slot = self.tailStateSlot() orelse return false;
+        return slot.* != null;
+    }
+
+    pub fn tailLen(self: *const StringRope) usize {
+        const slot = self.tailStateSlot() orelse return 0;
+        return if (slot.*) |tail| tail.len else 0;
+    }
+
+    fn flatString(self: *const StringRope) ?*String {
+        if (!self.isLinearized()) return null;
+        return self.left.asStringBodyRaw();
     }
 
     fn tailResolved(self: *const StringRope) ?String.ResolvedData {
-        return switch (self.tail) {
-            .none => null,
-            .latin1 => |buf| .{ .latin1 = buf[0..self.tail_len] },
-            .utf16 => |buf| .{ .utf16 = buf[0..self.tail_len] },
+        const slot = self.tailStateSlot() orelse return null;
+        const tail = slot.* orelse return null;
+        return switch (tail.data) {
+            .latin1 => |buf| .{ .latin1 = buf[0..tail.len] },
+            .utf16 => |buf| .{ .utf16 = buf[0..tail.len] },
         };
     }
 
-    /// Materializes this rope into a flat `*String`, caching it in `flat` and
-    /// releasing the children and tail. Returns a BORROWED pointer to the cached
-    /// flat string (the rope keeps ownership; callers that need to own it must
-    /// retain). Idempotent. On allocation failure the rope is left untouched.
+    /// Materializes this rope into a flat `*String`, caching its owned value in
+    /// `left` and releasing the former children and tail. Returns a BORROWED
+    /// pointer to the cached flat string (the rope keeps ownership; callers
+    /// that need to own it must retain). Idempotent. On allocation failure the
+    /// rope is left untouched.
     pub fn flatten(self: *StringRope) !*String {
-        if (self.flat) |flat| return flat;
+        if (self.flatString()) |flat| return flat;
         const rt = self.rt;
+        const total_len: usize = @intCast(self.len);
         const flat = if (self.wide) blk: {
-            const s = try String.createUninitialized(rt, .utf16, self.len);
+            const s = try String.createUninitialized(rt, .utf16, total_len);
             errdefer String.destroyFlat(rt, s);
-            try copyRopeContent(u16, rt, self, s.utf16Mut());
+            copyRopeContent(u16, self, s.utf16Mut());
             break :blk s;
         } else blk: {
-            const s = try String.createUninitialized(rt, .latin1, self.len);
+            const s = try String.createUninitialized(rt, .latin1, total_len);
             errdefer String.destroyFlat(rt, s);
-            try copyRopeContent(u8, rt, self, s.latin1Mut());
+            copyRopeContent(u8, self, s.latin1Mut());
             writeLatin1Terminator(s.latin1Mut());
             break :blk s;
         };
-        self.flat = flat;
-        // Release the children and the tail now that content is captured.
-        releaseRopeChild(rt, self.left);
-        releaseRopeChild(rt, self.right);
-        self.left = JSValue.undefinedValue();
+        const old_left = self.left;
+        const old_right = self.right;
+        self.left = flat.value();
         self.right = JSValue.undefinedValue();
         freeRopeTail(rt, self);
+        self.depth = 0;
+        // Release the former tree only after publishing the new owned flat
+        // child. String destruction has no user callback, but this ordering
+        // also keeps the rope internally valid under force-GC diagnostics.
+        old_left.free(rt);
+        old_right.free(rt);
         return flat;
     }
 
@@ -148,16 +186,24 @@ pub const StringRope = struct {
         };
     }
 
-    /// Content hash, cached. Flattens first so a rope hashes identically to a
-    /// content-equal flat string.
+    /// Content hash without materialization. Flat children keep their normal
+    /// cache; the rope itself has no duplicate hash field, matching QJS.
     pub fn contentHash(self: *StringRope) u32 {
-        if (!self.hash_ready) {
-            const flat = self.flattenInfallible();
-            self.hash = flat.contentHash();
-            self.hash_ready = true;
-        }
-        return self.hash;
+        return stringValueContentHash(self.value()).?;
     }
+};
+
+/// Sidecar used only by zjs's fused `add_loc` accumulator extension. Keeping
+/// it out of `StringRope` makes the ordinary concat/rebalance node compact like
+/// QJS while retaining the measured O(1) tail-append win for exclusive locals.
+const RopeTailState = struct {
+    data: Data,
+    len: usize,
+
+    const Data = union(enum) {
+        latin1: []u8,
+        utf16: []u16,
+    };
 };
 
 pub fn isAsciiBytes(bytes: []const u8) bool {
@@ -441,9 +487,15 @@ pub const String = struct {
         return self;
     }
 
-    /// Minimum combined length (in code units) for the `+` operator to defer
-    /// concatenation through a rope instead of copying eagerly.
-    pub const rope_min_len: usize = 256;
+    /// QuickJS `JS_STRING_ROPE_SHORT_LEN`: a short RHS is merged into a rope's
+    /// short right leaf before another wrapper node is introduced.
+    pub const rope_short_len: usize = 512;
+    /// QuickJS `JS_STRING_ROPE_SHORT2_LEN`: two flat strings stay flat while
+    /// the LHS is at most this long and the RHS is short.
+    pub const rope_short2_len: usize = 8192;
+    /// QuickJS `JS_STRING_ROPE_MAX_DEPTH`: deeper trees are rebuilt with the
+    /// Fibonacci-bucket rope balancing algorithm.
+    pub const rope_max_depth: u8 = 60;
 
     /// Creates a rope deferring the concatenation of `left ++ right`. Returns a
     /// STANDALONE `*StringRope` (the caller emits its `Tag.string_rope` value via
@@ -452,20 +504,73 @@ pub const String = struct {
     /// supplied as-is by the concat machinery; the rope stores them as owned
     /// `JSValue`s.
     pub fn createRope(rt: *JSRuntime, left: JSValue, right: JSValue) !*StringRope {
-        const total = try std.math.add(usize, stringValueLen(left), stringValueLen(right));
-        // Rope-concat length cap (qjs JS_ConcatString rope path, quickjs.c:4898).
-        if (total > max_length) return error.StringTooLong;
-        const node = try allocRopeNode(rt);
-        node.* = .{
-            .left = left,
-            .right = right,
-            .len = total,
-            .wide = stringValueWide(left) or stringValueWide(right),
-            .rt = rt,
-        };
-        _ = left.dup();
-        _ = right.dup();
+        // QJS classifies each operand once, collecting len/width/depth from
+        // the same branch before allocating. Do not repeat ropeBody/raw-body
+        // tag decoding independently for all three fields.
+        const left_info = stringValueInfo(left);
+        const right_info = stringValueInfo(right);
+        const node = try createRopeNode(rt, left, right, left_info, right_info, false);
+        left_info.header.retain();
+        right_info.header.retain();
         return node;
+    }
+
+    /// Creates the zjs-only fused-local accumulator rope. Its base node keeps
+    /// the same compact QJS layout; only this allocation receives one trailing
+    /// nullable tail-state slot.
+    pub fn createAccumulatorRope(rt: *JSRuntime, left: JSValue, right: JSValue) !*StringRope {
+        const left_info = stringValueInfo(left);
+        const right_info = stringValueInfo(right);
+        const node = try createRopeNode(rt, left, right, left_info, right_info, true);
+        left_info.header.retain();
+        right_info.header.retain();
+        return node;
+    }
+
+    /// Consuming counterpart of `createRope`, matching QJS
+    /// `js_new_string_rope(ctx, op1, op2)`: both input owners transfer directly
+    /// into the new node, with no retain-then-free round trip. On failure both
+    /// inputs are released.
+    pub fn createRopeOwned(rt: *JSRuntime, left: JSValue, right: JSValue) !*StringRope {
+        const left_info = stringValueInfo(left);
+        const right_info = stringValueInfo(right);
+        return createRopeNode(rt, left, right, left_info, right_info, false) catch |err| {
+            left.free(rt);
+            right.free(rt);
+            return err;
+        };
+    }
+
+    /// Creates a rope and applies the same depth cap and Fibonacci-bucket
+    /// rebalance as QuickJS `js_new_string_rope`. The inputs are borrowed; the
+    /// returned value owns its complete tree.
+    pub fn createBalancedRope(rt: *JSRuntime, left: JSValue, right: JSValue) !JSValue {
+        const node = try createRope(rt, left, right);
+        const rope_value = node.value();
+        if (node.depth <= rope_max_depth) return rope_value;
+
+        const balanced = rebalanceRope(rt, rope_value) catch |err| {
+            rope_value.free(rt);
+            return err;
+        };
+        rope_value.free(rt);
+        return balanced;
+    }
+
+    /// Consumes two owned operands and applies the same depth cap/rebalance as
+    /// `createBalancedRope`. This is the ownership contract of QJS's concat
+    /// helper and is the hot path used by direct `OP_add`.
+    pub fn createBalancedRopeOwned(rt: *JSRuntime, left: JSValue, right: JSValue) !JSValue {
+        const node = try createRopeOwned(rt, left, right);
+        const rope_value = node.value();
+        if (node.depth <= rope_max_depth) return rope_value;
+
+        const balanced = rebalanceRope(rt, rope_value) catch |err| {
+            rope_value.free(rt);
+            return err;
+        };
+        rope_value.free(rt);
+        return balanced;
     }
 
     /// Content hash accessor (qjs `JSString.hash`). Computes on first demand;
@@ -644,7 +749,7 @@ pub const String = struct {
         // itself stays exactly 12B (qjs `JSString`). The block base is
         // 4-aligned; the rc prefix is 4 bytes, so the struct at `base + 4` keeps
         // `String`'s 4-byte alignment and the inline char FAM stays u16-aligned.
-        const bytes = try rt.allocRuntimeAlignedBytes(inline_layout.total_size, inline_layout.allocation_alignment);
+        const bytes = try rt.allocStringAlignedBytes(inline_layout.total_size, inline_layout.allocation_alignment);
         const rc_ptr: *gc.StringHeader = @ptrCast(@alignCast(bytes.ptr));
         rc_ptr.* = .{};
         const self: *String = @ptrCast(@alignCast(bytes.ptr + gc.string_rc_prefix_size));
@@ -743,16 +848,362 @@ fn orderToI32(order: std.math.Order) i32 {
 
 /// True length in code units of a string-or-rope value.
 pub fn stringValueLen(value: JSValue) usize {
-    if (value.ropeBody()) |node| return node.len;
-    if (value.asStringBodyRaw()) |s| return s.len();
-    return 0;
+    if (!value.isString()) return 0;
+    return stringValueLenUnchecked(value);
 }
 
-/// Width of a string-or-rope value.
-pub fn stringValueWide(value: JSValue) bool {
-    if (value.ropeBody()) |node| return node.wide;
-    if (value.asStringBodyRaw()) |s| return s.isWide();
-    return false;
+/// QJS `string_rope_get_len` precondition: `value` is a string or rope.
+pub inline fn stringValueLenUnchecked(value: JSValue) usize {
+    const tag = value.tagOf();
+    const header = value.stringHeaderAssumeStringLike();
+    if (tag == ValueTag.string_rope) return StringRope.fromHeader(header).len_();
+    std.debug.assert(tag == ValueTag.string);
+    return String.fromHeader(header).len();
+}
+
+/// Fixed-stack, allocation-free traversal of a string-or-rope value. This is
+/// the zjs analogue of QJS `JSStringRopeIter`: flat leaf slices are returned in
+/// code-unit order without materializing the rope. The extra `tail` phase
+/// accounts for zjs's optional accumulator sidecar (`left ++ right ++ tail`).
+pub const StringValueIterator = struct {
+    current: ?JSValue,
+    nodes: [rope_iterator_stack_capacity]*const StringRope = undefined,
+    phases: [rope_iterator_stack_capacity]Phase = undefined,
+    stack_len: usize = 0,
+
+    const Phase = enum(u1) { right, tail };
+
+    pub fn init(value: JSValue) StringValueIterator {
+        std.debug.assert(value.isString());
+        return .{ .current = value };
+    }
+
+    pub fn next(self: *StringValueIterator) ?String.ResolvedData {
+        while (true) {
+            if (self.current) |value| {
+                self.current = null;
+                if (value.asStringBodyRaw()) |flat| {
+                    const resolved = flat.resolveData();
+                    if (resolved.len() != 0) return resolved;
+                    continue;
+                }
+
+                const node = value.ropeBody() orelse return null;
+                if (node.flatString()) |flat| {
+                    const resolved = flat.resolveData();
+                    if (resolved.len() != 0) return resolved;
+                    continue;
+                }
+
+                std.debug.assert(self.stack_len < self.nodes.len);
+                self.nodes[self.stack_len] = node;
+                self.phases[self.stack_len] = .right;
+                self.stack_len += 1;
+                self.current = node.left;
+                continue;
+            }
+
+            if (self.stack_len == 0) return null;
+            const top = self.stack_len - 1;
+            const node = self.nodes[top];
+            switch (self.phases[top]) {
+                .right => {
+                    self.phases[top] = .tail;
+                    self.current = node.right;
+                },
+                .tail => {
+                    self.stack_len = top;
+                    if (node.tailResolved()) |resolved| {
+                        if (resolved.len() != 0) return resolved;
+                    }
+                },
+            }
+        }
+    }
+};
+
+const rope_iterator_stack_capacity: usize = String.rope_max_depth;
+
+/// QJS `string_rope_get`: return one UTF-16 code unit without flattening.
+pub fn stringValueCodeUnitAt(value: JSValue, index: usize) ?u16 {
+    if (!value.isString() or index >= stringValueLen(value)) return null;
+    return stringValueCodeUnitAtUnchecked(value, index);
+}
+
+/// QJS `string_rope_get` precondition: `value` is a string/rope and `index` is
+/// in range. Callers that already checked length avoid repeating optional/tag
+/// validation on every character access.
+pub fn stringValueCodeUnitAtUnchecked(value: JSValue, index: usize) u16 {
+    var current = value;
+    var relative = index;
+    while (true) {
+        const tag = current.tagOf();
+        const header = current.stringHeaderAssumeStringLike();
+        if (tag == ValueTag.string) return String.fromHeader(header).codeUnitAt(relative);
+        std.debug.assert(tag == ValueTag.string_rope);
+
+        const node = StringRope.fromHeader(header);
+        if (node.flatString()) |flat| return flat.codeUnitAt(relative);
+
+        const left_len = stringValueLenUnchecked(node.left);
+        if (relative < left_len) {
+            current = node.left;
+            continue;
+        }
+        relative -= left_len;
+
+        const right_len = stringValueLenUnchecked(node.right);
+        if (relative < right_len) {
+            current = node.right;
+            continue;
+        }
+        relative -= right_len;
+
+        const tail = node.tailResolved() orelse unreachable;
+        return switch (tail) {
+            .latin1 => |bytes| bytes[relative],
+            .utf16 => |units| units[relative],
+        };
+    }
+}
+
+/// QJS `js_string_rope_compare`: compare flat and rope strings a leaf chunk at
+/// a time. `eq_only` permits the same early length mismatch used by equality.
+pub fn compareStringValues(a: JSValue, b: JSValue, eq_only: bool) ?i32 {
+    if (!a.isString() or !b.isString()) return null;
+    if (a.same(b)) return 0;
+
+    const a_len = stringValueLen(a);
+    const b_len = stringValueLen(b);
+    if (eq_only and a_len != b_len) return 1;
+
+    var remaining = @min(a_len, b_len);
+    var a_iter = StringValueIterator.init(a);
+    var b_iter = StringValueIterator.init(b);
+    var a_part = a_iter.next();
+    var b_part = b_iter.next();
+    var a_pos: usize = 0;
+    var b_pos: usize = 0;
+
+    while (remaining != 0) {
+        const a_resolved = a_part orelse return null;
+        const b_resolved = b_part orelse return null;
+        const chunk_len = @min(remaining, @min(a_resolved.len() - a_pos, b_resolved.len() - b_pos));
+        const cmp = compareResolved(
+            resolvedSlice(a_resolved, a_pos, chunk_len),
+            resolvedSlice(b_resolved, b_pos, chunk_len),
+        );
+        if (cmp != 0) return cmp;
+
+        remaining -= chunk_len;
+        a_pos += chunk_len;
+        b_pos += chunk_len;
+        if (a_pos == a_resolved.len()) {
+            a_part = a_iter.next();
+            a_pos = 0;
+        }
+        if (b_pos == b_resolved.len()) {
+            b_part = b_iter.next();
+            b_pos = 0;
+        }
+    }
+
+    return if (a_len < b_len) -1 else if (a_len > b_len) 1 else 0;
+}
+
+/// QJS `hash_string_rope`: hash leaf chunks in order without flattening. Flat
+/// strings retain their existing cached hash; ropes intentionally do not add a
+/// duplicate cache field, matching QJS's rope layout.
+pub fn stringValueContentHash(value: JSValue) ?u32 {
+    if (!value.isString()) return null;
+    if (value.asStringBodyRaw()) |flat| return flat.contentHash();
+    if (value.ropeBody()) |node| {
+        if (node.flatString()) |flat| return flat.contentHash();
+    }
+
+    var iterator = StringValueIterator.init(value);
+    var hash: u32 = 0;
+    while (iterator.next()) |resolved| {
+        hash = switch (resolved) {
+            .latin1 => |bytes| hashLatin1(bytes, hash),
+            .utf16 => |units| hashUtf16(units, hash),
+        };
+    }
+    return foldHash30(hash);
+}
+
+fn resolvedSlice(resolved: String.ResolvedData, start: usize, len: usize) String.ResolvedData {
+    return switch (resolved) {
+        .latin1 => |bytes| .{ .latin1 = bytes[start..][0..len] },
+        .utf16 => |units| .{ .utf16 = units[start..][0..len] },
+    };
+}
+
+const StringValueInfo = struct {
+    len: usize,
+    depth: u8,
+    wide: bool,
+    header: *gc.StringHeader,
+};
+
+/// QJS `js_new_string_rope`'s one-tag-test operand classification.
+fn stringValueInfo(value: JSValue) StringValueInfo {
+    const tag = value.tagOf();
+    const header = value.stringHeaderAssumeStringLike();
+    if (tag == ValueTag.string_rope) {
+        const node = StringRope.fromHeader(header);
+        return .{ .len = node.len_(), .depth = node.depth, .wide = node.wide, .header = header };
+    }
+    std.debug.assert(tag == ValueTag.string or tag == ValueTag.symbol);
+    const flat = String.fromHeader(header);
+    return .{ .len = flat.len(), .depth = 0, .wide = flat.isWide(), .header = header };
+}
+
+fn createRopeNode(
+    rt: *JSRuntime,
+    left: JSValue,
+    right: JSValue,
+    left_info: StringValueInfo,
+    right_info: StringValueInfo,
+    with_accumulator_tail_slot: bool,
+) !*StringRope {
+    const total = try std.math.add(usize, left_info.len, right_info.len);
+    // Rope-concat length cap (qjs JS_ConcatString rope path, quickjs.c:4898).
+    if (total > max_length) return error.StringTooLong;
+    const node = try allocRopeNode(rt, with_accumulator_tail_slot);
+    node.* = .{
+        .left = left,
+        .right = right,
+        .len = @intCast(total),
+        .depth = @max(left_info.depth, right_info.depth) +| 1,
+        .wide = left_info.wide or right_info.wide,
+        .flags = if (with_accumulator_tail_slot) StringRope.accumulator_tail_slot_flag else 0,
+        .rt = rt,
+    };
+    if (node.tailStateSlot()) |slot| slot.* = null;
+    return node;
+}
+
+// Fibonacci buckets from QuickJS `rope_bucket_len` (quickjs.c:4934). The last
+// entry is greater than `max_length`, so every valid string has a bucket.
+const rope_bucket_len = [_]usize{
+    1,         2,         3,         5,
+    8,         13,        21,        34,
+    55,        89,        144,       233,
+    377,       610,       987,       1597,
+    2584,      4181,      6765,      10946,
+    17711,     28657,     46368,     75025,
+    121393,    196418,    317811,    514229,
+    832040,    1346269,   2178309,   3524578,
+    5702887,   9227465,   14930352,  24157817,
+    39088169,  63245986,  102334155, 165580141,
+    267914296, 433494437, 701408733, 1134903170,
+};
+
+const RopeBuckets = [rope_bucket_len.len]?JSValue;
+
+/// Consumes two owned values and returns one owned raw rope value. `createRope`
+/// itself borrows and retains the inputs, so releasing the two incoming owners
+/// after construction implements the ownership transfer used by QJS's
+/// `js_new_string_rope`.
+fn createOwnedRope(rt: *JSRuntime, left: JSValue, right: JSValue) !JSValue {
+    return (try String.createRopeOwned(rt, left, right)).value();
+}
+
+/// Inserts one owned flat leaf into the Fibonacci buckets. On either success
+/// or failure ownership of `owned_leaf` is consumed.
+fn addRopeRebalanceLeaf(rt: *JSRuntime, buckets: *RopeBuckets, owned_leaf: JSValue) !void {
+    const leaf_len = stringValueLen(owned_leaf);
+    if (leaf_len == 0) {
+        owned_leaf.free(rt);
+        return;
+    }
+
+    var leaf: ?JSValue = owned_leaf;
+    var accumulated: ?JSValue = null;
+    errdefer {
+        if (leaf) |value| value.free(rt);
+        if (accumulated) |value| value.free(rt);
+    }
+
+    var bucket_index: usize = 0;
+    while (leaf_len >= rope_bucket_len[bucket_index + 1]) : (bucket_index += 1) {
+        if (buckets[bucket_index]) |bucket| {
+            buckets[bucket_index] = null;
+            if (accumulated) |current| {
+                accumulated = null;
+                accumulated = try createOwnedRope(rt, bucket, current);
+            } else {
+                accumulated = bucket;
+            }
+        }
+    }
+
+    if (accumulated) |prefix| {
+        accumulated = null;
+        const suffix = leaf.?;
+        leaf = null;
+        accumulated = try createOwnedRope(rt, prefix, suffix);
+    } else {
+        accumulated = leaf;
+        leaf = null;
+    }
+
+    while (buckets[bucket_index]) |bucket| : (bucket_index += 1) {
+        buckets[bucket_index] = null;
+        const current = accumulated.?;
+        accumulated = null;
+        accumulated = try createOwnedRope(rt, bucket, current);
+    }
+    std.debug.assert(bucket_index < buckets.len);
+    buckets[bucket_index] = accumulated;
+    accumulated = null;
+}
+
+fn collectRopeRebalanceLeaves(rt: *JSRuntime, buckets: *RopeBuckets, value: JSValue) !void {
+    const node = value.ropeBody() orelse {
+        return addRopeRebalanceLeaf(rt, buckets, value.dup());
+    };
+    if (node.flatString()) |flat| {
+        return addRopeRebalanceLeaf(rt, buckets, flat.value().dup());
+    }
+
+    try collectRopeRebalanceLeaves(rt, buckets, node.left);
+    try collectRopeRebalanceLeaves(rt, buckets, node.right);
+    if (node.tailResolved()) |tail| {
+        const flat = switch (tail) {
+            .latin1 => |bytes| try String.createLatin1(rt, bytes),
+            .utf16 => |units| try String.createUtf16(rt, units),
+        };
+        try addRopeRebalanceLeaf(rt, buckets, flat.value());
+    }
+}
+
+/// Returns a new balanced value without consuming `rope`. This is the Boehm,
+/// Atkinson and Plass Fibonacci-bucket algorithm used by QuickJS
+/// `js_rebalancee_string_rope`.
+fn rebalanceRope(rt: *JSRuntime, rope: JSValue) !JSValue {
+    var buckets: RopeBuckets = @splat(null);
+    errdefer for (&buckets) |*entry| {
+        if (entry.*) |value| value.free(rt);
+    };
+
+    try collectRopeRebalanceLeaves(rt, &buckets, rope);
+
+    var result: ?JSValue = null;
+    errdefer if (result) |value| value.free(rt);
+    for (&buckets) |*entry| {
+        const bucket = entry.* orelse continue;
+        entry.* = null;
+        if (result) |current| {
+            result = null;
+            result = try createOwnedRope(rt, bucket, current);
+        } else {
+            result = bucket;
+        }
+    }
+    if (result) |balanced| return balanced;
+    return (try String.createLatin1(rt, "")).value();
 }
 
 /// Appends flat content to a not-yet-materialized rope by extending the rope's
@@ -763,7 +1214,8 @@ pub fn stringValueWide(value: JSValue) bool {
 /// the call site). On allocation failure the rope is left untouched.
 pub fn appendRopeTail(node: *StringRope, rt: *JSRuntime, suffix: String.ResolvedData, max_ref_count: usize) !bool {
     std.debug.assert(node.rt == rt);
-    if (node.flat != null) return false;
+    if (node.isLinearized()) return false;
+    if (!node.supportsTail()) return false;
     // A shared rope (a rope child, or otherwise held by an INDEPENDENT owner)
     // must not mutate in place: another owner's view would change under it.
     // The caller passes `max_ref_count` = the number of references it knows to
@@ -773,24 +1225,21 @@ pub fn appendRopeTail(node: *StringRope, rt: *JSRuntime, suffix: String.Resolved
     // would corrupt it — bail. This is the refcount analogue of the old
     // `rope_child` snapshot bit, generalized to the caller's known-alias count.
     if (node.header().rc > max_ref_count) return false;
-    // Tail appends happen strictly before flattening. A demanded rope hash
-    // flattens first, so this in-place mutation cannot leave a live hash
-    // cache stale.
-    std.debug.assert(!node.hash_ready);
     const add_len = suffix.len();
     if (add_len == 0) return true;
-    const new_total = checkedAddLength(node.len, add_len) orelse return false;
+    const new_total = checkedAddLength(node.len_(), add_len) orelse return false;
     // Length cap on the in-place tail-append fast path: past JS_STRING_LEN_MAX
     // the append bails to createRope, which throws error.StringTooLong (qjs
     // JS_ConcatString cap, quickjs.c:4898). One compare on the hot churn loop.
     if (new_total > max_length) return false;
-    const used = node.tail_len;
+    const used = node.tailLen();
     const need = checkedAddLength(used, add_len) orelse return false;
 
-    const widen_tail = switch (node.tail) {
-        .none, .latin1 => suffix == .utf16,
+    const tail_slot = node.tailStateSlot().?;
+    const widen_tail = if (tail_slot.*) |tail| switch (tail.data) {
+        .latin1 => suffix == .utf16,
         .utf16 => true,
-    };
+    } else suffix == .utf16;
     if (widen_tail) {
         const buf = try ropeTailEnsureWide(rt, node, need);
         switch (suffix) {
@@ -804,15 +1253,30 @@ pub fn appendRopeTail(node: *StringRope, rt: *JSRuntime, suffix: String.Resolved
         @memcpy(buf[used..][0..add_len], suffix.latin1);
     }
     if (suffix == .utf16) node.wide = true;
-    node.tail_len = need;
-    node.len = new_total;
+    tail_slot.*.?.len = need;
+    node.len = @intCast(new_total);
     return true;
+}
+
+/// Allocates the optional accumulator-tail sidecar and its first buffer. The
+/// node is not mutated until both allocations succeed.
+fn createRopeTailState(rt: *JSRuntime, node: *StringRope, comptime T: type, need: usize) ![]T {
+    const state = try rt.createRuntime(RopeTailState);
+    errdefer rt.destroyRuntime(RopeTailState, state);
+    const buf = try rt.allocRuntime(T, nextStringCapacity(0, need));
+    state.* = .{
+        .data = if (T == u8) .{ .latin1 = buf } else .{ .utf16 = buf },
+        .len = 0,
+    };
+    node.tailStateSlot().?.* = state;
+    return buf;
 }
 
 /// Total allocation size for a `StringRope` node: the (padded) refcount prefix
 /// plus the node struct. The prefix is padded to the node's alignment so the
 /// node lands aligned at `base + StringRope.rc_prefix_size`.
 const rope_node_alloc_size: usize = StringRope.rc_prefix_size + @sizeOf(StringRope);
+const accumulator_rope_node_alloc_size: usize = rope_node_alloc_size + @sizeOf(?*RopeTailState);
 const rope_node_alignment: std.mem.Alignment = std.mem.Alignment.of(StringRope);
 
 comptime {
@@ -821,13 +1285,15 @@ comptime {
     // the 4-byte rc word that sits at `nodePtr - 4`.
     std.debug.assert(StringRope.rc_prefix_size % @alignOf(StringRope) == 0);
     std.debug.assert(StringRope.rc_prefix_size >= gc.string_rc_prefix_size);
+    std.debug.assert(@sizeOf(StringRope) % @alignOf(?*RopeTailState) == 0);
 }
 
 /// Allocates a `StringRope` node with a leading padded rc prefix (rc set to 1),
 /// mirroring the flat `String` prefix model. Returns the node pointer; the rc
 /// word lives at `nodePtr - 4` and is reached through `node.header()`.
-fn allocRopeNode(rt: *JSRuntime) !*StringRope {
-    const bytes = try rt.allocRuntimeAlignedBytes(rope_node_alloc_size, rope_node_alignment);
+fn allocRopeNode(rt: *JSRuntime, with_accumulator_tail_slot: bool) !*StringRope {
+    const alloc_size = if (with_accumulator_tail_slot) accumulator_rope_node_alloc_size else rope_node_alloc_size;
+    const bytes = try rt.allocStringAlignedBytes(alloc_size, rope_node_alignment);
     const node: *StringRope = @ptrCast(@alignCast(bytes.ptr + StringRope.rc_prefix_size));
     node.header().* = .{};
     return node;
@@ -836,36 +1302,34 @@ fn allocRopeNode(rt: *JSRuntime) !*StringRope {
 /// Frees a `StringRope` node from its allocation base (`nodePtr - rc_prefix_size`).
 fn freeRopeNode(rt: *JSRuntime, node: *StringRope) void {
     const base: [*]u8 = @as([*]u8, @ptrCast(node)) - StringRope.rc_prefix_size;
-    rt.memory.freeAlignedBytes(base[0..rope_node_alloc_size], rope_node_alignment);
+    const alloc_size = if (node.supportsTail()) accumulator_rope_node_alloc_size else rope_node_alloc_size;
+    rt.memory.freeAlignedBytes(base[0..alloc_size], rope_node_alignment);
 }
 
 /// Releases a rope's private tail buffer (no-op for tail-less ropes).
 fn freeRopeTail(rt: *JSRuntime, node: *StringRope) void {
-    switch (node.tail) {
-        .none => return,
+    const slot = node.tailStateSlot() orelse return;
+    const state = slot.* orelse return;
+    switch (state.data) {
         .latin1 => |buf| rt.memory.free(u8, buf),
         .utf16 => |buf| rt.memory.free(u16, buf),
     }
-    node.tail = .none;
-    node.tail_len = 0;
+    slot.* = null;
+    rt.destroyRuntime(RopeTailState, state);
 }
 
 /// Grows (or creates) a narrow tail buffer to hold `need` used bytes and
 /// returns it. Callers must route wide tails through `ropeTailEnsureWide`.
 fn ropeTailEnsureNarrow(rt: *JSRuntime, node: *StringRope, need: usize) ![]u8 {
-    switch (node.tail) {
+    const state = node.tailStateSlot().?.* orelse return createRopeTailState(rt, node, u8, need);
+    switch (state.data) {
         .latin1 => |buf| {
             if (need <= buf.len) return buf;
             const grown = try rt.allocRuntime(u8, nextStringCapacity(buf.len, need));
-            @memcpy(grown[0..node.tail_len], buf[0..node.tail_len]);
+            @memcpy(grown[0..state.len], buf[0..state.len]);
             rt.memory.free(u8, buf);
-            node.tail = .{ .latin1 = grown };
+            state.data = .{ .latin1 = grown };
             return grown;
-        },
-        .none => {
-            const buf = try rt.allocRuntime(u8, nextStringCapacity(0, need));
-            node.tail = .{ .latin1 = buf };
-            return buf;
         },
         .utf16 => unreachable,
     }
@@ -875,73 +1339,57 @@ fn ropeTailEnsureNarrow(rt: *JSRuntime, node: *StringRope, need: usize) ![]u8 {
 /// returns it. A narrow tail is widened in place so a wide suffix can land
 /// in the same buffer.
 fn ropeTailEnsureWide(rt: *JSRuntime, node: *StringRope, need: usize) ![]u16 {
-    switch (node.tail) {
+    const state = node.tailStateSlot().?.* orelse return createRopeTailState(rt, node, u16, need);
+    switch (state.data) {
         .utf16 => |buf| {
             if (need <= buf.len) return buf;
             const grown = try rt.allocRuntime(u16, nextStringCapacity(buf.len, need));
-            @memcpy(grown[0..node.tail_len], buf[0..node.tail_len]);
+            @memcpy(grown[0..state.len], buf[0..state.len]);
             rt.memory.free(u16, buf);
-            node.tail = .{ .utf16 = grown };
+            state.data = .{ .utf16 = grown };
             return grown;
         },
         .latin1 => |buf| {
             const widened = try rt.allocRuntime(u16, nextStringCapacity(buf.len, need));
-            for (buf[0..node.tail_len], 0..) |byte, index| widened[index] = byte;
+            for (buf[0..state.len], 0..) |byte, index| widened[index] = byte;
             rt.memory.free(u8, buf);
-            node.tail = .{ .utf16 = widened };
+            state.data = .{ .utf16 = widened };
             return widened;
-        },
-        .none => {
-            const buf = try rt.allocRuntime(u16, nextStringCapacity(0, need));
-            node.tail = .{ .utf16 = buf };
-            return buf;
         },
     }
 }
 
-/// Iterative left-to-right leaf copy; never recurses, so arbitrarily deep
-/// rope chains (`s = s + x` loops) cannot overflow the native stack. Only the
-/// traversal stack can fail; the output buffer is owned by the caller, so an
-/// error leaves the rope itself unmodified. Each unflattened rope contributes
-/// `left ++ right ++ tail`; a flattened child already merged its tail into
-/// `flat`.
-fn copyRopeContent(comptime T: type, rt: *JSRuntime, root: *StringRope, out: []T) !void {
-    const allocator = rt.memory.allocator;
-    const Item = union(enum) {
-        val: JSValue,
-        tail: *const StringRope,
-    };
-    var stack = std.ArrayList(Item).empty;
-    defer stack.deinit(allocator);
-    try stack.append(allocator, .{ .tail = root });
-    try stack.append(allocator, .{ .val = root.right });
-    try stack.append(allocator, .{ .val = root.left });
+/// QJS caps rope depth at 60 and walks its tree without allocating. Do the
+/// same here: the only possible failure during flattening is allocation of the
+/// destination flat string itself. Each unlinearized zjs rope contributes
+/// `left ++ right ++ optional-tail`.
+fn copyRopeContent(comptime T: type, root: *const StringRope, out: []T) void {
+    std.debug.assert(root.isLinearized() or root.depth <= String.rope_max_depth);
     var offset: usize = 0;
-    while (stack.pop()) |item| {
-        const value = switch (item) {
-            .tail => |node| {
-                if (node.tailResolved()) |resolved| {
-                    offset += copyResolvedUnits(T, out[offset..], resolved);
-                }
-                continue;
-            },
-            .val => |v| v,
-        };
-        if (value.ropeBody()) |child| {
-            if (child.flat) |flat| {
-                offset += copyResolvedUnits(T, out[offset..], flat.resolveData());
-                continue;
-            }
-            try stack.append(allocator, .{ .tail = child });
-            try stack.append(allocator, .{ .val = child.right });
-            try stack.append(allocator, .{ .val = child.left });
-            continue;
-        }
-        if (value.asStringBodyRaw()) |s| {
-            offset += copyResolvedUnits(T, out[offset..], s.resolveData());
-        }
-    }
+    copyRopeNodeContent(T, root, out, &offset);
     std.debug.assert(offset == out.len);
+}
+
+fn copyRopeNodeContent(comptime T: type, node: *const StringRope, out: []T, offset: *usize) void {
+    if (node.flatString()) |flat| {
+        offset.* += copyResolvedUnits(T, out[offset.*..], flat.resolveData());
+        return;
+    }
+    copyRopeValueContent(T, node.left, out, offset);
+    copyRopeValueContent(T, node.right, out, offset);
+    if (node.tailResolved()) |resolved| {
+        offset.* += copyResolvedUnits(T, out[offset.*..], resolved);
+    }
+}
+
+fn copyRopeValueContent(comptime T: type, value: JSValue, out: []T, offset: *usize) void {
+    if (value.ropeBody()) |node| {
+        copyRopeNodeContent(T, node, out, offset);
+        return;
+    }
+    if (value.asStringBodyRaw()) |flat| {
+        offset.* += copyResolvedUnits(T, out[offset.*..], flat.resolveData());
+    }
 }
 
 fn copyResolvedUnits(comptime T: type, out: []T, resolved: String.ResolvedData) usize {
@@ -965,62 +1413,20 @@ fn copyResolvedUnits(comptime T: type, out: []T, resolved: String.ResolvedData) 
     }
 }
 
-/// Destroys a rope object when its refcount reaches 0. Frees the cached flat
-/// string (if any), the tail buffer, and releases the child JSValues. Child
-/// ropes are drained iteratively (through `chain_next`) so arbitrarily deep
-/// rope chains never recurse the native stack; flat/other children are freed
-/// via ordinary value dispatch.
+/// Destroys a rope object when its refcount reaches 0. QJS's depth-60 invariant
+/// bounds the recursive release chain, so the generic node needs no intrusive
+/// destroy link.
 pub fn destroyRope(rt: *JSRuntime, node: *StringRope) void {
-    node.chain_next = null;
-    var pending: ?*StringRope = node;
-    while (pending) |cur| {
-        pending = cur.chain_next;
-        if (cur.flat) |flat| {
-            std.debug.assert(cur.tail == .none);
-            String.releaseFromHeader(rt, flat.header());
-        } else {
-            freeRopeTail(rt, cur);
-            releaseRopeChildIntoChain(rt, cur.left, &pending);
-            releaseRopeChildIntoChain(rt, cur.right, &pending);
-        }
-        freeRopeNode(rt, cur);
+    if (node.isLinearized()) {
+        std.debug.assert(!node.hasTail());
+        node.left.free(rt);
+    } else {
+        std.debug.assert(node.depth <= String.rope_max_depth);
+        freeRopeTail(rt, node);
+        node.left.free(rt);
+        node.right.free(rt);
     }
-}
-
-/// Releases a rope child JSValue. A rope child whose rc hits 0 is queued onto
-/// the destroy chain (iterative); any other value is freed immediately.
-fn releaseRopeChildIntoChain(rt: *JSRuntime, child: JSValue, pending: *?*StringRope) void {
-    if (child.ropeBody()) |cnode| {
-        const hdr = cnode.header();
-        std.debug.assert(hdr.rc > 0);
-        hdr.rc -= 1;
-        if (hdr.rc == 0) {
-            cnode.chain_next = pending.*;
-            pending.* = cnode;
-        }
-        return;
-    }
-    child.free(rt);
-}
-
-/// Releases a rope child during flattening (not a destroy): the rope object
-/// itself stays alive, only the child references are dropped. Deep child ropes
-/// are drained iteratively.
-fn releaseRopeChild(rt: *JSRuntime, child: JSValue) void {
-    var pending: ?*StringRope = null;
-    releaseRopeChildIntoChain(rt, child, &pending);
-    while (pending) |cur| {
-        pending = cur.chain_next;
-        if (cur.flat) |flat| {
-            std.debug.assert(cur.tail == .none);
-            String.releaseFromHeader(rt, flat.header());
-        } else {
-            freeRopeTail(rt, cur);
-            releaseRopeChildIntoChain(rt, cur.left, &pending);
-            releaseRopeChildIntoChain(rt, cur.right, &pending);
-        }
-        freeRopeNode(rt, cur);
-    }
+    freeRopeNode(rt, node);
 }
 
 const InlineAllocationLayout = struct {

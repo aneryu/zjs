@@ -21,7 +21,8 @@ pub const ResumeState = struct {
 
 const AwaitSuspendMode = enum {
     none,
-    /// Top-level module await currently resumes with the already-settled value.
+    /// Legacy synchronous-drain mode. Kept for the non-suspending helper legs;
+    /// module TLA now uses `.raw` and is resumed as an ordered Promise reaction.
     settled,
     /// Async functions and async generators yield the raw awaited value; the
     /// caller wires it through Promise.resolve(...).then(resume, reject),
@@ -497,7 +498,7 @@ fn suspendAwaitValue(
 }
 
 fn awaitSuspendMode(function: *const bytecode.Bytecode, suspend_on_module_await: bool, stop_on_yield: bool) AwaitSuspendMode {
-    if (suspend_on_module_await and function.flags.is_module) return .settled;
+    if (suspend_on_module_await and function.flags.is_module) return .raw;
     if (suspend_on_module_await and function.flags.is_async) return .raw;
     // Async-generator bodies genuinely suspend at every await; the queue
     // machine (exec/async_generator.zig) resumes them via promise-reaction

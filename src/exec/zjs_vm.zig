@@ -111,6 +111,19 @@ pub fn runModuleWithOutputAndVarRefsState(
     module_state: *core.Object,
     resume_value: ?core.JSValue,
 ) !core.JSValue {
+    return runModuleWithOutputAndVarRefsStateAtPc(ctx, stack, function, output, var_refs, module_state, resume_value, 0);
+}
+
+pub fn runModuleWithOutputAndVarRefsStateAtPc(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    output: ?*std.Io.Writer,
+    var_refs: []const *core.VarRef,
+    module_state: *core.Object,
+    resume_value: ?core.JSValue,
+    initial_pc: usize,
+) !core.JSValue {
     const global_object = try contextGlobal(ctx);
     return runWithCallEnv(.{
         .ctx = ctx,
@@ -122,6 +135,7 @@ pub fn runModuleWithOutputAndVarRefsState(
         .generator_state = module_state,
         .resume_value = resume_value,
         .suspend_on_module_await = true,
+        .initial_pc = initial_pc,
     });
 }
 
@@ -222,6 +236,7 @@ pub const CallEnv = struct {
     eval_global_var_bindings: bool = false,
     is_eval_code: bool = false,
     suspend_on_module_await: bool = false,
+    initial_pc: usize = 0,
 };
 
 pub fn runWithCallEnv(env: CallEnv) HostError!core.JSValue {
@@ -246,6 +261,7 @@ pub fn runWithCallEnv(env: CallEnv) HostError!core.JSValue {
         env.eval_global_var_bindings,
         env.is_eval_code,
         env.suspend_on_module_await,
+        env.initial_pc,
     );
 }
 
@@ -270,6 +286,7 @@ fn runWithArgsState(
     entry_eval_global_var_bindings: bool,
     entry_is_eval_code: bool,
     entry_suspend_on_module_await: bool,
+    entry_initial_pc: usize,
 ) HostError!core.JSValue {
     const call_depth_guard = try call_vm.enterCallDepth(ctx, global);
     defer call_depth_guard.deinit();
@@ -385,6 +402,7 @@ fn runWithArgsState(
         try vm_property_globals.instantiateGlobalVarDeclarations(ctx, global, entry_function, &frame_storage, entry_is_eval_code, entry_eval_global_var_bindings);
     }
 
+    frame_storage.pc = entry_initial_pc;
     const resume_state = try gen_async_vm.resumeExecutionState(ctx, entry_stack, entry_function, &frame_storage, entry_generator_state, resume_value);
     try reserveEntryFrameCapacity(entry_stack, entry_function);
     errdefer {

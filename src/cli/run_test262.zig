@@ -1758,6 +1758,7 @@ fn runEmbeddedEngine(
         .allocator = allocator,
         .max_source_size = 16 * 1024 * 1024,
     };
+    defer dynamic_import_state.deinit();
     test262_root.exec.module_graph.installDynamicImport(&dynamic_import_state);
     var value = (if (run_as_module)
         runtime_layer.evalFileModuleGraphWithOutput(ctx, source, &output, path, io, allocator, 16 * 1024 * 1024)
@@ -1783,7 +1784,7 @@ fn runEmbeddedEngine(
     defer value.free(rt);
 
     if (!value.isException()) {
-        try ctx.runJobs(&output);
+        try dynamic_import_state.runJobs();
         if (ctx.hasException()) {
             stderr_out.* = "unhandled promise rejection";
             const async_exception = ctx.takePendingException();

@@ -2675,7 +2675,7 @@ pub fn functionToStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSV
         return nativeFunctionSourceValue(rt, null);
     }
     if (object.class_id == core.class.ids.bytecode_function) {
-        const stored = object.functionBytecodeSlot().* orelse return nativeFunctionSourceValue(rt, object);
+        const stored = object.functionBytecode() orelse return nativeFunctionSourceValue(rt, object);
         const bytecode = functionBytecodeFromValue(stored) orelse return nativeFunctionSourceValue(rt, object);
         return functionBytecodeToStringValue(rt, bytecode, object);
     }

@@ -781,7 +781,7 @@ pub fn directEvalShouldExposeImplicitArguments(caller_frame: *frame_mod.Frame) b
     if (caller_frame.current_function.isUndefined()) return false;
     if (functionBytecodeFromValue(caller_frame.current_function)) |fb| return !fb.flags.is_arrow_function;
     if (objectFromValue(caller_frame.current_function)) |function_object| {
-        const stored = function_object.functionBytecodeSlot().* orelse return false;
+        const stored = function_object.functionBytecode() orelse return false;
         const fb = functionBytecodeFromValue(stored) orelse return false;
         return !fb.flags.is_arrow_function;
     }

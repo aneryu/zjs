@@ -5426,6 +5426,34 @@ pub const parser_core = struct {
         fn ensureClosureVar(self: *State, atom_id: Atom) Error!void {
             if (!self.emit_to_function_def) return;
             const current = self.cur_func();
+            // `arguments` is a binding of the current non-arrow function, so
+            // it must be materialized before looking for a binding in any
+            // parent. This mirrors QuickJS resolve_scope_var(), where the
+            // current function's arguments pseudo-variable wins over outer
+            // lexical declarations with the same name.
+            if (atom_id == atom_module.ids.arguments) {
+                // An explicit `arguments` parameter (including a binding in a
+                // destructuring parameter) is the current binding. Do not
+                // replace it with the implicit arguments-object pseudo local
+                // merely because it is referenced by a later initializer.
+                // A body-only `var arguments` is not visible from the separate
+                // parameter environment and therefore deliberately does not
+                // satisfy this guard.
+                if (!hasVisibleCurrentBinding(current, atom_id, self.scope_level)) {
+                    const needs_parameter_arguments_cell =
+                        self.in_parameter_initializer and
+                        current.has_parameter_expressions and
+                        current.func_type != .arrow and
+                        current.func_type != .class_static_init and
+                        (current.arguments_arg_idx >= 0 or
+                            (current.arguments_var_idx < 0 and current.findVar(atom_id) >= 0));
+                    if (needs_parameter_arguments_cell) {
+                        try ensureParameterArgumentsLocals(current);
+                    } else {
+                        _ = try State.ensureImplicitArgumentsLocal(current);
+                    }
+                }
+            }
             if (current.findVar(atom_id) >= 0 or current.findArg(atom_id) >= 0) return;
             for (current.closure_var) |cv| {
                 if (cv.var_name == atom_id) return;
@@ -5461,19 +5489,21 @@ pub const parser_core = struct {
                     return;
                 }
                 if (atom_id == atom_module.ids.arguments) {
-                    if (parameter_environment_only and
+                    const needs_parameter_arguments_cell =
+                        parameter_environment_only and
                         parent.has_parameter_expressions and
                         parent.func_type != .arrow and
-                        parent.func_type != .class_static_init)
-                    {
+                        parent.func_type != .class_static_init and
+                        (parent.arguments_arg_idx >= 0 or
+                            (parent.arguments_var_idx < 0 and parent.findVar(atom_id) >= 0));
+                    if (needs_parameter_arguments_cell) {
                         try ensureParameterArgumentsLocals(parent);
-                        const arguments_arg_idx: u16 = @intCast(parent.arguments_arg_idx);
                         try self.ensureClosureChain(parent_index, .{
                             .closure_type = .local,
                             .is_lexical = true,
                             .is_const = false,
                             .var_kind = .normal,
-                            .var_idx = arguments_arg_idx,
+                            .var_idx = @intCast(parent.arguments_arg_idx),
                             .var_name = atom_id,
                         });
                         return;
@@ -5713,6 +5743,21 @@ pub const parser_core = struct {
             return false;
         }
 
+        fn hasVisibleCurrentBinding(
+            fd: *const function_def_mod.FunctionDef,
+            atom_id: Atom,
+            scope_level: i32,
+        ) bool {
+            if (fd.findArg(atom_id) >= 0) return true;
+            var index = fd.vars.len;
+            while (index > 0) {
+                index -= 1;
+                const vd = fd.vars[index];
+                if (vd.var_name == atom_id and scopeChainContains(fd, scope_level, vd.scope_level)) return true;
+            }
+            return false;
+        }
+
         fn retrofitForwardTopLevelFunctionCapture(
             self: *State,
             parent_fd: *function_def_mod.FunctionDef,
@@ -5784,6 +5829,33 @@ pub const parser_core = struct {
                     .var_name = atom_id,
                 }));
                 try self.propagateForwardCaptureToDescendants(child, atom_id, child_ref_idx, local.is_lexical, local.is_const, local.var_kind);
+            }
+        }
+
+        fn retrofitParameterArgumentsCaptures(
+            self: *State,
+            parent_fd: *function_def_mod.FunctionDef,
+            body_arguments_idx: u16,
+            parameter_arguments_idx: u16,
+        ) Error!void {
+            const parameter_local = parent_fd.vars[parameter_arguments_idx];
+            for (parent_fd.child_list) |child| {
+                if (!child.parent_parameter_environment_only) continue;
+                const child_ref_idx = findClosureVarIndex(child, atom_module.ids.arguments) orelse continue;
+                const closure = &child.closure_var[child_ref_idx];
+                if (closure.closure_type != .local or closure.var_idx != body_arguments_idx) continue;
+                closure.is_lexical = parameter_local.is_lexical;
+                closure.is_const = parameter_local.is_const;
+                closure.var_kind = parameter_local.var_kind;
+                closure.var_idx = parameter_arguments_idx;
+                try self.propagateForwardCaptureToDescendants(
+                    child,
+                    atom_module.ids.arguments,
+                    child_ref_idx,
+                    parameter_local.is_lexical,
+                    parameter_local.is_const,
+                    parameter_local.var_kind,
+                );
             }
         }
 
@@ -9605,6 +9677,11 @@ pub const parser_core = struct {
         }
         try expectPunct(s, ')');
         try s.emitOp(opcode.op.import);
+        // ImportCall itself evaluates to a Promise. An anonymous function in
+        // either argument is nested and must not escape as the named-
+        // evaluation result of an enclosing declaration (qjs clears
+        // `func_name` after parsing call arguments).
+        s.last_anonymous_function_expr = false;
     }
 
     /// `js_parse_template` (`quickjs.c:23880`). Non-tagged template literals
@@ -13551,6 +13628,21 @@ pub const parser_core = struct {
                     try s.addGlobalVar(atom_id, false, false);
                 } else {
                     // Hoist `var` to function scope (level 0).
+                    var hoisted_arguments_var_idx: ?i32 = null;
+                    if (atomNameEquals(s, atom_id, "arguments") and
+                        s.cur_func().has_parameter_expressions and
+                        s.cur_func().arguments_var_idx >= 0 and
+                        s.cur_func().arguments_arg_idx < 0)
+                    {
+                        const body_arguments_idx: u16 = @intCast(s.cur_func().arguments_var_idx);
+                        hoisted_arguments_var_idx = body_arguments_idx;
+                        try ensureParameterArgumentsLocals(s.cur_func());
+                        try s.retrofitParameterArgumentsCaptures(
+                            s.cur_func(),
+                            body_arguments_idx,
+                            @intCast(s.cur_func().arguments_arg_idx),
+                        );
+                    }
                     const existing_var = s.cur_func().findVar(atom_id);
                     if (existing_var < 0 and s.cur_func().findArg(atom_id) < 0) {
                         const saved = s.scope_level;
@@ -13562,7 +13654,7 @@ pub const parser_core = struct {
                             s.cur_func().arguments_var_idx = @intCast(var_idx);
                         }
                     } else if (atomNameEquals(s, atom_id, "arguments")) {
-                        s.cur_func().arguments_var_idx = existing_var;
+                        s.cur_func().arguments_var_idx = hoisted_arguments_var_idx orelse existing_var;
                     }
                 }
 

@@ -3794,6 +3794,15 @@ pub const pipeline_resolve_variables = struct {
         if (local_idx) |idx| {
             if (scopedLocalShadowsArg(ctx, idx)) return .{ .local = idx };
         }
+        // The function's implicit `arguments` binding is visible while
+        // evaluating parameter initializers even though the parameter scope
+        // deliberately does not link to the body scope. QuickJS handles this
+        // as a pseudo-variable in resolve_scope_var().
+        if (ctx.function_def) |fd| {
+            if (atom_id == atom.ids.arguments and fd.arguments_var_idx >= 0) {
+                return .{ .local = @intCast(fd.arguments_var_idx) };
+            }
+        }
         if (lookupArg(ctx, atom_id)) |arg_idx| return .{ .arg = arg_idx };
         if (local_idx) |idx| return .{ .local = idx };
         return null;
@@ -5876,6 +5885,33 @@ pub const pipeline_resolve_labels = struct {
         };
     }
 
+    fn isFinallyNormalCompletionMarker(code: []const u8, goto_pc: usize) bool {
+        if (goto_pc >= code.len or code[goto_pc] != opcode.op.goto) return false;
+        const normal_finally_target = jumpTarget(code, goto_pc) catch return false;
+        if (normal_finally_target <= goto_pc) return false;
+
+        // The parser emits a catch marker before a try body and an otherwise
+        // unreachable normal-completion goto immediately before the exceptional
+        // finally copy. Generator return-through-finally discovery needs that
+        // jump even when the protected body already terminated.
+        var pc: usize = 0;
+        while (pc < goto_pc) {
+            const op_id = code[pc];
+            if (op_id == opcode.op.@"catch") {
+                const exceptional_finally_target = jumpTarget(code, pc) catch return false;
+                if (exceptional_finally_target > goto_pc and
+                    exceptional_finally_target < normal_finally_target)
+                {
+                    return true;
+                }
+            }
+            const size = if (op_id == opcode.op.label) 5 else instrSize(op_id);
+            if (size == 0 or pc + size > code.len) return false;
+            pc += size;
+        }
+        return false;
+    }
+
     fn deadCodePastTerminalSize(code: []const u8, pc: usize) ?usize {
         if (pc >= code.len or !canSkipDeadCodeAfter(code[pc])) return null;
         const terminal_size = instrSize(code[pc]);
@@ -5889,6 +5925,10 @@ pub const pipeline_resolve_labels = struct {
             // scanning from the catch target, not by a bytecode jump).  Never
             // erase that marker merely because a preceding finally arm returns.
             if (op_id == opcode.op.throw) break;
+            // Likewise preserve the parser's normal-completion jump over the
+            // exceptional finally copy. It bounds that copy when the finally
+            // body itself contains an explicit throw.
+            if (isFinallyNormalCompletionMarker(code, scan_pc)) break;
             const size = if (op_id == opcode.op.label) 5 else instrSize(op_id);
             if (size == 0 or scan_pc + size > code.len) return null;
             scan_pc += size;

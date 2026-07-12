@@ -544,6 +544,16 @@ pub const JSValue = extern struct {
         };
     }
 
+    /// Direct payload access for call sites that have already classified the
+    /// tag as string/symbol/string_rope. Mirrors QJS's JS_VALUE_GET_STRING*
+    /// macros and avoids repeating the tag switch while collecting multiple
+    /// rope operand fields.
+    pub inline fn stringHeaderAssumeStringLike(self: JSValue) *gc.StringHeader {
+        const tag = self.tagOf();
+        std.debug.assert(tag == Tag.string or tag == Tag.symbol or tag == Tag.string_rope);
+        return ptrFromPayload(gc.StringHeader, self.payloadOf()).?;
+    }
+
     pub fn objectHeader(self: JSValue) ?*gc.GCObjectHeader {
         return switch (self.tagOf()) {
             Tag.function_bytecode => ptrFromPayload(gc.GCObjectHeader, self.payloadOf()),
@@ -631,7 +641,7 @@ pub const JSValue = extern struct {
     }
 
     /// Refcount release for a `.string_rope` value: decrement the rope's
-    /// refcount and, at 0, iteratively destroy the rope object (never through
+    /// refcount and, at 0, destroy the depth-bounded rope object (never through
     /// the flat-`String` `releaseFromHeader` path, whose `@fieldParentPtr` cast
     /// assumes a `*String` layout).
     fn releaseRopeValue(rt: anytype, self: JSValue) void {
@@ -722,10 +732,7 @@ fn isNegativeZero(value: f64) bool {
 }
 
 fn compareStringValues(a: JSValue, b: JSValue) ?i32 {
-    if (!a.isString() or !b.isString()) return null;
-    const a_string = a.asStringBody() orelse return null;
-    const b_string = b.asStringBody() orelse return null;
-    return a_string.compare(b_string);
+    return string_mod.compareStringValues(a, b, true);
 }
 
 fn compareBigIntValues(a: JSValue, b: JSValue) ?std.math.Order {

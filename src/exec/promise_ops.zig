@@ -2841,7 +2841,7 @@ pub fn qjsAsyncFunctionRunState(
     resume_rejected: bool,
 ) HostError!core.JSValue {
     if (continuation.generatorExecuting()) return error.TypeError;
-    const function_value = continuation.functionBytecodeSlot().* orelse return error.TypeError;
+    const function_value = continuation.functionBytecode() orelse return error.TypeError;
     const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
     var nested_view = bytecode.makeBytecodeView(fb, &ctx.runtime.memory, &ctx.runtime.atoms);
     const nested = &nested_view;
@@ -3846,58 +3846,68 @@ pub fn drainPendingPromiseJobs(
     global: *core.Object,
 ) !void {
     while (true) {
-        try processExpiredAtomicsWaiters(ctx);
-        while (true) {
-            const promise_sequence = ctx.peekPendingPromiseJobSequence();
-            const finalization_sequence = ctx.runtime.peekPendingFinalizationJobSequence();
-            if (promise_sequence == null and finalization_sequence == null) break;
-
-            if (finalization_sequence != null and (promise_sequence == null or finalization_sequence.? < promise_sequence.?)) {
-                var cleanup_job = ctx.runtime.takePendingFinalizationJob().?;
-                defer cleanup_job.deinit(ctx.runtime);
-                var root_values = [_]core.runtime.ValueRootValue{
-                    .{ .value = &cleanup_job.callback },
-                    .{ .value = &cleanup_job.held_value },
-                };
-                const root_frame = core.runtime.ValueRootFrame{
-                    .previous = ctx.runtime.active_value_roots,
-                    .values = &root_values,
-                };
-                ctx.runtime.active_value_roots = &root_frame;
-                defer ctx.runtime.active_value_roots = root_frame.previous;
-
-                const result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), cleanup_job.callback, &.{cleanup_job.held_value}, null, null);
-                result.free(ctx.runtime);
-                try pollGCSafePoint(ctx);
-                continue;
-            }
-
-            var pending_job = ctx.takePendingPromiseJob().?;
-            defer pending_job.deinit(ctx.runtime);
-            const job = pending_job.value;
-            const promise = objectFromValue(job) orelse {
-                if (isCallableValue(job)) {
-                    const result = try callValueOrBytecode(ctx, output, global, global.value(), job, &.{}, null, null);
-                    result.free(ctx.runtime);
-                    try pollGCSafePoint(ctx);
-                }
-                continue;
-            };
-            if (promise.class_id == core.class.ids.promise) {
-                try settlePendingPromiseReaction(ctx, output, global, promise);
-                try pollGCSafePoint(ctx);
-                continue;
-            }
-            if (isCallableValue(job)) {
-                const result = try callValueOrBytecode(ctx, output, global, global.value(), job, &.{}, null, null);
-                result.free(ctx.runtime);
-                try pollGCSafePoint(ctx);
-            }
-        }
+        while (try drainOnePendingJob(ctx, output, global)) {}
         if (try call_mod.runNextOsSignalHandler(ctx, output, global)) continue;
         if (try runNextOsRwHandler(ctx, output, global)) continue;
         if (!try runNextOsTimer(ctx, output, global)) break;
     }
+}
+
+/// Execute exactly one promise/finalization job, preserving the global job
+/// sequence. The ordinary host drain loops over this helper; the module
+/// evaluator alternates it with TLA resume reactions.
+pub fn drainOnePendingJob(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+) !bool {
+    try processExpiredAtomicsWaiters(ctx);
+    const promise_sequence = ctx.peekPendingPromiseJobSequence();
+    const finalization_sequence = ctx.runtime.peekPendingFinalizationJobSequence();
+    if (promise_sequence == null and finalization_sequence == null) return false;
+
+    if (finalization_sequence != null and (promise_sequence == null or finalization_sequence.? < promise_sequence.?)) {
+        var cleanup_job = ctx.runtime.takePendingFinalizationJob().?;
+        defer cleanup_job.deinit(ctx.runtime);
+        var root_values = [_]core.runtime.ValueRootValue{
+            .{ .value = &cleanup_job.callback },
+            .{ .value = &cleanup_job.held_value },
+        };
+        const root_frame = core.runtime.ValueRootFrame{
+            .previous = ctx.runtime.active_value_roots,
+            .values = &root_values,
+        };
+        ctx.runtime.active_value_roots = &root_frame;
+        defer ctx.runtime.active_value_roots = root_frame.previous;
+
+        const result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), cleanup_job.callback, &.{cleanup_job.held_value}, null, null);
+        result.free(ctx.runtime);
+        try pollGCSafePoint(ctx);
+        return true;
+    }
+
+    var pending_job = ctx.takePendingPromiseJob().?;
+    defer pending_job.deinit(ctx.runtime);
+    const job = pending_job.value;
+    const promise = objectFromValue(job) orelse {
+        if (isCallableValue(job)) {
+            const result = try callValueOrBytecode(ctx, output, global, global.value(), job, &.{}, null, null);
+            result.free(ctx.runtime);
+            try pollGCSafePoint(ctx);
+        }
+        return true;
+    };
+    if (promise.class_id == core.class.ids.promise) {
+        try settlePendingPromiseReaction(ctx, output, global, promise);
+        try pollGCSafePoint(ctx);
+        return true;
+    }
+    if (isCallableValue(job)) {
+        const result = try callValueOrBytecode(ctx, output, global, global.value(), job, &.{}, null, null);
+        result.free(ctx.runtime);
+        try pollGCSafePoint(ctx);
+    }
+    return true;
 }
 
 pub fn enqueuePendingPromiseJob(ctx: *core.JSContext, promise: core.JSValue) !void {
