@@ -103,6 +103,10 @@ pub const Vm = struct {
     /// `adrp+add` at EVERY dispatch site (the table-base-remat tax — see
     /// dispatch-table-base-remat-rootcause). EXPERIMENT to measure that tax.
     tbl: [*]const Handler = undefined,
+    /// Primitive get_field handlers live behind a resident table pointer for the
+    /// same reason cold_table does: the indirect tail call keeps their shape walk
+    /// out of the already-hot object handlers without adding a non-tail frame.
+    primitive_field_tbl: [*]const Handler = undefined,
     /// Frame-constant `(depth==0 and l0.stop_before_pc != null)` — the generator
     /// stop-boundary guard that blocks the local/var fast paths. Hoisted here (set
     /// once per frame in the driver/reloadTop) so each loc op checks ONE bool load
@@ -1290,14 +1294,27 @@ pub fn op_get_arg_short(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm
     return cont(pc + 1, sp + 1, var_buf, vm);
 }
 
-// Hot inline get_field — qjs OP_get_field's inline-cache fast path. On a monomorphic
-// IC hit (the cached shape still matches the receiver) reads the property's data slot
-// directly and dispatches, skipping the cold field()'s publish→helper→coldNext shell.
-// IC miss / first access / non-object / profiling falls to the cold field, which runs
-// the full lookup AND installs the IC for the next time around. 5-byte op (atom u32).
+// Hot get_field mirrors qjs GET_FIELD_INLINE: ordinary objects walk shape data
+// properties in this handler, while primitive receivers tail-dispatch to a separate
+// realm-prototype walker so their uncommon qualification code does not inflate the
+// object path. Accessors/exotics and other misses keep the full cold resolver.
+// 5-byte op (atom u32).
+fn op_get_field_primitive(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const receiver = (sp - 1)[0];
+    const atom_id = readInt(u32, pc + 1);
+    if (vm_property_field.primitivePrototypeDataPropertyValueForFastPath(vm.ctx.runtime, vm.global, receiver, atom_id)) |value| {
+        const stack_value = if (value.requiresRefCount()) value.dup() else value;
+        (sp - 1)[0] = stack_value;
+        receiver.free(vm.ctx.runtime);
+        return cont(pc + 5, sp, var_buf, vm);
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
 pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
     const atom_id = readInt(u32, pc + 1);
+    if (!receiver.isObject()) return @call(.always_tail, vm.primitive_field_tbl[0], .{ pc, sp, var_buf, vm });
     // qjs OP_get_field does an inline find_own_property on each access (no cache).
     // Walk self+prototype for a plain data property; on a hit the value is BORROWED
     // from the holder slot, so dup onto the stack (which owns its entries) and free
@@ -1311,17 +1328,34 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
-// Hot inline get_field2 for primitive-string method resolution — the receiver of
-// a `"...".method(...)` call (and every template literal, which compiles to
-// `head.concat(...)`). get_field2 keeps the receiver on the stack and pushes the
-// resolved method on top. A standard String.prototype method resolves directly
-// (getFastStringPrimitiveDataProperty returns it dup'd/owned), skipping the cold
-// get_field2's getValueProperty -> getPrimitiveProperty detour. Non-string
-// receivers, non-standard names, and object/IC/prototype-method cases fall to the
-// cold h_field (whose borrowed-vs-owned push distinctions stay in one place).
+// Primitive get_field2 keeps the raw receiver on the stack and pushes the resolved
+// realm-prototype data property above it. String auto-init methods retain their
+// materializing resolver. Accessors/exotics and other misses tail to the full cold
+// handler, preserving observable receiver and ownership semantics there.
+fn op_get_field2_primitive(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const receiver = (sp - 1)[0];
+    const atom_id = readInt(u32, pc + 1);
+    if (vm_property_field.primitivePrototypeDataPropertyValueForFastPath(vm.ctx.runtime, vm.global, receiver, atom_id)) |value| {
+        const stack_value = if (value.requiresRefCount()) value.dup() else value;
+        sp[0] = stack_value;
+        return cont(pc + 5, sp + 1, var_buf, vm);
+    }
+    // Auto-init String.prototype entries need the allocating/materializing
+    // resolver; keep that existing cold call off the object get_field2 body.
+    if (receiver.isString()) {
+        const resolved = string_ops.getFastStringPrimitiveDataProperty(vm.ctx, vm.global, receiver, atom_id) catch |e| return vm.fail(e);
+        if (resolved) |value| {
+            sp[0] = value;
+            return cont(pc + 5, sp + 1, var_buf, vm);
+        }
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
 pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
     const atom_id = readInt(u32, pc + 1);
+    if (!receiver.isObject()) return @call(.always_tail, vm.primitive_field_tbl[1], .{ pc, sp, var_buf, vm });
     // Object receiver: own-or-prototype data/method via the same self+prototype
     // walk the cold get_field2 runs first (e.g. arr.push, map.get). The value is
     // BORROWED from its holder slot, so dup it onto the stack exactly as the cold
@@ -1330,15 +1364,6 @@ pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
         const stack_value = if (value.requiresRefCount()) value.dup() else value;
         sp[0] = stack_value;
         return cont(pc + 5, sp + 1, var_buf, vm);
-    }
-    // Primitive string receiver: standard String.prototype method (and every
-    // template literal, compiled to head.concat(...)). Returned value is owned.
-    if (receiver.isString()) {
-        const resolved = string_ops.getFastStringPrimitiveDataProperty(vm.ctx, vm.global, receiver, atom_id) catch |e| return vm.fail(e);
-        if (resolved) |value| {
-            sp[0] = value; // owned; receiver stays at sp-1 as the call's `this`
-            return cont(pc + 5, sp + 1, var_buf, vm);
-        }
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
@@ -1871,6 +1896,7 @@ const specials: colds.SpecialHandlers = .{
 /// so the cold publish+helper is NOT inlined into the lean fast handler.
 const cold_table: [256]Handler = colds.buildTable(specials, false);
 const dispatch_table: [256]Handler = colds.buildTable(specials, true);
+const primitive_field_table = [2]Handler{ op_get_field_primitive, op_get_field2_primitive };
 
 // ===========================================================================
 // Driver — the Outcome loop. Replaces dispatchLoop's switch; reuses the Machine +
@@ -1906,6 +1932,7 @@ fn reloadTop(vm: *Vm, pc: *[*]const u8, sp: *[*]JSValue, var_buf: *[*]JSValue) v
 /// Run the tail-call chain to completion for the current top frame.
 pub fn run(vm: *Vm) HostError!JSValue {
     vm.tbl = &dispatch_table; // resident table base (avoids per-dispatch adrp+add)
+    vm.primitive_field_tbl = &primitive_field_table;
     vm.local_fast_blocked = vm.machine.depth == 0 and vm.l0.stop_before_pc != null;
     var pc = vm.code_base + vm.frame.pc;
     var sp = vm.reloadSp();

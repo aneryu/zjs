@@ -356,8 +356,7 @@ pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_
     var object = objectFromValue(receiver) orelse return null;
     if (rt.atoms.mightBePrivate(atom_id)) return null;
     while (true) {
-        if (object.needsSlowPropertyAccess() and
-            !property_ic.functionObjectSupportsOrdinaryDataPropertyFastPath(object)) return null;
+        if (object.needsSlowPropertyAccess()) return null;
         var slow_property = false;
         if (object.findOwnDataValueFast(atom_id, &slow_property)) |v| return v;
         if (slow_property) return null;
@@ -368,6 +367,44 @@ pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_
         // a null self.prototype while still resolving those members through that fallback.
         // Returning null defers to the slow path, which both does the global fallback and
         // returns a genuine `undefined` for truly-absent properties.
+        object = object.getPrototype() orelse return null;
+    }
+}
+
+/// Primitive twin of qjsGetFieldFast. QuickJS selects
+/// `ctx->class_proto[primitive_tag]` inside JS_GetPropertyInternal and then
+/// performs the same shape walk as an object receiver. Realm prototype slots
+/// are the zjs class_proto equivalent; only ordinary data hits are returned.
+/// Accessors, auto-init/var-ref properties, exotic/proxy holders, and string
+/// own index/length semantics fall back to the full resolver.
+pub inline fn primitivePrototypeDataPropertyValueForFastPath(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    receiver: core.JSValue,
+    atom_id: core.Atom,
+) ?core.JSValue {
+    const slot: core.object.RealmValueSlot = if (receiver.isString()) blk: {
+        if (atom_id == core.atom.ids.length or core.atom.isTaggedInt(atom_id)) return null;
+        break :blk .string_prototype;
+    } else if (receiver.isNumber())
+        .number_prototype
+    else if (receiver.isBool())
+        .boolean_prototype
+    else if (receiver.isBigInt())
+        .bigint_prototype
+    else if (receiver.isSymbol())
+        .symbol_prototype
+    else
+        return null;
+
+    if (rt.atoms.mightBePrivate(atom_id)) return null;
+    const prototype_value = global.cachedRealmValue(slot) orelse return null;
+    var object = objectFromValue(prototype_value) orelse return null;
+    while (true) {
+        if (object.needsSlowPropertyAccess() or object.hasExoticMethods() or object.proxyTarget() != null) return null;
+        var slow_property = false;
+        if (object.findOwnDataValueFast(atom_id, &slow_property)) |value| return value;
+        if (slow_property) return null;
         object = object.getPrototype() orelse return null;
     }
 }

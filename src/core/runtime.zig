@@ -1190,7 +1190,10 @@ pub const JSRuntime = struct {
         try appendRuntimeObject(&self.memory, &self.borrowed_reference_holders, &self.borrowed_reference_holders_capacity, object);
         object.setBorrowedReferenceHolderIndex(index);
         object.flags.is_borrowed_reference_holder = true;
-        object.flags.needs_slow_property = true;
+        // This table is lifetime bookkeeping only. A borrowed realm/weak
+        // pointer does not add exotic [[Get]]/[[Set]] semantics, so it must not
+        // poison the object's ordinary shape fast paths. Semantic slow-path
+        // eligibility is established by the class/exotic flags at creation.
     }
 
     pub fn borrowedReferenceHolderRegistered(self: *const JSRuntime, object: *Object) bool {

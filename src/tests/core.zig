@@ -4465,6 +4465,22 @@ test "destroyed realm global clears borrowed realm pointers and auto init metada
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
 }
 
+test "borrowed realm bookkeeping does not force ordinary property slow paths" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+    defer global.value().free(rt);
+    global.flags.is_global = true;
+    const holder = try core.Object.create(rt, core.class.ids.object, null);
+    defer holder.value().free(rt);
+
+    try std.testing.expect(!holder.needsSlowPropertyAccess());
+    try holder.setFunctionRealmGlobalPtr(rt, global);
+    try std.testing.expect(rt.borrowedReferenceHolderRegistered(holder));
+    try std.testing.expect(!holder.needsSlowPropertyAccess());
+}
+
 test "cleared realm pointer unregisters empty borrowed holder" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

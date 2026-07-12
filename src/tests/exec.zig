@@ -5772,6 +5772,9 @@ test "primitive prototype lookup preserves raw receiver and exotic prototype sem
         \\const strictGetterKey = "__zjs_primitive_strict_getter_probe__";
         \\const sloppyGetterKey = "__zjs_primitive_sloppy_getter_probe__";
         \\const proxyKey = "__zjs_primitive_proxy_probe__";
+        \\const staticDataKey = "__zjs_primitive_static_data_probe__";
+        \\const staticGetterKey = "__zjs_primitive_static_getter_probe__";
+        \\const staticProxyKey = "__zjs_primitive_static_proxy_probe__";
         \\const originalNumberParent = Object.getPrototypeOf(Number.prototype);
         \\const intrinsicBigInt = BigInt;
         \\const intrinsicSymbol = Symbol;
@@ -5785,6 +5788,7 @@ test "primitive prototype lookup preserves raw receiver and exotic prototype sem
         \\    bigintPrototype[dataKey] = 14;
         \\    symbolPrototype[dataKey] = 15;
         \\    Object.prototype[inheritedKey] = 16;
+        \\    Number.prototype[staticDataKey] = 19;
         \\    assert.sameValue((1)[dataKey], 11);
         \\    assert.sameValue(true[dataKey], 12);
         \\    assert.sameValue("x"[dataKey], 13);
@@ -5792,6 +5796,7 @@ test "primitive prototype lookup preserves raw receiver and exotic prototype sem
         \\    assert.sameValue(symbolValue[dataKey], 15);
         \\    assert.sameValue((2)[inheritedKey], 16);
         \\    assert.sameValue("x"[inheritedKey], 16);
+        \\    assert.sameValue((2).__zjs_primitive_static_data_probe__, 19);
         \\    globalThis.BigInt = function ReplacementBigInt() {};
         \\    globalThis.Symbol = function ReplacementSymbol() {};
         \\    assert.sameValue((1n)[dataKey], 14);
@@ -5809,8 +5814,16 @@ test "primitive prototype lookup preserves raw receiver and exotic prototype sem
         \\            return Object.getPrototypeOf(this) === Number.prototype && this.valueOf();
         \\        },
         \\    });
+        \\    Object.defineProperty(Number.prototype, staticGetterKey, {
+        \\        configurable: true,
+        \\        get: function primitiveStaticGetter() {
+        \\            "use strict";
+        \\            return this;
+        \\        },
+        \\    });
         \\    assert.sameValue((3)[strictGetterKey], 3);
         \\    assert.sameValue((4)[sloppyGetterKey], 4);
+        \\    assert.sameValue((5).__zjs_primitive_static_getter_probe__, 5);
         \\    const parent = Object.create(originalNumberParent);
         \\    parent[inheritedKey] = 17;
         \\    Object.setPrototypeOf(Number.prototype, parent);
@@ -5820,7 +5833,7 @@ test "primitive prototype lookup preserves raw receiver and exotic prototype sem
         \\    const proxy = new Proxy(parent, {
         \\        get(target, key, receiver) {
         \\            trapCount++;
-        \\            if (key === proxyKey) {
+        \\            if (key === proxyKey || key === staticProxyKey) {
         \\                seenReceiver = receiver;
         \\                return 18;
         \\            }
@@ -5831,6 +5844,9 @@ test "primitive prototype lookup preserves raw receiver and exotic prototype sem
         \\    assert.sameValue((6)[proxyKey], 18);
         \\    assert.sameValue(seenReceiver, 6);
         \\    assert.sameValue(trapCount, 1);
+        \\    assert.sameValue((6).__zjs_primitive_static_proxy_probe__, 18);
+        \\    assert.sameValue(seenReceiver, 6);
+        \\    assert.sameValue(trapCount, 2);
         \\    assert.sameValue((7).__zjs_primitive_missing_probe__, undefined);
         \\    String.prototype[0] = "prototype";
         \\    assert.sameValue("a"[0], "a");
@@ -5847,6 +5863,8 @@ test "primitive prototype lookup preserves raw receiver and exotic prototype sem
         \\    delete Object.prototype[inheritedKey];
         \\    delete Number.prototype[strictGetterKey];
         \\    delete Number.prototype[sloppyGetterKey];
+        \\    delete Number.prototype[staticDataKey];
+        \\    delete Number.prototype[staticGetterKey];
         \\    delete String.prototype[0];
         \\}
     );

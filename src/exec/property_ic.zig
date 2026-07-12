@@ -166,19 +166,6 @@ fn isFunctionLikeClassId(class_id: core.ClassId) bool {
         class_id == core.class.ids.c_closure;
 }
 
-/// Function objects borrow their realm-global pointer and are consequently
-/// registered as runtime reference holders. That lifetime bookkeeping sets
-/// `needs_slow_property`, but it does not give ordinary function objects
-/// exotic `[[Get]]` semantics. qjs still probes their shape and prototype
-/// chain in GET_FIELD_INLINE. Let that same data-property walk proceed while
-/// preserving the slow path for proxies and genuinely exotic function
-/// classes; accessors/auto-init/var-ref slots are rejected by the lookup itself.
-pub inline fn functionObjectSupportsOrdinaryDataPropertyFastPath(object: *core.Object) bool {
-    return isFunctionLikeClassId(object.class_id) and
-        !object.flags.is_proxy and
-        !object.hasExoticMethods();
-}
-
 pub fn setObjectDataPropertyForPutFieldFastPath(
     rt: *core.JSRuntime,
     function: *const bytecode.Bytecode,
