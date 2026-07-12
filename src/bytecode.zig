@@ -6454,48 +6454,41 @@ pub const pipeline_resolve_labels = struct {
 
     /// Emit the function prologue with OP_special_object sequences.
     /// Mirrors `quickjs.c:34232-34294`.
-    fn emitFunctionPrologue(ctx: *const JSContext, output: []u8, out_idx: *usize) !void {
+    fn emitFunctionPrologue(ctx: *const JSContext, output: []u8, out_idx: *usize, use_short_opcodes: bool) !void {
         const fd = ctx.function_def orelse return;
 
         // home_object
         if (fd.home_object_var_idx >= 0) {
             output[out_idx.*] = opcode.op.special_object;
             output[out_idx.* + 1] = SPECIAL_OBJECT_HOME_OBJECT;
-            output[out_idx.* + 2] = opcode.op.put_loc;
-            std.mem.writeInt(u16, output[out_idx.* + 3 ..][0..2], @intCast(fd.home_object_var_idx), .little);
-            out_idx.* += 5;
+            out_idx.* += 2;
+            try emitSlotInstruction(opcode.op.put_loc, @intCast(fd.home_object_var_idx), output, out_idx, use_short_opcodes);
         }
 
         // this_active_func
         if (fd.this_active_func_var_idx >= 0) {
             output[out_idx.*] = opcode.op.special_object;
             output[out_idx.* + 1] = SPECIAL_OBJECT_THIS_FUNC;
-            output[out_idx.* + 2] = opcode.op.put_loc;
-            std.mem.writeInt(u16, output[out_idx.* + 3 ..][0..2], @intCast(fd.this_active_func_var_idx), .little);
-            out_idx.* += 5;
+            out_idx.* += 2;
+            try emitSlotInstruction(opcode.op.put_loc, @intCast(fd.this_active_func_var_idx), output, out_idx, use_short_opcodes);
         }
 
         // new_target
         if (fd.new_target_var_idx >= 0) {
             output[out_idx.*] = opcode.op.special_object;
             output[out_idx.* + 1] = SPECIAL_OBJECT_NEW_TARGET;
-            output[out_idx.* + 2] = opcode.op.put_loc;
-            std.mem.writeInt(u16, output[out_idx.* + 3 ..][0..2], @intCast(fd.new_target_var_idx), .little);
-            out_idx.* += 5;
+            out_idx.* += 2;
+            try emitSlotInstruction(opcode.op.put_loc, @intCast(fd.new_target_var_idx), output, out_idx, use_short_opcodes);
         }
 
         // this (special handling for derived class constructors)
         if (fd.this_var_idx >= 0) {
             if (fd.is_derived_class_constructor) {
-                output[out_idx.*] = opcode.op.set_loc_uninitialized;
-                std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], @intCast(fd.this_var_idx), .little);
-                out_idx.* += 3;
+                try emitSlotInstruction(opcode.op.set_loc_uninitialized, @intCast(fd.this_var_idx), output, out_idx, use_short_opcodes);
             } else {
                 output[out_idx.*] = opcode.op.push_this;
                 out_idx.* += 1;
-                output[out_idx.*] = opcode.op.put_loc;
-                std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], @intCast(fd.this_var_idx), .little);
-                out_idx.* += 3;
+                try emitSlotInstruction(opcode.op.put_loc, @intCast(fd.this_var_idx), output, out_idx, use_short_opcodes);
             }
         }
 
@@ -6512,40 +6505,33 @@ pub const pipeline_resolve_labels = struct {
                 out_idx.* += 2;
             }
             if (fd.arguments_arg_idx >= 0) {
-                output[out_idx.*] = opcode.op.set_loc;
-                std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], @intCast(fd.arguments_arg_idx), .little);
-                out_idx.* += 3;
+                try emitSlotInstruction(opcode.op.set_loc, @intCast(fd.arguments_arg_idx), output, out_idx, use_short_opcodes);
             }
-            output[out_idx.*] = opcode.op.put_loc;
-            std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], @intCast(fd.arguments_var_idx), .little);
-            out_idx.* += 3;
+            try emitSlotInstruction(opcode.op.put_loc, @intCast(fd.arguments_var_idx), output, out_idx, use_short_opcodes);
         }
 
         // func_var (reference to current function)
         if (fd.func_var_idx >= 0) {
             output[out_idx.*] = opcode.op.special_object;
             output[out_idx.* + 1] = SPECIAL_OBJECT_THIS_FUNC;
-            output[out_idx.* + 2] = opcode.op.put_loc;
-            std.mem.writeInt(u16, output[out_idx.* + 3 ..][0..2], @intCast(fd.func_var_idx), .little);
-            out_idx.* += 5;
+            out_idx.* += 2;
+            try emitSlotInstruction(opcode.op.put_loc, @intCast(fd.func_var_idx), output, out_idx, use_short_opcodes);
         }
 
         // var_object
         if (fd.var_object_idx >= 0) {
             output[out_idx.*] = opcode.op.special_object;
             output[out_idx.* + 1] = SPECIAL_OBJECT_VAR_OBJECT;
-            output[out_idx.* + 2] = opcode.op.put_loc;
-            std.mem.writeInt(u16, output[out_idx.* + 3 ..][0..2], @intCast(fd.var_object_idx), .little);
-            out_idx.* += 5;
+            out_idx.* += 2;
+            try emitSlotInstruction(opcode.op.put_loc, @intCast(fd.var_object_idx), output, out_idx, use_short_opcodes);
         }
 
         // arg_var_object
         if (fd.arg_var_object_idx >= 0) {
             output[out_idx.*] = opcode.op.special_object;
             output[out_idx.* + 1] = SPECIAL_OBJECT_VAR_OBJECT;
-            output[out_idx.* + 2] = opcode.op.put_loc;
-            std.mem.writeInt(u16, output[out_idx.* + 3 ..][0..2], @intCast(fd.arg_var_object_idx), .little);
-            out_idx.* += 5;
+            out_idx.* += 2;
+            try emitSlotInstruction(opcode.op.put_loc, @intCast(fd.arg_var_object_idx), output, out_idx, use_short_opcodes);
         }
     }
 
@@ -6556,24 +6542,24 @@ pub const pipeline_resolve_labels = struct {
         // Calculate function prologue size
         var prologue_size: usize = 0;
         if (ctx.function_def) |fd| {
-            if (fd.home_object_var_idx >= 0) prologue_size += 5;
-            if (fd.this_active_func_var_idx >= 0) prologue_size += 5;
-            if (fd.new_target_var_idx >= 0) prologue_size += 5;
+            if (fd.home_object_var_idx >= 0) prologue_size += 2 + loweredSlotInstructionSize(opcode.op.put_loc, @intCast(fd.home_object_var_idx), use_short_opcodes);
+            if (fd.this_active_func_var_idx >= 0) prologue_size += 2 + loweredSlotInstructionSize(opcode.op.put_loc, @intCast(fd.this_active_func_var_idx), use_short_opcodes);
+            if (fd.new_target_var_idx >= 0) prologue_size += 2 + loweredSlotInstructionSize(opcode.op.put_loc, @intCast(fd.new_target_var_idx), use_short_opcodes);
             if (fd.this_var_idx >= 0) {
                 if (fd.is_derived_class_constructor) {
-                    prologue_size += 3;
+                    prologue_size += loweredSlotInstructionSize(opcode.op.set_loc_uninitialized, @intCast(fd.this_var_idx), use_short_opcodes);
                 } else {
-                    prologue_size += 4; // push_this (1) + put_loc (3)
+                    prologue_size += 1 + loweredSlotInstructionSize(opcode.op.put_loc, @intCast(fd.this_var_idx), use_short_opcodes);
                 }
             }
             if (fd.arguments_var_idx >= 0) {
                 prologue_size += 2; // special_object
-                if (fd.arguments_arg_idx >= 0) prologue_size += 3;
-                prologue_size += 3; // put_loc
+                if (fd.arguments_arg_idx >= 0) prologue_size += loweredSlotInstructionSize(opcode.op.set_loc, @intCast(fd.arguments_arg_idx), use_short_opcodes);
+                prologue_size += loweredSlotInstructionSize(opcode.op.put_loc, @intCast(fd.arguments_var_idx), use_short_opcodes);
             }
-            if (fd.func_var_idx >= 0) prologue_size += 5;
-            if (fd.var_object_idx >= 0) prologue_size += 5;
-            if (fd.arg_var_object_idx >= 0) prologue_size += 5;
+            if (fd.func_var_idx >= 0) prologue_size += 2 + loweredSlotInstructionSize(opcode.op.put_loc, @intCast(fd.func_var_idx), use_short_opcodes);
+            if (fd.var_object_idx >= 0) prologue_size += 2 + loweredSlotInstructionSize(opcode.op.put_loc, @intCast(fd.var_object_idx), use_short_opcodes);
+            if (fd.arg_var_object_idx >= 0) prologue_size += 2 + loweredSlotInstructionSize(opcode.op.put_loc, @intCast(fd.arg_var_object_idx), use_short_opcodes);
         }
 
         const positions = try ctx.memory.alloc(usize, func.code.len + 1);
@@ -6596,7 +6582,8 @@ pub const pipeline_resolve_labels = struct {
 
         // Second pass: emit prologue and copy (dropping labels).
         var out_idx: usize = 0;
-        try emitFunctionPrologue(ctx, output, &out_idx);
+        try emitFunctionPrologue(ctx, output, &out_idx, use_short_opcodes);
+        std.debug.assert(out_idx == prologue_size);
         var i: usize = 0;
         while (i < func.code.len) {
             const op = func.code[i];

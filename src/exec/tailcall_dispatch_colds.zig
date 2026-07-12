@@ -827,6 +827,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.put_loc_check_init] = td.op_put_loc_check_init;
     inline for ([_]u8{ op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3 }) |o| t[o] = td.op_get_arg_short;
     t[op.push_atom_value] = td.op_push_atom_value;
+    t[op.special_object] = td.op_special_object; // THIS_FUNC direct dup; other subtypes stay cold
     // Per-op binary handlers (qjs CASE(OP_add)/…/CASE(OP_xor) are distinct labels,
     // quickjs.c:19696-20227; op.pow keeps the cold h_binary — qjs OP_pow:19916 has
     // no fast leg and falls straight to js_binary_arith_slow).

@@ -2972,6 +2972,47 @@ test "M1.2: resolve_labels emits FunctionDef special-object prologue" {
     try std.testing.expectEqualSlices(u8, &expected, bc.code);
 }
 
+test "resolve_labels shortens FunctionDef special-object prologue slots" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("short-prologue");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+    fd.home_object_var_idx = 0;
+    fd.this_active_func_var_idx = 1;
+    fd.new_target_var_idx = 2;
+    fd.this_var_idx = 3;
+    fd.arguments_var_idx = 4;
+    fd.arguments_arg_idx = 5;
+    fd.func_var_idx = 6;
+    fd.var_object_idx = 7;
+    fd.arg_var_object_idx = 8;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    const op = bytecode.opcode.op;
+    const expected = [_]u8{
+        op.special_object, 4,                 op.put_loc0,
+        op.special_object, 2,                 op.put_loc1,
+        op.special_object, 3,                 op.put_loc2,
+        op.push_this,      op.put_loc3,       op.special_object,
+        1,                 op.set_loc8,       5,
+        op.put_loc8,       4,                 op.special_object,
+        2,                 op.put_loc8,       6,
+        op.special_object, 5,                 op.put_loc8,
+        7,                 op.special_object, 5,
+        op.put_loc8,       8,
+    };
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+}
+
 test "resolve_labels: base class constructor prologue does not duplicate class fields init" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

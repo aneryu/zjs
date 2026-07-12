@@ -1118,6 +1118,19 @@ pub fn op_push_atom_value(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
     return cont(pc + 5, sp + 1, var_buf, vm);
 }
 
+/// QJS OP_special_object/THIS_FUNC is a register-resident
+/// `JS_DupValue(ctx, sf->cur_func)` (quickjs.c:17966). Named function
+/// expressions execute this two-op prologue on every call to initialize their
+/// immutable self binding. Keep the allocating/observable special-object
+/// subtypes on the cold helper; the current-function arm is only one retained
+/// value push and cannot fail.
+pub fn op_special_object(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.local_fast_blocked or pc[1] != bytecode.opcode.special_object_subtype.current_function)
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    sp[0] = vm.frame.current_function.dup();
+    return cont(pc + 2, sp + 1, var_buf, vm);
+}
+
 /// Frameless primitive constant pushes. QuickJS's `CASE(OP_null)` is the direct
 /// `*sp++ = JS_NULL; BREAK;` form; undefined, booleans, and immediate integers
 /// are the same register-resident primitive stores. `pushSmallIntMaybeFuse` is a

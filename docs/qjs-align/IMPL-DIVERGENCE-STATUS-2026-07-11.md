@@ -3,7 +3,7 @@
 > 方法：分步骤对比 — ①重建双引擎并测量 20 个基准（insn+cycles）→ ②同源码双引擎字节码序列 dump 对比 → ③perf 热点归因 → ④九个子系统代码级审计 → ⑤正确性与性能前沿排序。
 > 结论先行：本文最初记录的 C1–C4 正确性缺陷已经修复；二次审计又闭合了 conditional-only 回边中断、lexical lowering 死路径和 native builtin 栈帧。本轮进一步修复了模块 DFS/TLA 调度、动态导入 arrow 的 named-evaluation 状态泄漏、隐式 `arguments` 绑定优先级，以及 generator return 穿越 finally 时的显式抛出传播。原 13 条 known-errors 中已有 11 条转绿并移除，剩余 2 条在当前 QJS 参照上也失败，不构成已证实的 zjs → QJS 差异。§5.2 的 10 个性能候选均已执行“重建证据→实现、收窄或否决”：1–6、8、10 已按证据闭环；7 已完成 Math typed-cproto 首域、通用 op_call memo，并把 `Function.prototype.call/apply` 纳入 `.function` record，其他 builtin 域的 typed ABI 仍是架构迁移债；9 的 delete compact 原假设被基准否决，改为收益明确的 cached-string-atom 读路径。§1–§4 保留为**整改前历史快照**，当前结论以 §5 为准。
 >
-> **证据边界**：原始 20 项 best-of-5 仍只有聚合结果，不能回推方差或严谨 IPC。本轮把字符串、属性、peephole、调用与函数生命周期的 20 个固定脚本补入 `tests/perf/qjs-align/`，但尚未重建原历史 20 项全集和所有 perf.data；新旧数字必须分开解释。
+> **证据边界**：原始 20 项 best-of-5 仍只有聚合结果，不能回推方差或严谨 IPC。本轮把字符串、属性、peephole、调用与函数生命周期的 21 个固定脚本补入 `tests/perf/qjs-align/`，但尚未重建原历史 20 项全集和所有 perf.data；新旧数字必须分开解释。
 
 ## 0. 初始审计环境与方法
 
@@ -305,26 +305,32 @@ zjs：op_return 17.92% + op_get_arg_short 16.03% + op_call 13.04% + setupSimpleI
 
 第 10 项固定脚本 `peephole-mixed-2m.js` 的 5 次 CPU5 计数：zjs 4.24004–4.24066B instructions、725.0–733.2M cycles；qjs 2.13953–2.13971B、350.0–353.3M。该总差距还包含 checked locals、调用与其他残余，不能全部归因给 peephole。
 
-调用/闭包前沿的追加测量（CPU19，ReleaseFast，best-of-5 wall time）如下；冻结的本轮工作树起点二进制只用于同机 A/B，不替代 qjs 参照：
+调用/闭包前沿的追加测量（CPU19，ReleaseFast；7 轮配对、每轮各运行 5 次，表中为每次运行的归一化代表值）如下；冻结的本轮工作树起点二进制只用于同机 A/B，不替代 qjs 参照：
 
 | 固定脚本 | 起点 zjs | 当前 zjs | qjs | 当前 zjs/qjs |
 |---|---:|---:|---:|---:|
-| `call-const-zero-arg-10m.js` | 0.47s | 0.32s | 0.19s | 1.68x |
-| `call-add-two-arg-10m.js` | 0.37s | 0.36s | 0.21s | 1.71x |
-| `call-closure-two-arg-10m.js` | 0.49s | 0.47s | 0.23s | 2.04x |
+| `call-const-zero-arg-10m.js` | 0.47s | 0.316s | 0.196s | 1.61x |
+| `call-add-two-arg-10m.js` | 0.37s | 0.338s | 0.212s | 1.59x |
+| `call-named-function-expression-two-arg-10m.js` | 0.43s | 0.370s | 0.214s | 1.73x |
+| `call-closure-two-arg-10m.js` | 0.49s | 0.400s | 0.239s | 1.67x |
+
+新增 named-function 隔离把 closure cell 与函数名序言拆开：匿名 factory 与直接声明在 zjs 都约 1.76–1.77s/50M，给返回函数增加内部名字后变为 2.16s，而 qjs 两者都约 1.05–1.06s。两端都发 `special_object THIS_FUNC; put_loc*`；qjs 在 `JS_CallInternal` CASE 内直接 `JS_DupValue(sf->cur_func)`，zjs 原先却走 `coldStd → vm_literal.specialObject → coldNext`。当前只把不可失败的 `THIS_FUNC` arm 放进 152B frameless handler，其他会分配或访问复杂状态的 subtype 保持 cold；named 与 named-closure 分别约下降 14.4%/14.5%。同时 FunctionDef 序言复用 `selectShortSlot/emitSlotInstruction`，开启 short-opcode 时的全序言样本从 42B 降到 29B，实际 named 函数从 wide `put_loc u16` 对齐为 qjs 式 `put_loc0`（9B→7B）。
+
+本轮也用单变量构建否决了四个诱人但无收益的方向：强制内联 `pushFrame` 让三组调用变慢 3–8%；删除 inline depth 上限比较对 call0 中性、对 call2/named 变慢约 4%；删除未读 `InlineTarget.callable`（48B→40B）中性到约 +1%；关闭 same-loop 后，现有 recursive fallback 慢 3.2–3.4 倍。四项源码均已撤回，避免把结构清理或“更像 C 递归”误报成性能对齐。
 
 函数生命周期另发现一个独立的二次复杂度缺陷：嵌套函数的 realm 借用引用都登记在 runtime holder 数组，FIFO 析构原先逐项线性查找并 `copyForwards`，20 万函数需要 2.26s。当前函数 payload 用既有 3 字节尾隙缓存 `index+1`，holder 删除改为 swap-remove 并修复被移动项的缓存；`function-create-nested-hold-200k.js` 降到 0.11s，复杂度扫描 50k/100k/200k 为 0.02/0.06/0.10s。qjs 同一 200k 脚本为 0.04s，因此算法级差异已闭合，固定成本和内存差距仍在。DWARF 实测默认 `FunctionPayload` 保持 80B；该脚本 max RSS 当前约 79.4MiB、qjs 约 30.8MiB。
 
 ### 5.3 验证状态
 
-- Debug unified：最新工作树 1339/1339；`checkpoint-check` 25/25 steps。
+- Debug unified：最新工作树 1340/1340；`checkpoint-check` 25/25 steps。
 - `quick-check` 16/16、`checkpoint-check` 25/25、architecture/API snapshot、OOM-cap 2/2：通过。
-- alternate representation：最新工作树 1339/1339。
+- alternate representation：最新工作树 1340/1340。
 - OOM injection：最新工作树 7/7。
 - `test262-smoke`：12/12；最新联合 changed-area：TLA 251、dynamic-import assignment-expression 28、for-await-of 1234、AsyncGeneratorPrototype return 19、Function call/apply 97，合计 1629/1629。staging `Function/arguments-parameter-shadowing.js` 当前 zjs 1/1，当前 qjs 0/1。
+- 函数序言 changed-area：function expression/statement、new.target、method-definition、arrow-function、Function builtins 联合 1884/1884。
 - C1–C4/相关 changed-area test262：1215/1215；peephole 相关切片：867/867；二次审计 `let` 145/145；C7 的 module-code 595、dynamic-import 597。
 - full test262：默认 8B repr 与 alternate 16B repr 均准备 49,775/53,293，排除 3,518，按 feature 跳过 5,174；通过 44,599，known 2，unexpected 0；两次 `test262-gate` 均 5/5 steps。
-- ReleaseSafe unified：1339/1339，10/10 steps。
+- ReleaseSafe unified：1340/1340，10/10 steps。
 
 full test262 的阶段首跑曾暴露 IsHTMLDDA callable 判定与 generator finally rethrow marker；C8–C10 的收口首跑又暴露普通 catch 误判 finally、参数环境 `arguments` 同名声明回填两条回归。上面的最终全量结果均已覆盖，不以逐文件复测替代全量门禁。
 
@@ -348,7 +354,7 @@ full test262 的阶段首跑曾暴露 IsHTMLDDA callable 判定与 generator fin
 
 | 优先级 | 未对齐边界 | 当前证据/影响 |
 |---|---|---|
-| P0 | 调用帧与闭包访问 | qjs 的 `JS_CallInternal` 单体路径与寄存器驻留仍未被 zjs 的 Machine/Frame、tail-dispatch 分段路径同构替代；三个固定调用脚本仍为 1.68–2.04x。 |
+| P0 | 调用帧与闭包访问 | qjs 的 `JS_CallInternal` 单体路径与寄存器驻留仍未被 zjs 的 Machine/Frame、tail-dispatch 分段路径同构替代；本轮闭合 named-function cold 序言后，四个固定调用脚本仍为 1.59–1.73x。 |
 | P0 | 函数对象与 runtime holder 内存 | FIFO 析构已从 O(n²) 修成 O(n)，但 qjs 没有对应 borrowed-holder side table；20 万嵌套函数 max RSS 仍约 79.4MiB vs 30.8MiB。 |
 | P1 | builtin typed ABI | Math `.f_f/.f_f_f` 与 Function record 已迁移；Array、String、Promise 等大域仍经过 full-context/magic-switch handler，未达到 qjs 的 per-method function-pointer 直达。 |
 | P1 | 异步模块 SCC 状态机 | 目标 test262 切片已对齐，但 ModuleRecord 字段、cycle-root capability、parent/pending 关系以及 host-hook dynamic import 路径仍非 qjs 同构。 |
