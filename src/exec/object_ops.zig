@@ -2373,6 +2373,60 @@ pub fn qjsIteratorPrototype(rt: *core.JSRuntime, global: *core.Object, tag_name:
     return iter_vm.qjsIteratorPrototype(rt, global, tag_name);
 }
 
+fn argumentsPropertyTemplate(rt: *core.JSRuntime, global: *core.Object, comptime mapped: bool) !*core.Object {
+    const cached = try global.cachedRealmValueSlot(
+        rt,
+        if (mapped) .mapped_arguments_template else .unmapped_arguments_template,
+    );
+    if (cached.*) |stored| return core.Object.expect(stored);
+
+    // qjs prepares `ctx->arguments_shape` once per realm and every later
+    // `js_build_arguments` call supplies only the three property values. Keep a
+    // realm-owned template solely to pin that final shape and its fixed slots;
+    // the template is never exposed to JavaScript.
+    const template = try core.Object.createWithOwnPropertyCapacity(
+        rt,
+        if (mapped) core.class.ids.mapped_arguments else core.class.ids.arguments,
+        objectPrototypeFromGlobal(rt, global),
+        3,
+    );
+    defer template.value().free(rt);
+
+    if (mapped) {
+        try template.defineOwnProperty(
+            rt,
+            core.atom.ids.length,
+            core.Descriptor.data(core.JSValue.int32(0), true, false, true),
+        );
+    } else {
+        try template.defineOwnPropertyAssumingNew(
+            rt,
+            core.atom.ids.length,
+            core.Descriptor.data(core.JSValue.int32(0), true, false, true),
+        );
+    }
+    if (try arrayPrototypeValuesFromGlobal(rt, global)) |values| {
+        defer values.free(rt);
+        const iterator_key = (comptime core.atom.predefinedId("Symbol.iterator", .symbol)) orelse return error.TypeError;
+        if (mapped) {
+            try template.defineOwnProperty(rt, iterator_key, core.Descriptor.data(values, true, false, true));
+        } else {
+            try template.defineOwnPropertyAssumingNew(rt, iterator_key, core.Descriptor.data(values, true, false, true));
+        }
+    }
+    const callee_key = (comptime core.atom.predefinedId("callee", .string)) orelse return error.TypeError;
+    if (mapped) {
+        try template.defineOwnProperty(rt, callee_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, false, true));
+    } else {
+        const thrower = try throwTypeErrorIntrinsicForGlobal(rt, global);
+        defer thrower.free(rt);
+        try template.defineOwnPropertyAssumingNew(rt, callee_key, core.Descriptor.accessor(thrower, thrower, false, false));
+    }
+
+    try global.setOptionalValueSlot(rt, cached, template.value().dup());
+    return core.Object.expect(cached.*.?);
+}
+
 pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: *frame_mod.Frame, mapped_override: ?bool) !core.JSValue {
     const mapped = if (mapped_override) |requested|
         requested and frame.function.flags.has_simple_parameter_list
@@ -2384,49 +2438,63 @@ pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: 
         frame.originalArgs()[0..@min(frame.actual_arg_count, frame.originalArgs().len)]
     else
         frame.args[0..@min(frame.actual_arg_count, frame.args.len)];
-    const object = try core.Object.create(ctx.runtime, if (mapped) core.class.ids.mapped_arguments else core.class.ids.arguments, objectPrototypeFromGlobal(ctx.runtime, global));
+    const object = blk: {
+        const template = if (mapped)
+            try argumentsPropertyTemplate(ctx.runtime, global, true)
+        else
+            try argumentsPropertyTemplate(ctx.runtime, global, false);
+        const out = try core.Object.createFromPropertyTemplate(ctx.runtime, template);
+        out.replaceOwnDataPropertyValueAtAssumingShapeOwned(
+            ctx.runtime,
+            0,
+            core.JSValue.int32(@intCast(args.len)),
+        );
+        if (mapped) {
+            const callee_key = (comptime core.atom.predefinedId("callee", .string)) orelse return error.TypeError;
+            const callee_index = template.findProperty(callee_key) orelse return error.TypeError;
+            out.replaceOwnDataPropertyValueAtAssumingShapeOwned(
+                ctx.runtime,
+                callee_index,
+                slotValueDup(frame.current_function),
+            );
+        }
+        break :blk out;
+    };
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
-    try object.defineOwnProperty(ctx.runtime, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(@intCast(args.len)), true, false, true));
-    if (try arrayPrototypeValuesFromGlobal(ctx.runtime, global)) |values| {
-        defer values.free(ctx.runtime);
-        const iterator_key = (comptime core.atom.predefinedId("Symbol.iterator", .symbol)) orelse return error.TypeError;
-        try object.defineOwnProperty(ctx.runtime, iterator_key, core.Descriptor.data(values, true, false, true));
+
+    if (!mapped) {
+        var dense_elements: []core.JSValue = &.{};
+        if (args.len != 0) {
+            dense_elements = try ctx.runtime.allocRuntime(core.JSValue, args.len);
+            for (args, 0..) |arg, index| dense_elements[index] = slotValueDup(arg);
+        }
+        object.adoptDenseUnmappedArgumentsElementsAssumingEmpty(ctx.runtime, dense_elements);
+        return object.value();
     }
-    const callee_key = try ctx.runtime.internAtom("callee");
-    defer ctx.runtime.atoms.free(callee_key);
-    if (mapped) {
-        try object.defineOwnProperty(ctx.runtime, callee_key, core.Descriptor.data(frame.current_function, true, false, true));
-    } else {
-        const thrower = try throwTypeErrorIntrinsicForGlobal(ctx.runtime, global);
-        defer thrower.free(ctx.runtime);
-        try object.defineOwnProperty(ctx.runtime, callee_key, core.Descriptor.accessor(thrower, thrower, false, false));
-    }
+
     var rooted_argument_refs: []core.JSValue = &.{};
     var argument_refs_root = ValueSliceRoot{};
     argument_refs_root.init(ctx.runtime, &rooted_argument_refs);
     defer argument_refs_root.deinit();
 
-    if (mapped and args.len > 0) {
-        const refs = object.argumentsVarRefsSlot();
-        refs.* = try ctx.runtime.memory.alloc(core.JSValue, args.len);
-        errdefer {
-            rooted_argument_refs = &.{};
-            const owned_refs = refs.*;
-            refs.* = &.{};
-            ctx.runtime.memory.free(core.JSValue, owned_refs);
-        }
-        @memset(refs.*, core.JSValue.undefinedValue());
+    if (args.len > 0) {
+        const refs = try ctx.runtime.memory.alloc(core.JSValue, args.len);
+        @memset(refs, core.JSValue.uninitialized());
+        object.adoptMappedArgumentsVarRefsAssumingEmpty(ctx.runtime, refs);
     }
+    var initialized_argument_refs: usize = 0;
     for (args, 0..) |arg, index| {
-        const refs = object.argumentsVarRefsSlot();
-        if (mapped and index < refs.*.len and index < frame.args.len) {
-            const rooted_cell = try ensureFrameVarRefCell(ctx, frame, &frame.args[index]);
-            refs.*[index] = rooted_cell;
-            rooted_argument_refs = refs.*[0 .. index + 1];
+        const refs = object.argumentsVarRefsMut();
+        if (index < refs.len and index < frame.args.len) {
+            refs[index] = try ensureFrameVarRefCell(ctx, frame, &frame.args[index]);
+        } else {
+            // qjs creates a closed var-ref carrying each extra actual argument.
+            // The payload accepts the equivalent owned value directly and its
+            // existing read/write helpers preserve the same alias boundary.
+            refs[index] = slotValueDup(arg);
         }
-        const arg_value = slotValueDup(arg);
-        defer arg_value.free(ctx.runtime);
-        try object.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(@intCast(index)), core.Descriptor.data(arg_value, true, true, true));
+        initialized_argument_refs = index + 1;
+        rooted_argument_refs = refs[0..initialized_argument_refs];
     }
     return object.value();
 }
@@ -2451,14 +2519,24 @@ pub fn frameArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: *
 }
 
 pub fn frameArgumentsObjectForSpecialObject(ctx: *core.JSContext, global: *core.Object, frame: *frame_mod.Frame, subtype: u8) !core.JSValue {
-    if (frame.argumentsObject()) |value| return value.dup();
+    // The compiler emits this special object once in the function prologue and
+    // immediately stores it in the hidden `arguments_var_idx` local, matching
+    // qjs. Only direct eval needs a second cross-bytecode lookup channel; keep
+    // FrameCold as that bridge instead of allocating it for every ordinary
+    // arguments-using call.
+    const cache_for_direct_eval = frame.function.flags.has_eval_call;
+    if (cache_for_direct_eval) {
+        if (frame.argumentsObject()) |value| return value.dup();
+    }
     const mapped_override: ?bool = switch (subtype) {
         0 => false,
         1 => true,
         else => null,
     };
     const value = try createArgumentsObject(ctx, global, frame, mapped_override);
-    (try frame.ensureCold(&ctx.runtime.memory)).arguments_object = value.dup();
+    if (cache_for_direct_eval) {
+        (try frame.ensureCold(&ctx.runtime.memory)).arguments_object = value.dup();
+    }
     return value;
 }
 

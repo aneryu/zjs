@@ -224,6 +224,16 @@ pub const Registry = struct {
 
     pub fn createObjectRootWithPropertyCapacity(self: *Registry, proto: ?*Object, property_capacity: usize) !*Shape {
         if (property_capacity == 0) return self.createObjectRoot(proto);
+        var current = self.firstShapeWithHash(initialHash(proto));
+        while (current) |shape| : (current = shape.registry_hash_next) {
+            // The owning Object allocates a value buffer with exactly this
+            // capacity. Reusing a larger root would make shape.prop_size exceed
+            // the real buffer length, corrupting later appends and teardown.
+            // qjs shape transition reuse likewise requires equal prop_size.
+            if (shape.prop_count != 0 or shape.proto != proto or shape.prop_size != property_capacity) continue;
+            shape.retain();
+            return shape;
+        }
         return self.createShapeWithPropertyCapacity(proto, property_capacity);
     }
 

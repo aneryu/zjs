@@ -7359,24 +7359,24 @@ pub fn mappedArgumentsValue(rt: *core.JSRuntime, object: *core.Object, atom_id: 
 pub fn setMappedArgumentsValue(ctx: *core.JSContext, object: *core.Object, atom_id: core.Atom, value: core.JSValue) !bool {
     if (object.class_id != core.class.ids.mapped_arguments) return false;
     const index = core.array.arrayIndexFromAtom(&ctx.runtime.atoms, atom_id) orelse return false;
-    const refs = object.argumentsVarRefsSlot();
-    if (index >= refs.*.len) return false;
-    if (refs.*[index].isUninitialized()) return false;
+    const refs = object.argumentsVarRefsMut();
+    if (index >= refs.len) return false;
+    if (refs[index].isUninitialized()) return false;
     if (!object.hasOwnProperty(atom_id)) {
-        const old_value = refs.*[index];
-        refs.*[index] = core.JSValue.uninitialized();
+        const old_value = refs[index];
+        refs[index] = core.JSValue.uninitialized();
         old_value.free(ctx.runtime);
         return false;
     }
-    if (slot_ops.varRefCellFromValue(refs.*[index])) |cell| {
+    if (slot_ops.varRefCellFromValue(refs[index])) |cell| {
         const next_value = value.dup();
         try cell.setVarRefValue(ctx.runtime, next_value);
         return true;
     }
     const next_value = value.dup();
     errdefer next_value.free(ctx.runtime);
-    const old_value = refs.*[index];
-    refs.*[index] = next_value;
+    const old_value = refs[index];
+    refs[index] = next_value;
     old_value.free(ctx.runtime);
     return true;
 }

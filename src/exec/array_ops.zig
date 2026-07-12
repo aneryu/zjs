@@ -6247,9 +6247,9 @@ pub fn qjsArrayIteratorValue(ctx: *core.JSContext, output: ?*std.Io.Writer, glob
 }
 
 pub fn arrayPrototypeValuesFromGlobal(rt: *core.JSRuntime, global: *core.Object) !?core.JSValue {
+    if (global.cachedRealmValue(.array_prototype_values)) |stored| return stored.dup();
     const prototype = arrayPrototypeFromGlobal(rt, global) orelse return null;
-    const values_key = try rt.internAtom("values");
-    defer rt.atoms.free(values_key);
+    const values_key = (comptime core.atom.predefinedId("values", .string)) orelse return null;
     return prototype.getProperty(values_key);
 }
 

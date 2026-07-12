@@ -76,12 +76,13 @@ const corpus = [_]Snippet{
         .source =
         \\function add(a, b) { return a + b; }
         \\function mk(base) { return function (x) { return add(base, x); }; }
+        \\function strictArgs(a, b) { "use strict"; return arguments[0] + arguments[1] + arguments.length; }
         \\const inc = mk(1);
         \\let t = 0;
         \\for (let i = 0; i < 5; i++) t = inc(t);
-        \\"calls-ok:" + t
+        \\"calls-ok:" + t + ":" + strictArgs(2, 3)
         ,
-        .expect = .{ .string = "calls-ok:5" },
+        .expect = .{ .string = "calls-ok:5:7" },
     },
     .{
         .name = "properties-literals",

@@ -5572,6 +5572,8 @@ test "strict plain calls preserve this arguments eval captures and backtraces" {
         \\    return value;
         \\}
         \\assert.sameValue(strictArgs(1), 1);
+        \\function strictArgumentsIdentity() { "use strict"; return arguments === arguments; }
+        \\assert.sameValue(strictArgumentsIdentity(1), true);
         \\function strictOriginalArgs(value) {
         \\    "use strict";
         \\    value = 17;
@@ -5591,6 +5593,158 @@ test "strict plain calls preserve this arguments eval captures and backtraces" {
         \\assert.sameValue(makeStrictClosure()(), 4);
         \\function strictStack() { "use strict"; return new Error("x").stack; }
         \\assert.sameValue(strictStack().indexOf("    at strictStack"), 0);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "strict arguments preserve qjs intrinsic metadata and dense element semantics" {
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\const savedValues = Array.prototype.values;
+        \\Array.prototype.values = function patchedValues() { throw new Error("observable lookup"); };
+        \\try {
+        \\    function capture(a, b, c) {
+        \\        "use strict";
+        \\        return { args: arguments, parameter: a };
+        \\    }
+        \\    const record = capture(1, 2, 3);
+        \\    const args = record.args;
+        \\    assert.sameValue(args[Symbol.iterator], savedValues);
+        \\    assert.sameValue(JSON.stringify(args), '{"0":1,"1":2,"2":3}');
+        \\    const keys = Reflect.ownKeys(args);
+        \\    assert.sameValue(keys.length, 6);
+        \\    assert.sameValue(keys[0], "0");
+        \\    assert.sameValue(keys[1], "1");
+        \\    assert.sameValue(keys[2], "2");
+        \\    assert.sameValue(keys[3], "length");
+        \\    assert.sameValue(keys[4], "callee");
+        \\    assert.sameValue(keys[5], Symbol.iterator);
+        \\    const lengthDesc = Object.getOwnPropertyDescriptor(args, "length");
+        \\    assert.sameValue(lengthDesc.value, 3);
+        \\    assert.sameValue(lengthDesc.writable, true);
+        \\    assert.sameValue(lengthDesc.enumerable, false);
+        \\    assert.sameValue(lengthDesc.configurable, true);
+        \\    const iteratorDesc = Object.getOwnPropertyDescriptor(args, Symbol.iterator);
+        \\    assert.sameValue(iteratorDesc.value, savedValues);
+        \\    assert.sameValue(iteratorDesc.writable, true);
+        \\    assert.sameValue(iteratorDesc.enumerable, false);
+        \\    assert.sameValue(iteratorDesc.configurable, true);
+        \\    const calleeDesc = Object.getOwnPropertyDescriptor(args, "callee");
+        \\    assert.sameValue(calleeDesc.get, calleeDesc.set);
+        \\    assert.sameValue(calleeDesc.enumerable, false);
+        \\    assert.sameValue(calleeDesc.configurable, false);
+        \\    let calleeThrew = false;
+        \\    try { void args.callee; } catch (error) { calleeThrew = error instanceof TypeError; }
+        \\    assert.sameValue(calleeThrew, true);
+        \\    args.length = 1;
+        \\    assert.sameValue(Array.prototype.join.call(args, "-"), "1");
+        \\    args[0] = 9;
+        \\    assert.sameValue(record.parameter, 1);
+        \\    assert.sameValue(args[0], 9);
+        \\    assert.sameValue(delete args[0], true);
+        \\    assert.sameValue(0 in args, false);
+        \\    Object.defineProperty(args, "1", { value: 7, writable: false, enumerable: false, configurable: false });
+        \\    assert.sameValue(args[1], 7);
+        \\    assert.sameValue(Object.keys(args).join(","), "2");
+        \\    Object.freeze(args);
+        \\    const frozen = Object.getOwnPropertyDescriptor(args, "2");
+        \\    assert.sameValue(frozen.value, 3);
+        \\    assert.sameValue(frozen.writable, false);
+        \\    assert.sameValue(frozen.enumerable, true);
+        \\    assert.sameValue(frozen.configurable, false);
+        \\    assert.sameValue(Object.isFrozen(args), true);
+        \\} finally {
+        \\    Array.prototype.values = savedValues;
+        \\}
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "mapped arguments use var-ref indexed storage and detach on descriptor changes" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function mapped(first, second) {
+        \\    const args = arguments;
+        \\    first = 5;
+        \\    assert.sameValue(args[0], 5);
+        \\    args[1] = 7;
+        \\    assert.sameValue(second, 7);
+        \\    const keys = Reflect.ownKeys(args);
+        \\    assert.sameValue(keys[0], "0");
+        \\    assert.sameValue(keys[1], "1");
+        \\    assert.sameValue(keys[2], "length");
+        \\    assert.sameValue(keys[3], "callee");
+        \\    assert.sameValue(keys[4], Symbol.iterator);
+        \\    const initial = Object.getOwnPropertyDescriptor(args, "0");
+        \\    assert.sameValue(initial.value, 5);
+        \\    assert.sameValue(initial.writable, true);
+        \\    assert.sameValue(initial.enumerable, true);
+        \\    assert.sameValue(initial.configurable, true);
+        \\    assert.sameValue(delete args[0], true);
+        \\    first = 8;
+        \\    assert.sameValue(0 in args, false);
+        \\    assert.sameValue(args[0], undefined);
+        \\    Object.defineProperty(args, "1", { enumerable: false });
+        \\    second = 9;
+        \\    assert.sameValue(args[1], 9);
+        \\    assert.sameValue(Object.getOwnPropertyDescriptor(args, "1").enumerable, false);
+        \\    Object.defineProperty(args, "1", { writable: false });
+        \\    second = 10;
+        \\    assert.sameValue(args[1], 9);
+        \\    return args;
+        \\}
+        \\const mappedArgs = mapped(1, 2);
+        \\assert.sameValue(Object.keys(mappedArgs).length, 0);
+        \\function mappedArgumentsIdentity() {
+        \\    assert.sameValue(arguments, arguments);
+        \\    arguments.callee = 1;
+        \\    assert.sameValue(arguments.callee, 1);
+        \\}
+        \\mappedArgumentsIdentity({ callee: "argument" });
+        \\function annexBArgumentsBinding() {
+        \\    const outer = arguments;
+        \\    {
+        \\        assert.sameValue(arguments(), undefined);
+        \\        function arguments() {}
+        \\        assert.sameValue(arguments(), undefined);
+        \\    }
+        \\    assert.sameValue(arguments, outer);
+        \\}
+        \\annexBArgumentsBinding();
+        \\function extra(first) {
+        \\    const args = arguments;
+        \\    args[1] = 6;
+        \\    return args[1];
+        \\}
+        \\assert.sameValue(extra(1, 2), 6);
+        \\function duplicate(value, value) {
+        \\    const args = arguments;
+        \\    value = 7;
+        \\    assert.sameValue(args[0], 1);
+        \\    assert.sameValue(args[1], 7);
+        \\    args[0] = 8;
+        \\    assert.sameValue(value, 7);
+        \\    args[1] = 9;
+        \\    assert.sameValue(value, 9);
+        \\}
+        \\duplicate(1, 2);
+        \\function frozen(value) {
+        \\    const args = arguments;
+        \\    Object.freeze(args);
+        \\    value = 4;
+        \\    const desc = Object.getOwnPropertyDescriptor(args, "0");
+        \\    assert.sameValue(args[0], 1);
+        \\    assert.sameValue(desc.writable, false);
+        \\    assert.sameValue(desc.configurable, false);
+        \\    assert.sameValue(Object.isFrozen(args), true);
+        \\}
+        \\frozen(1);
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());

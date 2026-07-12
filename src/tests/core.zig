@@ -1480,7 +1480,7 @@ test "mapped arguments binding update defers value finalizer reentry" {
     const value = try core.Object.create(rt, reentrant_id, null);
     const refs = try rt.memory.alloc(core.JSValue, 1);
     refs[0] = value.value().dup();
-    arguments.argumentsVarRefsSlot().* = refs;
+    arguments.adoptMappedArgumentsVarRefsAssumingEmpty(rt, refs);
     value.value().free(rt);
 
     payload_finalizer_calls = 0;
@@ -1522,7 +1522,7 @@ test "mapped arguments var-ref binding update defers value finalizer reentry" {
     const cell = try core.VarRef.createClosed(rt, value.value().dup());
     const refs = try rt.memory.alloc(core.JSValue, 1);
     refs[0] = cell.valueRef();
-    arguments.argumentsVarRefsSlot().* = refs;
+    arguments.adoptMappedArgumentsVarRefsAssumingEmpty(rt, refs);
     value.value().free(rt);
 
     payload_finalizer_calls = 0;
@@ -1562,7 +1562,7 @@ test "mapped arguments binding delete defers value finalizer reentry" {
     const key = core.atom.atomFromUInt32(0);
     const refs = try rt.memory.alloc(core.JSValue, 1);
     refs[0] = core.JSValue.uninitialized();
-    arguments.argumentsVarRefsSlot().* = refs;
+    arguments.adoptMappedArgumentsVarRefsAssumingEmpty(rt, refs);
     try arguments.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
 
     const value = try core.Object.create(rt, reentrant_id, null);
@@ -2170,23 +2170,81 @@ test "proxy state uses payload storage" {
     try std.testing.expectEqual(@as(?i32, 66), proxy.proxyHandler().?.asInt32());
 }
 
-test "arguments state uses payload storage" {
+test "mapped arguments state uses inline var-ref storage" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const arguments = try core.Object.create(rt, core.class.ids.mapped_arguments, null);
     defer arguments.value().free(rt);
 
-    try std.testing.expect(arguments.u.payload != null);
-    try std.testing.expectEqual(core.class.PayloadKind.arguments, arguments.class_payload_kind);
+    try std.testing.expectEqual(core.class.PayloadKind.none, arguments.class_payload_kind);
     const refs = try rt.memory.alloc(core.JSValue, 2);
     refs[0] = core.JSValue.int32(77);
     refs[1] = core.JSValue.int32(88);
-    arguments.argumentsVarRefsSlot().* = refs;
+    arguments.adoptMappedArgumentsVarRefsAssumingEmpty(rt, refs);
 
+    try std.testing.expectEqual(refs.ptr, arguments.u.array_values);
+    try std.testing.expect(arguments.externalClassPayload() == null);
     try std.testing.expectEqual(@as(usize, 2), arguments.argumentsVarRefs().len);
     try std.testing.expectEqual(@as(?i32, 77), arguments.argumentsVarRefs()[0].asInt32());
     try std.testing.expectEqual(@as(?i32, 88), arguments.argumentsVarRefs()[1].asInt32());
+}
+
+test "unmapped arguments share a prepared shape and use dense element storage" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const template = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.arguments, null, 3);
+    defer template.value().free(rt);
+    try template.defineOwnPropertyAssumingNew(
+        rt,
+        core.atom.ids.length,
+        core.Descriptor.data(core.JSValue.int32(0), true, false, true),
+    );
+    const iterator_key = comptime core.atom.predefinedId("Symbol.iterator", .symbol).?;
+    try template.defineOwnPropertyAssumingNew(
+        rt,
+        iterator_key,
+        core.Descriptor.data(core.JSValue.int32(17), true, false, true),
+    );
+    const callee_key = comptime core.atom.predefinedId("callee", .string).?;
+    try template.defineOwnPropertyAssumingNew(
+        rt,
+        callee_key,
+        core.Descriptor.accessor(core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false),
+    );
+
+    const arguments = try core.Object.createFromPropertyTemplate(rt, template);
+    defer arguments.value().free(rt);
+    try std.testing.expectEqual(template.shape_ref, arguments.shape_ref);
+    try std.testing.expectEqual(core.class.ids.arguments, arguments.class_id);
+    try std.testing.expectEqual(core.class.PayloadKind.none, arguments.class_payload_kind);
+    try std.testing.expect(!arguments.flags.is_array);
+
+    arguments.replaceOwnDataPropertyValueAtAssumingShapeOwned(rt, 0, core.JSValue.int32(2));
+    const elements = try rt.memory.alloc(core.JSValue, 2);
+    elements[0] = core.JSValue.int32(31);
+    elements[1] = core.JSValue.int32(32);
+    arguments.adoptDenseUnmappedArgumentsElementsAssumingEmpty(rt, elements);
+
+    try std.testing.expect(arguments.flags.fast_array);
+    try std.testing.expectEqual(core.object.ArrayStorageMode.dense, arguments.arrayElementStorageMode());
+    try std.testing.expectEqual(@as(?i32, 2), arguments.getProperty(core.atom.ids.length).asInt32());
+    try std.testing.expectEqual(@as(?i32, 31), arguments.getProperty(core.atom.atomFromUInt32(0)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 32), arguments.getProperty(core.atom.atomFromUInt32(1)).asInt32());
+    try std.testing.expect(arguments.externalClassPayload() == null);
+
+    // Redefining a dense numeric property materializes the run into ordinary
+    // shape entries, exactly like qjs's arguments define-own-property exotic.
+    try arguments.defineOwnProperty(
+        rt,
+        core.atom.atomFromUInt32(1),
+        core.Descriptor.data(core.JSValue.int32(41), false, false, false),
+    );
+    try std.testing.expect(!arguments.flags.fast_array);
+    try std.testing.expectEqual(@as(?i32, 31), arguments.getProperty(core.atom.atomFromUInt32(0)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 41), arguments.getProperty(core.atom.atomFromUInt32(1)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 0), template.getProperty(core.atom.ids.length).asInt32());
 }
 
 test "object data state uses payload storage" {
@@ -2482,6 +2540,30 @@ test "shape registry hash grows and reuses object root shapes" {
     rt.shapes.release(first);
     rt.shapes.release(second);
     try std.testing.expectEqual(@as(usize, 0), rt.shapes.shape_hash_count);
+}
+
+test "reserved object root shapes reuse only an exact property capacity" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const four = try rt.shapes.createObjectRootWithPropertyCapacity(null, 4);
+    const eight = try rt.shapes.createObjectRootWithPropertyCapacity(null, 8);
+    const four_again = try rt.shapes.createObjectRootWithPropertyCapacity(null, 4);
+    defer rt.shapes.release(four);
+    defer rt.shapes.release(eight);
+    defer rt.shapes.release(four_again);
+
+    try std.testing.expectEqual(four, four_again);
+    try std.testing.expect(four != eight);
+    try std.testing.expectEqual(@as(u32, 4), four.prop_size);
+    try std.testing.expectEqual(@as(u32, 8), eight.prop_size);
+
+    const four_object = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, 4);
+    defer four_object.value().free(rt);
+    const eight_object = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, 8);
+    defer eight_object.value().free(rt);
+    try std.testing.expectEqual(@as(u32, 4), four_object.shape_ref.prop_size);
+    try std.testing.expectEqual(@as(u32, 8), eight_object.shape_ref.prop_size);
 }
 
 test "ordinary object additions reuse transition shapes" {
@@ -5391,7 +5473,7 @@ test "mapped arguments var-ref cycle is released by runtime cycle removal" {
 
     const refs = try rt.memory.alloc(core.JSValue, 1);
     refs[0] = target.value().dup();
-    arguments.argumentsVarRefsSlot().* = refs;
+    arguments.adoptMappedArgumentsVarRefsAssumingEmpty(rt, refs);
     try target.defineOwnProperty(rt, key, core.Descriptor.data(arguments.value(), true, true, true));
 
     arguments.value().free(rt);

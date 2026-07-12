@@ -848,6 +848,11 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
                     try installArrayPrototypeSymbols(rt, global, constructor);
                     try tagArrayPrototypeMethods(rt, constructor);
                     try bindArrayPrototypeNativeRecords(rt, constructor);
+                    const values_key = (comptime core.atom.predefinedId("values", .string)) orelse return error.InvalidBuiltinRegistry;
+                    const values = array_proto.getProperty(values_key);
+                    defer values.free(rt);
+                    const cached_values = try global.cachedRealmValueSlot(rt, .array_prototype_values);
+                    try global.setOptionalValueSlot(rt, cached_values, values.dup());
                 },
                 .string => {
                     const string_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;

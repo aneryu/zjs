@@ -9544,26 +9544,6 @@ pub const parser_core = struct {
                     s.cur_func().vars[idx].tdz_emitted_at_decl = true;
                     try s.retrofitForwardLocalFunctionCapture(s.cur_func(), ident, idx);
                 }
-                const ident_next_kind = s.peekNextKind();
-                const arguments_as_lvalue =
-                    isAssignmentLikeToken(ident_next_kind) or
-                    ident_next_kind == tok.TOK_INC or
-                    ident_next_kind == tok.TOK_DEC;
-                if (atomNameEquals(s, ident, "arguments") and
-                    s.return_depth > 0 and
-                    s.cur_func().func_type != .arrow and
-                    (s.in_parameter_initializer or !hasCurrentFunctionBinding(s, ident)) and
-                    !arguments_as_lvalue and
-                    (s.active_with_atom == null or s.active_with_func_depth != s.cur_func_stack.len))
-                {
-                    const subtype: u8 = if ((s.is_strict or s.cur_func().is_strict_mode) or !s.cur_func().has_simple_parameter_list) 0 else 1;
-                    try s.emitOpU8(opcode.op.special_object, subtype);
-                    try s.advance();
-                    s.last_was_with_method_ref = false;
-                    s.last_was_super = false;
-                    s.last_was_direct_eval_callee = false;
-                    return;
-                }
                 if (s.active_with_atom != null and s.active_with_func_depth != s.cur_func_stack.len and hasCurrentFunctionBinding(s, ident)) {
                     try s.emitScopeGetVar(ident);
                     s.last_was_with_method_ref = false;
@@ -15503,7 +15483,20 @@ pub const parser_core = struct {
                         !visible_lexical_blocking_annex_b and
                         !name_blocks_annex_b_parameter_rule and
                         !s.in_namespace;
-                    const duplicate_hoisted_block_func = is_block_level_function_decl and s.scopeHasVar(0, name);
+                    // The implicit arguments-object local is a parameter-name
+                    // blocker for Annex B, not an earlier block-function
+                    // declaration. Treating it as the latter forces the lexical
+                    // function initializer to its source position, so a call
+                    // before `function arguments(){}` incorrectly observes the
+                    // arguments object. Keep the block function in the normal
+                    // hoisted lexical-init path; the outer implicit binding stays
+                    // in its separate `arguments_var_idx` slot.
+                    const implicit_arguments_binding =
+                        atomNameEquals(s, name, "arguments") and parent_fd.arguments_var_idx >= 0;
+                    const duplicate_hoisted_block_func =
+                        is_block_level_function_decl and
+                        s.scopeHasVar(0, name) and
+                        !implicit_arguments_binding;
                     const function_decl_idx: u16 = if (annex_b_if_function_var) blk: {
                         const is_top_level_annex_b_if_scope =
                             parent_fd.scope_level == 0 or
