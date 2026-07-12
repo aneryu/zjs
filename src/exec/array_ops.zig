@@ -251,15 +251,10 @@ pub fn qjsArrayMethodFastCall(
     return null;
 }
 
-/// `function_object` is nullable so the prepared (no-function-object) call path
-/// reaches this hub under the uniform dispatch model. The prepared-call gate
-/// (`vm_call.arrayNativeSupportedWithoutFunctionObject`) admits only `push` and
-/// `pop`, whose implementations need only the receiver array, so those two ids
-/// route straight to their `*Impl` bodies when `function_object == null`. Every
-/// other id needs the materialized function object (TypedArray-vs-Array record
-/// disambiguation, species, callbacks) and unwraps it, surfacing the corrupt-id
-/// `error.TypeError` under null func_obj — unreachable because the gate blocks
-/// those ids from the prepared path.
+/// Push/pop use dedicated records and no longer enter this shared hub. Every
+/// remaining id needs the materialized function object for TypedArray-vs-Array
+/// disambiguation, species, or callbacks; null therefore signals a corrupt
+/// dispatch and surfaces TypeError.
 pub fn qjsArrayPrototypeNativeRecord(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -272,16 +267,7 @@ pub fn qjsArrayPrototypeNativeRecord(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const array_mod = method_ids.array;
-    // Prepared (no-function-object) path: the gate admits only `push`/`pop`,
-    // which are func-object-free, so route them straight to their `*Impl`
-    // bodies and reject every other id. Kept off the hot non-null path so the
-    // `call_method` / `call` table dispatch stays byte-identical to the path
-    // that always carried a materialized function object.
-    const function_object_nonnull = function_object orelse return switch (id) {
-        @intFromEnum(array_mod.PrototypeMethod.push) => qjsArrayPushCallImpl(ctx, output, global, receiver, args, caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.pop) => qjsArrayPopCallImpl(ctx, output, global, receiver, caller_function, caller_frame),
-        else => error.TypeError,
-    };
+    const function_object_nonnull = function_object orelse return error.TypeError;
     return switch (id) {
         @intFromEnum(array_mod.PrototypeMethod.to_string) => qjsArrayToStringCall(ctx, output, global, receiver, function_object_nonnull, caller_function, caller_frame),
         @intFromEnum(array_mod.PrototypeMethod.to_locale_string) => qjsArrayToLocaleStringCall(ctx, output, global, receiver, function_object_nonnull, caller_function, caller_frame),
@@ -3177,7 +3163,7 @@ pub fn qjsArrayPopCall(
     return qjsArrayPopCallImpl(ctx, output, global, receiver, caller_function, caller_frame);
 }
 
-fn qjsArrayPopCallImpl(
+pub fn qjsArrayPopCallImpl(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3190,9 +3176,14 @@ fn qjsArrayPopCallImpl(
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return error.TypeError;
     if (qjsFastDenseArrayPop(object)) |value| return value;
-    const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, caller_function, caller_frame);
-    defer length_value.free(ctx.runtime);
-    const length = try toLengthIndex(ctx, output, global, length_value);
+    if (try qjsFastEmptyArrayPop(ctx, global, object)) |value| return value;
+    const length: usize = if (object.flags.is_array)
+        @intCast(object.arrayLength())
+    else blk: {
+        const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, caller_function, caller_frame);
+        defer length_value.free(ctx.runtime);
+        break :blk try toLengthIndex(ctx, output, global, length_value);
+    };
 
     if (length == 0) {
         try ensureLengthWritableForArrayBuiltin(ctx, object);
@@ -3206,7 +3197,21 @@ fn qjsArrayPopCallImpl(
     const value = try getValueProperty(ctx, output, global, receiver_object_value, key.atom, caller_function, caller_frame);
     errdefer value.free(ctx.runtime);
     try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, key.atom);
-    try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(index), caller_function, caller_frame);
+    if (object.flags.is_array and object.arrayLength() <= length) {
+        // The last indexed property has already been deleted, so qjs's final
+        // JS_SetProperty(length, newLen) can update the actual Array length slot
+        // directly while the current length has not grown past the captured
+        // length. Preserve ordering: a getter above may have made length
+        // non-writable, in which case deletion remains visible before TypeError.
+        // If a getter grew the array, use the generic write so shrinking length
+        // also removes every newly-added element at or above `index`.
+        if (!object.flags.length_writable) {
+            return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "'length' is read-only"));
+        }
+        object.setArrayLength(@intCast(index));
+    } else {
+        try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(index), caller_function, caller_frame);
+    }
     return value;
 }
 
@@ -3217,6 +3222,19 @@ fn qjsFastDenseArrayPop(object: *core.Object) ?core.JSValue {
     // which must be a live dense element. A holey array (length > count) has a
     // hole at the logical end, so it falls back to the generic pop path.
     return object.takeLastFullyDenseFastArrayElement();
+}
+
+/// Effective empty-array leg of qjs `js_array_pop`: `js_get_length64` reads the
+/// own Array length slot, and the final `JS_SetProperty(..., length, 0)` writes
+/// that same slot or throws when it is non-writable. A Proxy/ordinary array-like
+/// is not `flags.is_array` and must keep the observable generic Get/Set path.
+fn qjsFastEmptyArrayPop(ctx: *core.JSContext, global: *core.Object, object: *core.Object) !?core.JSValue {
+    if (!object.flags.is_array or object.arrayLength() != 0) return null;
+    if (!object.flags.length_writable) {
+        return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "'length' is read-only"));
+    }
+    object.setArrayLength(0);
+    return core.JSValue.undefinedValue();
 }
 
 pub fn qjsFastDensePrimitiveArrayPop(object: *core.Object) ?core.JSValue {

@@ -5251,6 +5251,96 @@ test "Engine eval preserves ordinary array pop fast path semantics" {
     try std.testing.expectEqualStrings("3 2 1,2\n2 1 1\nundefined 1\n7 1\nTypeError 2 2\n", stream.buffered());
 }
 
+test "empty native array pop fast arm preserves observable length writes" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var frozen = Object.freeze([]);
+        \\var frozenError;
+        \\try { frozen.pop(); } catch (error) { frozenError = error; }
+        \\assert.sameValue(frozenError.name, "TypeError");
+        \\assert.sameValue(frozenError.message, "'length' is read-only");
+        \\
+        \\var log = [];
+        \\var target = [];
+        \\var proxy = new Proxy(target, {
+        \\    get: function(target, key, receiver) {
+        \\        if (key === "length") log.push("get");
+        \\        return Reflect.get(target, key, receiver);
+        \\    },
+        \\    set: function(target, key, value, receiver) {
+        \\        if (key === "length") log.push("set:" + value);
+        \\        return Reflect.set(target, key, value, receiver);
+        \\    }
+        \\});
+        \\assert.sameValue(Array.prototype.pop.call(proxy), undefined);
+        \\assert.sameValue(log.join(","), "get,set:0");
+        \\assert.sameValue(target.length, 0);
+        \\
+        \\var gets = 0;
+        \\var sets = [];
+        \\var ordinary = {
+        \\    get length() { gets++; return 0; },
+        \\    set length(value) { sets.push(value); }
+        \\};
+        \\assert.sameValue(Array.prototype.pop.call(ordinary), undefined);
+        \\assert.sameValue(gets, 1);
+        \\assert.sameValue(sets.join(","), "0");
+        \\
+        \\class SubArray extends Array {}
+        \\var subclass = new SubArray();
+        \\assert.sameValue(subclass.pop(), undefined);
+        \\assert.sameValue(subclass.length, 0);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "array pop length write removes elements added by the last-element getter" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var array = [];
+        \\array.length = 1;
+        \\Object.defineProperty(array, "0", {
+        \\    configurable: true,
+        \\    get: function() {
+        \\        array[5] = 9;
+        \\        return 7;
+        \\    }
+        \\});
+        \\assert.sameValue(array.pop(), 7);
+        \\assert.sameValue(array.length, 0);
+        \\assert.sameValue(0 in array, false);
+        \\assert.sameValue(5 in array, false);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "array pop reports read-only length after deleting a configurable last element" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var array = [7];
+        \\Object.defineProperty(array, "length", { writable: false });
+        \\var thrown;
+        \\try { array.pop(); } catch (error) { thrown = error; }
+        \\assert.sameValue(thrown.name, "TypeError");
+        \\assert.sameValue(thrown.message, "'length' is read-only");
+        \\assert.sameValue(array.length, 1);
+        \\assert.sameValue(0 in array, false);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Engine eval preserves simple closure call host output semantics" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

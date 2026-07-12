@@ -37,6 +37,7 @@ const qjsArrayBufferAccessor = collection_vm.qjsArrayBufferAccessor;
 const qjsArrayBufferIsView = collection_vm.qjsArrayBufferIsView;
 const qjsArrayBufferPrototypeNativeRecord = collection_vm.qjsArrayBufferPrototypeNativeRecord;
 pub const qjsArrayPushNativeRecord = collection_vm.qjsArrayPushCallImpl;
+pub const qjsArrayPopNativeRecord = collection_vm.qjsArrayPopCallImpl;
 const qjsSharedArrayBufferAccessor = collection_vm.qjsSharedArrayBufferAccessor;
 const qjsTypedArrayAccessor = collection_vm.qjsTypedArrayAccessor;
 const qjsTypedArrayConstructToIndex = collection_vm.qjsTypedArrayConstructToIndex;
@@ -232,16 +233,11 @@ pub fn qjsGlobalParseFloat(
 /// the realm-aware exec ops, which stay in exec because they are also reached
 /// by the VM fast-call path (`qjsArrayMethodFastCall`).
 ///
-/// `function_object` is nullable so the prepared (no-function-object) call path
-/// routes through this same record glue under the uniform dispatch model. Only
-/// `push`/`pop` reach here with `function_object == null` (the prepared-call
-/// gate admits no other Array id), and the prototype hub services those two
-/// without the function object. The Array statics (`from`/`of`/`isArray`) and
-/// every other prototype method need the materialized function object, so they
-/// surface the corrupt-id `error.TypeError` (via the hub) under null func_obj —
-/// unreachable in practice because the gate blocks those ids. The VM caller
-/// bytecode/frame are forwarded so the table path keeps the inline-cache hint
-/// the dedicated prepared bypass carried.
+/// Push/pop now use dedicated record functions and bypass this shared glue,
+/// including on the prepared no-function-object path. The Array statics and
+/// remaining prototype methods arrive with a materialized function object; a
+/// corrupt null reaches the hub's TypeError. Caller bytecode/frame are forwarded
+/// so the table path keeps its inline-cache hint.
 pub fn qjsArrayNativeRecord(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,

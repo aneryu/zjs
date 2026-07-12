@@ -105,11 +105,12 @@ pub fn legacyPrototypeMethodId(name: []const u8) ?u32 {
     return decodePrototypeMethodId(native_id);
 }
 
-/// `arrayCall` switches on the per-record `magic` (== domain-local id) by
-/// forwarding to `builtin_glue.qjsArrayNativeRecord`, the exec VM-op dispatch
-/// glue that resolves `Array.from`/`Array.of`/`Array.isArray` and the
-/// Array.prototype method record hub against the realm-aware exec ops. Those
-/// exec ops stay in exec (`exec/array_ops.zig`): the prototype hub
+/// Most Array records use `arrayCall`, which switches on the per-record `magic`
+/// (== domain-local id) and forwards to `builtin_glue.qjsArrayNativeRecord`.
+/// Array.push and Array.pop instead use per-method functions matching their qjs
+/// function-list entries. The shared glue resolves `Array.from`/`Array.of`/
+/// `Array.isArray` and the remaining Array.prototype record hub against the
+/// realm-aware exec ops. Those ops stay in exec (`exec/array_ops.zig`): the hub
 /// (`qjsArrayPrototypeNativeRecord`) and its leaf method bodies are BOTH —
 /// reached through this record table AND directly by the VM's residual
 /// fast-array fast-call (`qjsArrayMethodFastCall`) and the realm-fallback name
@@ -140,11 +141,11 @@ pub fn legacyPrototypeMethodId(name: []const u8) ?u32 {
 /// `prepared_call_ok` is uniformly false, but unlike the other domains that is
 /// not what gates `.array` prepared eligibility: the VM admits exactly `push`
 /// and `pop` to the prepared (no-function-object) path through
-/// `vm_call.arrayNativeSupportedWithoutFunctionObject`, and those calls now
-/// route through this same record handler with `func_obj = null` (uniform
-/// dispatch). `arrayCall` and the exec hub tolerate the null function object
-/// for `push`/`pop` and reject every other id, so the residual flag stays
-/// `false` without affecting the prepared path.
+/// `vm_call.arrayNativeSupportedWithoutFunctionObject`. Their dedicated record
+/// functions need only the receiver and tolerate `func_obj = null`; every
+/// shared `arrayCall` prototype method still requires a materialized function
+/// object. The residual flag therefore stays `false` without affecting the
+/// prepared path.
 pub const internal_entries = arrayEntries: {
     const Entry = core.host_function.InternalEntry;
     break :arrayEntries [_]Entry{
@@ -169,7 +170,7 @@ pub const internal_entries = arrayEntries: {
         arrayEntry("reduceRight", 1, @intFromEnum(PrototypeMethod.reduce_right)),
         arrayEntry("forEach", 1, @intFromEnum(PrototypeMethod.for_each)),
         arrayPushEntry("push", 1, @intFromEnum(PrototypeMethod.push)),
-        arrayEntry("pop", 0, @intFromEnum(PrototypeMethod.pop)),
+        arrayPopEntry("pop", 0, @intFromEnum(PrototypeMethod.pop)),
         arrayEntry("shift", 0, @intFromEnum(PrototypeMethod.shift)),
         arrayEntry("unshift", 1, @intFromEnum(PrototypeMethod.unshift)),
         arrayEntry("some", 1, @intFromEnum(PrototypeMethod.some)),
@@ -210,17 +211,26 @@ fn arrayPushEntry(comptime name: []const u8, comptime length: u8, comptime id: u
     return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .call = &arrayPushCall };
 }
 
+fn arrayPopEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .call = &arrayPopCall };
+}
+
 test "Array.push has a dedicated native record handler" {
     var push_call: ?core.host_function.InternalCallFn = null;
-    var pop_call: ?core.host_function.InternalCallFn = null;
     for (internal_entries) |entry| {
         if (entry.id == @intFromEnum(PrototypeMethod.push)) push_call = entry.call;
-        if (entry.id == @intFromEnum(PrototypeMethod.pop)) pop_call = entry.call;
     }
     try std.testing.expect(push_call != null);
-    try std.testing.expect(pop_call != null);
     try std.testing.expect(push_call.? == &arrayPushCall);
-    try std.testing.expect(pop_call.? == &arrayCall);
+}
+
+test "Array.pop has a dedicated native record handler" {
+    var pop_call: ?core.host_function.InternalCallFn = null;
+    for (internal_entries) |entry| {
+        if (entry.id == @intFromEnum(PrototypeMethod.pop)) pop_call = entry.call;
+    }
+    try std.testing.expect(pop_call != null);
+    try std.testing.expect(pop_call.? == &arrayPopCall);
 }
 
 /// The Array constructor record: construct-capable so `new Array(...)` (and
@@ -247,18 +257,11 @@ fn arrayPrototypeFromGlobal(global: *core.Object) ?*core.Object {
 /// Array.prototype method invoked against a non-array receiver the hub
 /// declines) as a TypeError, exactly as before.
 ///
-/// `func_obj` is nullable so the prepared (no-function-object) call path can
-/// reach this same record handler under the uniform dispatch model: the
-/// prepared-call gate (`vm_call.arrayNativeSupportedWithoutFunctionObject`)
-/// only admits `push`/`pop`, whose implementations need only the receiver
-/// array, so the exec glue routes those two ids to their func-object-free
-/// bodies when `func_obj == null`. Every other Array method record requires the
-/// materialized function object (to disambiguate Array vs `%TypedArray%`
-/// prototype methods sharing a record id, and to read species/callbacks) and
-/// surfaces the corrupt-id `error.TypeError` under null func_obj — which never
-/// fires here because the gate blocks those ids from the prepared path. The VM
-/// caller bytecode/frame are recovered and threaded so the relocated table path
-/// keeps the inline-cache hint the dedicated prepared bypass used to carry.
+/// Push/pop bypass this shared handler through their per-method records. Every
+/// remaining Array prototype record requires the materialized function object
+/// to disambiguate Array vs `%TypedArray%` ids and to read species/callbacks.
+/// The VM caller bytecode/frame are recovered and threaded so the relocated
+/// table path keeps its inline-cache hint.
 fn arrayCall(host_call: InternalCall) HostError!core.JSValue {
     const id: u32 = host_call.magic;
     if (id == @intFromEnum(ConstructorMethod.construct)) {
@@ -314,6 +317,22 @@ fn arrayPushCall(host_call: InternalCall) HostError!core.JSValue {
         global,
         host_call.this_value,
         host_call.args,
+        builtin_dispatch.callerBytecode(host_call),
+        builtin_dispatch.callerFrame(host_call),
+    )) orelse error.TypeError;
+}
+
+/// Per-method function pointer for Array.prototype.pop. Like qjs
+/// `js_array_pop(..., shift = 0)`, it enters the complete pop body directly;
+/// the body itself retains the dense-array arm and the observable generic
+/// length/property/delete fallback.
+fn arrayPopCall(host_call: InternalCall) HostError!core.JSValue {
+    const global = host_call.global orelse return error.TypeError;
+    return (try builtin_glue.qjsArrayPopNativeRecord(
+        host_call.ctx,
+        host_call.output,
+        global,
+        host_call.this_value,
         builtin_dispatch.callerBytecode(host_call),
         builtin_dispatch.callerFrame(host_call),
     )) orelse error.TypeError;
