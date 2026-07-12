@@ -36,6 +36,7 @@ const objectFromValue = object_ops.objectFromValue;
 const qjsArrayBufferAccessor = collection_vm.qjsArrayBufferAccessor;
 const qjsArrayBufferIsView = collection_vm.qjsArrayBufferIsView;
 const qjsArrayBufferPrototypeNativeRecord = collection_vm.qjsArrayBufferPrototypeNativeRecord;
+pub const qjsArrayPushNativeRecord = collection_vm.qjsArrayPushCallImpl;
 const qjsSharedArrayBufferAccessor = collection_vm.qjsSharedArrayBufferAccessor;
 const qjsTypedArrayAccessor = collection_vm.qjsTypedArrayAccessor;
 const qjsTypedArrayConstructToIndex = collection_vm.qjsTypedArrayConstructToIndex;

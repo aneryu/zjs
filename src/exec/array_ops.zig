@@ -3102,7 +3102,7 @@ pub fn qjsArrayPushCall(
     return qjsArrayPushCallImpl(ctx, output, global, receiver, args, caller_function, caller_frame);
 }
 
-fn qjsArrayPushCallImpl(
+pub fn qjsArrayPushCallImpl(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3114,20 +3114,31 @@ fn qjsArrayPushCallImpl(
     if (receiver.isNull() or receiver.isUndefined()) {
         return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "Cannot convert undefined or null to object"));
     }
-    const receiver_object_value = if (objectFromValue(receiver)) |_| receiver.dup() else try primitiveObjectForAccess(ctx.runtime, global, receiver);
+
+    // qjs `js_array_push` checks the direct Array receiver before JS_ToObject
+    // and returns from its fast case without a receiver dup/free. Keep the
+    // borrowed receiver rooted by the active call frame and do the same here.
+    // `appendDenseArrayValues` includes qjs's writable/extendable/fully-dense
+    // eligibility checks even for zero arguments; every miss falls through to
+    // the observable property path and performs the required length Set.
+    const direct_object = objectFromValue(receiver);
+    if (direct_object) |object| {
+        if (object.class_id == core.class.ids.array and !object.hasExoticMethods() and object.proxyTarget() == null) {
+            const index = object.arrayLength();
+            if (std.math.cast(u32, args.len)) |argc| {
+                if (std.math.add(u32, index, argc)) |next_length| {
+                    if (next_length <= core.array.max_array_length and try object.appendDenseArrayValues(ctx.runtime, index, args)) {
+                        return lengthIndexValue(next_length);
+                    }
+                } else |_| {}
+            }
+        }
+    }
+
+    const receiver_object_value = if (direct_object != null) receiver.dup() else try primitiveObjectForAccess(ctx.runtime, global, receiver);
     defer receiver_object_value.free(ctx.runtime);
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return error.TypeError;
-    if (args.len != 0 and objectFromValue(receiver) == object and object.flags.is_array and !object.hasExoticMethods()) {
-        const index = object.arrayLength();
-        if (std.math.cast(u32, args.len)) |argc| {
-            if (std.math.add(u32, index, argc)) |next_length| {
-                if (next_length <= core.array.max_array_length and try object.appendDenseArrayValues(ctx.runtime, index, args)) {
-                    return lengthIndexValue(next_length);
-                }
-            } else |_| {}
-        }
-    }
     const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, caller_function, caller_frame);
     defer length_value.free(ctx.runtime);
     const length = try toLengthIndex(ctx, output, global, length_value);

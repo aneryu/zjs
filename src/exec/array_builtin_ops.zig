@@ -168,7 +168,7 @@ pub const internal_entries = arrayEntries: {
         arrayEntry("reduce", 1, @intFromEnum(PrototypeMethod.reduce)),
         arrayEntry("reduceRight", 1, @intFromEnum(PrototypeMethod.reduce_right)),
         arrayEntry("forEach", 1, @intFromEnum(PrototypeMethod.for_each)),
-        arrayEntry("push", 1, @intFromEnum(PrototypeMethod.push)),
+        arrayPushEntry("push", 1, @intFromEnum(PrototypeMethod.push)),
         arrayEntry("pop", 0, @intFromEnum(PrototypeMethod.pop)),
         arrayEntry("shift", 0, @intFromEnum(PrototypeMethod.shift)),
         arrayEntry("unshift", 1, @intFromEnum(PrototypeMethod.unshift)),
@@ -204,6 +204,23 @@ pub const internal_entries = arrayEntries: {
 
 fn arrayEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
     return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .call = &arrayCall };
+}
+
+fn arrayPushEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .call = &arrayPushCall };
+}
+
+test "Array.push has a dedicated native record handler" {
+    var push_call: ?core.host_function.InternalCallFn = null;
+    var pop_call: ?core.host_function.InternalCallFn = null;
+    for (internal_entries) |entry| {
+        if (entry.id == @intFromEnum(PrototypeMethod.push)) push_call = entry.call;
+        if (entry.id == @intFromEnum(PrototypeMethod.pop)) pop_call = entry.call;
+    }
+    try std.testing.expect(push_call != null);
+    try std.testing.expect(pop_call != null);
+    try std.testing.expect(push_call.? == &arrayPushCall);
+    try std.testing.expect(pop_call.? == &arrayCall);
 }
 
 /// The Array constructor record: construct-capable so `new Array(...)` (and
@@ -283,6 +300,23 @@ fn arrayCall(host_call: InternalCall) HostError!core.JSValue {
         builtin_dispatch.callerFrame(host_call),
     )) |value| return value;
     return error.TypeError;
+}
+
+/// Per-method function pointer for Array.prototype.push. This is the same
+/// full-context ABI as the shared array record handler, so proxy/accessor and
+/// cross-realm behavior keep their existing output/global/caller threading;
+/// only the magic-switch and redundant function-object recognition disappear.
+fn arrayPushCall(host_call: InternalCall) HostError!core.JSValue {
+    const global = host_call.global orelse return error.TypeError;
+    return (try builtin_glue.qjsArrayPushNativeRecord(
+        host_call.ctx,
+        host_call.output,
+        global,
+        host_call.this_value,
+        host_call.args,
+        builtin_dispatch.callerBytecode(host_call),
+        builtin_dispatch.callerFrame(host_call),
+    )) orelse error.TypeError;
 }
 
 pub fn isArrayIndex(bytes: []const u8) bool {

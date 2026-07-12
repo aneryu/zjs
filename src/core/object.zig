@@ -8803,7 +8803,6 @@ pub const Object = struct {
     }
 
     pub fn appendDenseArrayValues(self: *Object, rt: *JSRuntime, start: u32, values: []const JSValue) !bool {
-        if (values.len == 0) return true;
         // Dense append gate keys off the dense extent (array_count), not the
         // logical length: a holey array appends at count. See add_fast_array_element.
         if (!self.flags.is_array or start != self.array_count or !self.flags.length_writable) return false;
@@ -8816,6 +8815,12 @@ pub const Object = struct {
         const indexed_proto = if (self.getPrototype()) |proto| blk: {
             break :blk if (arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) null else proto;
         } else null;
+        // Apply the eligibility checks above even for an empty append. qjs
+        // `js_array_push` admits `push()` to its fast case only
+        // when the receiver is the same extendable, fully-dense Array shape
+        // used for non-empty pushes; otherwise it performs the required
+        // ordinary length Set through the generic path.
+        if (values.len == 0) return true;
         var guard_index = start;
         while (guard_index < limit) : (guard_index += 1) {
             const atom_id = atom.atomFromUInt32(guard_index);
