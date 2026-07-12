@@ -3956,6 +3956,11 @@ test "native builtin errors capture a native callsite" {
         \\    callStack = error.stack;
         \\}
         \\assert.sameValue(callStack.indexOf("    at map (native)\n    at call (native)"), 0);
+        \\function forwardedCallTarget() { return new Error("forwarded").stack; }
+        \\var forwardedCallStack = forwardedCallTarget.call(undefined);
+        \\var forwardedFirstNewline = forwardedCallStack.indexOf("\n");
+        \\assert.sameValue(forwardedCallStack.indexOf("    at forwardedCallTarget"), 0);
+        \\assert.sameValue(forwardedCallStack.slice(forwardedFirstNewline + 1).indexOf("    at call (native)"), 0);
         \\var applyStack;
         \\try {
         \\    Array.prototype.map.apply([], [null]);
@@ -5606,6 +5611,62 @@ test "Phase 7: inlined arrow keeps lexical this and ignores any receiver" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("LEX\nLEX\nouter\n", stream.buffered());
+}
+
+test "function inherited data lookup preserves own and exotic semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function target() {}
+        \\var intrinsicCall = Function.prototype.call;
+        \\assert.sameValue(target.call, intrinsicCall);
+        \\assert.sameValue(target.bind(null).call, intrinsicCall);
+        \\
+        \\var ownReads = 0;
+        \\var ownCall = function ownCall() {};
+        \\Object.defineProperty(target, "call", {
+        \\    configurable: true,
+        \\    get: function() { ownReads++; return ownCall; }
+        \\});
+        \\assert.sameValue(target.call, ownCall);
+        \\assert.sameValue(ownReads, 1);
+        \\delete target.call;
+        \\
+        \\var inheritedCall = function inheritedCall() {};
+        \\var proto = { call: inheritedCall };
+        \\Object.setPrototypeOf(target, proto);
+        \\assert.sameValue(target.call, inheritedCall);
+        \\
+        \\var inheritedReads = 0;
+        \\Object.defineProperty(proto, "call", {
+        \\    configurable: true,
+        \\    get: function() { inheritedReads++; return ownCall; }
+        \\});
+        \\assert.sameValue(target.call, ownCall);
+        \\assert.sameValue(inheritedReads, 1);
+        \\
+        \\var proxyReads = 0;
+        \\var proxyProto = new Proxy({ call: inheritedCall }, {
+        \\    get: function(object, key, receiver) {
+        \\        if (key === "call") proxyReads++;
+        \\        return Reflect.get(object, key, receiver);
+        \\    }
+        \\});
+        \\Object.setPrototypeOf(target, proxyProto);
+        \\assert.sameValue(target.call, inheritedCall);
+        \\assert.sameValue(proxyReads, 1);
+        \\
+        \\var grandparentCall = function grandparentCall() {};
+        \\Object.setPrototypeOf(target, Object.create({ call: grandparentCall }));
+        \\assert.sameValue(target.call, grandparentCall);
+        \\
+        \\function strictFunction() { "use strict"; }
+        \\assert.throws(TypeError, function() { return strictFunction.caller; });
+        \\assert.throws(TypeError, function() { return strictFunction.arguments; });
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
 }
 
 test "Engine eval Function.prototype.toString returns source or native text" {

@@ -356,7 +356,8 @@ pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_
     var object = objectFromValue(receiver) orelse return null;
     if (rt.atoms.mightBePrivate(atom_id)) return null;
     while (true) {
-        if (object.needsSlowPropertyAccess()) return null;
+        if (object.needsSlowPropertyAccess() and
+            !property_ic.functionObjectSupportsOrdinaryDataPropertyFastPath(object)) return null;
         var slow_property = false;
         if (object.findOwnDataValueFast(atom_id, &slow_property)) |v| return v;
         if (slow_property) return null;

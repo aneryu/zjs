@@ -61,6 +61,7 @@ fn denseRecords(comptime entries: []const InternalEntry) []const InternalRecord 
                 .magic = entry.magic,
                 .prepared_call_ok = entry.prepared_call_ok,
                 .constructor = entry.constructor,
+                .forwards_call = entry.forwards_call,
                 .cproto = entry.cproto,
                 .call = entry.call,
                 .native_function = entry.native_function,

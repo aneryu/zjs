@@ -302,6 +302,10 @@ pub const InternalRecord = struct {
     /// this set; other records report a miss so the caller falls through to
     /// its construct cascade.
     constructor: bool = false,
+    /// Function.prototype.call-style transparent forwarding. The VM may reuse
+    /// its current bytecode Machine for an eligible target while retaining this
+    /// record as a synthetic native frame in observable error stacks.
+    forwards_call: bool = false,
     cproto: NativeCProto = .zjs_internal_call,
     /// Primary handler for `.zjs_internal_call`; optional cold coercion
     /// fallback for typed cprotos such as `.f_f`/`.f_f_f` when their arguments
@@ -328,6 +332,8 @@ pub const InternalEntry = struct {
     /// See `InternalRecord.constructor`: marks a construct-capable record so
     /// the construct dispatch path routes `new X()` here.
     constructor: bool = false,
+    /// See `InternalRecord.forwards_call`.
+    forwards_call: bool = false,
     cproto: NativeCProto = .zjs_internal_call,
     /// See `InternalRecord.call`: typed cproto entries may retain a slow
     /// InternalCall fallback for observable coercion cases.

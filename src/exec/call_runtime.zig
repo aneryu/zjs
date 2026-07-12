@@ -860,7 +860,7 @@ fn callValueOrBytecodeClassModeDispatch(
             return qjsFunctionApplyCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame);
         }
         if (std.mem.eql(u8, name, "call")) {
-            return qjsFunctionCallCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame);
+            return qjsFunctionCallCall(ctx, output, global, this_value, args, caller_function, caller_frame);
         }
         if (std.mem.eql(u8, name, "get __proto__")) return object_ops.qjsObjectProtoGetterCall(ctx, output, global, this_value, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "set __proto__")) {
@@ -1321,15 +1321,17 @@ pub fn qjsFunctionCallCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     this_value: core.JSValue,
-    function_object: *core.Object,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
-    if (!isCallableValue(this_value)) return throwFunctionRealmTypeError(ctx, global, function_object);
     const this_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const call_args = if (args.len >= 1) args[1..] else &.{};
-    return callValueOrBytecode(ctx, output, global, this_arg, this_value, call_args, caller_function, caller_frame);
+    // qjs `js_function_call` forwards `argv + 1` straight to `JS_Call`. The
+    // outer native call keeps `this_value` and `args` rooted for this complete
+    // synchronous invocation, so rebuilding the defensive eight-slot argument
+    // copy/root frame here is redundant.
+    return callValueOrBytecodeClassModePreRooted(ctx, output, global, this_arg, this_value, call_args, caller_function, caller_frame, false);
 }
 
 /// Function.prototype.apply body. `argsFromArrayLike` is the shared
@@ -4667,8 +4669,11 @@ pub fn callFunctionBytecodeModeState(
         return object_ops.createGeneratorObject(ctx, func, current_function_value, this_value, args, var_refs, output, global, fb.flags.func_kind == .async_generator);
     }
 
-    var nested_base = bytecode.makeBytecodeView(fb, &ctx.runtime.memory, &ctx.runtime.atoms);
-    const nested: *const bytecode.Bytecode = &nested_base;
+    var nested_base: bytecode.Bytecode = undefined;
+    const nested: *const bytecode.Bytecode = bytecode.cachedBytecodeView(fb, &ctx.runtime.memory, &ctx.runtime.atoms) orelse blk: {
+        nested_base = bytecode.makeBytecodeView(fb, &ctx.runtime.memory, &ctx.runtime.atoms);
+        break :blk &nested_base;
+    };
 
     var boxed_this: ?core.JSValue = null;
     defer if (boxed_this) |value| value.free(ctx.runtime);

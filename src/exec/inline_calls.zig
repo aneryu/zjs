@@ -175,6 +175,10 @@ pub const Entry = struct {
     /// var_refs, no owned view): the STATIC half of the `teardownSimpleEntry`
     /// eligibility. General-path frames still need the full teardown.
     fast_teardown: bool,
+    /// Native Function.call record skipped by transparent forwarding. Owned by
+    /// this entry so a stack captured inside the bytecode target still sees the
+    /// qjs frame order `target -> call (native) -> caller`.
+    native_caller: core.JSValue,
     /// Caller's Entry, or null when the caller is the L0 frame — qjs
     /// `JSStackFrame.prev_frame` (quickjs.c:408, "NULL if first stack
     /// frame"). Together with `Machine.top` (≅ rt->current_stack_frame)
@@ -203,13 +207,33 @@ pub const MachineBacktrace = struct {
 pub fn resolveMachineBacktrace(data: ?*const anyopaque, index: usize) ?core.ActiveBacktraceSnapshot {
     const holder: *const MachineBacktrace = @ptrCast(@alignCast(data.?));
     if (holder.machine) |machine| {
-        const depth = machine.depth;
-        if (index < depth) return exception_ops.frameBacktraceSnapshot(&machine.entryAt(depth - 1 - index).frame);
-        if (index == depth) return exception_ops.frameBacktraceSnapshot(holder.l0_frame);
+        var remaining = index;
+        var cursor = machine.top;
+        while (cursor) |entry| {
+            if (remaining == 0) return exception_ops.frameBacktraceSnapshot(&entry.frame);
+            remaining -= 1;
+            if (!entry.native_caller.isUndefined()) {
+                if (remaining == 0) return nativeBacktraceSnapshot(entry.native_caller);
+                remaining -= 1;
+            }
+            cursor = entry.prev;
+        }
+        if (remaining == 0) return exception_ops.frameBacktraceSnapshot(holder.l0_frame);
         return null;
     }
     if (index == 0) return exception_ops.frameBacktraceSnapshot(holder.l0_frame);
     return null;
+}
+
+fn nativeBacktraceSnapshot(function_value: core.JSValue) core.ActiveBacktraceSnapshot {
+    return .{
+        .function_name = core.atom.null_atom,
+        .filename = core.atom.null_atom,
+        .line_num = 0,
+        .col_num = 0,
+        .function_value = function_value,
+        .is_native = true,
+    };
 }
 
 pub const Machine = struct {
@@ -347,6 +371,7 @@ pub const Machine = struct {
         try vm_call.enterInlineCallDepth(self.ctx, global);
         errdefer self.ctx.call_depth -= 1;
         const entry = try self.acquireSlot(global);
+        entry.native_caller = core.JSValue.undefinedValue();
         if (isSimpleInlineFrame(target, source))
             try setupSimpleInlineEntry(self.ctx, global, entry, target, source)
         else
@@ -818,6 +843,29 @@ pub const Machine = struct {
         });
     }
 
+    /// Push a bytecode target reached through Function.prototype.call. Takes
+    /// ownership of `native_caller` only on success; the caller retains and
+    /// frees it when frame setup fails.
+    pub fn pushForwardedCall(
+        self: *Machine,
+        global: *core.Object,
+        caller_stack: *stack_mod.Stack,
+        target: *const InlineTarget,
+        region_base: usize,
+        argc: u16,
+        layout: RegionLayout,
+        native_caller: core.JSValue,
+    ) HostError!*Entry {
+        const entry = try self.pushFrame(global, target, .{ .stack_region = .{
+            .stack = caller_stack,
+            .region_base = region_base,
+            .argc = argc,
+            .has_receiver = layout == .method,
+        } });
+        entry.native_caller = native_caller;
+        return entry;
+    }
+
     /// Proper tail call: replace the top inline frame with a fresh frame
     /// for `target`, keeping the logical call depth constant. The operand
     /// region starting at `region_base` lives on the dying frame's own
@@ -884,6 +932,7 @@ pub const Machine = struct {
         const rt = ctx.runtime;
         const frame = &entry.frame;
         frame.current_function.free(rt);
+        entry.native_caller.free(rt);
         if (frame.open_var_refs.len != 0) frame.closeOpenVarRefs(rt);
         // qjs done: close var refs first, then free local_buf..sp (quickjs.c:20701-20706).
         const live_values = frame.locals.ptr[0 .. frame.locals.len + entry.stack.values.len];
@@ -899,6 +948,7 @@ pub const Machine = struct {
     /// (popTeardown) and the recursion path.
     pub fn teardownInlineEntry(ctx: *core.JSContext, entry: *Entry) void {
         const rt = ctx.runtime;
+        entry.native_caller.free(rt);
         entry.stack.deinit(rt);
         entry.frame.deinitInlineCall(&rt.memory, rt);
         if (entry.owned_view != null) freeOwnedView(rt, entry);

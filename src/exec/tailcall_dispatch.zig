@@ -406,6 +406,88 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
     return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
 }
 
+inline fn isForwardingCallRecord(ctx: *core.JSContext, method: JSValue) bool {
+    const function_object = class_vm.callableObjectFromValue(method) orelse return false;
+    if (function_object.class_payload_kind != core.class.PayloadKind.function) return false;
+    const record = function_object.nativeRecord() orelse blk: {
+        const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return false;
+        const resolved = ctx.runtime.internalBuiltinRecord(@intCast(@intFromEnum(native_ref.domain)), native_ref.id) orelse return false;
+        function_object.nativeRecordSlot().* = resolved;
+        break :blk resolved;
+    };
+    return record.forwards_call;
+}
+
+/// Function.prototype.call forwards an eligible bytecode target into the same
+/// Machine. The operand region starts as
+/// `[target, call, thisArg?, targetArgs...]`; rewrite it in place to the normal
+/// plain/method call layout and transfer the skipped native `call` function to
+/// the callee Entry for observable backtraces.
+inline fn pushForwardedAndEnter(
+    vb: [*]JSValue,
+    vm: *Vm,
+    target: *const inline_calls.InlineTarget,
+    region_base: usize,
+    outer_argc: u16,
+) Outcome {
+    const stack = vm.stack;
+    const target_argc: u16 = if (outer_argc == 0) 0 else outer_argc - 1;
+    const native_caller = stack.values[region_base + 1];
+    const target_function = stack.values[region_base];
+    const plain_layout = target.this_value.isUndefined();
+    const layout: inline_calls.RegionLayout = if (plain_layout) .plain else .method;
+
+    if (plain_layout) {
+        if (target_argc != 0) {
+            std.mem.copyForwards(
+                JSValue,
+                stack.values[region_base + 1 ..][0..target_argc],
+                stack.values[region_base + 3 ..][0..target_argc],
+            );
+        }
+        const removed: usize = if (outer_argc == 0) 1 else 2;
+        const new_len = stack.values.len - removed;
+        @memset(stack.values[new_len..], JSValue.undefinedValue());
+        stack.values = stack.values.ptr[0..new_len];
+    } else {
+        const this_arg = stack.values[region_base + 2];
+        stack.values[region_base] = this_arg;
+        stack.values[region_base + 1] = target_function;
+        if (target_argc != 0) {
+            std.mem.copyForwards(
+                JSValue,
+                stack.values[region_base + 2 ..][0..target_argc],
+                stack.values[region_base + 3 ..][0..target_argc],
+            );
+        }
+        const new_len = stack.values.len - 1;
+        stack.values[new_len] = JSValue.undefinedValue();
+        stack.values = stack.values.ptr[0..new_len];
+    }
+
+    const entry = vm.machine.pushForwardedCall(vm.global, stack, target, region_base, target_argc, layout, native_caller) catch |err| {
+        native_caller.free(vm.ctx.runtime);
+        if (!callSetupRecover(vm, err)) return .threw;
+        return coldNext(vb, vm);
+    };
+    if (vm.poller.active) {
+        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
+    }
+    vm.function = entry.function;
+    vm.frame = &entry.frame;
+    vm.stack = &entry.stack;
+    vm.catch_target = &entry.catch_target;
+    vm.code_base = vm.function.code.ptr;
+    vm.code_end = vm.function.code.ptr + vm.function.code.len;
+    vm.stack_base = vm.stack.values.ptr;
+    vm.arg_buf = vm.frame.args.ptr;
+    vm.local_fast_blocked = false;
+    const pc2: [*]const u8 = vm.code_base;
+    const sp2: [*]JSValue = vm.stack.values.ptr + vm.stack.values.len;
+    const vb2: [*]JSValue = vm.frame.locals.ptr;
+    return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
+}
+
 /// Fused popReturn + reload for an in-handler return to an inline caller —
 /// qjs OP_return + the done: epilogue (quickjs.c:18266, 20698-20710):
 /// teardown, unlink the frame (`rt->current_stack_frame = sf->prev_frame`,
@@ -562,6 +644,13 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) call
         if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, receiver, method)) |target| {
             vm.frame.pc += 2;
             return pushAndEnter(vb, vm, &target, region_base, argc, .method);
+        }
+        if (class_vm.functionObjectFromValue(receiver) != null and isForwardingCallRecord(vm.ctx, method)) {
+            const this_arg = if (argc == 0) JSValue.undefinedValue() else vm.stack.values[region_base + 2];
+            if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, this_arg, receiver)) |target| {
+                vm.frame.pc += 2;
+                return pushForwardedAndEnter(vb, vm, &target, region_base, argc);
+            }
         }
     }
     switch (call_vm.callMethod(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, false, &vm.tail_request) catch |e| return vm.fail(e)) {
