@@ -5666,6 +5666,79 @@ test "missing-argument plain calls preserve parameter and arguments ownership" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "method calls preserve receiver arguments eval captures and abrupt ownership" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const receiver = { value: 4 };
+        \\receiver.sloppy = function sloppy(first, second) {
+        \\    assert.sameValue(this, receiver);
+        \\    assert.sameValue(arguments.length, 1);
+        \\    first = 7;
+        \\    second = 8;
+        \\    assert.sameValue(arguments[0], 7);
+        \\    assert.sameValue(arguments.hasOwnProperty("1"), false);
+        \\    return this;
+        \\};
+        \\assert.sameValue(receiver.sloppy(1), receiver);
+        \\receiver.strict = function strict(first, second) {
+        \\    "use strict";
+        \\    assert.sameValue(this, receiver);
+        \\    first = 7;
+        \\    second = 8;
+        \\    assert.sameValue(arguments.length, 1);
+        \\    assert.sameValue(arguments[0], 1);
+        \\    assert.sameValue(arguments.hasOwnProperty("1"), false);
+        \\    return this;
+        \\};
+        \\assert.sameValue(receiver.strict(1), receiver);
+        \\receiver.capture = function capture(value) {
+        \\    return () => this;
+        \\};
+        \\assert.sameValue(receiver.capture()(), receiver);
+        \\receiver.evalThis = function evalThis(value) {
+        \\    return eval("this");
+        \\};
+        \\assert.sameValue(receiver.evalThis(), receiver);
+        \\receiver.escape = function escape(first, second) { return arguments; };
+        \\const escaped = receiver.escape(receiver);
+        \\assert.sameValue(escaped.length, 1);
+        \\assert.sameValue(escaped[0], receiver);
+        \\assert.sameValue(escaped.hasOwnProperty("1"), false);
+        \\receiver.thrower = function thrower(first, second) { throw this; };
+        \\try {
+        \\    receiver.thrower(receiver);
+        \\} catch (thrown) {
+        \\    assert.sameValue(thrown, receiver);
+        \\}
+        \\let getterReceiver;
+        \\const accessor = {
+        \\    get method() {
+        \\        getterReceiver = this;
+        \\        return function selected() { return this; };
+        \\    }
+        \\};
+        \\assert.sameValue(accessor.method(), accessor);
+        \\assert.sameValue(getterReceiver, accessor);
+        \\const proxy = new Proxy(receiver, {});
+        \\assert.sameValue(proxy.capture()(), proxy);
+        \\String.prototype.strictReceiver = function strictReceiver() {
+        \\    "use strict";
+        \\    return this;
+        \\};
+        \\assert.sameValue("x".strictReceiver(), "x");
+        \\delete String.prototype.strictReceiver;
+        \\Number.prototype.sloppyReceiver = function sloppyReceiver() {
+        \\    return Object.getPrototypeOf(this) === Number.prototype && this.valueOf();
+        \\};
+        \\assert.sameValue((4).sloppyReceiver(), 4);
+        \\delete Number.prototype.sloppyReceiver;
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Phase 7: arrow and method tail calls reuse inline frames for deep recursion" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

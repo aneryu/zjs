@@ -500,7 +500,7 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
     // Straight-line teardown (qjs done: epilogue) unless execution escaped
     // the simple shape: grew the operand stack to the heap, materialized the
     // cold box (arguments object), or moved frame storage to the heap.
-    if (dying.fast_teardown and dying.frame.cold == null and
+    if (dying.fast_teardown != .none and dying.frame.cold == null and
         !dying.frame.storage_on_heap and dying.stack.arena_window)
     {
         inline_calls.Machine.teardownSimpleEntry(vm.ctx, dying);
