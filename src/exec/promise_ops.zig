@@ -2054,10 +2054,30 @@ pub fn qjsPromiseResolveIdentity(
 ) !?core.JSValue {
     const promise_object = objectFromValue(value) orelse return null;
     if (promise_object.class_id != core.class.ids.promise) return null;
+    if (promiseConstructorDataValueForFastPath(promise_object)) |constructor| {
+        if (constructor.sameValue(constructor_value)) return value.dup();
+        return null;
+    }
     const constructor = try getValueProperty(ctx, output, global, value, core.atom.ids.constructor, caller_function, caller_frame);
     defer constructor.free(ctx.runtime);
     if (constructor.sameValue(constructor_value)) return value.dup();
     return null;
+}
+
+/// QuickJS's `JS_GetProperty(..., JS_ATOM_constructor)` reaches the Promise's
+/// ordinary shape/prototype chain directly. zjs's general resolver must also
+/// support legacy class-name fallback for prototype-less internal promises,
+/// so keep that authority for missing/accessor/exotic shapes while letting the
+/// normal Promise.prototype data hit take the same direct walk as qjs.
+fn promiseConstructorDataValueForFastPath(promise: *core.Object) ?core.JSValue {
+    var cursor = promise;
+    while (true) {
+        if (cursor.needsSlowPropertyAccess()) return null;
+        var slow_property = false;
+        if (cursor.findOwnDataValueFast(core.atom.ids.constructor, &slow_property)) |value| return value;
+        if (slow_property) return null;
+        cursor = cursor.getPrototype() orelse return null;
+    }
 }
 
 pub fn qjsPromiseDefaultConstructor(ctx: *core.JSContext, global: *core.Object) !core.JSValue {

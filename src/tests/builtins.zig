@@ -3141,8 +3141,33 @@ test "Promise.resolve returns an identity match before constructor validation" {
         \\});
         \\assert.sameValue(Promise.resolve.call(receiver, promise), promise);
         \\assert.sameValue(constructorGets, 1);
+        \\var dataPromise = Promise.resolve(2);
+        \\dataPromise.constructor = receiver;
+        \\assert.sameValue(Promise.resolve.call(receiver, dataPromise), dataPromise);
+        \\dataPromise.constructor = null;
         \\assert.throws(TypeError, function() {
-        \\    Promise.resolve.call(receiver, Promise.resolve(2));
+        \\    Promise.resolve.call(receiver, dataPromise);
+        \\});
+        \\var proxyPromise = Promise.resolve(3);
+        \\var originalPrototype = Object.getPrototypeOf(proxyPromise);
+        \\var proxyConstructorGets = 0;
+        \\Object.setPrototypeOf(proxyPromise, new Proxy(originalPrototype, {
+        \\    get: function(target, key, receiverValue) {
+        \\        if (key === "constructor") proxyConstructorGets++;
+        \\        return Reflect.get(target, key, receiverValue);
+        \\    }
+        \\}));
+        \\assert.sameValue(Promise.resolve(proxyPromise), proxyPromise);
+        \\assert.sameValue(proxyConstructorGets, 1);
+        \\var throwingPromise = Promise.resolve(4);
+        \\Object.defineProperty(throwingPromise, "constructor", {
+        \\    get: function() { throw new Error("constructor sentinel"); }
+        \\});
+        \\assert.throws(Error, function() {
+        \\    Promise.resolve(throwingPromise);
+        \\});
+        \\assert.throws(TypeError, function() {
+        \\    Promise.resolve.call(receiver, Promise.resolve(5));
         \\});
     );
     defer result.free(js.runtime);
