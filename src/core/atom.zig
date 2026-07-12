@@ -46,6 +46,7 @@ pub const ids = struct {
     pub const prototype: Atom = 60;
     pub const constructor: Atom = 61;
     pub const value: Atom = 65;
+    pub const get: Atom = 66;
     pub const done: Atom = 106;
     pub const undefined_: Atom = 70;
     // `typeof` result strings — predefined string atoms, so OP_typeof returns

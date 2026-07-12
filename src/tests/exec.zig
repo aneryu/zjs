@@ -5941,6 +5941,110 @@ test "computed named reads preserve prototype accessors proxies and operand owne
     try std.testing.expect(result.isUndefined());
 }
 
+test "static named getter and proxy fast paths preserve receivers throws and invariants" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\const prototype = {};
+        \\let getterReceiver;
+        \\let getterCount = 0;
+        \\Object.defineProperty(prototype, "__zjs_static_getter_probe__", {
+        \\    get() {
+        \\        getterReceiver = this;
+        \\        getterCount++;
+        \\        return 21;
+        \\    },
+        \\});
+        \\const object = Object.create(prototype);
+        \\assert.sameValue(object.__zjs_static_getter_probe__, 21);
+        \\assert.sameValue(getterReceiver, object);
+        \\assert.sameValue(getterCount, 1);
+        \\Object.defineProperty(prototype, "__zjs_static_throw_probe__", {
+        \\    get() { throw new Error("static getter sentinel"); },
+        \\});
+        \\let getterThrow;
+        \\try {
+        \\    object.__zjs_static_throw_probe__;
+        \\} catch (error) {
+        \\    getterThrow = error.message;
+        \\}
+        \\assert.sameValue(getterThrow, "static getter sentinel");
+        \\let primitiveReceiver;
+        \\Object.defineProperty(Number.prototype, "__zjs_static_primitive_probe__", {
+        \\    configurable: true,
+        \\    get: function staticPrimitiveGetter() {
+        \\        "use strict";
+        \\        primitiveReceiver = this;
+        \\        return 22;
+        \\    },
+        \\});
+        \\assert.sameValue((1).__zjs_static_primitive_probe__, 22);
+        \\assert.sameValue(primitiveReceiver, 1);
+        \\delete Number.prototype.__zjs_static_primitive_probe__;
+        \\let forwardedReceiver;
+        \\const forwardedTarget = {};
+        \\Object.defineProperty(forwardedTarget, "__zjs_static_forward_probe__", {
+        \\    get() {
+        \\        forwardedReceiver = this;
+        \\        return 23;
+        \\    },
+        \\});
+        \\const forwardedProxy = new Proxy(forwardedTarget, {});
+        \\assert.sameValue(forwardedProxy.__zjs_static_forward_probe__, 23);
+        \\assert.sameValue(forwardedReceiver, forwardedProxy);
+        \\let handlerGetterReceiver;
+        \\const handler = {};
+        \\Object.defineProperty(handler, "get", {
+        \\    get() {
+        \\        handlerGetterReceiver = this;
+        \\        return function (target, key, receiver) {
+        \\            assert.sameValue(receiver, trappedProxy);
+        \\            return 24;
+        \\        };
+        \\    },
+        \\});
+        \\const trappedProxy = new Proxy({}, handler);
+        \\assert.sameValue(trappedProxy.__zjs_static_trap_probe__, 24);
+        \\assert.sameValue(handlerGetterReceiver, handler);
+        \\const frozenTarget = {};
+        \\Object.defineProperty(frozenTarget, "frozen", {
+        \\    value: 25,
+        \\    writable: false,
+        \\    configurable: false,
+        \\});
+        \\assert.sameValue(new Proxy(frozenTarget, { get() { return 25; } }).frozen, 25);
+        \\let frozenRejected = false;
+        \\try {
+        \\    new Proxy(frozenTarget, { get() { return 26; } }).frozen;
+        \\} catch (error) {
+        \\    frozenRejected = error instanceof TypeError;
+        \\}
+        \\assert.sameValue(frozenRejected, true);
+        \\const mutationTarget = { marker: 1 };
+        \\const mutationProxy = new Proxy(mutationTarget, {
+        \\    get(target, key) {
+        \\        Object.defineProperty(target, key, {
+        \\            value: 1,
+        \\            writable: false,
+        \\            configurable: false,
+        \\        });
+        \\        return 2;
+        \\    },
+        \\});
+        \\let mutationRejected = false;
+        \\try {
+        \\    mutationProxy.marker;
+        \\} catch (error) {
+        \\    mutationRejected = error instanceof TypeError;
+        \\}
+        \\assert.sameValue(mutationRejected, true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Phase 7: arrow and method tail calls reuse inline frames for deep recursion" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

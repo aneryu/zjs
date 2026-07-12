@@ -28,6 +28,7 @@ const coercion_ops = @import("coercion_ops.zig");
 const error_stack_ops = @import("error_stack_ops.zig");
 const eval_ops = @import("eval_ops.zig");
 const promise_ops = @import("promise_ops.zig");
+const property_ic = @import("property_ic.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
 const regexp_properties = @import("../libs/unicode.zig").regexp_properties;
 const slot_ops = @import("slot_ops.zig");
@@ -5072,12 +5073,18 @@ pub fn getProxyProperty(
     defer target_value.free(ctx.runtime);
     const handler_value = (proxy.proxyHandler() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy")).dup();
     defer handler_value.free(ctx.runtime);
-    const get_atom = try ctx.runtime.internAtom("get");
-    defer ctx.runtime.atoms.free(get_atom);
-    const trap = try getValueProperty(ctx, output, global, handler_value, get_atom, caller_function, caller_frame);
+    const trap = if (property_ic.ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, handler_value, core.atom.ids.get)) |borrowed|
+        if (borrowed.requiresRefCount()) borrowed.dup() else borrowed
+    else
+        try getValueProperty(ctx, output, global, handler_value, core.atom.ids.get, caller_function, caller_frame);
     defer trap.free(ctx.runtime);
     const target = try property_ops.expectObject(target_value);
-    if (trap.isUndefined() or trap.isNull()) return getValuePropertyWithReceiver(ctx, output, global, target_value, target, receiver_value, atom_id, caller_function, caller_frame);
+    if (trap.isUndefined() or trap.isNull()) {
+        if (property_ic.ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, target_value, atom_id)) |borrowed| {
+            return if (borrowed.requiresRefCount()) borrowed.dup() else borrowed;
+        }
+        return getValuePropertyWithReceiver(ctx, output, global, target_value, target, receiver_value, atom_id, caller_function, caller_frame);
+    }
     const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
     defer key_value.free(ctx.runtime);
     const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, key_value, receiver_value }, caller_function, caller_frame);
@@ -5096,6 +5103,11 @@ pub fn validateProxyGetResult(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
+    switch (validatePlainProxyGetResultFast(target, atom_id, result)) {
+        .valid => return,
+        .invalid => return error.TypeError,
+        .slow => {},
+    }
     const target_desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, atom_id, caller_function, caller_frame) orelse return;
     defer target_desc.destroy(ctx.runtime);
     if (target_desc.configurable != false) return;
@@ -5108,6 +5120,34 @@ pub fn validateProxyGetResult(
         },
         .generic => {},
     }
+}
+
+const ProxyGetValidation = enum { valid, invalid, slow };
+
+/// qjs `js_proxy_get` validates the trap result with a direct
+/// JS_GetOwnPropertyInternal probe after the trap returns. Mirror that shape
+/// for a plain target instead of materializing and destroying a full zjs
+/// Descriptor. Only the two invariant-bearing cases can reject: a frozen data
+/// value, or a non-configurable accessor whose getter is absent. Other property
+/// kinds retain the authoritative descriptor path below.
+fn validatePlainProxyGetResultFast(target: *core.Object, atom_id: core.Atom, result: core.JSValue) ProxyGetValidation {
+    if (target.class_id != core.class.ids.object or target.flags.is_array or target.flags.is_global or target.flags.is_with_environment) return .slow;
+    if (target.proxyTarget() != null or target.hasExoticMethods()) return .slow;
+    const index = target.findProperty(atom_id) orelse return .valid;
+    const flags = target.propFlagsAt(index);
+    if (flags.deleted) return .valid;
+    if (flags.configurable) return .valid;
+    return switch (flags.kind) {
+        .data => blk: {
+            const stored = target.asDataAt(index) orelse break :blk .slow;
+            break :blk if (flags.writable or result.sameValue(stored)) .valid else .invalid;
+        },
+        .accessor => blk: {
+            const accessor = target.asAccessorAt(index) orelse break :blk .slow;
+            break :blk if (!accessor.getterIsUndefined() or result.isUndefined()) .valid else .invalid;
+        },
+        .var_ref, .auto_init => .slow,
+    };
 }
 
 pub fn firstProxyInPrototypeSetPath(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?*core.Object {
